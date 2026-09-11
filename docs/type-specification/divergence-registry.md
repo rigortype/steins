@@ -275,6 +275,14 @@ author a name that resolves nowhere and no reason why, and the reading is
 provable for the reason the reservation is airtight — since the alias never
 binds, the name is still an identifier that denotes nothing.
 
+The declaration half speaks **on a class, interface, trait or enum docblock
+only** (issue #668), which is where PHPStan reads `@phpstan-type` at all. The
+same tag on a function or a method binds no alias upstream and binds none here,
+so a refusal there would be a claim about a declaration nobody attempted — a
+finding about a comment rather than about the program, which is not the thing
+ADR-0091 §6 is calibrated for. The use-site half is not narrowed: a hyphenated
+name in a type position denotes nothing wherever it is written.
+
 **18. An unresolvable type alias is `Opaque`, not the class its name spells.**
 Entry 12's rule, applied to the second pre-lowering rewrite (issue #472). PHPStan
 resolves an invalid `@phpstan-import-type` — an owner that is not a class, an
@@ -290,25 +298,17 @@ accident was the hazard `KNOWN_UNENFORCED` exists for: a class contract over a
 name that is not a class answers a definite `No` for every non-object value, held
 back only by `Cx::is_known_class`'s valve.
 
-One precedence call in the same file goes the other way and is **not** a floor.
-`@phpstan-type Baz never` on a class-like where a class `Baz` is also in scope:
-PHPStan gives the alias precedence and answers `never`; Steins gives the
-in-project declaration precedence and answers `Baz`, which is the
-pseudo-type/class rule (entry 15's shape) applied to the same question. The row
-diverged before #472 and diverges after it, for a different reason.
-
-**This one is not a silence, and it is the only entry here that is not.** Where
-a class `Row` and `@phpstan-type Row int` are both in scope, `m(1)` is a
-`phpdoc.param-mismatch` under Steins' reading and is *accepted* under PHPStan's
-— which reports the collision (`typeAlias.duplicate`) and then resolves the
-alias anyway. So the tie-break convicts a value the oracle admits, which no
-other row in this section does. Two things keep it registered rather than
-changed: issue #472's "Refusals to keep" states the rule, and the conviction is
-not new — before #472 the unread alias name reached the class catch-all and
-convicted the same call for a worse reason. The zero-FP answer to a genuine
-collision is a third one neither tool gives — floor to `Opaque`, since the
-author has written two meanings for one name and neither is provable — and it is
-one line in `resolve_aliases_at` plus a test if the owner prefers it.
+The same-name precedence call that rode with this entry is **gone** (issue
+#670), and its removal is why the rest of this section is uniform again. #472
+gave an in-project class precedence over a same-named alias, which made
+`@phpstan-type Row int` beside a class `Row` answer a definite `No` on a call
+PHPStan *accepts* — it reports the collision as `typeAlias.duplicate` and then
+resolves the alias anyway. That was the only row in this section that was not a
+silence, and a conviction the oracle admits is not something to register:
+`ClassReflection::getTypeAliases` merges `array_merge($imported, $local)` and
+`TypeNodeResolver::resolveIdentifierTypeNode` consults the alias map before the
+class one, so Steins now reads the alias first too. What remains registered
+above is the floor, which is unchanged.
 
 ## Conformance-suite divergences (intentional silences)
 

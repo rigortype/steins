@@ -1138,10 +1138,37 @@ fn next_continuation(bytes: &[u8], mut line_end: usize) -> Option<(usize, usize,
 /// Whether a partial type text still has a bracket open — the syntactic half of
 /// [`join_alias_body`]'s continuation rule. Nesting only: what is inside the
 /// brackets is the type parser's business.
+///
+/// **A quoted span is not read** (issue #666). A shape key is a string literal
+/// and may spell anything, brackets included, so counting its bytes made the
+/// literal vote on a question it has no part in: `array{a: 'x>',` read as
+/// balanced and bound the half before the wrap, and `array{'{': int}` read as
+/// open and swallowed the prose after it. The type lexer already tokenizes both
+/// quotings, so skipping them here is agreement with it, not a second grammar —
+/// and an escaped quote has to be honoured for the same reason (`'it\'s'` is one
+/// span, and treating the middle quote as a closer would leak the rest of the
+/// line into a "quoted" state that never ends).
+///
+/// An **unterminated** quote leaves the state open to the end of the text, so
+/// the bytes after it never vote either. That is the safe direction: the tail
+/// that opened it is unfinished, and a body still inside a bracket keeps joining.
 fn is_unclosed(body: &str) -> bool {
     let mut depth = 0i32;
+    let mut quote = None;
+    let mut escaped = false;
     for b in body.bytes() {
+        if let Some(q) = quote {
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == q {
+                quote = None;
+            }
+            continue;
+        }
         match b {
+            b'\'' | b'"' => quote = Some(b),
             b'{' | b'[' | b'(' | b'<' => depth += 1,
             b'}' | b']' | b')' | b'>' => depth -= 1,
             _ => {}
@@ -2033,6 +2060,36 @@ mod tests {
                 TypeAliasBody::Imported { owner: String::new(), name: "Row".into() }
             )]
         );
+    }
+
+    /// The syntactic half of the continuation rule, asked directly (issue #666):
+    /// a quoted span is skipped, so a bracket a shape key spells never votes on
+    /// whether the body is finished.
+    #[test]
+    fn a_quoted_span_does_not_vote_on_whether_a_bracket_is_open() {
+        // The plain reading is unchanged.
+        assert!(is_unclosed("array{"));
+        assert!(is_unclosed("array{id: int,"));
+        assert!(!is_unclosed("array{id: int}"));
+        assert!(!is_unclosed("int|string"));
+        // The `>` cancelled the `{`, so a wrapped shape read as finished and the
+        // join bound the half before the wrap.
+        assert!(is_unclosed("array{a: 'x>',"));
+        assert!(is_unclosed("array{a: \"x>\","));
+        // The `{` in the key left a finished shape reading as open, so the prose
+        // on the next line joined the type.
+        assert!(!is_unclosed("array{'{': int}"));
+        assert!(!is_unclosed("array{\"[\": int}"));
+        // An escaped quote stays inside the span. Reading it as the closer would
+        // put the rest of the text back in play, which is the same defect again.
+        assert!(!is_unclosed("array{'it\\'s {': int}"));
+        assert!(is_unclosed("array{'it\\'s': 'x>',"));
+        assert!(!is_unclosed("array{\"say \\\"{\\\"\": int}"));
+        // One quoting does not close the other.
+        assert!(!is_unclosed("array{'\"{': int}"));
+        // An unterminated quote runs to the end, so nothing after it votes and
+        // the bracket that is genuinely open still stands.
+        assert!(is_unclosed("array{a: 'x"));
     }
 
     #[test]

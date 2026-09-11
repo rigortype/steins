@@ -59,14 +59,14 @@ is stated.
 `effect.*`) are held separately: they are true findings that legitimately abound
 in released code, so they gate as **per-package increase tripwires**, not
 red-on-sight (ADR-0050 §9). The seeded expectations are hand-maintained tables
-in `gate.rs`: `PHPDOC_EXPECTED` (526 findings across seven entries — the legacy
-monorepo alone at 477 after the ADR-0056 R1 return-fact reseed, +43 from
-uniquely-resolved builtin calls now seeding their reflected return envelope),
-`THROW_EXPECTED` (44,592 — dominated by the legacy monorepo's 44,372, and
-including the 20 `throw.undeclared` TRUEs seeded for phpstan-src at its
-registration), and `EFFECT_EXPECTED`, seeded **empty**: an all-zero tripwire
-that is vacuous until an envelope-annotated package lands, and correct the day
-one does. Moving a count is a conscious, comment-triaged act, never a drive-by.
+in `gate.rs`: `PHPDOC_EXPECTED` (784 findings across nine entries as of the
+#665–#670 alias-body reseed — the legacy monorepo alone at 617, and the table's
+own triage comments are the authority on every move since), `THROW_EXPECTED`
+(44,592 — dominated by the legacy monorepo's 44,372, and including the 20
+`throw.undeclared` TRUEs seeded for phpstan-src at its registration), and
+`EFFECT_EXPECTED`, seeded **empty**: an all-zero tripwire that is vacuous until
+an envelope-annotated package lands, and correct the day one does. Moving a
+count is a conscious, comment-triaged act, never a drive-by.
 
 Triaged true positives in the proof layer are **fingerprint-pinned**
 (`EXPECTED_PROOF_FINDINGS`), matched at finding precision — package + id +

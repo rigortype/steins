@@ -2972,3 +2972,77 @@ mod unknown_vocabulary_tests {
         }
     }
 }
+
+/// **The declaration allowlist** [`is_type_vocabulary`] answers: which names a
+/// `@phpstan-type` / `@psalm-type` declaration may bind (issue #472), as opposed
+/// to which a class may shadow ([`is_shadowable_pseudo_type`], two modules up).
+///
+/// The two questions look alike and are not the same one, which is the defect
+/// #472 fixed: taking the shadowing predicate for this one made `integer`,
+/// `number`, `list` and every other non-reserved pseudo-type aliasable, and the
+/// bound alias then convicted values the declaration accepts.
+///
+/// The predicate consults four things and this pins one of each, plus the three
+/// names where its answer diverges from phpstan-src's own rule (issue #667).
+#[cfg(test)]
+mod type_vocabulary_tests {
+    use super::*;
+
+    /// One representative per table the predicate reads, in its own order:
+    /// `KNOWN_UNENFORCED`, the derived operators, the generic-only names, and
+    /// the identifier table's catch-all — a name is free for a declaration
+    /// exactly when it reaches [`ContractTy::Class`].
+    #[test]
+    fn every_table_the_predicate_consults_answers_for_its_own() {
+        assert!(is_type_vocabulary("hasoffset"), "KNOWN_UNENFORCED");
+        assert!(is_type_vocabulary("key-of"), "a derived operator");
+        assert!(is_type_vocabulary("int-mask-of"), "generic-only vocabulary");
+        assert!(is_type_vocabulary("int"), "the identifier table");
+        // And the catch-all itself, from both sides: a name that reaches the
+        // class arm is the caller's to bind, and nothing else is.
+        assert!(!is_type_vocabulary("UserRow"));
+        assert!(matches!(lower_identifier("userrow"), ContractTy::Class(_)));
+    }
+
+    /// The normalization the lowering tables apply, applied here too: a leading
+    /// `\` is stripped and the comparison is case-blind, so one spelling of a
+    /// name cannot be vocabulary while another is free for a declaration.
+    #[test]
+    fn a_name_is_judged_in_the_spelling_the_tables_normalize_to() {
+        for spelling in ["int", "INT", "\\int", "\\Int"] {
+            assert!(is_type_vocabulary(spelling), "{spelling}");
+        }
+    }
+
+    /// The reserved space is vocabulary whether or not anything models the
+    /// spelling (ADR-0091 §3): an alias may be named `foo_bar` and may not be
+    /// named `foo-bar`, which is §4.1's ruling read from this side.
+    #[test]
+    fn the_reserved_hyphen_space_is_never_free_for_a_declaration() {
+        assert!(is_type_vocabulary("foo-bar"));
+        assert!(is_type_vocabulary("some-psalm-thing"));
+        assert!(!is_type_vocabulary("foo_bar"));
+    }
+
+    /// The three names where this predicate and phpstan-src's
+    /// `LocalTypeAliasesCheck::isAliasNameValid` disagree, measured 2026-09-11
+    /// and registered in `docs/phpstan-divergences.md` rather than tracked.
+    ///
+    /// Upstream asks whether the name would otherwise have resolved to an object
+    /// type — a question about the class index — where this asks whether the
+    /// vocabulary already owns it. They agree on every name anyone writes.
+    #[test]
+    fn the_three_names_that_diverge_from_upstreams_rule() {
+        // `empty` is a keyword in `TypeNodeResolver`'s switch, reached before it
+        // consults the alias table, so upstream binds nothing under that name.
+        // Steins models no `empty` at all, so the name reaches the class
+        // catch-all and is free — a standing gap in the vocabulary, not a
+        // decision about alias names.
+        assert!(!is_type_vocabulary("empty"));
+        // The other two go the other way: upstream binds both, reporting the
+        // `Closure` collision as `typeAlias.duplicate` and resolving the alias
+        // anyway, while `hasoffset` is a Psalm spelling it does not model.
+        assert!(is_type_vocabulary("Closure"));
+        assert!(is_type_vocabulary("hasoffset"));
+    }
+}

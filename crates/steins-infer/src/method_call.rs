@@ -337,7 +337,7 @@ fn check_method_args(
     if let Some(e) = &mut envelopes {
         e.shadow_templates(class_templates);
         // …then the class-like's type aliases expand, last (issue #472).
-        e.resolve_aliases(cx, class_aliases, class_file, method.span.start);
+        e.resolve_aliases(cx, class_aliases);
     }
     for (i, arg) in call.args.iter().enumerate() {
         let Some(param) = method.params.get(i) else { break };

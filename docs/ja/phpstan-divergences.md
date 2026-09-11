@@ -305,6 +305,49 @@ allowlist は builtin テーブル ∪ プラグイン登録の和集合であ�
 allowlist は builtin のみであり、この結合は登録種別が実装された時点で
 効いてくる。
 
+## `isAliasNameValid` vs 語彙の catch-all
+
+`@phpstan-type` 宣言がどの名前を束縛できるかは、Steins と上流とで別の
+問いによって決まる。`LocalTypeAliasesCheck::isAliasNameValid` は
+エイリアステーブルをバイパスした状態でエイリアス名を型として解決し、
+結果がオブジェクト型（またはテンプレート）であれば受理する。つまり
+上流の規則は「その名前は本来クラスを指していたか」である。Steins が
+問うのは「その名前を型語彙がすでに所有しているか」
+(`is_type_vocabulary`、issue #472) である。両者は誰もが実際に書く名前
+すべてで一致し、ちょうど三つの名前で食い違う（2026-09-11 に
+phpstan-src に対して実測）。
+
+`empty` は Steins では束縛し、上流では何も束縛しない。
+`TypeNodeResolver` は `case 'empty'`（falsey 擬似型）にキーワードの
+switch で到達し、それはエイリアステーブルを参照するより前である。
+したがってその名前のエイリアスは、命名規則が何と言おうと上流では
+到達不能である。Steins は `empty` をまったくモデル化していないため、
+この名前はクラスの catch-all に落ちて宣言に対して空いている。これは
+エイリアス名についての決定ではなく語彙の側の未実装であり、そちらが
+埋まればこの行も消える。
+
+`Closure` と `hasoffset` は上流では束縛し、Steins では拒否される。
+どちらも Steins の語彙である — `Closure` は callable ファミリー
+(ADR-0063 P3)、`hasoffset` は `KNOWN_UNENFORCED` — ので、作者が
+束縛し直せる名前ではない。上流は両方を束縛する。`Closure` は
+オブジェクト型に解決されるので名前としては妥当であり、実クラスとの
+衝突は *報告* され(`typeAlias.duplicate`、"already exists as a class
+in scope of …")、そのうえでエイリアスが解決される — issue #670 で
+Steins 自身のエイリアス/クラスの優先順位を直したのと同じ
+「報告してから解決する」形である。`hasoffset` は PHPStan が
+モデル化していない Psalm の綴りなので、その名前のオブジェクト型に
+解決され、エイリアスは何の指摘もなく妥当となる。
+
+オーナー裁定 (2026-09-11) は、上流の規則を追跡するのではなく
+Steins の語彙を保ってこの差分を登録することである。追跡するという
+ことは、型語彙についての問いを *クラスインデックス* についての問い
+—「この名前はオブジェクトに解決されただろうか」— に置き換えること
+であり、その答えはプロジェクトにクラスが追加されるたびに動く。
+そして宣言の問いを shadowing の問いから切り離すことこそ、エイリアス
+テーブルが definite `No` を捏造するのを止めるために issue #472 が
+行わねばならなかったことである。三つのいずれも、型エイリアスに
+付ける名前ではない。
+
 ## 裸の `@assert-if-true` vs vendor プレフィックス付き assertion ファミリー
 
 PHPStan と Psalm の assertion タグ — `@phpstan-assert(-if-true|-if-false)`

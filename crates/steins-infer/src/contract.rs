@@ -259,18 +259,18 @@ impl Envelopes {
     /// still owes — the declaring class-like's template shadow, and `template-type`
     /// resolution — are applied to the body itself, at its declaring site
     /// ([`Cx::expand_alias`]).
-    pub(crate) fn resolve_aliases(&mut self, cx: &Cx, table: &AliasTable, file: usize, off: u32) {
+    pub(crate) fn resolve_aliases(&mut self, cx: &Cx, table: &AliasTable) {
         if table.is_empty() {
             return;
         }
         for (_, t) in &mut self.params {
-            cx.resolve_aliases(t, table, file, off);
+            cx.resolve_aliases(t, table);
         }
         if let Some(t) = &mut self.ret {
-            cx.resolve_aliases(t, table, file, off);
+            cx.resolve_aliases(t, table);
         }
         for s in &mut self.asserts {
-            cx.resolve_aliases(&mut s.ty, table, file, off);
+            cx.resolve_aliases(&mut s.ty, table);
         }
     }
 }
@@ -376,6 +376,13 @@ enum AliasBody {
 /// the using member's.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct AliasTable {
+    /// Keyed by the alias name **as spelled** (issue #670). Upstream's
+    /// `NameScope::hasTypeAlias` is `array_key_exists($alias, …)` on the exact
+    /// spelling, so `@phpstan-type Row int` beside `class Row {}` leaves `@param
+    /// row` naming the class (a `class.nameCase` remark, not the alias). Folding
+    /// case here would make that `row` the alias and convict `new Row()` —
+    /// with the alias now winning a same-spelled collision, the fold is the one
+    /// step that manufactures a `No` the oracle does not give.
     entries: HashMap<String, AliasBody>,
     /// The declaring class-like's `@template` shadow, applied to a substituted
     /// body so the invariant "no template name survives as a class" holds inside
@@ -448,7 +455,7 @@ pub(crate) fn type_aliases_of(docblock: Option<&str>, file: usize, off: u32) -> 
                 }
                 steins_phpdoc::TypeAliasBody::Imported { .. } => AliasBody::Floor,
             };
-            table.entries.insert(decl.name.to_ascii_lowercase(), body);
+            table.entries.insert(decl.name.clone(), body);
         }
     }
     // The shadow is only ever read to neutralize templates inside a substituted
@@ -955,44 +962,43 @@ impl<'a> Cx<'a> {
     /// touched" rule, and the same reason for existing — a name that means
     /// something other than a class must not reach the class catch-all.
     ///
-    /// Three things can happen to a name the table knows, and only the first is a
+    /// Two things can happen to a name the table knows, and only the first is a
     /// resolution:
     ///
-    /// - **A class of that name is in scope.** The alias loses: an alias name
-    ///   colliding with a real class is the pseudo-type/class precedence question
-    ///   again, and the in-project declaration wins (ADR-0029). The identifier is
-    ///   left exactly as written, so it lowers to that class as it always did.
     /// - **The alias expands.** The node becomes the body, re-spelled for where it
     ///   landed, with one more level of alias expansion inside it.
     /// - **Anything else floors** to an opaque node: an unparsable body, an import
     ///   whose owner is unknown or does not declare the name, a body still naming
     ///   an alias at [`ALIAS_DEPTH`] — which is also what makes a cycle terminate.
     ///   Never `ContractTy::Class`, which is the whole point.
-    pub(crate) fn resolve_aliases(&self, ty: &mut PType, table: &AliasTable, file: usize, off: u32) {
-        self.resolve_aliases_at(ty, table, file, off, 0);
+    ///
+    /// **A class of the same name does not stop either** (issue #670). An alias
+    /// colliding with an in-project class reads as the alias, because that is the
+    /// order `ClassReflection::getTypeAliases` fixes upstream: it merges as
+    /// `array_merge($imported, $local)` and `TypeNodeResolver::resolveIdentifier
+    /// TypeNode` consults the alias map *before* the class one, so a declared
+    /// alias always wins. #472 shipped the opposite call as the pseudo-type/class
+    /// precedence rule (ADR-0029), and the divergence registry recorded it as the
+    /// one entry there that was not a silence — the tie-break convicted a value
+    /// the oracle admits. It is not a silence and so it is not registrable: the
+    /// order changed instead.
+    pub(crate) fn resolve_aliases(&self, ty: &mut PType, table: &AliasTable) {
+        self.resolve_aliases_at(ty, table, 0);
     }
 
-    fn resolve_aliases_at(
-        &self,
-        ty: &mut PType,
-        table: &AliasTable,
-        file: usize,
-        off: u32,
-        depth: u32,
-    ) {
+    fn resolve_aliases_at(&self, ty: &mut PType, table: &AliasTable, depth: u32) {
         if let PKind::Identifier(name) = &ty.kind {
             // `\Row` names a class, whatever the docblock aliases. Unreachable
-            // today — the table is keyed by bare lowercased names, so a
+            // today — the table is keyed by bare names as spelled, so a
             // qualified spelling misses it anyway — and kept as the statement of
             // the invariant: a key normalization that ever stripped the leading
             // `\` would otherwise turn a class reference into an alias silently.
             if name.contains('\\') {
                 return;
             }
-            let Some(body) = table.entries.get(&name.to_ascii_lowercase()) else { return };
-            if self.is_known_class(&self.resolve_pclass(file, off, name)) {
-                return; // the in-project class wins.
-            }
+            // Exact spelling, not a case fold: `row` is not the alias `Row`
+            // upstream, so it must not be one here (see [`AliasTable::entries`]).
+            let Some(body) = table.entries.get(name) else { return };
             match self.expand_alias(body, table, depth) {
                 Some(expanded) => ty.kind = expanded.kind,
                 None => {
@@ -1002,9 +1008,7 @@ impl<'a> Cx<'a> {
             }
             return;
         }
-        for_each_child_type_mut(ty, &mut |child| {
-            self.resolve_aliases_at(child, table, file, off, depth);
-        });
+        for_each_child_type_mut(ty, &mut |child| self.resolve_aliases_at(child, table, depth));
     }
 
     /// The type one [`AliasBody`] expands to, ready to be spliced in at a use site,
@@ -1031,7 +1035,7 @@ impl<'a> Cx<'a> {
                 let owner_fqn = self.resolve_pclass(table.site.0, table.site.1, owner);
                 let (ofile, od) = self.find_class(&owner_fqn)?;
                 let owner_table = type_aliases_of(od.docblock.as_deref(), ofile, od.span.start);
-                let ty = match owner_table.entries.get(&name.to_ascii_lowercase())? {
+                let ty = match owner_table.entries.get(name)? {
                     // One hop across the class boundary, not a chain of imports:
                     // re-importing an import is the walk ADR-0032 declines.
                     AliasBody::Local(ty) => ty.clone(),
@@ -1045,7 +1049,7 @@ impl<'a> Cx<'a> {
         let (dfile, doff) = owner_table.site;
         neutralize_templates(&mut ty, &owner_table.shadow);
         self.resolve_template_types(&mut ty, dfile, doff);
-        self.resolve_aliases_at(&mut ty, owner_table, dfile, doff, depth + 1);
+        self.resolve_aliases_at(&mut ty, owner_table, depth + 1);
         self.qualify_class_names(&mut ty, dfile, doff);
         Some(ty)
     }
@@ -1060,27 +1064,68 @@ impl<'a> Cx<'a> {
     /// to keep one, so the name is made fully qualified instead, which resolves the
     /// same everywhere.
     ///
-    /// Only identifiers that name a **known class** in the edge's own context are
-    /// touched: `int` and its kin must stay bare or they would stop being keywords,
-    /// and an unresolvable name is left alone because qualifying a guess would turn
-    /// a silence into a claim.
+    /// Every identifier that is **not vocabulary** is re-spelled, whether or not a
+    /// class of that name is known (issue #665). `int` and its kin must stay bare
+    /// or they would stop being keywords, which is what `is_type_vocabulary`
+    /// decides — the same catch-all question `type_aliases_of` asks, so `self`,
+    /// `static` and `never` stay as written for the same reason `int` does.
+    ///
+    /// Qualifying a name the edge's own context cannot resolve looks like turning
+    /// a silence into a claim, and it is the opposite. An unqualified name that
+    /// travels stays *relative*, so it resolves again wherever it lands: an
+    /// imported `@phpstan-type Rows list<Thing>` written in `Vendor` where no
+    /// `Vendor\Thing` exists arrived in an importing `App` file and found
+    /// `App\Thing` — a definite contract over a class the owner never named.
+    /// Upstream cannot make that mistake: `TypeAlias` stores the owner's
+    /// `NameScope` and `TypeNodeResolver` returns
+    /// `new ObjectType($nameScope->resolveStringName($name))`, so an unknown name
+    /// is an unknown class **in the owner's namespace**. Spelling it fully
+    /// qualified is how a node with nowhere to keep a scope says the same thing,
+    /// and an unknown class is still held silent by `Cx::is_known_class`'s valve.
+    ///
+    /// Two names are not vocabulary by `is_type_vocabulary`'s catch-all and are
+    /// still not classes where they stand:
+    ///
+    /// - `min`/`max` in the **bound position** of `int<…>` (issue #665). Upstream
+    ///   reads them there by spelling (`TypeNodeResolver`: `->name === 'min'`),
+    ///   and `lower_int_range` does the same, so a qualified `\App\max` is no
+    ///   bound and the range floors to `Opaque`. They are exempt only in that
+    ///   position: a class literally named `max` anywhere else is qualified like
+    ///   any other, and inside `int<…>` upstream would not read it as a class
+    ///   either.
+    /// - The class of a **const fetch** (`Geo::MAP` in `key-of<Geo::MAP>`, or
+    ///   bare as a type), issue #665's acceptance criterion. It is a class name
+    ///   written against the owner's scope like any identifier, and it is
+    ///   re-resolved where the body lands (`const_operand_shape` calls
+    ///   `resolve_pclass` at the use site), so left relative it found the
+    ///   importer's `App\Geo::MAP` instead of the owner's `Vendor\Geo::MAP`.
     fn qualify_class_names(&self, ty: &mut PType, efile: usize, eoff: u32) {
         let qualify = |name: &mut String| {
-            if name.starts_with('\\') {
+            if name.starts_with('\\') || steins_contract::is_type_vocabulary(name) {
                 return;
             }
             let fqn = self.resolve_pclass(efile, eoff, name);
-            if self.is_known_class(&fqn) {
-                *name = format!("\\{}", fqn.trim_start_matches('\\'));
-            }
+            *name = format!("\\{}", fqn.trim_start_matches('\\'));
         };
-        // The names this node itself carries: an identifier, and a generic's base.
-        // A callable's identifier (`Closure`) is deliberately left alone — it names
-        // the callable vocabulary the contract lane matches on, not a class the
-        // edge's file could re-spell.
+        // The names this node itself carries: an identifier, a generic's base,
+        // and a const fetch's class. A callable's identifier (`Closure`) is
+        // deliberately left alone — it names the callable vocabulary the
+        // contract lane matches on, not a class the edge's file could re-spell.
         match &mut ty.kind {
             PKind::Identifier(name) => qualify(name),
-            PKind::Generic { base, .. } => qualify(base),
+            PKind::Generic { base, args } => {
+                qualify(base);
+                if is_int_range_base(base) {
+                    for arg in args {
+                        if !is_int_range_bound(&arg.ty) {
+                            self.qualify_class_names(&mut arg.ty, efile, eoff);
+                        }
+                    }
+                    return;
+                }
+            }
+            // An empty class is a bare `CONST`, which names no class at all.
+            PKind::Const(ConstExpr::Fetch { class, .. }) if !class.is_empty() => qualify(class),
             _ => {}
         }
         for_each_child_type_mut(ty, &mut |child| self.qualify_class_names(child, efile, eoff));
@@ -1866,6 +1911,20 @@ fn const_operand_shape(cx: &Cx, cfile: usize, coff: u32, ty: &PType) -> Option<C
     }
     let non_empty = !fields.is_empty();
     Some(ContractTy::Shape { list: false, fields, sealed: true, non_empty, unsealed: None })
+}
+
+/// Whether a generic's base is the `int<lo, hi>` range spelling
+/// (`lower_generic`'s `"int" | "int-range"` arm), whose arguments may be the
+/// bound words `min`/`max` rather than types.
+fn is_int_range_base(base: &str) -> bool {
+    matches!(base.trim_start_matches('\\').to_ascii_lowercase().as_str(), "int" | "int-range")
+}
+
+/// Whether a range argument is the bound word `min` or `max` — the spelling
+/// `lower_int_range` reads as a bound, and so the one `qualify_class_names` must
+/// not turn into a class name.
+fn is_int_range_bound(ty: &PType) -> bool {
+    matches!(&ty.kind, PKind::Identifier(id) if id.eq_ignore_ascii_case("min") || id.eq_ignore_ascii_case("max"))
 }
 
 /// The literal contract one *proven* array element denotes. `None` for anything

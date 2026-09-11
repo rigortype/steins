@@ -41,6 +41,13 @@ fn param_count(src: &str) -> usize {
     check(&tree, &functions, "t.php").into_iter().filter(|d| d.id == PARAM_MISMATCH_ID).count()
 }
 
+/// How many findings of one id a source produces.
+fn ids(src: &str, id: &str) -> usize {
+    let tree = SourceTree::parse(src);
+    let functions = tree.functions().to_vec();
+    check(&tree, &functions, "t.php").into_iter().filter(|d| d.id == id).count()
+}
+
 /// A class declaring `$body` as its docblock, with one method that dumps its
 /// `@param $ty`.
 fn probe(body: &str, ty: &str) -> String {
@@ -231,13 +238,74 @@ fn an_unparsable_alias_body_floors() {
 // 4. Precedence: what an alias name loses to.
 
 #[test]
-fn an_in_project_class_wins_over_a_same_named_alias() {
-    // The pseudo-type/class precedence question again, with the same answer: the
-    // declaration wins, and the identifier is left exactly as written.
+fn an_alias_wins_over_a_same_named_class() {
+    // PHPStan's order, which #472 shipped inverted (issue #670).
+    // `ClassReflection::getTypeAliases` merges `array_merge($imported, $local)`
+    // and `TypeNodeResolver::resolveIdentifierTypeNode` consults the alias map
+    // before the class one, so a declared alias always wins. On the class-first
+    // reading this dumped `Row (asserted)`.
     let src = "<?php\nclass Row {}\n/** @phpstan-type Row array{id: int} */\nclass Probe {\n\
         /** @param Row $v */\n\
         public function m($v): void { \\PHPStan\\dumpPhpDocType($v); }\n}\n";
-    assert_eq!(one_dump(src), "dumped phpdoc type: Row (asserted)");
+    assert_eq!(one_dump(src), "dumped phpdoc type: array{id: int} (asserted)");
+}
+
+#[test]
+fn the_collision_no_longer_convicts_a_value_the_alias_admits() {
+    // Why the order moved rather than being registered. Divergence-registry entry
+    // 18 carried this as the one row in that section that was **not** a silence:
+    // the class-first tie-break answered a definite `No` on a call the oracle
+    // accepts (PHPStan reports the collision as `typeAlias.duplicate` and then
+    // resolves the alias anyway). A conviction the oracle admits is not a
+    // divergence to register, so the order changed and the two paragraphs
+    // recording it are gone.
+    let src = "<?php\nclass Foo {}\n/** @phpstan-type Foo array{x: int} */\nclass Probe {\n\
+        /** @param Foo $v */\n\
+        public function m($v): void {}\n}\n\
+        $p = new Probe();\n$p->m(['x' => 1]);\n";
+    assert_eq!(param_count(src), 0, "the shape the alias names is admitted");
+    assert_eq!(ids(src, "type.argument-mismatch"), 0, "and the proof lane says nothing either");
+    // That pair is the shape the issue asks for, and on its own it proves less
+    // than it looks: an array literal against a *class* contract was already
+    // `Maybe`, so the class-first reading was silent here too. The registry's own
+    // example is the sensitive one — a scalar is a definite non-member of a class,
+    // so `m(1)` against `@phpstan-type Row int` beside a class `Row` was the
+    // `phpdoc.param-mismatch` PHPStan accepts, and it is the row that moved.
+    let scalar = "<?php\nclass Row {}\n/** @phpstan-type Row int */\nclass Probe {\n\
+        /** @param Row $v */\n\
+        public function m($v): void {}\n}\n\
+        $p = new Probe();\n$p->m(1);\n";
+    assert_eq!(param_count(scalar), 0, "the alias admits `1`, and so does the oracle");
+}
+
+#[test]
+fn an_alias_is_looked_up_by_its_spelling_not_its_case() {
+    // `NameScope::hasTypeAlias` is `array_key_exists($alias, …)` on the exact
+    // spelling (issue #670), so beside `class Row {}` an alias `Row` leaves
+    // `@param row` naming the class — PHPStan says `class.nameCase` and resolves
+    // `App\row` — and only the same-spelled `@param Row` is the alias. Keyed by
+    // a case fold, `row` was the alias too, and with the alias now winning the
+    // collision `m(new Row())` was convicted against `int`, a `No` the oracle
+    // never gives. Both directions, because the fold hid both.
+    let src = "<?php\nnamespace App;\nclass Row {}\n/** @phpstan-type Row int */\nclass Probe {\n\
+        /** @param row $v */\n\
+        public function m($v): void { \\PHPStan\\dumpPhpDocType($v); }\n}\n\
+        $p = new Probe();\n$p->m(new Row());\n";
+    assert_eq!(one_dump(src), "dumped phpdoc type: App\\Row (asserted)");
+    assert_eq!(param_count(src), 0, "`row` is the class, which `new Row()` inhabits");
+    // The other way round: a lower-case alias does not capture the class-cased
+    // spelling either, and the exact spelling still is the alias.
+    let mirror = "<?php\nnamespace App;\nclass Row {}\n/** @phpstan-type row int */\nclass Probe {\n\
+        /** @param Row $v */\n\
+        public function m($v): void { \\PHPStan\\dumpPhpDocType($v); }\n\
+        /** @param row $v */\n\
+        public function n($v): void { \\PHPStan\\dumpPhpDocType($v); }\n}\n\
+        $p = new Probe();\n$p->m(new Row());\n$p->n(new Row());\n";
+    assert_eq!(
+        dumps(mirror),
+        ["dumped phpdoc type: App\\Row (asserted)", "dumped phpdoc type: int (asserted)"]
+    );
+    assert_eq!(param_count(mirror), 1, "only `n`, whose `row` is the alias, rejects the object");
 }
 
 #[test]
@@ -348,6 +416,40 @@ fn an_alias_body_wrapped_across_lines_is_reassembled() {
 }
 
 #[test]
+fn a_bracket_inside_a_shape_key_does_not_decide_where_the_body_ends() {
+    // Issue #666. The continuation rule counts brackets, and a shape key is a
+    // string literal that may spell one. Both repros are the same defect read in
+    // opposite directions, and both are what `is_unclosed` now refuses to read.
+    //
+    // The `>` cancelled the `{`, so the body looked finished and bound the half
+    // before the wrap — the narrowing this whole join exists to prevent.
+    assert_eq!(
+        one_dump(&probe(" * @phpstan-type Row array{a: 'x>',\n *   b: int}", "Row")),
+        "dumped phpdoc type: array{a: 'x>', b: int} (asserted)"
+    );
+    assert_eq!(
+        param_count(&format!(
+            "{}\n(new Probe())->m(['a' => 'x>', 'b' => 1]);\n",
+            probe(" * @phpstan-type Row array{a: 'x>',\n *   b: int}", "Row")
+        )),
+        0,
+        "the shape the author wrote across the wrap admits its own value"
+    );
+    // And the other way: the `{` in the key left a finished shape looking open,
+    // so the prose below joined it and the whole declaration floored.
+    assert_eq!(
+        one_dump(&probe(" * @phpstan-type Row array{'{': int}\n * Some prose.", "Row")),
+        one_dump(&probe(" * @phpstan-type Row array{'{': int}", "Row"))
+    );
+    // Spelled out as well as paired, because two floors also agree: what the
+    // prose used to cost was the whole declaration.
+    assert_eq!(
+        one_dump(&probe(" * @phpstan-type Row array{'{': int}\n * Some prose.", "Row")),
+        "dumped phpdoc type: array{'{': int} (asserted)"
+    );
+}
+
+#[test]
 fn a_template_name_is_not_captured_by_a_same_named_alias() {
     // The ordering claim, from the outside: aliases expand *after* both `@template`
     // shadow stages, so by then a declared template name is no longer an identifier
@@ -402,6 +504,93 @@ fn an_imported_body_keeps_naming_the_classes_it_named() {
         one_dump(&format!("{src}{user}")),
         "dumped phpdoc type: list<vendor\\row> (asserted)"
     );
+}
+
+#[test]
+fn an_imported_body_keeps_naming_a_class_the_owner_could_not_resolve_either() {
+    // The other half of the same rule (issue #665), and the half #472 got wrong:
+    // a name the *owner's* scope cannot resolve is an unknown class in the
+    // owner's namespace, never a class the importer happens to have. Qualifying
+    // only known classes left `Thing` relative, so it resolved again on arrival
+    // and this dumped `list<app\thing>` — a definite contract over a class
+    // `Vendor\Geo` never named. Upstream cannot make the mistake: `TypeAlias`
+    // carries the owner's `NameScope`, and an unknown identifier resolves through
+    // it to `Vendor\Thing`.
+    let src = "<?php\nnamespace Vendor;\n/** @phpstan-type Rows list<Thing> */\nclass Geo {}\n";
+    let user = "namespace App;\nclass Thing {}\n\
+        /** @phpstan-import-type Rows from \\Vendor\\Geo */\nclass Probe {\n\
+        /** @param Rows $v */\n\
+        public function m($v): void { \\PHPStan\\dumpPhpDocType($v); }\n}\n";
+    assert_eq!(
+        one_dump(&format!("{src}{user}")),
+        "dumped phpdoc type: list<vendor\\thing> (asserted)"
+    );
+}
+
+#[test]
+fn an_importers_own_class_does_not_answer_for_a_name_the_owner_left_unresolved() {
+    // The same defect at the relation that pays for it. `Vendor\Geo` names
+    // `Thing`, which does not exist in `Vendor`; the importing file has an
+    // `App\Thing` that has nothing to do with it. A relative name arriving here
+    // resolved to `App\Thing`, which IS a known class, so the contract stopped
+    // being silent and convicted every other object — a manufactured definite
+    // `No`, the outcome issue #472 exists to prevent. Qualified in the owner's
+    // scope the name is an unknown class and `Cx::is_known_class`'s valve holds.
+    let src = "<?php\nnamespace Vendor;\n/** @phpstan-type Row Thing */\nclass Geo {}\n";
+    let user = "namespace App;\nclass Thing {}\nclass Other {}\n\
+        /** @phpstan-import-type Row from \\Vendor\\Geo */\nclass Probe {\n\
+        /** @param Row $v */\n\
+        public function m($v): void {}\n}\n\
+        $p = new Probe();\n$p->m(new Other());\n";
+    assert_eq!(param_count(&format!("{src}{user}")), 0);
+}
+
+#[test]
+fn a_range_bound_is_not_a_class_name_to_qualify() {
+    // Qualifying every non-vocabulary identifier (issue #665) must stop at the
+    // bound position of `int<…>`: `min`/`max` are words `lower_int_range` reads
+    // by spelling, as upstream's `TypeNodeResolver` does, and `\App\max` is no
+    // bound. Spelled that way the range floored to `Opaque`, and a local body —
+    // `expand_alias` qualifies those too — dumped `no declared contract` and
+    // admitted `-1` against `int<1, max>`.
+    let src = "<?php\nnamespace App;\n/**\n * @phpstan-type Pos int<1, max>\n\
+         * @phpstan-type Neg int<min, -1>\n */\nclass Probe {\n\
+        /** @param Pos $v */\n\
+        public function m($v): void { \\PHPStan\\dumpPhpDocType($v); }\n\
+        /** @param Neg $v */\n\
+        public function n($v): void { \\PHPStan\\dumpPhpDocType($v); }\n}\n\
+        $p = new Probe();\n$p->m(-1);\n$p->n(1);\n";
+    assert_eq!(
+        dumps(src),
+        ["dumped phpdoc type: int<1, max> (asserted)", "dumped phpdoc type: int<min, -1> (asserted)"]
+    );
+    assert_eq!(param_count(src), 2, "-1 is below `int<1, max>` and 1 above `int<min, -1>`");
+}
+
+#[test]
+fn an_imported_bodys_const_fetch_names_the_owners_class() {
+    // Issue #665's acceptance criterion, at the one node the identifier walk
+    // did not reach: the class of a const fetch. `key-of<Geo::MAP>` written in
+    // `Vendor` resolves its `Geo` where the operand is read
+    // (`const_operand_shape`), so left relative it found the importer's
+    // `App\Geo::MAP = ['b' => 2]` and convicted `'a'`, the key the owner's map
+    // has. PHPStan dumps `'a'` and accepts.
+    let src = "<?php\nnamespace Vendor;\n\
+        /**\n * @phpstan-type Ko key-of<Geo::MAP>\n * @phpstan-type Vo value-of<Geo::MAP>\n */\n\
+        class Geo { const MAP = ['a' => 1]; }\n";
+    let user = "namespace App;\nclass Geo { const MAP = ['b' => 2]; }\n\
+        /**\n * @phpstan-import-type Ko from \\Vendor\\Geo\n\
+         * @phpstan-import-type Vo from \\Vendor\\Geo\n */\nclass Probe {\n\
+        /** @param Ko $v */\n\
+        public function ko($v): void {}\n\
+        /** @param Vo $v */\n\
+        public function vo($v): void {}\n}\n\
+        $p = new Probe();\n";
+    let with = |calls: &str| format!("{src}{user}{calls}");
+    assert_eq!(param_count(&with("$p->ko('a');\n$p->vo(1);\n")), 0, "the owner's key and value");
+    // Not a floor: the owner's map is what judges, so the importer's own key is
+    // the one rejected.
+    assert_eq!(param_count(&with("$p->ko('b');\n$p->vo(2);\n")), 2, "the importer's key and value");
 }
 
 // 5. What stays where it was.
