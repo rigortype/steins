@@ -58,10 +58,11 @@ and nix cannot build a Linux PHP on an Apple-silicon Mac without a Linux builder
 this machine does not have. So the Linux engine comes from CI, and its rows are
 merged deliberately:
 
-1. Dispatch the job — it is `workflow_dispatch`-only, so nothing else triggers it:
+1. Dispatch the job — it runs only when the dispatch asks for it by name, so
+   neither a push nor a webhook-escape-hatch re-run pays its twenty minutes:
 
    ```sh
-   gh workflow run ci.yml --ref <branch>
+   gh workflow run ci.yml --ref <branch> -f mine_param_facts=true
    ```
 
 2. Download the artefact once the run finishes:
