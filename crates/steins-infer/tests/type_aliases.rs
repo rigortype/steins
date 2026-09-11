@@ -265,6 +265,17 @@ fn the_collision_no_longer_convicts_a_value_the_alias_admits() {
         $p = new Probe();\n$p->m(['x' => 1]);\n";
     assert_eq!(param_count(src), 0, "the shape the alias names is admitted");
     assert_eq!(ids(src, "type.argument-mismatch"), 0, "and the proof lane says nothing either");
+    // That pair is the shape the issue asks for, and on its own it proves less
+    // than it looks: an array literal against a *class* contract was already
+    // `Maybe`, so the class-first reading was silent here too. The registry's own
+    // example is the sensitive one — a scalar is a definite non-member of a class,
+    // so `m(1)` against `@phpstan-type Row int` beside a class `Row` was the
+    // `phpdoc.param-mismatch` PHPStan accepts, and it is the row that moved.
+    let scalar = "<?php\nclass Row {}\n/** @phpstan-type Row int */\nclass Probe {\n\
+        /** @param Row $v */\n\
+        public function m($v): void {}\n}\n\
+        $p = new Probe();\n$p->m(1);\n";
+    assert_eq!(param_count(scalar), 0, "the alias admits `1`, and so does the oracle");
 }
 
 #[test]
