@@ -237,3 +237,32 @@ fn a_generator_method_is_not_bounded_by_its_object_hint() {
         \\PHPStan\\dumpType($x);\n";
     assert_eq!(one_type(src), "unknown");
 }
+
+/// A closure has a `Scope` and no declaration, so the enforced top reaches it through
+/// `Cx::scope_return_top` alone — the other of the two readers A9.7 names. The hint
+/// bounds the summary here exactly as it does on a named function.
+#[test]
+fn a_closures_array_hint_bounds_its_summary_too() {
+    let src = "<?php\n\
+        $f = function (int $trigger): array {\n\
+            return [1, 2];\n\
+        };\n\
+        $x = $f(1);\n\
+        \\PHPStan\\dumpType($x);\n";
+    assert_eq!(one_type(src), "list{1, 2}");
+}
+
+/// And the generator guard on that same reader, which is the only thing standing
+/// between a yielding closure and the envelope: `declared_enforced_top` cannot help
+/// here, because there is no `FunctionDecl` to withhold the top from.
+#[test]
+fn a_generator_closure_is_guarded_by_its_scope() {
+    let src = "<?php\n\
+        $f = function (int $trigger): iterable {\n\
+            yield 1;\n\
+            return 'x';\n\
+        };\n\
+        $x = $f(1);\n\
+        \\PHPStan\\dumpType($x);\n";
+    assert_eq!(one_type(src), "unknown");
+}

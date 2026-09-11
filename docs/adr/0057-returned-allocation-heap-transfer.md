@@ -1635,7 +1635,10 @@ This was a live hole, not a hypothetical: with only the scope-side guard
 in place, `function f(): iterable { yield 1; return 'x'; }` bound its
 caller `Traversable|array` through the arm lane. Pinned from both sides
 by `a_generator_is_not_bounded_by_its_iterable_hint` and
-`a_generator_method_is_not_bounded_by_its_object_hint`.
+`a_generator_method_is_not_bounded_by_its_object_hint`, and the
+scope-side reader gets its own pair — `a_closures_array_hint_bounds_its_
+summary_too` and `a_generator_closure_is_guarded_by_its_scope` — because a
+closure is the case `declared_enforced_top` cannot reach at all.
 
 ### A9.8 What it measured, including the shortfall
 
