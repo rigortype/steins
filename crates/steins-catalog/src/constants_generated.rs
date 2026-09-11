@@ -31,7 +31,7 @@
 // target. Build-dependent names (a linked library's version, an installation
 // path) are refused outright and answer nothing.
 //
-// Mined from PHP 8.5.10 with these extensions loaded:
+// Mined at PHP 8.5.10, over the engines' extensions:
 //   Core, PDO_ODBC, ast, brotli, calendar, curl, date, dom, exif, fileinfo, filter, ftp, gd,
 //   gmp, gnupg, hash, iconv, intl, json, ldap, libxml, mbstring, mysqli, odbc, openssl, pcntl,
 //   pcov, pcre, pgsql, posix, random, readline, session, snmp, soap, sockets, sodium, sqlite3,
@@ -45,9 +45,9 @@
 //
 // Counts at the mining pin:
 //    3286  constants the build had, over the catalog's extensions
-//    2572  rows (the spec-fixed literals, plus the value-less)
-//     137    of those, carrying a `since` the engines' presence proved
-//       6    of those, value-less — `until` and nothing else
+//    2571  rows (the spec-fixed literals, plus the value-less)
+//      80    of those, carrying a `since` the engines' presence proved
+//       5    of those, value-less — `until` and nothing else
 
 // `M_PI` and its siblings ARE the mathematical constants, spelled to the last
 // bit php-src spells them to, so `clippy::approx_constant` fires on every one of
@@ -273,9 +273,9 @@ pub(crate) static ENGINE_CONSTANTS: &[(&str, ConstRow)] = &[
     ("CURLE_URL_MALFORMAT_USER", ConstRow { value: Some(ConstValue::Int(4)), since: None, until: None }), // curl
     ("CURLE_WEIRD_SERVER_REPLY", ConstRow { value: Some(ConstValue::Int(8)), since: None, until: None }), // curl
     ("CURLE_WRITE_ERROR", ConstRow { value: Some(ConstValue::Int(23)), since: None, until: None }), // curl
-    ("CURLFOLLOW_ALL", ConstRow { value: Some(ConstValue::Int(1)), since: Some((8, 5)), until: None }), // curl
-    ("CURLFOLLOW_FIRSTONLY", ConstRow { value: Some(ConstValue::Int(3)), since: Some((8, 5)), until: None }), // curl
-    ("CURLFOLLOW_OBEYCODE", ConstRow { value: Some(ConstValue::Int(2)), since: Some((8, 5)), until: None }), // curl
+    ("CURLFOLLOW_ALL", ConstRow { value: Some(ConstValue::Int(1)), since: None, until: None }), // curl
+    ("CURLFOLLOW_FIRSTONLY", ConstRow { value: Some(ConstValue::Int(3)), since: None, until: None }), // curl
+    ("CURLFOLLOW_OBEYCODE", ConstRow { value: Some(ConstValue::Int(2)), since: None, until: None }), // curl
     ("CURLFTPAUTH_DEFAULT", ConstRow { value: Some(ConstValue::Int(0)), since: None, until: None }), // curl
     ("CURLFTPAUTH_SSL", ConstRow { value: Some(ConstValue::Int(1)), since: None, until: None }), // curl
     ("CURLFTPAUTH_TLS", ConstRow { value: Some(ConstValue::Int(2)), since: None, until: None }), // curl
@@ -307,7 +307,7 @@ pub(crate) static ENGINE_CONSTANTS: &[(&str, ConstRow)] = &[
     ("CURLINFO_CONDITION_UNMET", ConstRow { value: Some(ConstValue::Int(2097187)), since: None, until: None }), // curl
     ("CURLINFO_CONNECT_TIME", ConstRow { value: Some(ConstValue::Int(3145733)), since: None, until: None }), // curl
     ("CURLINFO_CONNECT_TIME_T", ConstRow { value: Some(ConstValue::Int(6291508)), since: None, until: None }), // curl
-    ("CURLINFO_CONN_ID", ConstRow { value: Some(ConstValue::Int(6291520)), since: Some((8, 5)), until: None }), // curl
+    ("CURLINFO_CONN_ID", ConstRow { value: Some(ConstValue::Int(6291520)), since: None, until: None }), // curl
     ("CURLINFO_CONTENT_LENGTH_DOWNLOAD", ConstRow { value: Some(ConstValue::Int(3145743)), since: None, until: None }), // curl
     ("CURLINFO_CONTENT_LENGTH_DOWNLOAD_T", ConstRow { value: Some(ConstValue::Int(6291471)), since: None, until: None }), // curl
     ("CURLINFO_CONTENT_LENGTH_UPLOAD", ConstRow { value: Some(ConstValue::Int(3145744)), since: None, until: None }), // curl
@@ -325,7 +325,7 @@ pub(crate) static ENGINE_CONSTANTS: &[(&str, ConstRow)] = &[
     ("CURLINFO_HEADER_OUT", ConstRow { value: Some(ConstValue::Int(2)), since: None, until: None }), // curl
     ("CURLINFO_HEADER_SIZE", ConstRow { value: Some(ConstValue::Int(2097163)), since: None, until: None }), // curl
     ("CURLINFO_HTTPAUTH_AVAIL", ConstRow { value: Some(ConstValue::Int(2097175)), since: None, until: None }), // curl
-    ("CURLINFO_HTTPAUTH_USED", ConstRow { value: Some(ConstValue::Int(2097221)), since: Some((8, 5)), until: None }), // curl
+    ("CURLINFO_HTTPAUTH_USED", ConstRow { value: Some(ConstValue::Int(2097221)), since: None, until: None }), // curl
     ("CURLINFO_HTTP_CODE", ConstRow { value: Some(ConstValue::Int(2097154)), since: None, until: None }), // curl
     ("CURLINFO_HTTP_CONNECTCODE", ConstRow { value: Some(ConstValue::Int(2097174)), since: None, until: None }), // curl
     ("CURLINFO_HTTP_VERSION", ConstRow { value: Some(ConstValue::Int(2097198)), since: None, until: None }), // curl
@@ -344,10 +344,10 @@ pub(crate) static ENGINE_CONSTANTS: &[(&str, ConstRow)] = &[
     ("CURLINFO_PRIVATE", ConstRow { value: Some(ConstValue::Int(1048597)), since: None, until: None }), // curl
     ("CURLINFO_PROTOCOL", ConstRow { value: Some(ConstValue::Int(2097200)), since: None, until: None }), // curl
     ("CURLINFO_PROXYAUTH_AVAIL", ConstRow { value: Some(ConstValue::Int(2097176)), since: None, until: None }), // curl
-    ("CURLINFO_PROXYAUTH_USED", ConstRow { value: Some(ConstValue::Int(2097222)), since: Some((8, 5)), until: None }), // curl
+    ("CURLINFO_PROXYAUTH_USED", ConstRow { value: Some(ConstValue::Int(2097222)), since: None, until: None }), // curl
     ("CURLINFO_PROXY_ERROR", ConstRow { value: Some(ConstValue::Int(2097211)), since: None, until: None }), // curl
     ("CURLINFO_PROXY_SSL_VERIFYRESULT", ConstRow { value: Some(ConstValue::Int(2097199)), since: None, until: None }), // curl
-    ("CURLINFO_QUEUE_TIME_T", ConstRow { value: Some(ConstValue::Int(6291521)), since: Some((8, 5)), until: None }), // curl
+    ("CURLINFO_QUEUE_TIME_T", ConstRow { value: Some(ConstValue::Int(6291521)), since: None, until: None }), // curl
     ("CURLINFO_REDIRECT_COUNT", ConstRow { value: Some(ConstValue::Int(2097172)), since: None, until: None }), // curl
     ("CURLINFO_REDIRECT_TIME", ConstRow { value: Some(ConstValue::Int(3145747)), since: None, until: None }), // curl
     ("CURLINFO_REDIRECT_TIME_T", ConstRow { value: Some(ConstValue::Int(6291511)), since: None, until: None }), // curl
@@ -378,7 +378,7 @@ pub(crate) static ENGINE_CONSTANTS: &[(&str, ConstRow)] = &[
     ("CURLINFO_TEXT", ConstRow { value: Some(ConstValue::Int(0)), since: Some((8, 4)), until: None }), // curl
     ("CURLINFO_TOTAL_TIME", ConstRow { value: Some(ConstValue::Int(3145731)), since: None, until: None }), // curl
     ("CURLINFO_TOTAL_TIME_T", ConstRow { value: Some(ConstValue::Int(6291506)), since: None, until: None }), // curl
-    ("CURLINFO_USED_PROXY", ConstRow { value: Some(ConstValue::Int(2097218)), since: Some((8, 5)), until: None }), // curl
+    ("CURLINFO_USED_PROXY", ConstRow { value: Some(ConstValue::Int(2097218)), since: None, until: None }), // curl
     ("CURLKHMATCH_LAST", ConstRow { value: Some(ConstValue::Int(3)), since: Some((8, 3)), until: None }), // curl
     ("CURLKHMATCH_MISMATCH", ConstRow { value: Some(ConstValue::Int(1)), since: Some((8, 3)), until: None }), // curl
     ("CURLKHMATCH_MISSING", ConstRow { value: Some(ConstValue::Int(2)), since: Some((8, 3)), until: None }), // curl
@@ -489,7 +489,7 @@ pub(crate) static ENGINE_CONSTANTS: &[(&str, ConstRow)] = &[
     ("CURLOPT_IGNORE_CONTENT_LENGTH", ConstRow { value: Some(ConstValue::Int(136)), since: None, until: None }), // curl
     ("CURLOPT_INFILE", ConstRow { value: Some(ConstValue::Int(10009)), since: None, until: None }), // curl
     ("CURLOPT_INFILESIZE", ConstRow { value: Some(ConstValue::Int(14)), since: None, until: None }), // curl
-    ("CURLOPT_INFILESIZE_LARGE", ConstRow { value: Some(ConstValue::Int(30115)), since: Some((8, 5)), until: None }), // curl
+    ("CURLOPT_INFILESIZE_LARGE", ConstRow { value: Some(ConstValue::Int(30115)), since: None, until: None }), // curl
     ("CURLOPT_INTERFACE", ConstRow { value: Some(ConstValue::Int(10062)), since: None, until: None }), // curl
     ("CURLOPT_IPRESOLVE", ConstRow { value: Some(ConstValue::Int(113)), since: None, until: None }), // curl
     ("CURLOPT_ISSUERCERT", ConstRow { value: Some(ConstValue::Int(10170)), since: None, until: None }), // curl
@@ -628,7 +628,7 @@ pub(crate) static ENGINE_CONSTANTS: &[(&str, ConstRow)] = &[
     ("CURLOPT_SSL_FALSESTART", ConstRow { value: Some(ConstValue::Int(233)), since: None, until: None }), // curl
     ("CURLOPT_SSL_OPTIONS", ConstRow { value: Some(ConstValue::Int(216)), since: None, until: None }), // curl
     ("CURLOPT_SSL_SESSIONID_CACHE", ConstRow { value: Some(ConstValue::Int(150)), since: None, until: None }), // curl
-    ("CURLOPT_SSL_SIGNATURE_ALGORITHMS", ConstRow { value: Some(ConstValue::Int(10328)), since: Some((8, 5)), until: None }), // curl
+    ("CURLOPT_SSL_SIGNATURE_ALGORITHMS", ConstRow { value: Some(ConstValue::Int(10328)), since: None, until: None }), // curl
     ("CURLOPT_SSL_VERIFYHOST", ConstRow { value: Some(ConstValue::Int(81)), since: None, until: None }), // curl
     ("CURLOPT_SSL_VERIFYPEER", ConstRow { value: Some(ConstValue::Int(64)), since: None, until: None }), // curl
     ("CURLOPT_SSL_VERIFYSTATUS", ConstRow { value: Some(ConstValue::Int(232)), since: None, until: None }), // curl
@@ -1124,7 +1124,7 @@ pub(crate) static ENGINE_CONSTANTS: &[(&str, ConstRow)] = &[
     ("IMAGETYPE_AVIF", ConstRow { value: Some(ConstValue::Int(19)), since: None, until: None }), // standard
     ("IMAGETYPE_BMP", ConstRow { value: Some(ConstValue::Int(6)), since: None, until: None }), // standard
     ("IMAGETYPE_GIF", ConstRow { value: Some(ConstValue::Int(1)), since: None, until: None }), // standard
-    ("IMAGETYPE_HEIF", ConstRow { value: Some(ConstValue::Int(20)), since: Some((8, 5)), until: None }), // standard
+    ("IMAGETYPE_HEIF", ConstRow { value: Some(ConstValue::Int(20)), since: None, until: None }), // standard
     ("IMAGETYPE_ICO", ConstRow { value: Some(ConstValue::Int(17)), since: None, until: None }), // standard
     ("IMAGETYPE_IFF", ConstRow { value: Some(ConstValue::Int(14)), since: None, until: None }), // standard
     ("IMAGETYPE_JB2", ConstRow { value: Some(ConstValue::Int(12)), since: None, until: None }), // standard
@@ -1135,8 +1135,8 @@ pub(crate) static ENGINE_CONSTANTS: &[(&str, ConstRow)] = &[
     ("IMAGETYPE_JPX", ConstRow { value: Some(ConstValue::Int(11)), since: None, until: None }), // standard
     ("IMAGETYPE_PNG", ConstRow { value: Some(ConstValue::Int(3)), since: None, until: None }), // standard
     ("IMAGETYPE_PSD", ConstRow { value: Some(ConstValue::Int(5)), since: None, until: None }), // standard
-    ("IMAGETYPE_SVG", ConstRow { value: Some(ConstValue::Int(21)), since: Some((8, 5)), until: None }), // standard
-    ("IMAGETYPE_SWC", ConstRow { value: Some(ConstValue::Int(13)), since: Some((8, 5)), until: None }), // standard
+    ("IMAGETYPE_SVG", ConstRow { value: Some(ConstValue::Int(21)), since: None, until: None }), // standard
+    ("IMAGETYPE_SWC", ConstRow { value: Some(ConstValue::Int(13)), since: None, until: None }), // standard
     ("IMAGETYPE_SWF", ConstRow { value: Some(ConstValue::Int(4)), since: None, until: None }), // standard
     ("IMAGETYPE_TIFF_II", ConstRow { value: Some(ConstValue::Int(7)), since: None, until: None }), // standard
     ("IMAGETYPE_TIFF_MM", ConstRow { value: Some(ConstValue::Int(8)), since: None, until: None }), // standard
@@ -1341,11 +1341,11 @@ pub(crate) static ENGINE_CONSTANTS: &[(&str, ConstRow)] = &[
     ("LDAP_OPT_X_KEEPALIVE_IDLE", ConstRow { value: Some(ConstValue::Int(25344)), since: None, until: None }), // ldap
     ("LDAP_OPT_X_KEEPALIVE_INTERVAL", ConstRow { value: Some(ConstValue::Int(25346)), since: None, until: None }), // ldap
     ("LDAP_OPT_X_KEEPALIVE_PROBES", ConstRow { value: Some(ConstValue::Int(25345)), since: None, until: None }), // ldap
-    ("LDAP_OPT_X_SASL_AUTHCID", ConstRow { value: Some(ConstValue::Int(24834)), since: Some((8, 5)), until: None }), // ldap
-    ("LDAP_OPT_X_SASL_AUTHZID", ConstRow { value: Some(ConstValue::Int(24835)), since: Some((8, 5)), until: None }), // ldap
-    ("LDAP_OPT_X_SASL_MECH", ConstRow { value: Some(ConstValue::Int(24832)), since: Some((8, 5)), until: None }), // ldap
+    ("LDAP_OPT_X_SASL_AUTHCID", ConstRow { value: Some(ConstValue::Int(24834)), since: None, until: None }), // ldap
+    ("LDAP_OPT_X_SASL_AUTHZID", ConstRow { value: Some(ConstValue::Int(24835)), since: None, until: None }), // ldap
+    ("LDAP_OPT_X_SASL_MECH", ConstRow { value: Some(ConstValue::Int(24832)), since: None, until: None }), // ldap
     ("LDAP_OPT_X_SASL_NOCANON", ConstRow { value: Some(ConstValue::Int(24843)), since: None, until: None }), // ldap
-    ("LDAP_OPT_X_SASL_REALM", ConstRow { value: Some(ConstValue::Int(24833)), since: Some((8, 5)), until: None }), // ldap
+    ("LDAP_OPT_X_SASL_REALM", ConstRow { value: Some(ConstValue::Int(24833)), since: None, until: None }), // ldap
     ("LDAP_OPT_X_SASL_USERNAME", ConstRow { value: Some(ConstValue::Int(24844)), since: None, until: None }), // ldap
     ("LDAP_OPT_X_TLS_ALLOW", ConstRow { value: Some(ConstValue::Int(3)), since: None, until: None }), // ldap
     ("LDAP_OPT_X_TLS_CACERTDIR", ConstRow { value: Some(ConstValue::Int(24579)), since: None, until: None }), // ldap
@@ -1394,7 +1394,6 @@ pub(crate) static ENGINE_CONSTANTS: &[(&str, ConstRow)] = &[
     ("LIBXML_NONET", ConstRow { value: Some(ConstValue::Int(2048)), since: None, until: None }), // libxml
     ("LIBXML_NOWARNING", ConstRow { value: Some(ConstValue::Int(64)), since: None, until: None }), // libxml
     ("LIBXML_NOXMLDECL", ConstRow { value: Some(ConstValue::Int(2)), since: None, until: None }), // libxml
-    ("LIBXML_NO_XXE", ConstRow { value: None, since: Some((8, 4)), until: Some((8, 4)) }), // libxml
     ("LIBXML_NSCLEAN", ConstRow { value: Some(ConstValue::Int(8192)), since: None, until: None }), // libxml
     ("LIBXML_PARSEHUGE", ConstRow { value: Some(ConstValue::Int(524288)), since: None, until: None }), // libxml
     ("LIBXML_PEDANTIC", ConstRow { value: Some(ConstValue::Int(128)), since: None, until: None }), // libxml
@@ -1447,45 +1446,45 @@ pub(crate) static ENGINE_CONSTANTS: &[(&str, ConstRow)] = &[
     ("MB_CASE_TITLE_SIMPLE", ConstRow { value: Some(ConstValue::Int(6)), since: None, until: None }), // mbstring
     ("MB_CASE_UPPER", ConstRow { value: Some(ConstValue::Int(0)), since: None, until: None }), // mbstring
     ("MB_CASE_UPPER_SIMPLE", ConstRow { value: Some(ConstValue::Int(4)), since: None, until: None }), // mbstring
-    ("MHASH_ADLER32", ConstRow { value: Some(ConstValue::Int(18)), since: Some((8, 5)), until: None }), // hash
-    ("MHASH_CRC32", ConstRow { value: Some(ConstValue::Int(0)), since: Some((8, 5)), until: None }), // hash
-    ("MHASH_CRC32B", ConstRow { value: Some(ConstValue::Int(9)), since: Some((8, 5)), until: None }), // hash
-    ("MHASH_CRC32C", ConstRow { value: Some(ConstValue::Int(34)), since: Some((8, 5)), until: None }), // hash
-    ("MHASH_FNV132", ConstRow { value: Some(ConstValue::Int(29)), since: Some((8, 5)), until: None }), // hash
-    ("MHASH_FNV164", ConstRow { value: Some(ConstValue::Int(31)), since: Some((8, 5)), until: None }), // hash
-    ("MHASH_FNV1A32", ConstRow { value: Some(ConstValue::Int(30)), since: Some((8, 5)), until: None }), // hash
-    ("MHASH_FNV1A64", ConstRow { value: Some(ConstValue::Int(32)), since: Some((8, 5)), until: None }), // hash
-    ("MHASH_GOST", ConstRow { value: Some(ConstValue::Int(8)), since: Some((8, 5)), until: None }), // hash
-    ("MHASH_HAVAL128", ConstRow { value: Some(ConstValue::Int(13)), since: Some((8, 5)), until: None }), // hash
-    ("MHASH_HAVAL160", ConstRow { value: Some(ConstValue::Int(12)), since: Some((8, 5)), until: None }), // hash
-    ("MHASH_HAVAL192", ConstRow { value: Some(ConstValue::Int(11)), since: Some((8, 5)), until: None }), // hash
-    ("MHASH_HAVAL224", ConstRow { value: Some(ConstValue::Int(10)), since: Some((8, 5)), until: None }), // hash
-    ("MHASH_HAVAL256", ConstRow { value: Some(ConstValue::Int(3)), since: Some((8, 5)), until: None }), // hash
-    ("MHASH_JOAAT", ConstRow { value: Some(ConstValue::Int(33)), since: Some((8, 5)), until: None }), // hash
-    ("MHASH_MD2", ConstRow { value: Some(ConstValue::Int(28)), since: Some((8, 5)), until: None }), // hash
-    ("MHASH_MD4", ConstRow { value: Some(ConstValue::Int(16)), since: Some((8, 5)), until: None }), // hash
-    ("MHASH_MD5", ConstRow { value: Some(ConstValue::Int(1)), since: Some((8, 5)), until: None }), // hash
-    ("MHASH_MURMUR3A", ConstRow { value: Some(ConstValue::Int(35)), since: Some((8, 5)), until: None }), // hash
-    ("MHASH_MURMUR3C", ConstRow { value: Some(ConstValue::Int(36)), since: Some((8, 5)), until: None }), // hash
-    ("MHASH_MURMUR3F", ConstRow { value: Some(ConstValue::Int(37)), since: Some((8, 5)), until: None }), // hash
-    ("MHASH_RIPEMD128", ConstRow { value: Some(ConstValue::Int(23)), since: Some((8, 5)), until: None }), // hash
-    ("MHASH_RIPEMD160", ConstRow { value: Some(ConstValue::Int(5)), since: Some((8, 5)), until: None }), // hash
-    ("MHASH_RIPEMD256", ConstRow { value: Some(ConstValue::Int(24)), since: Some((8, 5)), until: None }), // hash
-    ("MHASH_RIPEMD320", ConstRow { value: Some(ConstValue::Int(25)), since: Some((8, 5)), until: None }), // hash
-    ("MHASH_SHA1", ConstRow { value: Some(ConstValue::Int(2)), since: Some((8, 5)), until: None }), // hash
-    ("MHASH_SHA224", ConstRow { value: Some(ConstValue::Int(19)), since: Some((8, 5)), until: None }), // hash
-    ("MHASH_SHA256", ConstRow { value: Some(ConstValue::Int(17)), since: Some((8, 5)), until: None }), // hash
-    ("MHASH_SHA384", ConstRow { value: Some(ConstValue::Int(21)), since: Some((8, 5)), until: None }), // hash
-    ("MHASH_SHA512", ConstRow { value: Some(ConstValue::Int(20)), since: Some((8, 5)), until: None }), // hash
-    ("MHASH_SNEFRU256", ConstRow { value: Some(ConstValue::Int(27)), since: Some((8, 5)), until: None }), // hash
-    ("MHASH_TIGER", ConstRow { value: Some(ConstValue::Int(7)), since: Some((8, 5)), until: None }), // hash
-    ("MHASH_TIGER128", ConstRow { value: Some(ConstValue::Int(14)), since: Some((8, 5)), until: None }), // hash
-    ("MHASH_TIGER160", ConstRow { value: Some(ConstValue::Int(15)), since: Some((8, 5)), until: None }), // hash
-    ("MHASH_WHIRLPOOL", ConstRow { value: Some(ConstValue::Int(22)), since: Some((8, 5)), until: None }), // hash
-    ("MHASH_XXH128", ConstRow { value: Some(ConstValue::Int(41)), since: Some((8, 5)), until: None }), // hash
-    ("MHASH_XXH3", ConstRow { value: Some(ConstValue::Int(40)), since: Some((8, 5)), until: None }), // hash
-    ("MHASH_XXH32", ConstRow { value: Some(ConstValue::Int(38)), since: Some((8, 5)), until: None }), // hash
-    ("MHASH_XXH64", ConstRow { value: Some(ConstValue::Int(39)), since: Some((8, 5)), until: None }), // hash
+    ("MHASH_ADLER32", ConstRow { value: Some(ConstValue::Int(18)), since: None, until: None }), // hash
+    ("MHASH_CRC32", ConstRow { value: Some(ConstValue::Int(0)), since: None, until: None }), // hash
+    ("MHASH_CRC32B", ConstRow { value: Some(ConstValue::Int(9)), since: None, until: None }), // hash
+    ("MHASH_CRC32C", ConstRow { value: Some(ConstValue::Int(34)), since: None, until: None }), // hash
+    ("MHASH_FNV132", ConstRow { value: Some(ConstValue::Int(29)), since: None, until: None }), // hash
+    ("MHASH_FNV164", ConstRow { value: Some(ConstValue::Int(31)), since: None, until: None }), // hash
+    ("MHASH_FNV1A32", ConstRow { value: Some(ConstValue::Int(30)), since: None, until: None }), // hash
+    ("MHASH_FNV1A64", ConstRow { value: Some(ConstValue::Int(32)), since: None, until: None }), // hash
+    ("MHASH_GOST", ConstRow { value: Some(ConstValue::Int(8)), since: None, until: None }), // hash
+    ("MHASH_HAVAL128", ConstRow { value: Some(ConstValue::Int(13)), since: None, until: None }), // hash
+    ("MHASH_HAVAL160", ConstRow { value: Some(ConstValue::Int(12)), since: None, until: None }), // hash
+    ("MHASH_HAVAL192", ConstRow { value: Some(ConstValue::Int(11)), since: None, until: None }), // hash
+    ("MHASH_HAVAL224", ConstRow { value: Some(ConstValue::Int(10)), since: None, until: None }), // hash
+    ("MHASH_HAVAL256", ConstRow { value: Some(ConstValue::Int(3)), since: None, until: None }), // hash
+    ("MHASH_JOAAT", ConstRow { value: Some(ConstValue::Int(33)), since: None, until: None }), // hash
+    ("MHASH_MD2", ConstRow { value: Some(ConstValue::Int(28)), since: None, until: None }), // hash
+    ("MHASH_MD4", ConstRow { value: Some(ConstValue::Int(16)), since: None, until: None }), // hash
+    ("MHASH_MD5", ConstRow { value: Some(ConstValue::Int(1)), since: None, until: None }), // hash
+    ("MHASH_MURMUR3A", ConstRow { value: Some(ConstValue::Int(35)), since: None, until: None }), // hash
+    ("MHASH_MURMUR3C", ConstRow { value: Some(ConstValue::Int(36)), since: None, until: None }), // hash
+    ("MHASH_MURMUR3F", ConstRow { value: Some(ConstValue::Int(37)), since: None, until: None }), // hash
+    ("MHASH_RIPEMD128", ConstRow { value: Some(ConstValue::Int(23)), since: None, until: None }), // hash
+    ("MHASH_RIPEMD160", ConstRow { value: Some(ConstValue::Int(5)), since: None, until: None }), // hash
+    ("MHASH_RIPEMD256", ConstRow { value: Some(ConstValue::Int(24)), since: None, until: None }), // hash
+    ("MHASH_RIPEMD320", ConstRow { value: Some(ConstValue::Int(25)), since: None, until: None }), // hash
+    ("MHASH_SHA1", ConstRow { value: Some(ConstValue::Int(2)), since: None, until: None }), // hash
+    ("MHASH_SHA224", ConstRow { value: Some(ConstValue::Int(19)), since: None, until: None }), // hash
+    ("MHASH_SHA256", ConstRow { value: Some(ConstValue::Int(17)), since: None, until: None }), // hash
+    ("MHASH_SHA384", ConstRow { value: Some(ConstValue::Int(21)), since: None, until: None }), // hash
+    ("MHASH_SHA512", ConstRow { value: Some(ConstValue::Int(20)), since: None, until: None }), // hash
+    ("MHASH_SNEFRU256", ConstRow { value: Some(ConstValue::Int(27)), since: None, until: None }), // hash
+    ("MHASH_TIGER", ConstRow { value: Some(ConstValue::Int(7)), since: None, until: None }), // hash
+    ("MHASH_TIGER128", ConstRow { value: Some(ConstValue::Int(14)), since: None, until: None }), // hash
+    ("MHASH_TIGER160", ConstRow { value: Some(ConstValue::Int(15)), since: None, until: None }), // hash
+    ("MHASH_WHIRLPOOL", ConstRow { value: Some(ConstValue::Int(22)), since: None, until: None }), // hash
+    ("MHASH_XXH128", ConstRow { value: Some(ConstValue::Int(41)), since: None, until: None }), // hash
+    ("MHASH_XXH3", ConstRow { value: Some(ConstValue::Int(40)), since: None, until: None }), // hash
+    ("MHASH_XXH32", ConstRow { value: Some(ConstValue::Int(38)), since: None, until: None }), // hash
+    ("MHASH_XXH64", ConstRow { value: Some(ConstValue::Int(39)), since: None, until: None }), // hash
     ("MON_1", ConstRow { value: Some(ConstValue::Int(21)), since: None, until: None }), // standard
     ("MON_10", ConstRow { value: Some(ConstValue::Int(30)), since: None, until: None }), // standard
     ("MON_11", ConstRow { value: Some(ConstValue::Int(31)), since: None, until: None }), // standard

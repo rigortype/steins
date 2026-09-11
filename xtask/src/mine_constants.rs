@@ -38,16 +38,46 @@
 //! extension** — the same clause the value diff uses for the same reason, since
 //! a build without the extension is not a minor without the constant.
 //!
+//! # A boundary needs two comparable builds
+//!
+//! Presence answers "which minors have the name" only if the engines at a
+//! boundary differ in their MINOR and in nothing else that decides whether the
+//! name is registered. They do not: the 8.2/8.3/8.4 engines here are nix
+//! `php-with-extensions` and the 8.5 one is Homebrew's, and php-src guards whole
+//! blocks of registrations on the linked library's version and on configure-time
+//! features. `LIBXML_NO_XXE` sits behind `LIBXML_VERSION >= 21300`, and the two
+//! packagers link libxml2 2.15.3 and 2.9.13 — so "arrived at 8.4, left at 8.5"
+//! was a fact about libxml2, not about PHP. `MHASH_*` (39 names) needs
+//! `--with-mhash`, `LDAP_OPT_X_SASL_*` needs `HAVE_LDAP_SASL`, and
+//! `IMAGETYPE_SWC` needs a zlib compiled into the binary rather than loaded as a
+//! shared module.
+//!
+//! So each engine also reports a **build fingerprint** (`mine_constants.php`'s
+//! `build` map, plus the linkage probe [`static_extensions`] runs),
+//! [`BUILD_PARITY`] says which of those facts an extension's registrations are
+//! guarded on, and [`range`] mints a boundary only when the two engines AT that
+//! boundary agree on every one of them. A declined boundary is recorded by name
+//! with the fact that differed, the way a refused value is. Two further rules:
+//!
+//! * an `until` additionally needs the same **packager** on both sides. A name
+//!   gone at the next minor and a next minor somebody else built are
+//!   indistinguishable, and only one of them is a fact about PHP.
+//! * an extension [`BUILD_PARITY`] says nothing about is compared on nothing,
+//!   which is the residual risk a roster always carries — the same one
+//!   [`BUILD_DEPENDENT`] carries. The packager rule is what backs the roster up
+//!   on the departure boundary, which is the one a row goes on to ASSERT.
+//!
 //! # A row with no value
 //!
 //! A name present in the older engines and gone from the top one has no value to
 //! mine and still has something to say, so it gets a **value-less row** carrying
 //! `until` and nothing else (owner ruling 2026-09-11). The value resolver ignores
-//! such a row — there is no literal to answer with — and the absence family reads
-//! it: at a target whose floor is above `until`, the engine has taken the name
-//! away, and `constant.undefined` may say so over an analysis host that still has
-//! it. The table still never says a constant IS defined; a value-less row says
-//! only that it stopped being.
+//! it — there is no literal to answer with — and no other lane reads it: the
+//! absence family's own version-skew gate (issue #28) already declines every
+//! claim made from a runtime outside the project's `PhpTarget`, so a runtime past
+//! the departure reports the name absent on its own. The `until` is what the
+//! table RECORDS, for a reader and for the next tool; it is not a second absence
+//! oracle. The table still never says a constant IS defined.
 //!
 //! # What is admitted, and what is refused
 //!
@@ -282,10 +312,78 @@ const BUILD_DEPENDENT_FAMILIES: &[(&str, &str, &str)] = &[
 /// constant the extension gains.
 const REFUSED_EXTENSIONS: &[&str] = &["pcntl", "posix", "sockets", "tokenizer"];
 
+/// **What an extension's registrations are guarded on**: `(extension, the build
+/// facts a minor boundary must agree about)`.
+///
+/// php-src does not register a constant unconditionally. Whole blocks sit behind
+/// the linked library's version (`#if LIBXML_VERSION >= 21300`, `#if
+/// LIBCURL_VERSION_NUM >= …`) or behind a configure-time feature
+/// (`#ifdef PHP_MHASH_BC`, `#ifdef HAVE_LDAP_SASL`, `#ifdef HAVE_ZLIB`), so two
+/// engines that differ THERE disagree about which names exist for a reason that
+/// is not their PHP minor. [`range`] refuses to mint a boundary between two such
+/// engines.
+///
+/// The facts are named the way `mine_constants.php`'s `build` map and
+/// [`static_extensions`] spell them. An extension absent from this table is
+/// compared on nothing, which is the roster's residual risk: the next library
+/// guard php-src adds needs a line here, exactly as the next `PGRES_*` needs one
+/// in [`BUILD_DEPENDENT`]. The packager rule in [`range`] is what backs it up on
+/// the departure boundary, the one a value-less row goes on to assert.
+const BUILD_PARITY: &[(&str, &[&str])] = &[
+    // libxml2's version, read by every extension that links it. `LIBXML_NO_XXE`
+    // is the row this table was written for: it is registered only above libxml2
+    // 2.13, and the nix builds link 2.15.3 against Homebrew's 2.9.13.
+    ("libxml", &["libxml"]),
+    ("dom", &["libxml"]),
+    ("SimpleXML", &["libxml"]),
+    ("xml", &["libxml"]),
+    ("xmlreader", &["libxml"]),
+    ("xmlwriter", &["libxml"]),
+    ("soap", &["libxml"]),
+    ("xsl", &["libxml", "libxslt"]),
+    // `MHASH_*` is the `--with-mhash` BC layer, not a hash algorithm roster:
+    // 39 names that exist or do not exist by configure flag.
+    ("hash", &["mhash_bc"]),
+    // `LDAP_OPT_X_SASL_*` is `#ifdef HAVE_LDAP_SASL`.
+    ("ldap", &["ldap_sasl"]),
+    ("curl", &["curl"]),
+    ("openssl", &["openssl"]),
+    ("intl", &["icu"]),
+    ("mbstring", &["oniguruma"]),
+    ("pcre", &["pcre"]),
+    ("gd", &["gd", "zlib", "zlib_linkage"]),
+    ("sodium", &["sodium"]),
+    ("gmp", &["gmp"]),
+    ("iconv", &["iconv"]),
+    ("pgsql", &["libpq"]),
+    ("pdo_pgsql", &["libpq"]),
+    ("zlib", &["zlib", "zlib_linkage"]),
+    ("zip", &["libzip", "zlib", "zlib_linkage"]),
+    ("readline", &["readline"]),
+    ("sqlite3", &["sqlite"]),
+    ("pdo_sqlite", &["sqlite"]),
+    // `ext/standard` is PHP's own, with one library guard inside it:
+    // `IMAGETYPE_SWC` is `#ifdef HAVE_ZLIB`, which follows the zlib the binary
+    // was CONFIGURED with — the nix builds load zlib as a shared module and
+    // Homebrew's compiles it in, and `extension_loaded('zlib')` is true either
+    // way, so the linkage is the fact and the mere presence is not.
+    ("standard", &["zlib_linkage"]),
+];
+
+/// Extensions whose STATIC linkage is a build fact some other extension's
+/// registrations are guarded on, probed by running the engine with `-n` — no
+/// `php.ini`, so only what is compiled into the binary answers.
+const LINKAGE_PROBES: &[&str] = &["zlib"];
+
 /// The miner's JSON shape.
 #[derive(serde::Deserialize)]
 struct Mined {
     php: String,
+    /// The build fingerprint: `fact => spelling`, as `mine_constants.php` reads
+    /// it off the linked libraries and the configure-time features php-src guards
+    /// registrations on. [`BUILD_PARITY`] says which facts matter per extension.
+    #[serde(default)]
+    build: BTreeMap<String, String>,
     extensions: Vec<String>,
     constants_total: usize,
     rows: BTreeMap<String, MinedRow>,
@@ -321,6 +419,33 @@ enum Refusal {
 /// bare tuple of two optional tuples reads as noise at the call site.
 type MinorRange = (Option<(u16, u16)>, Option<(u16, u16)>);
 
+/// **A boundary the presence run found and the build fingerprints took back**:
+/// which boundary, the two engines that form it, and the fact they spell
+/// differently ([`BUILD_PARITY`], or `packager` for the `until` rule).
+///
+/// Recorded and not merely counted, for the reason [`Refusal`] is: a reviewer who
+/// wants to know whether `MHASH_ADLER32` really arrived in 8.5 reads that the two
+/// builds disagree about `mhash_bc`, and a smaller `gated` number tells them
+/// nothing.
+#[derive(PartialEq, Eq, Debug)]
+struct Decline {
+    boundary: &'static str,
+    below: String,
+    above: String,
+    fact: &'static str,
+}
+
+impl Decline {
+    fn new(boundary: &'static str, below: &Engine, above: &Engine, fact: &'static str) -> Self {
+        Decline {
+            boundary,
+            below: below.mined.php.clone(),
+            above: above.mined.php.clone(),
+            fact,
+        }
+    }
+}
+
 /// One admitted row, as the source of record spells it.
 struct Row {
     ext: String,
@@ -350,12 +475,40 @@ struct Engine {
     exts: BTreeSet<String>,
     /// This build's names, keyed the way the table keys its rows.
     names: BTreeSet<String>,
+    /// The build fingerprint: the engine's own `build` map plus the linkage
+    /// probes. Two engines that differ in a fact [`BUILD_PARITY`] charges to an
+    /// extension cannot range that extension's names between them.
+    build: BTreeMap<String, String>,
 }
 
 impl Engine {
     /// Whether this build can be asked about `ext`'s constants at all.
     fn judges(&self, ext: &str) -> bool {
         self.exts.contains(ext)
+    }
+
+    /// Which packager built this engine (`nix`, `homebrew`, `system`, …), as
+    /// `mine_constants.php` classifies its `PHP_PREFIX`. The label and never the
+    /// path: an install root is exactly what [`leak_tripwire`] keeps out of a
+    /// committed file.
+    fn packager(&self) -> &str {
+        self.build.get("packager").map_or("other", String::as_str)
+    }
+
+    /// The first fact `other` spells differently among those [`BUILD_PARITY`]
+    /// charges to `ext`, or `None` when the two builds are comparable there.
+    ///
+    /// A fact neither build reports is not a difference; a fact one reports and
+    /// the other does not IS one, and the `absent` spelling makes that the same
+    /// comparison as any other.
+    fn parity_gap(&self, other: &Engine, ext: &str) -> Option<&'static str> {
+        BUILD_PARITY
+            .iter()
+            .find(|(e, _)| *e == ext)
+            .into_iter()
+            .flat_map(|(_, facts)| facts.iter())
+            .find(|fact| self.build.get(**fact) != other.build.get(**fact))
+            .copied()
     }
 }
 
@@ -376,15 +529,17 @@ pub fn run(php_bins: &[String]) -> Result<(), String> {
     for bin in php_binaries(php_bins) {
         let mined = run_miner(&bin, &extensions)?;
         let minor = php_minor(&mined.php)?;
+        let build = build_fingerprint(&bin, &mined)?;
         println!(
-            "mine-constants: PHP {} — {} constants over {} extensions",
+            "mine-constants: PHP {} — {} constants over {} extensions, built by {}",
             mined.php,
             mined.constants_total,
-            mined.extensions.len()
+            mined.extensions.len(),
+            build.get("packager").map_or("other", String::as_str),
         );
         let exts = mined.extensions.iter().cloned().collect();
         let names = mined.rows.keys().map(|n| normalize_const_fqn(n)).collect();
-        engines.push(Engine { bin, minor, mined, exts, names });
+        engines.push(Engine { bin, minor, mined, exts, names, build });
     }
     // The TOP minor is the one whose values the table carries, and the order is
     // also the presence table's axis, so it is established before anything reads
@@ -416,17 +571,24 @@ pub fn run(php_bins: &[String]) -> Result<(), String> {
     let dirs = machine_dirs(&top.bin);
     let mut rows: BTreeMap<String, Row> = BTreeMap::new();
     let mut refused: BTreeMap<String, Refusal> = BTreeMap::new();
+    // The boundaries the presence run found and the build fingerprints took back
+    // ([`BUILD_PARITY`]). Recorded rather than counted: "this name's arrival was
+    // a packaging difference" is reviewable and a smaller `gated` number is not.
+    let mut declined: BTreeMap<String, Vec<Decline>> = BTreeMap::new();
     for (key, c) in &candidates {
         if let Some(r) = refuse(&c.raw, &c.ty, &c.ext) {
             refused.insert(c.raw.clone(), r);
             continue;
         }
-        let (since, until) = range(&engines, key, &c.ext);
+        let ((since, until), gaps) = range(&engines, key, &c.ext);
+        if !gaps.is_empty() {
+            declined.insert(c.raw.clone(), gaps);
+        }
         let value = if c.newest + 1 == engines.len() {
             let m = &engines[c.newest].mined.rows[&c.raw];
             let value = decode_value(&c.raw, &m.ty, &m.value)?;
             if m.ty == "string" {
-                leak_tripwire(&c.raw, &value, &dirs)?;
+                leak_tripwire(&format!("constant `{}`", c.raw), &value, &dirs)?;
             }
             Some((m.ty.clone(), value))
         } else if until.is_some() {
@@ -450,21 +612,24 @@ pub fn run(php_bins: &[String]) -> Result<(), String> {
         refused.insert(name.clone(), Refusal::ValueMoves);
     }
 
-    let out = render(&engines, &rows, &refused, &moves);
+    let out = render(&engines, &rows, &refused, &moves, &declined);
     let dst = repo_root().join("docs/research/phpsrc-mining/constants.toml");
     std::fs::write(&dst, &out).map_err(|e| format!("write {}: {e}", dst.display()))?;
     let gated = rows.values().filter(|r| r.since.is_some()).count();
     let value_less = rows.values().filter(|r| r.value.is_none()).count();
     println!(
-        "mine-constants: {} rows ({gated} version-gated, {value_less} value-less), {} refused → {}",
+        "mine-constants: {} rows ({gated} version-gated, {value_less} value-less), {} refused, \
+         {} boundaries declined for build parity → {}",
         rows.len(),
         refused.len(),
+        declined.len(),
         dst.display()
     );
     Ok(())
 }
 
-/// **The minors an engine set proves a name over**: `(since, until)`.
+/// **The minors an engine set proves a name over**: `(since, until)`, with the
+/// boundaries the build fingerprints took back.
 ///
 /// Only the engines that LOADED the name's extension take part. A build without
 /// `brotli` is silent about `BROTLI_*`, and reading its silence as an absence
@@ -473,39 +638,119 @@ pub fn run(php_bins: &[String]) -> Result<(), String> {
 /// [`value_moves`] applies for the same reason, and it is the whole of what
 /// replaced the php-src scan's per-extension coverage floor (issue #718).
 ///
-/// Three declines, each for its own reason:
+/// Having the extension is necessary and not sufficient, which is what
+/// [`BUILD_PARITY`] adds: two builds that load `libxml` and link different
+/// libxml2s disagree about `LIBXML_NO_XXE` for libxml2's reasons, so the
+/// boundary BETWEEN them states nothing about PHP. Each boundary is therefore
+/// checked against the two engines that form it, and an `until` — the boundary a
+/// value-less row records — additionally needs the same packager on both sides.
 ///
-/// * fewer than two judges — one engine knows only its own minor, so it proves
-///   neither an arrival nor a departure;
+/// Three declines beyond that, each for its own reason:
+///
 /// * no judge has the name — nothing to range over (the caller drops it);
+/// * a boundary with no engine on its far side: a lone judge knows only its own
+///   minor, and the top judge cannot see a departure it is not there to miss;
 /// * the presence is not contiguous (present, absent, present) — the builds
 ///   differ in some way the extension check did not catch, so no range at all
 ///   rather than a guessed one.
-fn range(
-    engines: &[Engine],
-    key: &str,
-    ext: &str,
-) -> MinorRange {
+fn range(engines: &[Engine], key: &str, ext: &str) -> (MinorRange, Vec<Decline>) {
     let judges: Vec<(&Engine, bool)> = engines
         .iter()
         .filter(|e| e.judges(ext))
         .map(|e| (e, e.names.contains(key)))
         .collect();
-    if judges.len() < 2 {
-        return (None, None);
-    }
     let (Some(first), Some(last)) = (
         judges.iter().position(|(_, present)| *present),
         judges.iter().rposition(|(_, present)| *present),
     ) else {
-        return (None, None);
+        return ((None, None), Vec::new());
     };
     if !judges[first..=last].iter().all(|(_, present)| *present) {
-        return (None, None);
+        return ((None, None), Vec::new());
     }
-    let since = (first > 0).then(|| judges[first].0.minor);
-    let until = (last + 1 < judges.len()).then(|| judges[last].0.minor);
-    (since, until)
+    let mut declined = Vec::new();
+    // The arrival: the engine that first has the name, against the one below it
+    // that does not.
+    let since = (first > 0)
+        .then(|| {
+            let (below, at) = (judges[first - 1].0, judges[first].0);
+            match below.parity_gap(at, ext) {
+                None => Some(at.minor),
+                Some(fact) => {
+                    declined.push(Decline::new("since", below, at, fact));
+                    None
+                }
+            }
+        })
+        .flatten();
+    // The departure, held to the stricter bar: this is the boundary a value-less
+    // row is made of, and a packager change alone is enough to explain it.
+    let until = (last + 1 < judges.len())
+        .then(|| {
+            let (at, above) = (judges[last].0, judges[last + 1].0);
+            let gap = at
+                .parity_gap(above, ext)
+                .or_else(|| (at.packager() != above.packager()).then_some("packager"));
+            match gap {
+                None => Some(at.minor),
+                Some(fact) => {
+                    declined.push(Decline::new("until", at, above, fact));
+                    None
+                }
+            }
+        })
+        .flatten();
+    ((since, until), declined)
+}
+
+/// **The build fingerprint of one engine**: what `mine_constants.php` read off
+/// the linked libraries and the configure-time features, plus the linkage probes
+/// only a second run of the binary can answer.
+fn build_fingerprint(bin: &str, mined: &Mined) -> Result<BTreeMap<String, String>, String> {
+    let mut build = mined.build.clone();
+    // The fingerprints are committed too, so they go past the same tripwire an
+    // admitted value does — against THIS engine's directories, since these are
+    // the only paths this engine's facts could be carrying.
+    let dirs = machine_dirs(bin);
+    for (fact, value) in &build {
+        leak_tripwire(&format!("build fact `{fact}`"), value, &dirs)?;
+    }
+    let statics = static_extensions(bin)?;
+    for ext in LINKAGE_PROBES {
+        // Three states and not two: a build that does not have the library at
+        // all is a third thing, and collapsing it into `shared` would make two
+        // different builds compare equal.
+        let linkage = if statics.contains(*ext) {
+            "static"
+        } else if mined.extensions.iter().any(|e| e == ext) {
+            "shared"
+        } else {
+            "absent"
+        };
+        build.insert(format!("{ext}_linkage"), linkage.to_owned());
+    }
+    Ok(build)
+}
+
+/// The extensions COMPILED INTO an engine, asked with `-n` so no `php.ini` loads
+/// a shared module and answers for one that is built in.
+///
+/// `ext/standard`'s `HAVE_ZLIB` guard follows the zlib the binary was configured
+/// with, which `extension_loaded('zlib')` cannot see: the nix builds load zlib as
+/// a shared module and lack `IMAGETYPE_SWC`, Homebrew's compiles it in and has
+/// it, and both answer `true` to the runtime question.
+fn static_extensions(bin: &str) -> Result<BTreeSet<String>, String> {
+    let out = Command::new(bin)
+        .args(["-n", "-r", "echo implode(\",\", get_loaded_extensions());"])
+        .output()
+        .map_err(|e| format!("run {bin} -n: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "linkage probe failed on {bin}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).split(',').map(|e| e.trim().to_owned()).collect())
 }
 
 /// The extension set the FUNCTION catalog mines (ADR-0094 §2: "the extension set
@@ -690,16 +935,18 @@ fn machine_dirs(bin: &str) -> Vec<String> {
     out
 }
 
-/// Fail the run if an admitted string value carries one of this machine's own
-/// directories. The [`BUILD_DEPENDENT`] roster is what *should* catch these; this
-/// is what makes a missing roster entry a failed mining run rather than an
-/// absolute path in a committed file.
-fn leak_tripwire(name: &str, value: &str, dirs: &[String]) -> Result<(), String> {
+/// Fail the run if a value bound for the committed file carries one of this
+/// machine's own directories — an admitted string constant, or a build fact.
+/// The [`BUILD_DEPENDENT`] roster is what *should* catch the first kind; this is
+/// what makes a missing roster entry, or a fingerprint probe that answers with a
+/// path, a failed mining run rather than an absolute path in a committed file.
+fn leak_tripwire(what: &str, value: &str, dirs: &[String]) -> Result<(), String> {
     for d in dirs {
         if value.contains(d.as_str()) {
             return Err(format!(
-                "constant `{name}` carries a directory of the mining machine — \
-                 add it to BUILD_DEPENDENT in xtask/src/mine_constants.rs"
+                "{what} carries a directory of the mining machine — a constant belongs in \
+                 BUILD_DEPENDENT in xtask/src/mine_constants.rs, a build fact needs a probe \
+                 that answers without a path"
             ));
         }
     }
@@ -747,6 +994,7 @@ fn render(
     rows: &BTreeMap<String, Row>,
     refused: &BTreeMap<String, Refusal>,
     moves: &BTreeMap<String, Vec<(String, String)>>,
+    declined: &BTreeMap<String, Vec<Decline>>,
 ) -> String {
     let top = engines.last().expect("at least one engine");
     let mined = &top.mined;
@@ -795,12 +1043,27 @@ fn render(
          # measures it. An engine that lacks the name, or that sits below the row's\n\
          # `since`, takes no part — absence is the version gate's question, not this one.\n\
          #\n\
+         # AND A BOUNDARY NEEDS TWO COMPARABLE BUILDS. Having the extension is necessary\n\
+         # and not sufficient: php-src guards whole blocks of registrations on the\n\
+         # linked library's version and on configure-time features, so two engines that\n\
+         # differ THERE disagree about which names exist for a reason that is not their\n\
+         # PHP minor. `[engines.build]` records each build's fingerprint, and a boundary\n\
+         # is minted only when the two engines forming it agree on every fact the\n\
+         # extension's registrations are guarded on — `LIBXML_NO_XXE` is registered only\n\
+         # above libxml2 2.13, `MHASH_*` only with `--with-mhash`, `LDAP_OPT_X_SASL_*`\n\
+         # only with `HAVE_LDAP_SASL`, `IMAGETYPE_SWC` only with a zlib compiled in. An\n\
+         # `until` is held higher still: it needs the same PACKAGER on both sides, since\n\
+         # `gone at the next minor` and `the next minor was built by somebody else` are\n\
+         # otherwise indistinguishable. `[declined.build_parity]` records what this took\n\
+         # back and why.\n\
+         #\n\
          # A ROW WITH NO VALUE. A name the older engines have and the top one does not\n\
          # has no value to mine and still has something to say, so it gets a row with\n\
-         # `until` and no `v` at all (owner ruling 2026-09-11). The value resolver\n\
-         # ignores such a row — there is no literal to answer with — and the absence\n\
-         # family reads it: above `until` the engine has taken the name away, and\n\
-         # `constant.undefined` may say so over an analysis host that still has it.\n\
+         # `until` and no `v` at all (owner ruling 2026-09-11). Nothing reads it as an\n\
+         # oracle: the value resolver has no literal to answer with, and the absence\n\
+         # family's own version-skew gate (issue #28) already declines a claim made from\n\
+         # a runtime outside the project's target, so a runtime past the departure\n\
+         # reports the name absent on its own. The `until` is what this file RECORDS.\n\
          # `E_STRICT` is NOT one of these: the row exists (2048) and 8.5 still defines\n\
          # it, deprecated (issue #720). A name deprecated in place keeps its value and\n\
          # its row; only a name actually REMOVED loses the value and keeps the row.\n\n",
@@ -828,6 +1091,24 @@ fn render(
     let _ = writeln!(s, "]");
     s.push('\n');
 
+    // The fingerprints themselves, so a reader can check a declined boundary
+    // against the two builds that declined it without re-running the miner.
+    let _ = writeln!(s, "[engines.build]");
+    let _ = writeln!(s, "# \"<php version>\" = {{ <fact> = \"<spelling>\", … }} — the linked-library");
+    let _ = writeln!(s, "# versions and configure-time features php-src guards constant");
+    let _ = writeln!(s, "# registrations on, plus `packager` and the `*_linkage` probes. `absent`");
+    let _ = writeln!(s, "# is a value like any other: a build that cannot answer a fact differs");
+    let _ = writeln!(s, "# from one that can.");
+    for e in engines {
+        let _ = write!(s, "{} = {{", toml_str(&e.mined.php));
+        for (i, (fact, value)) in e.build.iter().enumerate() {
+            let sep = if i == 0 { " " } else { ", " };
+            let _ = write!(s, "{sep}{fact} = {}", toml_str(value));
+        }
+        let _ = writeln!(s, " }}");
+    }
+    s.push('\n');
+
     let mut by_refusal: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     for (name, r) in refused {
         let key = match r {
@@ -848,10 +1129,13 @@ fn render(
     let _ = writeln!(s, "# value_less of those, carrying `until` and no value — the removed names");
     let _ = writeln!(s, "# refused_*  the three ADR-0094 §3 classes a mined row cannot carry, plus");
     let _ = writeln!(s, "#            the names the engines themselves disagreed about");
+    let _ = writeln!(s, "# declined   names whose boundary the presence run found and the build");
+    let _ = writeln!(s, "#            fingerprints took back — a packaging difference, not a minor");
     let _ = writeln!(s, "mined = {}", mined.constants_total);
     let _ = writeln!(s, "rows = {}", rows.len());
     let _ = writeln!(s, "gated = {gated}");
     let _ = writeln!(s, "value_less = {value_less}");
+    let _ = writeln!(s, "declined_build_parity = {}", declined.len());
     for (key, names) in &by_refusal {
         let _ = writeln!(s, "refused_{key} = {}", names.len());
     }
@@ -880,6 +1164,32 @@ fn render(
         for (i, (version, value)) in seen.iter().enumerate() {
             let sep = if i == 0 { "" } else { ", " };
             let _ = write!(s, "{sep}[{}, {}]", toml_str(version), toml_str(value));
+        }
+        let _ = writeln!(s, "]");
+    }
+    s.push('\n');
+
+    // What the fingerprints took back. The evidence is the FACT the two builds
+    // spell differently: `MHASH_ADLER32` does not arrive at 8.5, the 8.5 build is
+    // the one configured `--with-mhash`, and that sentence is the whole review.
+    let _ = writeln!(s, "[declined.build_parity]");
+    let _ = writeln!(s, "# name = [[\"since|until\", \"<lower php>\", \"<upper php>\", \"<fact>\"], …] —");
+    let _ = writeln!(s, "# a boundary the presence run found between two builds that are not");
+    let _ = writeln!(s, "# comparable there. The row keeps its value and loses the range — and a");
+    let _ = writeln!(s, "# name the TOP build lacks loses its row outright, since a departure it");
+    let _ = writeln!(s, "# cannot prove is the only thing that row would have said.");
+    for (name, gaps) in declined {
+        let _ = write!(s, "{} = [", toml_key(name));
+        for (i, d) in gaps.iter().enumerate() {
+            let sep = if i == 0 { "" } else { ", " };
+            let _ = write!(
+                s,
+                "{sep}[{}, {}, {}, {}]",
+                toml_str(d.boundary),
+                toml_str(&d.below),
+                toml_str(&d.above),
+                toml_str(d.fact)
+            );
         }
         let _ = writeln!(s, "]");
     }
@@ -946,8 +1256,21 @@ mod tests {
     /// build's extension set — what decides whether this engine may judge a
     /// name's presence at all.
     fn engine(version: &str, exts: &[&str], rows: &[(&str, &str, &str)]) -> Engine {
+        build_of(version, exts, rows, &[])
+    }
+
+    /// The same, with a build fingerprint: `facts` is `(fact, spelling)`, and
+    /// `packager` defaults to one shared value so a test that says nothing about
+    /// packaging is not silently testing the `until` packager rule.
+    fn build_of(
+        version: &str,
+        exts: &[&str],
+        rows: &[(&str, &str, &str)],
+        facts: &[(&str, &str)],
+    ) -> Engine {
         let mined = Mined {
             php: version.to_owned(),
+            build: BTreeMap::new(),
             extensions: exts.iter().map(|e| (*e).to_owned()).collect(),
             constants_total: rows.len(),
             rows: rows
@@ -967,7 +1290,15 @@ mod tests {
         let minor = php_minor(version).expect("test version");
         let names = mined.rows.keys().map(|n| normalize_const_fqn(n)).collect();
         let exts = mined.extensions.iter().cloned().collect();
-        Engine { bin: "php".to_owned(), minor, mined, exts, names }
+        let mut build = BTreeMap::from([("packager".to_owned(), "nix".to_owned())]);
+        build.extend(facts.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())));
+        Engine { bin: "php".to_owned(), minor, mined, exts, names, build }
+    }
+
+    /// `range`'s pair alone, for the tests that have nothing to say about why a
+    /// boundary was declined.
+    fn ranged(engines: &[Engine], key: &str, ext: &str) -> MinorRange {
+        range(engines, key, ext).0
     }
 
     fn row(ext: &str, value: &str, since: Option<(u16, u16)>) -> Row {
@@ -1046,7 +1377,7 @@ mod tests {
             engine("8.3.33", &["standard"], &[("LATE_ARRIVAL", "standard", "7")]),
             engine("8.5.10", &["standard"], &[("LATE_ARRIVAL", "standard", "7")]),
         ];
-        assert_eq!(range(&engines, "LATE_ARRIVAL", "standard"), (Some((8, 3)), None));
+        assert_eq!(ranged(&engines, "LATE_ARRIVAL", "standard"), (Some((8, 3)), None));
     }
 
     /// **The presence-derived `until`**: the name is there through 8.4 and gone at
@@ -1057,7 +1388,7 @@ mod tests {
             engine("8.4.25", &["standard"], &[("DEPARTED", "standard", "7")]),
             engine("8.5.10", &["standard"], &[]),
         ];
-        assert_eq!(range(&engines, "DEPARTED", "standard"), (None, Some((8, 4))));
+        assert_eq!(ranged(&engines, "DEPARTED", "standard"), (None, Some((8, 4))));
     }
 
     /// **A build difference is not a language change.** The nix 8.4 build has no
@@ -1070,29 +1401,124 @@ mod tests {
             engine("8.4.25", &["standard"], &[]),
             engine("8.5.10", &["standard", "brotli"], &[("BROTLI_GENERIC", "brotli", "0")]),
         ];
-        assert_eq!(range(&engines, "BROTLI_GENERIC", "brotli"), (None, None));
+        assert_eq!(ranged(&engines, "BROTLI_GENERIC", "brotli"), (None, None));
     }
 
     /// One engine knows only its own minor, so it proves neither an arrival nor a
     /// departure — which is what makes a single-engine run rangeless rather than a
     /// table claiming every name arrived at that minor.
+    ///
+    /// The pair is the point, and the clauses it pins are [`range`]'s `first > 0`
+    /// and `last + 1 < judges.len()`: a boundary is the gap BETWEEN two engines,
+    /// so the second engine is what creates one. Drop either clause and the lone
+    /// judge starts answering `since = 8.5` — which is the rangeless run turned
+    /// into a table claiming every name arrived at the top minor.
     #[test]
     fn one_judge_ranges_nothing() {
-        let engines = vec![engine("8.5.10", &["standard"], &[("SORT_REGULAR", "standard", "0")])];
-        assert_eq!(range(&engines, "SORT_REGULAR", "standard"), (None, None));
-        assert_eq!(range(&engines, "NOT_HERE", "standard"), (None, None));
+        let alone = vec![engine("8.5.10", &["standard"], &[("SORT_REGULAR", "standard", "0")])];
+        assert_eq!(ranged(&alone, "SORT_REGULAR", "standard"), (None, None));
+        assert_eq!(ranged(&alone, "NOT_HERE", "standard"), (None, None));
+        // The same top engine with a neighbour below it that lacks the name: now
+        // there IS a gap, and it is the arrival.
+        let paired = vec![
+            engine("8.4.25", &["standard"], &[]),
+            engine("8.5.10", &["standard"], &[("SORT_REGULAR", "standard", "0")]),
+        ];
+        assert_eq!(ranged(&paired, "SORT_REGULAR", "standard"), (Some((8, 5)), None));
     }
 
-    /// Present, absent, present: the builds differ in some way the extension check
-    /// did not catch, so no range at all rather than a guessed one.
+    /// Absent, present, absent, present: the builds differ in some way the
+    /// extension check did not catch, so no range at all rather than a guessed one.
+    ///
+    /// Four engines and not three, so the clause is load-bearing: with the
+    /// contiguity check deleted, the first `present` reads as an arrival and the
+    /// row mints `since = 8.3` over a minor that does not have the name.
     #[test]
     fn a_gap_in_the_presence_run_ranges_nothing() {
         let engines = vec![
-            engine("8.2.33", &["standard"], &[("PATCHY", "standard", "1")]),
-            engine("8.3.33", &["standard"], &[]),
-            engine("8.4.25", &["standard"], &[("PATCHY", "standard", "1")]),
+            engine("8.2.33", &["standard"], &[]),
+            engine("8.3.33", &["standard"], &[("PATCHY", "standard", "1")]),
+            engine("8.4.25", &["standard"], &[]),
+            engine("8.5.10", &["standard"], &[("PATCHY", "standard", "1")]),
         ];
-        assert_eq!(range(&engines, "PATCHY", "standard"), (None, None));
+        assert_eq!(ranged(&engines, "PATCHY", "standard"), (None, None));
+    }
+
+    /// **The boundary the fingerprints take back** — `LIBXML_NO_XXE` in miniature.
+    /// Both builds load `libxml` and they link different libxml2s, and php-src
+    /// registers the name only above 2.13: the presence run sees an arrival and
+    /// the arrival is libxml2's, not PHP's.
+    #[test]
+    fn a_boundary_between_two_incomparable_builds_is_declined() {
+        let engines = vec![
+            build_of("8.4.25", &["libxml"], &[], &[("libxml", "20913")]),
+            build_of(
+                "8.5.10",
+                &["libxml"],
+                &[("LIBXML_NO_XXE", "libxml", "1")],
+                &[("libxml", "21503")],
+            ),
+        ];
+        let (pair, declined) = range(&engines, "LIBXML_NO_XXE", "libxml");
+        assert_eq!(pair, (None, None));
+        assert_eq!(
+            declined,
+            vec![Decline {
+                boundary: "since",
+                below: "8.4.25".to_owned(),
+                above: "8.5.10".to_owned(),
+                fact: "libxml",
+            }]
+        );
+        // The same two minors with ONE libxml2 between them: now the arrival is
+        // PHP's, and the row is gated at it.
+        let agreed = vec![
+            build_of("8.4.25", &["libxml"], &[], &[("libxml", "21503")]),
+            build_of(
+                "8.5.10",
+                &["libxml"],
+                &[("LIBXML_NO_XXE", "libxml", "1")],
+                &[("libxml", "21503")],
+            ),
+        ];
+        assert_eq!(ranged(&agreed, "LIBXML_NO_XXE", "libxml"), (Some((8, 5)), None));
+    }
+
+    /// A fact `BUILD_PARITY` charges to some OTHER extension is not this row's
+    /// business: the prefixes stay as narrow as the claim, the way the
+    /// build-dependent families' do.
+    #[test]
+    fn a_fact_another_extension_is_guarded_on_declines_nothing() {
+        let engines = vec![
+            build_of("8.4.25", &["json"], &[], &[("libxml", "20913")]),
+            build_of("8.5.10", &["json"], &[("JSON_LATE", "json", "1")], &[("libxml", "21503")]),
+        ];
+        assert_eq!(ranged(&engines, "JSON_LATE", "json"), (Some((8, 5)), None));
+    }
+
+    /// **An `until` is never minted across a packager change.** The two builds
+    /// agree on every fact the extension is guarded on and were built by different
+    /// people, and "the name is gone at 8.5" and "8.5 was packaged by somebody
+    /// else" are the same observation until a second 8.5 build says otherwise.
+    ///
+    /// The arrival at the same boundary is NOT held to this bar: a wrong `since`
+    /// keeps the resolver quiet below it, and a wrong `until` is a row asserting a
+    /// departure that never happened.
+    #[test]
+    fn a_departure_across_a_packager_change_is_declined() {
+        let engines = vec![
+            build_of("8.4.25", &["mysqli"], &[("GONE", "mysqli", "1")], &[("packager", "nix")]),
+            build_of("8.5.10", &["mysqli"], &[], &[("packager", "homebrew")]),
+        ];
+        let (pair, declined) = range(&engines, "GONE", "mysqli");
+        assert_eq!(pair, (None, None));
+        assert_eq!(declined.first().map(|d| (d.boundary, d.fact)), Some(("until", "packager")));
+        // One packager on both sides and the departure stands.
+        let same = vec![
+            build_of("8.3.33", &["mysqli"], &[("GONE", "mysqli", "1")], &[]),
+            build_of("8.4.25", &["mysqli"], &[], &[]),
+        ];
+        assert_eq!(ranged(&same, "GONE", "mysqli"), (None, Some((8, 3))));
     }
 
     #[test]

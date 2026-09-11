@@ -41,12 +41,27 @@
 # measures it. An engine that lacks the name, or that sits below the row's
 # `since`, takes no part — absence is the version gate's question, not this one.
 #
+# AND A BOUNDARY NEEDS TWO COMPARABLE BUILDS. Having the extension is necessary
+# and not sufficient: php-src guards whole blocks of registrations on the
+# linked library's version and on configure-time features, so two engines that
+# differ THERE disagree about which names exist for a reason that is not their
+# PHP minor. `[engines.build]` records each build's fingerprint, and a boundary
+# is minted only when the two engines forming it agree on every fact the
+# extension's registrations are guarded on — `LIBXML_NO_XXE` is registered only
+# above libxml2 2.13, `MHASH_*` only with `--with-mhash`, `LDAP_OPT_X_SASL_*`
+# only with `HAVE_LDAP_SASL`, `IMAGETYPE_SWC` only with a zlib compiled in. An
+# `until` is held higher still: it needs the same PACKAGER on both sides, since
+# `gone at the next minor` and `the next minor was built by somebody else` are
+# otherwise indistinguishable. `[declined.build_parity]` records what this took
+# back and why.
+#
 # A ROW WITH NO VALUE. A name the older engines have and the top one does not
 # has no value to mine and still has something to say, so it gets a row with
-# `until` and no `v` at all (owner ruling 2026-09-11). The value resolver
-# ignores such a row — there is no literal to answer with — and the absence
-# family reads it: above `until` the engine has taken the name away, and
-# `constant.undefined` may say so over an analysis host that still has it.
+# `until` and no `v` at all (owner ruling 2026-09-11). Nothing reads it as an
+# oracle: the value resolver has no literal to answer with, and the absence
+# family's own version-skew gate (issue #28) already declines a claim made from
+# a runtime outside the project's target, so a runtime past the departure
+# reports the name absent on its own. The `until` is what this file RECORDS.
 # `E_STRICT` is NOT one of these: the row exists (2048) and 8.5 still defines
 # it, deprecated (issue #720). A name deprecated in place keeps its value and
 # its row; only a name actually REMOVED loses the value and keeps the row.
@@ -113,6 +128,17 @@ diffed = [
   "8.5.10",
 ]
 
+[engines.build]
+# "<php version>" = { <fact> = "<spelling>", … } — the linked-library
+# versions and configure-time features php-src guards constant
+# registrations on, plus `packager` and the `*_linkage` probes. `absent`
+# is a value like any other: a build that cannot answer a fact differs
+# from one that can.
+"8.2.33" = { curl = "8.21.0", gd = "2.3.3", gmp = "6.3.0", iconv = "1.11/libiconv", icu = "73.2", ldap_sasl = "no", libpq = "18.6", libxml = "21503", libxslt = "absent", libzip = "1.11.4", mhash_bc = "no", oniguruma = "6.9.10", openssl = "811597872", packager = "nix", pcre = "10.47 2025-10-21", readline = "readline", sodium = "1.0.22", sqlite = "3.53.3", zlib = "4896", zlib_linkage = "shared" }
+"8.3.33" = { curl = "8.21.0", gd = "2.3.3", gmp = "6.3.0", iconv = "1.11/libiconv", icu = "73.2", ldap_sasl = "no", libpq = "18.6", libxml = "21503", libxslt = "absent", libzip = "1.11.4", mhash_bc = "no", oniguruma = "6.9.10", openssl = "811597872", packager = "nix", pcre = "10.47 2025-10-21", readline = "readline", sodium = "1.0.22", sqlite = "3.53.3", zlib = "4896", zlib_linkage = "shared" }
+"8.4.25" = { curl = "8.21.0", gd = "2.3.3", gmp = "6.3.0", iconv = "1.11/libiconv", icu = "73.2", ldap_sasl = "no", libpq = "18.6", libxml = "21503", libxslt = "absent", libzip = "1.11.4", mhash_bc = "no", oniguruma = "6.9.10", openssl = "811597872", packager = "nix", pcre = "10.47 2025-10-21", readline = "readline", sodium = "1.0.22", sqlite = "3.53.3", zlib = "4896", zlib_linkage = "shared" }
+"8.5.10" = { curl = "8.22.0", gd = "2.3.3", gmp = "6.3.0", iconv = "1.11/libiconv", icu = "78.3", ldap_sasl = "yes", libpq = "18.6", libxml = "20913", libxslt = "1.1.35", libzip = "1.11.4", mhash_bc = "yes", oniguruma = "6.9.10", openssl = "811597872", packager = "homebrew", pcre = "10.48 2026-08-31", readline = "libedit", sodium = "1.0.22", sqlite = "3.53.4", zlib = "4800", zlib_linkage = "static" }
+
 [counts]
 # mined      what `get_defined_constants(true)` had on the TOP engine, over
 #            the catalog's extensions
@@ -121,10 +147,13 @@ diffed = [
 # value_less of those, carrying `until` and no value — the removed names
 # refused_*  the three ADR-0094 §3 classes a mined row cannot carry, plus
 #            the names the engines themselves disagreed about
+# declined   names whose boundary the presence run found and the build
+#            fingerprints took back — a packaging difference, not a minor
 mined = 3286
-rows = 2572
-gated = 137
-value_less = 6
+rows = 2571
+gated = 80
+value_less = 5
+declined_build_parity = 57
 refused_build = 693
 refused_platform = 18
 refused_unrepresentable = 5
@@ -863,6 +892,70 @@ unrepresentable = [
 "IMAGETYPE_COUNT" = [["8.2.33", "20"], ["8.3.33", "20"], ["8.4.25", "20"], ["8.5.10", "22"]]
 "PASSWORD_BCRYPT_DEFAULT_COST" = [["8.2.33", "10"], ["8.3.33", "10"], ["8.4.25", "12"], ["8.5.10", "12"]]
 
+[declined.build_parity]
+# name = [["since|until", "<lower php>", "<upper php>", "<fact>"], …] —
+# a boundary the presence run found between two builds that are not
+# comparable there. The row keeps its value and loses the range — and a
+# name the TOP build lacks loses its row outright, since a departure it
+# cannot prove is the only thing that row would have said.
+"CURLFOLLOW_ALL" = [["since", "8.4.25", "8.5.10", "curl"]]
+"CURLFOLLOW_FIRSTONLY" = [["since", "8.4.25", "8.5.10", "curl"]]
+"CURLFOLLOW_OBEYCODE" = [["since", "8.4.25", "8.5.10", "curl"]]
+"CURLINFO_CONN_ID" = [["since", "8.4.25", "8.5.10", "curl"]]
+"CURLINFO_HTTPAUTH_USED" = [["since", "8.4.25", "8.5.10", "curl"]]
+"CURLINFO_PROXYAUTH_USED" = [["since", "8.4.25", "8.5.10", "curl"]]
+"CURLINFO_QUEUE_TIME_T" = [["since", "8.4.25", "8.5.10", "curl"]]
+"CURLINFO_USED_PROXY" = [["since", "8.4.25", "8.5.10", "curl"]]
+"CURLOPT_INFILESIZE_LARGE" = [["since", "8.4.25", "8.5.10", "curl"]]
+"CURLOPT_SSL_SIGNATURE_ALGORITHMS" = [["since", "8.4.25", "8.5.10", "curl"]]
+"IMAGETYPE_HEIF" = [["since", "8.4.25", "8.5.10", "zlib_linkage"]]
+"IMAGETYPE_SVG" = [["since", "8.4.25", "8.5.10", "zlib_linkage"]]
+"IMAGETYPE_SWC" = [["since", "8.4.25", "8.5.10", "zlib_linkage"]]
+"LDAP_OPT_X_SASL_AUTHCID" = [["since", "8.4.25", "8.5.10", "ldap_sasl"]]
+"LDAP_OPT_X_SASL_AUTHZID" = [["since", "8.4.25", "8.5.10", "ldap_sasl"]]
+"LDAP_OPT_X_SASL_MECH" = [["since", "8.4.25", "8.5.10", "ldap_sasl"]]
+"LDAP_OPT_X_SASL_REALM" = [["since", "8.4.25", "8.5.10", "ldap_sasl"]]
+"LIBXML_NO_XXE" = [["until", "8.4.25", "8.5.10", "libxml"]]
+"MHASH_ADLER32" = [["since", "8.4.25", "8.5.10", "mhash_bc"]]
+"MHASH_CRC32" = [["since", "8.4.25", "8.5.10", "mhash_bc"]]
+"MHASH_CRC32B" = [["since", "8.4.25", "8.5.10", "mhash_bc"]]
+"MHASH_CRC32C" = [["since", "8.4.25", "8.5.10", "mhash_bc"]]
+"MHASH_FNV132" = [["since", "8.4.25", "8.5.10", "mhash_bc"]]
+"MHASH_FNV164" = [["since", "8.4.25", "8.5.10", "mhash_bc"]]
+"MHASH_FNV1A32" = [["since", "8.4.25", "8.5.10", "mhash_bc"]]
+"MHASH_FNV1A64" = [["since", "8.4.25", "8.5.10", "mhash_bc"]]
+"MHASH_GOST" = [["since", "8.4.25", "8.5.10", "mhash_bc"]]
+"MHASH_HAVAL128" = [["since", "8.4.25", "8.5.10", "mhash_bc"]]
+"MHASH_HAVAL160" = [["since", "8.4.25", "8.5.10", "mhash_bc"]]
+"MHASH_HAVAL192" = [["since", "8.4.25", "8.5.10", "mhash_bc"]]
+"MHASH_HAVAL224" = [["since", "8.4.25", "8.5.10", "mhash_bc"]]
+"MHASH_HAVAL256" = [["since", "8.4.25", "8.5.10", "mhash_bc"]]
+"MHASH_JOAAT" = [["since", "8.4.25", "8.5.10", "mhash_bc"]]
+"MHASH_MD2" = [["since", "8.4.25", "8.5.10", "mhash_bc"]]
+"MHASH_MD4" = [["since", "8.4.25", "8.5.10", "mhash_bc"]]
+"MHASH_MD5" = [["since", "8.4.25", "8.5.10", "mhash_bc"]]
+"MHASH_MURMUR3A" = [["since", "8.4.25", "8.5.10", "mhash_bc"]]
+"MHASH_MURMUR3C" = [["since", "8.4.25", "8.5.10", "mhash_bc"]]
+"MHASH_MURMUR3F" = [["since", "8.4.25", "8.5.10", "mhash_bc"]]
+"MHASH_RIPEMD128" = [["since", "8.4.25", "8.5.10", "mhash_bc"]]
+"MHASH_RIPEMD160" = [["since", "8.4.25", "8.5.10", "mhash_bc"]]
+"MHASH_RIPEMD256" = [["since", "8.4.25", "8.5.10", "mhash_bc"]]
+"MHASH_RIPEMD320" = [["since", "8.4.25", "8.5.10", "mhash_bc"]]
+"MHASH_SHA1" = [["since", "8.4.25", "8.5.10", "mhash_bc"]]
+"MHASH_SHA224" = [["since", "8.4.25", "8.5.10", "mhash_bc"]]
+"MHASH_SHA256" = [["since", "8.4.25", "8.5.10", "mhash_bc"]]
+"MHASH_SHA384" = [["since", "8.4.25", "8.5.10", "mhash_bc"]]
+"MHASH_SHA512" = [["since", "8.4.25", "8.5.10", "mhash_bc"]]
+"MHASH_SNEFRU256" = [["since", "8.4.25", "8.5.10", "mhash_bc"]]
+"MHASH_TIGER" = [["since", "8.4.25", "8.5.10", "mhash_bc"]]
+"MHASH_TIGER128" = [["since", "8.4.25", "8.5.10", "mhash_bc"]]
+"MHASH_TIGER160" = [["since", "8.4.25", "8.5.10", "mhash_bc"]]
+"MHASH_WHIRLPOOL" = [["since", "8.4.25", "8.5.10", "mhash_bc"]]
+"MHASH_XXH128" = [["since", "8.4.25", "8.5.10", "mhash_bc"]]
+"MHASH_XXH3" = [["since", "8.4.25", "8.5.10", "mhash_bc"]]
+"MHASH_XXH32" = [["since", "8.4.25", "8.5.10", "mhash_bc"]]
+"MHASH_XXH64" = [["since", "8.4.25", "8.5.10", "mhash_bc"]]
+
 [const]
 # name = { ext, t?, v?, since?, until? } — `v` is the value's SPELLING: a
 # decimal integer, PHP's own `var_export` float, `true`/`false`/`null`, or
@@ -1048,9 +1141,9 @@ unrepresentable = [
 "CURLE_URL_MALFORMAT_USER" = { ext = "curl", t = "int", v = "4" }
 "CURLE_WEIRD_SERVER_REPLY" = { ext = "curl", t = "int", v = "8" }
 "CURLE_WRITE_ERROR" = { ext = "curl", t = "int", v = "23" }
-"CURLFOLLOW_ALL" = { ext = "curl", t = "int", v = "1", since = "8.5" }
-"CURLFOLLOW_FIRSTONLY" = { ext = "curl", t = "int", v = "3", since = "8.5" }
-"CURLFOLLOW_OBEYCODE" = { ext = "curl", t = "int", v = "2", since = "8.5" }
+"CURLFOLLOW_ALL" = { ext = "curl", t = "int", v = "1" }
+"CURLFOLLOW_FIRSTONLY" = { ext = "curl", t = "int", v = "3" }
+"CURLFOLLOW_OBEYCODE" = { ext = "curl", t = "int", v = "2" }
 "CURLFTPAUTH_DEFAULT" = { ext = "curl", t = "int", v = "0" }
 "CURLFTPAUTH_SSL" = { ext = "curl", t = "int", v = "1" }
 "CURLFTPAUTH_TLS" = { ext = "curl", t = "int", v = "2" }
@@ -1082,7 +1175,7 @@ unrepresentable = [
 "CURLINFO_CONDITION_UNMET" = { ext = "curl", t = "int", v = "2097187" }
 "CURLINFO_CONNECT_TIME" = { ext = "curl", t = "int", v = "3145733" }
 "CURLINFO_CONNECT_TIME_T" = { ext = "curl", t = "int", v = "6291508" }
-"CURLINFO_CONN_ID" = { ext = "curl", t = "int", v = "6291520", since = "8.5" }
+"CURLINFO_CONN_ID" = { ext = "curl", t = "int", v = "6291520" }
 "CURLINFO_CONTENT_LENGTH_DOWNLOAD" = { ext = "curl", t = "int", v = "3145743" }
 "CURLINFO_CONTENT_LENGTH_DOWNLOAD_T" = { ext = "curl", t = "int", v = "6291471" }
 "CURLINFO_CONTENT_LENGTH_UPLOAD" = { ext = "curl", t = "int", v = "3145744" }
@@ -1100,7 +1193,7 @@ unrepresentable = [
 "CURLINFO_HEADER_OUT" = { ext = "curl", t = "int", v = "2" }
 "CURLINFO_HEADER_SIZE" = { ext = "curl", t = "int", v = "2097163" }
 "CURLINFO_HTTPAUTH_AVAIL" = { ext = "curl", t = "int", v = "2097175" }
-"CURLINFO_HTTPAUTH_USED" = { ext = "curl", t = "int", v = "2097221", since = "8.5" }
+"CURLINFO_HTTPAUTH_USED" = { ext = "curl", t = "int", v = "2097221" }
 "CURLINFO_HTTP_CODE" = { ext = "curl", t = "int", v = "2097154" }
 "CURLINFO_HTTP_CONNECTCODE" = { ext = "curl", t = "int", v = "2097174" }
 "CURLINFO_HTTP_VERSION" = { ext = "curl", t = "int", v = "2097198" }
@@ -1119,10 +1212,10 @@ unrepresentable = [
 "CURLINFO_PRIVATE" = { ext = "curl", t = "int", v = "1048597" }
 "CURLINFO_PROTOCOL" = { ext = "curl", t = "int", v = "2097200" }
 "CURLINFO_PROXYAUTH_AVAIL" = { ext = "curl", t = "int", v = "2097176" }
-"CURLINFO_PROXYAUTH_USED" = { ext = "curl", t = "int", v = "2097222", since = "8.5" }
+"CURLINFO_PROXYAUTH_USED" = { ext = "curl", t = "int", v = "2097222" }
 "CURLINFO_PROXY_ERROR" = { ext = "curl", t = "int", v = "2097211" }
 "CURLINFO_PROXY_SSL_VERIFYRESULT" = { ext = "curl", t = "int", v = "2097199" }
-"CURLINFO_QUEUE_TIME_T" = { ext = "curl", t = "int", v = "6291521", since = "8.5" }
+"CURLINFO_QUEUE_TIME_T" = { ext = "curl", t = "int", v = "6291521" }
 "CURLINFO_REDIRECT_COUNT" = { ext = "curl", t = "int", v = "2097172" }
 "CURLINFO_REDIRECT_TIME" = { ext = "curl", t = "int", v = "3145747" }
 "CURLINFO_REDIRECT_TIME_T" = { ext = "curl", t = "int", v = "6291511" }
@@ -1153,7 +1246,7 @@ unrepresentable = [
 "CURLINFO_TEXT" = { ext = "curl", t = "int", v = "0", since = "8.4" }
 "CURLINFO_TOTAL_TIME" = { ext = "curl", t = "int", v = "3145731" }
 "CURLINFO_TOTAL_TIME_T" = { ext = "curl", t = "int", v = "6291506" }
-"CURLINFO_USED_PROXY" = { ext = "curl", t = "int", v = "2097218", since = "8.5" }
+"CURLINFO_USED_PROXY" = { ext = "curl", t = "int", v = "2097218" }
 "CURLKHMATCH_LAST" = { ext = "curl", t = "int", v = "3", since = "8.3" }
 "CURLKHMATCH_MISMATCH" = { ext = "curl", t = "int", v = "1", since = "8.3" }
 "CURLKHMATCH_MISSING" = { ext = "curl", t = "int", v = "2", since = "8.3" }
@@ -1264,7 +1357,7 @@ unrepresentable = [
 "CURLOPT_IGNORE_CONTENT_LENGTH" = { ext = "curl", t = "int", v = "136" }
 "CURLOPT_INFILE" = { ext = "curl", t = "int", v = "10009" }
 "CURLOPT_INFILESIZE" = { ext = "curl", t = "int", v = "14" }
-"CURLOPT_INFILESIZE_LARGE" = { ext = "curl", t = "int", v = "30115", since = "8.5" }
+"CURLOPT_INFILESIZE_LARGE" = { ext = "curl", t = "int", v = "30115" }
 "CURLOPT_INTERFACE" = { ext = "curl", t = "int", v = "10062" }
 "CURLOPT_IPRESOLVE" = { ext = "curl", t = "int", v = "113" }
 "CURLOPT_ISSUERCERT" = { ext = "curl", t = "int", v = "10170" }
@@ -1403,7 +1496,7 @@ unrepresentable = [
 "CURLOPT_SSL_FALSESTART" = { ext = "curl", t = "int", v = "233" }
 "CURLOPT_SSL_OPTIONS" = { ext = "curl", t = "int", v = "216" }
 "CURLOPT_SSL_SESSIONID_CACHE" = { ext = "curl", t = "int", v = "150" }
-"CURLOPT_SSL_SIGNATURE_ALGORITHMS" = { ext = "curl", t = "int", v = "10328", since = "8.5" }
+"CURLOPT_SSL_SIGNATURE_ALGORITHMS" = { ext = "curl", t = "int", v = "10328" }
 "CURLOPT_SSL_VERIFYHOST" = { ext = "curl", t = "int", v = "81" }
 "CURLOPT_SSL_VERIFYPEER" = { ext = "curl", t = "int", v = "64" }
 "CURLOPT_SSL_VERIFYSTATUS" = { ext = "curl", t = "int", v = "232" }
@@ -1899,7 +1992,7 @@ unrepresentable = [
 "IMAGETYPE_AVIF" = { ext = "standard", t = "int", v = "19" }
 "IMAGETYPE_BMP" = { ext = "standard", t = "int", v = "6" }
 "IMAGETYPE_GIF" = { ext = "standard", t = "int", v = "1" }
-"IMAGETYPE_HEIF" = { ext = "standard", t = "int", v = "20", since = "8.5" }
+"IMAGETYPE_HEIF" = { ext = "standard", t = "int", v = "20" }
 "IMAGETYPE_ICO" = { ext = "standard", t = "int", v = "17" }
 "IMAGETYPE_IFF" = { ext = "standard", t = "int", v = "14" }
 "IMAGETYPE_JB2" = { ext = "standard", t = "int", v = "12" }
@@ -1910,8 +2003,8 @@ unrepresentable = [
 "IMAGETYPE_JPX" = { ext = "standard", t = "int", v = "11" }
 "IMAGETYPE_PNG" = { ext = "standard", t = "int", v = "3" }
 "IMAGETYPE_PSD" = { ext = "standard", t = "int", v = "5" }
-"IMAGETYPE_SVG" = { ext = "standard", t = "int", v = "21", since = "8.5" }
-"IMAGETYPE_SWC" = { ext = "standard", t = "int", v = "13", since = "8.5" }
+"IMAGETYPE_SVG" = { ext = "standard", t = "int", v = "21" }
+"IMAGETYPE_SWC" = { ext = "standard", t = "int", v = "13" }
 "IMAGETYPE_SWF" = { ext = "standard", t = "int", v = "4" }
 "IMAGETYPE_TIFF_II" = { ext = "standard", t = "int", v = "7" }
 "IMAGETYPE_TIFF_MM" = { ext = "standard", t = "int", v = "8" }
@@ -2116,11 +2209,11 @@ unrepresentable = [
 "LDAP_OPT_X_KEEPALIVE_IDLE" = { ext = "ldap", t = "int", v = "25344" }
 "LDAP_OPT_X_KEEPALIVE_INTERVAL" = { ext = "ldap", t = "int", v = "25346" }
 "LDAP_OPT_X_KEEPALIVE_PROBES" = { ext = "ldap", t = "int", v = "25345" }
-"LDAP_OPT_X_SASL_AUTHCID" = { ext = "ldap", t = "int", v = "24834", since = "8.5" }
-"LDAP_OPT_X_SASL_AUTHZID" = { ext = "ldap", t = "int", v = "24835", since = "8.5" }
-"LDAP_OPT_X_SASL_MECH" = { ext = "ldap", t = "int", v = "24832", since = "8.5" }
+"LDAP_OPT_X_SASL_AUTHCID" = { ext = "ldap", t = "int", v = "24834" }
+"LDAP_OPT_X_SASL_AUTHZID" = { ext = "ldap", t = "int", v = "24835" }
+"LDAP_OPT_X_SASL_MECH" = { ext = "ldap", t = "int", v = "24832" }
 "LDAP_OPT_X_SASL_NOCANON" = { ext = "ldap", t = "int", v = "24843" }
-"LDAP_OPT_X_SASL_REALM" = { ext = "ldap", t = "int", v = "24833", since = "8.5" }
+"LDAP_OPT_X_SASL_REALM" = { ext = "ldap", t = "int", v = "24833" }
 "LDAP_OPT_X_SASL_USERNAME" = { ext = "ldap", t = "int", v = "24844" }
 "LDAP_OPT_X_TLS_ALLOW" = { ext = "ldap", t = "int", v = "3" }
 "LDAP_OPT_X_TLS_CACERTDIR" = { ext = "ldap", t = "int", v = "24579" }
@@ -2169,7 +2262,6 @@ unrepresentable = [
 "LIBXML_NONET" = { ext = "libxml", t = "int", v = "2048" }
 "LIBXML_NOWARNING" = { ext = "libxml", t = "int", v = "64" }
 "LIBXML_NOXMLDECL" = { ext = "libxml", t = "int", v = "2" }
-"LIBXML_NO_XXE" = { ext = "libxml", since = "8.4", until = "8.4" }
 "LIBXML_NSCLEAN" = { ext = "libxml", t = "int", v = "8192" }
 "LIBXML_PARSEHUGE" = { ext = "libxml", t = "int", v = "524288" }
 "LIBXML_PEDANTIC" = { ext = "libxml", t = "int", v = "128" }
@@ -2222,45 +2314,45 @@ unrepresentable = [
 "MB_CASE_TITLE_SIMPLE" = { ext = "mbstring", t = "int", v = "6" }
 "MB_CASE_UPPER" = { ext = "mbstring", t = "int", v = "0" }
 "MB_CASE_UPPER_SIMPLE" = { ext = "mbstring", t = "int", v = "4" }
-"MHASH_ADLER32" = { ext = "hash", t = "int", v = "18", since = "8.5" }
-"MHASH_CRC32" = { ext = "hash", t = "int", v = "0", since = "8.5" }
-"MHASH_CRC32B" = { ext = "hash", t = "int", v = "9", since = "8.5" }
-"MHASH_CRC32C" = { ext = "hash", t = "int", v = "34", since = "8.5" }
-"MHASH_FNV132" = { ext = "hash", t = "int", v = "29", since = "8.5" }
-"MHASH_FNV164" = { ext = "hash", t = "int", v = "31", since = "8.5" }
-"MHASH_FNV1A32" = { ext = "hash", t = "int", v = "30", since = "8.5" }
-"MHASH_FNV1A64" = { ext = "hash", t = "int", v = "32", since = "8.5" }
-"MHASH_GOST" = { ext = "hash", t = "int", v = "8", since = "8.5" }
-"MHASH_HAVAL128" = { ext = "hash", t = "int", v = "13", since = "8.5" }
-"MHASH_HAVAL160" = { ext = "hash", t = "int", v = "12", since = "8.5" }
-"MHASH_HAVAL192" = { ext = "hash", t = "int", v = "11", since = "8.5" }
-"MHASH_HAVAL224" = { ext = "hash", t = "int", v = "10", since = "8.5" }
-"MHASH_HAVAL256" = { ext = "hash", t = "int", v = "3", since = "8.5" }
-"MHASH_JOAAT" = { ext = "hash", t = "int", v = "33", since = "8.5" }
-"MHASH_MD2" = { ext = "hash", t = "int", v = "28", since = "8.5" }
-"MHASH_MD4" = { ext = "hash", t = "int", v = "16", since = "8.5" }
-"MHASH_MD5" = { ext = "hash", t = "int", v = "1", since = "8.5" }
-"MHASH_MURMUR3A" = { ext = "hash", t = "int", v = "35", since = "8.5" }
-"MHASH_MURMUR3C" = { ext = "hash", t = "int", v = "36", since = "8.5" }
-"MHASH_MURMUR3F" = { ext = "hash", t = "int", v = "37", since = "8.5" }
-"MHASH_RIPEMD128" = { ext = "hash", t = "int", v = "23", since = "8.5" }
-"MHASH_RIPEMD160" = { ext = "hash", t = "int", v = "5", since = "8.5" }
-"MHASH_RIPEMD256" = { ext = "hash", t = "int", v = "24", since = "8.5" }
-"MHASH_RIPEMD320" = { ext = "hash", t = "int", v = "25", since = "8.5" }
-"MHASH_SHA1" = { ext = "hash", t = "int", v = "2", since = "8.5" }
-"MHASH_SHA224" = { ext = "hash", t = "int", v = "19", since = "8.5" }
-"MHASH_SHA256" = { ext = "hash", t = "int", v = "17", since = "8.5" }
-"MHASH_SHA384" = { ext = "hash", t = "int", v = "21", since = "8.5" }
-"MHASH_SHA512" = { ext = "hash", t = "int", v = "20", since = "8.5" }
-"MHASH_SNEFRU256" = { ext = "hash", t = "int", v = "27", since = "8.5" }
-"MHASH_TIGER" = { ext = "hash", t = "int", v = "7", since = "8.5" }
-"MHASH_TIGER128" = { ext = "hash", t = "int", v = "14", since = "8.5" }
-"MHASH_TIGER160" = { ext = "hash", t = "int", v = "15", since = "8.5" }
-"MHASH_WHIRLPOOL" = { ext = "hash", t = "int", v = "22", since = "8.5" }
-"MHASH_XXH128" = { ext = "hash", t = "int", v = "41", since = "8.5" }
-"MHASH_XXH3" = { ext = "hash", t = "int", v = "40", since = "8.5" }
-"MHASH_XXH32" = { ext = "hash", t = "int", v = "38", since = "8.5" }
-"MHASH_XXH64" = { ext = "hash", t = "int", v = "39", since = "8.5" }
+"MHASH_ADLER32" = { ext = "hash", t = "int", v = "18" }
+"MHASH_CRC32" = { ext = "hash", t = "int", v = "0" }
+"MHASH_CRC32B" = { ext = "hash", t = "int", v = "9" }
+"MHASH_CRC32C" = { ext = "hash", t = "int", v = "34" }
+"MHASH_FNV132" = { ext = "hash", t = "int", v = "29" }
+"MHASH_FNV164" = { ext = "hash", t = "int", v = "31" }
+"MHASH_FNV1A32" = { ext = "hash", t = "int", v = "30" }
+"MHASH_FNV1A64" = { ext = "hash", t = "int", v = "32" }
+"MHASH_GOST" = { ext = "hash", t = "int", v = "8" }
+"MHASH_HAVAL128" = { ext = "hash", t = "int", v = "13" }
+"MHASH_HAVAL160" = { ext = "hash", t = "int", v = "12" }
+"MHASH_HAVAL192" = { ext = "hash", t = "int", v = "11" }
+"MHASH_HAVAL224" = { ext = "hash", t = "int", v = "10" }
+"MHASH_HAVAL256" = { ext = "hash", t = "int", v = "3" }
+"MHASH_JOAAT" = { ext = "hash", t = "int", v = "33" }
+"MHASH_MD2" = { ext = "hash", t = "int", v = "28" }
+"MHASH_MD4" = { ext = "hash", t = "int", v = "16" }
+"MHASH_MD5" = { ext = "hash", t = "int", v = "1" }
+"MHASH_MURMUR3A" = { ext = "hash", t = "int", v = "35" }
+"MHASH_MURMUR3C" = { ext = "hash", t = "int", v = "36" }
+"MHASH_MURMUR3F" = { ext = "hash", t = "int", v = "37" }
+"MHASH_RIPEMD128" = { ext = "hash", t = "int", v = "23" }
+"MHASH_RIPEMD160" = { ext = "hash", t = "int", v = "5" }
+"MHASH_RIPEMD256" = { ext = "hash", t = "int", v = "24" }
+"MHASH_RIPEMD320" = { ext = "hash", t = "int", v = "25" }
+"MHASH_SHA1" = { ext = "hash", t = "int", v = "2" }
+"MHASH_SHA224" = { ext = "hash", t = "int", v = "19" }
+"MHASH_SHA256" = { ext = "hash", t = "int", v = "17" }
+"MHASH_SHA384" = { ext = "hash", t = "int", v = "21" }
+"MHASH_SHA512" = { ext = "hash", t = "int", v = "20" }
+"MHASH_SNEFRU256" = { ext = "hash", t = "int", v = "27" }
+"MHASH_TIGER" = { ext = "hash", t = "int", v = "7" }
+"MHASH_TIGER128" = { ext = "hash", t = "int", v = "14" }
+"MHASH_TIGER160" = { ext = "hash", t = "int", v = "15" }
+"MHASH_WHIRLPOOL" = { ext = "hash", t = "int", v = "22" }
+"MHASH_XXH128" = { ext = "hash", t = "int", v = "41" }
+"MHASH_XXH3" = { ext = "hash", t = "int", v = "40" }
+"MHASH_XXH32" = { ext = "hash", t = "int", v = "38" }
+"MHASH_XXH64" = { ext = "hash", t = "int", v = "39" }
 "MON_1" = { ext = "standard", t = "int", v = "21" }
 "MON_10" = { ext = "standard", t = "int", v = "30" }
 "MON_11" = { ext = "standard", t = "int", v = "31" }

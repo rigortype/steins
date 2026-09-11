@@ -29,6 +29,27 @@ which php                                        # Homebrew, 8.5
 `mine-constants` refuses two engines of the same minor outright: presence is read
 one engine per minor, and two answers for one column is not a table.
 
+### The engines at a boundary have to be comparable
+
+The set above is **two packagers**, and that is a real cost. php-src registers
+whole blocks of constants behind the linked library's version or a configure-time
+feature, so the nix→Homebrew step between 8.4 and 8.5 carries differences that
+have nothing to do with the minor: libxml2 2.15.3 against 2.9.13, `--with-mhash`
+on one side only, `HAVE_LDAP_SASL` on one side only, zlib compiled in against
+loaded as a shared module.
+
+`mine-constants` therefore records a **build fingerprint** per engine
+(`[engines.build]` in the TOML) and mints a minor boundary only when the two
+engines forming it agree on every fact that extension's registrations are guarded
+on; a departure (`until`) additionally needs the same packager on both sides.
+What this takes back is listed by name in `[declined.build_parity]` with the fact
+that differed — read it before concluding a constant arrived in a minor.
+
+The fingerprints are a mitigation and not a fix. **One packager for all four
+minors is the right answer** the day a PHP 8.5 build from the same source as the
+other three is reachable (`nix eval nixpkgs#php85.version`); re-mine then, and the
+declined boundaries above come back as real answers.
+
 ## The Linux half of `param_facts.toml`
 
 `param_facts.toml` is the one table whose universe is a **platform's** and not

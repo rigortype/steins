@@ -19,6 +19,16 @@
  * `PHP_FLOAT_MAX` and friends are `INF`/`NAN`-adjacent magnitudes that
  * `json_encode` either refuses or rounds, and a rounded `M_PI` is a wrong
  * answer rather than a missing one.
+ *
+ * `build` is the second half of the answer, and it is what keeps a PACKAGING
+ * difference from reading as a language change. php-src guards whole blocks of
+ * constant registrations on the linked library's version and on configure-time
+ * features — `LIBXML_NO_XXE` behind `LIBXML_VERSION >= 21300`, `MHASH_*` behind
+ * `--with-mhash`, `LDAP_OPT_X_SASL_*` behind `HAVE_LDAP_SASL` — so two builds
+ * that differ there disagree about which constants exist for a reason that has
+ * nothing to do with their PHP minor. Each fact is read through a name the guard
+ * does NOT gate (a version constant, or a function the same flag registers),
+ * because probing a guard with the thing it guards answers only itself.
  */
 
 $allow = [];
@@ -90,8 +100,67 @@ foreach ($grouped as $ext => $constants) {
 
 sort($extensions);
 
+/**
+ * The BUILD facts a minor boundary is checked against, `fact => spelling`.
+ *
+ * `absent` for a fact this build cannot answer — that is itself a difference
+ * from a build that can, which is the reading the caller wants.
+ */
+$constant = static fn (string $name): string => defined($name) ? (string) constant($name) : 'absent';
+$build = [
+    // Which packager built this engine. An `until` is never minted across a
+    // change of packager: "the name is gone at the next minor" and "the next
+    // minor was built by somebody else" are indistinguishable then, and only one
+    // of them is a fact about PHP.
+    'packager' => (static function (string $prefix): string {
+        if (str_starts_with($prefix, '/nix/store')) {
+            return 'nix';
+        }
+        // `/Cellar/` alone: Homebrew's prefix is `<root>/Cellar/php/<version>`
+        // and the root moves (Apple silicon, Intel, Linuxbrew under a home
+        // directory), so the segment is the stable part of the classification.
+        if (str_contains($prefix, '/Cellar/')) {
+            return 'homebrew';
+        }
+        if (str_starts_with($prefix, '/opt/local')) {
+            return 'macports';
+        }
+        if (str_starts_with($prefix, '/usr')) {
+            return 'system';
+        }
+        return 'other';
+    })(PHP_PREFIX),
+    // Linked-library versions. Every one of these is a constant the miner itself
+    // refuses as build-dependent, which is precisely why it is the right probe.
+    'libxml' => $constant('LIBXML_VERSION'),
+    'libxslt' => $constant('LIBXSLT_DOTTED_VERSION'),
+    'pcre' => $constant('PCRE_VERSION'),
+    'zlib' => $constant('ZLIB_VERNUM'),
+    'openssl' => $constant('OPENSSL_VERSION_NUMBER'),
+    'icu' => $constant('INTL_ICU_VERSION'),
+    'gd' => $constant('GD_VERSION'),
+    'gmp' => $constant('GMP_VERSION'),
+    'sodium' => $constant('SODIUM_LIBRARY_VERSION'),
+    'libpq' => $constant('PGSQL_LIBPQ_VERSION'),
+    'iconv' => $constant('ICONV_VERSION') . '/' . $constant('ICONV_IMPL'),
+    'oniguruma' => $constant('MB_ONIGURUMA_VERSION'),
+    'readline' => $constant('READLINE_LIB'),
+    'curl' => function_exists('curl_version') ? (string) (curl_version()['version'] ?? '?') : 'absent',
+    'libzip' => defined('ZipArchive::LIBZIP_VERSION')
+        ? (string) constant('ZipArchive::LIBZIP_VERSION')
+        : 'absent',
+    'sqlite' => class_exists('SQLite3') ? (string) SQLite3::version()['versionString'] : 'absent',
+    // Configure-time FEATURES, each read through a function the same flag
+    // registers alongside the constants it gates: `--with-mhash` brings
+    // `mhash()` with `MHASH_*`, and `HAVE_LDAP_SASL` brings `ldap_sasl_bind()`
+    // with `LDAP_OPT_X_SASL_*`.
+    'mhash_bc' => function_exists('mhash') ? 'yes' : 'no',
+    'ldap_sasl' => function_exists('ldap_sasl_bind') ? 'yes' : 'no',
+];
+
 echo json_encode([
     'php' => PHP_VERSION,
+    'build' => $build,
     'extensions' => $extensions,
     'skipped_extensions' => $skipped,
     'constants_total' => $total,
