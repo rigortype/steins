@@ -313,12 +313,16 @@ pub(crate) fn builtin_return_floor(cx: &Cx, name: &str) -> Option<Vec<ContractAr
 ///    where functionMap puts it, so a `SplFileObject` receiver finds
 ///    `SplFileInfo::getPath` only by walking upward. That walk is sound because PHP
 ///    enforces return covariance at class-declaration time — a child cannot widen
-///    the parent's promise — so the declaring class's envelope is an upper bound
-///    under every descendant (ADR-0049 A16), which is a membership-direction claim
-///    about the *result* and needs no exactness about the receiver. The walk is
-///    [`builtin_class_supers`]' transitive closure, breadth-first so the nearest
-///    row wins; an unknown class contributes no supers and simply ends its branch
-///    (ADR-0043's FP-safe absence).
+///    the parent's promise — so the declaring class's **native, non-`mixed`**
+///    engine envelope is an upper bound on every override (ADR-0049 A16), which is
+///    a membership-direction claim about the *result* and needs no exactness about
+///    the receiver. The miner is what makes the envelope native: it admits no row
+///    the engine declared nothing or `mixed` for, precisely because those bound no
+///    descendant. The walk is [`builtin_class_supers`]' transitive closure,
+///    breadth-first so the nearest row wins; an unknown class contributes no supers
+///    and simply ends its branch (ADR-0043's FP-safe absence), and a **shadow key**
+///    on the way up ends the walk with no answer at all — see
+///    [`builtin_method_row`].
 /// 2. **The static form constrains, the instance form does not.** PHP lets `$o->m()`
 ///    call a `static` method, so an instance call accepts either kind of row. `C::m()`
 ///    on an instance method is a PHP 8 `Error` unless it is forwarding `$this` from
@@ -359,7 +363,17 @@ pub(crate) fn builtin_method_return_floor(
 /// `SplFileInfo`'s were there one). The frontier is deduplicated, which both
 /// terminates on the diamond every SPL interface makes and bounds the walk.
 ///
+/// **A shadow key ends the walk with no answer.** Climbing past a class reads "no
+/// row here" as "inherit", and that reading is only sound where functionMap was
+/// *silent* about the class. Where it stated a row the miner could not carry or
+/// the engine refused, the map is saying the child's declaration differs — so
+/// [`declared_method_return_blocked`] is asked at every class on the way up, ahead
+/// of the row lookup, and a hit answers nothing at all. It is checked ahead
+/// because it is the stronger fact; the two tables are disjoint by construction,
+/// so the order cannot change which one answers, only which one is read first.
+///
 /// [`builtin_class_supers`]: steins_catalog::builtin_class_supers
+/// [`declared_method_return_blocked`]: steins_catalog::declared_method_return_blocked
 fn builtin_method_row(
     class: &str,
     method: &str,
@@ -372,6 +386,9 @@ fn builtin_method_row(
         for name in &frontier {
             if !seen.insert(name.to_ascii_lowercase()) {
                 continue;
+            }
+            if steins_catalog::declared_method_return_blocked(name, method) {
+                return None;
             }
             if let Some(row) = steins_catalog::declared_method_return(name, method) {
                 // A row found and then declined by the version gate ENDS the walk

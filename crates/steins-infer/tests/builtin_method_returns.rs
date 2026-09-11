@@ -151,6 +151,197 @@ function f(\SplFileObject $file): void {
 }
 
 // ---------------------------------------------------------------------------
+// No countersign, no row — the two SILENT countersigns (review finding 1).
+//
+// The function half admits a row the engine declares nothing for, and one it
+// declares `mixed` for, because ADR-0056's reflected envelope sits above it at
+// analysis time and corrects it per name. Nothing sits above this table, and the
+// walk above hands a row to every DESCENDANT on a covariance argument that only a
+// native, non-`mixed` envelope can make. So the miner refuses both, and these are
+// the answers PHP itself gave when the review checked them on 8.5.10.
+// ---------------------------------------------------------------------------
+
+/// `Exception::getCode` is `final` and carries no declared return type, so
+/// functionMap's `int` on the exception classes bounded nothing — and the walk
+/// handed that `int` to `PDOException`, whose code is the SQLSTATE **string**
+/// `"HY000"`. The row is gone, so the answer is silence.
+#[test]
+fn a_row_the_engine_declares_no_return_type_for_answers_nothing() {
+    let src = r#"<?php
+function f(\PDOException $e): void {
+    \PHPStan\dumpType($e->getCode());
+}
+"#;
+    assert_eq!(one_type(src), "unknown");
+}
+
+/// The same refusal reached through a project child, which is where it bites
+/// hardest: `$code` is a plain untyped property and any subclass may set it to a
+/// string, exactly as PDO's own does.
+#[test]
+fn a_project_child_of_an_untyped_builtin_method_answers_nothing() {
+    let src = r#"<?php
+class ParseFailure extends \RuntimeException {
+    protected $code = 'E_PARSE';
+}
+function f(ParseFailure $e): void {
+    \PHPStan\dumpType($e->getCode());
+}
+"#;
+    assert_eq!(one_type(src), "unknown");
+}
+
+/// `Iterator::key(): mixed` is a real declared type that bounds nothing, and
+/// `mixed` subsumes every row, so the arm-wise countersign passed vacuously.
+/// functionMap says `string`; PHP hands back `int(0)`.
+#[test]
+fn a_row_the_engine_declares_mixed_for_answers_nothing() {
+    let src = r#"<?php
+function f(\DirectoryIterator $d): void {
+    \PHPStan\dumpType($d->key());
+}
+"#;
+    assert_eq!(one_type(src), "unknown");
+}
+
+/// The same vacuous countersign, on the row whose wrongness is a data-type
+/// question rather than a hierarchy one: `PDOStatement::fetchColumn` is declared
+/// `mixed`, functionMap states `int|string|false|null`, and PHP 8.1+ returns a
+/// `float` for a REAL column.
+#[test]
+fn a_mixed_engine_envelope_refuses_even_a_plausible_row() {
+    let src = r#"<?php
+function f(\PDOStatement $s): void {
+    \PHPStan\dumpType($s->fetchColumn());
+}
+"#;
+    assert_eq!(one_type(src), "unknown");
+}
+
+/// An untyped row that is wrong about the *shape* rather than the width:
+/// functionMap says `mysqli::init()` returns a `mysqli`, and it returns `NULL`.
+#[test]
+fn an_untyped_engine_method_refuses_an_object_row_too() {
+    let src = r#"<?php
+function f(\mysqli $m): void {
+    \PHPStan\dumpType($m->init());
+}
+"#;
+    assert_eq!(one_type(src), "unknown");
+}
+
+// ---------------------------------------------------------------------------
+// Shadows: a key the miner refused is not the same fact as silence
+// (review finding 2).
+//
+// Only 957 of the 6,606 reduced keys became rows, so "no row on the child" cannot
+// be read as "the map said nothing about the child". Where functionMap STATES a
+// key and the miner dropped or refused it, that is positive evidence the child's
+// declaration differs from the ancestor's, and the walk stops there.
+// ---------------------------------------------------------------------------
+
+/// `SplFileInfo::getMTime` is admitted; `DirectoryIterator::getMTime` is the same
+/// map's row for the child, refused because it states `int` where the engine
+/// declares `int|false`. The walk used to climb straight past that refusal. What
+/// makes it wrong is not that the ancestor's envelope is unsound here — it happens
+/// to hold — but that the *source* said something about the child and the table
+/// could not carry it: inheriting is then a guess dressed as a lookup, and it is
+/// the guess that answered `int` for `PDOException::getCode`. The cost of the
+/// retreat is visible and small (25 keys), the cost of the guess was a wrong
+/// answer nothing downstream could correct.
+#[test]
+fn a_refused_child_key_shadows_its_ancestors_row() {
+    assert!(steins_catalog::declared_method_return("SplFileInfo", "getMTime").is_some());
+    assert!(steins_catalog::declared_method_return_blocked("DirectoryIterator", "getMTime"));
+    let src = r#"<?php
+function f(\DirectoryIterator $d): void {
+    \PHPStan\dumpType($d->getMTime());
+}
+"#;
+    assert_eq!(one_type(src), "unknown");
+}
+
+/// The ancestor itself is untouched: the shadow blocks the walk, it does not
+/// retract the row. This is the pair that makes the previous test about the gate
+/// rather than about a missing row.
+#[test]
+fn the_shadowed_ancestor_still_answers_for_its_own_receiver() {
+    let src = r#"<?php
+function f(\SplFileInfo $i): void {
+    \PHPStan\dumpType($i->getMTime());
+}
+"#;
+    assert_eq!(one_type(src), "int|false (asserted)");
+}
+
+/// A class **between** the receiver and the row-bearing ancestor is enough:
+/// `RecursiveDirectoryIterator` → `FilesystemIterator` → `DirectoryIterator` (the
+/// shadow) → `SplFileInfo` (the row). Neither of the first two is blocked itself,
+/// and the walk must still stop.
+#[test]
+fn a_shadow_between_the_receiver_and_the_row_stops_the_walk() {
+    assert!(!steins_catalog::declared_method_return_blocked("RecursiveDirectoryIterator", "getMTime"));
+    let src = r#"<?php
+function f(\RecursiveDirectoryIterator $r): void {
+    \PHPStan\dumpType($r->getMTime());
+}
+"#;
+    assert_eq!(one_type(src), "unknown");
+}
+
+/// A project class inherits the shadow along with everything else: the chain
+/// leaves the project at `DirectoryIterator`, which is where the walk stops.
+#[test]
+fn a_project_child_inherits_the_shadow() {
+    let src = r#"<?php
+class Walker extends \DirectoryIterator {}
+function f(Walker $w): void {
+    \PHPStan\dumpType($w->getMTime());
+}
+"#;
+    assert_eq!(one_type(src), "unknown");
+}
+
+/// The shadow is keyed on the **pair**, not on the class: `DirectoryIterator` is
+/// blocked for `getMTime` and for nothing else, so its other inherited rows still
+/// answer. A class-wide block would be a much bigger retreat than the evidence
+/// supports.
+#[test]
+fn a_shadow_blocks_one_method_and_not_its_class() {
+    assert!(!steins_catalog::declared_method_return_blocked("DirectoryIterator", "getPath"));
+    let src = r#"<?php
+function f(\DirectoryIterator $d): void {
+    \PHPStan\dumpType($d->getPath());
+}
+"#;
+    assert_eq!(one_type(src), "string (asserted)");
+}
+
+/// The two tables must never both answer for one key — a key that is admitted and
+/// blocked at once would make the walk's verdict depend on the order the two
+/// lookups happen to be written in. The generator refuses such a pair; this is the
+/// shipped-side assertion that it did.
+#[test]
+fn the_row_table_and_the_shadow_table_are_disjoint() {
+    for (class, method) in [
+        ("DirectoryIterator", "getMTime"),
+        ("ArrayObject", "getIterator"),
+        ("ParentIterator", "valid"),
+        ("SplQueue", "setIteratorMode"),
+    ] {
+        assert!(
+            steins_catalog::declared_method_return_blocked(class, method),
+            "{class}::{method} is a shadow key"
+        );
+        assert_eq!(
+            steins_catalog::declared_method_return(class, method),
+            None,
+            "{class}::{method} is blocked, so it must carry no row"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The static twin.
 // ---------------------------------------------------------------------------
 
