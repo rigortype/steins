@@ -1321,8 +1321,10 @@ The five sections, in order:
   `provably-missing` counts `offset.missing`, on every surface.
   `unguarded` counts `offset.maybe-missing`, which only the `strict` rung
   admits: measured when the stream came from `strict` (or a profile that
-  extends it and fired the id), otherwise reported as *not measured* with
-  the run that would measure it. `guarded-and-discharged` — reads a guard
+  extends it and fired the id), otherwise reported as *not measured* — the
+  stream names the profile but not the id set it resolved to, so a user
+  profile extending `strict` with zero fires reads as 0-or-unmeasured, and
+  the note names the run that settles it. `guarded-and-discharged` — reads a guard
   or a `??` discharged — is *not measured* from any stream, because a
   discharged read leaves no finding to count; the report says so rather
   than printing a zero.

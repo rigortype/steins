@@ -59,8 +59,8 @@ crates.io rejects crates with git dependencies. From a checkout,
 `cargo install --path crates/steins-cli` works, or run
 `target/release/steins` directly after a release build.
 
-The binary has eight subcommands — `check`, `annotate`,
-`transform`, `effect-diff`, `doctor`, `mcp`, `version`,
+The binary has nine subcommands — `check`, `annotate`,
+`transform`, `effect-diff`, `triage`, `doctor`, `mcp`, `version`,
 `license` — and no `--help`. Run it with no arguments to see the
 surface:
 
@@ -69,6 +69,7 @@ usage: steins check [--format text|json|github|sarif] [--profile <name>] [--no-p
        steins annotate [--no-php] [--format text|json] <file.php>
        steins transform <phpdoc-to-native|phpdoc-honesty|throws-envelope|effects-envelope|loop-to-array-map> [--apply] [--asserted-subjects] [--format text|json] <paths...>
        steins effect-diff [--baseline <path>] [--set-baseline] [--format text|json] <paths...>
+       steins triage [--format text|json] [--input <file>|-] [--top <n>] [--profile <name>] [--no-php] [--no-cache] [--no-tolerated-effects] [--vendor-diagnostics] [--ignore-baseline] [--baseline <path>] [<paths...>]
        steins doctor [--no-php] [--baseline <path>] [--format text|json] [path]
        steins mcp
        steins version | -v | --version

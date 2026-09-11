@@ -100,10 +100,11 @@ The offset section reports three buckets (issue #50), each either
 - **`unguarded`** — `offset.maybe-missing`. Admitted by the `strict` rung
   alone (A-G10). Measured when the document's `profile` is the built-in
   `strict` or when the id fires (a user profile extending `strict`);
-  otherwise `not-measured`, with the note naming the run that would
-  measure it. The document carries the profile's *name* and not the id
-  set it resolved to, which is why a user profile is recognized only
-  through the id firing.
+  otherwise `not-measured`, with a note that says what triage cannot
+  tell — the document carries the profile's *name* and not the id set it
+  resolved to, so a user profile extending `strict` with zero fires is 0
+  or unmeasured, never asserted either way — and names the run that
+  settles it.
 - **`guarded-and-discharged`** — a read the ladder deleted. A deleted
   finding leaves nothing in a stream of findings, so this bucket is
   `not-measured` from every stream, and the report says so in the
@@ -116,7 +117,12 @@ The offset section reports three buckets (issue #50), each either
 the count is a real addition with its own design (which discharges —
 S4 promotions, S5 covers, `??` arms — and at which stage of ADR-0050
 §6's pipeline it is taken), and the strict offset leg (#51) is where it
-belongs. Until then the bucket is a named hole, which is what the
+belongs. The same counter is what A-G10's other promise needs: the
+general-map and list reads it says "do not fire in v1 but are counted in
+triage buckets" leave no finding either, so a findings-only stream cannot
+count them, and §1's citation is a promise this ADR hands to #51 with
+the discharge count rather than one it keeps. Until then the bucket is a
+named hole, which is what the
 issue's "derive from what the stream already carries" asks for.
 
 ## 5. Hints: a recognizer catalogue, and what a hint is not

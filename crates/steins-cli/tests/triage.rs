@@ -348,14 +348,14 @@ Hotspots (top 1 of 1 file(s))
 
 Offset guard status (1 offset.* finding(s))
   unguarded                 not measured
-    surface `default` does not admit `offset.maybe-missing`; run `steins triage --profile strict <paths>` to measure the what-if
+    the stream names surface `default` but not the id set it resolved to, and `offset.maybe-missing` did not fire: 0 if `default` extends `strict`, otherwise unmeasured; `steins triage --profile strict <paths>` measures the what-if either way
   guarded-and-discharged    not measured
     a discharged read leaves no finding, and the check stream carries findings only; measuring this bucket needs a check-side count of discharges
   provably-missing             1  [offset.missing]
     reads of a key provably absent from a proven container; on the default surface, so these are runtime warnings today
 
 Hints (advice, not findings; the exit code is 0 either way)
-  - [strict-what-if-unmeasured] this report measures surface `default`; the strict what-if is one run away: `steins triage --profile strict <paths>` counts the optional-key reads `strict` would report, with check's behavior and exit code unchanged
+  - [strict-what-if-unmeasured] this report measures surface `default`, whose id set the stream does not carry; the strict what-if is one run away: `steins triage --profile strict <paths>` counts the optional-key reads `strict` would report, with check's behavior and exit code unchanged
 ";
 
 #[test]
@@ -405,6 +405,14 @@ fn top_caps_the_hotspots_and_the_json_says_so() {
     assert_eq!(doc["hotspots"]["files_with_findings"], 4);
     assert_eq!(doc["hotspots"]["entries"].as_array().expect("entries").len(), 1);
     assert_eq!(doc["hotspots"]["entries"][0]["path"], "src/Http/A.php");
+}
+
+#[test]
+fn top_zero_hides_every_hotspot_but_does_not_call_them_absent() {
+    let run = run_in(&fixtures(), &["triage", "--top", "0", "--input", "strict-stream.json"]);
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert!(run.stdout.contains("Hotspots (top 0 of 4 file(s))\n  (none shown: --top 0)\n"), "{}", run.stdout);
+    assert!(!run.stdout.contains("(no findings)"), "{}", run.stdout);
 }
 
 // ---- the run-over-paths arm and the what-if --------------------------------
@@ -502,11 +510,15 @@ fn check_errors_are_forwarded() {
     let run = run_in(&dir, &["triage", "--no-php", "--no-cache", "--profile", "nope", "src"]);
     assert_eq!(run.code, 2);
     assert!(run.stderr.contains("unknown profile `nope`"), "{}", run.stderr);
+    // Forwarded, not swallowed: a swallowed exit 2 leaves an empty stdout that
+    // the parser would then reject with its own exit 2 and a second message.
+    assert!(!run.stderr.contains("not a `check --format json` document"), "{}", run.stderr);
     assert_eq!(run.stdout, "");
 
     let run = run_in(&dir, &["triage", "--no-php", "--no-cache", "nothere"]);
     assert_eq!(run.code, 2);
     assert!(run.stderr.contains("path does not exist: nothere"), "{}", run.stderr);
+    assert!(!run.stderr.contains("not a `check --format json` document"), "{}", run.stderr);
 }
 
 // ---- usage errors ----------------------------------------------------------

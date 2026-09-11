@@ -381,7 +381,7 @@ fn offset_buckets(distribution: &[IdRow], profile: &str) -> OffsetGuardStatus {
             count: None,
             ids: vec![OFFSET_MAYBE_MISSING],
             note: format!(
-                "surface `{profile}` does not admit `{OFFSET_MAYBE_MISSING}`; run `steins triage --profile {STRICT_PROFILE} <paths>` to measure the what-if"
+                "the stream names surface `{profile}` but not the id set it resolved to, and `{OFFSET_MAYBE_MISSING}` did not fire: 0 if `{profile}` extends `{STRICT_PROFILE}`, otherwise unmeasured; `steins triage --profile {STRICT_PROFILE} <paths>` measures the what-if either way"
             ),
         }
     };
@@ -443,7 +443,7 @@ fn strict_what_if_unmeasured(agg: &Aggregate, hints: &mut Vec<String>) {
         .any(|b| b.name == BUCKET_UNGUARDED && b.status == BucketStatus::NotMeasured);
     if unmeasured {
         hints.push(format!(
-            "this report measures surface `{}`; the strict what-if is one run away: `steins triage --profile {STRICT_PROFILE} <paths>` counts the optional-key reads `strict` would report, with check's behavior and exit code unchanged",
+            "this report measures surface `{}`, whose id set the stream does not carry; the strict what-if is one run away: `steins triage --profile {STRICT_PROFILE} <paths>` counts the optional-key reads `strict` would report, with check's behavior and exit code unchanged",
             agg.profile
         ));
     }
@@ -563,7 +563,11 @@ pub fn render_text(r: &TriageReport) -> String {
         r.hotspots.files_with_findings
     ));
     if r.hotspots.entries.is_empty() {
-        out.push_str("  (no findings)\n");
+        out.push_str(if r.hotspots.files_with_findings == 0 {
+            "  (no findings)\n"
+        } else {
+            "  (none shown: --top 0)\n"
+        });
     }
     for h in &r.hotspots.entries {
         out.push_str(&format!("  {:>6}  {}\n", h.count, h.path));
