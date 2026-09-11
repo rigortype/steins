@@ -47,6 +47,9 @@ engines = [
   ["8.4.25", "Darwin"],
   ["8.5.10", "Darwin"],
 ]
+# The UNION over `engines` above — an extension ANY build has. Read back
+# by `mine-constants` as its allowlist, so a narrower build joining the
+# union must not shrink the constant table's coverage.
 extensions = [
   "Core",
   "FFI",
@@ -77,6 +80,7 @@ extensions = [
   "gnupg",
   "hash",
   "iconv",
+  "imap",
   "intl",
   "json",
   "ldap",

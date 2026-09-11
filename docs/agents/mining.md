@@ -78,11 +78,18 @@ merged deliberately:
    cargo xtask gen-catalog
    ```
 
-   `--merge` reads a previously-mined `param_facts.toml` back in its own shape,
-   so the CI job runs the same command a maintainer does and nothing needs
-   converting on the way down. Put it LAST only if its signature spellings should
-   win: the last source that has a name supplies `params`, `param_names`,
-   `optional` and `params_required` whole.
+   `--merge` reads a previously-mined `param_facts.toml` back in its own shape —
+   its rows, the `platforms` each already records, and its `[refused.by_ref]`
+   findings — so the CI job runs the same command a maintainer does and nothing
+   needs converting on the way down.
+
+   **`--merge` sources are always appended last**, whatever order the flags are
+   written in, so the merged table's signature spellings win: the last source that
+   has a name supplies `params`, `param_names`, `optional` and `params_required`
+   whole. `[meta] extensions` is NOT last-wins — it is the union over every
+   source, because `mine-constants` reads that list back as its own allowlist and
+   a CI build with a narrower extension set would otherwise delete every `ast\*`,
+   `BROTLI_*` and `GNUPG_*` constant from the other table on the next run.
 
 4. Read the run's output. `[refused.by_ref]` names every function the sources
    disagree about, with the positions each reported — those rows are left out of

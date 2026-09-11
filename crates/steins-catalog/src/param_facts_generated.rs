@@ -7,14 +7,14 @@
 // transcribed from php-src's stubs by hand; a second transcription of the same
 // stubs would agree with them wherever they are wrong.
 //
-// Mined from PHP 8.5.10 with these extensions loaded:
+// Mined at PHP 8.5.10, over the engines' extensions:
 //   Core, FFI, PDO, PDO_ODBC, Phar, Reflection, SPL, SimpleXML, Zend OPcache, ast, bcmath,
 //   brotli, bz2, calendar, ctype, curl, date, dba, dom, exif, fileinfo, filter, ftp, gd,
-//   gettext, gmp, gnupg, hash, iconv, intl, json, ldap, lexbor, libxml, mbstring, mysqli,
-//   mysqlnd, odbc, openssl, pcntl, pcov, pcre, pdo_dblib, pdo_mysql, pdo_pgsql, pdo_sqlite,
-//   pgsql, posix, random, readline, session, shmop, snmp, soap, sockets, sodium, sqlite3,
-//   standard, sysvmsg, sysvsem, sysvshm, tidy, tokenizer, uri, xml, xmlreader, xmlwriter, xsl,
-//   zip, zlib
+//   gettext, gmp, gnupg, hash, iconv, imap, intl, json, ldap, lexbor, libxml, mbstring,
+//   mysqli, mysqlnd, odbc, openssl, pcntl, pcov, pcre, pdo_dblib, pdo_mysql, pdo_pgsql,
+//   pdo_sqlite, pgsql, posix, random, readline, session, shmop, snmp, soap, sockets, sodium,
+//   sqlite3, standard, sysvmsg, sysvsem, sysvshm, tidy, tokenizer, uri, xml, xmlreader,
+//   xmlwriter, xsl, zip, zlib
 //
 // Counts at the mining pin:
 //    2192  internal functions the build had

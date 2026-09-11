@@ -56,6 +56,13 @@
 //!   `param_names`, `optional` and `params_required` describe a signature, and
 //!   half of one engine's signature spliced onto another's describes nothing.
 //!
+//! `[meta] extensions` is the one header field that is NOT last-wins: it is the
+//! union over every source, because `mine-constants` reads it back as its own
+//! allowlist and `--merge` sources land last unconditionally. A CI build with a
+//! narrower extension set would otherwise delete every `ast\*`, `BROTLI_*` and
+//! `GNUPG_*` row from the constant table on the next mining run — a table this
+//! command does not own.
+//!
 //! # Usage
 //!
 //! ```text
@@ -96,6 +103,17 @@ struct Mined {
     unreflectable: Vec<String>,
     absent: Vec<String>,
     rows: BTreeMap<String, Row>,
+    /// The host families each row was already stated by, for a source that is a
+    /// previously-mined TOML rather than an engine ([`read_merge`]). A live
+    /// engine leaves this empty and its rows take the build's own `os`.
+    #[serde(skip)]
+    platforms: BTreeMap<String, BTreeSet<String>>,
+    /// The by-ref disagreements this source had already recorded. A merged table
+    /// is somebody's completed union, and the names it refused stay refused —
+    /// dropping them would silently readmit a name on the strength of the one
+    /// engine that is still in the room.
+    #[serde(skip)]
+    refused: BTreeMap<String, Vec<(String, Vec<usize>)>>,
 }
 
 /// The family a source that predates the `os` field belongs to. Only a merged
@@ -226,20 +244,30 @@ fn union(sources: &[Source]) -> (BTreeMap<String, Merged>, BTreeMap<String, Refu
     let mut by_ref_seen: BTreeMap<String, Vec<(String, Vec<usize>)>> = BTreeMap::new();
     let mut refused: BTreeMap<String, Refusal> = BTreeMap::new();
     for s in sources {
+        // A source that is itself a union carries its own refusals, and they are
+        // findings that survive the trip: the engines that disagreed are not in
+        // this run to disagree again.
+        for (name, seen) in &s.mined.refused {
+            refused.entry(name.clone()).or_insert_with(|| Refusal { seen: seen.clone() });
+        }
         for (name, row) in &s.mined.rows {
             by_ref_seen
                 .entry(name.clone())
                 .or_default()
                 .push((s.label(), row.by_ref.clone()));
+            // The platforms this source states for this row: the ones it recorded
+            // when it is a merged table (a Linux TOML that is already a union of
+            // several minors), and its own host family when it is an engine.
+            let stated = s
+                .mined
+                .platforms
+                .get(name)
+                .filter(|p| !p.is_empty())
+                .cloned()
+                .unwrap_or_else(|| BTreeSet::from([s.os.clone()]));
             match rows.get_mut(name) {
                 None => {
-                    rows.insert(
-                        name.clone(),
-                        Merged {
-                            row: row.clone(),
-                            platforms: BTreeSet::from([s.os.clone()]),
-                        },
-                    );
+                    rows.insert(name.clone(), Merged { row: row.clone(), platforms: stated });
                 }
                 Some(have) => {
                     if have.row.by_ref != row.by_ref {
@@ -256,7 +284,7 @@ fn union(sources: &[Source]) -> (BTreeMap<String, Merged>, BTreeMap<String, Refu
                     let callable = union_positions(&have.row.callable, &row.callable);
                     let variadic = union_positions(&have.row.variadic, &row.variadic);
                     have.row = Row { callable, variadic, ..row.clone() };
-                    have.platforms.insert(s.os.clone());
+                    have.platforms.extend(stated);
                 }
             }
         }
@@ -317,7 +345,26 @@ fn read_merge(path: &str) -> Result<Mined, String> {
         meta: Meta,
         counts: Counts,
         #[serde(default)]
-        r#fn: BTreeMap<String, Row>,
+        refused: RefusedDoc,
+        #[serde(default)]
+        r#fn: BTreeMap<String, MergedRow>,
+    }
+    #[derive(Default, serde::Deserialize)]
+    struct RefusedDoc {
+        #[serde(default)]
+        by_ref: BTreeMap<String, Vec<(String, Vec<usize>)>>,
+    }
+    /// A row as a mined TOML spells it: the facts, plus the `platforms` the
+    /// union that wrote it recorded. Read back rather than collapsed into
+    /// `[meta] os` — a merged table can be a union of several hosts, and
+    /// flattening it to the one its header names would credit `chroot` to
+    /// whichever family happened to write the file.
+    #[derive(serde::Deserialize)]
+    struct MergedRow {
+        #[serde(flatten)]
+        row: Row,
+        #[serde(default)]
+        platforms: Vec<String>,
     }
     #[derive(serde::Deserialize)]
     struct Meta {
@@ -333,6 +380,12 @@ fn read_merge(path: &str) -> Result<Mined, String> {
     }
     let text = std::fs::read_to_string(path).map_err(|e| format!("read {path}: {e}"))?;
     let doc: Doc = toml::from_str(&text).map_err(|e| format!("parse {path}: {e}"))?;
+    let platforms = doc
+        .r#fn
+        .iter()
+        .map(|(name, r)| (name.clone(), r.platforms.iter().cloned().collect()))
+        .collect();
+    let rows = doc.r#fn.into_iter().map(|(name, r)| (name, r.row)).collect();
     Ok(Mined {
         php: doc.meta.php,
         os: doc.meta.os,
@@ -340,7 +393,9 @@ fn read_merge(path: &str) -> Result<Mined, String> {
         internal_total: doc.counts.internal_functions,
         unreflectable: Vec::new(),
         absent: Vec::new(),
-        rows: doc.r#fn,
+        rows,
+        platforms,
+        refused: doc.refused.by_ref,
     })
 }
 
@@ -412,11 +467,21 @@ fn render(
         let _ = writeln!(s, "  [\"{}\", \"{}\"],", src.php, src.os);
     }
     let _ = writeln!(s, "]");
-    // The extension set of the top build: `mine-constants` reads it back as its
-    // own allowlist, so the two tables cannot drift into covering different
-    // builds.
+    // The UNION of every source's extensions, and not the last source's.
+    // `mine-constants` reads this list back as its own allowlist, and `--merge`
+    // sources are appended last unconditionally — so taking the top source's set
+    // would let a CI build with a narrower extension list silently delete every
+    // `ast\*`, `BROTLI_*` and `GNUPG_*` row from the CONSTANT table on the next
+    // mining run. An extension any build has is an extension Steins covers; a
+    // build without it simply contributes no names, which is the one thing both
+    // miners already know how to read.
+    let extensions: BTreeSet<&str> =
+        sources.iter().flat_map(|s| s.mined.extensions.iter().map(String::as_str)).collect();
+    let _ = writeln!(s, "# The UNION over `engines` above — an extension ANY build has. Read back");
+    let _ = writeln!(s, "# by `mine-constants` as its allowlist, so a narrower build joining the");
+    let _ = writeln!(s, "# union must not shrink the constant table's coverage.");
     let _ = writeln!(s, "extensions = [");
-    for e in &top.mined.extensions {
+    for e in &extensions {
         let _ = writeln!(s, "  \"{e}\",");
     }
     let _ = writeln!(s, "]\n");
@@ -507,6 +572,8 @@ mod tests {
                     )
                 })
                 .collect(),
+            platforms: BTreeMap::new(),
+            refused: BTreeMap::new(),
         };
         Source { php: mined.php.clone(), os: mined.os.clone(), mined }
     }
@@ -568,6 +635,76 @@ mod tests {
         let (rows, refused) = union(&sources);
         assert!(refused.is_empty());
         assert_eq!(rows["cb"].row.callable, vec![1, 2]);
+    }
+
+    /// **A merged table's own `platforms` survive the merge.** The Linux TOML the
+    /// CI job uploads is itself a union, and reading its rows as "whatever
+    /// `[meta] os` says" would credit every one of them to the single family that
+    /// happened to write the header — including the rows a Darwin engine had
+    /// already stated.
+    ///
+    /// Delete the `s.mined.platforms` lookup in [`union`] and `strlen` here
+    /// reports `["Linux"]`, losing the Windows build that stated it upstream.
+    #[test]
+    fn a_merged_sources_recorded_platforms_are_not_collapsed_to_its_header() {
+        let mut merged = source("8.5.10", "Linux", &[("strlen", &[], &[]), ("chroot", &[], &[])]);
+        merged.mined.platforms = BTreeMap::from([
+            ("strlen".to_owned(), BTreeSet::from(["Linux".to_owned(), "Windows".to_owned()])),
+            ("chroot".to_owned(), BTreeSet::from(["Linux".to_owned()])),
+        ]);
+        let sources = vec![source("8.5.10", "Darwin", &[("strlen", &[], &[])]), merged];
+        let (rows, _) = union(&sources);
+        assert_eq!(
+            rows["strlen"].platforms.iter().map(String::as_str).collect::<Vec<_>>(),
+            ["Darwin", "Linux", "Windows"]
+        );
+        assert_eq!(
+            rows["chroot"].platforms.iter().map(String::as_str).collect::<Vec<_>>(),
+            ["Linux"]
+        );
+    }
+
+    /// **A refusal a merged table already recorded stays refused.** The engines
+    /// that disagreed about it are not in this run to disagree again, so dropping
+    /// the record would readmit the name on the strength of whichever build is
+    /// still in the room.
+    #[test]
+    fn a_merged_sources_refusals_are_carried_forward() {
+        let mut merged = source("8.5.10", "Linux", &[("strlen", &[], &[])]);
+        merged.mined.refused = BTreeMap::from([(
+            "pcntl_waitid".to_owned(),
+            vec![
+                ("8.4.25 (Linux)".to_owned(), vec![2]),
+                ("8.5.10 (Linux)".to_owned(), vec![2, 4]),
+            ],
+        )]);
+        let sources = vec![source("8.5.10", "Darwin", &[("pcntl_waitid", &[2], &[])]), merged];
+        let (rows, refused) = union(&sources);
+        assert!(!rows.contains_key("pcntl_waitid"), "a carried refusal keeps the name out");
+        assert_eq!(refused["pcntl_waitid"].seen.len(), 2);
+    }
+
+    /// **The extension list is the union, not the last source's.** `mine-constants`
+    /// reads it back as its own allowlist and `--merge` sources always land last,
+    /// so taking the last source's set would let one narrower CI build delete a
+    /// whole extension's constants from a table it has nothing to do with.
+    #[test]
+    fn the_rendered_extension_list_is_the_union_of_every_source() {
+        let mut mac = source("8.5.10", "Darwin", &[("strlen", &[], &[])]);
+        mac.mined.extensions = vec!["ast".to_owned(), "standard".to_owned()];
+        let mut linux = source("8.5.10", "Linux", &[("strlen", &[], &[])]);
+        linux.mined.extensions = vec!["standard".to_owned(), "pcntl".to_owned()];
+        let sources = vec![mac, linux];
+        let (rows, refused) = union(&sources);
+        let out = render(&sources, &rows, &refused, &[], 0);
+        let list = out
+            .split_once("extensions = [")
+            .and_then(|(_, rest)| rest.split_once(']'))
+            .expect("an extension list")
+            .0;
+        for ext in ["ast", "standard", "pcntl"] {
+            assert!(list.contains(&format!("\"{ext}\"")), "`{ext}` must survive the union: {list}");
+        }
     }
 
     /// The signature spellings come whole from the LAST source that has the name:

@@ -575,7 +575,10 @@ fn render_param_facts(
          // stubs would agree with them wherever they are wrong.\n\
          //\n",
     );
-    let _ = writeln!(s, "// Mined from PHP {} with these extensions loaded:", meta.php);
+    // The UNION over the engines, not the top one's set: `param_facts.toml`
+    // renders it that way (an extension ANY build had), and the constants table
+    // reads the same list back as its allowlist.
+    let _ = writeln!(s, "// Mined at PHP {}, over the engines' extensions:", meta.php);
     let mut line = String::from("//   ");
     for e in &meta.extensions {
         if line.len() + e.len() + 2 > 96 {
@@ -843,7 +846,10 @@ fn render_constants(
          // path) are refused outright and answer nothing.\n\
          //\n",
     );
-    let _ = writeln!(s, "// Mined from PHP {} with these extensions loaded:", meta.php);
+    // The UNION over the engines, not the top one's set: `param_facts.toml`
+    // renders it that way (an extension ANY build had), and the constants table
+    // reads the same list back as its allowlist.
+    let _ = writeln!(s, "// Mined at PHP {}, over the engines' extensions:", meta.php);
     let mut line = String::from("//   ");
     for e in &meta.extensions {
         if line.len() + e.len() + 2 > 96 {
