@@ -141,9 +141,11 @@ fn a_dynamic_this_write_keeps_no_stale_default() {
 #[test]
 fn the_private_shape_guard_never_reads_a_default_as_proven() {
     // The owner-probe shape ADR-0086 §4 was amended for, now with the walk on: the
-    // constructor computes `view` from an unknown, so `view` is unknown after `new`
-    // — never the declared `0` — and the getter that returns it premises nothing
-    // against a declared `positive-int`.
+    // constructor computes `view` from an unknown, so no VALUE for `view` survives
+    // the `new` — never the declared `0`. What is left is the declared type itself
+    // (issue #620): `int`, which is what the slot may ever hold and not what it
+    // holds, and the getter that returns it still premises nothing against a
+    // declared `positive-int` (`int` into `positive-int` is Maybe, never a No).
     let cls = "<?php\ndeclare(strict_types=1);\n\
         class H { private int $view = 0; private int $ad_count = 0;\n\
         \x20 public function __construct(int $original) { $this->view = $original - $this->ad_count; }\n\
@@ -151,7 +153,7 @@ fn the_private_shape_guard_never_reads_a_default_as_proven() {
         /** @param positive-int $n */\nfunction perPage(int $t, $n): int { return 1; }\n";
     assert_eq!(
         dumped(&format!("{cls}function run(int $o): void {{ $h = new H($o);\n\\PHPStan\\dumpType($h->view); }}\n")),
-        "dumped type: unknown",
+        "dumped type: int",
     );
     assert_eq!(
         count(&format!(

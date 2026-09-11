@@ -180,9 +180,11 @@ fn a_float_or_false_slot_converts_int_and_keeps_false() {
 }
 
 #[test]
-fn a_mode_dependent_conversion_drops_to_unknown() {
+fn a_mode_dependent_conversion_drops_to_the_declaration() {
     // `"5"` into `float`: coercive mode stores 5.0, strict mode fatals — mode-
-    // dependent, so the slot goes Unknown rather than keeping the string.
+    // dependent, so the slot keeps no VALUE rather than keeping the string. The
+    // declared `float` is still true of it either way (issue #620): in coercive
+    // mode the engine converted, in strict mode nothing reaches the read at all.
     let dumped = dumps(
         "<?php\n\
          class S { public float $f; }\n\
@@ -190,7 +192,7 @@ fn a_mode_dependent_conversion_drops_to_unknown() {
          $s->f = \"5\";\n\
          \\PHPStan\\dumpType($s->f);\n",
     );
-    assert_eq!(dumped, ["dumped type: unknown"]);
+    assert_eq!(dumped, ["dumped type: float"]);
 }
 
 #[test]
