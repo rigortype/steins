@@ -580,7 +580,7 @@ fn builtin_root(cx: &Cx, class: &str, method: &str) -> Option<String> {
 ///
 /// [`seed_declared_param_object`]: crate::heap::seed_declared_param_object
 /// [`Member`]: crate::env::Member
-fn declared_receiver_class(cx: &Cx, store: &Store, var: &str) -> Option<(String, Stratum)> {
+pub(crate) fn declared_receiver_class(cx: &Cx, store: &Store, var: &str) -> Option<(String, Stratum)> {
     if let Some(obj) = store.obj_of(var)
         && obj.class_exact
     {

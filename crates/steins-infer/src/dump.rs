@@ -28,6 +28,7 @@ use crate::cond::{
     eval_not_fact, eval_spaceship_fact, eval_ternary_fact,
 };
 use crate::cx::Cx;
+use crate::declared_property::declared_property_arms;
 use crate::descent::{project_call_summary, project_method_summary, summary_binds};
 use crate::env::{
     ContractArm, Known, ReturnSummary, Store, Stratum, array_literal_fact, class_const_class_fact,
@@ -872,8 +873,8 @@ fn best_dump_type(
 
     // A depth-1 property fetch `$var->prop` (ADR-0052 §7, Gap B): the allocation-keyed
     // heap property fact (alias-correct, ADR-0036). Escaped-then-swept props carry no
-    // fact and fall through to unknown; a readonly prop survives. Deeper chains
-    // (`$a->b->c`) lower to `Other`, never here.
+    // fact and fall through to the declared floor below; a readonly prop survives.
+    // Deeper chains (`$a->b->c`) lower to `Other`, never here.
     if let ArgValue::PropFetch { var, prop } = value
         && !poisoned
         && let Some(fact) = store.prop_fact(var, prop)
@@ -881,6 +882,22 @@ fn best_dump_type(
         return DumpRendering {
             text: render_dump_fact(fact),
             asserted: store.prop_stratum(var, prop) == Stratum::Asserted,
+        };
+    }
+    // The same fetch with NO in-trace fact (ADR-0049 A20, issue #620): the
+    // property's DECLARED type, read off the receiver's declared class through the
+    // declared-receiver lane. Strictly below the rung above — a write the trace saw
+    // states what this slot holds *now*, the declaration only what it may ever
+    // hold — which is also why a written-then-swept or unspellable-rvalue write
+    // lands here rather than on `unknown`: it recorded nothing to beat the floor.
+    if let ArgValue::PropFetch { var, prop } = value
+        && !poisoned
+        && let Some(arms) = declared_property_arms(cx, store, var, prop)
+        && let Some(text) = render_contract_arms(cx, &arms)
+    {
+        return DumpRendering {
+            text,
+            asserted: arms.iter().any(|a| a.stratum == Stratum::Asserted),
         };
     }
     // A bare global constant (ADR-0094, issue #598), above the literal rung for

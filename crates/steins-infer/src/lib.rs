@@ -34,6 +34,7 @@ mod cond;
 mod contract;
 mod cx;
 pub mod dam;
+mod declared_property;
 mod declared_receiver;
 mod descent;
 mod dispatch;

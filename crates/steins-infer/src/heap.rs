@@ -1091,7 +1091,7 @@ pub(crate) fn simple_class(fqn: &str) -> &str {
 
 /// Parse the first `@var` tag's type out of a property docblock (ADR-0036), or
 /// `None` when absent/unparseable — the property carries no phpdoc contract.
-fn parse_var_type(docblock: &str) -> Option<PType> {
+pub(crate) fn parse_var_type(docblock: &str) -> Option<PType> {
     for tag in scan_docblock(docblock) {
         if matches!(tag.kind, TagKind::Var) {
             return parse_tag_type(&tag.type_text);
