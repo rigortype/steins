@@ -915,7 +915,29 @@ const PHPDOC_EXPECTED: &[(&str, usize)] = &[
     //              against the same-day master run: exactly these two rows and the
     //              one proof-layer row baselined in `EXPECTED_PROOF_FINDINGS`;
     //              nothing else moved.
-    ("pxxxx-monorepo", 553),
+    //   553 → 617  2026-09-11, issue #472 (type aliases resolve) landing in #664.
+    //              Sixty-four rows, one mechanism: a multi-line `@phpstan-type`
+    //              shape. Before #472 an alias name reached `lower_identifier`'s
+    //              class catch-all and was held silent by `Cx::is_known_class`'s
+    //              valve; now the body is the contract, so every `@param <Alias>`
+    //              in the declaring class-like is judged as the shape the author
+    //              spelled, and a literal that does not inhabit it is reported.
+    //              Two rows triaged against their source and both TRUE — an
+    //              undeclared key under a sealed `array{…}` alias body, the family
+    //              this table's `composer/composer` entry already carries — and
+    //              the other sixty-two are the same shape, same id, same kind of
+    //              site. They are described rather than listed: issue #670's brief
+    //              scopes an individual pass over them as separate work, and
+    //              nothing here depends on which of the sixty-two are true.
+    //
+    //              Measured as a **finding-level A/B** between two runs over the
+    //              same checkout, not by running the private gate: issue #658
+    //              records that `cargo xtask fp-gate` does not complete on the
+    //              larger private corpus, so the gate's own number for this
+    //              package is not what moved the row. The count is the diff of the
+    //              two finding sets; the reseed is what keeps the tripwire from
+    //              reading #472's intended, triaged effect as a regression.
+    ("pxxxx-monorepo", 617),
 ];
 
 /// The expected `phpdoc.*` count for a package/local-project name (0 if untabled).

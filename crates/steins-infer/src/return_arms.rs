@@ -677,8 +677,6 @@ fn method_return_arms(cx: &Cx, target: &CallTarget<'_>) -> Option<Vec<ContractAr
                 file,
                 target.declaring_class.span.start,
             ),
-            file,
-            off,
         );
     }
     let phpdoc = envelopes.and_then(|e| e.ret);

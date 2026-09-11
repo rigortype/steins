@@ -259,18 +259,18 @@ impl Envelopes {
     /// still owes — the declaring class-like's template shadow, and `template-type`
     /// resolution — are applied to the body itself, at its declaring site
     /// ([`Cx::expand_alias`]).
-    pub(crate) fn resolve_aliases(&mut self, cx: &Cx, table: &AliasTable, file: usize, off: u32) {
+    pub(crate) fn resolve_aliases(&mut self, cx: &Cx, table: &AliasTable) {
         if table.is_empty() {
             return;
         }
         for (_, t) in &mut self.params {
-            cx.resolve_aliases(t, table, file, off);
+            cx.resolve_aliases(t, table);
         }
         if let Some(t) = &mut self.ret {
-            cx.resolve_aliases(t, table, file, off);
+            cx.resolve_aliases(t, table);
         }
         for s in &mut self.asserts {
-            cx.resolve_aliases(&mut s.ty, table, file, off);
+            cx.resolve_aliases(&mut s.ty, table);
         }
     }
 }
@@ -955,31 +955,31 @@ impl<'a> Cx<'a> {
     /// touched" rule, and the same reason for existing — a name that means
     /// something other than a class must not reach the class catch-all.
     ///
-    /// Three things can happen to a name the table knows, and only the first is a
+    /// Two things can happen to a name the table knows, and only the first is a
     /// resolution:
     ///
-    /// - **A class of that name is in scope.** The alias loses: an alias name
-    ///   colliding with a real class is the pseudo-type/class precedence question
-    ///   again, and the in-project declaration wins (ADR-0029). The identifier is
-    ///   left exactly as written, so it lowers to that class as it always did.
     /// - **The alias expands.** The node becomes the body, re-spelled for where it
     ///   landed, with one more level of alias expansion inside it.
     /// - **Anything else floors** to an opaque node: an unparsable body, an import
     ///   whose owner is unknown or does not declare the name, a body still naming
     ///   an alias at [`ALIAS_DEPTH`] — which is also what makes a cycle terminate.
     ///   Never `ContractTy::Class`, which is the whole point.
-    pub(crate) fn resolve_aliases(&self, ty: &mut PType, table: &AliasTable, file: usize, off: u32) {
-        self.resolve_aliases_at(ty, table, file, off, 0);
+    ///
+    /// **A class of the same name does not stop either** (issue #670). An alias
+    /// colliding with an in-project class reads as the alias, because that is the
+    /// order `ClassReflection::getTypeAliases` fixes upstream: it merges as
+    /// `array_merge($imported, $local)` and `TypeNodeResolver::resolveIdentifier
+    /// TypeNode` consults the alias map *before* the class one, so a declared
+    /// alias always wins. #472 shipped the opposite call as the pseudo-type/class
+    /// precedence rule (ADR-0029), and the divergence registry recorded it as the
+    /// one entry there that was not a silence — the tie-break convicted a value
+    /// the oracle admits. It is not a silence and so it is not registrable: the
+    /// order changed instead.
+    pub(crate) fn resolve_aliases(&self, ty: &mut PType, table: &AliasTable) {
+        self.resolve_aliases_at(ty, table, 0);
     }
 
-    fn resolve_aliases_at(
-        &self,
-        ty: &mut PType,
-        table: &AliasTable,
-        file: usize,
-        off: u32,
-        depth: u32,
-    ) {
+    fn resolve_aliases_at(&self, ty: &mut PType, table: &AliasTable, depth: u32) {
         if let PKind::Identifier(name) = &ty.kind {
             // `\Row` names a class, whatever the docblock aliases. Unreachable
             // today — the table is keyed by bare lowercased names, so a
@@ -990,9 +990,6 @@ impl<'a> Cx<'a> {
                 return;
             }
             let Some(body) = table.entries.get(&name.to_ascii_lowercase()) else { return };
-            if self.is_known_class(&self.resolve_pclass(file, off, name)) {
-                return; // the in-project class wins.
-            }
             match self.expand_alias(body, table, depth) {
                 Some(expanded) => ty.kind = expanded.kind,
                 None => {
@@ -1002,9 +999,7 @@ impl<'a> Cx<'a> {
             }
             return;
         }
-        for_each_child_type_mut(ty, &mut |child| {
-            self.resolve_aliases_at(child, table, file, off, depth);
-        });
+        for_each_child_type_mut(ty, &mut |child| self.resolve_aliases_at(child, table, depth));
     }
 
     /// The type one [`AliasBody`] expands to, ready to be spliced in at a use site,
@@ -1045,7 +1040,7 @@ impl<'a> Cx<'a> {
         let (dfile, doff) = owner_table.site;
         neutralize_templates(&mut ty, &owner_table.shadow);
         self.resolve_template_types(&mut ty, dfile, doff);
-        self.resolve_aliases_at(&mut ty, owner_table, dfile, doff, depth + 1);
+        self.resolve_aliases_at(&mut ty, owner_table, depth + 1);
         self.qualify_class_names(&mut ty, dfile, doff);
         Some(ty)
     }

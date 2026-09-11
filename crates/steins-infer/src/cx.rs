@@ -1548,8 +1548,6 @@ impl<'a> Cx<'a> {
                 env.resolve_aliases(
                     self,
                     &type_aliases_of(cd.docblock.as_deref(), self.cur, cd.span.start),
-                    self.cur,
-                    m.span.start,
                 );
                 Some(env)
             }
@@ -1686,8 +1684,6 @@ impl<'a> Cx<'a> {
                 env.resolve_aliases(
                     self,
                     &type_aliases_of(cd.docblock.as_deref(), self.cur, cd.span.start),
-                    self.cur,
-                    m.span.start,
                 );
                 let ret = env.ret?;
                 Some((ret, format!("{}::{}", cd.name, m.name)))

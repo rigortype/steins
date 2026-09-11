@@ -41,6 +41,13 @@ fn param_count(src: &str) -> usize {
     check(&tree, &functions, "t.php").into_iter().filter(|d| d.id == PARAM_MISMATCH_ID).count()
 }
 
+/// How many findings of one id a source produces.
+fn ids(src: &str, id: &str) -> usize {
+    let tree = SourceTree::parse(src);
+    let functions = tree.functions().to_vec();
+    check(&tree, &functions, "t.php").into_iter().filter(|d| d.id == id).count()
+}
+
 /// A class declaring `$body` as its docblock, with one method that dumps its
 /// `@param $ty`.
 fn probe(body: &str, ty: &str) -> String {
@@ -231,13 +238,33 @@ fn an_unparsable_alias_body_floors() {
 // 4. Precedence: what an alias name loses to.
 
 #[test]
-fn an_in_project_class_wins_over_a_same_named_alias() {
-    // The pseudo-type/class precedence question again, with the same answer: the
-    // declaration wins, and the identifier is left exactly as written.
+fn an_alias_wins_over_a_same_named_class() {
+    // PHPStan's order, which #472 shipped inverted (issue #670).
+    // `ClassReflection::getTypeAliases` merges `array_merge($imported, $local)`
+    // and `TypeNodeResolver::resolveIdentifierTypeNode` consults the alias map
+    // before the class one, so a declared alias always wins. On the class-first
+    // reading this dumped `Row (asserted)`.
     let src = "<?php\nclass Row {}\n/** @phpstan-type Row array{id: int} */\nclass Probe {\n\
         /** @param Row $v */\n\
         public function m($v): void { \\PHPStan\\dumpPhpDocType($v); }\n}\n";
-    assert_eq!(one_dump(src), "dumped phpdoc type: Row (asserted)");
+    assert_eq!(one_dump(src), "dumped phpdoc type: array{id: int} (asserted)");
+}
+
+#[test]
+fn the_collision_no_longer_convicts_a_value_the_alias_admits() {
+    // Why the order moved rather than being registered. Divergence-registry entry
+    // 18 carried this as the one row in that section that was **not** a silence:
+    // the class-first tie-break answered a definite `No` on a call the oracle
+    // accepts (PHPStan reports the collision as `typeAlias.duplicate` and then
+    // resolves the alias anyway). A conviction the oracle admits is not a
+    // divergence to register, so the order changed and the two paragraphs
+    // recording it are gone.
+    let src = "<?php\nclass Foo {}\n/** @phpstan-type Foo array{x: int} */\nclass Probe {\n\
+        /** @param Foo $v */\n\
+        public function m($v): void {}\n}\n\
+        $p = new Probe();\n$p->m(['x' => 1]);\n";
+    assert_eq!(param_count(src), 0, "the shape the alias names is admitted");
+    assert_eq!(ids(src, "type.argument-mismatch"), 0, "and the proof lane says nothing either");
 }
 
 #[test]
