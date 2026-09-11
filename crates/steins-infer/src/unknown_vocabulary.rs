@@ -141,12 +141,31 @@ pub(crate) fn unknown_vocabulary(cx: &Cx, allow: &VocabularyAllowlist, out: &mut
             continue;
         }
         for decl in steins_phpdoc::scan_type_aliases(&comment.text) {
-            if !decl.refused {
-                continue;
-            }
             let offset = comment.span.start + decl.at_offset;
             let mut seen: Vec<String> = Vec::new();
-            report(cx, allow, offset, &decl.name, &mut seen, out);
+            if decl.refused {
+                report(cx, allow, offset, &decl.name, &mut seen, out);
+                continue;
+            }
+            // An alias **body** is a type position like any other (issue #669).
+            // `@phpstan-type Row foo-bar` floored silently: the body failed to
+            // bind, the alias became `Opaque`, and the author was left with a
+            // declaration that admits everything and no reason why — while
+            // PHPStan says the alias contains an unknown class. Walked through
+            // the same two functions the use-site half runs, so the whole
+            // allowlist applies and a plugin registration silences a name here
+            // exactly as it silences it in a `@param`.
+            //
+            // Positioned at the tag, not inside the body: `TypeAliasDecl` records
+            // the `@`, and a body that wraps across lines has no one offset to
+            // point at anyway. `parse_tag_type` for the same reason the use-site
+            // walk uses it — a payload the parser rejects is `phpdoc.unparsable`'s
+            // finding, never two — and unlike `type_aliases_of` this does not ask
+            // whether the body runs to the end of the tag: a spelling that denotes
+            // nothing denotes nothing whether or not the declaration binds.
+            let steins_phpdoc::TypeAliasBody::Local(body) = &decl.body else { continue };
+            let Some(ty) = parse_tag_type(body) else { continue };
+            walk_type(cx, allow, offset, &ty, &mut seen, out);
         }
     }
 }

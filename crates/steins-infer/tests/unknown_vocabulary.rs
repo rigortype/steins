@@ -264,6 +264,52 @@ fn a_hyphenated_alias_declaration_is_reported() {
     );
 }
 
+/// An alias **body** is a type position like any other (issue #669).
+///
+/// `@phpstan-type Row foo-bar` floored silently: the body failed to bind, the
+/// alias became `Opaque`, and the author was left with a declaration that admits
+/// everything and no reason why — while PHPStan says the alias contains an
+/// unknown class. The body is walked through the same two functions the use-site
+/// half runs, so the whole allowlist decides it: recognized vocabulary is silent
+/// in a body exactly as in a `@param`, and so is a name a plugin registered
+/// (`VocabularyAllowlist`'s own tests pin that on the single predicate both
+/// walks consult — no manifest can populate the plugin half yet).
+#[test]
+fn an_alias_body_is_a_type_position_too() {
+    let src = "<?php\n/**\n * @phpstan-type Row foo-bar\n */\nclass C {}\n";
+    let msgs = vocab(src);
+    assert_eq!(msgs.len(), 1, "{msgs:?}");
+    assert!(msgs[0].contains("`foo-bar`"), "{msgs:?}");
+    // Every position the use-site walk asks, asked here too.
+    assert_eq!(
+        vocab_count("<?php\n/**\n * @phpstan-type Row list<foo-bar>\n */\nclass C {}\n"),
+        1
+    );
+    // One finding per spelling per declaration, the rule a tag already obeys.
+    assert_eq!(
+        vocab_count("<?php\n/**\n * @phpstan-type Row foo-bar|list<foo-bar>\n */\nclass C {}\n"),
+        1
+    );
+    // The allowlist is the same one, so a name the tables own says nothing.
+    assert!(
+        vocab("<?php\n/**\n * @phpstan-type Row non-empty-string\n */\nclass C {}\n").is_empty()
+    );
+    // A refused *name* reports for the name and stops: it binds nothing, so its
+    // body is not a declaration to read, and one edit fixes both halves.
+    assert_eq!(
+        vocab_count("<?php\n/**\n * @phpstan-type foo-bar baz-qux\n */\nclass C {}\n"),
+        1
+    );
+    // An import clause is class references and keywords, not a type.
+    assert!(
+        vocab("<?php\n/**\n * @phpstan-import-type Row from Geo\n */\nclass C {}\n").is_empty()
+    );
+    // And the body half sits behind #668's gate, like the name half.
+    assert!(
+        vocab("<?php\n/**\n * @phpstan-type Row foo-bar\n */\nfunction f(): void {}\n").is_empty()
+    );
+}
+
 /// Where the refusal speaks (issue #668): a class-like's docblock, which is the
 /// only place PHPStan reads `@phpstan-type` at all.
 ///
