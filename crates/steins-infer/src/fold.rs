@@ -1197,8 +1197,8 @@ fn fold_within_allocation_budget(name: &str, args: &[FoldArg]) -> bool {
 /// A fold decline is spelled `None` everywhere else, which is the right spelling
 /// for a widen and the wrong one for an audit: "the seam declined" and "the seam
 /// declined because parameter 1 of `array_filter` is a callee the engine would
-/// run" are the same value. This type is the second half, and
-/// [`fold_shape_refusal`] is what produces it.
+/// run" are the same value. This type is the second half, and the shape gate
+/// this module consults before dispatch is what produces it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FoldShapeRefusal {
     /// The callee has **no mined `param_facts` row**, so no shape gate can see

@@ -635,8 +635,9 @@ pub enum CarrierShape {
     ///
     /// [`invocation_shape`]: crate::invocation_shape
     Invoked,
-    /// A `mixed`-typed parameter the engine calls later — see
-    /// [`deferred_mixed_callback`].
+    /// A `mixed`-typed parameter the engine calls later — `ob_start`,
+    /// `pcntl_signal` and `assert`, curated because nothing in the signature
+    /// distinguishes such a parameter from an ordinary value (issue #705).
     DeferredMixed,
     /// An untyped variadic tail the catalog does not argue carries data: the
     /// `array_udiff`/`array_uintersect` comparator's hiding place.
@@ -717,7 +718,7 @@ impl CallbackCarrier {
 /// * [`CarrierShape::Declared`] — the engine's arginfo (mined, mechanical);
 /// * [`CarrierShape::Invoked`] — [`invocation_shape`] (curated for the effects
 ///   pass, and the one table that already existed);
-/// * [`CarrierShape::DeferredMixed`] — [`deferred_mixed_callback`] (curated,
+/// * [`CarrierShape::DeferredMixed`] — the three-name Deferred set (curated,
 ///   issue #705's residue);
 /// * [`CarrierShape::UndeclaredTail`] — a `mixed` variadic tail the catalog
 ///   does not argue carries data (positional, mechanical);
