@@ -16,6 +16,7 @@ use steins_syntax::{
 
 use crate::fold::Folder;
 use crate::asserts::cond_invalidations;
+use crate::builtin_returns::builtin_operand_fact;
 use crate::coerce::php_cast_fact;
 use crate::compare::{php_identical, php_loose_eq, php_truthy};
 use crate::contract::IsA;
@@ -443,7 +444,9 @@ fn value_truthiness(
 /// cast each already answer for themselves, so `!isset($foo)`, `$a && ($b || $c)`
 /// and `(int) ($a === $b)` fold rather than bottoming out. Every other shape goes
 /// to [`transfer_arg_known`], the same argument-fact reader every transfer rule
-/// uses — which resolves a literal operand to its `Singleton` on the way down.
+/// uses — which resolves a literal operand to its `Singleton` on the way down —
+/// and a **call** falls from there to [`builtin_operand_fact`], the rung that
+/// reader never had (issue #646).
 fn value_operand_fact(
     w: &WalkCx,
     folder: &mut dyn Folder,
@@ -474,6 +477,17 @@ fn value_operand_fact(
         ArgValue::Concat(lhs, rhs) => {
             Some(eval_concat_fact(w, folder, lhs, rhs, env, store, poisoned))
         }
+        // A **builtin call** as the operand (issue #646). The reader below has no
+        // rung for a call, so `(string) rand()` answered nothing while
+        // `$r = rand(); (string) $r` answered the catalog — one value, two
+        // spellings, two answers. [`builtin_operand_fact`] is the assignment
+        // seam's own ladder, so the two agree by construction.
+        //
+        // It runs BELOW that reader rather than instead of it: a call the fold
+        // resolves (`strlen('abc')`) is a literal first, and no declared return
+        // may outrank the value the call actually has.
+        ArgValue::Call(name, args) => transfer_arg_known(w.cx, folder, value, env, store)
+            .or_else(|| builtin_operand_fact(w.cx, folder, name, args, env, store, poisoned)),
         _ => transfer_arg_known(w.cx, folder, value, env, store),
     }
 }
