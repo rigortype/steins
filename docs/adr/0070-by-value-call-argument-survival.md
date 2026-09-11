@@ -498,3 +498,32 @@ standing delegation.
   gate (`by_value_arg_frame`), not the callee. The folding allowlist and
   `CERTIFIED_EXTRA` are hand-checked never to invoke userland and stay
   certified everywhere.
+
+### The carrier rule stops being this amendment's own (2026-09-11, issue #705)
+
+The membership rule above refuses a callback carrier by four shapes, and the
+fold seam refused one by the same four — two statements of one rule, written
+down twice. The copies had already drifted, in the direction that copies drift:
+`ob_start(mixed $callback)` and `pcntl_signal(int, mixed $handler)` certified
+here while `register_shutdown_function`, the same Deferred family, did not,
+because the effects pass happened to row that one in `invocation_shape` and
+nobody had rowed the others. `assert(mixed $assertion)` under `assert.callback`
+is the third of the three.
+
+No wrong fact came of it — the stored callback runs at flush, signal or
+assertion-failure time, and the later trigger carries no read of the variable —
+so this is the rule agreeing with its own statement rather than a repair. What
+makes it worth the edit is that the disagreement was *unobservable*: each copy
+was correct about everything it could see.
+
+So there is one predicate now, `steins_catalog::callback_carriers`, and both
+this lane and ADR-0028's fold seam read it. It carries a fifth route for the
+Deferred `mixed` set, and it names the carrying position — which the fold
+seam's decline reason needs and this lane does not, which is exactly the sort
+of asymmetry that makes a second copy look reasonable.
+
+The three names lose their by-value certification and fall back to the
+forgetting floor, and `register_shutdown_function` is where they now agree.
+
+**Status: PENDING ratification.** Designed autonomously under the owner's
+standing delegation.

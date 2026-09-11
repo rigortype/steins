@@ -1231,7 +1231,6 @@ impl FoldShapeRefusal {
 /// [`steins_catalog::foldable`] gates the callee, and this gates the argument
 /// list, so a name admitted to the allowlist tomorrow is gated today.
 ///
-
 /// # Why the allowlist is not enough
 ///
 /// The allowlist gates the **callee**. A builtin that takes a callable smuggles a
@@ -1247,11 +1246,7 @@ impl FoldShapeRefusal {
 ///   domain. `system` and `unlink` are the same call.
 ///
 /// Nothing about `array_filter` is impure; the *argument* is the problem. So the
-/// rule is about the argument list, not the name: a callable position must be
-/// **absent** (the call does not reach it) or a **literal `null`** (PHP's own
-/// "no callback" spelling, which `array_filter` reads as "drop the falsy
-/// elements"). Anything else declines, including a literal string — a string is
-/// exactly what a callable argument looks like on this wire.
+/// rule is about the argument list, not the name.
 ///
 /// # Where the positions come from
 ///
