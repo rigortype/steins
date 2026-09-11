@@ -826,6 +826,19 @@ fn the_template_name_indexes_the_owners_list_by_position() {
 }
 
 #[test]
+fn an_edges_int_range_keeps_its_bound_words() {
+    // The projected argument travels through `qualify_class_names` (issue #361),
+    // which since issue #665 re-spells every non-vocabulary identifier. `max` in
+    // `int<0, max>` is not vocabulary and not a class: qualified to `\App\max`
+    // the range floored to `Opaque`, and `f(-1)` was admitted.
+    let src = "<?php\nnamespace App;\n/** @template T */\nclass Base {}\n\
+        /** @extends Base<int<0, max>> */\nclass Child extends Base {}\n\
+        /** @param template-type<Child, Base, 'T'> $x */\nfunction f($x): void {}\n";
+    assert_eq!(param_count(&format!("{src}f(0);")), 0, "0 is in `int<0, max>`");
+    assert_eq!(param_count(&format!("{src}f(-1);")), 1, "-1 is not");
+}
+
+#[test]
 fn a_one_level_inheritance_edge_resolves_the_subject() {
     let base = "<?php\n\
         /** @template T */\n\

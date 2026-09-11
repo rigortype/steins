@@ -1082,6 +1082,17 @@ impl<'a> Cx<'a> {
     /// is an unknown class **in the owner's namespace**. Spelling it fully
     /// qualified is how a node with nowhere to keep a scope says the same thing,
     /// and an unknown class is still held silent by `Cx::is_known_class`'s valve.
+    ///
+    /// One name is not vocabulary by `is_type_vocabulary`'s catch-all and is
+    /// still not a class where it stands:
+    ///
+    /// - `min`/`max` in the **bound position** of `int<…>` (issue #665). Upstream
+    ///   reads them there by spelling (`TypeNodeResolver`: `->name === 'min'`),
+    ///   and `lower_int_range` does the same, so a qualified `\App\max` is no
+    ///   bound and the range floors to `Opaque`. They are exempt only in that
+    ///   position: a class literally named `max` anywhere else is qualified like
+    ///   any other, and inside `int<…>` upstream would not read it as a class
+    ///   either.
     fn qualify_class_names(&self, ty: &mut PType, efile: usize, eoff: u32) {
         let qualify = |name: &mut String| {
             if name.starts_with('\\') || steins_contract::is_type_vocabulary(name) {
@@ -1096,7 +1107,17 @@ impl<'a> Cx<'a> {
         // edge's file could re-spell.
         match &mut ty.kind {
             PKind::Identifier(name) => qualify(name),
-            PKind::Generic { base, .. } => qualify(base),
+            PKind::Generic { base, args } => {
+                qualify(base);
+                if is_int_range_base(base) {
+                    for arg in args {
+                        if !is_int_range_bound(&arg.ty) {
+                            self.qualify_class_names(&mut arg.ty, efile, eoff);
+                        }
+                    }
+                    return;
+                }
+            }
             _ => {}
         }
         for_each_child_type_mut(ty, &mut |child| self.qualify_class_names(child, efile, eoff));
@@ -1882,6 +1903,20 @@ fn const_operand_shape(cx: &Cx, cfile: usize, coff: u32, ty: &PType) -> Option<C
     }
     let non_empty = !fields.is_empty();
     Some(ContractTy::Shape { list: false, fields, sealed: true, non_empty, unsealed: None })
+}
+
+/// Whether a generic's base is the `int<lo, hi>` range spelling
+/// (`lower_generic`'s `"int" | "int-range"` arm), whose arguments may be the
+/// bound words `min`/`max` rather than types.
+fn is_int_range_base(base: &str) -> bool {
+    matches!(base.trim_start_matches('\\').to_ascii_lowercase().as_str(), "int" | "int-range")
+}
+
+/// Whether a range argument is the bound word `min` or `max` — the spelling
+/// `lower_int_range` reads as a bound, and so the one `qualify_class_names` must
+/// not turn into a class name.
+fn is_int_range_bound(ty: &PType) -> bool {
+    matches!(&ty.kind, PKind::Identifier(id) if id.eq_ignore_ascii_case("min") || id.eq_ignore_ascii_case("max"))
 }
 
 /// The literal contract one *proven* array element denotes. `None` for anything

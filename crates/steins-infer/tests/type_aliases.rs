@@ -545,6 +545,28 @@ fn an_importers_own_class_does_not_answer_for_a_name_the_owner_left_unresolved()
     assert_eq!(param_count(&format!("{src}{user}")), 0);
 }
 
+#[test]
+fn a_range_bound_is_not_a_class_name_to_qualify() {
+    // Qualifying every non-vocabulary identifier (issue #665) must stop at the
+    // bound position of `int<…>`: `min`/`max` are words `lower_int_range` reads
+    // by spelling, as upstream's `TypeNodeResolver` does, and `\App\max` is no
+    // bound. Spelled that way the range floored to `Opaque`, and a local body —
+    // `expand_alias` qualifies those too — dumped `no declared contract` and
+    // admitted `-1` against `int<1, max>`.
+    let src = "<?php\nnamespace App;\n/**\n * @phpstan-type Pos int<1, max>\n\
+         * @phpstan-type Neg int<min, -1>\n */\nclass Probe {\n\
+        /** @param Pos $v */\n\
+        public function m($v): void { \\PHPStan\\dumpPhpDocType($v); }\n\
+        /** @param Neg $v */\n\
+        public function n($v): void { \\PHPStan\\dumpPhpDocType($v); }\n}\n\
+        $p = new Probe();\n$p->m(-1);\n$p->n(1);\n";
+    assert_eq!(
+        dumps(src),
+        ["dumped phpdoc type: int<1, max> (asserted)", "dumped phpdoc type: int<min, -1> (asserted)"]
+    );
+    assert_eq!(param_count(src), 2, "-1 is below `int<1, max>` and 1 above `int<min, -1>`");
+}
+
 // 5. What stays where it was.
 
 #[test]
