@@ -279,6 +279,46 @@ to recapture, not to suppress. The registration kind is not on the manifest
 yet, so the allowlist is builtin-only today and the coupling bites when it
 lands.
 
+## `isAliasNameValid` vs the vocabulary catch-all
+
+Which names a `@phpstan-type` declaration may bind is decided here by one
+question and upstream by another.
+`LocalTypeAliasesCheck::isAliasNameValid` resolves the alias name as a
+type with the alias table bypassed and accepts it when the result is an
+object type (or a template), so upstream's rule is "the name would
+otherwise have named a class". Steins asks whether the type vocabulary
+already owns the name (`is_type_vocabulary`, issue #472). The two agree
+on every name anyone writes and disagree on exactly three, measured
+2026-09-11 against phpstan-src.
+
+`empty` binds here and binds nothing there. `TypeNodeResolver` reaches
+`case 'empty'` in its keyword switch — the falsey pseudo-type — before it
+ever consults the alias table, so an alias of that name is unreachable
+upstream whatever the naming rule says about it. Steins models no `empty`
+at all, so the name reaches the class catch-all and is free for a
+declaration. That is a standing gap in the vocabulary rather than a
+decision about alias names, and closing the gap closes this row with it.
+
+`Closure` and `hasoffset` bind there and are refused here. Both are
+Steins vocabulary — `Closure` in the callable family (ADR-0063 P3),
+`hasoffset` in `KNOWN_UNENFORCED` — so the name is not the author's to
+rebind. Upstream binds both. `Closure` resolves to an object type, so the
+name is valid; the collision with the real class is *reported*
+(`typeAlias.duplicate`, "already exists as a class in scope of …") and
+the alias resolves anyway, which is the same "report and then resolve"
+shape that fixed Steins' own alias/class tie-break in issue #670.
+`hasoffset` is a Psalm spelling PHPStan does not model, so it resolves to
+an object type of that name and the alias is valid without comment.
+
+The owner's ruling (2026-09-11) is to keep Steins' vocabulary and
+register the gap rather than track upstream's rule. Tracking it would
+replace a question about the type vocabulary with a question about the
+*class index* — "would this name have resolved to an object" — whose
+answer moves as classes are added to a project; and separating the
+declaration question from the shadowing one is exactly what issue #472
+had to do to stop the alias table manufacturing definite `No`s. None of
+the three is a name anyone would give a type alias.
+
 ## Bare `@assert-if-true` vs the vendor-prefixed assertion family
 
 PHPStan's and Psalm's assertion tags — `@phpstan-assert(-if-true|-if-false)`
