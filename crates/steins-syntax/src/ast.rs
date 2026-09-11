@@ -1525,6 +1525,12 @@ impl std::hash::Hash for ArgValue {
     }
 }
 
+/// How long a float's decimal spelling may run before the renderers switch to
+/// the exponent form. Wide enough to keep every spelling that was readable —
+/// `100000000000000000000.0` is 23 characters — and far short of the 309 digits
+/// `PHP_FLOAT_MAX` would otherwise print.
+pub(crate) const FLOAT_DECIMAL_MAX_LEN: usize = 24;
+
 impl ArgValue {
     /// Whether this is a concrete literal (`Int`/`Float`/`Str`/`Bool`/`Null`) —
     /// i.e. a self-evident, already-proven value.
@@ -1560,7 +1566,23 @@ impl ArgValue {
             ArgValue::Int(v) => v.to_string(),
             ArgValue::Float(v) => {
                 // Keep a float visibly a float: `5.0`, not `5`.
-                if v.fract() == 0.0 && v.is_finite() { format!("{v:.1}") } else { v.to_string() }
+                //
+                // A float whose decimal spelling runs long takes PHP's exponent form instead.
+                // Rust's `Display` never uses an exponent, so `PHP_FLOAT_MAX` (ADR-0094 §3.1, a
+                // value the analyzer now carries) spells as 309 digits and one diagnostic fills
+                // a terminal. The rule is on the rendered LENGTH and not on the magnitude, so
+                // every spelling short enough to read — the int-overflow promotions at 1e19 and
+                // 1e20 among them — is left exactly as it was.
+                let decimal = if v.fract() == 0.0 && v.is_finite() {
+                    format!("{v:.1}")
+                } else {
+                    v.to_string()
+                };
+                if v.is_finite() && decimal.len() > FLOAT_DECIMAL_MAX_LEN {
+                    format!("{v:E}")
+                } else {
+                    decimal
+                }
             }
             ArgValue::Str(v) => v.render_with('"'),
             ArgValue::Bool(v) => v.to_string(),

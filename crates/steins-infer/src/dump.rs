@@ -418,7 +418,18 @@ fn render_finite_precise(members: &[Val]) -> Option<String> {
 /// fractional part (`123.0`, not `123`); every other value uses its shortest
 /// round-tripping decimal (`3.14`, `1.5`).
 fn render_dump_float(f: f64) -> String {
-    if f.is_finite() && f.fract() == 0.0 { format!("{f:.1}") } else { f.to_string() }
+    // A float whose decimal spelling runs long takes PHP's exponent form instead.
+    // Rust's `Display` never uses an exponent, so `PHP_FLOAT_MAX` (ADR-0094 §3.1, a
+    // value the analyzer now carries) spells as 309 digits and one diagnostic fills
+    // a terminal. The rule is on the rendered LENGTH and not on the magnitude, so
+    // every spelling short enough to read — the int-overflow promotions at 1e19 and
+    // 1e20 among them — is left exactly as it was.
+    //
+    // The same rule `ArgValue::render` applies, so the two surfaces cannot
+    // disagree about one value.
+    let decimal =
+        if f.is_finite() && f.fract() == 0.0 { format!("{f:.1}") } else { f.to_string() };
+    if f.is_finite() && decimal.len() > 24 { format!("{f:E}") } else { decimal }
 }
 
 /// Append `|null` when the fact admits null (the honest nullable spelling).

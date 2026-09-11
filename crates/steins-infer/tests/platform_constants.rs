@@ -121,6 +121,12 @@ fn a_constant_outside_the_targets_minor_range_answers_nothing() {
 fn a_host_dependent_constant_defaults_to_the_union_of_its_values() {
     // A library cannot assume its deployment host, so the default is the union —
     // sound on every host, and Verified for that reason (no `(asserted)`).
+    //
+    // The spelling is the reference implementation's on both counts: a control
+    // character forces PHP's double-quoted form, everything else stays
+    // single-quoted, which is why `PHP_EOL` and `DIRECTORY_SEPARATOR` are written
+    // differently for the same kind of union.
+    assert_eq!(dump("PHP_EOL"), r#"dumped type: "\n"|"\r\n""#);
     assert_eq!(dump("DIRECTORY_SEPARATOR"), r"dumped type: '/'|'\\'");
     assert_eq!(dump("PATH_SEPARATOR"), "dumped type: ':'|';'");
     assert_eq!(
@@ -140,11 +146,13 @@ fn the_os_pin_fixes_the_four_host_constants_together_at_asserted() {
     // host, so it is Asserted and premises no proof-layer finding.
     let linux = Some(OsFamily::Linux);
     assert_eq!(dump_under("PHP_OS_FAMILY", None, linux), "dumped type: 'Linux' (asserted)");
+    assert_eq!(dump_under("PHP_EOL", None, linux), r#"dumped type: "\n" (asserted)"#);
     assert_eq!(dump_under("DIRECTORY_SEPARATOR", None, linux), "dumped type: '/' (asserted)");
     assert_eq!(dump_under("PATH_SEPARATOR", None, linux), "dumped type: ':' (asserted)");
 
     let windows = Some(OsFamily::Windows);
     assert_eq!(dump_under("PHP_OS_FAMILY", None, windows), "dumped type: 'Windows' (asserted)");
+    assert_eq!(dump_under("PHP_EOL", None, windows), r#"dumped type: "\r\n" (asserted)"#);
     assert_eq!(dump_under("DIRECTORY_SEPARATOR", None, windows), r"dumped type: '\\' (asserted)");
     assert_eq!(dump_under("PATH_SEPARATOR", None, windows), "dumped type: ';' (asserted)");
 
