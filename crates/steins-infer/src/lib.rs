@@ -67,6 +67,7 @@ mod ids;
 mod inaccessible;
 mod mechanics;
 mod method_call;
+mod no_effect;
 mod non_object;
 mod offsets;
 mod operands;

@@ -133,3 +133,4 @@ list in one place.
 | ADR-0093 | [The value domain grows one bool literal; objects are spelled in the contract lane, not the value domain](0093-object-spelling-and-bool-literal.md) |
 | ADR-0094 | [Platform constants: a generated table, a union by default, a pin by opt-in, and 64-bit integers](0094-platform-constants.md) |
 | ADR-0095 | [Triage: a report over the check stream, never a second surface](0095-triage-report-over-the-check-stream.md) |
+| ADR-0096 | [Discardable effects: a dead statement read off the label lattice, not off a curated boolean](0096-discardable-effects-and-dead-statements.md) |

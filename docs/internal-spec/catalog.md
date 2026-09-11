@@ -338,7 +338,10 @@ The standard SPL/engine exception tree, keyed by global simple name
 not a project class has an **unknown** parent — the caller keeps the chain result
 at `Maybe`, never `No` (ADR-0040's FP-safe side).
 
-`builtin_throws` gives the throw classes a builtin can raise.
+`builtin_throws` gives the throw classes a builtin can raise. The rows are
+per name and hand-transcribed from `throws.toml`; the fold-allowlist names with
+an input-determined `ValueError` arm (`str_repeat`, `count`, `sprintf`, …)
+carry theirs since issue #320, each reproduced by probe.
 
 ## `invocation_shape(name)` — higher-order builtins
 

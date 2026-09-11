@@ -127,6 +127,11 @@ pub fn builtin_throws(name: &str) -> Option<&'static [&'static str]> {
     // PHP 8 turned argument-value misuses from `false`-returns into
     // `ValueError`. Method-shaped constructor throws are deferred.
     const VALUE_ERROR: &[&str] = &["ValueError"];
+    // `sprintf` has two input-determined arms on its FORMAT string alone: an
+    // unknown conversion specifier is a `ValueError`, and a placeholder with no
+    // argument behind it is an `ArgumentCountError` — the one arity error PHP
+    // raises from inside a call rather than at its boundary.
+    const SPRINTF: &[&str] = &["ValueError", "ArgumentCountError"];
     match name.to_ascii_lowercase().as_str() {
         "intdiv" => Some(INTDIV),
         "preg_match" | "file_get_contents" | "fread" | "fgets" | "file" | "scandir"
@@ -135,6 +140,19 @@ pub fn builtin_throws(name: &str) -> Option<&'static [&'static str]> {
         | "random_int" | "random_bytes" | "proc_open" | "shmop_open" | "socket_create" => {
             Some(VALUE_ERROR)
         }
+        // The fold allowlist's `ValueError` arms (issue #320's review): each of
+        // these is catalogued pure — pure GIVEN arguments it accepts — and each
+        // has a value of an accepted type it refuses with a throw. A negative
+        // `$times`/`$count`, a zero `$step` or one wider than the range, an empty
+        // `$pad_string`/`$separator`, a zero `$length`, an offset past the end,
+        // an unknown rounding mode or `$operator`, an out-of-range `$mode`, a
+        // `$min` above `$max`, and the string-arithmetic pair's empty or
+        // non-alphanumeric subject. Every arm was reproduced by probe on PHP
+        // 8.5.10 (throws.toml carries the rows), and `sizeof` rides `count`'s.
+        "str_repeat" | "array_fill" | "range" | "str_pad" | "str_split" | "explode"
+        | "str_increment" | "str_decrement" | "round" | "strpos" | "stripos" | "strrpos"
+        | "version_compare" | "count" | "sizeof" | "mt_rand" => Some(VALUE_ERROR),
+        "sprintf" => Some(SPRINTF),
         // `json_decode`/`json_encode` throw JsonException only under
         // JSON_THROW_ON_ERROR; without flag inspection this key stays synthetic.
         "json_decode_throwing" | "json_encode_throwing" => Some(JSON),

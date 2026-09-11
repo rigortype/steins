@@ -904,6 +904,10 @@ pub(crate) fn walk_trace(
         for call in checkable_calls(&stmt.kind) {
             match &call.receiver {
                 Callee::Function(_) => {
+                    // Where this call's findings begin: the discarded-call
+                    // judgment below reads what the checkers between here and
+                    // there concluded about the same call (ADR-0096 §3).
+                    let before = out.len();
                     check_propagated_call(
                         cx,
                         folder,
@@ -954,6 +958,19 @@ pub(crate) fn walk_trace(
                         // statement-deletion fix payload (ADR-0010, issue #114).
                         let removal =
                             matches!(stmt.kind, StmtKind::Call(_)).then_some(stmt.span);
+                        // Discarded calls (ADR-0096, issue #320): the statement
+                        // IS the call, so its result is unused by construction,
+                        // and the oracle answers what the callee's summary
+                        // proves. Same statement span the dump family's deletion
+                        // fix uses — the thing a reader would delete.
+                        // `value_position` is the one thing `StmtKind::Call`
+                        // cannot say for itself: a `match` arm's body lowers to
+                        // one and its result is the construct's value.
+                        if let Some(span) = removal
+                            && !stmt.value_position
+                        {
+                            crate::no_effect::check_no_effect(cx, span, call, before, out);
+                        }
                         emit_dumps(w, folder, call, env, store, removal, out);
                         // Oracle idea B (harness-only): when the assertType sink is
                         // installed, record this call's (expected, rendering) pair —

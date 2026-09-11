@@ -2490,6 +2490,15 @@ pub struct Stmt {
     /// this: does the subtree exit anywhere) — splits a falling-through body into the
     /// unconditional/conditional classes (see [`body_has_terminator`]).
     pub has_terminator: bool,
+    /// Whether this statement is a **hoisted value-position expression** rather
+    /// than a statement the author wrote (issue #320): the body of a `match` arm,
+    /// which PHP evaluates for its value. `lower_expr_position` is the one place
+    /// that mints these, and the only consumer is the discarded-call family —
+    /// `width($v)` as an arm of `echo match (…)` is a `StmtKind::Call` whose
+    /// result the `echo` consumes, so judging it as a statement would be a false
+    /// claim about the program. Every other reader is indifferent: an arm body's
+    /// findings, dead-branch marking and terminality are unchanged.
+    pub value_position: bool,
 }
 
 impl Stmt {
@@ -2503,6 +2512,7 @@ impl Stmt {
             kind,
             span: ZERO_SPAN,
             invalidated,
+            value_position: false,
             string_contexts: Vec::new(),
             end: BodyEnd::FallsThrough,
             has_terminator: false,

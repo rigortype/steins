@@ -518,7 +518,7 @@ fn every_row_renders_asserted() {
 fn an_asserted_row_premises_no_definite_finding() {
     let src = r#"<?php
 declare(strict_types=1);
-function a(\SplFileObject $file): void { strlen($file->getRealPath()); }
+function a(\SplFileObject $file): void { $n = strlen($file->getRealPath()); }
 function b(\SplFileObject $file): int { return $file->fgets(); }
 function c(\DOMDocument $dom): \DOMElement { return $dom->getElementById('x'); }
 function d(\SplFileObject $file): void { echo $file->getSize() . 'x'; }

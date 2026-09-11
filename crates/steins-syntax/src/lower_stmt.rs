@@ -877,6 +877,11 @@ fn lower_expr_position(expr: &Expression<'_>) -> Vec<Stmt> {
         span: to_span(expr.span()),
         end: expr_end(expr),
         has_terminator: subtree_has_function_exit(&Node::Expression(expr)),
+        // The arm body is an expression PHP evaluates for its value, not a
+        // statement the author wrote (issue #320): `width($v)` as an arm of
+        // `echo match (…)` lowers to a `StmtKind::Call` whose result the `echo`
+        // consumes. Marked here, at the one site that mints these.
+        value_position: true,
         ..st
     });
     out

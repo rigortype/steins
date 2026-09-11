@@ -254,6 +254,152 @@ condition = "$domain not AF_* (:1162) or $type not SOCK_* (:1172)"
 evidence = "ext/sockets/sockets.c:1162,1172"
 gap_vs_steins = true
 
+# ─────────────────────── fold-allowlist ValueError arms (issue #320) ───────────────────────
+# Names the fold allowlist certifies pure GIVEN arguments they accept, each with
+# a value of an accepted type it refuses with a throw. Mined for the discarded-
+# call family (ADR-0096): a name with a throw arm is a validity check, never a
+# dead statement. Evidence is a probe rather than a C line — every arm below was
+# reproduced on PHP 8.5.10 with the literal shown, and `sizeof` is `count`'s
+# alias under a second name.
+
+[[throw]]
+function = "str_repeat"
+throws = "ValueError"
+determinism = "input"
+condition = "$times < 0"
+evidence = "probe PHP 8.5.10: str_repeat('a', -1)"
+gap_vs_steins = false
+
+[[throw]]
+function = "array_fill"
+throws = "ValueError"
+determinism = "input"
+condition = "$count < 0"
+evidence = "probe PHP 8.5.10: array_fill(0, -1, 1)"
+gap_vs_steins = false
+
+[[throw]]
+function = "range"
+throws = "ValueError"
+determinism = "input"
+condition = "$step == 0, or |$step| exceeds the range"
+evidence = "probe PHP 8.5.10: range(1, 10, 0); range(1, 10, 20)"
+gap_vs_steins = false
+
+[[throw]]
+function = "str_pad"
+throws = "ValueError"
+determinism = "input"
+condition = "$pad_string empty, or $pad_type not STR_PAD_*"
+evidence = "probe PHP 8.5.10: str_pad('a', 10, ''); str_pad('a', 5, 'b', 99)"
+gap_vs_steins = false
+
+[[throw]]
+function = "str_split"
+throws = "ValueError"
+determinism = "input"
+condition = "$length < 1"
+evidence = "probe PHP 8.5.10: str_split('a', 0)"
+gap_vs_steins = false
+
+[[throw]]
+function = "explode"
+throws = "ValueError"
+determinism = "input"
+condition = "$separator empty"
+evidence = "probe PHP 8.5.10: explode('', 'a')"
+gap_vs_steins = false
+
+[[throw]]
+function = "str_increment"
+throws = "ValueError"
+determinism = "input"
+condition = "$string empty or not alphanumeric"
+evidence = "probe PHP 8.5.10: str_increment(''); str_increment('a-')"
+gap_vs_steins = false
+
+[[throw]]
+function = "str_decrement"
+throws = "ValueError"
+determinism = "input"
+condition = "$string empty, not alphanumeric, or already at its floor"
+evidence = "probe PHP 8.5.10: str_decrement(''); str_decrement('a')"
+gap_vs_steins = false
+
+[[throw]]
+function = "round"
+throws = "ValueError"
+determinism = "input"
+condition = "$mode not a RoundingMode / PHP_ROUND_* value"
+evidence = "probe PHP 8.5.10: round(1.5, 0, 99)"
+gap_vs_steins = false
+
+[[throw]]
+function = "strpos"
+throws = "ValueError"
+determinism = "input"
+condition = "$offset outside the haystack"
+evidence = "probe PHP 8.5.10: strpos('abc', 'b', 10)"
+gap_vs_steins = false
+
+[[throw]]
+function = "stripos"
+throws = "ValueError"
+determinism = "input"
+condition = "$offset outside the haystack"
+evidence = "probe PHP 8.5.10: stripos('abc', 'b', 10)"
+gap_vs_steins = false
+
+[[throw]]
+function = "strrpos"
+throws = "ValueError"
+determinism = "input"
+condition = "$offset outside the haystack"
+evidence = "probe PHP 8.5.10: strrpos('abc', 'b', 10)"
+gap_vs_steins = false
+
+[[throw]]
+function = "sprintf"
+throws = "ValueError"
+determinism = "input"
+condition = "unknown conversion specifier in $format"
+evidence = "probe PHP 8.5.10: sprintf('%q', 1)"
+gap_vs_steins = false
+
+[[throw]]
+function = "sprintf"
+throws = "ArgumentCountError"
+determinism = "input"
+condition = "$format demands more placeholders than $values supplies"
+evidence = "probe PHP 8.5.10: sprintf('%d')"
+gap_vs_steins = false
+note = "Raised from inside the call, not at its boundary, so it is a row and not an arity fact."
+
+[[throw]]
+function = "version_compare"
+throws = "ValueError"
+determinism = "input"
+condition = "$operator not one of the accepted spellings"
+evidence = "probe PHP 8.5.10: version_compare('1', '2', 'bad')"
+gap_vs_steins = false
+
+[[throw]]
+function = "count"
+throws = "ValueError"
+determinism = "input"
+condition = "$mode not COUNT_NORMAL / COUNT_RECURSIVE"
+evidence = "probe PHP 8.5.10: count([1], 5)"
+gap_vs_steins = false
+note = "`sizeof` is the same handler under a second name and carries the same row."
+
+[[throw]]
+function = "mt_rand"
+throws = "ValueError"
+determinism = "input"
+condition = "$max < $min"
+evidence = "probe PHP 8.5.10: mt_rand(10, 1) — the legacy `rand(10, 1)` swaps instead and does not throw"
+gap_vs_steins = false
+
 # ─────────────────────── SUMMARY of steins coverage gaps ───────────────────────
 # steins-catalog builtin_throws() currently returns Some only for:
 #   intdiv -> [DivisionByZeroError]           (INCOMPLETE: misses ArithmeticError)

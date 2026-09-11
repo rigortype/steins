@@ -119,6 +119,28 @@ pub const RETURN_MISMATCH_ID: &str = "phpdoc.return-mismatch";
 /// every value as `Maybe`.
 pub const PHPDOC_UNKNOWN_VOCABULARY_ID: &str = "phpdoc.unknown-vocabulary";
 
+/// The registry id for the **discarded-call** check (ADR-0096, issue #320, proof
+/// layer): a statement-position call whose result is unused, whose callee is a
+/// catalogued builtin coloured wholly inside the discardable set with no
+/// out-parameter and no throw row, and whose every argument is a literal of
+/// exactly the declared type — the arguments the catalog's "pure given literals"
+/// calibration was made for.
+///
+/// The family PHPStan spells as `CallTo*StatementWithoutSideEffectsRule` over a
+/// curated `hasSideEffects` boolean, decided instead by the label lattice the
+/// effects pass already computes — which is why `rand();` is reportable here and
+/// structurally could not be under the boolean.
+///
+/// `Layer::Proof` and not the mechanics layer the issue first proposed: the claim
+/// is not a style preference about dead code but a proof about the program, made
+/// out of the same proven lane `effect.envelope-exceeded` is made of, and every
+/// leg of it is a *proof* rather than the absence of a counterexample.
+/// `Floor::Default` follows from that — a proof-layer id that fires only when
+/// every premise is established belongs on the surface a bare `steins check`
+/// shows, and the calibration that keeps it there is the predicate's strictness,
+/// not a higher rung.
+pub const STATEMENT_NO_EFFECT_ID: &str = "statement.no-effect";
+
 /// The registry id for the branch-sensitive null-dereference proof (ADR-0031
 /// stage 1): a method call whose receiver variable is **proven `null`** on the
 /// current path (e.g. inside `if ($u === null) { $u->name(); }`) — a guaranteed
@@ -1217,6 +1239,8 @@ pub const ALL_EMITTABLE_IDS: &[&str] = &[
     NEVER_PARAM_REACHABLE_ID,
     // the hyphen reservation's diagnostic (ADR-0091 §6, issue #479).
     PHPDOC_UNKNOWN_VOCABULARY_ID,
+    // the discarded-call family (ADR-0096, issue #320).
+    STATEMENT_NO_EFFECT_ID,
 ];
 
 /// Ids **registered ahead of emission**: they exist in [`DIAGNOSTIC_REGISTRY`]
