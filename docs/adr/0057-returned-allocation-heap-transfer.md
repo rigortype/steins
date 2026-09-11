@@ -1487,3 +1487,151 @@ rather than the intuition.
   nsrt rows. `: object` is not the same question: the heap component is
   the carrier there, and A3's asymmetry says the value domain has no
   object top to degrade into.
+
+## Amendment (2026-09-11, issue #603): A9 — the unrepresentable-but-enforced return hint
+
+**Status: PENDING ratification.** Issue #603, filed by A8.6 above with
+its probe attached, ruled by the owner on 2026-09-11 (option b). A8.6
+deferred the `: array` envelope because the maximal version of it — drop
+the refusal outright, check nothing — was deliberately unsound and
+measured at approximately nothing. This amendment takes the other shape:
+not *less* checking, but the **oracle A2 was missing**.
+
+```php
+function f(int $t): array { return [1, 2]; }
+$x = f(1);            // before: unknown.  After: array{0: 1, 1: 2}
+
+final class Box { private $items;
+    public function all(int $t): array { return $this->items; } }
+$y = (new Box())->all(1);   // before: unknown.  After: array
+```
+
+### A9.1 The three keywords, and why they are not `mixed`
+
+`array`, `object` and `iterable` share one property that no other
+unlowerable hint has: PHP **enforces** them at the return boundary. A
+`: array` body that returns a string raises a `TypeError` on the callee's
+side, so the value never crosses. "This call returned → the result is an
+array" is therefore a **Verified** upper bound, read off the declaration
+with no trust laundering — the same reading ADR-0049 A16 gives a native
+envelope on the declaration side.
+
+That separates them from both neighbours in the refusal list:
+
+- `: mixed` is the TOTAL envelope (A2's exemption, issue #364). Nothing
+  violates it, so its empty oracle is *correct* emptiness and the hint
+  reads as no hint at all.
+- `: void`, `: never` and a DNF union are genuinely unrepresentable
+  *cuts*: an exit can violate them and the oracle cannot say which, so
+  the A2 refusal stands verbatim. `: void` names no value at all, which
+  is ADR-0075's question and not this one.
+
+An enforced top is the third case — a real cut, statable. It is spelled
+`EnforcedTop` (`steins-syntax`), recorded beside `NativeType` and never
+inside it, and carried on `FunctionDecl::ret_top` / `MethodDecl::ret_top`
+and on `RetHintKind::Top`.
+
+### A9.2 Beside `NativeType`, not inside it
+
+Folding the three keywords into `NativeType::members` would have been
+fewer lines and is refused. A `NativeType` member is a type the value
+domain can **decide** about a value — every consumer of the union, on
+both sides of a call, reads it that way. These three only **bound** one,
+and exactly one lane wants the bound: the return lane. Widening the union
+would hand `array` to every parameter-side consumer in one motion, with
+no measurement of any of them, and would silently reopen the gate
+ADR-0049 A16 closes (A9.5).
+
+### A9.3 Where each top lands
+
+| Hint | A2 oracle / arm lane | Value component |
+| --- | --- | --- |
+| `: array` | `ContractTy::ArrayAny { non_empty: false }` | A1's, where the body proves a shape |
+| `: object` | `ContractTy::ObjectAny` | **nothing, ever** |
+| `: iterable` | `ArrayAny \| Class("traversable")` | A1's array half only |
+
+`: object` reaches the contract-arm lane and stops there. The value
+domain holds no object (ADR-0035/0043/0093 §3), so an object-returning
+exit is an `ExitContribution::Heap` — a `Floor` on the value side — and
+`native_value_floor` has no object top to degrade into, which is A3's
+asymmetry stated in A8's open questions. ADR-0093 candidate B, which
+would give the value domain an object, is deferred; until it lands,
+`: object`'s summary value component is `None` by construction and the
+`ObjectAny` arm is the whole answer.
+
+`: iterable` is spelled as PHP defines the keyword — `array|Traversable`,
+two arms — and **not** as `ContractTy::IterableOf`. That variant answers
+`No` for every object, so a one-arm `IterableOf` oracle would convict the
+`Traversable` half of the very keyword it is named after: A2 would drop a
+`return new ArrayIterator(...)` exit as a boundary `TypeError` it is not.
+The two-arm union is PHP's own definition and needs no new vocabulary.
+
+### A9.4 What A2 and A3 do with it
+
+A2 is the whole point: `SummaryCtx::native` is seeded from the enforced
+top where the hint lowered to no `NativeType`, so a `return 'x'` under
+`: array` is dropped as the boundary `TypeError` it is, and the callee's
+own `type.return-mismatch` stays the standing record. The refusal in
+`join_value_component` keeps its shape and loses only these three: the
+arms it exists to require are now there.
+
+A3 is **unchanged and still bites**. `native_value_floor` needs one
+scalar base and an enforced top has none, so a factless exit still floors
+the whole value summary out — exactly as under `: mixed`, and for the
+same reason. This is why the second witness above binds `array` and not a
+shape: the value component declined, and what the caller reads is the
+declared-return arm lane (`return_envelope_arms`). "Where A1 has nothing,
+the envelope alone is the answer" is that division of labour, not a new
+degrade rule.
+
+### A9.5 ADR-0049 A16: the gate moved, the silence did not
+
+A16's last bullet said unrepresentable hints "lower to the same `None` an
+absent hint gives" and asked for a fixture pinning *which* gate a
+`: array`-returning open method hits. After this amendment the **lowering
+gate no longer holds it**, so the pin is consciously updated rather than
+merely kept: `CallTarget::enforced_top` withholds the top from a target
+only `resolve_declaration_target` produced, and A16's silence is now its
+own withholding.
+
+Nothing in A16's covariance argument forbids the top — a child overriding
+`: array` can only narrow it, so `ArrayAny` is as sound there as `: string`
+is. Seeding it is simply #603's stated out-of-scope, and wants its own
+slice with its own fp-gate read. The fixture
+`a_bare_array_return_is_withheld_from_the_declaration_path` records which
+of the two it is.
+
+### A9.6 Only the bare keyword
+
+`enforced_top` recognizes the bare spelling and a parenthesized one, and
+nothing else. `?array` and `array|null` stay exactly as unrepresentable
+as they were: the envelope has a second half `EnforcedTop` cannot spell,
+and inventing a nullable flag for it would be modelling a union the
+value domain would then have to join against. Pinned by
+`a_nullable_array_hint_is_not_an_enforced_top`.
+
+### A9 refusals (each one line, each anchored)
+
+- **A `TypeMember::ArrayTop` inside `NativeType`** — a union member is a
+  decidable type, these are bounds, and one lane wants them (A9.2).
+- **`ContractTy::IterableOf` for `: iterable`** — it answers `No` for
+  every object, convicting the `Traversable` half (A9.3).
+- **A value-domain `object` top for `: object`** — ADR-0093 candidate B,
+  deferred; the arm lane carries it meanwhile (A9.3).
+- **A `plain_array` value floor so a factless exit degrades to `array`** —
+  A3's floor is single-base by definition and the arm lane already is
+  that floor; a second one would only hide the first (A9.4).
+- **Seeding the top on the declaration-only dispatch path** — sound, but
+  ADR-0049 A16's scope and its own measurement (A9.5).
+- **`?array` / `array|null`** — a two-half envelope `EnforcedTop` cannot
+  spell (A9.6).
+- **Lifting the refusal for `: void`, `: never` or a DNF union** — real
+  cuts with no statable oracle; A2's refusal is verbatim (A9.1).
+
+### A9 open questions
+
+- Whether the declaration-only path should seed the top after all, which
+  is a measurement question A9.5 leaves open rather than a soundness one.
+- Whether `: object` is worth revisiting once ADR-0093 candidate B gives
+  the value domain an object, at which point the value component would
+  have somewhere to land.

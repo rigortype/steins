@@ -572,23 +572,40 @@ fn phpdoc_refines_within_the_mixed_envelope() {
 }
 
 #[test]
-fn other_unlowerable_hints_still_refuse_the_summary() {
-    // The rest of the refusal list is untouched: `: array` and `: object` lower to no
-    // `NativeType` and — unlike `mixed` — really can be violated, so the A2 oracle's
-    // silence still means "refuse". The dump stays honestly unknown, and no finding
-    // is manufactured out of an exit that would never reach the caller.
-    for hint in ["array", "object"] {
-        let src = format!(
-            "<?php\n\
-             declare(strict_types=1);\n\
-             function f(int $x): {hint} {{ return $x; }}\n\
-             function takesString(string $s): void {{}}\n\
-             takesString(f(1));\n\
-             \\PHPStan\\dumpType(f(1));\n"
-        );
-        assert_eq!(one_type(&src), "dumped type: unknown", ": {hint} refuses the summary");
-        assert_eq!(count(&src, "type.argument-mismatch"), 0, ": {hint} premises nothing");
-    }
+fn enforced_top_hints_bound_the_summary_instead_of_refusing_it() {
+    // `: array` and `: object` used to sit beside `: void` in the refusal list: they
+    // lower to no `NativeType` and — unlike `mixed` — really can be violated, so the A2
+    // oracle had nothing to drop with. ADR-0057 A9 (issue #603) gives it the oracle:
+    // PHP enforces each keyword at the return boundary, so the top is a Verified upper
+    // bound and `return $x` (an int) is dropped as the boundary `TypeError` it is.
+    //
+    // No exit survives, so the VALUE component still declines and what the caller reads
+    // is the declared-return arm lane — the top itself. The dropped exit premises no
+    // definite finding, exactly as before.
+    //
+    // `: array` only. `: object` seeds its arm too, but `spell_arms` has no `object`
+    // spelling (ADR-0093 §3's own refusal), so its dump is still `unknown` — pinned
+    // beside its siblings in `enforced_top_return.rs`.
+    let src = "<?php\n\
+         declare(strict_types=1);\n\
+         function f(int $x): array { return $x; }\n\
+         function takesString(string $s): void {}\n\
+         takesString(f(1));\n\
+         \\PHPStan\\dumpType(f(1));\n";
+    assert_eq!(one_type(src), "dumped type: array");
+    assert_eq!(count(src, "type.argument-mismatch"), 0, "the dropped exit premises nothing");
+}
+
+#[test]
+fn an_unlowerable_non_top_hint_still_refuses_the_summary() {
+    // The refusal keeps everything that is a real cut with no statable oracle.
+    // `: callable` lowers to no `NativeType` and is no enforced top, so
+    // `join_value_component` refuses exactly as it did before A9.
+    let src = "<?php\n\
+        declare(strict_types=1);\n\
+        function f(int $x): callable { return $x; }\n\
+        \\PHPStan\\dumpType(f(1));\n";
+    assert_eq!(one_type(src), "dumped type: unknown");
 }
 
 #[test]
