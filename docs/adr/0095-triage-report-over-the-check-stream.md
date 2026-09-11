@@ -42,8 +42,13 @@ report. That is the whole dependency:
    `layer`, `level`, `path`, and the run-level `profile`,
    `vendor_suppressed`, `suppressed`, `baselined` — and nothing else. It
    names no analyzer type, imports nothing from `steins-infer`, and asks
-   the analyzer no question. A field the stream lacks is a fact triage
-   does not have (§4), not a reason to reach past the schema.
+   the analyzer no question. The one place the registry is named is a
+   unit test that pins the three id spellings triage writes by hand
+   (`offset.missing`, `offset.maybe-missing`, `strict`) to their
+   registry constants, so a rename fails a test instead of quietly
+   emptying a bucket; the command itself never reads it. A field the
+   stream lacks is a fact triage does not have (§4), not a reason to
+   reach past the schema.
 2. **Given paths, it runs `check` itself — once, as a child process.**
    `steins triage <paths>` starts this binary's own `check --format json`
    over the same paths with the same flags (`--profile`, `--no-php`,
