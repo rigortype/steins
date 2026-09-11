@@ -484,10 +484,21 @@ fn an_object_binding_always_invalidates() {
                function f(): void { $o = new C(); $o->p = 5; \\PHPStan\\dumpType($o->p); }\n";
     assert_eq!(one_type(src), "dumped type: 5", "the baseline the next case moves");
 
+    // The written fact `5` does not survive the call — that is this test's claim.
+    // What is left is the property's DECLARED type (issue #620): the sweep cleared
+    // the heap, and the floor below it is what the declaration says the slot may
+    // ever hold, which no call can invalidate.
     let touched = "<?php\nclass C { public int $p = 1; }\n\
                    function f(): void { $o = new C(); $o->p = 5; in_array($o, [1]);\n\
                    \\PHPStan\\dumpType($o->p); }\n";
-    assert_eq!(one_type(touched), "dumped type: unknown");
+    assert_eq!(one_type(touched), "dumped type: int");
+
+    // The same call over an UNDECLARED property, where there is no floor to fall
+    // to — the sweep's own answer, unchanged.
+    let undeclared = "<?php\nclass C { public $p = 1; }\n\
+                      function f(): void { $o = new C(); $o->p = 5; in_array($o, [1]);\n\
+                      \\PHPStan\\dumpType($o->p); }\n";
+    assert_eq!(one_type(undeclared), "dumped type: unknown");
 }
 
 #[test]
@@ -657,7 +668,9 @@ fn the_site_list_is_complete_or_absent_per_name() {
 /// must not keep `$a->p` across it: in guard position the shape gate refuses the
 /// offset read over an object-bound base, in statement position the kept handle
 /// takes the ADR-0036 sweep. Either way no `type.argument-mismatch` is
-/// manufactured on `want($a->p)`, and the property reads `unknown`.
+/// manufactured on `want($a->p)`, and the property loses the `1` it was written —
+/// falling to its declared `int|string` (issue #620), which is a floor `offsetGet`
+/// cannot violate either, since PHP type-checks its write to the slot too.
 #[test]
 fn an_offset_read_on_an_array_access_receiver_is_not_a_by_value_shape() {
     let src = "<?php
@@ -679,7 +692,10 @@ function stmt(): void { $a = new AA(); $a->p = 1; strstr($a['k'], 'x'); \\PHPSta
         !ds.iter().any(|d| d.id == "type.argument-mismatch"),
         "offsetGet rewrote the property: {ds:?}"
     );
-    assert_eq!(types(src), vec!["dumped type: unknown".to_owned(), "dumped type: unknown".to_owned()]);
+    assert_eq!(
+        types(src),
+        vec!["dumped type: unknown".to_owned(), "dumped type: int|string".to_owned()]
+    );
 }
 
 /// The top-level frame is the one whose locals are globals, so a builtin that runs

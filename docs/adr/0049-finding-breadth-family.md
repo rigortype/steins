@@ -976,3 +976,103 @@ recorded as deferred rather than answered wrongly.
   argument premise (`type.maybe-argument-mismatch` for a native envelope at
   its native stratum, `phpdoc.maybe-*` for an `@return`-derived arm), which
   A16's strata license — a definite `type.*` never premises on it.
+
+## Amendment (2026-09-11): a declared-property lane for a fact-less read (issue #620)
+
+Status: PENDING ratification (post-hoc-ratification mode, ADR-0077
+precedent). Source: the owner's ruling of 2026-09-11 on issue #620. This
+amendment adds one read lane and rules on its carrier and its floor
+position; A16–A19 stand unchanged, and no consumer that walks a body,
+rewrites a call site or applies an assert tag is touched.
+
+### A20. A property read with no in-trace fact answers its declaration
+
+ADR-0036 keeps declaration-derived property values **out of the heap**,
+and that ruling is right: a property's value inside an arbitrary method
+is whatever some other method last stored, so seeding the declared
+default would produce null-property false positives past a `!== null`
+guard. It is a ruling about the *value* lane. It says nothing against
+the property's declared **type**, and the two are not the same claim —
+PHP enforces a typed property's type on every write to the slot,
+including a write through a reference and including the value a `get`
+hook returns, so the hint is a sound upper bound on whatever is read out
+without asserting that anything in particular was written.
+
+The ruling is that a depth-1 property read `$var->prop` for which the
+trace holds no `(object, property)` fact answers from the declaration:
+
+- the **native** hint rides at its native stratum. There is no
+  covariance question to weigh as there was for A16's returns: PHP
+  requires a redeclared typed property to keep the parent's type
+  identically, so the declaration found on the chain is the type under
+  every descendant, not merely an upper bound on it;
+- the **`@var`** merges at `Asserted` (ADR-0069 §2's grade).
+  `refine_contract_arms` already merges the two halves and marks the
+  docblock side; the merged arm renders with the `(asserted)` marker and
+  never premises a proof-layer finding;
+- **unrepresentable** hints lower to nothing, as for returns: `array`,
+  `iterable`, `mixed`, `object`, DNF. A property so hinted, with no
+  `@var`, answers exactly what an unhinted one does — silence;
+- **static properties answer nothing.** ADR-0052 N5 defers them as
+  owner-deferred and this lane does not reopen that; the chain walk skips
+  a `static` declaration exactly as `Cx::class_props` does.
+
+### A21. The carrier is A17's lane, and the heap outranks it
+
+The receiver is read the way A17 reads it — `declared_receiver_class`,
+the same function the declaration-only dispatch path calls — so a
+property read and a method call on the same `$o` can never disagree
+about what `$o` is declared to be. An allocation, an `instanceof` fact,
+a narrowed one-class contract lane and a declared heap object all
+qualify; a surviving lane of two or more class arms declines for A17's
+reason. The receiver's own stratum demotes the whole answer (A13): a
+native `int` property read through an `@param C $o` receiver is
+`Asserted`, because the premise that `$o` is a `C` at all is.
+
+Property resolution through the chain follows #673's shape one rung
+over: nearest declaration first, so a project child redeclaring the
+property wins over its ancestor; an ancestor's declaration answers for a
+child that declares nothing; and a chain that leaves the project — a
+builtin ancestor, which has no `ClassDecl` — answers **nothing**, which
+is issue #715's slice and not this one's.
+
+The lane is a **floor**. Every reader consults its in-trace
+`(object, property)` fact first: a write the trace saw states what the
+slot holds now, the declaration only what it may ever hold. The same
+ordering is what makes the interesting fallback case sound rather than
+lossy — a write whose rvalue the value lane cannot spell, and a write
+swept away when the object escaped, both recorded nothing to beat the
+floor, and the declaration is still true of them because PHP type-checked
+those very writes against it.
+
+A **hooked** property (PHP 8.4 `get`/`set`) answers nothing. The crate's
+standing rule for the hooked surface is that it binds no fact ever (FP
+class 16), and the read side keeps that rule rather than reasoning
+separately about which half of a hook pair PHP type-checks.
+
+One route past the enforcement argument is known and deliberately not
+gated: `unset($o->typed)` removes a typed property's slot, so a later
+read on a class declaring `__get` reaches the magic method, which may
+return anything. The lane accepts that exposure at this grade because
+what it feeds is the introspection surface — the same answer PHPStan's
+own oracle gives at the same site — and no proof-layer finding premises
+on it. A reader that ever wants to convict on a declared property type
+must re-ask the question with `magic_obstacles_in_reach` in hand, the
+way the absence family does.
+
+### What the amendment does not change
+
+- The heap still holds no declaration-derived property fact. Nothing here
+  writes to it, and `store.prop_fact` answers exactly what it answered
+  before.
+- `descend`, `promote` and `asserts` are untouched, as under A16: a
+  declared property type is a membership claim about a slot, never a
+  proven value, so it does not flow into a callee's parameter, does not
+  enter the reverse call-site sweep as an observed argument, and is
+  neither fed by nor refined by an assert tag.
+- **Assignment propagation is deliberately out.** `$y = $c->x` still
+  binds `$y` nothing: seeding the assigned variable's contract-arm lane
+  from a property's declaration would put the lane in front of the
+  absence family and the argument-premise surface, which is a wider
+  question than "what does this read answer" and wants its own
+  measurement.

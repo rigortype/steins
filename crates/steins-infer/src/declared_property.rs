@@ -116,6 +116,16 @@ fn find_declared_property<'a>(
 ///
 /// **The heap wins.** This is a floor: every caller consults its in-trace
 /// `(object, property)` fact first and only reaches here when there is none.
+///
+/// One route past the enforcement argument is known and deliberately not gated
+/// (ADR-0049 A21): `unset($o->typed)` removes a typed property's slot, so a later
+/// read on a class declaring `__get` reaches the magic method, which may return
+/// anything. What this lane feeds is the introspection surface, where it answers
+/// what the upstream oracle answers at the same site, and no proof-layer finding
+/// premises on it. A reader that ever wants to convict on a declared property type
+/// must re-ask the question with [`magic_obstacles_in_reach`] in hand.
+///
+/// [`magic_obstacles_in_reach`]: crate::absence::magic_obstacles_in_reach
 pub(crate) fn declared_property_arms(
     cx: &Cx,
     store: &Store,
