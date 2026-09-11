@@ -89,7 +89,7 @@ Runtime
 Config + active surface
   steins.toml: not found (built-in defaults govern)
   active profile: `default` (from built-in default)
-  surface: layers [mechanics, proof], 47 checked id(s)
+  surface: layers [mechanics, proof], 48 checked id(s)
 
 Layout
   1 manifest(s) govern this tree:
@@ -146,7 +146,7 @@ expected `.`, `]`
 )
   (configuration contradiction — doctor exits 1, ADR-0054 §10)
   active profile: `default` (from built-in default)
-  surface: layers [mechanics, proof], 47 checked id(s)
+  surface: layers [mechanics, proof], 48 checked id(s)
 
 Layout
   1 manifest(s) govern this tree:

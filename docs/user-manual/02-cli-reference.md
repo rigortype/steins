@@ -38,7 +38,7 @@ whole surface to stderr and exits `2`:
 $ steins
 usage: steins check [--format text|json|github|sarif] [--profile <name>] [--no-php] [--no-cache] [--no-tolerated-effects] [--vendor-diagnostics] [--fix] [--set-baseline] [--baseline <path>] [--ignore-baseline] <paths...>
        steins annotate [--no-php] [--format text|json] <file.php>
-       steins transform <phpdoc-to-native|phpdoc-honesty|throws-envelope|effects-envelope|loop-to-array-map> [--apply] [--format text|json] <paths...>
+       steins transform <phpdoc-to-native|phpdoc-honesty|throws-envelope|effects-envelope|loop-to-array-map> [--apply] [--asserted-subjects] [--format text|json] <paths...>
        steins effect-diff [--baseline <path>] [--set-baseline] [--format text|json] <paths...>
        steins doctor [--no-php] [--baseline <path>] [--format text|json] [path]
        steins mcp
@@ -576,7 +576,8 @@ default.
 
 ```
 steins transform <phpdoc-to-native|phpdoc-honesty|throws-envelope|effects-envelope|loop-to-array-map>
-                 [--apply] [--config <path>] [--format text|json] <paths...>
+                 [--apply] [--asserted-subjects] [--config <path>]
+                 [--format text|json] <paths...>
 ```
 
 Five transforms:
@@ -612,6 +613,7 @@ Five transforms:
 | Flag | Default | Effect |
 | --- | --- | --- |
 | `--apply` | off | Write the edits, after the post-check passes. |
+| `--asserted-subjects` | off | `loop-to-array-map` only: admit a subject whose list-ness is *declared* (`@param list<T>`, an inline `@var list<T>` cast) rather than proven; the plan labels each such site. |
 | `--config <path>` | `./steins.toml` when present | Read `[transform.vouch]` and `[transform.partitions]` from here. |
 | `--format text\|json` | `text` | `text` prints unified diffs; `json` carries the whole plan. |
 
@@ -951,7 +953,7 @@ Runtime
 Config + active surface
   steins.toml: not found (built-in defaults govern)
   active profile: `default` (from built-in default)
-  surface: layers [mechanics, proof], 47 checked id(s)
+  surface: layers [mechanics, proof], 48 checked id(s)
 
 Layout
   1 manifest(s) govern this tree:

@@ -178,21 +178,21 @@ its `Config + active surface` section:
 ```
 $ steins doctor --no-php .
   active profile: `default` (from built-in default)
-  surface: layers [mechanics, proof], 47 checked id(s)
+  surface: layers [mechanics, proof], 48 checked id(s)
 ```
 
 | Profile | Base | What it adds | Checked ids |
 | --- | --- | --- | --- |
-| `default` | — | — | 47 |
-| `throws-direct` | `default` | `throw.undeclared`, direct escapes only | 48 |
-| `contracts` | `default` | the contract layer, except the strict and pedantic rungs | 65 |
-| `strict` | `contracts` | the some-paths-only claims — `offset.maybe-missing`, `variable.maybe-undefined`, `property.maybe-undefined`, `type.return-maybe-missing`, `type.maybe-argument-mismatch`, `phpdoc.maybe-argument-mismatch`, `type.maybe-return-mismatch`, `phpdoc.maybe-return-mismatch` | 73 |
-| `pedantic` | `contracts` | the house-style asks — `untyped.class-constant` | 66 |
+| `default` | — | — | 48 |
+| `throws-direct` | `default` | `throw.undeclared`, direct escapes only | 49 |
+| `contracts` | `default` | the contract layer, except the strict and pedantic rungs | 66 |
+| `strict` | `contracts` | the some-paths-only claims — `offset.maybe-missing`, `variable.maybe-undefined`, `property.maybe-undefined`, `type.return-maybe-missing`, `type.maybe-argument-mismatch`, `phpdoc.maybe-argument-mismatch`, `type.maybe-return-mismatch`, `phpdoc.maybe-return-mismatch` | 74 |
+| `pedantic` | `contracts` | the house-style asks — `untyped.class-constant` | 67 |
 
 Only the `default` / `contracts` / `strict` rows nest. `throws-direct` and
 `pedantic` branch off their base, so neither contains nor is contained by
-`strict` — 66 and 73 are not steps on one scale, they are two different
-supersets of the same 65.
+`strict` — 67 and 74 are not steps on one scale, they are two different
+supersets of the same 66.
 
 `boundary` is a reserved name (ADR-0050 §5, deferred to ADR-0042). Selecting
 it or defining `[profile.boundary]` is a config error until its design lands.
@@ -250,8 +250,8 @@ file it found and what state it is in:
 $ steins doctor --no-php .
 Baseline
   file: .steins-baseline.jsonl (1 entry)
-  capture surface: profile `throws-direct`, 48 id(s)
-  active surface: profile `default`, 47 id(s)
+  capture surface: profile `throws-direct`, 49 id(s)
+  active surface: profile `default`, 48 id(s)
   1 dormant entry (id outside the active surface — kept, not stale)
 ```
 

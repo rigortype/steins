@@ -69,9 +69,9 @@ usage: steins check [--format text|json|github|sarif] [--profile <name>] [--no-p
        steins annotate [--no-php] [--format text|json] <file.php>
        steins transform <phpdoc-to-native|phpdoc-honesty|throws-envelope|effects-envelope|loop-to-array-map> [--apply] [--asserted-subjects] [--format text|json] <paths...>
        steins effect-diff [--baseline <path>] [--set-baseline] [--format text|json] <paths...>
-       steins triage [--format text|json] [--input <file>|-] [--top <n>] [--profile <name>] [--no-php] [--no-cache] [--no-tolerated-effects] [--vendor-diagnostics] [--ignore-baseline] [--baseline <path>] [<paths...>]
        steins doctor [--no-php] [--baseline <path>] [--format text|json] [path]
        steins mcp
+       steins triage [--format text|json] [--input <file>|-] [--top <n>] [--profile <name>] [--no-php] [--no-cache] [--no-tolerated-effects] [--vendor-diagnostics] [--ignore-baseline] [--baseline <path>] [<paths...>]
        steins version | -v | --version
        steins license
 ```

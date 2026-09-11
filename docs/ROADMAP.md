@@ -12,7 +12,7 @@ position queries reachable — but they release after the checker is
 genuinely usable. The specifically protected LSP capability:
 type-directed member completion at a cursor position.
 
-## Current state (verified against the tree, 2026-08-26)
+## Current state (verified against the tree, 2026-09-12)
 
 Engine:
 
@@ -34,7 +34,24 @@ Engine:
   (ADR-0092 §4, over ADR-0066's replay seam). salsa still memoizes `parse`
   within a run; the check pass still runs outside the query graph
   (ADR-0028), which is now a placement rather than a limitation.
-- Diagnostic surface, through v0.1.6. Pre-existing: `type.argument-mismatch`,
+- **Structured loops (ADR-0027, the 2026-09 amendments).** `while`,
+  `for`, `foreach` and `do`/`while` bodies are walked as sub-traces
+  entered from an iteration-count-agnostic env (writes forgotten, reads
+  kept, the header's narrowing applied — withheld for `do`/`while`);
+  `foreach` binds its targets from the subject's element type; the
+  statement after a break-free loop knows the header is false. Bodies
+  contribute findings, not facts: a loop's exit env is still discarded.
+  `try` is the one construct still without a body.
+- Type aliases (#472, #665–#670): a class-like's `@phpstan-type` /
+  `@psalm-type` declarations and `@phpstan-import-type` resolve where
+  envelopes are built; the alias wins over a same-named class as
+  upstream orders it. Platform constants (ADR-0094): a generated table
+  answers `PHP_INT_MAX`, `PHP_EOL` and their kin as the union of what each
+  can be, with an opt-in `[runtime] os` pin; a same-file `const`/`define`
+  binds its literal. Mined tables (ADR-0069/0070/0094): builtin
+  `Class::method` declared returns, by-value argument certification off
+  arginfo, parameter facts as a union across platforms.
+- Diagnostic surface, through v0.1.7. Pre-existing: `type.argument-mismatch`,
   `type.return-mismatch`, `type.property-mismatch`, `call.on-null`,
   `readonly.reassigned`, `phpdoc.param-mismatch`,
   `phpdoc.return-mismatch`, `phpdoc.property-mismatch`,
@@ -83,6 +100,20 @@ Engine:
   judges a never-declared parameter at all.
   `call.too-many-arguments` is now the only id registered ahead of
   emission, still waiting on the reflect slice.
+- v0.1.7 added four ids. `statement.no-effect` (#320, ADR-0096): a call
+  written as a statement, to a catalogued builtin over literal
+  arguments, whose proven effects are all read-shaped and whose throw
+  set is empty — proof layer, `default` floor, the one id that moved the
+  default count from 47 to 48. `type.maybe-return-mismatch` and
+  `phpdoc.maybe-return-mismatch` (#537, ADR-0081 amendment B): the
+  possibly grade on the return side, `strict` floor, `return $variable;`
+  only. `phpdoc.unknown-vocabulary` (#479, ADR-0091 §6): a hyphenated
+  phpdoc type name that is not vocabulary, at the use site and — since
+  #472 — at a class-like's alias declaration; contract layer,
+  `contracts` floor. Measured on the built binary: 48 ids at `default`,
+  49 at `throws-direct`, 66 at `contracts`, 74 at `strict`, 67 at
+  `pedantic`. `call.too-many-arguments` remains the only id registered
+  ahead of emission.
 
 Verification apparatus (ADR-0013):
 
@@ -126,9 +157,12 @@ CLI (ADR-0020, partially landed):
   gated on zero-new-diagnostics; `--asserted-subjects` opt-in; vouch
   valve + partition regions read from `steins.toml`), `effect-diff`,
   `doctor` (ADR-0054 C3 minimal scope, plus `--format json` and the
-  Catalog/Registry/SAPI posture sections, ADR-0054 C4 partial), and
-  `mcp` (stdio MCP server, four tools). Inline `@steins-ignore` with
-  anti-rot.
+  Catalog/Registry/SAPI posture sections, ADR-0054 C4 partial),
+  `mcp` (stdio MCP server, four tools), and `triage` (ADR-0095, #50:
+  totals by level and layer, per-id counts, per-file hotspots, the
+  guard-status buckets and the per-project strictness judgment over a
+  `check --format json` stream, from `--input` or a run of its own).
+  Inline `@steins-ignore` with anti-rot.
 - NOT landed (declared in ADR-0020/0023, absent from the binary):
   `lsp`, `doctor`'s remaining ADR-0054 C4 audits (the dump-site count
   and `contract_touches_class`'s project-wide count), `[paths.sets]` /
@@ -165,11 +199,13 @@ names its milestone.
    established) and corpus-triaged before its id shipped. See the
    diagnostic surface above for the full list. The rest of M1's exit
    criteria are unaffected by this and still bind. → M1
-2. **Narrowing and assertions.** Real code is guard-heavy. The deferred
-   list — `@phpstan-assert-if-true/-if-false`, `assert()`,
-   short-circuit refinement, loops beyond write-sets, static props,
-   property chains — costs true positives (never FPs: unknowns widen to
-   silence), which costs adoption credibility. → M1
+2. **Narrowing and assertions.** Real code is guard-heavy. Loop bodies
+   are walked now (ADR-0027's 2026-09 amendments) and the logical,
+   cast, concatenation and `??` families answer in value position
+   (ADR-0052's 2026-09 notes); what is still deferred — loop-carried
+   facts out of a loop's exit, static props, property chains — costs
+   true positives (never FPs: unknowns widen to silence), which costs
+   adoption credibility. → M1
 3. **Generics carry, callable signatures, template scope transfer**
    (ADR-0030 queue; ADR-0032; issues #1–4, FP #5). Collections and
    callbacks are where application code lives. → M1
@@ -500,10 +536,13 @@ it" is not a reason.
 These are decisions the roadmap *waits on*; nothing here pre-decides
 them.
 
-- **G1 — `throw.undeclared` default posture.** ON today and printed in
-  default runs; the monorepo carries ~44k such findings. Options:
-  keep-on, demote to a policy profile, split (on for
-  envelope-carrying code only). Blocks the M2 exit.
+- **G1 — `throw.undeclared` default posture.** Registered on the
+  contract layer today, so a default run does not print it (ADR-0050);
+  it fires under `throws-direct` (direct escapes only), `contracts` and
+  the profiles built on them. The monorepo carries ~44k such findings.
+  Whether that demotion is the final answer, or whether a split (on for
+  envelope-carrying code only) follows, is the ruling this gate still
+  waits on. Blocks the M2 exit.
 - **G2 — public repo creation** (`rigortype/steins-attributes`, and
   the core repo's visibility; ADR-0025). Blocks M3.
 - **G3 — core relicense — RESOLVED (2026-07-25): Apache-2.0.** Settled
@@ -520,5 +559,6 @@ them.
   first anyway: ADR-0092 landed as one twenty-two-PR series and most of
   the milestone is done. The reasoning behind the recommendation was
   not wrong and still applies to what is left — M4 is now the larger
-  open milestone, and the remaining M5 items (#490, #491, #525) are
-  bounded.
+  open milestone; the M5 items that were bounded when this was written
+  (#490, #491, #525, #529) have all landed, and the one M5 criterion
+  still open is the ~30k-file warm target.
