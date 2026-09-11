@@ -1060,7 +1060,11 @@ impl<E: FoldEngine> EngineFolder<E> {
         if !fold_admitted_at_width(width, name, &fargs) {
             return None;
         }
-        if !fold_admitted_by_shape(name, &fargs) {
+        // The shape gate (issue #382), asked before the runner: the allowlist
+        // gates the CALLEE, and a callable argument is a second callee the seam
+        // would hand to a real PHP process verbatim. The refusal carries the
+        // carrying position; a fold decline is a widen either way.
+        if fold_shape_refusal(name, &fargs).is_some() {
             return None;
         }
         if !fold_within_allocation_budget(name, &fargs) {
@@ -1187,8 +1191,45 @@ fn fold_within_allocation_budget(name: &str, args: &[FoldArg]) -> bool {
     })
 }
 
-/// The **shape gate** (issue #382): whether this call's argument list keeps every
-/// callable parameter empty.
+/// Why the shape gate refused a fold (issue #382) — the decline reason, carried
+/// as data so it names a position rather than a sentence.
+///
+/// A fold decline is spelled `None` everywhere else, which is the right spelling
+/// for a widen and the wrong one for an audit: "the seam declined" and "the seam
+/// declined because parameter 1 of `array_filter` is a callee the engine would
+/// run" are the same value. This type is the second half, and the shape gate
+/// this module consults before dispatch is what produces it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FoldShapeRefusal {
+    /// The callee has **no mined `param_facts` row**, so no shape gate can see
+    /// where its callees would arrive. Declining is the only honest answer: the
+    /// catalog asserts every foldable name is mined, so this costs nothing
+    /// today and means an admission that skips the mining step declines rather
+    /// than walking past a gate that cannot see it.
+    Unmined,
+    /// An argument reached a position that carries a userland callee.
+    Carrier(steins_catalog::CallbackCarrier),
+}
+
+impl FoldShapeRefusal {
+    /// The refusal in words, naming the carrying position.
+    #[must_use]
+    pub fn reason(self, name: &str) -> String {
+        match self {
+            Self::Unmined => {
+                format!("{name} has no mined parameter row, so no callee position is visible")
+            }
+            Self::Carrier(c) => c.describe(name),
+        }
+    }
+}
+
+/// The **shape gate** (issue #382): whether this call's argument list leaves
+/// every callee-carrying position empty, and which position refused it.
+///
+/// Consulted before the runner is asked, and **independent of the allowlist** —
+/// [`steins_catalog::foldable`] gates the callee, and this gates the argument
+/// list, so a name admitted to the allowlist tomorrow is gated today.
 ///
 /// # Why the allowlist is not enough
 ///
@@ -1205,98 +1246,65 @@ fn fold_within_allocation_budget(name: &str, args: &[FoldArg]) -> bool {
 ///   domain. `system` and `unlink` are the same call.
 ///
 /// Nothing about `array_filter` is impure; the *argument* is the problem. So the
-/// rule is about the argument list, not the name: a callable position must be
-/// **absent** (the call does not reach it) or a **literal `null`** (PHP's own
-/// "no callback" spelling, which `array_filter` reads as "drop the falsy
-/// elements"). Anything else declines, including a literal string — a string is
-/// exactly what a callable argument looks like on this wire.
+/// rule is about the argument list, not the name.
 ///
 /// # Where the positions come from
 ///
-/// `param_facts` — the engine's own arginfo (ADR-0077's 2026-08-16 amendment),
-/// not `invocation_shape`, which is a curated table with one position per row and
-/// cannot express `session_set_save_handler`'s seven. **A name with no mined row
-/// does not fold at all**: the catalog asserts every foldable name is mined, so
-/// this costs nothing today and means a future admission that skips the mining
-/// step declines rather than folding past a gate that cannot see it.
+/// [`steins_catalog::callback_carriers`] — the **one** carrier rule, which the
+/// by-value lane (ADR-0070 §2.3) reads for its own hazard. Its five routes are
+/// argued there; what this function owns is what "empty" means at each of them,
+/// since that is the only part a *call site* can answer:
 ///
-/// # The tail nothing declares
+/// | route | empty is |
+/// | --- | --- |
+/// | declared `callable`, `invocation_shape`, deferred `mixed` | absent, or a literal `null` |
+/// | untyped variadic tail | absent — the call does not reach the tail |
+/// | array of callables | absent, a literal `null`, or an EMPTY array |
 ///
-/// A callable can also arrive where the engine declares no type at all. The
-/// `array_udiff`/`array_uintersect` family takes its comparator at a variadic
-/// `mixed` tail: `param_facts`' `callable` column is blind to it because nothing
-/// declares it callable, and `invocation_shape` cannot name it because that
-/// table has one fixed index per row.
+/// A literal `null` is PHP's own "no callback" spelling — `array_filter($a,
+/// null)` drops the falsy elements — and a literal string is exactly what a
+/// callable argument looks like on this wire, so it declines. `ob_start()` with
+/// no arguments carries nothing and `ob_start("var_dump")` carries a callee,
+/// and the gate tells them apart without knowing anything about either name.
 ///
-/// So the second half of this gate is about the **position**, not the type: an
-/// argument reaching an untyped variadic tail is refused unless the catalog
-/// argues that tail carries data ([`steins_catalog::variadic_tail_is_data`] —
-/// `sprintf` and its siblings, whose tail is rendered by the format string).
-/// Thirty-three builtins declare such a tail and four are argued, so admitting
-/// one of the other twenty-nine cannot quietly reopen the hole: the seam refuses
-/// the call that would execute the comparator whether or not anyone noticed.
+/// The empty array is the same rule one level down: measured with the name
+/// force-admitted, `preg_replace_callback_array(["/a/" => "strtoupper"], "aaa")`
+/// does not fold while `preg_replace_callback_array([], "aaa")` answers `'aaa'`.
 ///
-/// # The array whose values are callables
-///
-/// `preg_replace_callback_array` takes `[pattern => callback, …]`, which arginfo
-/// describes as `array` and stops — "array of callables" is not a type PHP
-/// declares, so no rule about types or positions can see into it. That one is
-/// **curated** ([`steins_catalog::callables_in_array_param`]), and the curation
-/// is the claim: the engine reaches into that array and calls what it finds.
-///
-/// The refusal is about the hazard rather than the name, like the other two: an
-/// EMPTY array at that position carries no callee and folds. Measured with the
-/// name force-admitted, `preg_replace_callback_array(["/a/" => "strtoupper"],
-/// "aaa")` does not fold while `preg_replace_callback_array([], "aaa")` answers
-/// `'aaa'`.
-///
-/// With that, all three shapes a callback can arrive in are refused: a declared
-/// `callable` parameter, an untyped variadic tail, and an array of callables.
-/// Two are mechanical and one is a list — and the list is one row, because
-/// nothing in a signature distinguishes `[$k => $callback]` from `[$k => $v]`.
-fn fold_admitted_by_shape(name: &str, args: &[FoldArg]) -> bool {
-    let Some(facts) = steins_catalog::param_facts(name) else {
-        return false;
-    };
-    let declared_callables_are_empty = facts
-        .callable
-        .iter()
-        .all(|&p| matches!(args.get(p), None | Some(FoldArg::Null)));
-    if !declared_callables_are_empty {
-        return false;
+/// **A name with no mined row does not fold at all** ([`FoldShapeRefusal::Unmined`]),
+/// whatever the carrier rule says about it — the curated routes can name a
+/// position without the arginfo, and a gate that cannot see the whole parameter
+/// list should not be certifying one.
+fn fold_shape_refusal(name: &str, args: &[FoldArg]) -> Option<FoldShapeRefusal> {
+    use steins_catalog::CarrierShape;
+
+    if steins_catalog::param_facts(name).is_none() {
+        return Some(FoldShapeRefusal::Unmined);
     }
-    // …and the tail nothing declares. 33 builtins take a `mixed ...$rest`, and
-    // the `array_udiff`/`array_uintersect` family puts its COMPARATOR there:
-    // a callable the engine invokes, which no declared type marks and which
-    // `invocation_shape`'s single fixed index cannot name. It is the one
-    // callback shape neither table can express, so the rule here is about the
-    // POSITION rather than the type — an argument reaching an untyped variadic
-    // tail is refused unless the catalog argues that tail carries data
-    // (`sprintf`'s is rendered by its format string).
-    let tail_is_safe = facts.variadic.iter().all(|&p| {
-        let untyped = facts.params.get(p).is_some_and(|t| *t == "mixed");
-        !untyped
-            || args.len() <= p
-            || steins_catalog::variadic_tail_is_data(name)
-    });
-    if !tail_is_safe {
-        return false;
-    }
-    // …and the array whose VALUES are callables. `preg_replace_callback_array`
-    // takes `[pattern => callback, …]`, which arginfo describes as `array` and
-    // no rule about types or positions can see into. The catalog curates the
-    // position (`callables_in_array_param`); the seam refuses to fold a call
-    // that puts anything there, since every entry is a callee.
-    match steins_catalog::callables_in_array_param(name) {
-        None => true,
-        Some(p) => match args.get(p) {
-            None | Some(FoldArg::Null) => true,
-            Some(FoldArg::Array(entries)) => entries.is_empty(),
-            // Anything else in that position is not the array the name expects,
-            // so the call is not one this seam should be asking about either.
-            Some(_) => false,
-        },
-    }
+    steins_catalog::callback_carriers(name)
+        .positions()
+        .find(|c| {
+            // The position is OCCUPIED — the call reaches it with something
+            // that is not the name's own spelling of "no callback".
+            match c.shape {
+                // The tail rule is about the POSITION rather than the type: any
+                // argument that REACHES an unargued `mixed ...$rest` is the
+                // `array_udiff` comparator as far as this seam can tell.
+                CarrierShape::UndeclaredTail => args.len() > c.position,
+                // Every entry of the array is a callee, so only an empty one is
+                // vacant. Anything that is not an array there is not the call
+                // this name describes, and declining is the answer for that too.
+                CarrierShape::InsideArray => match args.get(c.position) {
+                    None | Some(FoldArg::Null) => false,
+                    Some(FoldArg::Array(entries)) => !entries.is_empty(),
+                    Some(_) => true,
+                },
+                CarrierShape::Declared | CarrierShape::Invoked | CarrierShape::DeferredMixed => {
+                    !matches!(args.get(c.position), None | Some(FoldArg::Null))
+                }
+            }
+        })
+        .map(FoldShapeRefusal::Carrier)
 }
 
 /// Which fold lane an engine of this integer width gets — the width half of
@@ -1445,5 +1453,145 @@ fn fold_arg_fits_i32(arg: &FoldArg) -> bool {
             key_ok && fold_arg_fits_i32(v)
         }),
         FoldArg::Float(_) | FoldArg::Str(_) | FoldArg::Bool(_) | FoldArg::Null => true,
+    }
+}
+
+#[cfg(test)]
+mod shape_gate_tests {
+    use super::{FoldArg, FoldShapeRefusal, fold_shape_refusal};
+    use steins_catalog::CarrierShape;
+
+    /// A string argument, which is what a callee looks like on this wire.
+    fn s(v: &str) -> FoldArg {
+        FoldArg::Str(v.to_owned())
+    }
+
+    /// One non-empty array argument, for the names that take one.
+    fn arr() -> FoldArg {
+        FoldArg::Array(vec![(None, s("a"))])
+    }
+
+    fn shape(name: &str, args: &[FoldArg]) -> Option<CarrierShape> {
+        match fold_shape_refusal(name, args) {
+            Some(FoldShapeRefusal::Carrier(c)) => Some(c.shape),
+            Some(FoldShapeRefusal::Unmined) => panic!("{name} is mined"),
+            None => None,
+        }
+    }
+
+    /// The gate's whole reason for existing, in one table: the names the issue
+    /// lists refuse a callee argument.
+    ///
+    /// **Independent of the allowlist by construction** — `usort`, `ob_start`
+    /// and `array_udiff` are not foldable and are refused here anyway, which is
+    /// the claim that a future admission cannot quietly walk past this gate.
+    /// The end-to-end half, where a real engine is asked, is
+    /// `array_filter_folds_only_with_no_callback` and
+    /// `a_callback_carrier_never_reaches_the_runner`.
+    #[test]
+    fn the_callback_carriers_refuse_a_callee_argument() {
+        for (name, args) in [
+            ("array_filter", vec![arr(), s("var_dump")]),
+            ("array_map", vec![s("strtoupper"), arr()]),
+            ("usort", vec![arr(), s("strcmp")]),
+            ("preg_replace_callback", vec![s("/a/"), s("strtoupper"), s("aaa")]),
+            // The issue-#705 Deferred set: `mixed $callback`, so the `callable`
+            // column is blank and only the curated route sees it.
+            ("ob_start", vec![s("var_dump")]),
+            ("pcntl_signal", vec![FoldArg::Int(2), s("var_dump")]),
+            // The tail nothing declares: `array_udiff`'s comparator.
+            ("array_udiff", vec![arr(), arr(), s("strcmp")]),
+            // The array whose VALUES are callees.
+            (
+                "preg_replace_callback_array",
+                vec![FoldArg::Array(vec![(None, s("strtoupper"))]), s("aaa")],
+            ),
+        ] {
+            assert!(shape(name, &args).is_some(), "{name} handed a callee to the runner");
+        }
+    }
+
+    /// …and the other half, which a gate that refused everything would also
+    /// pass: a carrier-free argument list is not refused.
+    #[test]
+    fn an_empty_carrying_position_is_not_a_refusal() {
+        let list = FoldArg::Array(vec![(None, FoldArg::Int(1)), (None, FoldArg::Int(0))]);
+        for (name, args) in [
+            // The acceptance case: no callback at all.
+            ("array_filter", vec![list.clone()]),
+            // PHP's own "no callback" spelling, which `array_filter` reads as
+            // "drop the falsy elements".
+            ("array_filter", vec![list.clone(), FoldArg::Null]),
+            // A name with no carrying position at all.
+            ("strtoupper", vec![s("ab")]),
+            // The argued tail: `sprintf`'s is rendered BY the format string.
+            ("sprintf", vec![s("%s-%d"), s("a"), FoldArg::Int(7)]),
+            // An EMPTY array carries no callee, one level down.
+            ("preg_replace_callback_array", vec![FoldArg::Array(vec![]), s("aaa")]),
+            // The deferred set, with the position the call never reaches.
+            ("ob_start", vec![]),
+        ] {
+            assert_eq!(fold_shape_refusal(name, &args), None, "{name} was refused with no callee");
+        }
+    }
+
+    /// Four of the five routes are load-bearing on their own: delete one and a
+    /// name only that route can see starts folding. The shape carried in the
+    /// refusal is what makes the claim checkable — a test asserting only
+    /// "refused" would pass with three routes doing four routes' work.
+    ///
+    /// The fifth, [`CarrierShape::Invoked`], has no name of its own **today**:
+    /// every `invocation_shape` position is also declared `callable` in the
+    /// engine's arginfo, which is the agreement
+    /// `the_invocation_rows_are_all_declared_callable` pins from the catalog
+    /// side. It is kept because the two tables are independent witnesses of the
+    /// same fact and either may move first — a curated row for a name arginfo
+    /// types `mixed` is exactly what issue #705 found three of.
+    #[test]
+    fn every_route_is_the_only_one_that_sees_its_name() {
+        // Declared `callable`: arginfo's own column, the only route that sees
+        // `array_filter`'s position 1 as a type.
+        assert_eq!(shape("array_filter", &[arr(), s("var_dump")]), Some(CarrierShape::Declared));
+        // Deferred `mixed` (issue #705): no declared type, no row, no tail.
+        assert_eq!(shape("ob_start", &[s("var_dump")]), Some(CarrierShape::DeferredMixed));
+        // The undeclared tail: `array_udiff`'s comparator, which nothing
+        // declares and no fixed index can name.
+        assert_eq!(
+            shape("array_udiff", &[arr(), arr(), s("strcmp")]),
+            Some(CarrierShape::UndeclaredTail)
+        );
+        // The array of callees, which no rule about types or positions sees.
+        assert_eq!(
+            shape(
+                "preg_replace_callback_array",
+                &[FoldArg::Array(vec![(None, s("strtoupper"))]), s("aaa")]
+            ),
+            Some(CarrierShape::InsideArray)
+        );
+    }
+
+    /// The decline names the carrying POSITION, not just the name — the half of
+    /// the gate an audit reads. The engine's own parameter name comes with it,
+    /// since a bare index is the one thing a reader cannot check against the
+    /// manual.
+    #[test]
+    fn the_decline_reason_names_the_carrying_position() {
+        let refused = fold_shape_refusal("array_filter", &[arr(), s("var_dump")])
+            .expect("a string at the callback position");
+        assert_eq!(
+            refused.reason("array_filter"),
+            "array_filter carries a callee at parameter 1 ($callback): declared callable"
+        );
+        // An unmined name declines with the reason that it cannot be gated at
+        // all, rather than with a position it does not have.
+        assert_eq!(
+            fold_shape_refusal("no_such_builtin", &[]),
+            Some(FoldShapeRefusal::Unmined),
+            "a name the arginfo table never had cannot be gated by a rule that reads it"
+        );
+        assert_eq!(
+            FoldShapeRefusal::Unmined.reason("no_such_builtin"),
+            "no_such_builtin has no mined parameter row, so no callee position is visible"
+        );
     }
 }

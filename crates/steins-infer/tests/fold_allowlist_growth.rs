@@ -662,7 +662,9 @@ fn array_filter_folds_only_with_no_callback() {
     // The hazards: no value at all, and in particular not the one the callback
     // would have produced.
     assert_ne!(d[2], "array{0: 'a', 1: 'b'}", "a callback argument must not fold");
-    assert_ne!(d[3], "array{0: 'PATH'}", "`getenv` must not run inside the analysis");
+    // Equality on the declared floor: a fold would render `list{'PATH'}`, which
+    // the old `array{0: 'PATH'}` inequality never caught.
+    assert_eq!(d[3], "array (asserted)", "`getenv` must not run inside the analysis");
     for (i, got) in [(2, &d[2]), (3, &d[3])] {
         assert!(
             !got.starts_with("array{"),

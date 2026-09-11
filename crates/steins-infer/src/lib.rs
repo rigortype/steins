@@ -160,8 +160,8 @@ use steins_syntax::{ArgValue, ArrayKey, FunctionDecl, NormKey, SourceTree};
 // return missing (ADR-0078, issue #199)
 pub use steins_syntax::{BodyEnd, body_end, body_has_terminator};
 pub use fold::{
-    EngineFolder, FoldEngine, FoldLane, FoldPosture, Folder, MONKEY_PATCH_EXTENSIONS, NoFold,
-    RefusalNote, SurfaceSummary,
+    EngineFolder, FoldEngine, FoldLane, FoldPosture, FoldShapeRefusal, Folder,
+    MONKEY_PATCH_EXTENSIONS, NoFold, RefusalNote, SurfaceSummary,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use fold_persist::{

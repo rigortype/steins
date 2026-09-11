@@ -578,8 +578,9 @@ mod tests {
     ///   value domain. `system`, `unlink` and the rest are the same call.
     ///
     /// Since issue #382 the seam refuses such a call unless every callable
-    /// position is **absent or a literal `null`** (`fold_admitted_by_shape`,
-    /// reading this crate's mined [`param_facts`] rather than the curated
+    /// position is **absent or a literal `null`** (`fold_shape_refusal` in
+    /// `steins-infer`, over this crate's [`callback_carriers`] — the mined
+    /// [`param_facts`] and the curated routes together — rather than the curated
     /// [`invocation_shape`], which has one position per row and could not
     /// express `session_set_save_handler`'s seven). Two things have to hold on
     /// this side for that gate to be reachable at all, and neither is implied by
@@ -626,6 +627,33 @@ mod tests {
         // …and the names that could NOT be gated this way are still off it.
         assert!(!foldable("usort"), "a required callable cannot be gated away");
         assert!(!foldable("array_udiff"), "a comparator at a variadic mixed tail is invisible here");
+    }
+
+    /// The same claim over **every** carrier route, not only the declared one
+    /// (issue #382's shape gate, and its one shared predicate).
+    ///
+    /// The test above reads the arginfo column directly, which was the whole
+    /// rule when it was written. Four more routes see a callee now, and a
+    /// foldable name that carried one at a REQUIRED position would be a row
+    /// that folds nothing while claiming to: the seam refuses every call to it.
+    ///
+    /// Not vacuous — `array_filter` is on the list with a carrier at 1, and
+    /// that position is optional.
+    #[test]
+    fn a_foldable_name_carries_no_callee_it_cannot_be_called_without() {
+        let mut carriers = 0_usize;
+        for name in PORTABLE.iter().chain(REFUSED).chain(UNVERIFIED) {
+            let Some(facts) = param_facts(name) else { continue };
+            for carrier in crate::callback_carriers(name).positions() {
+                carriers += 1;
+                assert!(
+                    carrier.position >= facts.params_required,
+                    "{name} folds and the seam would refuse every call to it — {}",
+                    carrier.describe(name)
+                );
+            }
+        }
+        assert!(carriers > 0, "no foldable name carries a callee at all; the gate proves nothing");
     }
 
     /// The alias rows: a second spelling of a name already on the list, and the

@@ -113,6 +113,70 @@ fn a_refused_bomb_leaves_the_run_posture_intact() {
     );
 }
 
+/// A snippet whose every fold names a SECOND callee, and then asks an ordinary
+/// question.
+///
+/// `var_dump` is the one that desyncs: it writes to stdout, which is the NDJSON
+/// stream's own channel, so its output lands ahead of the JSON-RPC reply and
+/// every subsequent read is off by one frame. `getenv` is the quieter half of
+/// the same hazard — no output, and the analysis carrying the environment of
+/// the machine it runs on into the value domain.
+const CARRIERS_THEN_FOLDABLE: &str = "<?php\n\
+     $a = array_filter([\"a\", \"b\"], \"var_dump\");\n\
+     \\PHPStan\\dumpType($a);\n\
+     $b = array_filter([\"PATH\"], \"getenv\");\n\
+     \\PHPStan\\dumpType($b);\n\
+     $ok = strtoupper(\"ab\");\n\
+     \\PHPStan\\dumpType($ok);\n";
+
+/// **The stream survives a would-be callback fold** (issue #382).
+///
+/// The incident this pins is not a wrong type; it is a dead transport. On a
+/// branch that admitted `array_filter` with no shape gate,
+/// `array_filter(["a", "b"], "var_dump")` folded — which is to say the sidecar
+/// ran `var_dump`, whose stdout went into the NDJSON stream ahead of the reply.
+/// The frame after that was unreadable, the child was replaced, and the whole
+/// run carried the degradation notice: every later fold in every later file
+/// answered from the sound subset instead of from the engine.
+///
+/// So the assertion is about the RUN and not about the two dumps. A test that
+/// only checked the types would pass on the branch that desynced — the widened
+/// answer is what a poisoned transport gives you too. What separates "refused
+/// before dispatch" from "dispatched and survived" is that nothing was lost,
+/// nothing was restarted, and the fold *after* them still answers from the
+/// engine.
+#[test]
+fn a_callback_carrier_never_reaches_the_runner() {
+    let mut folder = SidecarFolder::enabled();
+    if folder.fold("strtoupper", &[ArgValue::Str("probe".into())], true).is_none() {
+        eprintln!(
+            "SKIP a_callback_carrier_never_reaches_the_runner: \
+             no folding engine — is `php` on PATH?"
+        );
+        return;
+    }
+    let before = folder.posture();
+    assert!(before.engaged && before.sidecar_backed_throughout(), "got {before:?}");
+
+    let d = dumps(CARRIERS_THEN_FOLDABLE, &mut folder);
+    // Neither call folded: each refused one answers exactly its declared floor.
+    // The floor is asserted by equality on purpose — a fold of `["PATH"]` renders
+    // `list{'PATH'}`, which a `starts_with("array{")` test would wave through.
+    assert_eq!(d[0], "array (asserted)", "a `var_dump` argument reached the runner");
+    assert_eq!(d[1], "array (asserted)", "`getenv` ran inside the analysis");
+    // …and the engine is intact, which is the claim the dumps alone cannot make.
+    assert_eq!(d[2], "'AB'", "the next fold still answers from the engine");
+
+    let after = folder.posture();
+    assert_eq!(after.losses, 0, "a reply was lost, so something was dispatched: {after:?}");
+    assert_eq!(after.restarts, 0, "the child was replaced: {after:?}");
+    assert!(!after.abandoned, "the transport gave up: {after:?}");
+    assert!(
+        after.sidecar_backed_throughout(),
+        "the run degraded to the sound subset — the desync this gate exists for, got {after:?}"
+    );
+}
+
 // The whole-run `env` answers, across a restart (issue #245). No `php` needed:
 // the transport's recovery is modeled directly, the only way to hold the
 // decline window open on purpose.

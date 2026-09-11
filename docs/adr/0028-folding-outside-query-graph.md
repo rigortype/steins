@@ -276,3 +276,51 @@ reinterpretation. The invariant is untouched: a fold that fails widens,
 a recorded row never outlives the fingerprint that scopes it, and the
 `replay_fold.rs` differential oracle is the acceptance pin that
 replay-from-disk means what ask-the-engine means.
+
+## Amendment (2026-09-11): the allowlist does not gate the second callee (issue #382)
+
+Every clause above reasons about **the name**: a builtin joins the allowlist
+when it is pure, deterministic and width-agreed, and the fold is then a pure
+function of `(function, args)`. That is true of the callee and says nothing
+about the arguments, and PHP lets an argument *be* a callee. So the allowlist
+has a blind spot it cannot close from the inside: `array_filter(["a", "b"],
+"var_dump")` is an allowlisted call whose fold runs `var_dump` in the sidecar,
+whose stdout is the NDJSON stream's own channel (ADR-0066's 2026-08-16
+amendment records the incident — a desynced frame, a replaced child, and a
+whole run degraded to the sound subset).
+
+**The gate for that is a second one, and it is about the argument list.** The
+seam asks `steins_catalog::callback_carriers` before the runner is asked, and a
+call that puts anything at a carrying position declines — whatever the allowlist
+says about the name. The two gates are therefore independent in both
+directions: admitting a name to this list does not admit its callback position,
+and refusing a call here does not say anything about the name's purity.
+
+Two properties of the seam's side are worth stating here, because a future
+admission depends on them:
+
+1. **A name with no mined `param_facts` row does not fold at all.** The gate
+   reads the engine's arginfo, so a name it cannot see is a name it cannot
+   certify. This costs nothing today — the catalog asserts every foldable name
+   is mined — and it means an admission that skips the mining step declines
+   rather than walking past a gate that cannot see it.
+2. **A foldable name may not carry a callee at a REQUIRED position.** Such a
+   row would fold nothing while claiming to, since the gate refuses every call
+   to it. `a_foldable_name_carries_no_callee_it_cannot_be_called_without` is the
+   check, and it is why `usort` is not on this list and `array_filter` is.
+
+The carrier rule itself is **one predicate**, shared with ADR-0070 §2.3's
+by-value lane, which asks the same question for a different hazard (a callback
+body reaching a caller local through `global`). It had been two copies, and the
+copies had drifted: the by-value copy certified `ob_start` and `pcntl_signal`
+as all-by-value while refusing `register_shutdown_function`, the same family
+(issue #705). A drift like that is invisible by construction — each copy is
+correct about what it can see — so the fix is that there is one copy, and the
+three Deferred `mixed` names are now a curated route inside it.
+
+No name leaves the allowlist for this. The names that carry a callee and are
+NOT on it (`array_map`, `usort`, `preg_replace_callback`, `ob_start`,
+`array_udiff`) were never on it, for reasons this ADR's §5 already gave.
+
+**Status: PENDING ratification.** Designed autonomously under the owner's
+standing delegation.
