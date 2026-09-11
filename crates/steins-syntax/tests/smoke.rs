@@ -375,6 +375,16 @@ fn scans_the_constant_leading_arguments_of_a_named_call() {
     assert_eq!(const_args("file_put_contents('/tmp/x', 'y', flags: 8);"), ConstArgs::default());
     // Nothing past position 1 is recorded.
     assert_eq!(const_args("file_put_contents('/a', 'b', 'c');").second, lit("b"));
+    // The return-mode flag (issue #352): a keyword to the lexer, so it never
+    // arrives as a constant fetch however it is spelled.
+    for spelling in ["true", "TRUE", "True"] {
+        assert_eq!(
+            const_args(&format!("print_r($p, {spelling});")).second,
+            Some(CallTarget::Bool(true)),
+            "`{spelling}` is one keyword"
+        );
+    }
+    assert_eq!(const_args("print_r($p, false);").second, Some(CallTarget::Bool(false)));
 }
 
 // Class / method lowering (class-world extension)

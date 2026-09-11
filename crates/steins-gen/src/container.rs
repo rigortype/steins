@@ -146,7 +146,17 @@ use crate::names::{PackageName, SectionName};
 /// decodes: a schema-19 file records a bare `: array` as an unrepresentable hint
 /// that refuses the return summary outright, so replaying one would answer the
 /// arm floor for every call this binary now bounds by `array`.
-pub const SCHEMA_VERSION: u32 = 20;
+/// `21` is the return-mode output narrowing (issue #352), and it is a
+/// **meaning** bump of schema 18's kind rather than a misdecode one. `CallTarget`
+/// grows a `Bool` variant appended after the last, so no existing index moves and
+/// every schema-20 `ConstArgs` still decodes exactly as it was written. What
+/// changed is what the absence of a second argument *means*: `print_r($x, true)`
+/// was lowered with `second: None` because the parser lexes `true` as a literal
+/// and the old enum could not carry one, so replaying a schema-20 artifact would
+/// answer `io.output.buffer` for every return-mode dumper this binary now proves
+/// writes nothing. ADR-0092 §2 forbids a miss that changes meaning, so the bump
+/// buys the refusal to read the old file, not a decode fix.
+pub const SCHEMA_VERSION: u32 = 21;
 
 const MAGIC: [u8; 8] = *b"steinsgn";
 const HEADER_LEN: u64 = 16;

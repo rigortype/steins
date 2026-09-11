@@ -1121,6 +1121,16 @@ const EFFECT_EXPECTED: &[(&str, usize)] = &[
     // over-approximation; the fix is a sibling of `narrowed_stream_labels` and will
     // move this row DOWN, which never trips the tripwire.
     //
+    // 2026-09-12, issue #352: that fix landed. `narrowed_output_labels` drops the
+    // label at a call site that proves the `true`, so those 776 findings are gone
+    // and this row should read roughly 3666. It is deliberately NOT reseeded here:
+    // `corpus.local.toml` is gitignored, the agent worktree that landed the change
+    // measures public packages only, and the seeding discipline for this row is a
+    // count re-MEASURED rather than computed. Leaving 4442 standing is safe in the
+    // meantime — the gate is an increase tripwire and a decrease never trips it —
+    // and costs only this row's sharpness until someone with the corpus mounted
+    // re-runs and reseeds.
+    //
     // Seeding rather than fixing is the zero-FP posture, not a retreat from it: the
     // violations are real, and what makes 4442 of them is a house logger three hops
     // under an assertion helper — the shape ADR-0084's `[effects]` attribution
