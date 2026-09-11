@@ -25,7 +25,7 @@
 //!   behavior or exit code — it is measured here, judged by a person, and
 //!   enabled (then baselined) in `steins.toml` on that evidence.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read as _;
 use std::process::{Command, ExitCode, Stdio};
 
@@ -238,14 +238,22 @@ struct Aggregate {
     optional_read_paths: Vec<String>,
 }
 
+/// One id's running tally while the stream is walked: its layer and level as
+/// first seen, its count, and the distinct files it fired in.
+struct IdTally<'a> {
+    layer: String,
+    level: String,
+    count: usize,
+    files: BTreeSet<&'a str>,
+}
+
 /// Build the report from a parsed document. Pure: same document, same report.
 fn aggregate(doc: &CheckDocument, source: Source, hotspot_limit: usize) -> TriageReport {
     let profile = doc.profile.clone().unwrap_or_else(|| UNKNOWN.to_owned());
 
     let mut by_level: BTreeMap<String, usize> = BTreeMap::new();
     let mut by_layer: BTreeMap<String, usize> = BTreeMap::new();
-    // id → (layer, level, count, files)
-    let mut per_id: BTreeMap<&str, (String, String, usize, BTreeMap<&str, ()>)> = BTreeMap::new();
+    let mut per_id: BTreeMap<&str, IdTally<'_>> = BTreeMap::new();
     let mut per_file: BTreeMap<String, (usize, BTreeMap<String, usize>)> = BTreeMap::new();
     let mut optional_read_paths = Vec::new();
 
@@ -256,9 +264,9 @@ fn aggregate(doc: &CheckDocument, source: Source, hotspot_limit: usize) -> Triag
         *by_layer.entry(layer.clone()).or_insert(0) += 1;
         let row = per_id
             .entry(f.id.as_str())
-            .or_insert_with(|| (layer, level, 0, BTreeMap::new()));
-        row.2 += 1;
-        row.3.insert(f.path.as_str(), ());
+            .or_insert_with(|| IdTally { layer, level, count: 0, files: BTreeSet::new() });
+        row.count += 1;
+        row.files.insert(f.path.as_str());
         let file = per_file.entry(f.path.clone()).or_insert_with(|| (0, BTreeMap::new()));
         file.0 += 1;
         *file.1.entry(f.id.clone()).or_insert(0) += 1;
@@ -269,12 +277,12 @@ fn aggregate(doc: &CheckDocument, source: Source, hotspot_limit: usize) -> Triag
 
     let mut distribution: Vec<IdRow> = per_id
         .into_iter()
-        .map(|(id, (layer, level, count, files))| IdRow {
+        .map(|(id, t)| IdRow {
             id: id.to_owned(),
-            layer,
-            level,
-            count,
-            files: files.len(),
+            layer: t.layer,
+            level: t.level,
+            count: t.count,
+            files: t.files.len(),
         })
         .collect();
     // Heaviest first; ties by id so the order is a function of the stream.
