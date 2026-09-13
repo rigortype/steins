@@ -372,8 +372,48 @@ otherwise unchanged.
 - **Open/closed state.** `fclose($h); fread($h, 1)` is a real bug and a
   real analysis, and it is a dataflow one, not a type one. The leaf
   models the kind; the state would need a different mechanism.
+  *(Partly taken up by §8.8: a closed handle, not the `fread`.)*
 - **A `resource` value in the value domain.** Standing refusal, per
   ADR-0035/0038.
+
+### 8.8 Amendment (2026-09-14): the one state a return proves
+
+**Status: PENDING ratification.** §8.7 left open/closed state out as a
+dataflow question. Half of it needs no new mechanism, because a
+resource's state moves one way only: open to closed, never back. So
+"closed" is a claim about the *value*, stable for as long as a variable
+holds it, and the arm lane already tracks exactly that — killed by
+reassignment and by-ref passing, widened by every join. "Open" is the
+opposite: `$b = $h; fclose($b);` or any callee receiving the handle can
+close it behind `$h`'s back, so no proof ever produces it.
+
+- **Vocabulary.** The leaf carries a `ResourceState` (`Any` for
+  `resource`, `Open`, `Closed`), and the three spellings lower to their
+  own state and spell back as themselves. `subsumes` answers `Maybe`
+  wherever two states disagree — `Any` covering the others is the only
+  state-dependent `Yes` — so two docblocks (`@return closed-resource`
+  into `@param open-resource`) never convict each other, and a join of
+  closed with unknown dedups to unknown.
+- **The proof.** A bare call statement (or an assignment not rebinding
+  the handle) to the global `closedir`, `pclose` or `proc_close`, over a
+  one-arm `Verified` resource lane (§8.6's predicate), leaves that lane
+  `Closed`. A return is the whole premise: every argument those calls
+  reject is a `TypeError`, so nothing after it runs. `fclose` and
+  `gzclose` are weaker — over an `opendir()` handle they warn, return
+  `false` and leave it **open** (probed at 8.5.10) — so they close only a
+  handle whose producer is on a probed allowlist (`fopen`, `tmpfile`,
+  `popen`, the socket producers, `gzopen`, `bzopen`,
+  `socket_export_stream`), carried as an unspelled `fclose_closes` bit
+  on the arm §8.4 seeds.
+- **The verdict.** A proven-closed handle is `No` against
+  `open-resource` and `Yes` against `resource` and `closed-resource`; an
+  unknown-state handle is `Maybe` against both state spellings. Every
+  native parameter still rejects a closed handle (`fclose($h);
+  strlen($h)` is the same `TypeError`), so §8.6's predicate reads any
+  state. A docblock's state is `Asserted` and never evidence.
+- **Still out.** Proving a handle open, the alias's other names, and
+  using a closed handle with a stream function (`fread`, a second
+  `fclose`) — the last is the parameter direction §9.6 keeps out.
 
 ## 9. Amendment (2026-08-17): R1's parameter twin
 
