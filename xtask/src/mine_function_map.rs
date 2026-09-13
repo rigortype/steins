@@ -447,7 +447,7 @@ impl Dropped {
             // `resource` stays in this bucket (ADR-0069 §5) so the comparison series doesn't
             // shift; it's excluded by the countersign, not the lowering — a genuine resource
             // producer has no declared return type.
-            | ContractTy::Resource
+            | ContractTy::Resource { .. }
             | ContractTy::Opaque => &mut self.objects,
             // `unset` counts with the value-less spellings; a mined stub return
             // type never carries it (ADR-0087), so this arm keeps the census
