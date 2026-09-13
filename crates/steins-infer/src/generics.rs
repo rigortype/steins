@@ -132,7 +132,7 @@ pub(crate) fn carg_contract_ty(arg: &CArg) -> Option<ContractTy> {
         CArg::Val(CVal::Object(class, _)) => {
             Some(ContractTy::Class(format!("\\{}", class_key(class))))
         }
-        CArg::Val(CVal::Array(_) | CVal::Resource) => None,
+        CArg::Val(CVal::Array(_) | CVal::Resource { .. }) => None,
     }
 }
 

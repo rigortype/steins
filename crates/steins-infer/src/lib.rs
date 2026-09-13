@@ -1560,7 +1560,8 @@ fn rendered_cval(v: &CVal) -> String {
     match v {
         CVal::Scalar(s) => s.render(),
         CVal::Object(class, _) => format!("new {}()", class.rsplit('\\').next().unwrap_or(class)),
-        CVal::Resource => "a resource".to_owned(),
+        CVal::Resource { closed: false } => "a resource".to_owned(),
+        CVal::Resource { closed: true } => "a closed resource".to_owned(),
         CVal::Array(entries) => {
             // Rebuild an `ArgValue::Array` with explicit keys so the shared compact
             // renderer applies (it re-normalizes; explicit keys round-trip).
@@ -1583,7 +1584,7 @@ fn rendered_cval(v: &CVal) -> String {
 fn cval_to_argvalue(v: &CVal) -> ArgValue {
     match v {
         CVal::Scalar(s) => s.clone(),
-        CVal::Object(..) | CVal::Resource => ArgValue::Other,
+        CVal::Object(..) | CVal::Resource { .. } => ArgValue::Other,
         CVal::Array(entries) => ArgValue::Array(
             entries
                 .iter()

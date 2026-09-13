@@ -31,6 +31,7 @@ use crate::branch::{
     walk_match, walk_while_body,
 };
 use crate::contract::accepts;
+use crate::builtin_returns::resource_closed_by_call;
 use crate::cx::Cx;
 use crate::declared_receiver::check_phpdoc_undefined_method;
 use crate::descent::{
@@ -900,6 +901,9 @@ pub(crate) fn walk_trace(
         // before the call, and step 4 is about to forget exactly that — so the
         // read has to happen while the entry env still holds it.
         let stmt_out_seeds = stmt_out_param_seeds(w, folder, &stmt.kind, env, store);
+        // The handle a closing call proves closed (ADR-0056 §8.8), read on the
+        // same pre-call store and applied beside the out-parameter seeds.
+        let stmt_closed_handle = resource_closed_by_call(cx, scope.poisoned, &stmt.kind, store);
         // 1. Check + descend every statically-named call this statement carries.
         for call in checkable_calls(&stmt.kind) {
             match &call.receiver {
@@ -1666,6 +1670,11 @@ pub(crate) fn walk_trace(
         // rung: the callee's stated write REPLACES the conservative drop rather
         // than racing it. Empty for every statement that carries no such call.
         apply_stmt_out_param_seeds(stmt_out_seeds, env, store);
+        // A handle the call closed keeps its resource lane, now in the closed
+        // state — the one state a return proves (ADR-0056 §8.8).
+        if let Some((var, arms)) = stmt_closed_handle {
+            store.contract.insert(var, arms);
+        }
 
         // Flush the pending trace annotation at the iteration's common exit —
         // the statement's own effect (step 2), its assert narrowings (step 3)

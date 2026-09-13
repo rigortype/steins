@@ -35,7 +35,7 @@
 //! **ADR-0048 compliance:** every function here is pure. Arm lists are
 //! declaration-ordered by their caller; [`dedup_arms`] is order-stable.
 
-use crate::{CField, CKey, ContractTy, MixedCut, admits_fact, admits_val};
+use crate::{CField, CKey, ContractTy, MixedCut, ResourceState, admits_fact, admits_val};
 use steins_domain::{
     Base, Certainty, Fact, IntRange, Key, KeyClass, PhpStr, Presence, Refinement, ShapeFact,
     StrPreds, Tail, Val, php_is_falsy,
@@ -280,7 +280,9 @@ pub fn subsumes(a: &ContractTy, b: &ContractTy) -> Certainty {
         ContractTy::ObjectAny => subsumes_object(a),
         // The resource leaf: no scalar-fact denotation, but no hierarchy to be
         // unsure about either, so the answer is exact both ways (ADR-0056 §8).
-        ContractTy::Resource => subsumes_resource(a),
+        ContractTy::Resource { state, fclose_closes } => {
+            subsumes_resource(a, *state, *fclose_closes)
+        }
 
         // `a` covers everything only if `a` is `mixed` itself (`Opaque` → `Maybe`).
         ContractTy::Mixed => match a {
@@ -377,25 +379,40 @@ fn subsumes_enum_case(a: &ContractTy, enum_fqn: &str, case: &str) -> Certainty {
     }
 }
 
-/// Whether `a` subsumes every resource. Exact, because a resource is a **leaf**
-/// with no hierarchy to be unsure about — the only `Maybe` is what
-/// [`ContractTy::Opaque`] forces.
+/// Whether `a` subsumes every resource `b` denotes — a `b` in `state`, carrying
+/// `fclose_closes`. The kind is exact, because a resource is a **leaf** with no
+/// hierarchy to be unsure about: the only `Maybe` the kind forces is what
+/// [`ContractTy::Opaque`] does.
 ///
 /// Both cuts of `mixed` keep every resource: no resource is null, and every
 /// resource is truthy — even a *closed* one (`fclose($h); (bool) $h === true`
 /// at 8.5.9) — so `non-empty-mixed` covers the leaf exactly as `non-null-mixed`
 /// does.
-fn subsumes_resource(a: &ContractTy) -> Certainty {
+///
+/// **The state is never a `No`** (ADR-0056 §8.8). `open-resource` and
+/// `closed-resource` are disjoint sets, but which one a handle is in is a
+/// dataflow fact about a moment, and a lattice verdict would convict a
+/// declared `@return closed-resource` handed to `@param open-resource` on two
+/// docblocks' say-so. Where the states disagree the answer is `Maybe`, and
+/// `Any` on the covering side is the only state that decides `Yes`. The
+/// `fclose_closes` bit is likewise only ever a narrowing: a covering arm that
+/// claims it over a `b` that does not is `Maybe`.
+fn subsumes_resource(a: &ContractTy, state: ResourceState, fclose_closes: bool) -> Certainty {
     use Certainty::{Maybe, No, Yes};
     match a {
-        ContractTy::Mixed | ContractTy::MixedMinus(_) | ContractTy::Resource => Yes,
+        ContractTy::Mixed | ContractTy::MixedMinus(_) => Yes,
+        ContractTy::Resource { state: a_state, fclose_closes: a_closes } => {
+            let state_covered = *a_state == ResourceState::Any || *a_state == state;
+            let bit_covered = !*a_closes || fclose_closes;
+            if state_covered && bit_covered { Yes } else { Maybe }
+        }
         ContractTy::Opaque => Maybe,
-        ContractTy::Union(members) => {
-            members.iter().fold(No, |acc, m| acc.or(subsumes_resource(m)))
-        }
-        ContractTy::Inter(members) => {
-            members.iter().fold(Yes, |acc, m| acc.and(subsumes_resource(m)))
-        }
+        ContractTy::Union(members) => members
+            .iter()
+            .fold(No, |acc, m| acc.or(subsumes_resource(m, state, fclose_closes))),
+        ContractTy::Inter(members) => members
+            .iter()
+            .fold(Yes, |acc, m| acc.and(subsumes_resource(m, state, fclose_closes))),
         _ => No,
     }
 }
@@ -498,7 +515,7 @@ fn subsumes_array(a: &ContractTy, b: &ContractTy) -> Certainty {
         | ContractTy::Class(_)
         | ContractTy::EnumCase { .. }
         | ContractTy::ObjectAny
-        | ContractTy::Resource => No,
+        | ContractTy::Resource { .. } => No,
     }
 }
 
@@ -524,7 +541,7 @@ pub(crate) fn array_incapable(t: &ContractTy) -> bool {
         | ContractTy::Class(_)
         | ContractTy::EnumCase { .. }
         | ContractTy::ObjectAny
-        | ContractTy::Resource => true,
+        | ContractTy::Resource { .. } => true,
         // Only the `*-closure` spellings refuse an array outright.
         ContractTy::CallableTy { obl, .. } => obl.closure_only,
         ContractTy::Union(m) => m.iter().all(array_incapable),
@@ -1532,7 +1549,7 @@ fn enum_case_covers(
         | ContractTy::MapOf { .. }
         | ContractTy::IterableOf { .. }
         | ContractTy::Shape { .. }
-        | ContractTy::Resource
+        | ContractTy::Resource { .. }
         | ContractTy::Unset => Yes,
         // A union is covered only if every member is; an intersection as soon as
         // one member is.

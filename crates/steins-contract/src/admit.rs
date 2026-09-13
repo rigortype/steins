@@ -100,7 +100,7 @@ pub fn admits_val(ty: &ContractTy, v: &Val) -> Certainty {
         ContractTy::Class(_) | ContractTy::EnumCase { .. } | ContractTy::ObjectAny => No,
         // No coercion to resource, even weakly (probed 8.5.9): `No`, not the
         // old `KNOWN_UNENFORCED` floor (ADR-0056 §8).
-        ContractTy::Resource => No,
+        ContractTy::Resource { .. } => No,
         // Signature unused (only for the closure-argument variance check, #11,
         // `steins-infer`); `closure_only` (ADR-0063 P3) decides string/array `No`.
         ContractTy::CallableTy { obl, .. } => match v {
@@ -279,7 +279,7 @@ fn base_only(ty: &ContractTy, base: Base, known: ArmKnown) -> Certainty {
         | ContractTy::EnumCase { .. }
         | ContractTy::ObjectAny
         // Scalars only; no scalar is a resource ([`admits_val`]'s disjointness).
-        | ContractTy::Resource => No,
+        | ContractTy::Resource { .. } => No,
         // As in [`admits_val`]: string is a `callable`-candidate but never `Closure`.
         ContractTy::CallableTy { obl, .. } => {
             if base == Base::String && !obl.closure_only { Maybe } else { No }
@@ -558,7 +558,7 @@ fn admits_shape_fact(ty: &ContractTy, sf: &ShapeFact) -> Certainty {
         | ContractTy::EnumCase { .. }
         | ContractTy::ObjectAny
         // An array is never a resource.
-        | ContractTy::Resource => No,
+        | ContractTy::Resource { .. } => No,
         // Pair-array may be `callable`; `*-closure` (ADR-0063 P3) never is.
         // ADR-0072 §5 refuses the pair-array-vs-signature refinement outright.
         ContractTy::CallableTy { obl, .. } => {

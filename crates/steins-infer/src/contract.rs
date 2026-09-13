@@ -5,7 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use steins_contract::{ContractTy, normalize};
+use steins_contract::{ContractTy, ResourceState, normalize};
 use steins_domain::{Certainty, PhpStr, Val};
 use steins_phpdoc::{AssertKind, Type as PType, TagKind, Variance, parse_type, scan_docblock};
 use steins_phpdoc::ast::{ConditionalSubject, ConstExpr, TypeKind as PKind, StringLit};
@@ -18,7 +18,7 @@ use crate::cx::Cx;
 use crate::env::{Known, Store, val_of};
 use crate::fold::Folder;
 use crate::contract_touches_class;
-use crate::builtin_returns::store_holds_resource;
+use crate::builtin_returns::{store_holds_closed_resource, store_holds_resource};
 use crate::generics::{
     accepts_carried_ty, accepts_shape, carry_for_owner, check_arraylike, domain_key,
     template_variances,
@@ -68,11 +68,14 @@ pub(crate) enum CVal {
     Scalar(ArgValue),
     Array(Vec<(NormKey, CVal)>),
     Object(String, Vec<GenericCarry>),
-    /// A legacy PHP **resource** handle (ADR-0056 §8). Carries nothing: there is
-    /// no resource hierarchy to name and the open/closed state is not modeled, so
-    /// the kind IS the whole fact — which is also why it needs no exactness flag
+    /// A legacy PHP **resource** handle (ADR-0056 §8). No resource hierarchy to
+    /// name, so the kind is the fact — which is also why it needs no exactness flag
     /// where [`CVal::Object`] does. Being a resource is never a lower bound.
-    Resource,
+    ///
+    /// `closed` is the one state a proof reaches (ADR-0056 §8.8): `true` for a
+    /// handle a closing call returned from, `false` for "open or closed, unknown".
+    /// There is no proven-open handle — an alias or a callee may have closed it.
+    Resource { closed: bool },
 }
 
 /// One class-level generic parameterization an object carries: the FQN of the class
@@ -1222,7 +1225,7 @@ impl<'a> Cx<'a> {
                     let v = k.singleton()?;
                     self.resolve_cval(&v, env, store, poisoned, folder)
                 } else if store_holds_resource(store, name) {
-                    Some(CVal::Resource)
+                    Some(CVal::Resource { closed: store_holds_closed_resource(store, name) })
                 } else if store.is_exact(name) {
                     // Only an EXACT object becomes a `CVal::Object` (audit G1): the
                     // phpdoc-acceptance consumer draws a No-side `is_a` conclusion,
@@ -1764,7 +1767,7 @@ fn cval_as_val(v: &CVal) -> Option<Val> {
             .map(|(k, cv)| cval_as_val(cv).map(|val| (domain_key(k), val)))
             .collect::<Option<Vec<_>>>()
             .map(Val::Array),
-        CVal::Object(..) | CVal::Resource => None,
+        CVal::Object(..) | CVal::Resource { .. } => None,
     }
 }
 
@@ -1796,7 +1799,7 @@ fn unrepresentable_verdict(cty: &steins_contract::ContractTy, v: &CVal) -> Tri {
             // `CurlHandle` now) on code that works. The other direction — a
             // proven RESOURCE against a native class parameter — does convict
             // (`resource_is_type_error`): there the value is proven, not the doc.
-            C::Resource => Tri::Maybe,
+            C::Resource { .. } => Tri::Maybe,
             // Every other lowered form denotes scalars, null, or arrays, of which no
             // object is a member (pure set membership, no coercion — ADR-0030).
             _ => Tri::No,
@@ -1822,8 +1825,17 @@ fn unrepresentable_verdict(cty: &steins_contract::ContractTy, v: &CVal) -> Tri {
         },
         // A resource (ADR-0056 §8). Exact almost everywhere — a leaf with no
         // hierarchy, so only two `Maybe`s and the object arm (FP channel) need care.
-        CVal::Resource => match cty {
-            C::Mixed | C::Resource => Tri::Yes,
+        CVal::Resource { closed } => match cty {
+            C::Mixed => Tri::Yes,
+            // The state (ADR-0056 §8.8). `resource` takes every handle, open or
+            // closed (`gettype()` still says `resource (closed)`). Only a handle
+            // proven closed decides the other two; one in the unknown state stays
+            // `Maybe` against both, because "open" is never proven.
+            C::Resource { state, .. } => match (state, closed) {
+                (ResourceState::Any, _) | (ResourceState::Closed, true) => Tri::Yes,
+                (ResourceState::Open, true) => Tri::No,
+                (ResourceState::Open | ResourceState::Closed, false) => Tri::Maybe,
+            },
             // Both cuts keep every resource: none is null, and every resource is
             // truthy — a CLOSED one included (`fclose($h); (bool) $h === true` at
             // 8.5.9).
@@ -1870,7 +1882,7 @@ fn accepts_class_name(cx: &Cx, cfile: usize, coff: u32, name: &str, v: &CVal) ->
         // same way (ADR-0056 §8.5). Without this arm the contract layer would be
         // quieter than the proof layer about the same pairing
         // (`resource_is_type_error` convicts on a native `\CurlHandle` param).
-        CVal::Scalar(_) | CVal::Resource if cx.is_known_class(&target) => Tri::No,
+        CVal::Scalar(_) | CVal::Resource { .. } if cx.is_known_class(&target) => Tri::No,
         // An array is likewise never a class instance, but it is left
         // intentionally undecided here (out of the stage-4 scope).
         _ => Tri::Maybe,

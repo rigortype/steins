@@ -866,7 +866,8 @@ fn cval_binding_key(v: &CVal) -> String {
             let cs: Vec<String> = carries.iter().map(carry_binding_key).collect();
             format!("{class}{{{}}}", cs.join(","))
         }
-        CVal::Resource => "resource".to_owned(),
+        CVal::Resource { closed: false } => "resource".to_owned(),
+        CVal::Resource { closed: true } => "closed-resource".to_owned(),
     }
 }
 
