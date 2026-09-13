@@ -432,9 +432,6 @@ const KNOWN_UNENFORCED: &[&str] = &[
     // to, so this entry keeps that case `Opaque` rather than `Class("hasoffset")`.
     "hasoffset",
     "hasoffsetvalue",
-    "int-mask",
-    "int-mask-of",
-    "non-empty-literal-string",
     "arraylike-object",
     "properties-of",
     "stringable-object",
@@ -479,14 +476,15 @@ fn is_derived_operator(name: &str) -> bool {
 
 /// Vocabulary [`lower_generic`] models that [`lower_identifier`] has no arm
 /// for: a hyphenated base whose **bare** form states nothing and so never
-/// earned an identifier arm. Phan's `int-range<lo, hi>` is the whole list.
+/// earned an identifier arm: Phan's `int-range<lo, hi>`, and PHPStan's
+/// `int-mask<…>`/`int-mask-of<…>`, a mask with no flags written.
 ///
 /// Recognition is arity-blind, as both tables above are: `int-range` written
 /// bare is a name Steins knows, exactly as `key-of` written bare is, and
 /// neither is a defect in the docblock. Without this entry the recognition
 /// answer would be read off the identifier table alone and convict a spelling
 /// the generic table implements.
-const GENERIC_ONLY_VOCABULARY: &[&str] = &["int-range"];
+const GENERIC_ONLY_VOCABULARY: &[&str] = &["int-range", "int-mask", "int-mask-of"];
 
 /// Whether `name`, written in a phpdoc type position, is a hyphenated spelling
 /// that **denotes nothing** — the whole judgment behind ADR-0091 §6's
@@ -626,6 +624,14 @@ pub fn lower_identifier(name: &str) -> ContractTy {
         // `callable-string` needs a function table this crate cannot see, and
         // `numeric-int-string` is Phan-only vocabulary with no predicate here.
         "literal-string" | "callable-string" | "numeric-int-string" => ContractTy::StrOpaque,
+        // PHPStan's `string&AccessoryLiteralStringType&AccessoryNonEmptyStringType`,
+        // the intersection `literal-string&non-empty-string` lowers to. The two
+        // halves stay separate: provenance never decides (`'x'` is `Maybe`), the
+        // length half does (`''` is `No`).
+        "non-empty-literal-string" => ContractTy::Inter(vec![
+            ContractTy::StrOpaque,
+            ContractTy::StrWith(StrPreds::NON_EMPTY),
+        ]),
         "positive-int" => ContractTy::IntIn(IntRange::POSITIVE),
         "negative-int" => ContractTy::IntIn(IntRange::NEGATIVE),
         "non-negative-int" => ContractTy::IntIn(IntRange::NON_NEGATIVE),
@@ -798,6 +804,12 @@ pub fn is_shadowable_pseudo_type(name: &str) -> bool {
             // (`unset()`), so `class unset {}` is a parse error and nothing can
             // shadow the pseudo-type (ADR-0087).
             | "unset"
+            // Neither reserved nor native: `class Resource {}` is legal PHP, and
+            // PHPStan lets it shadow. Steins does not. PHP has no declaration
+            // spelling for a resource (ADR-0056 §8), so in a docblock the word
+            // is the type, and reading `@param resource` in a namespace declaring
+            // `Resource` as that class convicts every handle the author meant.
+            | "resource"
     )
 }
 
@@ -834,7 +846,7 @@ pub fn is_type_vocabulary(name: &str) -> bool {
 /// the grammar. Its catch-all carries the same meaning: a base name that is
 /// not vocabulary lowers to [`ContractTy::Class`] (hand it to the caller's
 /// class-generic machinery), and the same two exceptions hold — a
-/// `KNOWN_UNENFORCED` base (`int-mask<...>`, `properties-of<T>`, …), and any
+/// `KNOWN_UNENFORCED` base (`properties-of<T>`, `class-string-map<…>`, …), and any
 /// **hyphenated** base, which is vocabulary and never a class-generic
 /// (ADR-0091 §3).
 #[must_use]
@@ -876,6 +888,24 @@ pub fn lower_generic(base: &str, args: &[steins_phpdoc::ast::GenericArg]) -> Con
             elem: Box::new(arg(0).expect("len checked")),
             non_empty: norm.starts_with("non-empty"),
         },
+        // `int-mask<1, 2, 4>` names its flags one argument each; `int-mask-of<T>`
+        // takes them as one type, a union of int literals. Context-free operands
+        // only: a class-constant operand (`int-mask-of<Foo::*>`) lowers to
+        // `Opaque` here and is resolved by `steins-infer`, which holds the
+        // project index, into the same [`int_mask`].
+        ("int-mask", 1..) => {
+            let mut flags = Vec::new();
+            args.iter()
+                .try_for_each(|a| collect_int_literals(&lower(&a.ty), &mut flags))
+                .and_then(|()| int_mask(&flags))
+                .unwrap_or(ContractTy::Opaque)
+        }
+        ("int-mask-of", 1) => {
+            let mut flags = Vec::new();
+            collect_int_literals(&arg(0).expect("len checked"), &mut flags)
+                .and_then(|()| int_mask(&flags))
+                .unwrap_or(ContractTy::Opaque)
+        }
         // `int<lo, hi>` (PHPStan/Psalm/Mago) and `int-range<lo, hi>` (Phan) are the
         // same bounded range under two base names — one lowering, not two.
         ("int" | "int-range", 2) => lower_int_range(args),
@@ -938,6 +968,78 @@ fn union_of(members: Vec<ContractTy>) -> ContractTy {
         1 => uniq.pop().expect("len checked"),
         _ => ContractTy::Union(uniq),
     }
+}
+
+/// The int literals a lowered mask operand names — an [`ContractTy::LitInt`],
+/// or a union made only of them. `None` for anything else, which declines the
+/// whole mask: PHPStan skips a non-int member silently, and a mask read off
+/// the members Steins happened to understand would be narrower than the one
+/// PHPStan reads.
+fn collect_int_literals(ty: &ContractTy, out: &mut Vec<i64>) -> Option<()> {
+    match ty {
+        ContractTy::LitInt(i) => {
+            out.push(*i);
+            Some(())
+        }
+        ContractTy::Union(members) => {
+            members.iter().try_for_each(|m| collect_int_literals(m, out))
+        }
+        _ => None,
+    }
+}
+
+/// How many combinations a mask enumerates before it is carried as a range —
+/// PHPStan's `InitializerExprTypeResolver::CALCULATE_SCALARS_LIMIT`.
+const INT_MASK_ENUMERATION_LIMIT: usize = 128;
+
+/// `int-mask<…>` / `int-mask-of<…>` over resolved flags: every bitwise-or
+/// combination of `flags`, `0` (the empty combination) included — PHPStan's
+/// `TypeNodeResolver::expandIntMaskToType`, rung for rung:
+///
+/// | Combinations | Contract |
+/// | --- | --- |
+/// | contiguous (`int-mask<1, 2>` = `0..3`) | `int<min, max>` |
+/// | over [`INT_MASK_ENUMERATION_LIMIT`] | `int<0, f₁\|f₂\|…>`, or `int` when a flag is negative |
+/// | otherwise | the literal union, ascending |
+///
+/// The over-limit rung is the one place this answers wider than PHPStan: its
+/// range runs to the true minimum, which needs the enumeration this rung exists
+/// to avoid. With no negative flag that minimum is `0`, so the two agree; with
+/// one, `int` is the honest superset. Wider is never a false `No`.
+///
+/// `None` for no flags at all, which PHPStan resolves to an error type.
+#[must_use]
+pub fn int_mask(flags: &[i64]) -> Option<ContractTy> {
+    if flags.is_empty() {
+        return None;
+    }
+    let mut values: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
+    let mut over_limit = false;
+    for &flag in flags {
+        if flag != 0 && !values.contains(&flag) {
+            let combined: Vec<i64> = values.iter().map(|v| v | flag).collect();
+            values.extend(combined);
+        }
+        values.insert(flag);
+        if values.len() > INT_MASK_ENUMERATION_LIMIT {
+            over_limit = true;
+            break;
+        }
+    }
+    values.insert(0);
+    if over_limit || values.len() > INT_MASK_ENUMERATION_LIMIT {
+        if flags.iter().any(|f| *f < 0) {
+            return Some(ContractTy::Base(Base::Int));
+        }
+        let all = flags.iter().fold(0, |acc, f| acc | f);
+        return Some(ContractTy::IntIn(IntRange::new(0, all).expect("0 <= a non-negative or")));
+    }
+    let (min, max) = (*values.first().expect("0 inserted"), *values.last().expect("0 inserted"));
+    let span = i128::from(max) - i128::from(min);
+    if i128::try_from(values.len()).is_ok_and(|n| span == n - 1) {
+        return Some(ContractTy::IntIn(IntRange::new(min, max).expect("min <= max")));
+    }
+    Some(ContractTy::Union(values.into_iter().map(ContractTy::LitInt).collect()))
 }
 
 /// `key-of<T>`: the type of the keys `T`'s realizations carry, projected out
@@ -1668,11 +1770,19 @@ mod known_unenforced_tests {
     #[test]
     fn known_unenforced_identifiers_lower_to_opaque() {
         for name in [
-            "non-empty-literal-string",
             "arraylike-object",
             "stringable-object",
         ] {
             assert_eq!(lower_identifier(name), ContractTy::Opaque, "{name} should lower to Opaque");
+        }
+    }
+
+    /// A legal class name, but never read as one in a docblock: PHP cannot
+    /// declare a resource, so the docblock word is the only spelling it has.
+    #[test]
+    fn no_class_in_scope_shadows_resource() {
+        for name in ["resource", "Resource", "\\RESOURCE", "open-resource"] {
+            assert!(!is_shadowable_pseudo_type(name), "{name} must stay the resource type");
         }
     }
 
@@ -1778,22 +1888,21 @@ mod known_unenforced_tests {
 
     #[test]
     fn known_unenforced_generics_lower_to_opaque_regardless_of_args() {
-        let ty = lower_str("int-mask<1, 2, 4>").unwrap();
-        assert_eq!(ty, ContractTy::Opaque);
-        let ty = lower_str("int-mask-of<Permissions::*>").unwrap();
-        assert_eq!(ty, ContractTy::Opaque);
         let ty = lower_str("properties-of<User>").unwrap();
         assert_eq!(ty, ContractTy::Opaque);
         let ty = lower_str("class-string-map<Foo, Bar>").unwrap();
         assert_eq!(ty, ContractTy::Opaque);
     }
 
-    /// Pin: `int-mask<1, 2, 4>` admits an int as `Maybe`, not the `No` the
-    /// old `Class("int-mask")` catch-all would have manufactured.
+    /// `non-empty-literal-string` is the intersection of its two halves: the
+    /// length half decides, the provenance half never does.
     #[test]
-    fn int_mask_admits_an_int_as_maybe_not_no() {
-        let ty = lower_str("int-mask<1, 2, 4>").unwrap();
-        assert_eq!(admits_val(&ty, &Val::Int(5)), Certainty::Maybe);
+    fn non_empty_literal_string_rejects_only_the_empty_string() {
+        let ty = lower_identifier("non-empty-literal-string");
+        assert_eq!(ty, lower_str("literal-string&non-empty-string").unwrap());
+        assert_eq!(admits_val(&ty, &Val::Str(PhpStr::from(""))), Certainty::No);
+        assert_eq!(admits_val(&ty, &Val::Str(PhpStr::from("x"))), Certainty::Maybe);
+        assert_eq!(admits_val(&ty, &Val::Int(1)), Certainty::No);
     }
 
     /// The floor this fix must not touch: an unknown name still lowers to
@@ -1805,6 +1914,75 @@ mod known_unenforced_tests {
             lower_generic("SomeUnknownGeneric", &[]),
             ContractTy::Class(name) if name == "someunknowngeneric"
         ));
+    }
+}
+
+/// `int-mask<…>` / `int-mask-of<…>` — PHPStan's `expandIntMaskToType`.
+#[cfg(test)]
+mod int_mask_tests {
+    use super::*;
+    use steins_domain::Val;
+
+    fn lits(values: &[i64]) -> ContractTy {
+        ContractTy::Union(values.iter().copied().map(ContractTy::LitInt).collect())
+    }
+
+    #[test]
+    fn a_sparse_mask_enumerates_its_combinations() {
+        let ty = lower_str("int-mask<1, 4>").unwrap();
+        assert_eq!(ty, lits(&[0, 1, 4, 5]));
+        assert_eq!(admits_val(&ty, &Val::Int(5)), Certainty::Yes);
+        assert_eq!(admits_val(&ty, &Val::Int(2)), Certainty::No);
+        assert_eq!(admits_val(&ty, &Val::Str(PhpStr::from("5"))), Certainty::No);
+    }
+
+    #[test]
+    fn a_contiguous_mask_is_a_range() {
+        let ty = lower_str("int-mask<1, 2, 4>").unwrap();
+        assert_eq!(ty, ContractTy::IntIn(IntRange::new(0, 7).unwrap()));
+        assert_eq!(admits_val(&ty, &Val::Int(5)), Certainty::Yes);
+        assert_eq!(admits_val(&ty, &Val::Int(8)), Certainty::No);
+    }
+
+    #[test]
+    fn int_mask_of_reads_a_union_of_literals() {
+        assert_eq!(lower_str("int-mask-of<1|4>").unwrap(), lits(&[0, 1, 4, 5]));
+        assert_eq!(lower_str("int-mask-of<1|2|4>").unwrap(), lower_str("int-mask<1, 2, 4>").unwrap());
+    }
+
+    /// Anything but int literals declines the whole mask — never a mask over
+    /// the members that happened to be understood.
+    #[test]
+    fn a_non_literal_operand_declines() {
+        for src in [
+            "int-mask-of<Permissions::*>",
+            "int-mask<1, Foo::BAR>",
+            "int-mask<1, 'a'>",
+            "int-mask-of<int>",
+            "int-mask-of<1, 2>",
+        ] {
+            assert_eq!(lower_str(src).unwrap(), ContractTy::Opaque, "{src}");
+        }
+    }
+
+    /// Past the enumeration limit the mask is carried as the range PHPStan
+    /// widens to — and `int` once a negative flag makes its minimum unknown.
+    #[test]
+    fn a_wide_mask_is_carried_as_a_range() {
+        let flags: Vec<i64> = (0..8).map(|b| 1 << b).chain([1 << 20]).collect();
+        let want = flags.iter().fold(0, |a, f| a | f);
+        assert_eq!(int_mask(&flags), Some(ContractTy::IntIn(IntRange::new(0, want).unwrap())));
+        let sparse: Vec<i64> = (0..8).map(|b| 1 << (b * 2)).collect();
+        assert_eq!(int_mask(&sparse), Some(ContractTy::IntIn(IntRange::new(0, 0x5555).unwrap())));
+        let negative: Vec<i64> = (0..8).map(|b| 1 << (b * 2)).chain([-2]).collect();
+        assert_eq!(int_mask(&negative), Some(ContractTy::Base(Base::Int)));
+    }
+
+    #[test]
+    fn zero_and_repeated_flags_add_nothing() {
+        assert_eq!(int_mask(&[0]), Some(ContractTy::IntIn(IntRange::new(0, 0).unwrap())));
+        assert_eq!(int_mask(&[1, 4, 1, 0]), Some(lits(&[0, 1, 4, 5])));
+        assert_eq!(int_mask(&[]), None);
     }
 }
 
