@@ -1605,3 +1605,190 @@ fn the_conformance_shape_reads_and_now_enforces() {
     ));
     assert_eq!(ids(&quiet), Vec::<String>::new());
 }
+
+// 8. `key-of<T>` / `value-of<T>` over a function-level template bound from the
+// argument's proven array (ADR-0032's 2026-09-14 amendment) — conformance cases
+// `phpdoc_advanced_fallback_key_of_template` and `…_value_of_template`.
+//
+// The claim throughout is parity with the hand-written literal union the projection
+// names: same stratum, same dump, same (absent) findings. The bodies prove nothing,
+// so every dump below is the declared rung answering.
+
+/// A `@template T{bound}`, `@param T $items`, `@return {ret}` function named `pick`
+/// over a body no summary proves.
+fn picker(bound: &str, ret: &str) -> String {
+    format!(
+        "<?php\n/**\n * @template T{bound}\n * @param T $items\n * @return {ret}\n */\n\
+         function pick(array $items) {{ return noSuchSource(); }}\n"
+    )
+}
+
+/// [`picker`]'s hand-written twin: the same parameter, the `@return` spelled out.
+fn spelled(ret: &str) -> String {
+    format!(
+        "<?php\n/**\n * @param array<array-key, mixed> $items\n * @return {ret}\n */\n\
+         function pick(array $items) {{ return noSuchSource(); }}\n"
+    )
+}
+
+const FLAGS: &str = "['debug' => false, 'verbose' => true]";
+
+#[test]
+fn key_of_a_bound_template_reads_exactly_as_the_spelled_key_union() {
+    for bound in ["", " of array<array-key, mixed>", " of array"] {
+        let f = picker(bound, "key-of<T>");
+        let call = format!("\\PHPStan\\dumpType(pick({FLAGS}));");
+        assert_eq!(
+            dumped(&format!("{f}{call}")),
+            dumped(&format!("{}{call}", spelled("'debug'|'verbose'"))),
+            "`@template T{bound}` read differently from the spelled union",
+        );
+        assert_eq!(dumped(&format!("{f}{call}")), "dumped type: 'debug'|'verbose' (asserted)");
+        // The assignment form takes the same seam.
+        let assigned = format!("{f}$k = pick({FLAGS}); \\PHPStan\\dumpType($k);");
+        assert_eq!(dumped(&assigned), "dumped type: 'debug'|'verbose' (asserted)");
+    }
+}
+
+#[test]
+fn value_of_a_bound_template_reads_exactly_as_the_spelled_value_union() {
+    let f = picker(" of array<array-key, mixed>", "value-of<T>");
+    let call = "\\PHPStan\\dumpType(pick(['low' => 1, 'high' => 10]));";
+    assert_eq!(dumped(&format!("{f}{call}")), dumped(&format!("{}{call}", spelled("1|10"))));
+    assert_eq!(dumped(&format!("{f}{call}")), "dumped type: 1|10 (asserted)");
+}
+
+#[test]
+fn a_list_operand_projects_its_positions_and_its_elements() {
+    let keys = picker(" of array<array-key, mixed>", "key-of<T>");
+    assert_eq!(
+        dumped(&format!("{keys}\\PHPStan\\dumpType(pick(['a', 'b']));")),
+        "dumped type: 0|1 (asserted)",
+    );
+    let values = picker(" of list<string>", "value-of<T>");
+    assert_eq!(
+        dumped(&format!("{values}\\PHPStan\\dumpType(pick(['a', 'b']));")),
+        "dumped type: 'a'|'b' (asserted)",
+    );
+}
+
+#[test]
+fn the_conformance_lines_match_the_spelled_union_finding_for_finding() {
+    // The file's own body — a `foreach` returning its first key — and its three
+    // calls, under `strict_types=1`. The two `// V` lines stay silent. The `E?` line
+    // is silent too, and exactly as silent as a hand-written `@return
+    // 'debug'|'verbose'` is: an Asserted return fact premises no
+    // `type.argument-mismatch` (ADR-0032's 2026-08-15 amendment), so enforcing it is
+    // the body summary's job, not this read's.
+    let body = "function pick(array $items) { foreach ($items as $key => $_) { return $key; } \
+                throw new \\InvalidArgumentException('empty'); }\n";
+    let sinks = "function acceptsString(string $value): void {}\n\
+                 function acceptsInt(int $value): void {}\n\
+                 /** @param 'debug'|'verbose' $flag */\n\
+                 function acceptsFlagName(string $flag): void {}\n";
+    let template = "<?php\n/**\n * @template T of array<array-key, mixed>\n * @param T $items\n\
+                    \x20* @return key-of<T>\n */\n";
+    let hand = "<?php\n/**\n * @param array<array-key, mixed> $items\n\
+                \x20* @return 'debug'|'verbose'\n */\n";
+    for call in [
+        format!("acceptsString(pick({FLAGS}));"),
+        format!("acceptsFlagName(pick({FLAGS}));"),
+        format!("acceptsInt(pick({FLAGS}));"),
+    ] {
+        let t = strict(&format!("{template}{body}{sinks}{call}"));
+        let h = strict(&format!("{hand}{body}{sinks}{call}"));
+        assert_eq!(ids(&t), ids(&h), "{call} differs from the spelled union");
+        assert_eq!(ids(&t), Vec::<String>::new(), "{call}");
+    }
+    let t = strict(&format!("{template}{body}\\PHPStan\\dumpType(pick({FLAGS}));"));
+    assert_eq!(dumped(&t), "dumped type: 'debug'|'verbose' (asserted)");
+}
+
+#[test]
+fn an_unproven_or_contested_operand_stays_at_the_floor() {
+    let bounded = picker(" of array<array-key, mixed>", "key-of<T>");
+    // The floor is the bound's own projection, as before this read existed.
+    let floor = "dumped type: int|string (asserted)";
+    // An argument nothing proved.
+    assert_eq!(
+        dumped(&format!("{bounded}function g(array $a) {{ \\PHPStan\\dumpType(pick($a)); }}\n")),
+        floor,
+    );
+    // An empty array: `never` is true, and not a floor worth handing out.
+    assert_eq!(dumped(&format!("{bounded}\\PHPStan\\dumpType(pick([]));")), floor);
+    // Two occurrences that disagree, and the same two agreeing.
+    let two = "<?php\n/**\n * @template T of array<array-key, mixed>\n * @param T $a\n * @param T $b\n\
+               \x20* @return key-of<T>\n */\n\
+               function pick2(array $a, array $b) { return noSuchSource(); }\n";
+    assert_eq!(dumped(&format!("{two}\\PHPStan\\dumpType(pick2(['a' => 1], ['b' => 2]));")), floor);
+    assert_eq!(
+        dumped(&format!("{two}\\PHPStan\\dumpType(pick2(['a' => 1], ['a' => 1]));")),
+        "dumped type: 'a' (asserted)",
+    );
+    // An occurrence the binder cannot read contests the name, bounded or not.
+    let nested = "<?php\n/**\n * @template T of array<array-key, mixed>\n * @param T $a\n\
+                  \x20* @param list<T> $more\n * @return key-of<T>\n */\n\
+                  function pick3(array $a, array $more) { return noSuchSource(); }\n";
+    assert_eq!(
+        dumped(&format!("{nested}\\PHPStan\\dumpType(pick3(['a' => 1], [['a' => 1]]));")),
+        floor,
+    );
+    // `value-of` needs every value stated: an object value declines it, while
+    // `key-of` over the very same array reads its keys.
+    let objects = "class Foo {}\n\\PHPStan\\dumpType(pick(['a' => new Foo()]));";
+    let values = picker(" of array<array-key, mixed>", "value-of<T>");
+    assert_eq!(
+        dumped(&format!("{values}{objects}")),
+        dumped(&format!("{}{objects}", spelled("value-of<array<array-key, mixed>>"))),
+    );
+    assert_eq!(dumped(&format!("{bounded}{objects}")), "dumped type: 'a' (asserted)");
+}
+
+#[test]
+fn an_argument_outside_the_bound_reads_the_bound_and_not_the_value() {
+    // A value that does not provably inhabit `T`'s bound is a call the declaration
+    // does not describe, so nothing is read off it: the floor projects the bound.
+    let list = picker(" of list<int>", "key-of<T>");
+    assert_eq!(
+        dumped(&format!("{list}\\PHPStan\\dumpType(pick(['a' => 1]));")),
+        dumped(&format!("{}\\PHPStan\\dumpType(pick(['a' => 1]));", spelled("key-of<list<int>>"))),
+    );
+    let strings = picker(" of array<string, int>", "value-of<T>");
+    assert_eq!(
+        dumped(&format!("{strings}\\PHPStan\\dumpType(pick(['a' => 'x']));")),
+        "dumped type: int (asserted)",
+    );
+    // Inside the bound, the same declaration reads the value.
+    assert_eq!(
+        dumped(&format!("{strings}\\PHPStan\\dumpType(pick(['a' => 3]));")),
+        "dumped type: 3 (asserted)",
+    );
+    // And a bounded `@return T` itself still reads its bound, value in bound or not —
+    // only the derived operators consume a bounded binding.
+    let plain = picker(" of array<string, int>", "T");
+    assert_eq!(
+        dumped(&format!("{plain}\\PHPStan\\dumpType(pick(['a' => 3]));")),
+        dumped(&format!("{}\\PHPStan\\dumpType(pick(['a' => 3]));", spelled("array<string, int>"))),
+    );
+}
+
+#[test]
+fn a_method_level_template_projects_through_the_same_read() {
+    let m = format!(
+        "<?php\nfinal class Flags {{\n\
+         \x20 /**\n  * @template T of array<array-key, mixed>\n  * @param T $items\n\
+         \x20 * @return key-of<T>\n  */\n\
+         \x20 public static function first(array $items) {{ return noSuchSource(); }}\n\
+         \x20 /**\n  * @template T of array<array-key, mixed>\n  * @param T $items\n\
+         \x20 * @return value-of<T>\n  */\n\
+         \x20 public function value(array $items) {{ return noSuchSource(); }}\n}}\n"
+    );
+    assert_eq!(
+        dumped(&format!("{m}\\PHPStan\\dumpType(Flags::first({FLAGS}));")),
+        "dumped type: 'debug'|'verbose' (asserted)",
+    );
+    assert_eq!(
+        dumped(&format!("{m}$f = new Flags(); $v = $f->value({FLAGS}); \\PHPStan\\dumpType($v);")),
+        dumped(&format!("{}\\PHPStan\\dumpType(pick({FLAGS}));", spelled("false|true"))),
+    );
+}
