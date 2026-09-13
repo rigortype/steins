@@ -98,6 +98,19 @@ rules instead of a keyword zoo:
   `StrWith(CLASS_STRING)` — a value property, judged like any other string
   refinement (issue #236).
 - `literal-string`, `callable-string`, `numeric-int-string` → `StrOpaque`.
+  `non-empty-literal-string` → `Inter[StrOpaque, StrWith(NON_EMPTY)]`, the
+  lowering `literal-string&non-empty-string` already had: `''` is refuted by
+  the length half, and the provenance half keeps every other string `Maybe`.
+- `int-mask<f₁, f₂, …>`, `int-mask-of<f₁|f₂|…>` → every bitwise-or
+  combination of the flags, `0` included, following PHPStan's
+  `expandIntMaskToType`: `IntIn` when the combinations are contiguous or number
+  more than 128, the `LitInt` union otherwise. The context-free lowering reads
+  int literals only and floors to `Opaque` on anything else; a class-constant
+  operand (`int-mask-of<Flags::*>`, `int-mask<Flags::A, Flags::B>`) is resolved
+  at acceptance, where the project index is, and only when every constant the
+  pattern matches across the whole class-like closure is a known int literal —
+  a mask built from part of the flags would refuse the combinations the rest
+  make.
 - `list<T>`, `non-empty-list<T>` → `ListOf`; `array<K, V>`, `T[]` → `MapOf`;
   `iterable<K, V>` → `IterableOf`.
 - `array{…}` / `list{…}` → `Shape`.

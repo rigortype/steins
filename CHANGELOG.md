@@ -38,6 +38,15 @@ Entries accumulate under this heading as work lands; the `steins-release-prep`
 skill seals them into a version section at release time, reconstructing from
 `git log` if the discipline slipped.
 
+### Added
+
+- **`int-mask<…>` and `int-mask-of<…>` are enforced: a value that is no bitwise-or combination of the flags is a `phpdoc.param-mismatch`.** The flags may be int literals (`int-mask<1, 2, 4>`, `int-mask-of<1|2|4>`) or class constants (`int-mask-of<Permissions::*>`, `int-mask-of<Flags::MODE_*>`, `int-mask<Flags::READ, Flags::WRITE>`), and the mask is every combination of them with `0` included, as PHPStan expands it. A class-constant mask is enforced only when Steins can see every constant the pattern matches — across parents and interfaces, each with a literal int initializer — and stays silent otherwise, since a mask built from part of the flags would reject combinations the rest make. Contract layer, so a bare `steins check` is unaffected; **a green `--profile contracts` can turn red** where an argument really is outside the mask. Both spellings were recognized and accepted everything before.
+- **`non-empty-literal-string` rejects `''`.** It means what `literal-string&non-empty-string` already meant to Steins: the empty string fails the length half, and every other string stays unjudged, because whether a string came from source code is not a property of its value. Before, the spelling accepted everything. Contract layer, same caveat as above.
+
+### Changed
+
+- **`@param resource` means the resource type even where a class named `Resource` is in scope.** PHPStan lets such a class shadow the word, as it does for `integer` or `number`. Steins does not do that for `resource`, because PHP has no way to declare a resource and the docblock word is the only spelling the type has. A namespace declaring `class Resource` no longer turns `@param resource $h` into a class contract that rejects every non-`Resource` object passed to it. Native `resource $x` hints are unchanged: to PHP that is a class reference, and `class.undefined` still reports it.
+
 ## [0.1.7] - 2026-09-12
 
 This release is about loops, dead statements, and remembering more between lines. Every loop body is analyzed now — `while`, `for`, `foreach` and `do`/`while` were dark before — with `foreach` typing its variables from the subject and the statement after a loop knowing the loop's condition failed; `statement.no-effect` names a call whose result is thrown away by a callee that provably does nothing else; global constants have values, with a `[runtime] os` pin for host-dependent ones; `@phpstan-type` aliases mean what they say; and a long list of writes, guards, casts, operators and builtin calls that used to erase or decline now keep and answer. `steins check` caches its analysis in `.steins/` by default so a re-check costs the edit rather than the project, and the new `steins triage` measures a codebase before you turn a profile on.

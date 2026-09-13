@@ -310,6 +310,21 @@ silence, and a conviction the oracle admits is not something to register:
 class one, so Steins now reads the alias first too. What remains registered
 above is the floor, which is unchanged.
 
+**19. A class named `Resource` does not shadow the docblock `resource`.**
+PHPStan resolves `@param resource` by first trying a pseudo-type class
+(`TypeNodeResolver::tryResolvePseudoTypeClassType`), so in a namespace that
+declares `class Resource` the annotation names that class. Steins reads the word
+as the resource type unconditionally (`is_shadowable_pseudo_type`). The word is
+legal as a class name — PHP reserves the native type words, not `resource` — so
+the precedence rule's premise holds, but its conclusion does not: PHP has no
+declaration spelling for a resource (ADR-0056 §8), which makes the docblock word
+the *only* way to say the type, and the class reading turns every handle the
+author meant into a proven non-instance. The other pseudo-types keep PHPStan's
+precedence: `@param Integer` beside a project `class Integer` is that class,
+because `int` remains for anyone who means the type. A native `resource $x` hint
+is unaffected — that is a class reference to PHP, and `class.undefined` still
+says so (entry 4). Reconsideration precondition: none.
+
 ## Conformance-suite divergences (intentional silences)
 
 Steins runs `php-typing-conformance`. Standing at the last recorded run

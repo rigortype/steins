@@ -1913,6 +1913,109 @@ fn const_operand_shape(cx: &Cx, cfile: usize, coff: u32, ty: &PType) -> Option<C
     Some(ContractTy::Shape { list: false, fields, sealed: true, non_empty, unsealed: None })
 }
 
+/// The flags an `int-mask<…>` / `int-mask-of<…>` operand names, class constants
+/// resolved — the operand resolver for [`steins_contract::int_mask`], as
+/// [`const_operand_shape`] is for `key-of`. `int-mask` reads every argument,
+/// `int-mask-of` its one; each may be an int literal, a class constant
+/// (`Foo::READ`), a wildcard over them (`Foo::FLAG_*`), or a union of those.
+///
+/// `None` on the first thing that is not one of those, and on any constant set
+/// [`class_const_flags`] cannot prove complete: a mask built from part of the
+/// flags is narrower than the declared one, which is a false `No` for every
+/// combination the missing flags make.
+fn mask_operand_flags(
+    cx: &Cx,
+    cfile: usize,
+    coff: u32,
+    base_lc: &str,
+    args: &[steins_phpdoc::ast::GenericArg],
+) -> Option<Vec<i64>> {
+    fn collect(cx: &Cx, cfile: usize, coff: u32, ty: &PType, out: &mut Vec<i64>) -> Option<()> {
+        match &ty.kind {
+            PKind::Union { types, .. } => {
+                types.iter().try_for_each(|t| collect(cx, cfile, coff, t, out))
+            }
+            PKind::Const(ConstExpr::Fetch { class, name }) if !class.is_empty() => {
+                class_const_flags(cx, &cx.resolve_pclass(cfile, coff, class), name, out)
+            }
+            _ => match steins_contract::lower(ty) {
+                ContractTy::LitInt(i) => {
+                    out.push(i);
+                    Some(())
+                }
+                _ => None,
+            },
+        }
+    }
+    let operands = match (base_lc, args) {
+        ("int-mask", [_, ..]) => args,
+        ("int-mask-of", [_]) => args,
+        _ => return None,
+    };
+    let mut flags = Vec::new();
+    operands.iter().try_for_each(|a| collect(cx, cfile, coff, &a.ty, &mut flags))?;
+    Some(flags)
+}
+
+/// Every int a class constant pattern names on `fqn` — `READ` names one constant,
+/// `FLAG_*` every constant it matches (`*` is any run, case-sensitively, as
+/// PHPStan's pattern is) — pushed onto `out`.
+///
+/// **Complete or nothing.** The whole class-like closure is walked — parent
+/// chain, interfaces and the interfaces those extend — and every constant
+/// *declared* with a matching name must have an int literal initializer, since
+/// `ClassDecl::consts` omits the rest. An ancestor the index does not hold, a
+/// trait (whose constants live elsewhere), an enum, a non-int or non-literal
+/// match, or no match at all declines.
+///
+/// A constant redeclared down the chain contributes both values, and a private
+/// one on an ancestor contributes although `Child::*` does not see it. Both only
+/// widen the mask, which is the direction that cannot convict a valid argument.
+fn class_const_flags(cx: &Cx, fqn: &str, pattern: &str, out: &mut Vec<i64>) -> Option<()> {
+    let mut pending = vec![fqn.trim_start_matches('\\').to_owned()];
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut matched = false;
+    while let Some(cur) = pending.pop() {
+        if !seen.insert(cur.to_ascii_lowercase()) {
+            continue;
+        }
+        let (file, cd) = cx.find_class(&cur)?;
+        if cd.is_enum || cd.uses_traits {
+            return None;
+        }
+        for (name, _) in &cd.const_visibility {
+            if !const_pattern_matches(pattern, name) {
+                continue;
+            }
+            matched = true;
+            match cd.consts.iter().find(|(n, _)| n == name) {
+                Some((_, ArgValue::Int(i))) => out.push(*i),
+                _ => return None,
+            }
+        }
+        let tree = &cx.units[file].tree;
+        pending.extend(cd.parent.iter().chain(&cd.implements).map(|r| tree.resolve_class_fqn(r)));
+    }
+    matched.then_some(())
+}
+
+/// Whether a constant name matches a phpdoc constant pattern, where each `*` is
+/// any (possibly empty) run of characters and everything else is literal.
+fn const_pattern_matches(pattern: &str, name: &str) -> bool {
+    let mut parts = pattern.split('*');
+    let first = parts.next().unwrap_or_default();
+    let Some(mut rest) = name.strip_prefix(first) else { return false };
+    let mut parts: Vec<&str> = parts.collect();
+    let Some(last) = parts.pop() else { return rest.is_empty() };
+    for part in parts {
+        match rest.find(part) {
+            Some(at) => rest = &rest[at + part.len()..],
+            None => return false,
+        }
+    }
+    rest.len() >= last.len() && rest.ends_with(last)
+}
+
 /// Whether a generic's base is the `int<lo, hi>` range spelling
 /// (`lower_generic`'s `"int" | "int-range"` arm), whose arguments may be the
 /// bound words `min`/`max` rather than types.
@@ -2027,6 +2130,16 @@ fn accepts_generic(
                     steins_contract::admits_val(&steins_contract::lower_generic(base, args), &val)
                 }
             }
+        }
+        // `int-mask<…>` / `int-mask-of<…>`: the same two resolvers as `key-of`,
+        // one expansion. The index-backed resolver supplies class constants; a
+        // literal-only operand it declines still lowers context-free.
+        "int-mask" | "int-mask-of" => {
+            let Some(val) = cval_as_val(v) else { return Tri::Maybe };
+            let ty = mask_operand_flags(cx, cfile, coff, &base_lc, args)
+                .and_then(|flags| steins_contract::int_mask(&flags))
+                .unwrap_or_else(|| steins_contract::lower_generic(base, args));
+            steins_contract::admits_val(&ty, &val)
         }
         // A class-level generic `Class<A, …>` (ADR-0032 tier 3, issue #10).
         _ => accepts_class_generic(cx, cfile, coff, base, args, v),

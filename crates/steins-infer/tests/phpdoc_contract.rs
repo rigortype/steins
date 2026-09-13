@@ -836,3 +836,103 @@ fn the_falsy_cut_decides_abstractly_only_where_the_refinement_answers() {
         f(r());\n";
     assert_eq!(param_findings(maybe).len(), 0, "a string fact is not refutable here");
 }
+
+/// `non-empty-literal-string` (`phpdoc_advanced_fallback_non_empty_literal_string`):
+/// the length half decides, the provenance half never does — so `''` is
+/// rejected and a runtime string, which may well be a literal, stays silent.
+#[test]
+fn non_empty_literal_string_rejects_the_empty_literal_only() {
+    let f = "<?php /** @param non-empty-literal-string $s */ function f($s): void {}\n";
+    assert_eq!(param_count(&format!("{f}f('x');")), 0);
+    assert_eq!(param_count(&format!("{f}f('');")), 1, "'' is empty");
+    assert_eq!(param_count(&format!("{f}f(1);")), 1, "an int is not a string");
+    let runtime = format!("{f}function g(string $s): void {{ f($s); }}\n");
+    assert_eq!(param_count(&runtime), 0, "literalness is never decided");
+}
+
+/// `int-mask<…>` (`phpdoc_advanced_fallback_int_mask`): every bitwise-or
+/// combination of the flags, `0` included, and nothing else.
+#[test]
+fn int_mask_admits_exactly_the_flag_combinations() {
+    let f = "<?php /** @param int-mask<1, 4> $m */ function f($m): void {}\n";
+    for ok in ["0", "1", "4", "5", "1 | 4"] {
+        assert_eq!(param_count(&format!("{f}f({ok});")), 0, "{ok} is a combination");
+    }
+    for bad in ["2", "8", "-1", "'5'"] {
+        assert_eq!(param_count(&format!("{f}f({bad});")), 1, "{bad} is not a combination");
+    }
+    let of = "<?php /** @param int-mask-of<1|2|4> $m */ function f($m): void {}\n";
+    assert_eq!(param_count(&format!("{of}f(7);")), 0);
+    assert_eq!(param_count(&format!("{of}f(8);")), 1);
+}
+
+/// `int-mask-of<Class::*>` (`phpdoc_advanced_fallback_int_mask_of`): the class
+/// constants are resolved through the index, wildcard and single fetch alike.
+#[test]
+fn int_mask_of_resolves_class_constants() {
+    let f = "<?php\n\
+        final class P { const READ = 1; const WRITE = 2; const EXECUTE = 4; const MODE_X = 64; }\n\
+        /** @param int-mask-of<P::*> $m */ function all($m): void {}\n\
+        /** @param int-mask-of<P::READ|P::EXECUTE> $m */ function two($m): void {}\n\
+        /** @param int-mask<P::READ, P::WRITE> $m */ function pair($m): void {}\n\
+        /** @param int-mask-of<P::MODE_*> $m */ function prefixed($m): void {}\n";
+    assert_eq!(param_count(&format!("{f}all(P::READ | P::WRITE); all(71);")), 0);
+    assert_eq!(param_count(&format!("{f}all(8);")), 1, "8 is no combination of P::*");
+    assert_eq!(param_count(&format!("{f}two(5);")), 0);
+    assert_eq!(param_count(&format!("{f}two(2);")), 1, "WRITE is not in the mask");
+    assert_eq!(param_count(&format!("{f}pair(3);")), 0);
+    assert_eq!(param_count(&format!("{f}pair(4);")), 1);
+    assert_eq!(param_count(&format!("{f}prefixed(64); prefixed(0);")), 0);
+    assert_eq!(param_count(&format!("{f}prefixed(1);")), 1, "READ does not match MODE_*");
+}
+
+/// A constant set that cannot be proven complete declines rather than building a
+/// mask from the part it can see, which would reject the combinations the missing
+/// flags make.
+#[test]
+fn int_mask_of_declines_an_incomplete_constant_set() {
+    for decl in [
+        // A matching constant with no literal initializer.
+        "final class P { const READ = 1; const WRITE = 1 << 1; }",
+        // An ancestor outside the index may declare more flags.
+        "final class P extends Vendor\\Base { const READ = 1; }",
+        // A trait may declare constants too.
+        "trait T {} final class P { use T; const READ = 1; }",
+        // A non-int constant.
+        "final class P { const READ = 1; const NAME = 'x'; }",
+        // An unresolvable class.
+        "",
+    ] {
+        let src = format!(
+            "<?php\n{decl}\n/** @param int-mask-of<P::*> $m */ function f($m): void {{}}\nf(2);\n"
+        );
+        assert_eq!(param_count(&src), 0, "must decline: {decl}");
+    }
+}
+
+/// Inherited constants take part: an interface's and a parent's flags are in
+/// the child's mask.
+#[test]
+fn int_mask_of_reads_inherited_constants() {
+    let src = "<?php\n\
+        interface HasExec { const EXEC = 4; }\n\
+        class Base { const READ = 1; }\n\
+        final class P extends Base implements HasExec { const WRITE = 2; }\n\
+        /** @param int-mask-of<P::*> $m */ function f($m): void {}\n";
+    assert_eq!(param_count(&format!("{src}f(7);")), 0);
+    assert_eq!(param_count(&format!("{src}f(8);")), 1);
+}
+
+/// `resource` in a docblock is the resource type even where a class named
+/// `Resource` is in scope — the one pseudo-type no class shadows.
+#[test]
+fn a_class_named_resource_does_not_shadow_the_docblock_type() {
+    let src = "<?php\nnamespace App;\n\
+        class Resource {}\n\
+        /** @param resource $h */ function f($h): void {}\n";
+    assert_eq!(param_count(&format!("{src}f(1);")), 1, "an int is not a resource");
+    // What separates the two readings: as the class `App\Resource`, a
+    // `stdClass` is a proven non-instance; as the type, an object is left
+    // undecided (ADR-0056 §8.5), so it stays silent.
+    assert_eq!(param_count(&format!("{src}f(new \\stdClass());")), 0);
+}
