@@ -1774,15 +1774,13 @@ fn an_argument_outside_the_bound_reads_the_bound_and_not_the_value() {
 
 #[test]
 fn a_method_level_template_projects_through_the_same_read() {
-    let m = format!(
-        "<?php\nfinal class Flags {{\n\
+    let m = "<?php\nfinal class Flags {\n\
          \x20 /**\n  * @template T of array<array-key, mixed>\n  * @param T $items\n\
          \x20 * @return key-of<T>\n  */\n\
-         \x20 public static function first(array $items) {{ return noSuchSource(); }}\n\
+         \x20 public static function first(array $items) { return noSuchSource(); }\n\
          \x20 /**\n  * @template T of array<array-key, mixed>\n  * @param T $items\n\
          \x20 * @return value-of<T>\n  */\n\
-         \x20 public function value(array $items) {{ return noSuchSource(); }}\n}}\n"
-    );
+         \x20 public function value(array $items) { return noSuchSource(); }\n}\n";
     assert_eq!(
         dumped(&format!("{m}\\PHPStan\\dumpType(Flags::first({FLAGS}));")),
         "dumped type: 'debug'|'verbose' (asserted)",
