@@ -369,7 +369,10 @@ unavailable. §8 substitutes a tripwire — a curated row stands only while the
 engine still declares nothing for the name, which is exactly what the PHP 8
 resource-to-object migration ends. The value domain is unchanged and still
 object- and resource-free (ADR-0035/0038). Still deferred (§8.7): arrays *of*
-resources, resource-consuming *parameters*, and open/closed state.
+resources, resource-consuming *parameters*, and proving a handle *open* — a
+handle a closing call returned from is proven closed since §8.8 (2026-09-14),
+so `@param open-resource` refuses it while PHPStan, which resolves all three
+spellings to one `ResourceType`, does not.
 
 **5. `phpdoc_advanced_phpstan_template_type` line 47 — RETIRED (2026-08-15,
 ADR-0086 §2 / #376): the case is enforced.** The entry recorded a standing
