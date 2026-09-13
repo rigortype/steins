@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 
 use steins_contract::ContractTy;
-use steins_domain::Base;
+use steins_domain::{Base, Certainty};
 use steins_phpdoc::Type as PType;
 use steins_phpdoc::ast::{ConstExpr, TypeKind as PKind, StringLit};
 use steins_syntax::{
@@ -15,8 +15,8 @@ use steins_syntax::{
 use crate::fold::Folder;
 use crate::builtin_returns::builtin_method_return_floor;
 use crate::contract::{
-    CArg, CVal, Envelopes, TemplateShadow, declared_carrier, for_each_child_type, template_names_of,
-    type_aliases_of,
+    CArg, CVal, Envelopes, TemplateShadow, accepts, declared_carrier, for_each_child_type,
+    proven_array_shape, template_names_of, type_aliases_of,
 };
 use crate::cx::Cx;
 use crate::descent::value_lane_fn_site;
@@ -397,10 +397,13 @@ fn template_arg_return_arms(
     if args.len() > at.params.len() || at.params.iter().any(|p| p.variadic || p.by_ref) {
         return None;
     }
-    let envelopes = cx.envelopes_of(at.docblock, at.file, at.off)?;
+    // The binder's view keeps a bounded name as a node naming it (see
+    // [`Cx::bindable_envelopes_of`]); for an unbounded name the two views are the
+    // same envelopes. Every read of a bounded binding goes through `shadow`'s bound.
+    let envelopes = cx.bindable_envelopes_of(at.docblock, at.file, at.off)?;
     let ret = envelopes.ret.as_ref()?;
     let bound = bind_call_templates(cx, folder, &envelopes, &at, &shadow, args, env, store, poisoned);
-    read_bound_template(cx, &bound, ret, at.native, at.file, at.off)
+    read_bound_template(cx, &bound, &shadow, ret, at.native, at.file, at.off)
 }
 
 /// Bind every one of the declaration's own `@template` names the call's arguments
@@ -454,9 +457,10 @@ fn bind_call_templates(
         match &ty.kind {
             // `@param T $p` — the whole parameter IS the template, so what binds is
             // the argument's own proven value, and there is no sub-node left to
-            // contest. A bounded template never reaches this arm: the shadow already
-            // replaced it with its bound, which is what the author promised and what
-            // `@return T` therefore reads.
+            // contest. A bounded template reaches this arm too, in the binder's view
+            // of the envelopes, but binding is not reading: only a derived-operator
+            // read consumes a bounded binding, and only once the value is proven to
+            // sit inside the bound (see [`read_bound_template`]).
             PKind::Unsupported(name) if shadow.contains(&name.to_ascii_lowercase()) => {
                 let carried = cx
                     .resolve_cval(value, env, store, poisoned, folder)
@@ -595,15 +599,28 @@ pub(crate) fn class_template_names(cx: &Cx, class_fqn: &str) -> Vec<String> {
 
 /// The arms a callee's `@return` denotes once its own `@template` names are bound —
 /// the reading half of [`template_arg_return_arms`].
+///
+/// A **bounded** template's binding is read by the derived-operator arm alone. At
+/// `@return T` and `template-type<T, …>` it declines, and the argument-blind floor
+/// reads the bound exactly as it did before bounded names were visible to the
+/// binder (ADR-0032's 2026-08-15 amendment, "a bounded template does not bind").
+#[allow(clippy::too_many_arguments)]
 fn read_bound_template(
     cx: &Cx,
     bound: &HashMap<String, Option<BoundTemplate>>,
+    shadow: &TemplateShadow,
     ret: &PType,
     native: &[ContractTy],
     file: usize,
     off: u32,
 ) -> Option<Vec<ContractArm>> {
-    let binding = |name: &str| bound.get(&name.to_ascii_lowercase())?.as_ref();
+    let binding = |name: &str| {
+        let key = name.to_ascii_lowercase();
+        if shadow.bound(&key).is_some() {
+            return None;
+        }
+        bound.get(&key)?.as_ref()
+    };
     let (ty, site) = match &ret.kind {
         // `@return T`, and — since issue #361 rewrote it to this very node —
         // `@return template-type<Box<T>, Box, 'T'>` with it.
@@ -627,6 +644,26 @@ fn read_bound_template(
             let named = get_template_type(cx, &hop, &owner_fqn, want)?;
             (carg_contract_ty(named.arg)?, named.site)
         }
+        // `@return key-of<T>` / `value-of<T>` (ADR-0089 over ADR-0032's 2026-09-14
+        // amendment): the operator projected out of the argument's proven array.
+        PKind::Generic { base, args } if args.len() == 1 => {
+            let base_lc = base.to_ascii_lowercase();
+            let keys = match base_lc.as_str() {
+                "key-of" => true,
+                "value-of" => false,
+                _ => return None,
+            };
+            let PKind::Unsupported(name) = &args[0].ty.kind else { return None };
+            let shape = derived_operand_shape(cx, bound, shadow, name, !keys, file, off)?;
+            let projected = if keys {
+                steins_contract::project_key_of(&shape)
+            } else {
+                steins_contract::project_value_of(&shape)
+            };
+            // A proven value carries no class names written anywhere, so there is
+            // no site to resolve them in; the declaration's own stands in.
+            (projected, None)
+        }
         // Every other `@return` — a class, a scalar, a union mentioning `T`, a
         // shape — is not this read. The argument-blind floor already says whatever
         // there is to say about it.
@@ -642,6 +679,50 @@ fn read_bound_template(
     let resolve =
         |n: &str| cx.resolve_pclass(rfile, roff, n).trim_start_matches('\\').to_ascii_lowercase();
     refine_declared_arms(native, flatten_arms(ty), &resolve)
+}
+
+/// The sealed shape a `key-of<T>` / `value-of<T>` return projects out of, when `T`
+/// is bound at this call to a **proven array** (ADR-0032's 2026-09-14 amendment).
+///
+/// Three gates, each a decline to the floor:
+///
+/// - `T` bound, uncontested, to a proven value — a type carry (`@extends Box<array>`)
+///   states a lower bound on nothing and an upper bound on everything, so it is not
+///   an operand a projection may enumerate;
+/// - that value is a non-empty array — `key-of<array{}>` is `never`, which is true
+///   and also a return type no floor should hand to narrowing on a proof this thin;
+/// - where `T` declares a bound, the value provably inhabits it (`Yes`, not
+///   `Maybe`). A value outside its own bound is a call the author's contract does
+///   not describe, and nothing about its return is claimed.
+///
+/// Why reading the value is not narrower than true: `T` at this call is instantiated
+/// to the argument's type, and a proven array's type is its sealed shape. Every
+/// wider instantiation the bound admits is also a valid reading, but the declaration
+/// promises `key-of<T>` for *each* of them, so the narrowest one is a promise too —
+/// the same one a hand-written `@return 'a'|'b'` would make.
+fn derived_operand_shape(
+    cx: &Cx,
+    bound: &HashMap<String, Option<BoundTemplate>>,
+    shadow: &TemplateShadow,
+    name: &str,
+    values: bool,
+    file: usize,
+    off: u32,
+) -> Option<ContractTy> {
+    let key = name.to_ascii_lowercase();
+    let BoundTemplate { arg: CArg::Val(cv), .. } = bound.get(&key)?.as_ref()? else {
+        return None;
+    };
+    let CVal::Array(entries) = cv else { return None };
+    if entries.is_empty() {
+        return None;
+    }
+    if let Some(upper) = shadow.bound(&key)
+        && accepts(cx, file, off, upper, cv) != Certainty::Yes
+    {
+        return None;
+    }
+    proven_array_shape(entries, values)
 }
 
 /// The declared-return contract arms of a resolved method/static target (ADR-0075
