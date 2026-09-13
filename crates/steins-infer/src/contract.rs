@@ -333,6 +333,19 @@ impl TemplateShadow {
         self.names.contains(name)
     }
 
+    /// The declared bound Steins reads for `name` (already lowercased), if any.
+    pub(crate) fn bound(&self, name: &str) -> Option<&PType> {
+        self.bounds.get(name)
+    }
+
+    /// The same names with every bound dropped, so the shadow leaves a bounded
+    /// template as an opaque node naming it rather than as its bound — the view the
+    /// call-site binder needs to see where a bounded name was written (see
+    /// [`Cx::bindable_envelopes_of`]). Never the view a check reads.
+    pub(crate) fn without_bounds(&self) -> Self {
+        Self { names: self.names.clone(), bounds: HashMap::new() }
+    }
+
     /// Fold another docblock's declarations in — the class-level stage extended by
     /// a member's own `@template` names. A member redeclaring a class-level name
     /// wins, bound and all, which matches PHP shadowing.
@@ -673,6 +686,16 @@ pub(crate) fn neutralize_templates(ty: &mut PType, shadow: &TemplateShadow) {
 /// The context-free half of [`Cx::envelopes_of`], and since issue #374 its only
 /// caller: every consumer now has a declaration context to read the docblock in.
 pub(crate) fn parse_envelopes(docblock: Option<&str>) -> Option<Envelopes> {
+    parse_envelopes_under(docblock, &|shadow| shadow)
+}
+
+/// [`parse_envelopes`] with the declaration's own `@template` shadow passed through
+/// `view` before it is applied — the one seam [`Cx::bindable_envelopes_of`] needs
+/// to keep bounded names visible, without a second copy of the tag walk.
+fn parse_envelopes_under(
+    docblock: Option<&str>,
+    view: &dyn Fn(TemplateShadow) -> TemplateShadow,
+) -> Option<Envelopes> {
     let text = docblock?;
     // A `@phpstan-`/`@psalm-` prefixed tag overrides the plain one for the same
     // target (PHPStan precedence; ADR-0029): a later prefixed tag wins, a plain
@@ -749,7 +772,7 @@ pub(crate) fn parse_envelopes(docblock: Option<&str>) -> Option<Envelopes> {
     // Shadow this declaration's own `@template` names (issue #5); a member-check
     // site additionally applies the enclosing class-like's class-level templates
     // (idempotent second stage).
-    env.shadow_templates(&template_names_of(Some(text)));
+    env.shadow_templates(&view(template_names_of(Some(text))));
     Some(env)
 }
 
@@ -810,6 +833,24 @@ impl<'a> Cx<'a> {
     /// [`Cx::find_ctor`] to report the file that declared it (issue #374).
     pub(crate) fn envelopes_of(&self, docblock: Option<&str>, file: usize, off: u32) -> Option<Envelopes> {
         let mut env = parse_envelopes(docblock)?;
+        env.resolve_template_types(self, file, off);
+        Some(env)
+    }
+
+    /// [`Self::envelopes_of`] with this declaration's own **bounded** `@template`
+    /// names left as opaque nodes naming them, instead of rewritten to their bounds
+    /// (issue #293's substitution). The call-site template binder's view: a bound
+    /// erases the spelling the binder matches on, so `@param T $items` under `@template
+    /// T of array` would otherwise leave nothing to bind. Every bound stays in the
+    /// shadow [`template_names_of`] returns, which is where the reader that consumes
+    /// such a binding checks it — this view is never judged against directly.
+    pub(crate) fn bindable_envelopes_of(
+        &self,
+        docblock: Option<&str>,
+        file: usize,
+        off: u32,
+    ) -> Option<Envelopes> {
+        let mut env = parse_envelopes_under(docblock, &|shadow| shadow.without_bounds())?;
         env.resolve_template_types(self, file, off);
         Some(env)
     }
@@ -1903,14 +1944,57 @@ fn const_operand_shape(cx: &Cx, cfile: usize, coff: u32, ty: &PType) -> Option<C
     let normalized = normalize_array(&items, cx.php_minor)?;
     let mut fields = Vec::with_capacity(normalized.len());
     for (k, v) in normalized {
-        let key = match k {
-            NormKey::Int(i) => steins_contract::CKey::Int(i),
-            NormKey::Str(s) => steins_contract::CKey::Str(s),
-        };
-        fields.push(steins_contract::CField { key, optional: false, ty: literal_contract(&v)? });
+        fields.push((k, literal_contract(&v)?));
     }
+    Some(sealed_shape(fields))
+}
+
+/// The sealed [`ContractTy::Shape`] of an array whose every entry is known — the
+/// one construction both operand resolvers feeding `project_key_of` /
+/// `project_value_of` share: [`const_operand_shape`] over a constant's literal, and
+/// [`proven_array_shape`] over an argument's proven value.
+fn sealed_shape(entries: Vec<(NormKey, ContractTy)>) -> ContractTy {
+    let fields: Vec<steins_contract::CField> = entries
+        .into_iter()
+        .map(|(k, ty)| {
+            let key = match k {
+                NormKey::Int(i) => steins_contract::CKey::Int(i),
+                NormKey::Str(s) => steins_contract::CKey::Str(s),
+            };
+            steins_contract::CField { key, optional: false, ty }
+        })
+        .collect();
     let non_empty = !fields.is_empty();
-    Some(ContractTy::Shape { list: false, fields, sealed: true, non_empty, unsealed: None })
+    ContractTy::Shape { list: false, fields, sealed: true, non_empty, unsealed: None }
+}
+
+/// The sealed shape a **proven** array value denotes, for a `key-of` / `value-of`
+/// operand bound at a call site (ADR-0032's 2026-09-14 amendment). A proven
+/// [`CVal::Array`] is the whole array — every key it has is listed and no other
+/// can exist — which is exactly what sealing states.
+///
+/// `values` says whether the entries' value types are read at all. `key-of`
+/// projects the keys alone, so an entry whose value the contract lane cannot state
+/// (an object, a resource) is a field of unknown type and costs nothing; `value-of`
+/// needs every one, and a single unstatable value declines the whole operand
+/// rather than projecting a partial union. A nested proven array reads as its own
+/// sealed shape.
+pub(crate) fn proven_array_shape(entries: &[(NormKey, CVal)], values: bool) -> Option<ContractTy> {
+    let mut fields = Vec::with_capacity(entries.len());
+    for (k, v) in entries {
+        let ty = match v {
+            CVal::Scalar(s) => literal_contract(s),
+            CVal::Array(inner) => proven_array_shape(inner, values),
+            CVal::Object(..) | CVal::Resource => None,
+        };
+        let ty = match ty {
+            Some(ty) => ty,
+            None if !values => ContractTy::Opaque,
+            None => return None,
+        };
+        fields.push((k.clone(), ty));
+    }
+    Some(sealed_shape(fields))
 }
 
 /// The flags an `int-mask<…>` / `int-mask-of<…>` operand names, class constants
