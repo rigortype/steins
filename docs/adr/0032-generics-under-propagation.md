@@ -658,3 +658,62 @@ after the `$this` seed, exactly as every other allocation this walk mints.
 
 **Status: PENDING ratification.** Designed autonomously under the owner's
 standing delegation, recorded ahead of the implementation.
+
+## Amendment (2026-09-14): `key-of<T>` / `value-of<T>` project a call-bound template's proven array, and a bounded name binds for that read alone
+
+The issue #363 amendment reads `@return T` and `@return template-type<T, …>`
+off a call-site binding. It stops at the derived operators of ADR-0089:
+`@template T of array<array-key, mixed>`, `@param T $items`, `@return
+key-of<T>` read the bound's projection, `array-key`, at every call — the
+conformance case `phpdoc_advanced_fallback_key_of_template`, and its
+`value-of` mirror. This amendment extends the read to that shape.
+
+**The read.** A `@return key-of<T>` or `value-of<T>` whose operand is one of
+the declaration's own templates projects the operator out of `T`'s binding
+when that binding is a **proven, non-empty array** (`CVal::Array`). The array
+becomes the sealed shape it denotes — a proven array lists every key it has —
+and the shared `project_key_of` / `project_value_of` answer, exactly as they
+do for a `key-of<Foo::MAP>` operand. The result enters through the same
+`refine_declared_arms` a hand-written `@return 'debug'|'verbose'` does, so it
+is `Asserted` and indistinguishable from that spelling. Everything else
+declines to the argument-blind floor: a type carry, an empty array (`never`
+is true, and too thin a proof to hand to narrowing), a `value-of` over an
+entry whose value the contract lane cannot state, and every binding the #363
+rule already contests.
+
+**A bounded template binds now, and only this read consumes it.** The
+shadow's substitution of a vocabulary bound (issue #293) erased the spelling
+the binder matches, so the binder reads the envelopes in a view that keeps a
+bounded name as an opaque node. A bounded binding is read only here, and
+only when the value **provably inhabits the bound** (`accepts` answers
+`Yes`); a value outside its own bound is a call the declaration does not
+describe, and nothing is read off it. At `@return T` and `template-type<T, …>`
+a bounded binding still declines, so the previous amendment's "a bounded
+template does not bind" holds verbatim for those two reads and `@return T`
+under `@template T of int` still reads `int`. Extending the bounded read to
+them is a separate decision with its own measurement.
+
+**Why this is not narrower than true.** `T` at a call is instantiated to the
+argument's type, and a proven array's type is its sealed shape. A wider
+instantiation the bound admits is also a valid reading, but the declaration
+promises `key-of<T>` for each of them, the narrowest included. This is the
+instantiation PHPStan infers, and it is the promise a hand-written literal
+union makes.
+
+**The conformance line stays unenforced by this read.** The `E?` line,
+`acceptsInt(firstKey([...]))` under `strict_types=1`, reports nothing — and
+nothing is exactly what a hand-written `@return 'debug'|'verbose'` reports
+there, for the reason the #363 amendment gives: an `Asserted` return fact
+premises no `type.argument-mismatch`. Enforcing it is the body summary's
+job — the `foreach` that returns the first key, proven over the argument's
+literal — which is the road ADR-0086 §2 opened for `template-type`. The dump
+surface and the contract store are this read's consumers; both `// V` lines
+stay silent.
+
+**ADR-0048 obligations.** Unchanged from the #363 amendment: the read is a
+pure function of the resolved arguments, the callee's docblock and the
+project index; nothing is seeded into any scope; nothing depends on order
+across scopes or files.
+
+**Status: PENDING ratification.** Designed autonomously under the owner's
+standing delegation, recorded with the implementation.
