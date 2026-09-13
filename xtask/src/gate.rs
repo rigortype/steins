@@ -742,7 +742,18 @@ const PHPDOC_EXPECTED: &[(&str, usize)] = &[
     // is legacy PHP that does not type its parameters — and it is the soundness
     // signal too, since a wrong producer row would have lit up the well-typed
     // OSS packages first.
-    ("symfony/console", 2),
+    // 2 → 4 (+2), 2026-09-14, with `int-mask`/`int-mask-of` becoming a relation.
+    // Both are `testInvalidModes`, and both wrap the call in
+    // `expectException(\InvalidArgumentException::class)`:
+    // `InputArgumentTest.php:51` passes `-1` to `@param
+    // int-mask-of<InputArgument::*>|null $mode` (flags 1, 2, 4), and
+    // `InputOptionTest.php:114` passes the string `'-1'` to `@param
+    // int-mask-of<InputOption::*>|null $mode` (flags 1, 2, 4, 8, 16). Neither
+    // value is any combination of the class's constants, and `'-1'` is not an
+    // int at all, so both are TRUE. The two constant sets are complete — every
+    // class constant in both classes is an int literal and neither class has a
+    // parent — which is what the wildcard resolver requires before it reads one.
+    ("symfony/console", 4),
     // 0 → 15 (+15) with ADR-0043 stage 4. Every finding is a deliberate
     // negative-test call site (`expectException(\LogicException::class)` /
     // `\PhpParser\...`) passing a wrong-typed argument to a class-typed `@param`:
