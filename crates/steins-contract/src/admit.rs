@@ -865,7 +865,7 @@ mod shape_fact_tests {
 
     #[test]
     fn opaque_is_the_floor() {
-        assert_eq!(judge("int-mask<1, 2>", &int_pair()), Certainty::Maybe);
+        assert_eq!(judge("properties-of<Foo>", &int_pair()), Certainty::Maybe);
     }
 
     /// See [`ne_gate`]'s deviation note (ADR reads `No` where this is `Maybe`).
