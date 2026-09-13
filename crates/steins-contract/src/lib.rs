@@ -999,7 +999,7 @@ const INT_MASK_ENUMERATION_LIMIT: usize = 128;
 /// | Combinations | Contract |
 /// | --- | --- |
 /// | contiguous (`int-mask<1, 2>` = `0..3`) | `int<min, max>` |
-/// | over [`INT_MASK_ENUMERATION_LIMIT`] | `int<0, f₁\|f₂\|…>`, or `int` when a flag is negative |
+/// | over 128 (`INT_MASK_ENUMERATION_LIMIT`) | `int<0, f₁\|f₂\|…>`, or `int` when a flag is negative |
 /// | otherwise | the literal union, ascending |
 ///
 /// The over-limit rung is the one place this answers wider than PHPStan: its
