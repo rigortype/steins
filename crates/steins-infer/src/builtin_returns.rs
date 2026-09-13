@@ -5,13 +5,14 @@
 
 use std::collections::{HashMap, HashSet};
 
-use steins_contract::{ContractTy, normalize};
+use steins_contract::{ContractTy, ResourceState, normalize};
 use steins_domain::{Base, Certainty, Fact, Refinement, ShapeFact, Key as VKey, Val};
-use steins_syntax::ArgValue;
+use steins_syntax::{ArgValue, StmtKind};
 
 use crate::cx::Cx;
 use crate::dispatch::BuiltinCallee;
 use crate::env::{ContractArm, Known, Store, Stratum, array_literal_fact, singleton_fact};
+use crate::existence::global_function_callee;
 use crate::refine::{flatten_arms, refine_declared_arms, seed_shape_fact};
 use crate::walk::value_stratum;
 use crate::fold::Folder;
@@ -214,6 +215,47 @@ pub(crate) const CATALOG_FLOOR: &str = "declared in the builtin catalog, unverif
 /// keeps the fact out of every finding by construction. The absence family never
 /// comes here at all — existence is a boot-surface fact, and this table answers only
 /// about return types.
+/// Whether `var`'s contract lane says it holds a **resource and nothing else**
+/// (ADR-0056 §8) — the single condition under which the argument families may
+/// read that lane.
+///
+/// Three requirements, each ruling out a specific way of being wrong:
+///
+/// * **exactly one arm.** `resource|false` straight out of `fopen()` is not a
+///   proven resource until the `=== false` guard kills that arm.
+/// * **that arm is [`ContractTy::Resource`].** Not a supertype, not an `Opaque`
+///   that might contain one. Any state: a closed handle is still a resource to
+///   every native parameter (`fclose($h); strlen($h)` is the same `TypeError`,
+///   probed at 8.5.10).
+/// * **`Verified`.** ADR-0052 §3 keeps the contract lane away from the proof
+///   layer — a lane arm reaching `Asserted` by any route, including a
+///   `@return resource` docblock, does not qualify.
+///
+/// [`fn_return_arms`]: crate::fn_return_arms
+pub(crate) fn store_holds_resource(store: &Store, var: &str) -> bool {
+    proven_resource(store, var).is_some()
+}
+
+/// Whether `var` holds a resource **proven closed** (ADR-0056 §8.8): the
+/// [`store_holds_resource`] lane, in [`ResourceState::Closed`]. Only
+/// [`resource_closed_by_call`] puts a lane in that state — a docblock's
+/// `closed-resource` is `Asserted` and never reaches here.
+pub(crate) fn store_holds_closed_resource(store: &Store, var: &str) -> bool {
+    matches!(proven_resource(store, var), Some((ResourceState::Closed, _)))
+}
+
+/// The one `Verified` resource arm [`store_holds_resource`] asks for, as its
+/// state and `fclose_closes` bit.
+fn proven_resource(store: &Store, var: &str) -> Option<(ResourceState, bool)> {
+    match store.contract_arms(var) {
+        Some([ContractArm {
+            ty: ContractTy::Resource { state, fclose_closes },
+            stratum: Stratum::Verified,
+        }]) => Some((*state, *fclose_closes)),
+        _ => None,
+    }
+}
+
 /// The **resource-return arms** of a builtin call (ADR-0056 §8): `resource` plus,
 /// where the stub declares one, the `false` failure arm — both `Verified`.
 ///
@@ -226,29 +268,11 @@ pub(crate) const CATALOG_FLOOR: &str = "declared in the builtin catalog, unverif
 /// (`curl_init` → `CurlHandle|false`) declares one and is refused; a genuine
 /// resource producer declares none because the language has no syntax for it.
 ///
+/// The resource arm's state is [`ResourceState::Any`] — a fresh handle is open,
+/// but "open" is never a proof (ADR-0056 §8.8) — and its `fclose_closes` bit is
+/// [`FCLOSE_CLOSES_PRODUCERS`]'s answer for the name.
+///
 /// The project-shadowing check comes first, as for the floor.
-/// Whether `var`'s contract lane says it holds a **resource and nothing else**
-/// (ADR-0056 §8) — the single condition under which the argument families may
-/// read that lane.
-///
-/// Three requirements, each ruling out a specific way of being wrong:
-///
-/// * **exactly one arm.** `resource|false` straight out of `fopen()` is not a
-///   proven resource until the `=== false` guard kills that arm.
-/// * **that arm is [`ContractTy::Resource`].** Not a supertype, not an `Opaque`
-///   that might contain one.
-/// * **`Verified`.** ADR-0052 §3 keeps the contract lane away from the proof
-///   layer — a lane arm reaching `Asserted` by any route, including a
-///   `@return resource` docblock, does not qualify.
-///
-/// [`fn_return_arms`]: crate::fn_return_arms
-pub(crate) fn store_holds_resource(store: &Store, var: &str) -> bool {
-    matches!(
-        store.contract_arms(var),
-        Some([ContractArm { ty: steins_contract::ContractTy::Resource, stratum: Stratum::Verified }])
-    )
-}
-
 pub(crate) fn builtin_resource_arms(
     cx: &Cx,
     folder: &mut dyn Folder,
@@ -258,17 +282,102 @@ pub(crate) fn builtin_resource_arms(
         return None;
     }
     let may_be_false = folder.builtin_resource_return(name)?;
+    let fclose_closes =
+        FCLOSE_CLOSES_PRODUCERS.iter().any(|p| p.eq_ignore_ascii_case(name));
     let mut arms = vec![ContractArm {
-        ty: steins_contract::ContractTy::Resource,
+        ty: ContractTy::Resource { state: ResourceState::Any, fclose_closes },
         stratum: Stratum::Verified,
     }];
     if may_be_false {
-        arms.push(ContractArm {
-            ty: steins_contract::ContractTy::LitBool(false),
-            stratum: Stratum::Verified,
-        });
+        arms.push(ContractArm { ty: ContractTy::LitBool(false), stratum: Stratum::Verified });
     }
     Some(arms)
+}
+
+/// The resource producers whose handle `fclose()` (and `gzclose()`) **closes**
+/// whenever it returns (ADR-0056 §8.8), each probed at 8.5.10 by `gettype()`
+/// reading `"resource (closed)"` after the call.
+///
+/// An allowlist, because the counterexample is a producer row like any other:
+/// a directory handle from `opendir()` carries the stream flag that makes both
+/// calls warn, return `false` and leave it **open**. `pg_socket()` is left out
+/// for want of a probe, not for a known answer. The producers whose handle the
+/// two calls reject outright (`proc_open`, the `stream_context_*` and
+/// `stream_filter_*` rows) are out too: the call throws, so nothing after it is
+/// reached, and a row that could only ever be vacuous would only be noise.
+const FCLOSE_CLOSES_PRODUCERS: &[&str] = &[
+    "fopen",
+    "tmpfile",
+    "popen",
+    "fsockopen",
+    "pfsockopen",
+    "stream_socket_server",
+    "stream_socket_client",
+    "stream_socket_accept",
+    "gzopen",
+    "bzopen",
+    "socket_export_stream",
+];
+
+/// The variable a closing call **proves closed** when it returns (ADR-0056 §8.8),
+/// and the lane it leaves behind — or `None`.
+///
+/// Read off `stmt`'s pre-call store and applied after the statement, by the
+/// ordering [`stmt_out_param_seeds`] uses: a bare call statement, or an
+/// assignment's right-hand side whose target is not the handle itself
+/// (`$h = fclose($h)` rebinds `$h` to a `bool`, and the rebind is the last word).
+///
+/// A return is the whole premise, so every argument that the call rejects is
+/// free: the call throws and nothing after it runs. What remains is which
+/// handles a *normal* return leaves closed, probed at 8.5.10:
+///
+/// * `closedir`, `pclose`, `proc_close` close every handle they return from —
+///   anything else, an already-closed handle included, is a `TypeError`. (`pclose`
+///   closes a directory handle too.)
+/// * `fclose`, `gzclose` return `false` over a directory handle and leave it
+///   open, so they close only a handle whose producer [`FCLOSE_CLOSES_PRODUCERS`]
+///   vouched for.
+///
+/// The premises are the argument family's: a one-arm `Verified` resource lane
+/// ([`store_holds_resource`] — a `resource|false` lane is left alone), a plain
+/// local variable as the single positional argument, the **global** builtin
+/// ([`global_function_callee`]), and an unpoisoned scope.
+///
+/// Nothing here says anything about the handle's other names. `$b = $h;
+/// fclose($b);` closes `$b`'s lane and leaves `$h` in the unknown state it was
+/// in — silent, never wrong, since "unknown" convicts nothing.
+///
+/// [`stmt_out_param_seeds`]: crate::out_params::stmt_out_param_seeds
+pub(crate) fn resource_closed_by_call(
+    cx: &Cx,
+    poisoned: bool,
+    stmt: &StmtKind,
+    store: &Store,
+) -> Option<(String, Vec<ContractArm>)> {
+    let (call, rebound) = match stmt {
+        StmtKind::Call(call) => (call, None),
+        StmtKind::Assign { var, call: Some(call), .. } => (call, Some(var.as_str())),
+        _ => return None,
+    };
+    if poisoned || !call.positional_only {
+        return None;
+    }
+    let callee = global_function_callee(cx, call)?.to_ascii_lowercase();
+    let [arg] = call.args.as_slice() else { return None };
+    let ArgValue::Var(var) = &arg.value else { return None };
+    if Some(var.as_str()) == rebound {
+        return None;
+    }
+    let (_, fclose_closes) = proven_resource(store, var)?;
+    let closes = match callee.as_str() {
+        "closedir" | "pclose" | "proc_close" => true,
+        "fclose" | "gzclose" => fclose_closes,
+        _ => false,
+    };
+    closes.then(|| {
+        let ty = ContractTy::Resource { state: ResourceState::Closed, fclose_closes };
+        (var.clone(), vec![ContractArm { ty, stratum: Stratum::Verified }])
+    })
 }
 
 pub(crate) fn builtin_return_floor(cx: &Cx, name: &str) -> Option<Vec<ContractArm>> {

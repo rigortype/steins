@@ -11,7 +11,9 @@
 
 use steins_domain::{Base, Certainty, IntRange, Key, PhpStr, StrPreds, Val, CAP};
 
-use crate::{is_array_key_ty, shape_is_list, CallableObl, CField, CKey, ContractTy, MixedCut};
+use crate::{
+    is_array_key_ty, shape_is_list, CallableObl, CField, CKey, ContractTy, MixedCut, ResourceState,
+};
 
 /// Spell a summarized contract-arm list as a terminal-safe phpdoc type, or `None`
 /// when no faithful scalar spelling exists; matches
@@ -67,7 +69,9 @@ pub fn spell_arms(arms: &[ContractTy]) -> Option<String> {
     let mut class_members: Vec<String> = Vec::new();
     // Resource leaf (ADR-0056 §8.4): only reachable via the contract-arm surface
     // (no `Val` is a resource); lets a resource dump as `resource`, not `unknown`.
-    let mut has_resource = false;
+    // `Some(state)` while every resource arm agrees on one state (ADR-0056 §8.8);
+    // arms that disagree spell as the plain kind.
+    let mut resource_state: Option<ResourceState> = None;
     for arm in arms {
         match arm {
             ContractTy::Base(Base::Int) => has_int = true,
@@ -86,7 +90,12 @@ pub fn spell_arms(arms: &[ContractTy]) -> Option<String> {
             ContractTy::IntIn(r) => int_ranges.push(int_range_keyword(*r)),
             ContractTy::LitInt(i) => int_lits.push(*i),
             ContractTy::LitFloat(f) => float_lits.push(*f),
-            ContractTy::Resource => has_resource = true,
+            ContractTy::Resource { state, .. } => {
+                resource_state = match resource_state {
+                    Some(seen) if seen != *state => Some(ResourceState::Any),
+                    _ => Some(*state),
+                };
+            }
             ContractTy::Class(name) => class_members.push(name.clone()),
             // PHPStan's own spelling for the case type (issue #429), the same one
             // [`spell_nested`] writes.
@@ -135,8 +144,8 @@ pub fn spell_arms(arms: &[ContractTy]) -> Option<String> {
     }
     members.extend(array_members);
     // Last: PHP's own type list doesn't include resource.
-    if has_resource {
-        members.push("resource".to_owned());
+    if let Some(state) = resource_state {
+        members.push(resource_keyword(state).to_owned());
     }
 
     if members.is_empty() { None } else { Some(members.join("|")) }
@@ -288,6 +297,16 @@ fn spell_callable(obl: CallableObl) -> &'static str {
     }
 }
 
+/// The phpdoc spelling of a resource state (ADR-0056 §8.8): the inverse of
+/// `lower_identifier`'s three resource rows.
+fn resource_keyword(state: ResourceState) -> &'static str {
+    match state {
+        ResourceState::Any => "resource",
+        ResourceState::Open => "open-resource",
+        ResourceState::Closed => "closed-resource",
+    }
+}
+
 /// [`spell_nested`] for tests: what an intersection/union arm reaches
 /// (issue #238's round-trip property).
 #[cfg(test)]
@@ -312,8 +331,8 @@ fn spell_nested(ty: &ContractTy) -> String {
         // source casing is a caller's concern, not this module's.
         ContractTy::EnumCase { enum_fqn, case } => format!("{enum_fqn}::{case}"),
         ContractTy::ObjectAny => "object".to_owned(),
-        // One spelling for all three forms: open/closed is not modeled.
-        ContractTy::Resource => "resource".to_owned(),
+        // The state's own spelling; `fclose_closes` has none (ADR-0056 §8.8).
+        ContractTy::Resource { state, .. } => resource_keyword(*state).to_owned(),
         ContractTy::CallableTy { obl, .. } => spell_callable(*obl).to_owned(),
         ContractTy::ArrayAny { .. }
         | ContractTy::ListOf { .. }

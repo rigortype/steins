@@ -103,7 +103,7 @@ fn arm_rt_kinds(arm: &ContractTy) -> Option<&'static [RtKind]> {
         // An enum case is an object at runtime — `gettype(Suit::Hearts)` is
         // `"object"`, and `is_object` is the only predicate that separates it.
         C::Class(_) | C::EnumCase { .. } | C::ObjectAny => &[Object],
-        C::Resource => &[Resource],
+        C::Resource { .. } => &[Resource],
         // `iterable` is `array|Traversable`; `callable` is a callable-string, a
         // `[obj, 'm']`/`['C', 'm']` pair-array, a Closure or an `__invoke`able.
         C::IterableOf { .. } => &[Array, Object],

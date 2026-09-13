@@ -333,3 +333,211 @@ fn an_object_handed_to_a_resource_parameter_stays_silent() {
                f(new \\stdClass());\n";
     assert!(any_mismatch(src, Engine::typeless()).is_empty());
 }
+
+// §8.8 — handle state: a closing call's return proves CLOSED; nothing proves open.
+
+/// A strict-types file declaring `f` with `@param {spelling}`, then `body`.
+fn with_state_param(spelling: &str, body: &str) -> String {
+    format!(
+        "<?php\ndeclare(strict_types=1);\n\
+         /** @param {spelling} $v */\n\
+         function f($v): void {{}}\n\
+         {body}"
+    )
+}
+
+/// A guarded fresh stream handle in `$h`.
+const OPEN_H: &str = "$h = fopen('php://memory', 'r');\nif ($h === false) { return; }\n";
+
+#[test]
+fn a_closed_handle_is_not_an_open_resource() {
+    // The conformance case: `fclose()` returned, so the handle is closed, and
+    // `open-resource` is exactly the set a closed handle is not in.
+    let src = with_state_param("open-resource", &format!("{OPEN_H}fclose($h);\nf($h);\n"));
+    let out = phpdoc_mismatches(&src, Engine::typeless());
+    assert_eq!(out.len(), 1, "a proven-closed handle must convict; got {out:?}");
+    assert!(out[0].contains("closed resource"), "the message must say why: {}", out[0]);
+}
+
+#[test]
+fn the_assert_spelling_of_the_guard_convicts_the_same_way() {
+    // The conformance file's own shape: `\assert()` discharges `false`, and an
+    // assignment that keeps its result is still a call that returned.
+    let src = with_state_param(
+        "open-resource",
+        "$h = \\fopen('php://memory', 'r');\n\\assert($h !== false);\n$ok = \\fclose($h);\nf($h);\n",
+    );
+    assert_eq!(phpdoc_mismatches(&src, Engine::typeless()).len(), 1);
+}
+
+#[test]
+fn a_fresh_handle_is_never_convicted_on_its_state() {
+    // "Open" is never proven, so neither state spelling may refuse a fresh handle:
+    // `open-resource` because it IS open, `closed-resource` because nothing here
+    // can know that no alias closed it.
+    for spelling in ["resource", "open-resource", "closed-resource"] {
+        let src = with_state_param(spelling, &format!("{OPEN_H}f($h);\n"));
+        assert!(
+            any_mismatch(&src, Engine::typeless()).is_empty(),
+            "`@param {spelling}` must stay silent on an unknown-state handle",
+        );
+    }
+}
+
+#[test]
+fn a_closed_handle_is_still_a_resource_and_a_closed_resource() {
+    // `gettype()` says `resource (closed)`: the kind survives the close.
+    for spelling in ["resource", "closed-resource", "mixed", "non-empty-mixed"] {
+        let src = with_state_param(spelling, &format!("{OPEN_H}fclose($h);\nf($h);\n"));
+        assert!(
+            any_mismatch(&src, Engine::typeless()).is_empty(),
+            "`@param {spelling}` accepts a closed handle",
+        );
+    }
+}
+
+#[test]
+fn a_closed_handle_still_convicts_every_scalar_native_parameter() {
+    // Probed at 8.5.10: `string`/`int`/`bool` parameters `TypeError` on a closed
+    // handle exactly as on an open one — the proof layer's lane still reads it.
+    for param in ["string", "int", "bool"] {
+        let src = format!(
+            "<?php\ndeclare(strict_types=1);\nfunction f({param} $v): void {{}}\n\
+             {OPEN_H}fclose($h);\nf($h);\n"
+        );
+        let out = mismatches(&src, Engine::typeless());
+        assert_eq!(out.len(), 1, "`{param}` must still reject a closed handle; got {out:?}");
+    }
+}
+
+#[test]
+fn a_branch_that_may_not_have_closed_the_handle_forgets_the_state() {
+    // The join rule: closed on one path, unknown on the other, is unknown.
+    let one_side = with_state_param(
+        "open-resource",
+        &format!("{OPEN_H}if (random_int(0, 1) === 1) {{ fclose($h); }}\nf($h);\n"),
+    );
+    assert!(any_mismatch(&one_side, Engine::typeless()).is_empty());
+    // Closed on every path stays closed.
+    let both_sides = with_state_param(
+        "open-resource",
+        &format!("{OPEN_H}if (random_int(0, 1) === 1) {{ fclose($h); }} else {{ fclose($h); }}\nf($h);\n"),
+    );
+    assert_eq!(phpdoc_mismatches(&both_sides, Engine::typeless()).len(), 1);
+}
+
+#[test]
+fn a_loop_that_may_not_run_forgets_the_state() {
+    let src = with_state_param(
+        "open-resource",
+        &format!("{OPEN_H}foreach ([1, 2] as $i) {{ if ($i === 2) {{ fclose($h); }} }}\nf($h);\n"),
+    );
+    assert!(any_mismatch(&src, Engine::typeless()).is_empty());
+    let src = with_state_param(
+        "open-resource",
+        &format!("{OPEN_H}while (random_int(0, 1) === 1) {{ fclose($h); break; }}\nf($h);\n"),
+    );
+    assert!(any_mismatch(&src, Engine::typeless()).is_empty());
+}
+
+#[test]
+fn reassignment_and_by_ref_passing_kill_the_proof() {
+    let reopened = with_state_param(
+        "open-resource",
+        &format!("{OPEN_H}fclose($h);\n{OPEN_H}f($h);\n"),
+    );
+    assert!(any_mismatch(&reopened, Engine::typeless()).is_empty());
+    let by_ref = format!(
+        "<?php\ndeclare(strict_types=1);\n\
+         /** @param open-resource $v */\nfunction f($v): void {{}}\n\
+         function g(mixed &$r): void {{}}\n\
+         {OPEN_H}fclose($h);\ng($h);\nf($h);\n"
+    );
+    assert!(any_mismatch(&by_ref, Engine::typeless()).is_empty());
+    // `$h = fclose($h)`: the rebind to the call's result is the last word.
+    let rebound = with_state_param(
+        "open-resource|bool",
+        &format!("{OPEN_H}$h = fclose($h);\nf($h);\n"),
+    );
+    assert!(any_mismatch(&rebound, Engine::typeless()).is_empty());
+}
+
+#[test]
+fn closing_an_alias_says_nothing_about_the_original_name() {
+    // `$b = $h; fclose($b);` closes the one handle both names hold, but only `$b`'s
+    // lane learns it. `$h` stays unknown — silent, which is the safe direction:
+    // unknown never convicts `open-resource` and never lets `closed-resource` say No.
+    let src = with_state_param(
+        "open-resource",
+        &format!("{OPEN_H}$b = $h;\nfclose($b);\nf($h);\n"),
+    );
+    assert!(any_mismatch(&src, Engine::typeless()).is_empty());
+    // A callee that closes its argument is the same story one call away.
+    let src = format!(
+        "<?php\ndeclare(strict_types=1);\n\
+         /** @param open-resource $v */\nfunction f($v): void {{}}\n\
+         function shut(mixed $r): void {{ if (is_resource($r)) {{ fclose($r); }} }}\n\
+         {OPEN_H}shut($h);\nf($h);\n"
+    );
+    assert!(any_mismatch(&src, Engine::typeless()).is_empty());
+}
+
+#[test]
+fn fclose_does_not_close_a_directory_handle() {
+    // Probed at 8.5.10: `fclose()`/`gzclose()` over an `opendir()` handle warn,
+    // return `false` and leave it OPEN. `closedir()` closes it.
+    let dir = "$h = opendir('.');\nif ($h === false) { return; }\n";
+    for closer in ["fclose", "gzclose"] {
+        let src = with_state_param("open-resource", &format!("{dir}{closer}($h);\nf($h);\n"));
+        assert!(
+            any_mismatch(&src, Engine::typeless()).is_empty(),
+            "`{closer}` may leave a directory handle open",
+        );
+    }
+    let src = with_state_param("open-resource", &format!("{dir}closedir($h);\nf($h);\n"));
+    assert_eq!(phpdoc_mismatches(&src, Engine::typeless()).len(), 1);
+}
+
+#[test]
+fn the_other_closing_calls_close_what_they_return_from() {
+    let cases = [
+        ("$h = popen('true', 'r');\nif ($h === false) { return; }\n", "pclose"),
+        ("$h = proc_open('true', [], $pipes);\nif ($h === false) { return; }\n", "proc_close"),
+        (OPEN_H, "gzclose"),
+    ];
+    for (open, closer) in cases {
+        let src = with_state_param("open-resource", &format!("{open}{closer}($h);\nf($h);\n"));
+        assert_eq!(
+            phpdoc_mismatches(&src, Engine::typeless()).len(),
+            1,
+            "`{closer}` closes the handle it returns from",
+        );
+    }
+}
+
+#[test]
+fn nothing_closes_a_lane_that_is_not_a_proven_resource() {
+    // `resource|false` is left alone: `fclose(false)` throws, but the lane is not
+    // the one-arm resource lane the rule reads, so it states nothing.
+    let unguarded = with_state_param(
+        "open-resource|false",
+        "$h = fopen('php://memory', 'r');\nfclose($h);\nf($h);\n",
+    );
+    assert!(any_mismatch(&unguarded, Engine::typeless()).is_empty());
+    // A docblock's `closed-resource` is `Asserted`, never evidence of state.
+    let declared = with_state_param(
+        "open-resource",
+        "/** @param closed-resource $c */\nfunction g($c): void { f($c); }\n",
+    );
+    assert!(any_mismatch(&declared, Engine::typeless()).is_empty());
+}
+
+#[test]
+fn a_project_fclose_is_not_the_closing_builtin() {
+    let src = "<?php\nnamespace App;\n\
+               /** @param open-resource $v */\nfunction f($v): void {}\n\
+               function fclose(mixed $h): void {}\n\
+               $h = \\fopen('php://memory', 'r');\nif ($h === false) { return; }\n\
+               fclose($h);\nf($h);\n";
+    assert!(any_mismatch(src, Engine::typeless()).is_empty());
+}
