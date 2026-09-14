@@ -470,8 +470,9 @@ fn default_checkout() -> Result<PathBuf, String> {
 }
 
 /// The checkout's `HEAD` — the mining pin recorded in the TOML and the generated file.
-/// Read-only: `git rev-parse`, nothing else.
-fn git_head(root: &Path) -> Result<String, String> {
+/// Read-only: `git rev-parse`, nothing else. Shared with `mine-resource-params`,
+/// which pins a php-src checkout the same way.
+pub(crate) fn git_head(root: &Path) -> Result<String, String> {
     let out = Command::new("git")
         .args(["-C", &root.display().to_string(), "rev-parse", "HEAD"])
         .output()
