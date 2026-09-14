@@ -623,7 +623,7 @@ fn git_in(root: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
 fn mentions_resource(ty: &str) -> bool {
     ty.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '\\'))
         .filter(|tok| !tok.is_empty())
-        .any(|tok| matches!(steins_contract::lower_identifier(tok), ContractTy::Resource))
+        .any(|tok| matches!(steins_contract::lower_identifier(tok), ContractTy::Resource { .. }))
 }
 
 /// The class names in the engine's own rendering of a declared return type, in
