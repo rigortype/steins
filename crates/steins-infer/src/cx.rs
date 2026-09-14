@@ -1459,6 +1459,46 @@ impl<'a> Cx<'a> {
         }
     }
 
+    /// Build the resource-**position** flavour of a `type.argument-mismatch`
+    /// diagnostic (ADR-0097 §2.5): a proven non-resource handed to a builtin
+    /// position the pinned stub declares `@param resource`. Same id and shape as
+    /// [`Self::diagnostic`]; the tail names PHP's own error and omits the
+    /// coercion mode, because the engine raises it in both — probed at 8.5.10
+    /// with no `declare(strict_types=1)`, `fwrite('x', …)`, `fwrite(null, …)`,
+    /// `fwrite(new stdClass, …)`, `fwrite([], …)` and `fclose(1)` are all
+    /// `TypeError: … must be of type resource, T given`, and the same four under
+    /// `strict_types=1` (the transcripts are in `resource_params.toml`).
+    pub(crate) fn resource_param_diagnostic(
+        &self,
+        offset: u32,
+        value: &ArgValue,
+        provenance: Option<&str>,
+        callee: &str,
+        param_name: &str,
+    ) -> Diagnostic {
+        let pos = self.tree().position(offset);
+        let tail = "proven TypeError (must be of type resource, in either mode)";
+        let message = match provenance {
+            Some(p) => format!(
+                "argument {} ({p}) to {callee}() cannot become resource ${param_name} — {tail}",
+                value.render(),
+            ),
+            None => format!(
+                "argument {} to {callee}() cannot become resource ${param_name} — {tail}",
+                value.render(),
+            ),
+        };
+        Diagnostic {
+            id: ID,
+            path: self.path().to_owned(),
+            line: pos.line,
+            column: pos.column,
+            message,
+            facet: None,
+            fix: None,
+        }
+    }
+
     /// Build a `type.return-mismatch` diagnostic. `display` is the owning
     /// function/method name (`f`, `Foo::bar`); `mode` is governed by the owning
     /// file's `declare(strict_types=1)` — the file this `Cx` points at.
