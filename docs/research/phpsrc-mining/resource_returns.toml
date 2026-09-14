@@ -55,6 +55,15 @@
 # connection and says so; it carries stub + reflection evidence only, and its
 # `confidence` records the difference.
 #
+# `kind` is the handle's KIND (ADR-0097 §2.1), the second thing the consumer
+# seeds: the heap entry a producer call allocates carries it, and the closing
+# table is keyed by it (`fclose` closes a `stream` and warns over a `dir`). The
+# spelling is `get_debug_type()`'s where PHP has one (`stream`, `process`,
+# `stream-context`, `stream-filter`, `persistent-stream`) and Steins' own `dir`
+# where it does not: PHP reports an `opendir()` handle as a `stream` and then
+# refuses to `fclose()` it, so the distinction the closers need is one the
+# runtime keeps private. `pg_socket` is `stream` on the stub's word alone.
+#
 # ─────────────────── What is deliberately NOT here ───────────────────
 # * `stream_socket_pair` — returns `array` of two resources. The arms are an
 #   array, not a resource, and the element type has no carrier (a `ShapeFact`
@@ -76,6 +85,7 @@ functionmap_crosscheck = "phpstan-src resources/functionMap.php: 110 resource-re
 [[function]]
 name = "fopen"
 arms = "resource|false"
+kind = "stream"
 stub = "ext/standard/basic_functions.stub.php"
 confidence = "verified-probe"
 probe = "get_debug_type(fopen('php://memory','r')) === 'resource (stream)'"
@@ -83,6 +93,7 @@ probe = "get_debug_type(fopen('php://memory','r')) === 'resource (stream)'"
 [[function]]
 name = "tmpfile"
 arms = "resource|false"
+kind = "stream"
 stub = "ext/standard/basic_functions.stub.php"
 confidence = "verified-probe"
 probe = "get_debug_type(tmpfile()) === 'resource (stream)'"
@@ -90,6 +101,7 @@ probe = "get_debug_type(tmpfile()) === 'resource (stream)'"
 [[function]]
 name = "opendir"
 arms = "resource|false"
+kind = "dir"
 stub = "ext/standard/basic_functions.stub.php"
 confidence = "verified-probe"
 probe = "get_debug_type(opendir(sys_get_temp_dir())) === 'resource (stream)'"
@@ -97,6 +109,7 @@ probe = "get_debug_type(opendir(sys_get_temp_dir())) === 'resource (stream)'"
 [[function]]
 name = "popen"
 arms = "resource|false"
+kind = "stream"
 stub = "ext/standard/basic_functions.stub.php"
 confidence = "verified-probe"
 probe = "get_debug_type(popen('true','r')) === 'resource (stream)'"
@@ -104,6 +117,7 @@ probe = "get_debug_type(popen('true','r')) === 'resource (stream)'"
 [[function]]
 name = "proc_open"
 arms = "resource|false"
+kind = "process"
 stub = "ext/standard/basic_functions.stub.php"
 confidence = "verified-probe"
 probe = "get_debug_type(proc_open('true', [], $pipes)) === 'resource (process)'"
@@ -111,6 +125,7 @@ probe = "get_debug_type(proc_open('true', [], $pipes)) === 'resource (process)'"
 [[function]]
 name = "fsockopen"
 arms = "resource|false"
+kind = "stream"
 stub = "ext/standard/basic_functions.stub.php"
 confidence = "verified-probe"
 probe = "against a local stream_socket_server('tcp://127.0.0.1:0'): get_debug_type(fsockopen($host, $port)) === 'resource (stream)'"
@@ -118,6 +133,7 @@ probe = "against a local stream_socket_server('tcp://127.0.0.1:0'): get_debug_ty
 [[function]]
 name = "pfsockopen"
 arms = "resource|false"
+kind = "persistent-stream"
 stub = "ext/standard/basic_functions.stub.php"
 confidence = "verified-probe"
 probe = "same local server: get_debug_type(pfsockopen($host, $port)) === 'resource (persistent stream)' — a persistent stream is still a resource, and `is_resource` says so"
@@ -125,6 +141,7 @@ probe = "same local server: get_debug_type(pfsockopen($host, $port)) === 'resour
 [[function]]
 name = "stream_socket_server"
 arms = "resource|false"
+kind = "stream"
 stub = "ext/standard/basic_functions.stub.php"
 confidence = "verified-probe"
 probe = "get_debug_type(stream_socket_server('tcp://127.0.0.1:0')) === 'resource (stream)'"
@@ -132,6 +149,7 @@ probe = "get_debug_type(stream_socket_server('tcp://127.0.0.1:0')) === 'resource
 [[function]]
 name = "stream_socket_client"
 arms = "resource|false"
+kind = "stream"
 stub = "ext/standard/basic_functions.stub.php"
 confidence = "verified-probe"
 probe = "against a local server: get_debug_type(stream_socket_client('tcp://'.$addr)) === 'resource (stream)'"
@@ -139,6 +157,7 @@ probe = "against a local server: get_debug_type(stream_socket_client('tcp://'.$a
 [[function]]
 name = "stream_socket_accept"
 arms = "resource|false"
+kind = "stream"
 stub = "ext/standard/basic_functions.stub.php"
 confidence = "verified-probe"
 probe = "against a local server with one pending client: get_debug_type(stream_socket_accept($srv, 1)) === 'resource (stream)'"
@@ -146,6 +165,7 @@ probe = "against a local server with one pending client: get_debug_type(stream_s
 [[function]]
 name = "stream_filter_append"
 arms = "resource|false"
+kind = "stream-filter"
 stub = "ext/standard/basic_functions.stub.php"
 confidence = "verified-probe"
 probe = "get_debug_type(stream_filter_append(fopen('php://memory','w'), 'string.toupper', STREAM_FILTER_WRITE)) === 'resource (closed)' — the probe drops the underlying stream, so the filter comes back already closed. A CLOSED resource is still a resource (gettype 'resource'), which is exactly why the leaf does not model the open/closed state."
@@ -153,6 +173,7 @@ probe = "get_debug_type(stream_filter_append(fopen('php://memory','w'), 'string.
 [[function]]
 name = "stream_filter_prepend"
 arms = "resource|false"
+kind = "stream-filter"
 stub = "ext/standard/basic_functions.stub.php"
 confidence = "verified-probe"
 probe = "same construction as stream_filter_append: 'resource (closed)'"
@@ -160,6 +181,7 @@ probe = "same construction as stream_filter_append: 'resource (closed)'"
 [[function]]
 name = "stream_context_create"
 arms = "resource"
+kind = "stream-context"
 stub = "ext/standard/basic_functions.stub.php"
 confidence = "verified-probe"
 probe = "get_debug_type(stream_context_create([])) === 'resource (stream-context)' — no false arm in the stub, and none observed"
@@ -167,6 +189,7 @@ probe = "get_debug_type(stream_context_create([])) === 'resource (stream-context
 [[function]]
 name = "stream_context_get_default"
 arms = "resource"
+kind = "stream-context"
 stub = "ext/standard/basic_functions.stub.php"
 confidence = "verified-probe"
 probe = "get_debug_type(stream_context_get_default()) === 'resource (stream-context)'"
@@ -174,6 +197,7 @@ probe = "get_debug_type(stream_context_get_default()) === 'resource (stream-cont
 [[function]]
 name = "stream_context_set_default"
 arms = "resource"
+kind = "stream-context"
 stub = "ext/standard/basic_functions.stub.php"
 confidence = "verified-probe"
 probe = "get_debug_type(stream_context_set_default(['http' => []])) === 'resource (stream-context)'"
@@ -181,6 +205,7 @@ probe = "get_debug_type(stream_context_set_default(['http' => []])) === 'resourc
 [[function]]
 name = "gzopen"
 arms = "resource|false"
+kind = "stream"
 stub = "ext/zlib/zlib.stub.php"
 confidence = "verified-probe"
 probe = "get_debug_type(gzopen(sys_get_temp_dir().'/steins_probe.gz','w')) === 'resource (stream)'"
@@ -188,6 +213,7 @@ probe = "get_debug_type(gzopen(sys_get_temp_dir().'/steins_probe.gz','w')) === '
 [[function]]
 name = "bzopen"
 arms = "resource|false"
+kind = "stream"
 stub = "ext/bz2/bz2.stub.php"
 confidence = "verified-probe"
 probe = "get_debug_type(bzopen(sys_get_temp_dir().'/steins_probe.bz2','w')) === 'resource (stream)'"
@@ -195,6 +221,7 @@ probe = "get_debug_type(bzopen(sys_get_temp_dir().'/steins_probe.bz2','w')) === 
 [[function]]
 name = "socket_export_stream"
 arms = "resource|false"
+kind = "stream"
 stub = "ext/sockets/sockets.stub.php"
 confidence = "verified-probe"
 probe = "get_debug_type(socket_export_stream(socket_create(AF_INET, SOCK_STREAM, SOL_TCP))) === 'resource (stream)' — note the ARGUMENT is a Socket object since 8.0 while the RETURN is still a resource, which is the migration's asymmetry in one call"
@@ -202,6 +229,7 @@ probe = "get_debug_type(socket_export_stream(socket_create(AF_INET, SOCK_STREAM,
 [[function]]
 name = "pg_socket"
 arms = "resource|false"
+kind = "stream"
 stub = "ext/pgsql/pgsql.stub.php"
 confidence = "stub-and-reflection"
 probe = "NOT behaviorally probed: needs a live PostgreSQL connection. Evidence is the stub `@return resource|false` at the pin plus ReflectionFunction('pg_socket')->getReturnType() === null on 8.5.9 with ext-pgsql loaded. Its sibling pg_connect DID migrate (PgSql\\Connection), so this row is exactly the case condition 2 exists to keep honest — and condition 2 passes it."

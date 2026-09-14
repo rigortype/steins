@@ -375,9 +375,63 @@ pub fn return_fact(name: &str) -> Option<&'static str> {
         .map(|i| return_facts_generated::RETURN_FACTS[i].1)
 }
 
-/// Whether the builtin `name` returns a legacy PHP **resource**, and whether
-/// its return carries a `false` failure arm (ADR-0056 §8). `Some(true)` is
-/// `resource|false`, `Some(false)` is a bare `resource`, `None` otherwise.
+/// The **kind** of a legacy PHP resource handle (ADR-0097 §2.1): the one
+/// refinement beside its state. Spelled as `get_debug_type()` spells it where
+/// PHP has a spelling, and as Steins' own `dir` where PHP reports a directory
+/// handle as a `stream` and then refuses to `fclose()` it — the distinction the
+/// closing table needs is one the runtime keeps private. Never reaches a
+/// docblock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ResourceKind {
+    /// `resource (stream)` — `fopen`, `tmpfile`, `popen`, the socket producers,
+    /// `gzopen`, `bzopen`, `socket_export_stream`.
+    Stream,
+    /// `resource (persistent stream)` — `pfsockopen`. `fclose()` closes the
+    /// handle (probed at 8.5.10: `gettype()` reads `resource (closed)` after it)
+    /// while the underlying connection lives on for the next `pfsockopen()`.
+    PersistentStream,
+    /// An `opendir()` handle: a `stream` to `get_debug_type()`, but one
+    /// `fclose()`, `gzclose()` and `bzclose()` warn over and leave open.
+    Dir,
+    /// `resource (process)` — `proc_open`.
+    Process,
+    /// `resource (stream-context)` — the `stream_context_*` producers.
+    StreamContext,
+    /// `resource (stream filter)` — `stream_filter_append`/`_prepend`.
+    StreamFilter,
+}
+
+impl ResourceKind {
+    /// The `kind` spelling `resource_returns.toml` uses, for a diagnostic to name.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            ResourceKind::Stream => "stream",
+            ResourceKind::PersistentStream => "persistent-stream",
+            ResourceKind::Dir => "dir",
+            ResourceKind::Process => "process",
+            ResourceKind::StreamContext => "stream-context",
+            ResourceKind::StreamFilter => "stream-filter",
+        }
+    }
+}
+
+/// One resource-producer row (ADR-0056 §8, ADR-0097 §2.1): what
+/// [`resource_return`] answers for a builtin the pinned stubs say returns a
+/// resource.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResourceReturn {
+    /// Whether the stub's `@return` carries a `false` failure arm
+    /// (`resource|false`) beside the resource.
+    pub may_be_false: bool,
+    /// The kind of handle the producer returns.
+    pub kind: ResourceKind,
+}
+
+/// The resource-producer row of the builtin `name` (ADR-0056 §8): whether its
+/// return carries a `false` failure arm, and the kind of handle it returns
+/// (ADR-0097 §2.1). `None` for a name the pinned stubs do not say returns a
+/// resource — every migrated producer included.
 ///
 /// `resource` is the one type PHP cannot spell in a declaration, so the
 /// reflected envelope anchoring every other return fact is structurally
@@ -389,12 +443,15 @@ pub fn return_fact(name: &str) -> Option<&'static str> {
 ///
 /// [`PINNED_PHP`]: crate::PINNED_PHP
 #[must_use]
-pub fn resource_return(name: &str) -> Option<bool> {
+pub fn resource_return(name: &str) -> Option<ResourceReturn> {
     let key = name.trim_start_matches('\\').to_ascii_lowercase();
     resource_returns_generated::RESOURCE_RETURNS
-        .binary_search_by(|(n, _)| (*n).cmp(key.as_str()))
+        .binary_search_by(|(n, _, _)| (*n).cmp(key.as_str()))
         .ok()
-        .map(|i| resource_returns_generated::RESOURCE_RETURNS[i].1)
+        .map(|i| {
+            let (_, may_be_false, kind) = resource_returns_generated::RESOURCE_RETURNS[i];
+            ResourceReturn { may_be_false, kind }
+        })
 }
 
 pub use resource_params_generated::ResourceParam;
@@ -788,12 +845,30 @@ mod tests {
     }
 
     #[test]
-    fn resource_returns_carry_the_stub_reading_and_nothing_else() {
-        assert_eq!(super::resource_return("fopen"), Some(true));
-        assert_eq!(super::resource_return("tmpfile"), Some(true));
-        assert_eq!(super::resource_return("stream_context_create"), Some(false));
-        assert_eq!(super::resource_return("stream_context_get_default"), Some(false));
-        assert_eq!(super::resource_return("stream_context_set_default"), Some(false));
+    fn resource_returns_carry_the_stub_reading_and_the_kind() {
+        use super::{ResourceKind, ResourceReturn};
+        let row = |may_be_false, kind| Some(ResourceReturn { may_be_false, kind });
+        assert_eq!(super::resource_return("fopen"), row(true, ResourceKind::Stream));
+        assert_eq!(super::resource_return("tmpfile"), row(true, ResourceKind::Stream));
+        assert_eq!(super::resource_return("opendir"), row(true, ResourceKind::Dir));
+        assert_eq!(super::resource_return("proc_open"), row(true, ResourceKind::Process));
+        assert_eq!(super::resource_return("pfsockopen"), row(true, ResourceKind::PersistentStream));
+        assert_eq!(
+            super::resource_return("stream_filter_append"),
+            row(true, ResourceKind::StreamFilter),
+        );
+        assert_eq!(
+            super::resource_return("stream_context_create"),
+            row(false, ResourceKind::StreamContext),
+        );
+        assert_eq!(
+            super::resource_return("stream_context_get_default"),
+            row(false, ResourceKind::StreamContext),
+        );
+        assert_eq!(
+            super::resource_return("stream_context_set_default"),
+            row(false, ResourceKind::StreamContext),
+        );
         for migrated in ["curl_init", "imagecreate", "finfo_open", "ldap_connect", "odbc_connect"] {
             assert_eq!(
                 super::resource_return(migrated),
@@ -803,8 +878,8 @@ mod tests {
         }
         assert_eq!(super::resource_return("stream_socket_pair"), None);
         assert_eq!(super::resource_return("get_resources"), None);
-        assert_eq!(super::resource_return("FOPEN"), Some(true));
-        assert_eq!(super::resource_return("\\fopen"), Some(true));
+        assert_eq!(super::resource_return("FOPEN"), row(true, ResourceKind::Stream));
+        assert_eq!(super::resource_return("\\fopen"), row(true, ResourceKind::Stream));
         let t = super::resource_returns_generated::RESOURCE_RETURNS;
         assert!(t.windows(2).all(|w| w[0].0 < w[1].0), "RESOURCE_RETURNS must be sorted by key");
         assert!(!t.is_empty(), "the table is the whole point; an empty one is a generation bug");

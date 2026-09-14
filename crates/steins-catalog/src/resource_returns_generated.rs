@@ -10,27 +10,30 @@
 // PHP minor equalling PINNED_PHP.
 //
 // Each row: (lowercased builtin name, whether the stub's `@return` carries
-// a `false` arm). Sorted by key for binary search. Source of record is the
-// TOML, which carries the per-row stub path and probe transcript.
+// a `false` arm, the kind of handle it returns — ADR-0097 §2.1). Sorted by
+// key for binary search. Source of record is the TOML, which carries the
+// per-row stub path and probe transcript.
 
-pub(crate) static RESOURCE_RETURNS: &[(&str, bool)] = &[
-    ("bzopen", true),
-    ("fopen", true),
-    ("fsockopen", true),
-    ("gzopen", true),
-    ("opendir", true),
-    ("pfsockopen", true),
-    ("pg_socket", true),
-    ("popen", true),
-    ("proc_open", true),
-    ("socket_export_stream", true),
-    ("stream_context_create", false),
-    ("stream_context_get_default", false),
-    ("stream_context_set_default", false),
-    ("stream_filter_append", true),
-    ("stream_filter_prepend", true),
-    ("stream_socket_accept", true),
-    ("stream_socket_client", true),
-    ("stream_socket_server", true),
-    ("tmpfile", true),
+use crate::ResourceKind;
+
+pub(crate) static RESOURCE_RETURNS: &[(&str, bool, ResourceKind)] = &[
+    ("bzopen", true, ResourceKind::Stream),
+    ("fopen", true, ResourceKind::Stream),
+    ("fsockopen", true, ResourceKind::Stream),
+    ("gzopen", true, ResourceKind::Stream),
+    ("opendir", true, ResourceKind::Dir),
+    ("pfsockopen", true, ResourceKind::PersistentStream),
+    ("pg_socket", true, ResourceKind::Stream),
+    ("popen", true, ResourceKind::Stream),
+    ("proc_open", true, ResourceKind::Process),
+    ("socket_export_stream", true, ResourceKind::Stream),
+    ("stream_context_create", false, ResourceKind::StreamContext),
+    ("stream_context_get_default", false, ResourceKind::StreamContext),
+    ("stream_context_set_default", false, ResourceKind::StreamContext),
+    ("stream_filter_append", true, ResourceKind::StreamFilter),
+    ("stream_filter_prepend", true, ResourceKind::StreamFilter),
+    ("stream_socket_accept", true, ResourceKind::Stream),
+    ("stream_socket_client", true, ResourceKind::Stream),
+    ("stream_socket_server", true, ResourceKind::Stream),
+    ("tmpfile", true, ResourceKind::Stream),
 ];
