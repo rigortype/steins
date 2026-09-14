@@ -1785,7 +1785,7 @@ fn unrepresentable_verdict(cty: &steins_contract::ContractTy, v: &CVal) -> Tri {
     use steins_contract::ContractTy as C;
     use steins_contract::MixedCut;
     match v {
-        CVal::Object(..) => match cty {
+        CVal::Object(class, _) => match cty {
             C::Mixed | C::ObjectAny => Tri::Yes,
             // Both cuts of `mixed` keep every object: not null, and every object
             // truthy since PHP 7 — the arm that keeps `f(new stdClass())` against
@@ -1794,14 +1794,27 @@ fn unrepresentable_verdict(cty: &steins_contract::ContractTy, v: &CVal) -> Tri {
             // An object may be `Traversable`, may have `__invoke` — none of it
             // provable from the class name alone.
             C::Opaque | C::IterableOf { .. } | C::CallableTy { .. } | C::StrOpaque => Tri::Maybe,
-            // `@param resource $ch` handed an object — ADR-0056 §8.5's named FP
-            // channel. An object genuinely is not a resource, so `No` would be
-            // true, but overwhelmingly this is a stale docblock from PHP 8's own
-            // migration (`curl_init()` returned a resource for twenty years, a
-            // `CurlHandle` now) on code that works. The other direction — a
-            // proven RESOURCE against a native class parameter — does convict
-            // (`resource_is_type_error`): there the value is proven, not the doc.
-            C::Resource { .. } => Tri::Maybe,
+            // `@param resource $ch` handed an object. ADR-0056 §8.5 refused this
+            // verdict outright to protect a real channel: PHP 8 has migrated a
+            // family of handles into objects per release and left a decade of
+            // `@param resource` on parameters that now receive a `CurlHandle` —
+            // rot the caller inherited, and convicting it would call the
+            // programmer a liar. ADR-0097 §2.6 makes the channel finite. The
+            // migrated table is the extension of "a class PHP migrated a
+            // resource into" — every class the pinned engine declares where
+            // functionMap still says `resource`, derived at `mine-function-map
+            // --migrated`, never hand-listed — and an object of one of those
+            // classes stays `Maybe`: the docblock is the suspect. An object of
+            // any other class is a genuine docblock violation: no migration ever
+            // produced a `stdClass`, and `No` here is the verdict every other
+            // analyzer on the conformance page reaches. The comparison is the
+            // whole FQN, so a project `App\CurlHandle` is not the migrated one.
+            // The other direction — a proven RESOURCE against a native class
+            // parameter — convicts regardless (`resource_is_type_error`): there
+            // the value is proven, not the doc.
+            C::Resource { .. } => {
+                if steins_catalog::is_migrated_resource_class(class) { Tri::Maybe } else { Tri::No }
+            }
             // Every other lowered form denotes scalars, null, or arrays, of which no
             // object is a member (pure set membership, no coercion — ADR-0030).
             _ => Tri::No,
