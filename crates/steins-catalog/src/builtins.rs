@@ -15,8 +15,8 @@
 
 use crate::{
     declared_method_returns_generated, declared_returns_generated, display_names_generated,
-    hierarchy_generated, param_facts_generated, resource_params_generated, resource_returns_generated,
-    return_facts_generated,
+    hierarchy_generated, migrated_resource_classes_generated, param_facts_generated,
+    resource_params_generated, resource_returns_generated, return_facts_generated,
 };
 
 /// The **builtin SPL/engine exception hierarchy** (ADR-0040): the parent of a
@@ -478,6 +478,32 @@ pub fn resource_param(name: &str, index: usize) -> Option<ResourceParam> {
         .map(|i| resource_params_generated::RESOURCE_PARAMS[i].2)
 }
 
+/// Whether `fqn` names a class PHP **migrated a resource into** (ADR-0097 §2.6):
+/// a class the pinned engine declares as the return of a function whose
+/// functionMap row still says `resource` — `CurlHandle`, `GdImage`,
+/// `LDAP\Connection`, `PgSql\Result`, `Socket`, `finfo`, ….
+///
+/// The set is the extension of "a class a `@param resource` may legitimately be
+/// handed": the docblock predates the migration and the value is what PHP 8
+/// returns now. The contract relation keeps `Maybe` for exactly these classes
+/// (ADR-0056 §8.5's channel, made finite) and answers `No` for every other
+/// object — `new \stdClass()` against `@param resource` is a genuine docblock
+/// violation. Derived by `cargo xtask mine-function-map --migrated` from the
+/// countersign's own disagreement, off the base functionMap so it is per class
+/// rather than per row; it grows with each migration and shrinks when PHPStan
+/// drops the PHP that returned the resource. Never hand-listed.
+///
+/// Case-insensitive, leading `\` stripped — the normalization `ContractTy::Class`
+/// applies — and the whole FQN compares, so a project `App\CurlHandle` is not
+/// `CurlHandle`.
+#[must_use]
+pub fn is_migrated_resource_class(fqn: &str) -> bool {
+    let key = fqn.trim_start_matches('\\').to_ascii_lowercase();
+    migrated_resource_classes_generated::MIGRATED_RESOURCE_CLASSES
+        .binary_search_by(|(n, _)| (*n).cmp(key.as_str()))
+        .is_ok()
+}
+
 /// The **declared return type** of a builtin `name` (ADR-0069, issues #73/#79):
 /// the canonical phpdoc spelling the builtin declares (`"string"`,
 /// `"string|false"`), or `None` when no row covers it — the bottom rung of the
@@ -918,6 +944,28 @@ mod tests {
         );
         assert!(t.iter().all(|(_, _, r)| r.kind.is_none_or(|k| ["stream", "dir", "process", "stream-context", "stream-filter"].contains(&k))));
         assert!(t.len() >= 90, "the table is the whole point; {} rows is a generation bug", t.len());
+    }
+
+    /// The migrated-class table (ADR-0097 §2.6) is the OTHER half of the resource
+    /// rows above: the very names `resource_return` refuses because the engine
+    /// declares a class are the names whose class this table holds. It compares
+    /// whole FQNs, so a project class that borrows a migrated name in its own
+    /// namespace is not the migrated one.
+    #[test]
+    fn the_migrated_class_table_names_php_8s_handle_classes_and_nothing_else() {
+        for class in ["CurlHandle", "curlhandle", "\\CurlHandle", "GdImage", "\\GdImage", "finfo", "LDAP\\Result", "\\ldap\\result", "PgSql\\Connection", "Socket", "XMLParser"] {
+            assert!(super::is_migrated_resource_class(class), "{class} replaced a resource on PHP 8");
+        }
+        for class in ["stdClass", "stdclass", "App\\CurlHandle", "Curl", "CurlHandle\\Sub", "SplFileObject", "mysqli", ""] {
+            assert!(!super::is_migrated_resource_class(class), "{class} never replaced a resource");
+        }
+        let t = super::migrated_resource_classes_generated::MIGRATED_RESOURCE_CLASSES;
+        assert!(t.windows(2).all(|w| w[0].0 < w[1].0), "MIGRATED_RESOURCE_CLASSES must be sorted by key");
+        assert!(!t.is_empty(), "the table is the whole point; an empty one is a generation bug");
+        for &(key, name) in t {
+            assert_eq!(key, name.to_ascii_lowercase(), "the key is the casing, lowercased");
+            assert!(!name.starts_with('\\'), "`{name}`: the engine spells no leading backslash");
+        }
     }
 
     /// Spellings treated as single-base envelopes when partitioning generated rows.
