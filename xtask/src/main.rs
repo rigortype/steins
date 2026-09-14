@@ -15,6 +15,8 @@
 //!                            mine the engines' constants and their minor ranges into the constants TOML
 //!   mine-function-map [DIR] [--functions] [--methods] [--php PATH]…
 //!                            mine phpstan-src's functionMap into the declared-return TOMLs
+//!   mine-function-map [DIR] --migrated [--php PATH]…
+//!                            derive the ADR-0097 §2.6 migrated-class table at declared_returns.toml's pin
 //!   mine-param-facts [--php PATH]… [--merge TOML]…
 //!                            union the engines' own arginfo into the parameter-facts TOML
 //!   mine-resource-params [--php-src DIR]
@@ -128,6 +130,22 @@ fn main() -> ExitCode {
         }
         Some("mine-function-map") => {
             let dir = args.get(1).filter(|a| !a.starts_with("--")).map(String::as_str);
+            // `--php PATH`, repeatable: the countersigning engines (issue #714).
+            // The top minor decides each row's bucket; the rest are vetoes.
+            let php: Vec<String> = args
+                .windows(2)
+                .filter(|w| w[0] == "--php")
+                .map(|w| w[1].clone())
+                .collect();
+            // `--migrated` writes the ADR-0097 §2.6 migrated-class table and
+            // nothing else: it reads functionMap at `declared_returns.toml`'s own
+            // pin, so the two declared-return TOMLs stay byte-identical.
+            if args.iter().any(|a| a == "--migrated") {
+                return match mine_function_map::run_migrated(dir, &php) {
+                    Ok(()) => ExitCode::SUCCESS,
+                    Err(e) => fail(&e),
+                };
+            }
             // Neither flag means both halves; either one alone narrows the run
             // (see `mine_function_map::Halves`).
             let functions = args.iter().any(|a| a == "--functions");
@@ -136,13 +154,6 @@ fn main() -> ExitCode {
                 functions: functions || !methods,
                 methods: methods || !functions,
             };
-            // `--php PATH`, repeatable: the countersigning engines (issue #714).
-            // The top minor decides each row's bucket; the rest are vetoes.
-            let php: Vec<String> = args
-                .windows(2)
-                .filter(|w| w[0] == "--php")
-                .map(|w| w[1].clone())
-                .collect();
             match mine_function_map::run(dir, halves, &php) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => fail(&e),
@@ -207,7 +218,7 @@ fn main() -> ExitCode {
         )),
         None => {
             eprintln!(
-                "usage: cargo xtask <artifact-bytes <DIR>… [--no-php] | corpus-sync [--update] | fp-gate | freq | gen-catalog | lean-check [--bless] | licenses | mine-constants [--php PATH]… | mine-function-map [DIR] [--functions] [--methods] [--php PATH]… | mine-param-facts [--php PATH]… [--merge TOML]… | mine-resource-params [--php-src DIR] | nsrt [DIR] | perf <DIR>… [--runs N] [--bless] [--no-php] | phpdoc-oracle [--check]>"
+                "usage: cargo xtask <artifact-bytes <DIR>… [--no-php] | corpus-sync [--update] | fp-gate | freq | gen-catalog | lean-check [--bless] | licenses | mine-constants [--php PATH]… | mine-function-map [DIR] [--functions] [--methods] [--migrated] [--php PATH]… | mine-param-facts [--php PATH]… [--merge TOML]… | mine-resource-params [--php-src DIR] | nsrt [DIR] | perf <DIR>… [--runs N] [--bless] [--no-php] | phpdoc-oracle [--check]>"
             );
             ExitCode::from(2)
         }
