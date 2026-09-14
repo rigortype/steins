@@ -146,8 +146,12 @@ pub(crate) fn escape_and_sweep_calls(
             escape_nested_args(args, named, store, &mut object_passed);
         }
         for (i, arg) in call.args.iter().enumerate() {
+            // An OBJECT argument escapes here; a heap resource in the same
+            // position takes the closer/keeper/escape verdict of the statement's
+            // `resource_call_effects` instead (ADR-0097 §2.4) — a nested position
+            // below escapes both kinds alike.
             if let ArgValue::Var(name) = &arg.value
-                && store.is_bound(name)
+                && store.is_object(name)
             {
                 store.mark_escaped(name);
                 object_passed = true;

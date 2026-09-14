@@ -121,7 +121,7 @@ use generics::{check_callable_arg, check_phpdoc_param};
 
 use cx::Cx;
 use dump::render_shape_fact;
-use env::{Known, Store};
+use env::{HandleState, Known, Store};
 use project::Index;
 use walk::{analyze_scope, in_dead};
 use walk_fleet::WalkFleet;
@@ -1560,8 +1560,9 @@ fn rendered_cval(v: &CVal) -> String {
     match v {
         CVal::Scalar(s) => s.render(),
         CVal::Object(class, _) => format!("new {}()", class.rsplit('\\').next().unwrap_or(class)),
-        CVal::Resource { closed: false } => "a resource".to_owned(),
-        CVal::Resource { closed: true } => "a closed resource".to_owned(),
+        CVal::Resource { state: HandleState::Open } => "an open resource".to_owned(),
+        CVal::Resource { state: HandleState::Closed } => "a closed resource".to_owned(),
+        CVal::Resource { state: HandleState::Unknown } => "a resource".to_owned(),
         CVal::Array(entries) => {
             // Rebuild an `ArgValue::Array` with explicit keys so the shared compact
             // renderer applies (it re-normalizes; explicit keys round-trip).

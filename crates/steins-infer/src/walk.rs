@@ -31,7 +31,9 @@ use crate::branch::{
     walk_match, walk_while_body,
 };
 use crate::contract::accepts;
-use crate::builtin_returns::resource_closed_by_call;
+use crate::builtin_returns::{
+    apply_resource_effects, escape_mentioned_resources, resource_call_effects,
+};
 use crate::cx::Cx;
 use crate::declared_receiver::check_phpdoc_undefined_method;
 use crate::descent::{
@@ -617,6 +619,9 @@ fn forget_construct_sets(
         store.clear();
     } else {
         for v in writes.iter().chain(reads) {
+            // A handle the construct names may have been closed inside it, and
+            // the entry outlives the name for its aliases (ADR-0097 §2.4).
+            store.escape_resource(v);
             env.remove(v);
             store.unbind(v);
         }
@@ -689,6 +694,10 @@ fn loop_fallthrough_forget(
         store.clear();
     } else {
         for v in writes {
+            // The handle a written name held may have been closed by the body
+            // through THAT name, and its entry outlives the name for every alias
+            // (ADR-0097 §2.4) — the resource half of the read names' sweep below.
+            store.escape_resource(v);
             env.remove(v);
             store.unbind(v);
         }
@@ -747,6 +756,9 @@ fn loop_entry_forget(
             store.sweep_object(v);
             continue;
         }
+        // Iteration 2 may see a handle iteration 1 closed through this name, and
+        // an alias outside `writes` still refers to the entry (ADR-0097 §2.4).
+        store.escape_resource(v);
         env.remove(v);
         store.unbind(v);
     }
@@ -901,9 +913,18 @@ pub(crate) fn walk_trace(
         // before the call, and step 4 is about to forget exactly that — so the
         // read has to happen while the entry env still holds it.
         let stmt_out_seeds = stmt_out_param_seeds(w, folder, &stmt.kind, env, store);
-        // The handle a closing call proves closed (ADR-0056 §8.8), read on the
-        // same pre-call store and applied beside the out-parameter seeds.
-        let stmt_closed_handle = resource_closed_by_call(cx, scope.poisoned, &stmt.kind, store);
+        // What this statement's calls do to the heap resources they are handed
+        // (ADR-0097 §2.4) — a close, a keeper, an escape — read on the same
+        // pre-call store and applied beside the out-parameter seeds, after the
+        // checks above have judged the arguments in the state they were passed in.
+        let stmt_resources = resource_call_effects(
+            cx,
+            folder,
+            scope.poisoned,
+            &checkable_calls(&stmt.kind),
+            Some(&stmt.invalidated),
+            store,
+        );
         // 1. Check + descend every statically-named call this statement carries.
         for call in checkable_calls(&stmt.kind) {
             match &call.receiver {
@@ -1350,6 +1371,8 @@ pub(crate) fn walk_trace(
             // The A-G8 invalidation table: barrier semantics, plus the base
             // binding's array shape carried across with the key promoted/removed.
             StmtKind::OffsetWrite { base, keys, value } => {
+                // A handle stored into an array escapes (ADR-0097 §2.4).
+                escape_mentioned_resources(value, store);
                 apply_offset_write(w, folder, base, keys, Some(value), env, store);
                 Flow::FellThrough
             }
@@ -1360,6 +1383,7 @@ pub(crate) fn walk_trace(
             // `$var[] = v` (issue #636): the same containment, with the landing
             // key computed rather than read from the source.
             StmtKind::OffsetAppend { base, value } => {
+                escape_mentioned_resources(value, store);
                 apply_offset_append(w, folder, base, value, env, store);
                 Flow::FellThrough
             }
@@ -1520,10 +1544,13 @@ pub(crate) fn walk_trace(
             }
             // Terminators: the trace stops; the remainder is unreachable.
             StmtKind::Return { value, .. } => {
-                // `return $o;` escapes the returned object (ADR-0036).
+                // `return $o;` escapes the returned object (ADR-0036), and a
+                // returned handle — named anywhere in the operand — escapes the
+                // same way (ADR-0097 §2.4).
                 if let ArgValue::Var(v) = value {
                     store.mark_escaped(v);
                 }
+                escape_mentioned_resources(value, store);
                 for v in &stmt.invalidated {
                     env.remove(&v.name);
                     store.unbind(&v.name);
@@ -1633,12 +1660,19 @@ pub(crate) fn walk_trace(
         }
 
         // 4. After the statement, invalidate any variable handed to a call — except
-        // one an assertion just narrowed (its post-call fact is known), and except
-        // one every occurrence of which is a proven by-value argument (ADR-0070).
+        // one an assertion just narrowed (its post-call fact is known), except
+        // one every occurrence of which is a proven by-value argument (ADR-0070),
+        // and except a handle every occurrence of which a keeper or a closing
+        // call received (ADR-0097 §2.4): a by-value builtin argument never rebinds
+        // the variable, so the resource lane survives and only the heap state
+        // moves (step 5).
         let (by_value, object_kept) =
             by_value_survivors(cx, scope.poisoned, &stmt.invalidated, env, store);
         for v in &stmt.invalidated {
-            if asserted.contains(&v.name) || by_value.contains(v.name.as_str()) {
+            if asserted.contains(&v.name)
+                || by_value.contains(v.name.as_str())
+                || stmt_resources.kept.contains(&v.name)
+            {
                 continue;
             }
             env.remove(&v.name);
@@ -1670,11 +1704,11 @@ pub(crate) fn walk_trace(
         // rung: the callee's stated write REPLACES the conservative drop rather
         // than racing it. Empty for every statement that carries no such call.
         apply_stmt_out_param_seeds(stmt_out_seeds, env, store);
-        // A handle the call closed keeps its resource lane, now in the closed
-        // state — the one state a return proves (ADR-0056 §8.8).
-        if let Some((var, arms)) = stmt_closed_handle {
-            store.contract.insert(var, arms);
-        }
+        // The heap resources' state transitions (ADR-0097 §2.4): a closing call's
+        // return proves `Closed`, an escape forgets. By allocation id, so a name
+        // step 4 dropped or the statement rebound still reaches the entry its
+        // aliases share.
+        apply_resource_effects(&stmt_resources, store);
 
         // Flush the pending trace annotation at the iteration's common exit —
         // the statement's own effect (step 2), its assert narrowings (step 3)

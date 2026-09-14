@@ -18,7 +18,8 @@ use crate::cx::Cx;
 use crate::env::{Known, Store, val_of};
 use crate::fold::Folder;
 use crate::contract_touches_class;
-use crate::builtin_returns::{store_holds_closed_resource, store_holds_resource};
+use crate::builtin_returns::proven_resource_state;
+use crate::env::HandleState;
 use crate::generics::{
     accepts_carried_ty, accepts_shape, carry_for_owner, check_arraylike, domain_key,
     template_variances,
@@ -69,13 +70,14 @@ pub(crate) enum CVal {
     Array(Vec<(NormKey, CVal)>),
     Object(String, Vec<GenericCarry>),
     /// A legacy PHP **resource** handle (ADR-0056 §8). No resource hierarchy to
-    /// name, so the kind is the fact — which is also why it needs no exactness flag
+    /// name, so the type is the fact — which is also why it needs no exactness flag
     /// where [`CVal::Object`] does. Being a resource is never a lower bound.
     ///
-    /// `closed` is the one state a proof reaches (ADR-0056 §8.8): `true` for a
-    /// handle a closing call returned from, `false` for "open or closed, unknown".
-    /// There is no proven-open handle — an alias or a callee may have closed it.
-    Resource { closed: bool },
+    /// `state` is read off the heap entry the variable refers to (ADR-0097
+    /// §2.3): `Open` for a fresh handle nothing has touched, `Closed` for one a
+    /// closing call returned from, `Unknown` where the handle escaped or the
+    /// binding carries no heap entry. Only `Open` and `Closed` decide anything.
+    Resource { state: HandleState },
 }
 
 /// One class-level generic parameterization an object carries: the FQN of the class
@@ -1224,8 +1226,8 @@ impl<'a> Cx<'a> {
                     // A `OneOf` fact is not one proven value → not a `CVal`.
                     let v = k.singleton()?;
                     self.resolve_cval(&v, env, store, poisoned, folder)
-                } else if store_holds_resource(store, name) {
-                    Some(CVal::Resource { closed: store_holds_closed_resource(store, name) })
+                } else if let Some(state) = proven_resource_state(store, name) {
+                    Some(CVal::Resource { state })
                 } else if store.is_exact(name) {
                     // Only an EXACT object becomes a `CVal::Object` (audit G1): the
                     // phpdoc-acceptance consumer draws a No-side `is_a` conclusion,
@@ -1825,16 +1827,19 @@ fn unrepresentable_verdict(cty: &steins_contract::ContractTy, v: &CVal) -> Tri {
         },
         // A resource (ADR-0056 §8). Exact almost everywhere — a leaf with no
         // hierarchy, so only two `Maybe`s and the object arm (FP channel) need care.
-        CVal::Resource { closed } => match cty {
+        CVal::Resource { state: proven } => match cty {
             C::Mixed => Tri::Yes,
-            // The state (ADR-0056 §8.8). `resource` takes every handle, open or
-            // closed (`gettype()` still says `resource (closed)`). Only a handle
-            // proven closed decides the other two; one in the unknown state stays
-            // `Maybe` against both, because "open" is never proven.
-            C::Resource { state, .. } => match (state, closed) {
-                (ResourceState::Any, _) | (ResourceState::Closed, true) => Tri::Yes,
-                (ResourceState::Open, true) => Tri::No,
-                (ResourceState::Open | ResourceState::Closed, false) => Tri::Maybe,
+            // The state (ADR-0097 §2.3). `resource` takes every handle, open or
+            // closed (`gettype()` still says `resource (closed)`). A proven
+            // state decides the other two spellings exactly — the two sets are
+            // disjoint — and the unknown state is `Maybe` against both.
+            C::Resource { state: declared } => match (declared, proven) {
+                (ResourceState::Any, _) => Tri::Yes,
+                (ResourceState::Open, HandleState::Open)
+                | (ResourceState::Closed, HandleState::Closed) => Tri::Yes,
+                (ResourceState::Open, HandleState::Closed)
+                | (ResourceState::Closed, HandleState::Open) => Tri::No,
+                (ResourceState::Open | ResourceState::Closed, HandleState::Unknown) => Tri::Maybe,
             },
             // Both cuts keep every resource: none is null, and every resource is
             // truthy — a CLOSED one included (`fclose($h); (bool) $h === true` at

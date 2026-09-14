@@ -9,7 +9,7 @@ use steins_domain::{Base, Certainty, Fact, Refinement, StrPreds, Val, php_is_num
 use steins_syntax::{ArgValue, CallExpr, CondExpr};
 
 use crate::cx::Cx;
-use crate::env::{Known, Store, Stratum, val_of};
+use crate::env::{HandleState, Known, Store, Stratum, val_of};
 use crate::existence::global_function_callee;
 use crate::refine::{
     add_str_preds, arms_refute, clear_null, exclude_member, leave_empty_domain, refine_fact,
@@ -60,6 +60,15 @@ pub(crate) enum TypePred {
     Callable,
     /// `is_iterable`
     Iterable,
+    /// `is_resource` (ADR-0097 §2.4). The one predicate whose true branch is
+    /// not decided by kind alone: a **closed** handle is still a resource to
+    /// `gettype()` and `false` to `is_resource()` (probed at 8.5.10), so a
+    /// resource arm is `Maybe` on both branches and what the guard proves goes
+    /// to the heap entry's state — `Open` where it holds, `Closed` where it
+    /// fails — through [`apply_type_narrowing`]. PHPStan drops the resource arm
+    /// on the false branch; that reading is unsound for a closed handle and is
+    /// not copied.
+    Resource,
 }
 
 /// A value's PHP runtime type class — what `gettype()` reports, the only thing
@@ -128,14 +137,16 @@ fn arm_rt_kinds(arm: &ContractTy) -> Option<&'static [RtKind]> {
 /// in neither set is undecidable for that predicate (`is_callable` on a string,
 /// array, or object; `is_iterable` on an object).
 ///
-/// Every predicate here rejects [`RtKind::Resource`]: PHP's `is_*` family answers
-/// `false` for a resource across the board, `is_scalar`/`is_callable`/
-/// `is_iterable` included (probed at 8.5.9). `is_resource` itself would answer
-/// `true` and is deliberately not a [`TypePred`] yet (ADR-0056 §8 deferral) —
-/// it needs the positive branch to bind a resource fact, a producer question.
+/// Every other predicate here rejects [`RtKind::Resource`]: PHP's `is_*` family
+/// answers `false` for a resource across the board, `is_scalar`/`is_callable`/
+/// `is_iterable` included (probed at 8.5.9). `is_resource` rejects every other
+/// kind and **accepts none outright** — a closed handle is of the resource kind
+/// and answers `false` (ADR-0097 §2.4) — so the resource kind sits in neither of
+/// its sets and a resource arm survives both branches.
 fn pred_kind_sets(pred: TypePred) -> (&'static [RtKind], &'static [RtKind]) {
     use RtKind::{Array, Bool, Float, Int, Null, Object, Resource, String as Str};
     match pred {
+        TypePred::Resource => (&[], &[Null, Bool, Int, Float, Str, Array, Object]),
         TypePred::Str => (&[Str], &[Null, Bool, Int, Float, Array, Object, Resource]),
         TypePred::Int => (&[Int], &[Null, Bool, Float, Str, Array, Object, Resource]),
         TypePred::Float => (&[Float], &[Null, Bool, Int, Str, Array, Object, Resource]),
@@ -334,6 +345,7 @@ pub(crate) fn type_predicate(cx: &Cx, call: &CallExpr) -> Option<TypePred> {
         ("is_numeric", TypePred::Numeric),
         ("is_callable", TypePred::Callable),
         ("is_iterable", TypePred::Iterable),
+        ("is_resource", TypePred::Resource),
     ];
     PREDS.iter().find(|(n, _)| callee.eq_ignore_ascii_case(n)).map(|(_, p)| *p)
 }
@@ -823,6 +835,26 @@ pub(crate) fn apply_type_narrowing(
                     leave_empty_domain(env, store, var);
                 } else {
                     refine_fact_for_pred(env, var, *pred, *positive);
+                }
+                if *pred == TypePred::Resource {
+                    // What `is_resource` decides is the handle's STATE (ADR-0097
+                    // §2.4): `true` only for an open one, `false` for a closed one
+                    // as much as for a non-resource. The heap entry the binding
+                    // refers to takes the branch's answer; a binding to an object
+                    // is refuted by the true branch and dropped with its bound.
+                    if store.is_object(var) {
+                        if *positive {
+                            store.refs.remove(var);
+                            store.members.remove(var);
+                        }
+                    } else {
+                        let state = if *positive { HandleState::Open } else { HandleState::Closed };
+                        store.set_resource_state(var, state);
+                    }
+                    if *positive {
+                        store.members.remove(var);
+                    }
+                    continue;
                 }
                 // A value the guard proved is not an object cannot still carry a
                 // heap binding or is-a bound; the declared-arm lane stays.
