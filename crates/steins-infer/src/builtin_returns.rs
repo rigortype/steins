@@ -330,8 +330,11 @@ pub(crate) fn builtin_resource_arms(
 /// A persistent stream (`pfsockopen`) is closed by `fclose`, `gzclose`,
 /// `bzclose` and `pclose` alike: the handle reads `resource (closed)` and
 /// `is_resource` says `false`, while the connection lives on for the next
-/// `pfsockopen()` to hand out under a new id. The `stream-context` and
-/// `stream-filter` kinds appear in no row: every closer throws on them.
+/// `pfsockopen()` to hand out under a new id. A `stream-filter` has one closer
+/// of its own, `stream_filter_remove` (probed at 8.5.10: `gettype()` reads
+/// `resource (closed)` after it, and the call throws on a stream, a context
+/// and an already-removed filter alike); the `stream-context` kind appears in
+/// no row, since every closer throws on it.
 const CLOSERS: &[(&str, &[ResourceKind])] = &[
     ("fclose", &[ResourceKind::Stream, ResourceKind::PersistentStream]),
     ("gzclose", &[ResourceKind::Stream, ResourceKind::PersistentStream]),
@@ -339,6 +342,7 @@ const CLOSERS: &[(&str, &[ResourceKind])] = &[
     ("pclose", &[ResourceKind::Stream, ResourceKind::PersistentStream, ResourceKind::Dir]),
     ("closedir", &[ResourceKind::Dir]),
     ("proc_close", &[ResourceKind::Process]),
+    ("stream_filter_remove", &[ResourceKind::StreamFilter]),
 ];
 
 /// What one **direct argument position** of a global builtin does to the heap

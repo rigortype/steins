@@ -687,6 +687,11 @@ fn the_other_closing_calls_close_what_they_return_from() {
         ("$h = pfsockopen('127.0.0.1', 1);\nif ($h === false) { return; }\n", "fclose"),
         (OPEN_H, "gzclose"),
         (OPEN_H, "bzclose"),
+        // A `stream filter` has one closer of its own (probed at 8.5.10).
+        (
+            "$h = stream_filter_append(fopen('php://memory', 'w'), 'string.toupper');\nif ($h === false) { return; }\n",
+            "stream_filter_remove",
+        ),
     ];
     for (open, closer) in cases {
         let src = with_state_param("open-resource", &format!("{open}{closer}($h);\nf($h);\n"));
