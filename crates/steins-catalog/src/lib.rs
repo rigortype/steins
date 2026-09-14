@@ -51,6 +51,11 @@ mod return_facts_generated;
 /// [`resource_return`].
 mod resource_returns_generated;
 
+/// **Resource-parameter** table (ADR-0097 §2.5), from
+/// `docs/research/phpsrc-mining/resource_params.toml` — the consumer twin of the
+/// table above. Consulted only by [`resource_param`].
+mod resource_params_generated;
+
 /// Builtin **per-parameter facts** (issue #382), from
 /// `docs/research/phpsrc-mining/param_facts.toml` — the engine's own arginfo,
 /// which is the independent source [`out_params`] and [`invocation_shape`] are
@@ -102,9 +107,10 @@ pub use labels::{
 mod builtins;
 pub use builtins::{
     ArgSource, ConstRow, ConstValue, FailureArms, FailureCause, Invocation, InvocationShape,
-    ParamFacts, builtin_class_display, builtin_class_supers, builtin_exception_parent,
-    builtin_throws, declared_method_return, declared_method_return_blocked,
-    declared_method_return_changed_at, declared_return, declared_return_changed_at,
-    engine_constant, engine_constant_count, failure_arms, hierarchy_entry_count,
-    invocation_shape, param_facts, param_facts_mined, resource_return, return_fact,
+    ParamFacts, ResourceParam, builtin_class_display, builtin_class_supers,
+    builtin_exception_parent, builtin_throws, declared_method_return,
+    declared_method_return_blocked, declared_method_return_changed_at, declared_return,
+    declared_return_changed_at, engine_constant, engine_constant_count, failure_arms,
+    hierarchy_entry_count, invocation_shape, param_facts, param_facts_mined, resource_param,
+    resource_return, return_fact,
 };
