@@ -101,13 +101,16 @@ pub struct CallableParamTy {
     pub by_ref: bool,
 }
 
-/// The handle state a [`ContractTy::Resource`] contract names (ADR-0056 §8.8).
+/// The handle state a [`ContractTy::Resource`] contract **names** (ADR-0056
+/// §8.8, ADR-0097 §2.2): the qualifier a docblock spelling carries, and nothing
+/// a proof reads.
 ///
-/// A resource's state moves one way only — open to closed, never back — so a
-/// `Closed` claim about a *value* is stable for as long as a variable holds it.
-/// `Open` is the opposite: an alias or a callee can close the handle behind the
-/// variable's back, so no proof ever produces it; it exists for the
-/// `open-resource` declaration alone.
+/// A resource's state moves one way only — open to closed, never back — and it
+/// is a fact about the *handle*, not about a variable: `$b = $h; fclose($b)`
+/// closes what `$h` holds. So the proven state lives where identity lives, on
+/// `steins-infer`'s heap (ADR-0097 §2.3), and this enum only says what a
+/// declaration asks for. Where two declared states differ the answer is
+/// `Maybe` ([`normalize::subsumes`]); the heap's state is what decides a `No`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ResourceState {
     /// `resource` — open or closed.
@@ -277,12 +280,15 @@ pub enum ContractTy {
     /// `resource` — a legacy PHP resource handle, the one type PHP itself
     /// **cannot spell** in a declaration (ADR-0056 §8). `open-resource`/
     /// `closed-resource` lower here too, differing only in [`ResourceState`]
-    /// (ADR-0056 §8.8): the *kind* is the leaf, the state a qualifier on it.
+    /// (ADR-0097 §2.2): the *type* is the leaf, the state a qualifier on it.
     ///
-    /// The state is a dataflow claim, not a set this crate can decide between:
-    /// [`normalize::subsumes`] answers `Maybe` wherever two states disagree, so
-    /// no lattice consumer convicts on it. The one conviction lives in
-    /// `steins-infer`, on a handle a closing call proved closed.
+    /// The qualifier is what a declaration **asks for**, never what a handle
+    /// **is**: a handle's state is a fact about an identity aliases share, so it
+    /// lives on `steins-infer`'s heap beside the object heap (ADR-0097 §2.3),
+    /// and a producer seeds this arm at [`ResourceState::Any`] with the state
+    /// on the heap entry. [`normalize::subsumes`] answers `Maybe` wherever two
+    /// declared states disagree, so no lattice consumer convicts on the
+    /// qualifier alone; the conviction reads the heap.
     ///
     /// [`admits_val`] answers a true `No` for every [`steins_domain::Val`]
     /// (probed at 8.5.9). The object case stays `Maybe`: PHP 8 migrated most
@@ -293,13 +299,6 @@ pub enum ContractTy {
         /// What the contract says about the handle's state — [`ResourceState::Any`]
         /// for `resource`.
         state: ResourceState,
-        /// Whether `fclose()`/`gzclose()` returning normally proves this handle
-        /// closed. Never set by lowering (every spelling says `false`): only
-        /// `steins-infer`'s resource rung sets it, for a producer whose streams
-        /// were probed to close. A directory handle is the counterexample — both
-        /// calls warn, return `false` and leave it open (probed at 8.5.10).
-        /// Spelled nowhere; `true` is the narrower set.
-        fclose_closes: bool,
     },
     /// `callable` and callable signatures: strings and arrays are `Maybe`
     /// (a string may name a function, a pair-array a method), other
@@ -344,11 +343,10 @@ pub enum ContractTy {
 }
 
 impl ContractTy {
-    /// The resource leaf a phpdoc spelling lowers to: `state`, and no `fclose`
-    /// knowledge (a docblock is never evidence of how a handle closes).
+    /// The resource leaf a phpdoc spelling lowers to, in the state it names.
     #[must_use]
     pub const fn resource(state: ResourceState) -> Self {
-        ContractTy::Resource { state, fclose_closes: false }
+        ContractTy::Resource { state }
     }
 
     /// Is this the `unset` pseudo-type — a member that carries a *spelling* but
@@ -1843,7 +1841,7 @@ mod known_unenforced_tests {
         for (name, state) in cases {
             assert_eq!(
                 lower_identifier(name),
-                ContractTy::Resource { state, fclose_closes: false },
+                ContractTy::Resource { state },
                 "{name} should lower to the resource leaf in its own state",
             );
         }
@@ -1856,13 +1854,13 @@ mod known_unenforced_tests {
         }
     }
 
-    /// The `fclose_closes` bit has no spelling, and resource arms that disagree
-    /// on a state spell as the plain kind rather than as either state.
+    /// Resource arms that disagree on a state spell as the plain kind rather
+    /// than as either state.
     #[test]
     fn resource_arms_spell_their_state_only_when_they_agree() {
-        let proven_closed = ContractTy::Resource { state: ResourceState::Closed, fclose_closes: true };
+        let closed = ContractTy::resource(ResourceState::Closed);
         assert_eq!(
-            spell::spell_arms(std::slice::from_ref(&proven_closed)).as_deref(),
+            spell::spell_arms(std::slice::from_ref(&closed)).as_deref(),
             Some("closed-resource"),
         );
         let mixed = [ContractTy::resource(ResourceState::Closed), ContractTy::resource(ResourceState::Any)];
@@ -1871,9 +1869,9 @@ mod known_unenforced_tests {
         assert_eq!(spell::spell_arms(&with_false).as_deref(), Some("false|closed-resource"));
     }
 
-    /// The state never decides a `No` (ADR-0056 §8.8): `Any` covers every
-    /// state, a state covers itself, and every other pairing is `Maybe` — the
-    /// one conviction on state is `steins-infer`'s, on a proven-closed handle.
+    /// The declared state never decides a `No` (ADR-0097 §2.2): `Any` covers
+    /// every state, a state covers itself, and every other pairing is `Maybe` —
+    /// the conviction on state is `steins-infer`'s, off the heap.
     #[test]
     fn resource_state_subsumption_never_refuses() {
         use ResourceState::{Any, Closed, Open};
@@ -1889,10 +1887,6 @@ mod known_unenforced_tests {
                 "{a:?} over {b:?} is a dataflow question, not a set verdict",
             );
         }
-        // The bit only narrows: a covering arm without it covers one with it.
-        let fclosable = ContractTy::Resource { state: Any, fclose_closes: true };
-        assert_eq!(normalize::subsumes(&res(Any), &fclosable), Certainty::Yes);
-        assert_eq!(normalize::subsumes(&fclosable, &res(Any)), Certainty::Maybe);
         // Every state is still a resource to `mixed`, both cuts, and nothing else.
         for covering in ["mixed", "non-null-mixed", "non-empty-mixed"] {
             assert_eq!(
@@ -1904,12 +1898,12 @@ mod known_unenforced_tests {
         assert_eq!(normalize::subsumes(&lower_str("string").unwrap(), &res(Closed)), Certainty::No);
     }
 
-    /// The join rule a branch merge rides: a proven-closed arm beside an
-    /// unknown-state one collapses to the unknown state, never to closed.
+    /// The join rule a branch merge rides: a closed arm beside an unknown-state
+    /// one collapses to the unknown state, never to closed.
     #[test]
     fn dedup_widens_a_closed_arm_to_the_unknown_state() {
-        let closed = ContractTy::Resource { state: ResourceState::Closed, fclose_closes: true };
-        let any = ContractTy::Resource { state: ResourceState::Any, fclose_closes: true };
+        let closed = ContractTy::resource(ResourceState::Closed);
+        let any = ContractTy::resource(ResourceState::Any);
         for order in [[closed.clone(), any.clone()], [any.clone(), closed.clone()]] {
             let mut arms = order.to_vec();
             normalize::dedup_arms(&mut arms);

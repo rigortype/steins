@@ -90,7 +90,7 @@ pub fn spell_arms(arms: &[ContractTy]) -> Option<String> {
             ContractTy::IntIn(r) => int_ranges.push(int_range_keyword(*r)),
             ContractTy::LitInt(i) => int_lits.push(*i),
             ContractTy::LitFloat(f) => float_lits.push(*f),
-            ContractTy::Resource { state, .. } => {
+            ContractTy::Resource { state } => {
                 resource_state = match resource_state {
                     Some(seen) if seen != *state => Some(ResourceState::Any),
                     _ => Some(*state),
@@ -331,8 +331,8 @@ fn spell_nested(ty: &ContractTy) -> String {
         // source casing is a caller's concern, not this module's.
         ContractTy::EnumCase { enum_fqn, case } => format!("{enum_fqn}::{case}"),
         ContractTy::ObjectAny => "object".to_owned(),
-        // The state's own spelling; `fclose_closes` has none (ADR-0056 §8.8).
-        ContractTy::Resource { state, .. } => resource_keyword(*state).to_owned(),
+        // The declared state's own spelling (ADR-0097 §2.2).
+        ContractTy::Resource { state } => resource_keyword(*state).to_owned(),
         ContractTy::CallableTy { obl, .. } => spell_callable(*obl).to_owned(),
         ContractTy::ArrayAny { .. }
         | ContractTy::ListOf { .. }

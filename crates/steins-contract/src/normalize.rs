@@ -280,9 +280,7 @@ pub fn subsumes(a: &ContractTy, b: &ContractTy) -> Certainty {
         ContractTy::ObjectAny => subsumes_object(a),
         // The resource leaf: no scalar-fact denotation, but no hierarchy to be
         // unsure about either, so the answer is exact both ways (ADR-0056 §8).
-        ContractTy::Resource { state, fclose_closes } => {
-            subsumes_resource(a, *state, *fclose_closes)
-        }
+        ContractTy::Resource { state } => subsumes_resource(a, *state),
 
         // `a` covers everything only if `a` is `mixed` itself (`Opaque` → `Maybe`).
         ContractTy::Mixed => match a {
@@ -379,40 +377,36 @@ fn subsumes_enum_case(a: &ContractTy, enum_fqn: &str, case: &str) -> Certainty {
     }
 }
 
-/// Whether `a` subsumes every resource `b` denotes — a `b` in `state`, carrying
-/// `fclose_closes`. The kind is exact, because a resource is a **leaf** with no
-/// hierarchy to be unsure about: the only `Maybe` the kind forces is what
-/// [`ContractTy::Opaque`] does.
+/// Whether `a` subsumes every resource `b` denotes — a `b` in `state`. The kind
+/// is exact, because a resource is a **leaf** with no hierarchy to be unsure
+/// about: the only `Maybe` the kind forces is what [`ContractTy::Opaque`] does.
 ///
 /// Both cuts of `mixed` keep every resource: no resource is null, and every
 /// resource is truthy — even a *closed* one (`fclose($h); (bool) $h === true`
 /// at 8.5.9) — so `non-empty-mixed` covers the leaf exactly as `non-null-mixed`
 /// does.
 ///
-/// **The state is never a `No`** (ADR-0056 §8.8). `open-resource` and
+/// **The declared state is never a `No`** (ADR-0097 §2.2). `open-resource` and
 /// `closed-resource` are disjoint sets, but which one a handle is in is a
 /// dataflow fact about a moment, and a lattice verdict would convict a
 /// declared `@return closed-resource` handed to `@param open-resource` on two
 /// docblocks' say-so. Where the states disagree the answer is `Maybe`, and
-/// `Any` on the covering side is the only state that decides `Yes`. The
-/// `fclose_closes` bit is likewise only ever a narrowing: a covering arm that
-/// claims it over a `b` that does not is `Maybe`.
-fn subsumes_resource(a: &ContractTy, state: ResourceState, fclose_closes: bool) -> Certainty {
+/// `Any` on the covering side is the only state that decides `Yes`; the
+/// proven state that decides a `No` lives on `steins-infer`'s heap.
+fn subsumes_resource(a: &ContractTy, state: ResourceState) -> Certainty {
     use Certainty::{Maybe, No, Yes};
     match a {
         ContractTy::Mixed | ContractTy::MixedMinus(_) => Yes,
-        ContractTy::Resource { state: a_state, fclose_closes: a_closes } => {
-            let state_covered = *a_state == ResourceState::Any || *a_state == state;
-            let bit_covered = !*a_closes || fclose_closes;
-            if state_covered && bit_covered { Yes } else { Maybe }
+        ContractTy::Resource { state: a_state } => {
+            if *a_state == ResourceState::Any || *a_state == state { Yes } else { Maybe }
         }
         ContractTy::Opaque => Maybe,
-        ContractTy::Union(members) => members
-            .iter()
-            .fold(No, |acc, m| acc.or(subsumes_resource(m, state, fclose_closes))),
-        ContractTy::Inter(members) => members
-            .iter()
-            .fold(Yes, |acc, m| acc.and(subsumes_resource(m, state, fclose_closes))),
+        ContractTy::Union(members) => {
+            members.iter().fold(No, |acc, m| acc.or(subsumes_resource(m, state)))
+        }
+        ContractTy::Inter(members) => {
+            members.iter().fold(Yes, |acc, m| acc.and(subsumes_resource(m, state)))
+        }
         _ => No,
     }
 }
