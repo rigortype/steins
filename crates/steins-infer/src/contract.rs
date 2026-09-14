@@ -2002,7 +2002,7 @@ pub(crate) fn proven_array_shape(entries: &[(NormKey, CVal)], values: bool) -> O
         let ty = match v {
             CVal::Scalar(s) => literal_contract(s),
             CVal::Array(inner) => proven_array_shape(inner, values),
-            CVal::Object(..) | CVal::Resource => None,
+            CVal::Object(..) | CVal::Resource { .. } => None,
         };
         let ty = match ty {
             Some(ty) => ty,
