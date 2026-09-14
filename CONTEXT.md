@@ -72,6 +72,26 @@ an Isset-cover promises a *non-null* member, a KeyExists-cover only a
 *present* one — the flavor decides what `??` may conclude.
 _Avoid_: union-of-shapes expansion (the cover is the compact form)
 
+**Resource** (ADR-0097):
+A value of PHP's eighth runtime kind — neither scalar, array, object nor
+null — that PHP cannot declare in a signature and that no class can shadow.
+Spelled `resource`, `open-resource` or `closed-resource`, in phpdoc only. A
+handle with identity: aliases share it, a callee can close it, and its one
+state change (open → closed, never back) is a fact about the handle, not
+about a variable. Refined by *state* and by *kind* (stream, dir, process,
+stream-context, …), nothing else.
+_Avoid_: "resource class" (a native `resource $x` hint is a reference to a
+class named `resource`, never this type), "stream" as a synonym (a stream is
+one kind of resource), "handle" for the type (it names the value's identity)
+
+**Closing call** (ADR-0097):
+A builtin that leaves its resource argument closed when it returns —
+`fclose`, `pclose`, `closedir`, `proc_close`, `gzclose`, `bzclose`. The
+return is the premise: every argument such a call rejects has already
+thrown. Kind-sensitive: `fclose` warns and keeps a directory handle open.
+_Avoid_: "destructor", "release" (PHP closes a dropped handle silently, and
+that is not a closing call)
+
 **Surface floor** (ADR-0062 A-G10):
 The single registry attribute that places a diagnostic id on the profile
 ladder (`default ⊂ contracts ⊂ strict`): the lowest surface at which the id
