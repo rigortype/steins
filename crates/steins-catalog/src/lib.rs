@@ -72,6 +72,12 @@ mod declared_returns_generated;
 /// by [`declared_method_return`] and [`declared_method_return_changed_at`].
 mod declared_method_returns_generated;
 
+/// The **migrated-class** table (ADR-0097 §2.6), from
+/// `docs/research/phpstan-mining/migrated_resource_classes.toml` — every class
+/// the pinned engine declares where PHPStan's functionMap still says `resource`.
+/// Consulted only by [`is_migrated_resource_class`].
+mod migrated_resource_classes_generated;
+
 /// **Engine constants** (ADR-0094 §2, issue #598), from
 /// `docs/research/phpsrc-mining/constants.toml` — the spec-fixed value of every
 /// constant the mined build's extensions register. Consulted only by
@@ -111,6 +117,6 @@ pub use builtins::{
     builtin_class_supers, builtin_exception_parent, builtin_throws, declared_method_return,
     declared_method_return_blocked, declared_method_return_changed_at, declared_return,
     declared_return_changed_at, engine_constant, engine_constant_count, failure_arms,
-    hierarchy_entry_count, invocation_shape, param_facts, param_facts_mined, resource_param,
-    resource_return, return_fact,
+    hierarchy_entry_count, invocation_shape, is_migrated_resource_class, param_facts,
+    param_facts_mined, resource_param, resource_return, return_fact,
 };
