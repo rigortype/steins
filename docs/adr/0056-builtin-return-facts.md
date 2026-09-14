@@ -342,7 +342,10 @@ there is no hierarchy for an oracle to be unsure about.
   docblocks attached to parameters that now receive a `CurlHandle`.
   The docblock is wrong and the value is fine; convicting there would
   call the programmer a liar about rot they inherited. Named FP
-  channel, refused on purpose.
+  channel, refused on purpose. *(2026-09-14: bounded by ADR-0097 §2.6 —
+  the channel is finite, and its extension is the derived migrated table;
+  an object of a class PHP migrated a resource into stays `Maybe`, any
+  other object is `No`.)*
 
 ### 8.6 The one lane-reading opening, and its three locks
 
