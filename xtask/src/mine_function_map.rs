@@ -57,10 +57,23 @@
 //! how. There is no property half: functionMap's key grammar has no spelling for
 //! a property.
 //!
+//! # The third artefact: the migrated-class table (ADR-0097 §2.6)
+//!
+//! `--migrated` writes `migrated_resource_classes.toml` and nothing else. It is
+//! not a third population but a by-product of the countersign's one recorded
+//! disagreement: every function whose return type functionMap spells with
+//! `resource`, asked of the engine, and the CLASSES the engine declares there
+//! instead (`curl_init` → `CurlHandle|false`, the `imagecreatefrom*` family →
+//! `GdImage`). That set is exactly what a `@param resource` may legitimately be
+//! handed on PHP 8 — the docblock is the rot, the value is fine — and the contract
+//! relation reads it to keep `Maybe` for those classes while every other object is
+//! a `No`. See [`run_migrated`] for the three ways it differs from the halves above.
+//!
 //! # Usage
 //!
 //! ```text
 //! cargo xtask mine-function-map [/path/to/phpstan-src] [--functions] [--methods] [--php PATH]…
+//! cargo xtask mine-function-map [/path/to/phpstan-src] --migrated [--php PATH]…
 //! ```
 //!
 //! Default checkout: `~/repo/php/phpstan-src`, read-only. Its `HEAD` becomes
@@ -70,8 +83,9 @@
 //! the run asks the `php` on `PATH` alone and nothing is vetoed.
 //!
 //! Output: `docs/research/phpstan-mining/declared_returns.toml` and
-//! `declared_method_returns.toml` (sources of record). `cargo xtask gen-catalog`
-//! turns those into the shipped Rust tables.
+//! `declared_method_returns.toml` (sources of record), or, under `--migrated`,
+//! `migrated_resource_classes.toml` alone. `cargo xtask gen-catalog` turns those
+//! into the shipped Rust tables.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -96,6 +110,11 @@ struct Mined {
     method_rows: BTreeMap<String, String>,
     method_alternates_disagree: BTreeMap<String, Vec<String>>,
     method_version_sensitive: BTreeMap<String, Vec<String>>,
+    /// Plain function -> every return-type spelling the BASE map states for it,
+    /// before any delta rewrites it — the migrated table's population
+    /// ([`run_migrated`]). Absent from a miner that predates it.
+    #[serde(default)]
+    base_returns: BTreeMap<String, Vec<String>>,
 }
 
 /// Which half (or halves) of the pipeline a run writes.
@@ -334,6 +353,425 @@ pub fn run(checkout: Option<&str>, halves: Halves, php_bins: &[String]) -> Resul
     }
     println!("mine-function-map: now run `cargo xtask gen-catalog`");
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// The migrated-class table (ADR-0097 §2.6).
+// ---------------------------------------------------------------------------
+
+/// Entry point for `cargo xtask mine-function-map --migrated`.
+///
+/// Three things differ from the halves [`run`] writes, and all three are about
+/// which question the table answers:
+///
+/// 1. **The pin is `declared_returns.toml`'s, never the checkout's `HEAD`.** The
+///    table is the extension of "a class PHP migrated a resource into", read off
+///    the disagreement between functionMap's `resource` and the engine's
+///    declaration — the measurement ADR-0056 §8.2 made at one revision (110
+///    names, 89 objects). A checkout that has moved on would answer for a
+///    functionMap no other table was mined from, so the map and its delta files
+///    are staged from the recorded commit with `git show` ([`stage_function_map_at`])
+///    and the working tree is never read.
+/// 2. **The population is the BASE map's, before the delta ladder.** The halves
+///    above read the ladder's end — the map PHPStan uses at the pin's PHP — and
+///    that is the wrong record here, because the deltas are where PHPStan
+///    catches up ROW BY ROW: at the pin `functionMap_php80delta.php` already
+///    rewrites `curl_init` to `CurlHandle|false` and every `imagecreate*` row to
+///    `GdImage|false`, while `curl_copy_handle` still says `resource`. Read after
+///    the ladder, `CurlHandle` would be in the table by the accident of one row
+///    lagging and `GdImage` out by the accident of none — and the channel this
+///    table bounds is per CLASS: a `@param resource $ch` docblock receives a
+///    `CurlHandle` from either function. The base map is the map for the oldest
+///    PHP PHPStan supports, so it is the last record of what returned a resource
+///    before PHP 8 migrated it; it is measured to be a superset of every rung
+///    (368 names against the ladder's 337 at the pin, nothing added by any
+///    delta), and it is what §8.2's 110/89 was counted on. A class leaves the
+///    table when the resource era leaves the base map — when PHPStan drops the
+///    PHP that returned it — which is the retirement ADR-0097 §2.8 names.
+/// 3. **Only the top engine answers, and each kind of silence is a row.** A lower
+///    minor cannot veto a class the top engine declares — a class that arrived at
+///    8.5 is still a class a `@param resource` may be handed — so the veto pass
+///    does not run. What the top engine says sorts every resource name into
+///    exactly one bucket: it declares a class (a `[[class]]` row and a `[migrated]`
+///    entry), it declares no return type (the name is still a resource — the
+///    producers ADR-0056 §8.2's gate admits), it declares a type naming no class,
+///    or it does not have the function (an unloaded extension). The last three
+///    are `[declined]`, each with its reason, so the derivation is auditable end
+///    to end and the counts add up.
+pub fn run_migrated(checkout: Option<&str>, php_bins: &[String]) -> Result<(), String> {
+    let root = match checkout {
+        Some(p) => PathBuf::from(p),
+        None => default_checkout()?,
+    };
+    let (pin, countersign_php) = declared_returns_pin()?;
+    let staged = stage_function_map_at(&root, &pin)?;
+    let mined = run_miner(&staged)?;
+    if !mined.malformed.is_empty() {
+        return Err(format!("{} malformed signature rows: {:?}", mined.malformed.len(), mined.malformed));
+    }
+    if mined.base_returns.is_empty() {
+        return Err("the miner emitted no `base_returns` — is mine_function_map.php current?".to_owned());
+    }
+    // A name is a resource row when ANY spelling the base map states for it
+    // mentions the leaf: an alternate signature is the same function.
+    let resource_rows: Vec<&String> = mined
+        .base_returns
+        .iter()
+        .filter(|(_, spellings)| spellings.iter().any(|ty| mentions_resource(ty)))
+        .map(|(name, _)| name)
+        .collect();
+    println!(
+        "mine-function-map: {} of {} base-map functions at pin {pin} spell `resource`",
+        resource_rows.len(),
+        mined.base_returns.len(),
+    );
+
+    let mut engines = engines(php_bins)?;
+    let top = engines.last_mut().ok_or("no PHP engine to ask")?;
+    if top.version != countersign_php {
+        println!(
+            "mine-function-map: note — asking PHP {}, while declared_returns.toml was countersigned by PHP {countersign_php}",
+            top.version
+        );
+    }
+
+    // name -> the engine's own rendering of what it declares instead.
+    let mut migrated: BTreeMap<String, String> = BTreeMap::new();
+    // lowercased class -> (the engine's casing, the functions that declare it).
+    let mut by_class: BTreeMap<String, (String, Vec<String>)> = BTreeMap::new();
+    let mut declined: BTreeMap<String, Declined> = BTreeMap::new();
+    for name in &resource_rows {
+        let Some(refl) = top.sidecar.reflect(name) else {
+            return Err(format!("sidecar `reflect({name})` failed — refusing to mine a partial table"));
+        };
+        if !refl.function_exists {
+            declined.insert((*name).clone(), Declined::Unloaded);
+            continue;
+        }
+        let Some(engine_ty) = refl.return_type.as_deref() else {
+            declined.insert((*name).clone(), Declined::Typeless);
+            continue;
+        };
+        let classes = class_names_in(engine_ty);
+        if classes.is_empty() {
+            declined.insert((*name).clone(), Declined::NoClass(engine_ty.to_owned()));
+            continue;
+        }
+        migrated.insert((*name).clone(), engine_ty.to_owned());
+        for class in classes {
+            let entry = by_class
+                .entry(class.to_ascii_lowercase())
+                .or_insert_with(|| (class.clone(), Vec::new()));
+            if entry.0 != class {
+                return Err(format!(
+                    "the engine spells one class two ways: `{}` and `{class}`",
+                    entry.0
+                ));
+            }
+            entry.1.push((*name).clone());
+        }
+    }
+    // The engine declares each of these as a return type, so it must have the
+    // class; an engine that names a class it does not have is broken, and the
+    // table would carry a name nothing can be an instance of.
+    for (class, _) in by_class.values() {
+        let Some(refl) = top.sidecar.reflect(class) else {
+            return Err(format!("sidecar `reflect({class})` failed — refusing to mine a partial table"));
+        };
+        if !refl.class_like_exists {
+            return Err(format!("PHP {} declares `{class}` as a return type and does not have the class", top.version));
+        }
+    }
+    let unloaded = declined.values().filter(|d| matches!(d, Declined::Unloaded)).count();
+    let typeless = declined.values().filter(|d| matches!(d, Declined::Typeless)).count();
+    let no_class = declined.values().filter(|d| matches!(d, Declined::NoClass(_))).count();
+    println!(
+        "mine-function-map: {} migrated to {} classes; {} declined ({} the engine does not have, \
+         {} still declare no return type, {} declare a type naming no class)",
+        migrated.len(),
+        by_class.len(),
+        declined.len(),
+        unloaded,
+        typeless,
+        no_class,
+    );
+
+    let counts = MigratedCounts {
+        resource_rows: resource_rows.len(),
+        migrated_functions: migrated.len(),
+        classes: by_class.len(),
+        declined: declined.len(),
+        declined_unloaded: unloaded,
+        declined_typeless: typeless,
+        declined_no_class: no_class,
+    };
+    let toml = render_migrated(&pin, &top.version, &counts, &by_class, &migrated, &declined);
+    let dst = repo_root().join("docs/research/phpstan-mining/migrated_resource_classes.toml");
+    std::fs::write(&dst, &toml).map_err(|e| format!("write {}: {e}", dst.display()))?;
+    println!("mine-function-map: wrote {}", dst.display());
+    println!("mine-function-map: now run `cargo xtask gen-catalog`");
+    Ok(())
+}
+
+/// Why a resource row contributed no class to the migrated table.
+enum Declined {
+    /// The engine does not have the function — an extension this build does not
+    /// load. Its class, if it has one, is unknown to this engine, and ADR-0056
+    /// §8.2's condition 2 refuses the producer row on the same engine anyway.
+    Unloaded,
+    /// The engine declares no return type: the row is still a resource, and the
+    /// engine has not disowned it. These are the producers the §8.2 gate admits.
+    Typeless,
+    /// The engine declares a type, and it names no class (`bool`, `int|false`).
+    NoClass(String),
+}
+
+impl Declined {
+    fn reason(&self) -> String {
+        match self {
+            Declined::Unloaded => "the engine does not have the function (an extension this build does not load)".to_owned(),
+            Declined::Typeless => "the engine declares no return type — still a resource, not a migration".to_owned(),
+            Declined::NoClass(ty) => format!("the engine declares `{ty}`, which names no class"),
+        }
+    }
+}
+
+/// The counts the migrated table's header carries.
+struct MigratedCounts {
+    resource_rows: usize,
+    migrated_functions: usize,
+    classes: usize,
+    declined: usize,
+    declined_unloaded: usize,
+    declined_typeless: usize,
+    declined_no_class: usize,
+}
+
+/// The two `[meta]` fields of `declared_returns.toml` the migrated table is
+/// keyed to: the phpstan-src commit its rows were read at, and the engine that
+/// countersigned them.
+#[derive(serde::Deserialize)]
+struct DeclaredReturnsDoc {
+    meta: DeclaredReturnsMeta,
+}
+
+#[derive(serde::Deserialize)]
+struct DeclaredReturnsMeta {
+    phpstan_src_commit: String,
+    crosscheck_php: String,
+}
+
+/// `declared_returns.toml`'s pin and countersigning engine — the revision the
+/// migrated table must read functionMap at, so the two tables describe one map.
+fn declared_returns_pin() -> Result<(String, String), String> {
+    let src = repo_root().join("docs/research/phpstan-mining/declared_returns.toml");
+    let text = std::fs::read_to_string(&src).map_err(|e| format!("read {}: {e}", src.display()))?;
+    let doc: DeclaredReturnsDoc =
+        toml::from_str(&text).map_err(|e| format!("parse {}: {e}", src.display()))?;
+    Ok((doc.meta.phpstan_src_commit, doc.meta.crosscheck_php))
+}
+
+/// Stage `resources/functionMap*.php` as they were at `pin` into
+/// `target/phpstan-src-at-pin/<pin>/`, so the PHP miner reads the map the pin
+/// names rather than whatever the checkout's working tree holds now. Read-only
+/// on the checkout: `git ls-tree` and `git show`, nothing else.
+fn stage_function_map_at(root: &Path, pin: &str) -> Result<PathBuf, String> {
+    let listing = git_in(root, &["ls-tree", "--name-only", pin, "resources/"])?;
+    let files: Vec<String> = String::from_utf8_lossy(&listing)
+        .lines()
+        .filter(|p| p.starts_with("resources/functionMap") && p.ends_with(".php"))
+        .map(str::to_owned)
+        .collect();
+    if files.is_empty() {
+        return Err(format!("no resources/functionMap*.php at {pin} in {}", root.display()));
+    }
+    let dir = repo_root().join("target").join("phpstan-src-at-pin").join(pin);
+    std::fs::create_dir_all(dir.join("resources"))
+        .map_err(|e| format!("create {}: {e}", dir.display()))?;
+    for path in &files {
+        let bytes = git_in(root, &["show", &format!("{pin}:{path}")])?;
+        let dst = dir.join(path);
+        std::fs::write(&dst, bytes).map_err(|e| format!("write {}: {e}", dst.display()))?;
+    }
+    Ok(dir)
+}
+
+/// Run one read-only `git` command in `root` and return its stdout.
+fn git_in(root: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
+    let out = Command::new("git")
+        .args(["-C", &root.display().to_string()])
+        .args(args)
+        .output()
+        .map_err(|e| format!("git {} in {}: {e}", args.join(" "), root.display()))?;
+    if !out.status.success() {
+        return Err(format!(
+            "git {} in {} failed: {}",
+            args.join(" "),
+            root.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(out.stdout)
+}
+
+/// Whether a functionMap return type spells `resource` anywhere — as the whole
+/// type, a union member, or a state-qualified spelling. Decided by the one
+/// identifier table ([`steins_contract::lower_identifier`]) per token, so the
+/// spellings that mean the leaf are the analyzer's, not a second list here; a
+/// class whose name merely contains the word (`ResourceBundle`) is a token of its
+/// own and does not match.
+fn mentions_resource(ty: &str) -> bool {
+    ty.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '\\'))
+        .filter(|tok| !tok.is_empty())
+        .any(|tok| matches!(steins_contract::lower_identifier(tok), ContractTy::Resource))
+}
+
+/// The class names in the engine's own rendering of a declared return type, in
+/// the engine's casing, union and intersection members included and the
+/// nullable `?` stripped: `CurlHandle|false` → `[CurlHandle]`, `?GdImage` →
+/// `[GdImage]`, `LDAP\Connection|false` → `[LDAP\Connection]`. A member is a
+/// class exactly when the one identifier table says so — every keyword (`false`,
+/// `null`, `bool`, `static`, …) lowers to something else.
+fn class_names_in(engine_ty: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for member in engine_ty.split(['|', '&']) {
+        let member = member
+            .trim()
+            .trim_matches(|c| c == '(' || c == ')')
+            .trim_start_matches('?')
+            .trim_start_matches('\\');
+        if member.is_empty()
+            || !matches!(steins_contract::lower_identifier(member), ContractTy::Class(_))
+            || out.iter().any(|seen| seen.eq_ignore_ascii_case(member))
+        {
+            continue;
+        }
+        out.push(member.to_owned());
+    }
+    out
+}
+
+/// Render the committed migrated-class TOML.
+fn render_migrated(
+    pin: &str,
+    engine_version: &str,
+    counts: &MigratedCounts,
+    by_class: &BTreeMap<String, (String, Vec<String>)>,
+    migrated: &BTreeMap<String, String>,
+    declined: &BTreeMap<String, Declined>,
+) -> String {
+    let mut s = String::new();
+    s.push_str(
+        "# Builtin RESOURCE-TO-OBJECT MIGRATIONS — the ADR-0097 §2.6 migrated-class table.\n\
+         #\n\
+         # SOURCE OF RECORD, DERIVED. Generated by `cargo xtask mine-function-map\n\
+         # --migrated`; never hand-edited. It is a by-product of the countersign that\n\
+         # builds `declared_returns.toml`, read at THAT table's pin: every function\n\
+         # whose return type functionMap spells with `resource`, asked of the real PHP\n\
+         # sidecar, and the classes the engine declares there instead. Regenerate\n\
+         # alongside `declared_returns.toml`, never on its own pin.\n\
+         #\n\
+         # WHICH MAP. The BASE `functionMap.php`, before the per-minor delta ladder —\n\
+         # deliberately the opposite of `declared_returns.toml`, which reads the\n\
+         # ladder's end. The deltas are where PHPStan catches up row by row (at the\n\
+         # pin `functionMap_php80delta.php` already says `CurlHandle|false` for\n\
+         # `curl_init` and `GdImage|false` for every `imagecreate*`, while\n\
+         # `curl_copy_handle` still says `resource`), and the channel this table bounds\n\
+         # is per CLASS, not per row: a `@param resource $ch` receives a `CurlHandle`\n\
+         # from either function. The base map is the map for the oldest PHP PHPStan\n\
+         # supports — the last record of what returned a resource before PHP 8 migrated\n\
+         # it — and it is a measured superset of every rung (nothing any delta adds\n\
+         # spells `resource`). A class leaves this table when the resource era leaves\n\
+         # the base map, i.e. when PHPStan drops the PHP that returned it.\n\
+         #\n\
+         # WHY IT EXISTS. PHP 8 has turned a family of handles into objects per release\n\
+         # (`curl_init` → `CurlHandle`, the `imagecreate*` family → `GdImage`, `ldap_*` →\n\
+         # `LDAP\\Connection`, …) and left a decade of `@param resource $ch` docblocks\n\
+         # on parameters that now receive those objects. ADR-0056 §8.5 protected that\n\
+         # channel by refusing EVERY object against `@param resource`; ADR-0097 §2.6\n\
+         # makes the channel finite. An object of a class below stays `Maybe` — the\n\
+         # docblock is the suspect — and an object of any other class is a genuine\n\
+         # docblock violation: `new \\stdClass()` convicts, as it does under every other\n\
+         # analyzer on the conformance page.\n\
+         #\n\
+         # RETIREMENT IS THE DESIGN (ADR-0097 §2.8). A class enters while functionMap\n\
+         # lags the engine and leaves when the map catches up — at which point `@param\n\
+         # resource` handed that class is rot the docblock's own vocabulary has\n\
+         # abandoned, and PHPStan reports it too. Nothing here is hand-listed.\n\
+         #\n\
+         # LINEAGE (see the root NOTICE file):\n\
+         #   Steins <- phpstan-src `resources/functionMap.php`\n\
+         #              (MIT, Copyright (c) Ondrej Mirtes and contributors)\n\
+         #          <- Phan `src/Phan/Language/Internal/FunctionSignatureMap.php`\n\
+         #              (MIT, Copyright (c) 2015 Rasmus Lerdorf,\n\
+         #                   Copyright (c) 2015 Andrew Morrison)\n\n",
+    );
+    let _ = writeln!(s, "[meta]");
+    // `declared_returns.toml`'s pin, and the map was staged from it with `git
+    // show` — the checkout's HEAD is not consulted.
+    let _ = writeln!(s, "phpstan_src_commit = {pin:?}");
+    let _ = writeln!(s, "php = {engine_version:?}");
+    let _ = writeln!(
+        s,
+        "derived_from = \"docs/research/phpstan-mining/declared_returns.toml\"\n\
+         miner = \"docs/research/phpstan-mining/mine_function_map.php\"\n\
+         generator = \"cargo xtask mine-function-map --migrated\"\n"
+    );
+
+    s.push_str(
+        "# resource_rows        base-map functions at the pin whose return type spells\n\
+         #                      `resource` (in any of their alternate signatures)\n\
+         # migrated_functions   of those, the ones the engine declares a CLASS for (the `from` lists)\n\
+         # classes              distinct classes those declarations name (the `[[class]]` rows)\n\
+         # declined             functions contributing no class, by reason (`[declined]` below):\n\
+         # declined_unloaded      the engine does not have the function (an unloaded\n\
+         #                        extension — its class is unknown to this engine, and\n\
+         #                        ADR-0056 §8.2's condition 2 refuses the producer row too)\n\
+         # declined_typeless      the engine declares NO return type — still a resource,\n\
+         #                        the producers the §8.2 gate admits\n\
+         # declined_no_class      the engine declares a type that names no class\n",
+    );
+    let _ = writeln!(s, "[counts]");
+    let _ = writeln!(s, "resource_rows = {}", counts.resource_rows);
+    let _ = writeln!(s, "migrated_functions = {}", counts.migrated_functions);
+    let _ = writeln!(s, "classes = {}", counts.classes);
+    let _ = writeln!(s, "declined = {}", counts.declined);
+    let _ = writeln!(s, "declined_unloaded = {}", counts.declined_unloaded);
+    let _ = writeln!(s, "declined_typeless = {}", counts.declined_typeless);
+    let _ = writeln!(s, "declined_no_class = {}\n", counts.declined_no_class);
+
+    s.push_str(
+        "# One row per class: `name` in the engine's own casing, `from` the functions\n\
+         # whose functionMap row says `resource` and whose engine declaration names the\n\
+         # class (sorted). The shipped table keeps the name alone; `from` is the audit\n\
+         # trail, and `[migrated]` below has each declaration verbatim.\n",
+    );
+    for (casing, from) in by_class.values() {
+        let _ = writeln!(s, "[[class]]");
+        let _ = writeln!(s, "name = {casing:?}");
+        let items: Vec<String> = from.iter().map(|f| format!("{f:?}")).collect();
+        let _ = writeln!(s, "from = [{}]\n", items.join(", "));
+    }
+
+    s.push_str(
+        "# The disagreement itself, verbatim: name = the engine's `getReturnType()`\n\
+         # rendering where functionMap says `resource`.\n",
+    );
+    let _ = writeln!(s, "[migrated]");
+    for (name, ty) in migrated {
+        let _ = writeln!(s, "{name:?} = {ty:?}");
+    }
+    s.push('\n');
+
+    s.push_str(
+        "# Resource rows that contributed no class, each with why. Recorded so the\n\
+         # refusals are auditable rather than invisible, and so the counts add up.\n",
+    );
+    let _ = writeln!(s, "[declined]");
+    for (name, why) in declined {
+        let _ = writeln!(s, "{name:?} = {:?}", why.reason());
+    }
+    s
 }
 
 /// The pinned engine's own version string — recorded in each TOML's `[meta]` as
@@ -1465,7 +1903,36 @@ fn render_methods(
 
 #[cfg(test)]
 mod tests {
-    use super::{builtin_ancestors, countersigned, engine_says_mixed, floor_row};
+    use super::{
+        builtin_ancestors, class_names_in, countersigned, engine_says_mixed, floor_row,
+        mentions_resource,
+    };
+
+    /// The migrated table's two classifiers (ADR-0097 §2.6): which functionMap
+    /// rows are asked, and which members of the engine's answer are classes.
+    /// Both defer to the one identifier table, so a keyword never becomes a class
+    /// and a class whose name contains the word never becomes a resource row.
+    #[test]
+    fn the_migrated_table_reads_resource_rows_and_the_classes_the_engine_names() {
+        for ty in ["resource", "resource|false", "?resource", "array|resource", "open-resource", "closed-resource|null", "\\resource"] {
+            assert!(mentions_resource(ty), "{ty} spells the leaf");
+        }
+        for ty in ["ResourceBundle", "ResourceBundle|false", "string", "CurlHandle|false", ""] {
+            assert!(!mentions_resource(ty), "{ty} does not spell the leaf");
+        }
+        assert_eq!(class_names_in("CurlHandle|false"), ["CurlHandle"]);
+        assert_eq!(class_names_in("?GdImage"), ["GdImage"]);
+        assert_eq!(class_names_in("\\GdImage"), ["GdImage"], "the leading `\\` is normalized away");
+        assert_eq!(class_names_in("LDAP\\Connection|false"), ["LDAP\\Connection"], "namespaced, casing kept");
+        assert_eq!(class_names_in("finfo|false"), ["finfo"], "the engine's casing, not a display table's");
+        assert_eq!(class_names_in("(A&B)|null"), ["A", "B"]);
+        assert_eq!(class_names_in("GdImage|GdImage"), ["GdImage"], "one entry per class");
+        assert!(class_names_in("bool").is_empty());
+        assert!(class_names_in("int|false").is_empty());
+        assert!(class_names_in("static").is_empty(), "`static` is a keyword, not a class");
+        assert!(class_names_in("mixed").is_empty());
+        assert!(class_names_in("").is_empty());
+    }
 
     /// The method half's own refusal (issue #673 review): `mixed` is the engine
     /// answer that makes the countersign vacuous, so it is recognized by name

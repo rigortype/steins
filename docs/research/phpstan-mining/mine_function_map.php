@@ -45,6 +45,12 @@ declare(strict_types=1);
  *     are skipped: PHPStan applies them only under `stricterFunctionMap`, an
  *     opt-in stricter-than-the-engine posture, and the floor must state what the
  *     engine states.
+ *   - The BASE map's return spellings are emitted too (`base_returns`, plain
+ *     functions, every alternate's spelling): the base map is the map for the
+ *     OLDEST PHP PHPStan supports, so it is the last record of what returned a
+ *     resource before PHP 8 migrated it — the migrated-class table (ADR-0097
+ *     §2.6, `mine-function-map --migrated`) reads that record, not the ladder's
+ *     end, because the deltas are where PHPStan catches up row by row.
  *
  * No filtering by lowerability and no reflection cross-check happens here: both are
  * the Rust generator's job (`cargo xtask gen-function-map`), which owns the same
@@ -165,10 +171,41 @@ function fold_alternates(array $byKey): array
     return [$rows, $disagree];
 }
 
+/**
+ * Every return-type spelling the map states for each plain function, alternates
+ * included and folded by name — the base map's record of a name, read BEFORE any
+ * delta rewrites it. A name whose alternates disagree keeps every spelling here
+ * (this is not a floor row, so nothing has to be arbitrated).
+ *
+ * @param array<string, mixed> $map
+ * @return array<string, list<string>>
+ */
+function return_spellings(array $map): array
+{
+    /** @var array<string, array<string, true>> $byName */
+    $byName = [];
+    foreach ($map as $key => $signature) {
+        $key = (string) $key;
+        if (str_contains($key, '::') || !is_array($signature) || !isset($signature[0]) || !is_string($signature[0])) {
+            continue;
+        }
+        $byName[strtolower(base_name($key))][$signature[0]] = true;
+    }
+    $out = [];
+    foreach ($byName as $name => $types) {
+        $spellings = array_keys($types);
+        sort($spellings);
+        $out[$name] = $spellings;
+    }
+    ksort($out);
+    return $out;
+}
+
 /** @var array<string, mixed> $base */
 $base = require $mapPath;
 $base = array_change_key_case($base, CASE_LOWER);
 $totalKeys = count($base);
+$baseReturns = return_spellings($base);
 
 // The deltas PHPStan applies, in the order it applies them, each tagged with the
 // minor it lifts the map TO. 7.4 and 8.0 are below Steins' floor but must still be
@@ -252,4 +289,5 @@ echo json_encode([
     'method_rows' => $pinMethodRows,
     'method_alternates_disagree' => $reduced['method_disagree'],
     'method_version_sensitive' => $methodVersionSensitive,
+    'base_returns' => $baseReturns,
 ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n";
