@@ -15,7 +15,8 @@
 
 use crate::{
     declared_method_returns_generated, declared_returns_generated, display_names_generated,
-    hierarchy_generated, param_facts_generated, resource_returns_generated, return_facts_generated,
+    hierarchy_generated, param_facts_generated, resource_params_generated, resource_returns_generated,
+    return_facts_generated,
 };
 
 /// The **builtin SPL/engine exception hierarchy** (ADR-0040): the parent of a
@@ -394,6 +395,30 @@ pub fn resource_return(name: &str) -> Option<bool> {
         .binary_search_by(|(n, _)| (*n).cmp(key.as_str()))
         .ok()
         .map(|i| resource_returns_generated::RESOURCE_RETURNS[i].1)
+}
+
+pub use resource_params_generated::ResourceParam;
+
+/// What the builtin `name` demands at its 0-based position `index` when the
+/// php-src stub at the pin says `@param resource` there — the consumer twin of
+/// [`resource_return`] (ADR-0097 §2.5). `None` where the stub says anything else,
+/// unions included (`resource|null`, `resource|string` are declined at mining
+/// time and judged by the ordinary relation once their arms lower).
+///
+/// Condition 1 of the gate, exactly as for the producers: steins-infer supplies
+/// the other two before a row is consumed — **the tripwire** (the analyzing
+/// engine must report no declared type at the position: the day `fwrite`
+/// declares `Stream $stream`, the engine speaks and the row is disowned) and
+/// **the minor pin** ([`PINNED_PHP`]). Case-insensitive, leading `\` stripped.
+///
+/// [`PINNED_PHP`]: crate::PINNED_PHP
+#[must_use]
+pub fn resource_param(name: &str, index: usize) -> Option<ResourceParam> {
+    let key = name.trim_start_matches('\\').to_ascii_lowercase();
+    resource_params_generated::RESOURCE_PARAMS
+        .binary_search_by(|(n, i, _)| (*n, *i).cmp(&(key.as_str(), index)))
+        .ok()
+        .map(|i| resource_params_generated::RESOURCE_PARAMS[i].2)
 }
 
 /// The **declared return type** of a builtin `name` (ADR-0069, issues #73/#79):
@@ -783,6 +808,41 @@ mod tests {
         let t = super::resource_returns_generated::RESOURCE_RETURNS;
         assert!(t.windows(2).all(|w| w[0].0 < w[1].0), "RESOURCE_RETURNS must be sorted by key");
         assert!(!t.is_empty(), "the table is the whole point; an empty one is a generation bug");
+    }
+
+    #[test]
+    fn resource_params_carry_the_stub_reading_and_the_probed_bits() {
+        let fwrite = super::resource_param("fwrite", 0).expect("fwrite's $stream is a row");
+        assert_eq!(fwrite.name, "stream");
+        assert!(!fwrite.accepts_closed);
+        assert!(!fwrite.closes);
+        assert_eq!(fwrite.kind, Some("stream"));
+        // The second position of `fwrite` is a native `string`, not a resource.
+        assert_eq!(super::resource_param("fwrite", 1), None);
+        // A probed closer, and a probed any-state position.
+        assert!(super::resource_param("fclose", 0).expect("row").closes);
+        assert!(super::resource_param("get_resource_id", 0).expect("row").accepts_closed);
+        assert_eq!(super::resource_param("proc_close", 0).expect("row").kind, Some("process"));
+        // A position further along than the first.
+        assert_eq!(super::resource_param("hash_update_stream", 1).expect("row").name, "stream");
+        assert_eq!(super::resource_param("hash_update_stream", 0), None);
+        // Unions are declined at mining time: `resource|null`, `resource|string|null`.
+        assert_eq!(super::resource_param("closedir", 0), None);
+        assert_eq!(super::resource_param("imagepng", 1), None);
+        assert_eq!(super::resource_param("fopen", 3), None);
+        // Migrated families never had a resource position to begin with.
+        assert_eq!(super::resource_param("curl_setopt", 0), None);
+        assert_eq!(super::resource_param("imagedestroy", 0), None);
+        // The shared lookup contract.
+        assert_eq!(super::resource_param("FWRITE", 0).map(|r| r.name), Some("stream"));
+        assert_eq!(super::resource_param("\\fwrite", 0).map(|r| r.name), Some("stream"));
+        let t = super::resource_params_generated::RESOURCE_PARAMS;
+        assert!(
+            t.windows(2).all(|w| (w[0].0, w[0].1) < (w[1].0, w[1].1)),
+            "RESOURCE_PARAMS must be sorted by (function, index)"
+        );
+        assert!(t.iter().all(|(_, _, r)| r.kind.is_none_or(|k| ["stream", "dir", "process", "stream-context", "stream-filter"].contains(&k))));
+        assert!(t.len() >= 90, "the table is the whole point; {} rows is a generation bug", t.len());
     }
 
     /// Spellings treated as single-base envelopes when partitioning generated rows.
