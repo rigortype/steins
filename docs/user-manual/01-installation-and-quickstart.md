@@ -333,8 +333,13 @@ contain no `.php` files is a genuine no-op and still exits `0`.
     PHP has no declarable resource type and says so at compile time — and
     is reported as `class.undefined` with a message that names the type
     (ADR-0097 §2.2). Resource *values* are modeled since ADR-0056 §8, so a
-    stream handle handed to a scalar parameter is a finding. Arrays of
-    resources remain deferred (ADR-0097 §3).
+    stream handle handed to a scalar parameter is a finding. A handle's
+    state is tracked on the heap (ADR-0097 §2.3–§2.4): a fresh handle is
+    open, `fclose($h)` and its siblings close it through every alias, and
+    `@param open-resource` / `@param closed-resource` each reject the other
+    state — while a handle a function, an array or a closure received is in
+    an unknown state that rejects nothing. Arrays of resources remain
+    deferred (ADR-0097 §3).
   - Conditional late-static-binding return shapes (`new self()` under
     `: static` in an open class) stay silent — refused worst-casing.
 

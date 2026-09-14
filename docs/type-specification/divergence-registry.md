@@ -369,10 +369,18 @@ unavailable. §8 substitutes a tripwire — a curated row stands only while the
 engine still declares nothing for the name, which is exactly what the PHP 8
 resource-to-object migration ends. The value domain is unchanged and still
 object- and resource-free (ADR-0035/0038). Still deferred (§8.7): arrays *of*
-resources, resource-consuming *parameters*, and proving a handle *open* — a
-handle a closing call returned from is proven closed since §8.8 (2026-09-14),
-so `@param open-resource` refuses it while PHPStan, which resolves all three
-spellings to one `ResourceType`, does not.
+resources and resource-consuming *parameters*. The *state* is on the heap since
+ADR-0097 §2.3–§2.4 (2026-09-14), beside the object heap, so it belongs to the
+handle rather than to a variable: a producer's handle is proven **open** once
+`false` is subtracted, a closing call's return proves it **closed** through
+every alias, a keeper (`ftell($h)`, any by-value builtin position) leaves both
+the lane and the state alone, and an escape — a project callee, a store, a
+capture, a merge — forgets the state and convicts nothing. So `@param
+open-resource` refuses a closed handle and `@param closed-resource` refuses a
+fresh one, while PHPStan, which resolves all three spellings to one
+`ResourceType`, refuses neither; and `is_resource($h)` narrows the state
+(true: open, false: closed beside a `false` arm) where PHPStan drops the
+resource arm on the false branch, which is unsound for a closed handle.
 
 **5. `phpdoc_advanced_phpstan_template_type` line 47 — RETIRED (2026-08-15,
 ADR-0086 §2 / #376): the case is enforced.** The entry recorded a standing

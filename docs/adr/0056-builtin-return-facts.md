@@ -378,6 +378,11 @@ otherwise unchanged.
 
 ### 8.8 Amendment (2026-09-14): the one state a return proves
 
+*Superseded by ADR-0097 §2.3–§2.4 (2026-09-14): the state lives on the heap
+beside the object heap, aliases share it, `Open` is proven at allocation, and
+the `fclose_closes` bit became the heap entry's kind. The text is kept as the
+record of the per-variable design it replaced.*
+
 **Status: PENDING ratification.** §8.7 left open/closed state out as a
 dataflow question. Half of it needs no new mechanism, because a
 resource's state moves one way only: open to closed, never back. So
