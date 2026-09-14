@@ -931,8 +931,8 @@ fn a_class_named_resource_does_not_shadow_the_docblock_type() {
         class Resource {}\n\
         /** @param resource $h */ function f($h): void {}\n";
     assert_eq!(param_count(&format!("{src}f(1);")), 1, "an int is not a resource");
-    // What separates the two readings: as the class `App\Resource`, a
-    // `stdClass` is a proven non-instance; as the type, an object is left
-    // undecided (ADR-0056 §8.5), so it stays silent.
-    assert_eq!(param_count(&format!("{src}f(new \\stdClass());")), 0);
+    // What separates the two readings: as the class `App\Resource`, an
+    // `App\Resource` object satisfies the contract; as the type, it is an
+    // object of no migrated class (ADR-0097 §2.6) and a docblock violation.
+    assert_eq!(param_count(&format!("{src}f(new Resource());")), 1);
 }
