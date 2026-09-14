@@ -86,6 +86,9 @@ struct Curated {
     probe: Option<String>,
 }
 
+/// The curated rows read back from the committed table, by `(function, index)`.
+type CuratedRows = BTreeMap<(String, usize), Curated>;
+
 /// One scanned `(function, position)` — the mechanical half of a row.
 struct ScanRow {
     name: String,
@@ -182,10 +185,7 @@ fn collect_stubs(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
 /// Read the committed table back for its curated columns, keyed by
 /// `(function, index)`; a curated row the scan no longer produces is an error,
 /// never a silent drop.
-fn read_committed(
-    dst: &Path,
-    scan: &Scan,
-) -> Result<(Option<String>, BTreeMap<(String, usize), Curated>), String> {
+fn read_committed(dst: &Path, scan: &Scan) -> Result<(Option<String>, CuratedRows), String> {
     let Ok(text) = std::fs::read_to_string(dst) else {
         return Ok((None, BTreeMap::new()));
     };
@@ -544,12 +544,7 @@ fn toml_str(s: &str) -> String {
 }
 
 /// Render the committed source of record.
-fn render(
-    pin: &str,
-    probe_php: Option<&str>,
-    scan: &Scan,
-    curated: &BTreeMap<(String, usize), Curated>,
-) -> String {
+fn render(pin: &str, probe_php: Option<&str>, scan: &Scan, curated: &CuratedRows) -> String {
     let mut s = String::new();
     s.push_str(
         "# resource_params.toml — builtin POSITIONS that demand a legacy PHP RESOURCE\n\

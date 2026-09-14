@@ -1,9 +1,11 @@
 # Re-mining the generated tables
 
-Four of the catalog's tables are generated from engines rather than written by
-hand, and all four take the same repeatable `--php` flag. The engines are a real
-input: a row mined from one build is a claim about every build a target may run
-on, so what a run is given decides what the table is worth.
+Five of the catalog's tables are generated rather than written by hand. Four of
+them are mined from engines and take the same repeatable `--php` flag; the
+engines are a real input: a row mined from one build is a claim about every build
+a target may run on, so what a run is given decides what the table is worth. The
+fifth is mined from php-src's stubs, because the type it records is one no engine
+can voice.
 
 | table | command | what the extra engines buy |
 | --- | --- | --- |
@@ -11,6 +13,7 @@ on, so what a run is given decides what the table is worth.
 | `phpstan-mining/declared_returns.toml` | `mine-function-map --functions` | a lower minor vetoes a row it contradicts (ADR-0069 §3) |
 | `phpstan-mining/declared_method_returns.toml` | `mine-function-map --methods` | the same |
 | `phpsrc-mining/param_facts.toml` | `mine-param-facts` | a platform's own builtins, and a by-ref disagreement refused rather than merged (issue #703) |
+| `phpsrc-mining/resource_params.toml` | `mine-resource-params [--php-src DIR]` | no engine: the stubs at the pinned php-src checkout are the only record of a `@param resource` position (ADR-0097 §2.5); the engine's part is the tripwire at the call site. The curated columns (`accepts_closed`, `closes`, `kind`, `probe`) are carried forward from the committed file by `(function, index)`, never invented, and a run refuses to write when one is orphaned |
 
 Run `cargo xtask gen-catalog` after any of them, and commit the TOML and the
 generated `.rs` together — `gen-catalog --check` is a CI gate and the two are one

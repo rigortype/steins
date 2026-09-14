@@ -530,7 +530,13 @@ boundary.
 - **Resource-consuming parameters** (§8.7's entry) — still out. A
   `resource` position declines with the other unmodeled types, so
   `fwrite($notAResource, …)` is silent; the direction now has a road,
-  not a judgment.
+  not a judgment. *Landed 2026-09-14 under ADR-0097 §2.5: the consumer
+  table (`resource_params.toml`, mined from the stubs at the pin the way
+  §8.2's producer table is) is admitted by the same three-condition gate
+  in the parameter direction — the engine reporting no type at the
+  position is the tripwire — and a proven non-resource there is
+  `type.argument-mismatch`, mode-independent. The closed-state cell
+  stays with ADR-0097's slice 1.*
 - **Curated parameter refinements.** §1's composition is stated for
   returns and is not extended: a curated `non-empty-string` *parameter*
   would refuse values the engine accepts, which is a finding-adding
