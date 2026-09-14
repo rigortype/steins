@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 
-use steins_catalog::RefusalAxis;
+use steins_catalog::{RefusalAxis, ResourceParam};
 use steins_domain::Fact;
 use steins_sidecar::{
     BuiltinParam, ClassReflection, ConstantDefined, EnvInfo, FoldArg, FoldKey, FoldResult,
@@ -269,6 +269,24 @@ pub trait Folder {
         None
     }
 
+    /// What the builtin `name` demands of a **resource** argument at its 0-based
+    /// position `index` (ADR-0097 §2.5) — the parameter twin of
+    /// [`Self::builtin_resource_return`], gated the same way.
+    ///
+    /// `resource` is the one parameter type PHP cannot spell, so the reflected
+    /// list above reports no type at every such position and the stub docblock
+    /// is the only record of the demand. A row is answered only when all of the
+    /// gate holds: the catalog has the row (the stub reading at the pin), the
+    /// engine has the function and **reports no declared type at the position**
+    /// — the tripwire: the day `fwrite` declares `Stream $stream`, the engine
+    /// speaks and the row is disowned — the position is neither by-reference
+    /// nor variadic, and the project minor equals the catalog pin. Default
+    /// `None` (sound subset, ADR-0004): `--no-php` admits nothing.
+    fn builtin_resource_param(&mut self, name: &str, index: usize) -> Option<ResourceParam> {
+        let _ = (name, index);
+        None
+    }
+
     // preg pattern refusal (ADR-0078, issue #189)
 
     /// The project's own PCRE **refusal** of `pattern`, as PCRE's own words — or
@@ -439,6 +457,10 @@ pub struct EngineFolder<E: FoldEngine> {
     /// answer read off the same `reflect` reply, memoized on the same terms, so a
     /// builtin called in fifty files costs the round trip once.
     param_types_memo: HashMap<String, Option<Vec<BuiltinParam>>>,
+    /// Per-`(name, position)` memo of the ADR-0097 §2.5 resource-parameter answer.
+    /// Rides [`Self::param_types_memo`]'s reply — the tripwire is a question about
+    /// that reply's position, not a second round trip.
+    resource_param_memo: HashMap<(String, usize), Option<ResourceParam>>,
     /// Per-**pattern** memo of the PCRE compile verdict (ADR-0078, issue #189):
     /// the dedupe that makes a pattern repeated across a run cost exactly one
     /// `preg_compile` request. Keyed by the pattern verbatim — PCRE is
@@ -515,6 +537,7 @@ impl<E: FoldEngine> EngineFolder<E> {
             resource_return_memo: HashMap::new(),
             param_counts_memo: HashMap::new(),
             param_types_memo: HashMap::new(),
+            resource_param_memo: HashMap::new(),
             preg_refusal_memo: HashMap::new(),
             boot_surface_const_memo: HashMap::new(),
             class_reflect_memo: HashMap::new(),
@@ -546,6 +569,7 @@ impl<E: FoldEngine> EngineFolder<E> {
             self.return_type_memo.clear();
             self.param_counts_memo.clear();
             self.param_types_memo.clear();
+            self.resource_param_memo.clear();
             self.boot_surface_memo.clear();
             self.boot_surface_fn_memo.clear();
             self.boot_surface_const_memo.clear();
@@ -840,6 +864,35 @@ impl<E: FoldEngine> EngineFolder<E> {
         }
         refl.params
     }
+
+    /// Compute the resource-parameter answer for `key` (already lowercased) at
+    /// `index` — ADR-0097 §2.5's gate, which is [`Self::compute_builtin_resource_return`]'s
+    /// gate in the parameter direction. Called once per `(name, position)`;
+    /// memoized by [`Folder::builtin_resource_param`].
+    fn compute_builtin_resource_param(&mut self, key: &str, index: usize) -> Option<ResourceParam> {
+        // Gate 1 — the catalog row, asked first because it is free and it is the
+        // common decline: most positions of most builtins are not resources.
+        let row = steins_catalog::resource_param(key, index)?;
+        // Gate 2 — the minor pin: the stub was read at `PINNED_PHP` and says
+        // nothing about any other minor (ADR-0056 §2). Includes the live-engine /
+        // no-monkey-patching posture through `builtin_param_types` below.
+        if !self.curated_rows_admitted() {
+            return None;
+        }
+        // Gate 3 — THE TRIPWIRE, read off the reflected parameter list (the same
+        // reply and the same memo the ordinary builtin judgment consumes). A name
+        // this engine does not have, or a list shorter than the position, is not
+        // this engine's resource consumer whatever the pinned stub said. A
+        // position that DECLARES a type has been migrated — the engine speaks,
+        // curation yields (ADR-0056 §1) — and so is disowned; a by-reference or
+        // variadic position is not a value position at all (ADR-0056 §9.4).
+        let params = self.builtin_param_types(key)?;
+        let bp = params.get(index)?;
+        if bp.ty.is_some() || bp.by_ref || bp.variadic {
+            return None;
+        }
+        Some(row)
+    }
 }
 
 impl<E: FoldEngine> Folder for EngineFolder<E> {
@@ -1019,6 +1072,16 @@ impl<E: FoldEngine> Folder for EngineFolder<E> {
         }
         let answer = self.compute_builtin_param_types(&key);
         self.param_types_memo.insert(key, answer.clone());
+        answer
+    }
+
+    fn builtin_resource_param(&mut self, name: &str, index: usize) -> Option<ResourceParam> {
+        let key = (name.to_ascii_lowercase(), index);
+        if let Some(cached) = self.resource_param_memo.get(&key) {
+            return *cached;
+        }
+        let answer = self.compute_builtin_resource_param(&key.0, index);
+        self.resource_param_memo.insert(key, answer);
         answer
     }
 

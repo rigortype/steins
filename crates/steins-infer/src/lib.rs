@@ -143,7 +143,7 @@ pub use steins_contract::normalize::FinalKeyword;
 pub use global_consts::OsFamily;
 /// The catalog's refusal axis, re-exported: a consumer of [`SurfaceSummary`]
 /// reads the classification without naming `steins-catalog`.
-pub use steins_catalog::RefusalAxis;
+pub use steins_catalog::{RefusalAxis, ResourceParam};
 pub use suppress::{
     DIAGNOSTIC_IDS, DIAGNOSTIC_REGISTRY, FACET_ORIGIN, Facet, Floor, INLINE_IGNORE, InlineOutcome,
     Layer, Origin, SUPPRESS_UNKNOWN_ID, SUPPRESS_UNMATCHED_ID, apply_inline_ignores,

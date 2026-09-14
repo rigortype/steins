@@ -6,10 +6,11 @@
 
 use std::collections::HashMap;
 
+use steins_catalog::ResourceParam;
 use steins_contract::ContractTy;
 use steins_domain::{ArmKnown, Base, Fact};
 use steins_sidecar::BuiltinParam;
-use steins_syntax::{ArgValue, CallExpr, NativeType, Param, ScalarType, Span, TypeMember};
+use steins_syntax::{Arg, ArgValue, CallExpr, NativeType, Param, ScalarType, Span, TypeMember};
 
 use crate::cx::Cx;
 use crate::descent::{
@@ -865,8 +866,22 @@ pub(crate) fn check_builtin_call_args(
             continue;
         }
         // An untyped or unmodeled position (`var_dump`'s `mixed`, `array_map`'s
-        // `array`) declines; §9.4 lists the whole set and why each is silence.
-        let Some(ty) = bp.ty.as_deref().and_then(builtin_param_native_type) else { continue };
+        // `array`) declines; §9.4 lists the whole set and why each is silence —
+        // with one exception the engine cannot voice: an UNTYPED position the
+        // pinned stub declares `@param resource` (ADR-0097 §2.5). The folder
+        // holds the gate (the row, the tripwire, the pin); the arm holds the
+        // judgment, beside the typed one.
+        let Some(ty) = bp.ty.as_deref().and_then(builtin_param_native_type) else {
+            if bp.ty.is_none()
+                && let Some(row) = folder.builtin_resource_param(name, i)
+            {
+                check_resource_position(
+                    cx, folder, row, name, arg, env, store, this_exact, enclosing_class, poisoned,
+                    in_descent, out,
+                );
+            }
+            continue;
+        };
         let param = builtin_param_as_param(bp, ty, arg.span);
         let ty = param.ty.as_ref().expect("set just above");
 
@@ -953,4 +968,155 @@ pub(crate) fn check_builtin_call_args(
             );
         }
     }
+}
+
+// ===========================================================================
+// Resource positions (ADR-0097 §2.5): the one parameter type the engine cannot
+// voice, judged beside the reflected ones.
+//
+// `resource` is a leaf in the runtime universe (§2.1): no hierarchy, no
+// members, no coercion path in either direction. So the relation here has
+// exactly two cells and both are exact — a proven NON-resource is a `TypeError`
+// (`must be of type resource, string given`), and a proven resource is the
+// value the position asks for. The state cell (§2.5's second) is slice 1's; its
+// seam is `closed_handle_verdict` below.
+// ===========================================================================
+
+/// Judge one argument at a builtin position whose admitted row says the pinned
+/// stub declares `@param resource` there (ADR-0097 §2.5).
+///
+/// **Mode-independent**, and the tail of the message says so: probed at 8.5.10
+/// with no `declare(strict_types=1)`, `fwrite('x', …)`, `fwrite(null, …)`,
+/// `fwrite(new stdClass, …)`, `fwrite([], …)`, `fwrite(1.5, …)`, `fwrite(true, …)`
+/// and `fclose(1)` are every one `TypeError: <f>(): Argument #1 ($stream) must
+/// be of type resource, T given`, and `strict_types=1` changes none of them.
+/// `null` is in that list on purpose: the §9.3 internal-null carve-out is a
+/// *deprecation* for non-nullable **scalar** positions of internal functions,
+/// and a resource position is not one — `fwrite(null, …)` and `fclose(null)`
+/// fatal in both modes, so the carve-out is not consulted here.
+///
+/// **Proven** means what it means in the typed arm beside this one, and is read
+/// off the same two resolutions: the propagated value ([`propagated_arg_value`]
+/// — a variable's `Singleton`, a nested call's proven return) and the static one
+/// (`Cx::resolve_static_value` — a literal, a `new`, an enum case, a resolved
+/// class constant), plus an array literal (an array whatever its elements) and
+/// a variable the heap binds to an exact class (no class has resource
+/// instances). An abstract fact — a declared `string $s` forwarded, `mixed`, an
+/// `Asserted` arm — is not a proven value and stays silent: the possibly pair
+/// has no resource cell, and this slice adds none.
+#[allow(clippy::too_many_arguments)]
+fn check_resource_position(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    row: ResourceParam,
+    callee: &str,
+    arg: &Arg,
+    env: &HashMap<String, Known>,
+    store: &Store,
+    this_exact: Option<&str>,
+    enclosing_class: Option<&str>,
+    poisoned: bool,
+    in_descent: bool,
+    out: &mut Vec<Diagnostic>,
+) {
+    // A variable whose contract lane is a bare `Verified` resource (ADR-0056
+    // §8.6's lock) IS what the position asks for; what remains to ask about it
+    // is its state, and that is the seam below.
+    if !poisoned
+        && let ArgValue::Var(v) = &arg.value
+        && store_holds_resource(store, v)
+    {
+        if let Some(d) = closed_handle_verdict(row, store, v) {
+            out.push(d);
+        }
+        return;
+    }
+    // A variable the heap binds to a proven object of exact class (ADR-0036):
+    // the same rung the typed arm carries, on the same guards — never inside a
+    // descent, where the callee's own `instanceof` guards are unmodeled.
+    if !poisoned
+        && !in_descent
+        && let ArgValue::Var(v) = &arg.value
+        && store.is_exact(v)
+        && let Some(class) = store.class_of(v)
+    {
+        out.push(cx.resource_param_diagnostic(
+            arg.span.start,
+            &arg.value,
+            Some(&format!("holds a {}", simple_class(class))),
+            callee,
+            row.name,
+        ));
+        return;
+    }
+    // The proven value, resolved exactly as the typed arm resolves it, plus the
+    // array literal `resolve_static_value` leaves to the shape lane.
+    let proven = propagated_arg_value(
+        cx, folder, &arg.value, env, store, this_exact, enclosing_class, poisoned, in_descent,
+        arg.span.start, out,
+    )
+    .map(|(v, prov, s)| (v, Some(prov), s))
+    .or_else(|| {
+        cx.resolve_static_value(&arg.value, enclosing_class).map(|v| (v, None, Stratum::Verified))
+    })
+    .or_else(|| {
+        matches!(arg.value, ArgValue::Array(_)).then(|| (arg.value.clone(), None, Stratum::Verified))
+    });
+    let Some((value, provenance, stratum)) = proven else { return };
+    // Proof-layer consumption rule (ADR-0052 §5): an all-`Verified` premise, or
+    // silence.
+    if stratum != Stratum::Verified || !proven_non_resource(cx, &value) {
+        return;
+    }
+    // ADR-0043 stage 3's guard-blindness: an object value judged inside a
+    // binding descent may be narrowed by an `instanceof` the walk cannot see.
+    if in_descent && matches!(value, ArgValue::New(..) | ArgValue::EnumCase(..)) {
+        return;
+    }
+    out.push(cx.resource_param_diagnostic(arg.span.start, &value, provenance.as_deref(), callee, row.name));
+}
+
+/// Whether a resolved value is provably one of the seven runtime kinds that are
+/// NOT `resource` (ADR-0097 §2.1's leaf: a resource is none of the others, and
+/// none of the others is a resource).
+fn proven_non_resource(cx: &Cx, value: &ArgValue) -> bool {
+    match value {
+        // The scalars, `null` and an array — each a literal in the source or a
+        // value the propagation proved. `null` is a `TypeError` here in both
+        // modes (see `check_resource_position`), unlike at a scalar position.
+        ArgValue::Int(_)
+        | ArgValue::Float(_)
+        | ArgValue::Str(_)
+        | ArgValue::Bool(_)
+        | ArgValue::Null
+        | ArgValue::Array(_) => true,
+        // A proven object: no class has resource instances. The migrated
+        // families (`CurlHandle`, `GdImage`, …) are not a counter-example — the
+        // position that takes one DECLARES its class, and the tripwire disowns
+        // such a row before this is ever asked.
+        ArgValue::New(..) | ArgValue::EnumCase(..) => cx.proven_object_class(value).is_some(),
+        _ => false,
+    }
+}
+
+/// **The seam for ADR-0097 §2.5's second cell** — a proven CLOSED handle at a
+/// position whose row says `accepts_closed = false` is `type.argument-mismatch`
+/// with the state named (`must be an open stream resource`) — deliberately not
+/// reached here. Slice 1 of ADR-0097 (§2.3, §2.4) moves the handle's identity
+/// and state onto the heap; until it lands there is no proven `Closed` to read,
+/// only the arm lane's type, and "closed" is not a claim this slice can make.
+///
+/// What the seam fixes is *where* the verdict will be reached and *what* it
+/// will read: the row's `accepts_closed` bit, beside the resource-ness judgment,
+/// on the same id. `get_resource_id` and `get_resource_type` (`accepts_closed`
+/// probed `true`) have no verdict to reach whatever the state turns out to be;
+/// every other row will convict on `Closed` and stay silent on `Open` and
+/// `Unknown` (§2.4: Unknown convicts nothing). `None` until then.
+fn closed_handle_verdict(row: ResourceParam, store: &Store, var: &str) -> Option<Diagnostic> {
+    if row.accepts_closed {
+        return None;
+    }
+    // Slice 1: read the heap entry `var` is bound to; `Closed` convicts.
+    let _ = (store, var);
+    None
 }
