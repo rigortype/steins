@@ -30,10 +30,12 @@
 # docblock violation: `new \stdClass()` convicts, as it does under every other
 # analyzer on the conformance page.
 #
-# RETIREMENT IS THE DESIGN (ADR-0097 §2.8). A class enters while functionMap
-# lags the engine and leaves when the map catches up — at which point `@param
-# resource` handed that class is rot the docblock's own vocabulary has
-# abandoned, and PHPStan reports it too. Nothing here is hand-listed.
+# RETIREMENT IS THE DESIGN (ADR-0097 §2.8). A class enters when the engine
+# declares it where the base map still says `resource`, and leaves when the
+# resource era leaves the base map — when PHPStan drops the PHP that returned
+# the handle — at which point `@param resource` handed that class is rot the
+# docblock's own vocabulary has abandoned, and PHPStan reports it too. Nothing
+# here is hand-listed.
 #
 # LINEAGE (see the root NOTICE file):
 #   Steins <- phpstan-src `resources/functionMap.php`
