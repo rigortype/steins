@@ -86,8 +86,8 @@ one kind of resource), "handle" for the type (it names the value's identity)
 
 **Closing call** (ADR-0097):
 A builtin that leaves its resource argument closed when it returns —
-`fclose`, `pclose`, `closedir`, `proc_close`, `gzclose`, `bzclose`. The
-return is the premise: every argument such a call rejects has already
+`fclose`, `pclose`, `closedir`, `proc_close`, `gzclose`, `bzclose`,
+`stream_filter_remove`. The return is the premise: every argument such a call rejects has already
 thrown. Kind-sensitive: `fclose` warns and keeps a directory handle open.
 _Avoid_: "destructor", "release" (PHP closes a dropped handle silently, and
 that is not a closing call)

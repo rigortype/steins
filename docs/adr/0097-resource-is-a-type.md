@@ -67,7 +67,9 @@ callee that closes its argument, and so does closing `$arr[0]` after `$arr
 = [$h]`. `unset($x)` of an alias closes nothing; dropping the last
 reference closes silently. A closed handle never reopens. A **closing
 call** is a builtin that leaves its argument closed when it returns:
-`fclose`, `pclose`, `closedir`, `proc_close`, `gzclose`, `bzclose`. Two of
+`fclose`, `pclose`, `closedir`, `proc_close`, `gzclose`, `bzclose`, and
+`stream_filter_remove` (a filter resource; found by the §2.5 mining,
+2026-09-14). Two of
 them are kind-sensitive: `fclose` on an `opendir()` handle warns (`cannot
 close the provided stream, as it must not be manually closed`), returns
 `false` and **leaves it open**; `closedir` on an `fopen()` handle is a
@@ -85,8 +87,10 @@ Argument #1 ($stream) must be of type resource, string given` (`null`,
 closed handle or a handle of the wrong kind is `TypeError: fread():
 Argument #1 ($stream) must be an open stream resource`, and a second
 `fclose` is the same error. A few positions accept any state
-(`get_resource_type`, `get_resource_id`, `gettype`, `is_resource`,
-`stream_context_get_options` on a live stream or context).
+(`get_resource_type`, `get_resource_id`, `gettype`, `is_resource`);
+`stream_context_get_options` is not one of them — a closed handle there is
+`TypeError: … must be a valid stream/context` (corrected 2026-09-14 by the
+§2.5 mining, which probes every row it curates).
 
 ### 1.2 What Steins says today
 
@@ -230,7 +234,7 @@ sweep, keyed on what received it:
 
 | the handle is … | state after |
 | --- | --- |
-| passed to a **closing call** (`fclose`, `pclose`, `closedir`, `proc_close`, `gzclose`, `bzclose`) whose table row closes the handle's *kind* | `Closed` — the call returned, so every argument it rejects has already thrown |
+| passed to a **closing call** (`fclose`, `pclose`, `closedir`, `proc_close`, `gzclose`, `bzclose`, `stream_filter_remove`) whose table row closes the handle's *kind* | `Closed` — the call returned, so every argument it rejects has already thrown |
 | passed to a **keeper** — a stub-table position (§2.5) whose row says the call does not close | unchanged |
 | passed to anything else: a project function, a method, a callback, a spread or by-reference position, a name the tables do not hold | `Unknown` (the escape) |
 | stored into an array or a property, captured by a closure, returned | `Unknown` (the escape) |
