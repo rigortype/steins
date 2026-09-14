@@ -17,6 +17,8 @@
 //!                            mine phpstan-src's functionMap into the declared-return TOMLs
 //!   mine-param-facts [--php PATH]… [--merge TOML]…
 //!                            union the engines' own arginfo into the parameter-facts TOML
+//!   mine-resource-params [--php-src DIR]
+//!                            scan php-src's stubs for `@param resource` positions into the resource-params TOML
 //!   nsrt [DIR]               assertType harness (oracle idea B) over phpstan-src nsrt
 //!   perf <DIR>… [--bless]    cold perf baseline + the determinism half of warm ≡ cold (ADR-0092 §5)
 //!   phpdoc-oracle [--check]  diff steins-phpdoc against the real phpstan/phpdoc-parser
@@ -35,6 +37,7 @@ mod gate;
 mod mine_constants;
 mod mine_function_map;
 mod mine_param_facts;
+mod mine_resource_params;
 mod gen_catalog;
 mod lean_check;
 mod nsrt;
@@ -166,6 +169,19 @@ fn main() -> ExitCode {
                 Err(e) => fail(&e),
             }
         }
+        Some("mine-resource-params") => {
+            // `--php-src DIR`: the pinned php-src checkout whose stubs are scanned
+            // (ADR-0097 §2.5); the default is the checkout `resource_returns.toml`
+            // was read from.
+            let php_src = args
+                .windows(2)
+                .find(|w| w[0] == "--php-src")
+                .map(|w| w[1].as_str());
+            match mine_resource_params::run(php_src) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => fail(&e),
+            }
+        }
         Some("nsrt") => {
             let dir = args.get(1).filter(|a| !a.starts_with("--")).map(String::as_str);
             match nsrt::run(dir) {
@@ -187,11 +203,11 @@ fn main() -> ExitCode {
             }
         }
         Some(other) => fail(&format!(
-            "unknown command `{other}` (artifact-bytes | corpus-sync | fp-gate | freq | gen-catalog | lean-check | licenses | mine-constants | mine-function-map | nsrt | perf | phpdoc-oracle)"
+            "unknown command `{other}` (artifact-bytes | corpus-sync | fp-gate | freq | gen-catalog | lean-check | licenses | mine-constants | mine-function-map | mine-param-facts | mine-resource-params | nsrt | perf | phpdoc-oracle)"
         )),
         None => {
             eprintln!(
-                "usage: cargo xtask <artifact-bytes <DIR>… [--no-php] | corpus-sync [--update] | fp-gate | freq | gen-catalog | lean-check [--bless] | licenses | mine-constants [--php PATH]… | mine-function-map [DIR] [--functions] [--methods] [--php PATH]… | mine-param-facts [--php PATH]… [--merge TOML]… | nsrt [DIR] | perf <DIR>… [--runs N] [--bless] [--no-php] | phpdoc-oracle [--check]>"
+                "usage: cargo xtask <artifact-bytes <DIR>… [--no-php] | corpus-sync [--update] | fp-gate | freq | gen-catalog | lean-check [--bless] | licenses | mine-constants [--php PATH]… | mine-function-map [DIR] [--functions] [--methods] [--php PATH]… | mine-param-facts [--php PATH]… [--merge TOML]… | mine-resource-params [--php-src DIR] | nsrt [DIR] | perf <DIR>… [--runs N] [--bless] [--no-php] | phpdoc-oracle [--check]>"
             );
             ExitCode::from(2)
         }
