@@ -1,10 +1,10 @@
 # Re-mining the generated tables
 
-Five of the catalog's tables are generated rather than written by hand. Four of
+Six of the catalog's tables are generated rather than written by hand. Five of
 them are mined from engines and take the same repeatable `--php` flag; the
 engines are a real input: a row mined from one build is a claim about every build
 a target may run on, so what a run is given decides what the table is worth. The
-fifth is mined from php-src's stubs, because the type it records is one no engine
+sixth is mined from php-src's stubs, because the type it records is one no engine
 can voice.
 
 | table | command | what the extra engines buy |
@@ -12,6 +12,7 @@ can voice.
 | `phpsrc-mining/constants.toml` | `mine-constants` | `since`/`until` from presence, and a value the engines disagree about is refused (ADR-0094 §2) |
 | `phpstan-mining/declared_returns.toml` | `mine-function-map --functions` | a lower minor vetoes a row it contradicts (ADR-0069 §3) |
 | `phpstan-mining/declared_method_returns.toml` | `mine-function-map --methods` | the same |
+| `phpstan-mining/migrated_resource_classes.toml` | `mine-function-map --migrated` | nothing — the top engine alone answers, and the pin is `declared_returns.toml`'s rather than the checkout's, so regenerate it alongside that table (ADR-0097 §2.6) |
 | `phpsrc-mining/param_facts.toml` | `mine-param-facts` | a platform's own builtins, and a by-ref disagreement refused rather than merged (issue #703) |
 | `phpsrc-mining/resource_params.toml` | `mine-resource-params [--php-src DIR]` | no engine: the stubs at the pinned php-src checkout are the only record of a `@param resource` position (ADR-0097 §2.5); the engine's part is the tripwire at the call site. The curated columns (`accepts_closed`, `closes`, `kind`, `probe`) are carried forward from the committed file by `(function, index)`, never invented, and a run refuses to write when one is orphaned |
 

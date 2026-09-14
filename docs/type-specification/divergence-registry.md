@@ -369,7 +369,8 @@ unavailable. §8 substitutes a tripwire — a curated row stands only while the
 engine still declares nothing for the name, which is exactly what the PHP 8
 resource-to-object migration ends. The value domain is unchanged and still
 object- and resource-free (ADR-0035/0038). Still deferred (§8.7): arrays *of*
-resources and resource-consuming *parameters*. The *state* is on the heap since
+resources (ADR-0097 §3); the consuming direction landed with ADR-0097 §2.5
+(2026-09-14). The *state* is on the heap since
 ADR-0097 §2.3–§2.4 (2026-09-14), beside the object heap, so it belongs to the
 handle rather than to a variable: a producer's handle is proven **open** once
 `false` is subtracted, a closing call's return proves it **closed** through
@@ -381,6 +382,15 @@ fresh one, while PHPStan, which resolves all three spellings to one
 `ResourceType`, refuses neither; and `is_resource($h)` narrows the state
 (true: open, false: closed beside a `false` arm) where PHPStan drops the
 resource arm on the false branch, which is unsound for a closed handle.
+*Amended 2026-09-14 (ADR-0097 §2.6):* the object verdict is `No` now —
+`acceptsResource(new \stdClass())` is a `phpdoc.param-mismatch`, the verdict
+every other analyzer on this page reaches — except for an object of a class PHP
+migrated a resource into (`CurlHandle`, `GdImage`, `LDAP\Result`,
+`PgSql\Connection`, `finfo`, …), which stays `Maybe`: §8.5's channel, made
+finite. The exception is the derived migrated table
+(`docs/research/phpstan-mining/migrated_resource_classes.toml`, every class the
+pinned engine declares where PHPStan's functionMap still says `resource`), never
+a hand-kept list, and it compares whole FQNs. Conformance `resource` 2/3 → 3/3.
 
 **5. `phpdoc_advanced_phpstan_template_type` line 47 — RETIRED (2026-08-15,
 ADR-0086 §2 / #376): the case is enforced.** The entry recorded a standing
