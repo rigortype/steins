@@ -417,3 +417,35 @@ fn silent_in_a_dead_branch() {
     let d = fires("<?php\nif (false) {\n  new Widget();\n}\n");
     assert!(d.is_empty(), "{d:?}");
 }
+
+// The word `resource` (ADR-0097 §2.2): the same absent-class diagnosis, a sentence
+// that names the type PHP cannot declare.
+
+#[test]
+fn a_resource_hint_is_reported_as_the_undeclarable_type() {
+    let d = fires("<?php\nnamespace App;\nfunction f(resource $x): void {}\n");
+    assert_eq!(d.len(), 1, "{d:?}");
+    let m = &d[0].message;
+    assert!(m.contains("not a type PHP can declare"), "{m}");
+    assert!(m.contains("class App\\resource"), "{m}");
+    assert!(m.contains("@param resource"), "{m}");
+    assert!(m.contains("not on PHP 8.5.8"), "the evidence clause stays: {m}");
+}
+
+#[test]
+fn a_qualified_resource_is_an_ordinary_class_reference() {
+    // `\resource` and `App\resource` are spelled as class references; the special
+    // sentence is for the bare word an author meant as the type.
+    for src in ["<?php\nfunction f(\\resource $x): void {}\n", "<?php\nfunction f(App\\resource $x): void {}\n"] {
+        let d = fires(src);
+        assert_eq!(d.len(), 1, "{d:?}");
+        assert!(d[0].message.starts_with("reference to undefined class"), "{}", d[0].message);
+    }
+}
+
+#[test]
+fn a_project_class_named_resource_silences_the_hint() {
+    // The ordinary ladder: a declared class of that name is what the hint refers to.
+    let d = fires("<?php\nnamespace App;\nclass resource {}\nfunction f(resource $x): void {}\n");
+    assert!(d.is_empty(), "{d:?}");
+}

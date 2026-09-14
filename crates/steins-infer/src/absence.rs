@@ -1210,12 +1210,27 @@ pub(crate) fn check_undefined_class(cx: &Cx, folder: &mut dyn Folder, r: &NameRe
 
     let pos = cx.tree().position(r.offset);
     let evidence = existence_evidence(folder);
+    // The word `resource` (ADR-0097 §2.2): PHP has no declarable resource type and
+    // reads the word as a class name, warning at compile time that it will
+    // (`"resource" is not a supported builtin type and will be interpreted as a
+    // class name`, 8.5.10). The diagnosis is the same absent class and keeps the
+    // id; the sentence names the type the author meant and where it can be
+    // written. Unqualified only — `\resource` and `App\resource` are class
+    // references an author spelled as such.
+    let message = if r.kind == RefKind::Unqualified && r.raw.eq_ignore_ascii_case("resource") {
+        format!(
+            "`resource` is not a type PHP can declare — this is a reference to a class \
+             {display}, {evidence}; the resource type is spelled in a docblock (`@param resource`)",
+        )
+    } else {
+        format!("reference to undefined class {display} — {evidence}")
+    };
     out.push(Diagnostic {
         id: CLASS_UNDEFINED_ID,
         path: cx.path().to_owned(),
         line: pos.line,
         column: pos.column,
-        message: format!("reference to undefined class {display} — {evidence}"),
+        message,
         facet: None,
         fix: None,
     });

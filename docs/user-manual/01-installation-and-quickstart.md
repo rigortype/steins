@@ -329,10 +329,12 @@ contain no `.php` files is a genuine no-op and still exits `0`.
   - Declaration-coherence lints (native `?string` wider than
     `@param string`) are not reported — type-safe code, not a proof-layer
     concern; a standing refusal PHPStan itself shares by design.
-  - `resource`-typed hints reference a non-existent class and are reported
-    as one; resource *values* are modeled since ADR-0056 §8, so a stream
-    handle handed to a scalar parameter is a finding. Arrays of resources,
-    resource-consuming parameters and open/closed state remain deferred.
+  - A native `resource` hint is a reference to a class named `resource` —
+    PHP has no declarable resource type and says so at compile time — and
+    is reported as `class.undefined` with a message that names the type
+    (ADR-0097 §2.2). Resource *values* are modeled since ADR-0056 §8, so a
+    stream handle handed to a scalar parameter is a finding. Arrays of
+    resources remain deferred (ADR-0097 §3).
   - Conditional late-static-binding return shapes (`new self()` under
     `: static` in an open class) stay silent — refused worst-casing.
 
