@@ -5,14 +5,20 @@
 
 use std::collections::{HashMap, HashSet};
 
+use steins_catalog::ResourceKind;
 use steins_contract::{ContractTy, ResourceState, normalize};
 use steins_domain::{Base, Certainty, Fact, Refinement, ShapeFact, Key as VKey, Val};
-use steins_syntax::{ArgValue, StmtKind};
+use steins_syntax::{
+    ArgValue, ArrayKey, CallExpr, Callee, ClosureRef, InvalidatedVar, Receiver,
+};
 
 use crate::cx::Cx;
 use crate::dispatch::BuiltinCallee;
-use crate::env::{ContractArm, Known, Store, Stratum, array_literal_fact, singleton_fact};
-use crate::existence::global_function_callee;
+use crate::env::{
+    AllocId, ContractArm, HandleState, HeapRes, Known, Store, Stratum, array_literal_fact,
+    singleton_fact,
+};
+use crate::existence::{denotes_global_function, global_function_callee};
 use crate::refine::{flatten_arms, refine_declared_arms, seed_shape_fact};
 use crate::walk::value_stratum;
 use crate::fold::Folder;
@@ -224,40 +230,47 @@ pub(crate) const CATALOG_FLOOR: &str = "declared in the builtin catalog, unverif
 /// * **exactly one arm.** `resource|false` straight out of `fopen()` is not a
 ///   proven resource until the `=== false` guard kills that arm.
 /// * **that arm is [`ContractTy::Resource`].** Not a supertype, not an `Opaque`
-///   that might contain one. Any state: a closed handle is still a resource to
-///   every native parameter (`fclose($h); strlen($h)` is the same `TypeError`,
-///   probed at 8.5.10).
+///   that might contain one. Any declared state: a closed handle is still a
+///   resource to every native parameter (`fclose($h); strlen($h)` is the same
+///   `TypeError`, probed at 8.5.10).
 /// * **`Verified`.** ADR-0052 §3 keeps the contract lane away from the proof
 ///   layer — a lane arm reaching `Asserted` by any route, including a
 ///   `@return resource` docblock, does not qualify.
 ///
+/// The lane answers "is this a resource" and nothing about its **state**: that
+/// lives on the heap entry the same binding refers to (ADR-0097 §2.3), read by
+/// [`proven_resource_state`] — the lock's second clause.
+///
 /// [`fn_return_arms`]: crate::fn_return_arms
 pub(crate) fn store_holds_resource(store: &Store, var: &str) -> bool {
-    proven_resource(store, var).is_some()
+    matches!(
+        store.contract_arms(var),
+        Some([ContractArm { ty: ContractTy::Resource { .. }, stratum: Stratum::Verified }])
+    )
 }
 
-/// Whether `var` holds a resource **proven closed** (ADR-0056 §8.8): the
-/// [`store_holds_resource`] lane, in [`ResourceState::Closed`]. Only
-/// [`resource_closed_by_call`] puts a lane in that state — a docblock's
-/// `closed-resource` is `Asserted` and never reaches here.
-pub(crate) fn store_holds_closed_resource(store: &Store, var: &str) -> bool {
-    matches!(proven_resource(store, var), Some((ResourceState::Closed, _)))
-}
-
-/// The one `Verified` resource arm [`store_holds_resource`] asks for, as its
-/// state and `fclose_closes` bit.
-fn proven_resource(store: &Store, var: &str) -> Option<(ResourceState, bool)> {
-    match store.contract_arms(var) {
-        Some([ContractArm {
-            ty: ContractTy::Resource { state, fclose_closes },
-            stratum: Stratum::Verified,
-        }]) => Some((*state, *fclose_closes)),
-        _ => None,
+/// The proven state of the resource `var` holds (ADR-0097 §2.3): `None` where
+/// [`store_holds_resource`]'s lock fails, else the state of the heap resource
+/// the binding refers to — the lock's second clause — and
+/// [`HandleState::Unknown`] where the lane holds but no heap resource is bound
+/// (a lane that reached here by a route other than a producer call, or one
+/// whose binding a join or a forgetting dropped).
+///
+/// Only a producer call allocates a heap resource and only a closing call, an
+/// `is_resource` guard or an escape moves its state, so a docblock's
+/// `open-resource`/`closed-resource` — `Asserted`, and heap-less — never
+/// reaches a state here.
+pub(crate) fn proven_resource_state(store: &Store, var: &str) -> Option<HandleState> {
+    if !store_holds_resource(store, var) {
+        return None;
     }
+    Some(store.res_of(var).map_or(HandleState::Unknown, |r| r.state))
 }
 
 /// The **resource-return arms** of a builtin call (ADR-0056 §8): `resource` plus,
-/// where the stub declares one, the `false` failure arm — both `Verified`.
+/// where the stub declares one, the `false` failure arm — both `Verified` — and
+/// the **heap resource** the assignment binds beside them (ADR-0097 §2.3):
+/// the row's kind, in the `Open` state, with the producer's name.
 ///
 /// # Why these arms are `Verified` when the declared floor's are not
 ///
@@ -268,116 +281,322 @@ fn proven_resource(store: &Store, var: &str) -> Option<(ResourceState, bool)> {
 /// (`curl_init` → `CurlHandle|false`) declares one and is refused; a genuine
 /// resource producer declares none because the language has no syntax for it.
 ///
-/// The resource arm's state is [`ResourceState::Any`] — a fresh handle is open,
-/// but "open" is never a proof (ADR-0056 §8.8) — and its `fclose_closes` bit is
-/// [`FCLOSE_CLOSES_PRODUCERS`]'s answer for the name.
+/// The resource arm's declared state is [`ResourceState::Any`]: the lane
+/// carries the type, and `Open` is the heap entry's claim — a proof, since the
+/// producer returned and nothing has touched the handle yet; the `false` arm,
+/// where present, is what the ordinary `=== false` guard subtracts before
+/// [`store_holds_resource`] admits the lane at all.
 ///
 /// The project-shadowing check comes first, as for the floor.
 pub(crate) fn builtin_resource_arms(
     cx: &Cx,
     folder: &mut dyn Folder,
     name: &str,
-) -> Option<Vec<ContractArm>> {
+) -> Option<(Vec<ContractArm>, HeapRes)> {
     if cx.index.has_simple_function(name) {
         return None;
     }
-    let may_be_false = folder.builtin_resource_return(name)?;
-    let fclose_closes =
-        FCLOSE_CLOSES_PRODUCERS.iter().any(|p| p.eq_ignore_ascii_case(name));
+    let row = folder.builtin_resource_return(name)?;
     let mut arms = vec![ContractArm {
-        ty: ContractTy::Resource { state: ResourceState::Any, fclose_closes },
+        ty: ContractTy::Resource { state: ResourceState::Any },
         stratum: Stratum::Verified,
     }];
-    if may_be_false {
+    if row.may_be_false {
         arms.push(ContractArm { ty: ContractTy::LitBool(false), stratum: Stratum::Verified });
     }
-    Some(arms)
+    let res = HeapRes {
+        kind: row.kind,
+        state: HandleState::Open,
+        producer: name.trim_start_matches('\\').to_ascii_lowercase(),
+    };
+    Some((arms, res))
 }
 
-/// The resource producers whose handle `fclose()` (and `gzclose()`) **closes**
-/// whenever it returns (ADR-0056 §8.8), each probed at 8.5.10 by `gettype()`
-/// reading `"resource (closed)"` after the call.
+/// The **closing calls** (ADR-0097 §2.4; CONTEXT.md "Closing call") and, per
+/// call, the kinds of handle it leaves **closed** when it returns — each cell
+/// probed at 8.5.10 by `gettype()` reading `"resource (closed)"` after the call.
 ///
-/// An allowlist, because the counterexample is a producer row like any other:
-/// a directory handle from `opendir()` carries the stream flag that makes both
-/// calls warn, return `false` and leave it **open**. `pg_socket()` is left out
-/// for want of a probe, not for a known answer. The producers whose handle the
-/// two calls reject outright (`proc_open`, the `stream_context_*` and
-/// `stream_filter_*` rows) are out too: the call throws, so nothing after it is
-/// reached, and a row that could only ever be vacuous would only be noise.
-const FCLOSE_CLOSES_PRODUCERS: &[&str] = &[
-    "fopen",
-    "tmpfile",
-    "popen",
-    "fsockopen",
-    "pfsockopen",
-    "stream_socket_server",
-    "stream_socket_client",
-    "stream_socket_accept",
-    "gzopen",
-    "bzopen",
-    "socket_export_stream",
+/// A return is the whole premise: every argument a closing call rejects — a
+/// non-resource, an already-closed handle, a handle of a kind the call has no
+/// row for — is a `TypeError`, so the statement after it runs only when the
+/// close happened. That is why the table lists what a *normal* return closes
+/// and nothing else, and why the one kind-sensitive cell is a keeper rather
+/// than an error: `fclose`, `gzclose` and `bzclose` over an `opendir()` handle
+/// **warn, return `false` and leave it open** (`cannot close the provided
+/// stream, as it must not be manually closed`), so a `dir` is absent from their
+/// rows and the handle keeps its state. `pclose` closes a `dir` (and any plain
+/// stream); `closedir` and `proc_close` reject everything but their own kind.
+///
+/// A persistent stream (`pfsockopen`) is closed by `fclose`, `gzclose`,
+/// `bzclose` and `pclose` alike: the handle reads `resource (closed)` and
+/// `is_resource` says `false`, while the connection lives on for the next
+/// `pfsockopen()` to hand out under a new id. The `stream-context` and
+/// `stream-filter` kinds appear in no row: every closer throws on them.
+const CLOSERS: &[(&str, &[ResourceKind])] = &[
+    ("fclose", &[ResourceKind::Stream, ResourceKind::PersistentStream]),
+    ("gzclose", &[ResourceKind::Stream, ResourceKind::PersistentStream]),
+    ("bzclose", &[ResourceKind::Stream, ResourceKind::PersistentStream]),
+    ("pclose", &[ResourceKind::Stream, ResourceKind::PersistentStream, ResourceKind::Dir]),
+    ("closedir", &[ResourceKind::Dir]),
+    ("proc_close", &[ResourceKind::Process]),
 ];
 
-/// The variable a closing call **proves closed** when it returns (ADR-0056 §8.8),
-/// and the lane it leaves behind — or `None`.
+/// What one **direct argument position** of a global builtin does to the heap
+/// resource handed to it (ADR-0097 §2.4's table, one row per verdict).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SiteVerdict {
+    /// A closing call whose row closes this kind: the state becomes `Closed`.
+    Close,
+    /// A **keeper**: a closing call that returns from this kind without closing
+    /// it, or a builtin whose reflected parameter here is by value and that is
+    /// not a closing call — a builtin cannot close a handle it merely reads.
+    /// The state is unchanged and the binding survives the call.
+    Keep,
+    /// Everything else: the handle escapes and its state goes `Unknown`.
+    Escape,
+}
+
+/// [`SiteVerdict`] for the global builtin `name` (already resolved through
+/// [`denotes_global_function`], so a project shadow is excluded) receiving a
+/// handle of `kind` at `position`.
 ///
-/// Read off `stmt`'s pre-call store and applied after the statement, by the
-/// ordering [`stmt_out_param_seeds`] uses: a bare call statement, or an
-/// assignment's right-hand side whose target is not the handle itself
-/// (`$h = fclose($h)` rebinds `$h` to a `bool`, and the rebind is the last word).
+/// The closing table is consulted **first** and by name alone: its rows were
+/// probed by hand and every one takes its handle by value, so it needs no
+/// reflection — which is also what keeps the proof of `Closed` available on an
+/// engine whose replay table predates the parameter reply. A name outside the
+/// table is a keeper only on the engine's own word: the reflected parameter at
+/// `position` exists, is not variadic, and is not by reference. A position past
+/// the declared list, a variadic one, a by-reference one, and a name the engine
+/// reflects no signature for are all escapes — the silent direction.
 ///
-/// A return is the whole premise, so every argument that the call rejects is
-/// free: the call throws and nothing after it runs. What remains is which
-/// handles a *normal* return leaves closed, probed at 8.5.10:
+/// The one userland route a by-value stream position leaves open is a user
+/// stream wrapper (`stream_wrapper_register`), whose `stream_tell()` runs on
+/// `ftell($h)`; that its body could reach `$h` through `global` and close it is
+/// accepted as this slice's calibration, exactly as ADR-0070's by-value rule
+/// accepts a callback's `global` inside a function frame.
+fn site_verdict(
+    folder: &mut dyn Folder,
+    name: &str,
+    position: usize,
+    kind: ResourceKind,
+) -> SiteVerdict {
+    if let Some((_, kinds)) = CLOSERS.iter().find(|(n, _)| name.eq_ignore_ascii_case(n)) {
+        return if kinds.contains(&kind) { SiteVerdict::Close } else { SiteVerdict::Keep };
+    }
+    let Some(params) = folder.builtin_param_types(name) else { return SiteVerdict::Escape };
+    match params.get(position) {
+        Some(p) if !p.variadic && !p.by_ref => SiteVerdict::Keep,
+        _ => SiteVerdict::Escape,
+    }
+}
+
+/// What a statement's calls do to the heap resources their arguments name
+/// (ADR-0097 §2.4), read on the pre-call store — where every binding the
+/// statement is about to forget still resolves — and applied by
+/// [`apply_resource_effects`] after the statement's own forgetting, so that
+/// a closed handle stays closed for every name that shares it, `$h =
+/// fclose($h)` included.
+pub(crate) struct ResourceEffects {
+    /// The heap resources this statement closed (`true`) or let escape
+    /// (`false`), by allocation id — a binding the statement drops cannot be
+    /// read back by name, and the entry outlives the name for its aliases.
+    transitions: Vec<(AllocId, bool)>,
+    /// The variables whose **binding survives** the statement's conservative
+    /// forgetting: every occurrence of the name in the statement's call
+    /// arguments is a keeper or a closing call, so nothing the statement did
+    /// could have rebound the variable — only the heap state may have changed.
+    pub(crate) kept: HashSet<String>,
+}
+
+/// Compute [`ResourceEffects`] for `calls` — a statement's
+/// [`checkable_calls`] or a guard's retained calls — on the pre-call `store`.
 ///
-/// * `closedir`, `pclose`, `proc_close` close every handle they return from —
-///   anything else, an already-closed handle included, is a `TypeError`. (`pclose`
-///   closes a directory handle too.)
-/// * `fclose`, `gzclose` return `false` over a directory handle and leave it
-///   open, so they close only a handle whose producer [`FCLOSE_CLOSES_PRODUCERS`]
-///   vouched for.
+/// Per call: each **direct** positional `$v` argument bound to a heap resource
+/// takes [`site_verdict`] for the call's global builtin, and escapes for any
+/// other callee (a project function, a method, a constructor, a dynamic or
+/// unresolvable name, a call with named or spread arguments). A handle named
+/// anywhere **inside** an argument — an array literal, a nested call's
+/// argument, a closure's capture — and one in receiver position escapes
+/// unconditionally: nothing here reads through a nested position, and the
+/// silent direction is the only sound one there.
 ///
-/// The premises are the argument family's: a one-arm `Verified` resource lane
-/// ([`store_holds_resource`] — a `resource|false` lane is left alone), a plain
-/// local variable as the single positional argument, the **global** builtin
-/// ([`global_function_callee`]), and an unpoisoned scope.
+/// `invalidated` is the statement's own completeness oracle for `kept`
+/// ([`Stmt::invalidated`], every occurrence recorded or the entry marked
+/// opaque); a guard position passes none and keeps nothing here — its lane
+/// survival stays with the guard machinery ([`by_value_survivors`],
+/// [`type_predicate`]) as before.
 ///
-/// Nothing here says anything about the handle's other names. `$b = $h;
-/// fclose($b);` closes `$b`'s lane and leaves `$h` in the unknown state it was
-/// in — silent, never wrong, since "unknown" convicts nothing.
-///
-/// [`stmt_out_param_seeds`]: crate::out_params::stmt_out_param_seeds
-pub(crate) fn resource_closed_by_call(
+/// [`checkable_calls`]: crate::descent::checkable_calls
+/// [`Stmt::invalidated`]: steins_syntax::Stmt::invalidated
+/// [`by_value_survivors`]: crate::walk::by_value_survivors
+/// [`type_predicate`]: crate::predicates::type_predicate
+pub(crate) fn resource_call_effects(
     cx: &Cx,
+    folder: &mut dyn Folder,
     poisoned: bool,
-    stmt: &StmtKind,
+    calls: &[&CallExpr],
+    invalidated: Option<&[InvalidatedVar]>,
     store: &Store,
-) -> Option<(String, Vec<ContractArm>)> {
-    let (call, rebound) = match stmt {
-        StmtKind::Call(call) => (call, None),
-        StmtKind::Assign { var, call: Some(call), .. } => (call, Some(var.as_str())),
-        _ => return None,
-    };
-    if poisoned || !call.positional_only {
-        return None;
+) -> ResourceEffects {
+    let mut effects = ResourceEffects { transitions: Vec::new(), kept: HashSet::new() };
+    if poisoned || calls.is_empty() {
+        return effects;
     }
-    let callee = global_function_callee(cx, call)?.to_ascii_lowercase();
-    let [arg] = call.args.as_slice() else { return None };
-    let ArgValue::Var(var) = &arg.value else { return None };
-    if Some(var.as_str()) == rebound {
-        return None;
+    let mut escaped_mentions: Vec<&str> = Vec::new();
+    for call in calls {
+        let builtin = global_function_callee(cx, call).filter(|_| call.positional_only);
+        for (position, arg) in call.args.iter().enumerate() {
+            match &arg.value {
+                ArgValue::Var(v) => {
+                    let Some(res) = store.res_of(v) else { continue };
+                    let id = store.id_of(v).expect("a bound resource has an id");
+                    let verdict = match builtin {
+                        Some(name) => site_verdict(folder, name, position, res.kind),
+                        None => SiteVerdict::Escape,
+                    };
+                    match verdict {
+                        SiteVerdict::Close => effects.transitions.push((id, true)),
+                        SiteVerdict::Keep => {}
+                        SiteVerdict::Escape => effects.transitions.push((id, false)),
+                    }
+                }
+                other => mentioned_vars(other, &mut escaped_mentions),
+            }
+        }
+        for named in &call.named_args {
+            mentioned_vars(&named.value, &mut escaped_mentions);
+        }
+        match &call.receiver {
+            Callee::Method { receiver: Receiver::Var(v), .. } => escaped_mentions.push(v),
+            Callee::Method { receiver: Receiver::New { args, named, .. }, .. } => {
+                for value in args.iter().chain(named.iter().map(|n| &n.value)) {
+                    mentioned_vars(value, &mut escaped_mentions);
+                }
+            }
+            _ => {}
+        }
     }
-    let (_, fclose_closes) = proven_resource(store, var)?;
-    let closes = match callee.as_str() {
-        "closedir" | "pclose" | "proc_close" => true,
-        "fclose" | "gzclose" => fclose_closes,
-        _ => false,
-    };
-    closes.then(|| {
-        let ty = ContractTy::Resource { state: ResourceState::Closed, fclose_closes };
-        (var.clone(), vec![ContractArm { ty, stratum: Stratum::Verified }])
-    })
+    for v in escaped_mentions {
+        if let Some(id) = store.id_of(v).filter(|id| store.resources.contains_key(id)) {
+            effects.transitions.push((id, false));
+        }
+    }
+    // The survivors: a resource-bound name every recorded site of which is a
+    // keeper or a closing call of a global builtin, with no opaque occurrence.
+    for entry in invalidated.unwrap_or(&[]) {
+        if entry.opaque || entry.sites.is_empty() {
+            continue;
+        }
+        let Some(res) = store.res_of(&entry.name) else { continue };
+        let kind = res.kind;
+        let survives = entry.sites.iter().all(|(r, position)| {
+            denotes_global_function(cx, r)
+                && site_verdict(folder, &r.raw, *position as usize, kind) != SiteVerdict::Escape
+        });
+        if survives {
+            effects.kept.insert(entry.name.clone());
+        }
+    }
+    effects
+}
+
+/// Apply [`resource_call_effects`]' transitions to `store`: a closed handle's
+/// entry goes `Closed`; an escaped one takes [`HandleState::escaped`]
+/// (`Closed` stays — nothing reopens a handle). By id, so a name the statement
+/// rebound or forgot still reaches the entry its aliases share.
+pub(crate) fn apply_resource_effects(effects: &ResourceEffects, store: &mut Store) {
+    for (id, closed) in &effects.transitions {
+        if let Some(r) = store.resources.get_mut(id) {
+            r.state = if *closed { HandleState::Closed } else { r.state.escaped() };
+        }
+    }
+}
+
+/// Every local variable a value **mentions**, at any depth the value IR spells
+/// (ADR-0097 §2.4's "stored, captured, nested" escapes): array elements and
+/// expression keys, nested call/method/constructor arguments and receivers, a
+/// closure's by-value captures, both arms of a ternary and both operands of
+/// `??`, a clone's source, the operands of a cast, a negation, a
+/// concatenation and a binary operator, an offset read's base and key. A
+/// property fetch, an `isset` and the literal/constant leaves mention no
+/// binding a handle could ride.
+pub(crate) fn mentioned_vars<'a>(value: &'a ArgValue, out: &mut Vec<&'a str>) {
+    match value {
+        ArgValue::Var(v) | ArgValue::Clone(v) => out.push(v),
+        ArgValue::Call(_, args) => args.iter().for_each(|a| mentioned_vars(a, out)),
+        ArgValue::MethodCall { callee, args, named } => {
+            match callee {
+                Callee::Method { receiver: Receiver::Var(v), .. } => out.push(v),
+                Callee::Method { receiver: Receiver::New { args, named, .. }, .. } => {
+                    for value in args.iter().chain(named.iter().map(|n| &n.value)) {
+                        mentioned_vars(value, out);
+                    }
+                }
+                _ => {}
+            }
+            for value in args.iter().chain(named.iter().map(|n| &n.value)) {
+                mentioned_vars(value, out);
+            }
+        }
+        ArgValue::New(_, args, named) => {
+            for value in args.iter().chain(named.iter().map(|n| &n.value)) {
+                mentioned_vars(value, out);
+            }
+        }
+        ArgValue::Array(items) => {
+            for (key, value) in items {
+                if let ArrayKey::Expr(k) = key {
+                    mentioned_vars(k, out);
+                }
+                mentioned_vars(value, out);
+            }
+        }
+        ArgValue::Ternary { then_val, else_val, .. } => {
+            mentioned_vars(then_val, out);
+            mentioned_vars(else_val, out);
+        }
+        ArgValue::Closure(ClosureRef::Anonymous { captures, .. }) => {
+            out.extend(captures.iter().map(String::as_str));
+        }
+        ArgValue::Coalesce(a, b, _) | ArgValue::Concat(a, b) => {
+            mentioned_vars(a, out);
+            mentioned_vars(b, out);
+        }
+        ArgValue::Binary { lhs, rhs, .. } | ArgValue::Logical { lhs, rhs, .. } => {
+            mentioned_vars(lhs, out);
+            mentioned_vars(rhs, out);
+        }
+        ArgValue::OffsetRead { base, key } => {
+            mentioned_vars(base, out);
+            mentioned_vars(key, out);
+        }
+        ArgValue::Not(v) | ArgValue::Cast { operand: v, .. } => mentioned_vars(v, out),
+        ArgValue::Int(_)
+        | ArgValue::Float(_)
+        | ArgValue::Str(_)
+        | ArgValue::Bool(_)
+        | ArgValue::Null
+        | ArgValue::Closure(ClosureRef::FunctionName(_))
+        | ArgValue::PropFetch { .. }
+        | ArgValue::ClassConst(..)
+        | ArgValue::EnumCase(..)
+        | ArgValue::GlobalConst(_)
+        | ArgValue::Isset(_)
+        | ArgValue::Other => {}
+    }
+}
+
+/// Let every heap resource `value` mentions escape (ADR-0097 §2.4's "stored
+/// into an array or a property, captured by a closure, returned" rows): the
+/// statement-effect twin of [`resource_call_effects`], for the rvalue positions
+/// that are not calls — an assignment's right-hand side, an offset write's
+/// value, a `return` operand.
+pub(crate) fn escape_mentioned_resources(value: &ArgValue, store: &mut Store) {
+    let mut vars = Vec::new();
+    mentioned_vars(value, &mut vars);
+    for v in vars {
+        store.escape_resource(v);
+    }
 }
 
 pub(crate) fn builtin_return_floor(cx: &Cx, name: &str) -> Option<Vec<ContractArm>> {

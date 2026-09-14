@@ -512,15 +512,73 @@ impl HeapObj {
     }
 }
 
+/// The open/closed state of a heap resource (ADR-0097 §2.3) — the one fact
+/// about a handle that a call can change, and it changes one way only.
+///
+/// `Open` **is a proof** at allocation: the producer returned, `false` was
+/// subtracted, nothing has touched the handle. What can invalidate it is what
+/// invalidates an object's property fact — an escape (§2.4) — and an escape
+/// takes it to `Unknown`, never to `Closed`. `Closed` is monotone: no call
+/// reopens a handle, so it survives every escape and every join with itself.
+/// `Unknown` convicts nothing: it is `Maybe` against both state spellings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HandleState {
+    Open,
+    Closed,
+    Unknown,
+}
+
+impl HandleState {
+    /// The branch-merge join: equal states keep, `Open ⊔ Closed` and anything
+    /// with `Unknown` is `Unknown`.
+    pub(crate) fn join(self, other: HandleState) -> HandleState {
+        if self == other { self } else { HandleState::Unknown }
+    }
+
+    /// The state after the handle **escaped** — was handed to something that may
+    /// close it. `Closed` stays (nothing reopens a handle); everything else is
+    /// `Unknown`.
+    pub(crate) fn escaped(self) -> HandleState {
+        if self == HandleState::Closed { HandleState::Closed } else { HandleState::Unknown }
+    }
+}
+
+/// A heap **resource** (ADR-0097 §2.3): the identity and state of a handle a
+/// producer call returned, allocation-keyed beside [`HeapObj`] so that aliases
+/// share it — `$b = $h; fclose($b)` closes the one entry both names refer to,
+/// which is PHP's own handle semantics.
+///
+/// The **type** is not here. It stays in the contract arm lane (`resource`,
+/// plus `false` where the stub declares it), read by the argument families
+/// through the §8.6 lock; this entry answers only the state question, and only
+/// for a variable that lock admits. The kind is the closing table's key
+/// (`fclose` closes a `stream` and warns over a `dir`), the producer a record
+/// for a message.
+#[derive(Clone, Debug)]
+pub(crate) struct HeapRes {
+    /// The kind the producer row states (`resource_returns.toml`).
+    pub(crate) kind: steins_catalog::ResourceKind,
+    /// The handle's state on this path.
+    pub(crate) state: HandleState,
+    /// The lowercased builtin that produced the handle.
+    pub(crate) producer: String,
+}
+
 /// The object store threaded through the walk (ADR-0036). `refs` binds a variable
 /// to an allocation id (its ObjRef);
 /// `heap` maps ids to objects. Aliasing (`$b = $a`) copies the ref (shared id), so
 /// a write through any alias is visible through all. A variable's exact-class fact
 /// lives at `heap[refs[var]].class`.
+///
+/// `resources` maps ids to heap resources (ADR-0097 §2.3), the second entry
+/// kind an id can name: the two maps share the [`AllocId`] space and the one
+/// `refs` binding, so a plain copy aliases a handle exactly as it aliases an
+/// object, and an id is in at most one of them.
 #[derive(Clone, Default)]
 pub(crate) struct Store {
     pub(crate) refs: HashMap<String, AllocId>,
     pub(crate) heap: HashMap<AllocId, HeapObj>,
+    pub(crate) resources: HashMap<AllocId, HeapRes>,
     /// **Contract facts** (ADR-0052 §1): a variable's declared type as a lowered
     /// syntactic arm list, seeded at scope entry (§9) and narrowed by guards
     /// arm-wise (`instanceof`, `!== null`). Each arm carries its own trust stratum:
@@ -658,7 +716,47 @@ impl Store {
         self.heap.get(self.refs.get(var)?)
     }
 
-    /// Whether `var` is bound to any object.
+    /// Whether `var` refers to a heap **object** (not a resource — the two share
+    /// [`Self::refs`]).
+    pub(crate) fn is_object(&self, var: &str) -> bool {
+        self.obj_of(var).is_some()
+    }
+
+    /// The heap resource `var` currently refers to (ADR-0097 §2.3).
+    pub(crate) fn res_of(&self, var: &str) -> Option<&HeapRes> {
+        self.resources.get(self.refs.get(var)?)
+    }
+
+    /// Bind `var` to a fresh heap resource under `id` — the producer rung's
+    /// allocation, the resource twin of `$x = new C()`.
+    pub(crate) fn bind_resource(&mut self, var: &str, id: AllocId, res: HeapRes) {
+        self.resources.insert(id, res);
+        self.refs.insert(var.to_owned(), id);
+    }
+
+    /// Set the state of the heap resource `var` refers to. A no-op where `var`
+    /// refers to none.
+    pub(crate) fn set_resource_state(&mut self, var: &str, state: HandleState) {
+        if let Some(id) = self.refs.get(var).copied()
+            && let Some(r) = self.resources.get_mut(&id)
+        {
+            r.state = state;
+        }
+    }
+
+    /// The heap resource `var` refers to **escapes** (ADR-0097 §2.4): it was
+    /// handed to something that may close it, so its state is no longer known —
+    /// unless it was already closed, which nothing undoes. A no-op where `var`
+    /// refers to none.
+    pub(crate) fn escape_resource(&mut self, var: &str) {
+        if let Some(id) = self.refs.get(var).copied()
+            && let Some(r) = self.resources.get_mut(&id)
+        {
+            r.state = r.state.escaped();
+        }
+    }
+
+    /// Whether `var` is bound to any heap entry — an object or a resource.
     pub(crate) fn is_bound(&self, var: &str) -> bool {
         self.refs.contains_key(var)
     }
@@ -696,6 +794,7 @@ impl Store {
     pub(crate) fn clear(&mut self) {
         self.refs.clear();
         self.heap.clear();
+        self.resources.clear();
         self.members.clear();
         self.contract.clear();
         self.narrowed.clear();
@@ -781,13 +880,17 @@ impl Store {
         self.vouched.contains(&Vouch::Function(fqn.trim_start_matches('\\').to_ascii_lowercase()))
     }
 
-    /// Mark the object `var` refers to as escaped (if any).
+    /// Mark the object `var` refers to as escaped (if any). A heap resource
+    /// escapes the same way (ADR-0097 §2.4): its state is what an object's
+    /// mutable props are, and the same hand-off — a callee, a property, a
+    /// closure capture, an unnamed nested call — is what loses it.
     pub(crate) fn mark_escaped(&mut self, var: &str) {
         if let Some(id) = self.refs.get(var).copied()
             && let Some(o) = self.heap.get_mut(&id)
         {
             o.escaped = true;
         }
+        self.escape_resource(var);
     }
 
     /// Sweep the object `var` refers to: its non-readonly props and its value
@@ -795,6 +898,10 @@ impl Store {
     /// walk cannot see through may have written to it — the mutable half of an
     /// object, named by a variable rather than reached through the escape set. A
     /// no-op where `var` refers to no object.
+    ///
+    /// A heap resource's mutable half is its state, so the same sweep escapes
+    /// it ([`Self::escape_resource`]): what a call this walk cannot see through
+    /// may have done to a handle is close it.
     pub(crate) fn sweep_object(&mut self, var: &str) {
         if let Some(id) = self.refs.get(var).copied()
             && let Some(o) = self.heap.get_mut(&id)
@@ -802,6 +909,7 @@ impl Store {
             o.sweep_nonreadonly();
             o.sweep_targs();
         }
+        self.escape_resource(var);
     }
 
     /// Sweep the `$this` object's non-readonly props and value carries (ADR-0057 C5) —
@@ -1247,6 +1355,20 @@ pub(crate) fn join_stores(first: &Store, rest: &[&Store]) -> Store {
     let mut heap: HashMap<AllocId, HeapObj> = HashMap::new();
     // Join every id that survives via a ref (and any id present in all branches).
     let live_ids: HashSet<AllocId> = refs.values().copied().collect();
+    // Heap resources (ADR-0097 §2.3): a surviving id is the same handle on every
+    // path, so its kind and producer are invariant and only the state joins —
+    // `Open ⊔ Closed` is `Unknown`, and `Unknown` absorbs (the object props'
+    // "present-and-joinable in every branch" rule, over a three-point lattice).
+    let mut resources: HashMap<AllocId, HeapRes> = HashMap::new();
+    for id in &live_ids {
+        let Some(r0) = first.resources.get(id) else { continue };
+        let others: Vec<&HeapRes> = rest.iter().filter_map(|s| s.resources.get(id)).collect();
+        if others.len() != rest.len() {
+            continue;
+        }
+        let state = others.iter().fold(r0.state, |acc, r| acc.join(r.state));
+        resources.insert(*id, HeapRes { kind: r0.kind, state, producer: r0.producer.clone() });
+    }
     for id in live_ids {
         let Some(o0) = first.heap.get(&id) else { continue };
         let others: Vec<&HeapObj> = rest.iter().filter_map(|s| s.heap.get(&id)).collect();
@@ -1377,7 +1499,7 @@ pub(crate) fn join_stores(first: &Store, rest: &[&Store]) -> Store {
         .cloned()
         .collect();
 
-    Store { refs, heap, contract, narrowed, members, vouched, guarded_calls }
+    Store { refs, heap, resources, contract, narrowed, members, vouched, guarded_calls }
 }
 
 /// Remove contract arms another surviving arm subsumes (`Certainty::Yes`) — the

@@ -48,7 +48,7 @@ use crate::walk::WalkCx;
 /// why the difference is load-bearing.
 ///
 /// [`name_reaches_global_var_dump`]: crate::dump::name_reaches_global_var_dump
-fn denotes_global_function(cx: &Cx, r: &NameRef) -> bool {
+pub(crate) fn denotes_global_function(cx: &Cx, r: &NameRef) -> bool {
     let spells_global = match r.kind {
         RefKind::FullyQualified => !r.raw.contains('\\'),
         RefKind::Qualified => false,

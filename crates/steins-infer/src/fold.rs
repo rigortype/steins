@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 
-use steins_catalog::{RefusalAxis, ResourceParam};
+use steins_catalog::{RefusalAxis, ResourceParam, ResourceReturn};
 use steins_domain::Fact;
 use steins_sidecar::{
     BuiltinParam, ClassReflection, ConstantDefined, EnvInfo, FoldArg, FoldKey, FoldResult,
@@ -215,9 +215,9 @@ pub trait Folder {
         None
     }
 
-    /// Whether the builtin `name` returns a legacy PHP **resource**, and whether
-    /// that return carries a `false` failure arm (ADR-0056 §8). `Some(true)` is
-    /// `resource|false`, `Some(false)` a bare `resource`.
+    /// The resource-producer row of the builtin `name` (ADR-0056 §8): whether
+    /// that return carries a `false` failure arm, and the kind of handle it
+    /// returns (ADR-0097 §2.1).
     ///
     /// The one return fact that cannot ride the reflected envelope — PHP has no
     /// syntax to declare it (`fopen` reports no return type and never will). §7's
@@ -226,7 +226,7 @@ pub trait Folder {
     /// declaring NO return type for the name (the resource-to-object migration
     /// tripwire — an engine answering `CurlHandle|false` has disowned the row),
     /// and the project minor equalling the catalog pin. Default `None`.
-    fn builtin_resource_return(&mut self, name: &str) -> Option<bool> {
+    fn builtin_resource_return(&mut self, name: &str) -> Option<ResourceReturn> {
         let _ = name;
         None
     }
@@ -448,7 +448,7 @@ pub struct EngineFolder<E: FoldEngine> {
     /// Per-name memo of the ADR-0056 §8 resource-return answer. Rides the same
     /// `reflect` reply as the two memos above — §7's tripwire is a question about
     /// that reply, not a second round trip.
-    resource_return_memo: HashMap<String, Option<bool>>,
+    resource_return_memo: HashMap<String, Option<ResourceReturn>>,
     /// Per-name memo of the reflected `(total, required)` parameter counts —
     /// ADR-0064's mixed-pin second leg, riding the same `reflect` reply as the two
     /// memos above and following the same per-name pattern.
@@ -798,7 +798,7 @@ impl<E: FoldEngine> EngineFolder<E> {
     /// ADR-0056 §8 gate, whose three conditions are checked here in the order that
     /// makes the reasoning readable. Called once per name; memoized by
     /// [`Folder::builtin_resource_return`].
-    fn compute_builtin_resource_return(&mut self, key: &str) -> Option<bool> {
+    fn compute_builtin_resource_return(&mut self, key: &str) -> Option<ResourceReturn> {
         // Gate 1 — same live-engine / no-monkey-patching posture as every other
         // return rung (ADR-0049 A9): without an engine there is no tripwire to
         // check, and a row admitted without its tripwire is what §7 prevents.
@@ -1045,7 +1045,7 @@ impl<E: FoldEngine> Folder for EngineFolder<E> {
         answer
     }
 
-    fn builtin_resource_return(&mut self, name: &str) -> Option<bool> {
+    fn builtin_resource_return(&mut self, name: &str) -> Option<ResourceReturn> {
         let key = name.to_ascii_lowercase();
         if let Some(cached) = self.resource_return_memo.get(&key) {
             return *cached;

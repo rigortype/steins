@@ -11,7 +11,7 @@ use crate::fold::Folder;
 use crate::annotate::{FactKind, LineFact};
 use crate::builtin_returns::{
     CATALOG_FLOOR, builtin_call_return_fact, builtin_resource_arms, builtin_return_floor,
-    floor_value_fact, shape_builtin_return_fact,
+    escape_mentioned_resources, floor_value_fact, shape_builtin_return_fact,
 };
 use crate::cond::{
     coalesce_lhs_proven_present, eval_binary_fact, eval_cast_fact, eval_concat_fact,
@@ -53,6 +53,16 @@ pub(crate) fn apply_assign(
 ) {
     let cx = w.cx;
     let line = cx.tree().position(span_start).line;
+
+    // Any rvalue other than a plain copy that names a handle stores it somewhere
+    // this walk cannot follow — an array literal, a ternary arm, a `(array)`
+    // cast, a closure's capture (ADR-0097 §2.4): the handle escapes, before any
+    // rung below binds. A plain `$b = $h` is the one rvalue that ALIASES instead
+    // (the `Var` arm of the match below shares the heap entry), and a call's
+    // arguments are the statement's call effects, judged on the pre-call store.
+    if !matches!(value, ArgValue::Var(_) | ArgValue::Call(..) | ArgValue::MethodCall { .. }) {
+        escape_mentioned_resources(value, store);
+    }
 
     // A ternary rvalue `$x = $c ? A : B` (ADR-0031): the walk evaluates the guard
     // and resolves to the chosen arm, or (undecided) a `OneOf` of both when
@@ -454,11 +464,15 @@ pub(crate) fn apply_assign(
                 // ordinary literal arm, subtracted by ordinary guard machinery.
                 ArgValue::Call(name, _)
                     if !w.scope.poisoned
-                        && let Some(arms) = builtin_resource_arms(cx, folder, name) =>
+                        && let Some((arms, res)) = builtin_resource_arms(cx, folder, name) =>
                 {
                     store.unbind(var);
                     env.remove(var);
                     store.contract.insert(var.to_owned(), arms);
+                    // The identity and the state (ADR-0097 §2.3): a fresh heap
+                    // resource, `Open`, bound exactly as `new` binds an object —
+                    // so `$b = $h` shares it and `fclose($b)` closes it for both.
+                    store.bind_resource(var, w.fresh_id(), res);
                 }
                 // The declared-return floor (ADR-0069): reached only where the
                 // engine said nothing about this name. Enters `Asserted` — a catalog

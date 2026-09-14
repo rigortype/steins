@@ -25,8 +25,8 @@ use crate::cx::Cx;
 use crate::descent::{ThisSeed, descend};
 use crate::dispatch::resolve_exact;
 use crate::env::{
-    AllocId, ClosureTarget, ClosureVal, Descent, HeapObj, HeapSummary, Known, PropFact, Store,
-    Stratum, arg_of_val, singleton_fact,
+    AllocId, ClosureTarget, ClosureVal, Descent, HandleState, HeapObj, HeapSummary, Known,
+    PropFact, Store, Stratum, arg_of_val, singleton_fact,
 };
 use crate::project::Diagnostic;
 use crate::refine::seed_fact;
@@ -866,8 +866,9 @@ fn cval_binding_key(v: &CVal) -> String {
             let cs: Vec<String> = carries.iter().map(carry_binding_key).collect();
             format!("{class}{{{}}}", cs.join(","))
         }
-        CVal::Resource { closed: false } => "resource".to_owned(),
-        CVal::Resource { closed: true } => "closed-resource".to_owned(),
+        CVal::Resource { state: HandleState::Open } => "open-resource".to_owned(),
+        CVal::Resource { state: HandleState::Closed } => "closed-resource".to_owned(),
+        CVal::Resource { state: HandleState::Unknown } => "resource".to_owned(),
     }
 }
 
@@ -919,10 +920,14 @@ pub(crate) fn apply_prop_assign(
     {
         store.mark_escaped(src);
     }
+    // A binding may name a heap resource rather than an object (ADR-0097 §2.3);
+    // `$h->p = …` on a handle is a runtime error with no property to record.
     let Some(id) = store.id_of(target_var) else {
         return;
     };
-    let class = store.heap.get(&id).expect("bound id present").class.clone();
+    let Some(class) = store.heap.get(&id).map(|o| o.class.clone()) else {
+        return;
+    };
 
     // Resolve the rvalue to a proven literal (for the native check) and a fact
     // (for storage + the abstract phpdoc check). The rvalue's trust stratum

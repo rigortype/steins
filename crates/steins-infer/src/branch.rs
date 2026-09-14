@@ -10,6 +10,7 @@ use steins_syntax::{ArgValue, CallExpr, CmpOp, CondExpr, CondOperand, MatchArmT,
 
 use crate::fold::Folder;
 use crate::annotate::LineFact;
+use crate::builtin_returns::{apply_resource_effects, resource_call_effects};
 use crate::asserts::{
     apply_guard_asserts, cond_branch_scoped_invalidations, cond_invalidations,
     guard_assert_kept_lanes,
@@ -83,6 +84,12 @@ pub(crate) fn walk_if(
     // proven-non-null receiver), then by-ref argument invalidation and opaque reads
     // are forgotten. Both apply before the branch clones.
     let guard_calls: Vec<&CallExpr> = collect_guard_calls_any(cond);
+    // The heap resources a guard call is handed (ADR-0097 §2.4): read before the
+    // sweep and the drop below, applied after them — the same ordering the
+    // statement rung uses. The guard position keeps no binding on this account;
+    // its lane survival stays with the guard machinery below.
+    let guard_resources =
+        resource_call_effects(w.cx, folder, poisoned, &guard_calls, None, store);
     escape_and_sweep_calls(w, &guard_calls, store, &[]);
     // The pattern-refusal check at guard position (ADR-0078 / issue #189):
     // `if (preg_match('/…/', $s))` is the idiom the id is about, and a guard
@@ -124,6 +131,7 @@ pub(crate) fn walk_if(
     for (var, arms) in kept_lanes {
         store.contract.insert(var, arms);
     }
+    apply_resource_effects(&guard_resources, store);
 
     // 3. Walk the live branches on cloned envs, collecting those that fall through.
     let mut fell: Vec<(HashMap<String, Known>, Store)> = Vec::new();
