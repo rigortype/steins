@@ -20,7 +20,10 @@
 //!   coercion path into anything;
 //! * the **heap state** (ADR-0097 §2.3–§2.4): a producer's handle is `Open` on
 //!   the heap, aliases share it, a closing call's return proves it `Closed`, a
-//!   keeper leaves it alone, and everything else is an escape to `Unknown`.
+//!   keeper leaves it alone, and everything else is an escape to `Unknown`;
+//! * the **migrated table** (ADR-0097 §2.6): an object against `@param resource`
+//!   is `No` — except an object of a class PHP migrated a resource into, where
+//!   §8.5's channel stays open and the docblock is the suspect.
 
 use std::collections::HashMap;
 
@@ -359,16 +362,65 @@ fn a_scalar_handed_to_a_resource_parameter_is_now_a_finding() {
     }
 }
 
+// ADR-0097 §2.6 — an object against `@param resource`: `No`, except the migrated classes.
+
 #[test]
-fn an_object_handed_to_a_resource_parameter_stays_silent() {
-    // §8.5's named FP channel — the one verdict the amendment declines to reach:
-    // PHP 8 left a decade of `@param resource $ch` attached to params that now
-    // receive a `CurlHandle`; convicting that inherited rot would call the programmer a liar.
+fn an_object_of_no_migrated_class_handed_to_a_resource_parameter_is_a_finding() {
+    // §8.5 refused this verdict for EVERY object, to protect the `CurlHandle`
+    // channel; §2.6 bounds the channel by the migrated table, and `stdClass` is a
+    // class no migration ever produced — a genuine docblock violation, the
+    // verdict every other analyzer on the conformance page reaches. Contract id:
+    // the docblock is the claim, and it is the claim that is wrong.
     let src = "<?php\ndeclare(strict_types=1);\n\
                /** @param resource $v */\n\
                function f($v): void {}\n\
                f(new \\stdClass());\n";
-    assert!(any_mismatch(src, Engine::typeless()).is_empty());
+    let out = phpdoc_mismatches(src, Engine::typeless());
+    assert_eq!(out.len(), 1, "an object of a class PHP never migrated a resource into; got {out:?}");
+    assert!(
+        out[0].contains("resource"),
+        "the message must name the declared contract: {}",
+        out[0],
+    );
+    assert!(mismatches(src, Engine::typeless()).is_empty(), "a docblock never reaches the proof layer");
+}
+
+#[test]
+fn an_object_of_a_migrated_class_handed_to_a_resource_parameter_stays_silent() {
+    // §8.5's channel, kept exactly where it is real: `@param resource $ch` on a
+    // parameter that now receives the class PHP 8 migrated the handle into. The
+    // docblock is the suspect, not the value. `CurlHandle` cannot be constructed
+    // at runtime, but the walk proves the object off `new` all the same, which is
+    // what makes it the right probe here; `finfo` is the one migrated class that
+    // CAN be constructed, so the pair covers both shapes the relation sees.
+    for class in ["\\CurlHandle", "\\finfo", "\\GdImage", "\\LDAP\\Result"] {
+        let src = format!(
+            "<?php\ndeclare(strict_types=1);\n\
+             /** @param resource $v */\n\
+             function f($v): void {{}}\n\
+             f(new {class}());\n",
+        );
+        assert!(
+            any_mismatch(&src, Engine::typeless()).is_empty(),
+            "`new {class}()` is what a stale `@param resource` legitimately receives",
+        );
+    }
+}
+
+#[test]
+fn a_project_class_borrowing_a_migrated_name_is_not_the_migrated_one() {
+    // The table compares whole FQNs. `App\CurlHandle` is a project class that
+    // happens to share a simple name with PHP's; no migration produced it, so the
+    // object is a `No` like any other — the same normalization `ContractTy::Class`
+    // applies, and nothing shorter than the FQN.
+    let src = "<?php\ndeclare(strict_types=1);\n\
+               namespace App;\n\
+               class CurlHandle {}\n\
+               /** @param resource $v */\n\
+               function f($v): void {}\n\
+               f(new CurlHandle());\n";
+    let out = phpdoc_mismatches(src, Engine::typeless());
+    assert_eq!(out.len(), 1, "`App\\CurlHandle` shares a name, not a migration; got {out:?}");
 }
 
 // ADR-0097 §2.3–§2.4 — the state lives on the heap: a producer's handle is
