@@ -12,7 +12,7 @@
 //! finding (the absence-family condition).
 //!
 //! The `@var` legs reuse ADR-0073/0074's statement-adoption rule verbatim
-//! (`SourceTree::stmt_docblock`), styled like `tests/inline_var_casts.rs`.
+//! (`SourceTree::stmt_docblock`), styled like `tests/it/inline_var_casts.rs`.
 
 use steins_infer::{
     CLOSURE_UNUSED_USE_ID, Diagnostic, PHPDOC_MISPLACED_VAR_ID, PHPDOC_STALE_PARAM_ID,

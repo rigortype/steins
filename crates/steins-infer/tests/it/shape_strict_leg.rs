@@ -147,7 +147,7 @@ fn an_array_key_exists_guard_discharges_the_read() {
 fn a_not_empty_guard_discharges_the_read() {
     // `empty(e)` lowers to `!isset(e) || !e`, so its false branch is `isset(e) && e`
     // and the presence promotion is the `isset` half's (full polarity table in
-    // `tests/shape_guards.rs`).
+    // `tests/it/shape_guards.rs`).
     let src = fixture("array{a?: string}", "if (!empty($d['a'])) { $x = $d['a']; }");
     assert!(ids(&src).is_empty(), "!empty-guarded read must be clean: {:?}", strict(&src));
 }
@@ -163,7 +163,7 @@ fn an_empty_guarded_read_still_fires_on_the_true_branch() {
 #[test]
 fn a_tagged_assertion_helper_discharges_the_read() {
     // The entire 2026-07-29-sweep `offset.maybe-missing` residue was this shape
-    // (own suite: `tests/assert_helper_discharge.rs`; this is the ladder-level pin).
+    // (own suite: `tests/it/assert_helper_discharge.rs`; this is the ladder-level pin).
     let src = format!(
         "<?php\nfinal class H {{\n\
          /** @phpstan-assert true $c */\n\

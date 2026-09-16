@@ -7,7 +7,7 @@
 //! claim is weaker (a path, not the whole scope), so the id sits at `strict` and
 //! the default profile never shows it.
 //!
-//! The firing set is pinned in `crates/steins-syntax/tests/binding_presence.rs`
+//! The firing set is pinned in `crates/steins-syntax/tests/it/binding_presence.rs`
 //! (lattice, termination subtraction, loop fixpoint, guard polarities). This
 //! file pins the **checker's** half: the warning-handler gate, the out-parameter
 //! subtraction with its call-site-forward refinement, the floor, and the

@@ -142,7 +142,7 @@ mod tests {
     /// until the OS's symlink limit stopped it (33 spellings of every file),
     /// while the CLI's separate collector reported twice the tree.
     ///
-    /// The CLI half of this pair is `crates/steins-cli/tests/symlink_walk.rs`,
+    /// The CLI half of this pair is `crates/steins-cli/tests/it/symlink_walk.rs`,
     /// which asserts the same universe through the binary.
     #[cfg(unix)]
     #[test]

@@ -2,7 +2,7 @@
 //! no-manifest config channel for a project that predates or ignores Composer.
 //!
 //! Each test runs the real binary in a private temp dir, mirroring
-//! `tests/profile.rs`'s isolation discipline: `steins.toml` reads from the CWD,
+//! `tests/it/profile.rs`'s isolation discipline: `steins.toml` reads from the CWD,
 //! not the analyzed path, so these can't reuse the checked-in `tests/fixtures`.
 
 use std::path::{Path, PathBuf};

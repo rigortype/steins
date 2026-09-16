@@ -165,7 +165,7 @@ Three legs, only the first two of which need Lean:
    checked against `StrPreds::of`) and an exhaustive associativity tally.
    `lean-check` verifies `crates/steins-domain/tests/fixtures/lean-vectors.expected`
    is byte-identical to that output; `--bless` rewrites it.
-3. `cargo test -p steins-domain --test lean_vectors` — the Rust implementation
+3. `cargo test -p steins-domain --test it lean_vectors::` — the Rust implementation
    walks the same universe in the same order and diffs the rendered results.
 
 Leg 3 is an ordinary test, so a machine without a Lean toolchain still gets the
@@ -266,10 +266,11 @@ coverage here:
 - **A test that parses a deep fixture in process must set a budget first.**
   libtest runs tests on 2 MiB threads — a quarter of the stack issue #246 found
   fatal at ~520 levels — so an unguarded in-process deep parse aborts the whole
-  test binary, and a stack overflow is not a catchable panic.
-  `crates/steins-syntax/tests/deep_nesting.rs` sets one;
-  `crates/steins-cli/tests/deep_nesting.rs` takes the other route and drives the
-  real binary as a subprocess.
+  test binary, which holds every integration test of its crate, and a stack
+  overflow is not a catchable panic.
+  `crates/steins-syntax/tests/it/deep_nesting.rs` sets one;
+  `crates/steins-cli/tests/it/deep_nesting.rs` takes the other route and drives
+  the real binary as a subprocess.
 - **The wasm module has a gate now.** `apps/playground/smoke.mjs` called itself
   "the CI gate before any artifact upload" while no workflow invoked it; the
   `wasm` job in `ci.yml` builds the module and runs it, with the deep-chain case
@@ -621,13 +622,13 @@ phpdoc contracts, …).
 Two structural tests deserve naming because they enforce invariants rather than
 behavior:
 
-- **`tests/registry.rs`** — the diagnostic id totality reconciliation. See
+- **`tests/it/registry.rs`** — the diagnostic id totality reconciliation. See
   [diagnostic-shape.md](diagnostic-shape.md).
 - **the domain's property tests** — `γ(a) ∪ γ(b) ⊆ γ(join(a, b))` over generated
   facts. The same statement is *proved* for every value by the Lean spec
   (ADR-0059); the property tests stay because they exercise the real
   implementation, which the proofs do not.
-- **`crates/steins-domain/tests/lean_vectors.rs`** — the Rust leg of the
+- **`crates/steins-domain/tests/it/lean_vectors.rs`** — the Rust leg of the
   `lean-check` loop above.
 
 The standing rule recorded in the roadmap: **zero conformance regressions,

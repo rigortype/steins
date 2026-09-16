@@ -16,7 +16,7 @@
 //!
 //! Invariants are enforced by constructors, checked by property tests, and proved for every
 //! value by the Lean 4 spec in `spike/lean-domain` (ADR-0059, differentially checked against
-//! `tests/lean_vectors.rs`):
+//! `tests/it/lean_vectors.rs`):
 //! - **Soundness of join**: `γ(a) ∪ γ(b) ⊆ γ(join(a, b))`; may widen, never lose members.
 //!   `None` means "not representable", so the caller drops it.
 //! - **Canonical forms**: `OneOf` is sorted/deduped, `2..=CAP` members; a `Refined` always

@@ -1,5 +1,5 @@
 //! PHP value semantics the domain depends on, implemented to the letter of PHP 8.x and
-//! verified against the real engine by `tests/php_oracle.rs` where history was treacherous.
+//! verified against the real engine by `tests/it/php_oracle.rs` where history was treacherous.
 //!
 //! Every predicate takes `impl AsRef<[u8]>`, not `&str`: a PHP string is a byte string
 //! (ADR-0080) that need not be valid UTF-8; `&str` callers pass through unchanged, and every
@@ -91,7 +91,7 @@ pub fn php_str_is_falsy(s: impl AsRef<[u8]>) -> bool {
 /// Byte-oriented on ASCII letters, matching the engine: since PHP 8.2 `strtolower()` is
 /// locale-independent and maps only `A-Z` to `a-z`. A UTF-8 `"Ä"` therefore qualifies too
 /// (its bytes are all >= 0x80). Verified against the real engine, including multibyte cases,
-/// by `tests/php_oracle.rs`.
+/// by `tests/it/php_oracle.rs`.
 #[must_use]
 pub fn php_str_is_lowercase(s: impl AsRef<[u8]>) -> bool {
     !s.as_ref().iter().any(u8::is_ascii_uppercase)
@@ -117,7 +117,7 @@ pub fn php_str_is_uppercase(s: impl AsRef<[u8]>) -> bool {
 ///   string key, `"-9223372036854775808"` (`PHP_INT_MIN`) does not.
 ///
 /// Strictly narrower than [`php_is_numeric`]: `"007"`, `"+1"`, `"00"`, `"1.2"`, `"18E+3"`,
-/// `" 1 "` are all numeric but keep string identity. `tests/php_oracle.rs` verifies against
+/// `" 1 "` are all numeric but keep string identity. `tests/it/php_oracle.rs` verifies against
 /// the real engine via `is_int(array_key_first(...))`.
 #[must_use]
 pub fn php_str_is_decimal_int(s: impl AsRef<[u8]>) -> bool {

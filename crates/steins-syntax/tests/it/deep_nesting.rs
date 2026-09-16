@@ -3,7 +3,7 @@
 //! Runs in-process on libtest's 2 MiB thread, smaller than the 8 MiB stack
 //! issue #246 found fatal at ~520 `->` levels — deliberate, so the guard, not
 //! the OS, stops the walk with a named refusal. A fixture parsed without a
-//! budget belongs in `crates/steins-cli/tests/deep_nesting.rs` (subprocess).
+//! budget belongs in `crates/steins-cli/tests/it/deep_nesting.rs` (subprocess).
 //!
 //! Budget is small and byte-sized because the margin must hold under both
 //! profiles' frame sizes — ~16 KiB/level debug, ~2.7 KiB release — which a

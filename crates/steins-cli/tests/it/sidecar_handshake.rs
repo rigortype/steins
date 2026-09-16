@@ -12,7 +12,7 @@
 //! race other tests in the binary). [`stub_php_dir`] never speaks the wire
 //! format; [`stub_php_dir_mid_run`] passes the handshake and only then goes
 //! silent (PR #134 review). Neither needs a real `php`, unlike
-//! `crates/steins-sidecar/tests/protocol.rs`.
+//! `crates/steins-sidecar/tests/it/protocol.rs`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -114,7 +114,7 @@ fn stub_php_dir_mid_run() -> PathBuf {
 ///
 /// A `check` runs `--no-cache`: these fixtures are checked in, and a cached run
 /// would leave a `.steins/` in the repository for the next run of the suite to
-/// start warm from (issue #525 — see `tests/cli.rs`'s `uncached`, which states
+/// start warm from (issue #525 — see `tests/it/cli.rs`'s `uncached`, which states
 /// the rule in full). Nothing here is about the cache; it is about what a
 /// silent sidecar does to a run.
 fn run_against_stub(stub_dir: &Path, args: &[&str]) -> Run {

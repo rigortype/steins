@@ -5,7 +5,7 @@
 //!   1. the Lean spec proves the domain's soundness contract (`lake build`);
 //!   2. it prints the vector file (`lake exe vectors`) — this command checks the
 //!      committed fixture is byte-identical to that output;
-//!   3. `cargo test -p steins-domain --test lean_vectors` regenerates the same
+//!   3. `cargo test -p steins-domain --test it lean_vectors::` regenerates the same
 //!      vectors from the Rust implementation and diffs them.
 //!
 //! Leg 3 needs no Lean and runs in the ordinary test suite. Only this command
@@ -39,8 +39,8 @@ pub fn run(bless: bool) -> Result<(), String> {
         println!(
             "lean-check: no Lean toolchain and no nix — skipping.\n\
              \x20 The committed vectors are still checked against the Rust implementation by\n\
-             \x20 `cargo test -p steins-domain --test lean_vectors`; this command only verifies\n\
-             \x20 that the fixture still matches what the spec prints.\n\
+             \x20 `cargo test -p steins-domain --test it lean_vectors::`; this command only\n\
+             \x20 verifies that the fixture still matches what the spec prints.\n\
              \x20 To get a toolchain: `nix develop` in {}, or install elan.",
             spike.display()
         );
@@ -74,7 +74,7 @@ pub fn run(bless: bool) -> Result<(), String> {
             .map_err(|e| format!("cannot write {}: {e}", fixture.display()))?;
         println!(
             "lean-check: blessed {} ({} lines).\n\
-             Now run `cargo test -p steins-domain --test lean_vectors`.",
+             Now run `cargo test -p steins-domain --test it lean_vectors::`.",
             fixture.display(),
             produced.lines().count()
         );

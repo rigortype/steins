@@ -240,7 +240,7 @@ mod tests {
     // ---- should_page --------------------------------------------------------
 
     /// Paging requires both an interactive terminal AND a non-blank `$PAGER`;
-    /// piped output (`tests/license.rs`) must never page even with `$PAGER` set.
+    /// piped output (`tests/it/license.rs`) must never page even with `$PAGER` set.
     #[test]
     fn pager_policy() {
         assert!(should_page(true, Some("less")));

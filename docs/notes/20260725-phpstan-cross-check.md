@@ -91,7 +91,7 @@ whenever a referencing file is analysed, **aborts the entire run** — pixelfed 
 unanalysable until either that file or every file referencing it is excluded.
 
 Steins says nothing. `SourceTree::parse` recovers, and `parse_errors()` has no
-consumer anywhere outside `crates/steins-syntax/tests/smoke.rs`. Inference then
+consumer anywhere outside `crates/steins-syntax/tests/it/smoke.rs`. Inference then
 proceeds over the recovered tree and emits proof-grade findings from it. Two
 consequences worth separating: the missing diagnostic (easy), and the question
 of whether any finding derived from a recovered tree should be allowed to claim

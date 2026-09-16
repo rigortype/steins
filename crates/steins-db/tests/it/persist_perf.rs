@@ -3,7 +3,7 @@
 //! sizes over a synthetic package, next to a cold parse of the same file for
 //! scale. Self-contained — the corpus is absent in agent worktrees — and
 //! ignored by default: numbers from a shared CI runner would mislead, so it
-//! runs by hand (`cargo test -p steins-db --release --test persist_perf --
+//! runs by hand (`cargo test -p steins-db --release --test it persist_perf:: --
 //! --ignored --nocapture`, and the raw prints are also why it lives outside
 //! `src/`, which the output-seam scan covers).
 #![cfg(feature = "persist")]

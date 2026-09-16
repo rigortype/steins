@@ -38,7 +38,7 @@ use crate::walk::WalkCx;
 // env-free direct pass on a live path — an FP class that must stay closed.
 // `Fact::truthy`/`is_null`/`int_in`/`satisfies_str` are decisive on
 // `Fact::Shape`, so tripwire test `shape_facts_do_not_decide_guard_verdicts`
-// (tests/shape_guards.rs) guards against a caller reopening that question.
+// (tests/it/shape_guards.rs) guards against a caller reopening that question.
 // ---------------------------------------------------------------------------
 
 /// Which presence predicate a guard tests — A-G8's flavor discipline applied to

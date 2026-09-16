@@ -2178,7 +2178,7 @@ fn accepts_generic(
         // NOT converged onto `lower_generic` + `admits_val` (unlike the
         // `associative-array`/`int`/`key-of` arms below): that convergence
         // regressed `nested_generic_fires_on_inner_mismatch`
-        // (`steins-infer/tests/generics_carry.rs`) — `list<Box<int>>` with a
+        // (`steins-infer/tests/it/generics_carry.rs`) — `list<Box<int>>` with a
         // `Box<string>` element must still fire `No`, but a `Box` element is an
         // **object**, which `cval_as_val` cannot represent, so the array collapses
         // to `Maybe`, losing inner-mismatch detection. This leg is reached for

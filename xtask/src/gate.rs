@@ -621,7 +621,7 @@ const PHPDOC_EXPECTED: &[(&str, usize)] = &[
     //   CI 8.4 engine this line is calibrated on, whose four extra rows (the
     //   51 → 55 entry above) are elsewhere in the package.
     //   The mechanism is pinned independently of the corpus in
-    //   `crates/steins-infer/tests/bool_literal_narrowing.rs`
+    //   `crates/steins-infer/tests/it/bool_literal_narrowing.rs`
     //   (`a_guarded_false_arm_no_longer_reaches_a_string_parameter`).
     //   86 → 88 (+2), 2026-09-11 with issue #637 (ADR-0070's mined certification):
     //   `tests/end-to-end/regression/5884/tests/FooTest.php:53` and `:78`,
@@ -2485,7 +2485,7 @@ fn analyze_local(proj: &LocalProject) -> PackageReport {
     //
     // All three are VENDOR, so none is a dam site and each `syntax.unparsable`
     // is dropped below anyway — the §2.5 member-incomplete leg stays exercised
-    // by fixtures alone (`crates/steins-infer/tests/parse_failure_dam.rs`)
+    // by fixtures alone (`crates/steins-infer/tests/it/parse_failure_dam.rs`)
     // until a NON-vendor break appears here, at which point these counts can
     // only fall, never rise.
     let parse_error_files = run.parse_error_files;

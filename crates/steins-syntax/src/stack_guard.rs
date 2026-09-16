@@ -51,7 +51,7 @@
 //! stack issue #246 found fatal at 520 levels. A test parsing a deep
 //! fixture in-process must set a budget (as this module's own tests do) or
 //! drive the binary as a subprocess (as
-//! `crates/steins-cli/tests/deep_nesting.rs` does).
+//! `crates/steins-cli/tests/it/deep_nesting.rs` does).
 
 use std::cell::Cell;
 

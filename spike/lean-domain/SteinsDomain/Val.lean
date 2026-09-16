@@ -18,7 +18,7 @@ Abstracting them is what makes the soundness proofs independent of PHP's
 `is_numeric` grammar and of IEEE-754 (`total_cmp`, `NaN`, `-0.0`). That
 independence is the point, not a shortcut: the classifier's *fidelity* is a
 separate obligation, discharged differentially against the real engine
-(`tests/php_oracle.rs`, and the ADR-0059 vector file's `classifier` block), not
+(`tests/it/php_oracle.rs`, and the ADR-0059 vector file's `classifier` block), not
 by this spec.
 
 The atom ranks reproduce Rust's `discriminant_rank`: Null < Bool < Int < Float <

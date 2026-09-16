@@ -601,7 +601,7 @@ pub(crate) fn eval_not_fact(
 /// grid of issue #595, `php -r`-measured cell by cell at `PINNED_PHP`, and this
 /// is the second syntax over the same grid — so `settype($v, 'int')` and `(int)
 /// $v` answer identically by construction, which is the property
-/// `tests/cast_value_position.rs` pins. A cell the grid declines is a decline
+/// `tests/it/cast_value_position.rs` pins. A cell the grid declines is a decline
 /// here too, and then the floor below answers.
 ///
 /// # Every cast is total, `(string)` included

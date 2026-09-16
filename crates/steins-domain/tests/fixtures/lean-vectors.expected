@@ -1,6 +1,6 @@
 # steins-domain differential vectors — GENERATED, do not hand-edit.
 # spec:    spike/lean-domain (ADR-0059), `lake exe vectors`
-# checker: crates/steins-domain/tests/lean_vectors.rs
+# checker: crates/steins-domain/tests/it/lean_vectors.rs
 #
 # `atom` lines carry the concrete Rust value each abstract atom stands for and
 # the field each side computes independently (a string's predicate summary, a

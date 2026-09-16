@@ -57,7 +57,7 @@ mod tests {
     use super::*;
 
     /// Round-trips representative types through parse + canonical render; guards
-    /// the headline grammar features. Exhaustive check: `tests/reference_corpus.rs`.
+    /// the headline grammar features. Exhaustive check: `tests/it/reference_corpus.rs`.
     #[test]
     fn canonical_forms() {
         let cases = [

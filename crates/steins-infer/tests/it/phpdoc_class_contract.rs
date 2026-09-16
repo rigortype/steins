@@ -1,6 +1,6 @@
 //! Class-typed phpdoc contracts (`@param`/`@return`) against proven object values,
 //! enum cases, `::class` strings, and scalar facts, via the trinary is-a oracle
-//! (ADR-0043; see `tests/object_acceptance.rs`).
+//! (ADR-0043; see `tests/it/object_acceptance.rs`).
 //!
 //! The phpdoc relation is pure set membership with no coercion (ADR-0030): a proven
 //! scalar is never a class-type member, in either mode. A definite `No` reports;

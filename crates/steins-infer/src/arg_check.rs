@@ -203,7 +203,7 @@ pub(crate) fn object_world_guard_blind(in_descent: bool, ty: &NativeType, value:
 ///   reason a `string` base is not a coercive-mode definite No against `int`.
 ///
 /// The classes are measured, not asserted: `harness/coercion-grid` runs all 72
-/// cells per mode on PHP itself, and `tests/coercion_witness_grid.rs` pins
+/// cells per mode on PHP itself, and `tests/it/coercion_witness_grid.rs` pins
 /// Steins against it. The witnesses go to [`is_type_error`] — there is **no
 /// second coercion table** anywhere in this judgment.
 fn maybe_arg_witnesses(base: Base) -> Vec<ArgValue> {
@@ -708,7 +708,7 @@ pub(crate) fn check_maybe_argument_mismatch(
 /// ```
 ///
 /// Measured rather than recalled: `harness/coercion-grid/witness.php internal`
-/// runs the cells on the project's own PHP and `tests/builtin_param_types.rs`
+/// runs the cells on the project's own PHP and `tests/it/builtin_param_types.rs`
 /// pins Steins against the recorded rows in both modes, the way the userland
 /// grid has been pinned since issue #391.
 ///

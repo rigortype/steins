@@ -672,8 +672,8 @@ eval('$q = 1;');
 #[test]
 fn the_maybe_sibling_never_doubles_up_on_a_definite_finding() {
     // A definite leg never ships without its possibly-grade twin NAMED; the twin now
-    // emits (ADR-0081 §7, #267). Registry checks live in tests/registry.rs, the twin's
-    // fixtures in tests/property_maybe_undefined.rs — here: the two legs partition sites, never overlap.
+    // emits (ADR-0081 §7, #267). Registry checks live in tests/it/registry.rs, the twin's
+    // fixtures in tests/it/property_maybe_undefined.rs — here: the two legs partition sites, never overlap.
     assert!(
         !REGISTERED_NOT_YET_EMITTED.contains(&"property.maybe-undefined"),
         "the maybe- sibling emits, so it left the registered-ahead-of-emission list"

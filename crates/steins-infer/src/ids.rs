@@ -1108,7 +1108,7 @@ pub const PHPDOC_MAYBE_UNDEFINED_ID: &str = "phpdoc.maybe-undefined";
 /// Every id constant that reaches a `Diagnostic { id: … }` construction site — the
 /// canonical enumeration of what the emitters can produce (ADR-0050 §2 totality).
 ///
-/// **Invariant, checked by the workspace totality test** (`tests/registry.rs`):
+/// **Invariant, checked by the workspace totality test** (`tests/it/registry.rs`):
 /// this list and [`DIAGNOSTIC_REGISTRY`] are the same set, both directions — so a
 /// new emitter whose id is added here but not registered (or the reverse) fails to
 /// build the tests. Adding a `*_ID` constant and emitting it therefore *forces*
@@ -1247,7 +1247,7 @@ pub const ALL_EMITTABLE_IDS: &[&str] = &[
 /// (so `@steins-ignore` can name them and their layer is pinned) but no emitter
 /// produces them yet. An id moves into [`ALL_EMITTABLE_IDS`] once its emitter lands.
 ///
-/// The totality test (`tests/registry.rs`) keeps this honest: every registered id
+/// The totality test (`tests/it/registry.rs`) keeps this honest: every registered id
 /// must be in `ALL_EMITTABLE_IDS ∪ REGISTERED_NOT_YET_EMITTED`, the two lists are
 /// **disjoint**, and every id here must actually be registered. An emitted id
 /// missing from `ALL_EMITTABLE_IDS` still fails forward totality.

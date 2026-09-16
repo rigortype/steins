@@ -9,7 +9,7 @@ fn bin() -> &'static str {
 
 /// Every test spawns the binary with `GITHUB_ACTIONS` scrubbed: `check`'s format
 /// auto-detection (ADR-0054 §6) reads it, so a run on CI would otherwise emit workflow
-/// commands instead of the asserted text (detection is tested in `tests/format_github.rs`).
+/// commands instead of the asserted text (detection is tested in `tests/it/format_github.rs`).
 fn steins_cmd() -> Command {
     let mut cmd = Command::new(bin());
     cmd.env_remove("GITHUB_ACTIONS");
@@ -44,7 +44,7 @@ fn run(args: &[&str]) -> Run {
 /// `CARGO_PKG_VERSION` and therefore the same generation identity. That is a
 /// very unpleasant flake to chase, and none of the properties on this page is
 /// about the cache: the findings are identical either way (ADR-0092 §2), and
-/// the cache's own behavior belongs to `tests/generation_capture_root.rs`,
+/// the cache's own behavior belongs to `tests/it/generation_capture_root.rs`,
 /// whose every fixture lives in a temp directory that dies with the test.
 fn uncached(args: &[&str]) -> Vec<String> {
     let mut out: Vec<String> = args.iter().map(|a| (*a).to_owned()).collect();

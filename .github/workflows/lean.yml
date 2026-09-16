@@ -6,7 +6,7 @@
 #
 # What it gates, precisely: the SPECIFICATION side. The implementation side is
 # already covered by ci.yml, where `cargo test` runs
-# `crates/steins-domain/tests/lean_vectors.rs` — that test regenerates the
+# `crates/steins-domain/tests/it/lean_vectors.rs` — that test regenerates the
 # vectors from the real Rust and needs no Lean at all. This workflow adds the two
 # legs that do need a toolchain:
 #

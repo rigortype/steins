@@ -245,7 +245,7 @@ impl Floor {
 /// compile. A workspace totality test asserts every emittable id appears here.
 ///
 /// The floor column reproduces pre-S6 behavior exactly (pinned by
-/// `tests/registry.rs`): proof/mechanics/debug and pre-S6 contract ids carry
+/// `tests/it/registry.rs`): proof/mechanics/debug and pre-S6 contract ids carry
 /// `Floor::Default`/`Floor::Contracts`; only the two S6 ids carry `Floor::Strict`.
 ///
 /// `@steins-ignore` ids are validated against it (prefix-aware); the baseline

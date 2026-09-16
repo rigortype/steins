@@ -3,7 +3,7 @@
 // witness value) cell as a real call site, one per line, so
 // `steins check --profile strict` can be eyeballed against the `php -r` answers
 // by hand. The automated cell-for-cell comparison is
-// `crates/steins-infer/tests/coercion_witness_grid.rs`, which builds the same
+// `crates/steins-infer/tests/it/coercion_witness_grid.rs`, which builds the same
 // sources in memory and reads the same `.tsv` files; this script exists for the
 // human loop, and for regenerating a fixture when a divergence needs a name.
 //

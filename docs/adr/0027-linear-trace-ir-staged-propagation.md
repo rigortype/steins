@@ -344,7 +344,7 @@ positionally, so `SCHEMA_VERSION` moves 16 → 17: a schema-16 payload would
 read a `do`/`while`'s old `body` where the new `cond` is, and would in any
 case replay `unknown` after every loop.
 
-Fixtures: `crates/steins-infer/tests/loop_exit_condition.rs` — the shape and
+Fixtures: `crates/steins-infer/tests/it/loop_exit_condition.rs` — the shape and
 its `if`/`else` twin, both post-forget readings, the four loop forms, the
 `break`/`break 2`/nested-`switch`/nested-loop level matrix, `continue` and
 `continue 2`, `goto`, and the `foreach` subject surviving into a second loop.

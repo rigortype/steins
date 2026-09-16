@@ -4,7 +4,7 @@
 //! `println!` panics on `EPIPE` (`| head`, `| grep -m1`, an early-quit `less`),
 //! which crashed ordinary use of `license` (2000+ lines) and `check` (one line
 //! per finding). Rather than fix each call site, `outln!` / `out!` / `errln!` are
-//! the only way this crate writes; `crates/steins-cli/tests/output_seam.rs` fails
+//! the only way this crate writes; `crates/steins-cli/tests/it/output_seam.rs` fails
 //! the build if a raw `println!` reappears in the CLI's source.
 //!
 //! # The policy
@@ -126,7 +126,7 @@ pub fn finish(code: ExitCode) -> ExitCode {
 #[cfg(test)]
 mod tests {
     //! End-to-end behavior (a real closed pipe, a real process exit) is covered
-    //! by `tests/output_seam.rs`; this just checks the macros compile and route.
+    //! by `tests/it/output_seam.rs`; this just checks the macros compile and route.
 
     #[test]
     fn the_macros_write_through_the_seam() {
