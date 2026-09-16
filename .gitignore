@@ -14,10 +14,15 @@
 # would silently drop the release skill from a clone — AGENTS.md points at it, so
 # it is repo content, not local scratch. Re-include the directory (a repo
 # .gitignore outranks the global excludes), then ignore everything in it EXCEPT
-# `skills/` and `CLAUDE.md`; git cannot re-include a path whose parent stays
-# excluded, hence the three-step dance. `.claude/worktrees/` and any local
-# settings stay ignored.
+# `skills/`, `CLAUDE.md`, and the worktree cargo config named at the end; git
+# cannot re-include a path whose parent stays excluded, hence the three-step
+# dance. Local settings and a worktree's own files stay ignored.
 !/.claude/
 /.claude/*
 !/.claude/skills/
 !/.claude/CLAUDE.md
+!/.claude/worktrees/
+/.claude/worktrees/*
+!/.claude/worktrees/.cargo/
+/.claude/worktrees/.cargo/*
+!/.claude/worktrees/.cargo/config.toml

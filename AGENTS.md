@@ -18,6 +18,9 @@ rules for one kind of task. Read it when the task matches its trigger.
 - **Performance** — before profiling, or before proposing an optimization:
   `docs/agents/profiling.md`. It carries the current baseline and what that
   baseline rules out.
+- **Worktrees** — before `git worktree add`, or before removing one:
+  `docs/agents/worktrees.md`. It carries what a worktree costs and the clone
+  that keeps the cost off the disk. Don't `cargo build --release` in one.
 - **Release** — a version bump, changelog seal, or version tag:
   `.claude/skills/steins-release-prep/SKILL.md`. It owns the push approval
   gates for releases.

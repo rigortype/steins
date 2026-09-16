@@ -1,0 +1,9 @@
+# Worktree-scoped: cargo merges the config of every parent directory, and the
+# main checkout never walks through `.claude/worktrees/`, so only worktrees lose
+# this cache. Rationale and the measurements: docs/agents/worktrees.md.
+
+[profile.dev]
+incremental = false
+
+[profile.test]
+incremental = false
