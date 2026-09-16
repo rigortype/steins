@@ -4,7 +4,7 @@
 //! domain, no receiver) and claim a fatal PHP raises **at class load**.
 //!
 //! Every runtime claim is `php -r`-witnessed on PHP 8.5.9, condensed to one
-//! line per fixture. Harness mirrors `tests/class_undefined.rs` minus its
+//! line per fixture. Harness mirrors `tests/it/class_undefined.rs` minus its
 //! `Boot` mock: these ids consult no sidecar (positive claims about resolved
 //! declarations, not absence-of-symbol), pinned by `fires_without_a_sidecar`
 //! — `check` runs with `NoFold`, whose absence family is unavailable.

@@ -1,7 +1,7 @@
 //! The reachability foundation itself (ADR-0078 §5, issue #199): `Stmt::end`
 //! and the [`body_end`] fold, pinned as the **three-valued** judgment they are.
 //!
-//! `crates/steins-infer/tests/return_missing.rs` exercises the same foundation
+//! `crates/steins-infer/tests/it/return_missing.rs` exercises the same foundation
 //! but collapses `Terminates` and `Unknown` into one outcome (silence). This
 //! file tells the two apart: a future dead-code consumer may report only on
 //! `Terminates`, so `Terminates` where the truth is `Unknown` is a false

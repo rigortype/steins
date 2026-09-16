@@ -4,7 +4,7 @@ import SteinsDomain.Fact
 # Soundness of the value domain
 
 The theorems this spike exists for. The Rust crate states them as doc comments
-and checks them with five proptests (`crates/steins-domain/tests/lattice.rs`);
+and checks them with five proptests (`crates/steins-domain/tests/it/lattice.rs`);
 here they hold for *every* value, every predicate set, every interval, and every
 string classifier.
 

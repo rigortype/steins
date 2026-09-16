@@ -35,7 +35,7 @@ pub const ALL_EMITTABLE_IDS: &[&str];              // ids reaching a constructio
 pub const REGISTERED_NOT_YET_EMITTED: &[&str];     // registered ahead of emission
 ```
 
-The workspace totality test (`tests/registry.rs`) asserts:
+The workspace totality test (`tests/it/registry.rs`) asserts:
 
 1. `DIAGNOSTIC_REGISTRY` and `ALL_EMITTABLE_IDS ∪ REGISTERED_NOT_YET_EMITTED`
    are the same set, both directions;

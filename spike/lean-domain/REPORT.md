@@ -1,7 +1,7 @@
 # Spike report: a Lean 4 specification for `steins-domain`
 
 **Verdict: keep it, scoped to the value domain.** The soundness contract
-ADR-0035 states in a doc comment and `tests/lattice.rs` samples with five
+ADR-0035 states in a doc comment and `tests/it/lattice.rs` samples with five
 property tests is now a set of closed theorems over every value; the
 differential harness that binds spec to implementation caught two real
 divergences on its first two runs; and the whole thing is small enough to check
@@ -47,7 +47,7 @@ stating:
 ## What the harness found
 
 Two divergences, both on the first two runs of
-`cargo test -p steins-domain --test lean_vectors`. Neither is a bug in shipped
+`cargo test -p steins-domain --test it lean_vectors::`. Neither is a bug in shipped
 code — both are in what the *spec assumed about the implementation*, which is
 precisely the class of thing a proof rests on silently and the reason the `atom`
 and `order` lines exist.
@@ -175,7 +175,7 @@ and a four-argument one 2^20 (a build hazard). So:
 evaluator is a `Model` parameter, so what binds it is the atom table: the vector
 universe gained `"ABC"` — rank 5, since `'A' < 'a'` — which is the only atom
 that is uppercase and not lowercase, and every `atom` line now carries the
-casing bits. `crates/steins-domain/tests/php_oracle.rs` additionally asks the
+casing bits. `crates/steins-domain/tests/it/php_oracle.rs` additionally asks the
 real engine for `strtolower($s) === $s` over 22 cases, multibyte included: the
 byte-oriented rule is not an approximation of PHP 8.2+'s locale-independent
 `strtolower`, it is exactly it.
@@ -225,7 +225,7 @@ on both sides, which is the ceiling written out as data.
 whole fixture family turns on — `is_numeric` yet *not* canonical, so they keep
 their string identity as an array key. Every atom carries exactly one of the two
 bits, so the classifier table is itself the check that they are complementary.
-`crates/steins-domain/tests/php_oracle.rs` asks the real engine over 36 cases by
+`crates/steins-domain/tests/it/php_oracle.rs` asks the real engine over 36 cases by
 inserting each as an array key and reading back `is_int(array_key_first(...))` —
 the definition, not a proxy for it — and it agreed on the first run, including
 `"-0"` (PHP writes zero back as `"0"`), `PHP_INT_MAX`, and one past it.
@@ -420,9 +420,9 @@ nix develop --command lake exe vectors  # the vector file, on stdout
 From the repo root:
 
 ```
-cargo xtask lean-check                            # proofs compile + fixture is current
-cargo xtask lean-check --bless                    # rewrite the fixture after a spec change
-cargo test -p steins-domain --test lean_vectors    # Rust vs. the fixture (needs no Lean)
+cargo xtask lean-check                                # proofs compile + fixture is current
+cargo xtask lean-check --bless                        # rewrite the fixture after a spec change
+cargo test -p steins-domain --test it lean_vectors::  # Rust vs. the fixture (needs no Lean)
 ```
 
 In CI, `.github/workflows/lean.yml` runs the first two legs behind a path filter

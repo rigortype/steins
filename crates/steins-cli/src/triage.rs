@@ -414,7 +414,7 @@ struct Recognizer {
 }
 
 /// The catalogue, in report order. Adding a recognizer is one row here and
-/// one function below; `tests/triage.rs` pins each row with a stream that
+/// one function below; `tests/it/triage.rs` pins each row with a stream that
 /// fires it, so a row cannot vanish unnoticed.
 const CATALOGUE: &[Recognizer] = &[
     Recognizer { name: "strict-what-if-unmeasured", run: strict_what_if_unmeasured },

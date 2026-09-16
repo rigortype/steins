@@ -102,7 +102,7 @@ assert(true, "50 repeated checks on one instance");
 
 // 6. The replay round trip (ADR-0066). No php-wasm here yet — the answers are a
 // canned table captured from a real `php` by the differential oracle in
-// crates/steins-infer/tests/replay_fold.rs — so what this pins is the ABI: the
+// crates/steins-infer/tests/it/replay_fold.rs — so what this pins is the ABI: the
 // pending contract, the key format the JS loop echoes back, and the fold landing
 // in the envelope once the table is complete.
 const flagship = `<?php

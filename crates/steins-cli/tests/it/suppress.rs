@@ -13,7 +13,7 @@ fn bin() -> &'static str {
 
 /// Every test spawns the binary with `GITHUB_ACTIONS` scrubbed: `check`'s
 /// format auto-detection (ADR-0054 §6) reads it and would otherwise emit
-/// workflow commands (detection itself is tested in `tests/format_github.rs`).
+/// workflow commands (detection itself is tested in `tests/it/format_github.rs`).
 fn steins_cmd() -> Command {
     let mut cmd = Command::new(bin());
     cmd.env_remove("GITHUB_ACTIONS");

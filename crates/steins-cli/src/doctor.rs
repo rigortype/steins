@@ -1275,7 +1275,7 @@ fn section_catalog(target: Option<&PhpTarget>, runtime_minor: Option<(u16, u16)>
 
 /// Section 9 — Registry totality (ADR-0054 §9.7): mechanics self-check.
 /// Registry ids must partition exactly into `ALL_EMITTABLE_IDS` and
-/// `REGISTERED_NOT_YET_EMITTED`. Redundant with `tests/registry.rs` today,
+/// `REGISTERED_NOT_YET_EMITTED`. Redundant with `tests/it/registry.rs` today,
 /// until plugin registration adds ids at runtime.
 fn section_registry() -> Section {
     let mut sec = Section::new("Registry totality");

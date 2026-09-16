@@ -659,7 +659,7 @@ fn error_control_is_not_a_read() {
 
 // The `variable.maybe-undefined` boundary (ADR-0081, issue #267): everything
 // ordering- or path-sensitive is silence HERE by construction, reported instead by
-// the sibling id (`tests/variable_maybe_undefined.rs`).
+// the sibling id (`tests/it/variable_maybe_undefined.rs`).
 
 #[test]
 fn a_read_before_its_only_assignment_is_silence() {

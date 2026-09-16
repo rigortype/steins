@@ -2867,7 +2867,7 @@ mod unset_pseudo_type_tests {
 
 /// ADR-0089's **vocabulary** half: what the operator names are, and what every
 /// spelling that is not the operator's own arity does. The *projections* are
-/// judged end to end in `tests/end_to_end.rs`, against real values.
+/// judged end to end in `tests/it/end_to_end.rs`, against real values.
 #[cfg(test)]
 mod derived_operator_tests {
     use super::*;

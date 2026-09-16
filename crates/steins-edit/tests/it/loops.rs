@@ -3,7 +3,7 @@
 //! Pins the flagship **rewrite** shape (applied file re-enumerates zero
 //! candidates) and the **refusal taxonomy** (every ADR-0076 §4 reason
 //! exercised). Behaviour identity measured by the differential fixture in
-//! `crates/steins-cli/tests/transform_loops.rs`, under real `php`.
+//! `crates/steins-cli/tests/it/transform_loops.rs`, under real `php`.
 
 use steins_edit::TransformReport;
 use steins_edit::VouchSet;

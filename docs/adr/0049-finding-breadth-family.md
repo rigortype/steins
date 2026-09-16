@@ -629,7 +629,7 @@ leg is therefore not a stopgap to be deleted when #28 lands; it is the
 shape #28 will need, already built and already fixture-pinned.
 
 **Evidence bar.** Every expectation in
-`crates/steins-syntax/tests/array_lowering.rs` and in the A12 cases of
+`crates/steins-syntax/tests/it/array_lowering.rs` and in the A12 cases of
 `steins-infer`'s `domain_tests` is a `php -r` witness at PHP 8.5.8 for
 the 8.3+ column; the pre-8.3 column is the documented floor rule that
 ADR-0011's 8.1 floor obliges Steins to keep serving. Both columns are

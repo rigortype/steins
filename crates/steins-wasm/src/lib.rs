@@ -510,7 +510,7 @@ mod tests {
 /// malformed-table path, and a fully-answered canned table folding the flagship.
 ///
 /// The table is captured from the differential oracle in
-/// `steins-infer/tests/replay_fold.rs` (a real `php` answered these requests)
+/// `steins-infer/tests/it/replay_fold.rs` (a real `php` answered these requests)
 /// and hardcoded so the pin survives without a PHP dependency — only the
 /// extension list is trimmed. Key strings are hardcoded deliberately: they are
 /// the interchange format S2's loop echoes back, so a silent shape change must

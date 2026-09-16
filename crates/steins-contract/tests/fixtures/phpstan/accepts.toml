@@ -13,7 +13,7 @@
 #
 # Operation. PHPStan `Type::accepts($other, true)->result`. Steins runs its
 # single acceptance relation (`admits_val` / `admits_fact`) over the probe of
-# the right-hand type. See tests/phpstan_port.rs for the bridge.
+# the right-hand type. See tests/it/phpstan_port.rs for the bridge.
 #
 # Coverage summary for the providers mined into this file
 # (IntegerTypeTest, FloatTypeTest, BooleanTypeTest, ConstantIntegerTypeTest,

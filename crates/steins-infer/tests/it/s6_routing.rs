@@ -1,6 +1,6 @@
 //! ADR-0049 A13: the declared-receiver lane routes by **minimum stratum**.
 //!
-//! One ladder (`tests/phpdoc_undefined_method.rs` pins every leg of it), two ids.
+//! One ladder (`tests/it/phpdoc_undefined_method.rs` pins every leg of it), two ids.
 //! All-`Verified` arms — a native `C $o` parameter PHP enforces at the call
 //! boundary — emit `call.undefined-method`, the proof layer at the `Default` floor,
 //! the same id S2 emits (ADR-0022 decouples emitter from id). Any `Asserted` arm —

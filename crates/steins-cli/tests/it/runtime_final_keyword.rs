@@ -10,7 +10,7 @@
 //! nothing in the finding stream today, and it never reaches `readonly`.
 //!
 //! Each test runs the real `steins` binary in a private temp dir (its own
-//! CWD), mirroring `tests/profile.rs`: `steins.toml` reads from the process's
+//! CWD), mirroring `tests/it/profile.rs`: `steins.toml` reads from the process's
 //! working directory, not the analyzed path.
 
 use std::path::{Path, PathBuf};
@@ -23,7 +23,7 @@ fn bin() -> &'static str {
 
 /// Every test scrubs `GITHUB_ACTIONS`: `check`'s format auto-detection
 /// (ADR-0054 §6) reads it, so CI would otherwise get workflow commands where
-/// text was asserted (detection itself is tested in `tests/format_github.rs`).
+/// text was asserted (detection itself is tested in `tests/it/format_github.rs`).
 fn steins_cmd() -> Command {
     let mut cmd = Command::new(bin());
     cmd.env_remove("GITHUB_ACTIONS");

@@ -151,7 +151,7 @@ impl SourceInventory {
     /// symlink seal as two entries and the fingerprint covers those bytes
     /// twice. That is the seal behaving as designed, and it is why the `.php`
     /// walk (`steins_db::walk`, issue #524) hands over one spelling per real
-    /// file — see `tests/inventory.rs`.
+    /// file — see `tests/it/inventory.rs`.
     ///
     /// The bytes read here are dropped; a caller that wants them should call
     /// [`SourceInventory::capture_keeping`] rather than read every file a

@@ -105,7 +105,7 @@ Section 5 records the one surface where it is not.
   ran on rayon's **2 MiB** default — a quarter of the stack issue #246 already
   found fatal, in a debug-built CI job, over a corpus that includes an unpinned
   local checkout.
-- `crates/steins-cli/tests/deep_nesting.rs`: drives the real binary over a
+- `crates/steins-cli/tests/it/deep_nesting.rs`: drives the real binary over a
   3,000-level chain, past both the debug and the release ceiling, and asserts it
   neither prints an overflow nor dies by signal. It fails on the pre-fix binary
   (verified by reverting the `main.rs` change) — a stack overflow is not a
@@ -216,8 +216,8 @@ probably an ADR amendment:
 3. ~~**`cargo test` runs on libtest's 2 MiB threads**~~ — written down as a
    convention in
    [the verification apparatus](../internal-spec/verification-apparatus.md), and
-   demonstrated both ways (`crates/steins-syntax/tests/deep_nesting.rs` sets a
-   budget; `crates/steins-cli/tests/deep_nesting.rs` uses a subprocess). Not
+   demonstrated both ways (`crates/steins-syntax/tests/it/deep_nesting.rs` sets a
+   budget; `crates/steins-cli/tests/it/deep_nesting.rs` uses a subprocess). Not
    *enforced*: nothing stops a new in-process deep parse from aborting the suite.
 4. ~~**Wiring `apps/playground/smoke.mjs` into CI**~~ — done, §5.1.
 5. **Mago's recursive `HasSpan`** (new, from §5.1): the parser fork computes a

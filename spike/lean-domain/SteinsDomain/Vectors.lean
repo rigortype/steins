@@ -4,7 +4,7 @@ import SteinsDomain.Queries
 # The differential vector file
 
 `lake exe vectors` prints a deterministic text file that
-`crates/steins-domain/tests/lean_vectors.rs` regenerates from the Rust
+`crates/steins-domain/tests/it/lean_vectors.rs` regenerates from the Rust
 implementation and diffs byte for byte (ADR-0059 §4).
 
 Why a *regenerate-and-diff* file rather than a parsed input format: both sides
@@ -461,7 +461,7 @@ def renderBool (b : Bool) : String := if b then "true" else "false"
 private def header : List String :=
   [ "# steins-domain differential vectors — GENERATED, do not hand-edit.",
     "# spec:    spike/lean-domain (ADR-0059), `lake exe vectors`",
-    "# checker: crates/steins-domain/tests/lean_vectors.rs",
+    "# checker: crates/steins-domain/tests/it/lean_vectors.rs",
     "#",
     "# `atom` lines carry the concrete Rust value each abstract atom stands for and",
     "# the field each side computes independently (a string's predicate summary, a",

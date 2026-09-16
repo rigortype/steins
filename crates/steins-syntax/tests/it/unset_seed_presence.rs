@@ -7,7 +7,7 @@
 //! misses a declaration (the `unset` spelling is the only route to the leaf), and it
 //! costs nothing on a file that does not spell the word. The semantic half — which
 //! candidate is really a `T|unset` — is pinned in
-//! `crates/steins-infer/tests/unset_maybe_undefined.rs`.
+//! `crates/steins-infer/tests/it/unset_maybe_undefined.rs`.
 
 use steins_syntax::SourceTree;
 

@@ -3,7 +3,7 @@
 What **PHP itself** does with one value of each base handed to each native
 parameter type, in both coercion modes — measured by running the calls, not by
 reading the spec. The committed `.tsv` files are the oracle
-`crates/steins-infer/tests/coercion_witness_grid.rs` pins Steins against, cell
+`crates/steins-infer/tests/it/coercion_witness_grid.rs` pins Steins against, cell
 for cell, in both modes.
 
 The grid answers the base-level question issue #391's judgment is built on:
@@ -43,7 +43,7 @@ written down, so a signature change shows up as a diff. Rows carry one extra
 column (the function name):
 `mode <TAB> function <TAB> param <TAB> value-class <TAB> literal <TAB> accept|TypeError <TAB> [deprecated]`.
 
-`crates/steins-infer/tests/builtin_param_types.rs` pins Steins against these
+`crates/steins-infer/tests/it/builtin_param_types.rs` pins Steins against these
 files cell for cell, with the same rule: a Steins finding where PHP accepts is
 a false positive and fails the test outright; a silence where PHP raises is
 admissible only as a named divergence.

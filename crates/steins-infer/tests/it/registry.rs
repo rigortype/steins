@@ -217,7 +217,7 @@ fn finding_breadth_ids_light_up_stage_by_stage() {
     assert_eq!(layer(PHPDOC_UNDEFINED_METHOD_ID), Some(Layer::Contract));
     // A13's disjointness invariant (§8) is over SITES, not ids: one id may carry two
     // emitters, but one site is never judged by both — pinned in
-    // `tests/s6_routing.rs` and `tests/phpdoc_undefined_method.rs`. Registry-side:
+    // `tests/it/s6_routing.rs` and `tests/it/phpdoc_undefined_method.rs`. Registry-side:
     // both ids stay emittable and neither duplicates the other.
     assert!(emittable.contains(CALL_UNDEFINED_METHOD_ID), "the promoted half's id must be emittable");
     assert_ne!(PHPDOC_UNDEFINED_METHOD_ID, CALL_UNDEFINED_METHOD_ID);

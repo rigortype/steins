@@ -244,7 +244,7 @@ fn section_json(reader: &mut ArtifactReader, name: &SectionName) -> Result<serde
 /// The warm-path [`FoldEngine`] (ADR-0092 §4): table-first over recorded rows,
 /// live [`ProcessEngine`] on a miss, recording everything it serves.
 ///
-/// Three properties, each an oracle in `tests/fold_table_persistence.rs`:
+/// Three properties, each an oracle in `tests/it/fold_table_persistence.rs`:
 ///
 /// * **Replay is not a second semantics.** A hit answers through the same
 ///   `parse_*_result` readers [`TableEngine`] uses, a miss through the same

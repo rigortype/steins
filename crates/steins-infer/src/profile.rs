@@ -260,7 +260,7 @@ impl Surface {
     ///
     /// The pre-S6 layer-set test became the ladder test `floor(id) <= rung` at
     /// ADR-0062 S6 — behavior-preserving for every pre-S6 id, pinned id-by-id
-    /// against the registry by `tests/profile.rs`.
+    /// against the registry by `tests/it/profile.rs`.
     #[must_use]
     pub fn surfaces_id(&self, id: &str) -> bool {
         let Some(l) = layer(id) else { return false };

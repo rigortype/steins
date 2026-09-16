@@ -4,7 +4,7 @@ The zero-false-positive bar (ADR-0002) is not a slogan about care; it is a
 containment claim about one function. Every proof-layer finding rests on
 `γ(fact)` — the set of runtime values a fact denotes — actually containing every
 value the program can produce. ADR-0035 states the claim in a doc comment
-(`γ(a) ∪ γ(b) ⊆ γ(join(a, b))`) and `crates/steins-domain/tests/lattice.rs`
+(`γ(a) ∪ γ(b) ⊆ γ(join(a, b))`) and `crates/steins-domain/tests/it/lattice.rs`
 samples it with five property tests.
 
 Property tests search for counterexamples. They cannot establish containment,
@@ -90,7 +90,7 @@ proofs do assume is two coherence laws, bundled in `SteinsDomain.Model`:
 
 Both are *classifier* obligations, discharged by execution, not by proof — which
 is the ADR-0004 posture applied to a unit semantics. They are checked on concrete
-strings by the vector file's `atom` lines, alongside `tests/php_oracle.rs`.
+strings by the vector file's `atom` lines, alongside `tests/it/php_oracle.rs`.
 
 ## The differential loop
 
@@ -106,7 +106,7 @@ reference, the Rust is the subject, and disagreement is the signal.
    48-fact × 22-value universe, plus an exhaustive associativity tally.
    `cargo xtask lean-check` verifies the fixture is still what the spec prints;
    `--bless` rewrites it after a deliberate spec change.
-3. **`cargo test -p steins-domain --test lean_vectors`** — the Rust
+3. **`cargo test -p steins-domain --test it lean_vectors::`** — the Rust
    implementation walks the same universe in the same order and diffs the
    rendered results line by line.
 

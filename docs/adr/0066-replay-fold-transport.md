@@ -188,7 +188,7 @@ outlive the answer that fixes it.
 ## 7. Consequences
 
 - The differential fixpoint oracle
-  (`crates/steins-infer/tests/replay_fold.rs`) is the acceptance pin: a replay
+  (`crates/steins-infer/tests/it/replay_fold.rs`) is the acceptance pin: a replay
   run driven to its fixpoint by a real `Sidecar` answering each pending request
   verbatim produces exactly the findings and annotations a direct
   `SidecarFolder` run produces. If a future change gives the replay path its own
@@ -701,7 +701,7 @@ and it is a decision about `strval`, `implode` and `array_unique` together.
 the first name on the allowlist where a single integer literal reaches it — `explode`
 needs a 257-piece string. The runner charges the 256-entry budget **after** the call
 and **before** encoding, so the reply is declined, never truncated, and the dump falls
-to a type. Pinned at both levels: `steins-sidecar/tests/protocol.rs` for the runner's
+to a type. Pinned at both levels: `steins-sidecar/tests/it/protocol.rs` for the runner's
 `'array result over entry budget'`, and
 `an_over_budget_array_fill_widens_rather_than_truncating` for the analyzer, with 256
 folding whole beside 257 declining.

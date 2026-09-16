@@ -601,9 +601,9 @@ Deliberately **not** landed:
   subtraction carrier by construction — every mutation on it removes
   arms it can prove dead.
 
-Fixtures: `crates/steins-infer/tests/false_arm_strip.rs` (the mechanism,
+Fixtures: `crates/steins-infer/tests/it/false_arm_strip.rs` (the mechanism,
 both directions, all four identity spellings, the two refusals);
-`crates/steins-infer/tests/declared_return_floor.rs` (the floor-row /
+`crates/steins-infer/tests/it/declared_return_floor.rs` (the floor-row /
 hand-written-row parity pins, re-pinned by this change).
 
 ## Note (2026-08-02): adjacent int arms absorb, and an int range spells as PHPStan spells it
@@ -718,7 +718,7 @@ Direction of movement: **finding-removing only**. Nothing here mints a
 verdict, a fact, or an id; php-typing-conformance is unmoved (206/214
 before and after, same eight fails).
 
-Fixtures: `crates/steins-infer/tests/short_circuit_dead_operands.rs` —
+Fixtures: `crates/steins-infer/tests/it/short_circuit_dead_operands.rs` —
 every shape as a decided/undecided pair, the Asserted-presence stratum pin,
 the short-circuiting chain, and the per-span (not per-call) proof that an
 identical call on a live path keeps firing.
@@ -778,7 +778,7 @@ same eight fails — none narrowing-owned;
 `regressions_string_narrowing_assert_if_true` keeps passing, as point 10
 requires).
 
-Fixtures: `crates/steins-infer/tests/assert_tag_class_lane.rs` — the
+Fixtures: `crates/steins-infer/tests/it/assert_tag_class_lane.rs` — the
 `instanceof` reference narrowing beside the tag forms, both polarities of
 both guard kinds, the negated spec, and four pins: the proof-layer absence
 id stays silent (exactness is not membership), a Verified null is not
@@ -939,7 +939,7 @@ rather than left as implementation residue.** Each stays exactly as implemented:
   inside the interval keeps its proven value untouched, being sharper than any
   shape.
 
-Fixtures: `crates/steins-infer/tests/count_guards.rs` — both polarities of the
+Fixtures: `crates/steins-infer/tests/it/count_guards.rs` — both polarities of the
 floor, the Yoda spelling, `sizeof`, the ceiling, the identity pin, the bounded
 variable, the sealed exact-count pin beside its unsealed complement, the
 assert lane, conjunction distribution and negation, the four refusals, the
@@ -1069,7 +1069,7 @@ own terms — it removes a marker that was never earned — but it is a
 consumer of abstract facts exists. Recorded so the next reader does not
 mistake the flat gate for a failed measurement.
 
-Fixtures: `crates/steins-infer/tests/comparison_value.rs` pins the split from
+Fixtures: `crates/steins-infer/tests/it/comparison_value.rs` pins the split from
 both sides so a refactor cannot collapse it in either direction —
 `a_union_operand_decides_only_when_every_pair_agrees` (declared operands: the
 decided verdict keeps `(asserted)`, the undecided one drops it),
@@ -1126,7 +1126,7 @@ A `count($x) <op> N` guard therefore cannot narrow anything a
 `catch (\TypeError $e)` body downstream can see, by construction — not
 because of a special case added here, but because the surrounding
 `try`/`catch` was never structured enough to carry the narrowing across the
-boundary in the first place. `crates/steins-infer/tests/count_guards.rs`
+boundary in the first place. `crates/steins-infer/tests/it/count_guards.rs`
 pins this as a regression: a `count($x)` guard immediately followed by a
 `catch (\TypeError)` that could plausibly have caught the guard's own call
 failing must not see `$x` proven non-null.
@@ -1138,7 +1138,7 @@ equally let a definite verdict fire where the nullable arm was previously
 absorbing it to `Maybe` (finding-adding) — exactly the class ADR-0052 §2
 reserves for the verdict layer to decide, not this narrowing.
 
-Fixtures: `crates/steins-infer/tests/count_guards.rs` — both arms clearing
+Fixtures: `crates/steins-infer/tests/it/count_guards.rs` — both arms clearing
 `nullable` on a declared-nullable array, the `Countable` receiver reading
 identically, the sealed/unsealed cases unaffected, an expression `count()`
 cannot bind to a subject still doing nothing, and the catch-arm regression
@@ -1225,7 +1225,7 @@ as PHPStan's own `*NEVER*`.
   a heap object, which has no arm lane to narrow; the declared-return floor is
   where this leg lands today.
 
-Fixtures: `crates/steins-infer/tests/enum_case_domain.rs` (both directions,
+Fixtures: `crates/steins-infer/tests/it/enum_case_domain.rs` (both directions,
 the accumulating chain and the two chain outcomes, the backed/pure split, the
 five absence shapes, the out-of-scope pins); `crates/steins-contract/src/`
 `normalize.rs` (the arm's subsumption, both polarities of the subtrahend, the
@@ -1300,10 +1300,10 @@ built yet, so the lift needs that check beside it. Issue #433 owns the pair — 
 the `\UnhandledMatchError` origin, and the enum-arm lift ships with its gate or not
 at all.
 
-Fixtures: `crates/steins-infer/tests/match_no_match_subtraction.rs` (the
+Fixtures: `crates/steins-infer/tests/it/match_no_match_subtraction.rs` (the
 reproducer in both positions and its `if` twin, the `switch` pair, the loose
 weakness, the two evidence refusals, the inexpressible condition, the arm-local
-rebinding); `crates/steins-infer/tests/match_value_position.rs` (the residue
+rebinding); `crates/steins-infer/tests/it/match_value_position.rs` (the residue
 fixture this closes, and the two `assertNever` tripwires whose silence now comes
 from an emptied domain rather than an untouched lane).
 
@@ -1379,7 +1379,7 @@ property doing its job. That is why the fix landed one layer down, in the guard
 vocabulary, and every spelling went quiet at once. See the note of 2026-08-19
 (issue #445).
 
-Fixtures: `crates/steins-infer/tests/match_true_guards.rs` (the worked
+Fixtures: `crates/steins-infer/tests/it/match_true_guards.rs` (the worked
 example's cells, the accumulated subtraction, `match (false)`, the three
 refusals, the inexpressible guard, the pair that proves the subtraction
 landed, and the re-narrowing chain above, now pinned silent in both spellings).
@@ -1462,7 +1462,7 @@ than kept-empty, so it reads as `unknown` where the `Value`-subtrahend path of
 the 2026-08-18 enum note would read `*NEVER*`. Both are silent and neither
 manufactures anything; unifying the two spellings is a separate change.
 
-Fixtures: `crates/steins-infer/tests/match_true_guards.rs` —
+Fixtures: `crates/steins-infer/tests/it/match_true_guards.rs` —
 `a_chain_whose_later_arm_re_narrows_reports_where_php_reaches_nothing` and
 `the_re_narrowing_is_the_guard_vocabulary_and_needs_no_match_at_all` (both
 flipped from the false positive they pinned),
@@ -1568,12 +1568,12 @@ Fixtures: `crates/steins-contract/src/normalize.rs` (`subtract_arm`'s two new
 unit tests for each direction, the emptied-by-two-steps walk, and the
 cross-contamination refusals — a bool subtrahend leaves an interval alone and
 an int subtrahend leaves the general `bool` arm alone); re-pinned in
-`crates/steins-infer/tests/false_arm_strip.rs`
+`crates/steins-infer/tests/it/false_arm_strip.rs`
 (`a_general_bool_arm_narrows_to_the_surviving_literal`, formerly
 `a_general_bool_arm_survives_the_false_exclusion` — the soundness pin this
 note supersedes — plus `an_assert_narrows_the_general_bool_arm_like_every_other_guard`
 and the new `excluding_both_bool_literals_in_sequence_empties_the_general_arm`);
-`crates/steins-infer/tests/never_sentinel.rs`
+`crates/steins-infer/tests/it/never_sentinel.rs`
 (`the_nullable_bool_reproducer_of_issue_443_is_silent`, the issue's own
 worked example; `a_bool_missing_one_literal_still_reports`, the
 over-silencing guard; `a_bool_covered_by_both_literals_is_silent`, re-pinned
@@ -1626,9 +1626,9 @@ than carrying the refuting fact in, which is what the type-predicate slice's
 measured false-positive class needed; it is only the arm lane underneath that
 now answers first, and more precisely.
 
-Fixtures: re-pinned in `crates/steins-infer/tests/match_true_guards.rs`
+Fixtures: re-pinned in `crates/steins-infer/tests/it/match_true_guards.rs`
 (`guard_arms_narrow_and_the_default_sees_the_accumulated_subtraction`) and
-`crates/steins-infer/tests/type_predicate_guards.rs`
+`crates/steins-infer/tests/it/type_predicate_guards.rs`
 (`the_refutation_drop_holds_on_the_false_branch_too`, whose sibling
 `a_refuted_guard_drops_the_fact_because_the_verdict_owns_death` is untouched
 and pins that the value lane's own behaviour did not move). New in the same
@@ -1713,11 +1713,11 @@ Truthiness itself is `Fact::truthy` and nothing else, and the verdicts fold
 through `Certainty::and`/`or`/`not`. No second falsiness table exists anywhere
 in the family, which is the precedent `php_cast_fact` set for the `bool` cast.
 
-Fixtures: `crates/steins-infer/tests/logical_value.rs` (the measured table, the
+Fixtures: `crates/steins-infer/tests/it/logical_value.rs` (the measured table, the
 floor, the object decline, compositionality, the seams, the spaceship),
-`crates/steins-infer/tests/ternary_value.rs` (the seam agreement leg 1
+`crates/steins-infer/tests/it/ternary_value.rs` (the seam agreement leg 1
 restored), and the value-position pairs appended to
-`crates/steins-infer/tests/short_circuit_dead_operands.rs`.
+`crates/steins-infer/tests/it/short_circuit_dead_operands.rs`.
 
 ## Note (2026-09-02): §6's short-circuit is one predicate, and a proven absence is a fall-through (issue #630) — PENDING ratification
 
@@ -1793,10 +1793,10 @@ non-projection arm still drops every accumulated premise. Nothing here extends
 the carrier to a path, so a depth-2 offset arm is unchanged and its soundness
 argument remains unwritten.
 
-Fixtures: `crates/steins-infer/tests/coalesce_value.rs` (the settled rule, the
+Fixtures: `crates/steins-infer/tests/it/coalesce_value.rs` (the settled rule, the
 lifted base, the fall-through, the seam agreement and every control), and the
 `??` pairs appended to
-`crates/steins-infer/tests/short_circuit_dead_operands.rs`.
+`crates/steins-infer/tests/it/short_circuit_dead_operands.rs`.
 
 ## Note (2026-09-03): a cast has a floor, `(string)` included, and its stratum splits the same way (issue #626) — PENDING ratification
 
@@ -1910,8 +1910,8 @@ Nothing here folds width-sensitive integer arithmetic: `(int)` of a float
 truncates through the grid's own `is_finite`-gated reader, `(int)` of an int is
 the identity, and `(string)` of an int prints exactly. ADR-0028 §3 is untouched.
 
-Fixtures: `crates/steins-syntax/tests/cast_value.rs` (the token map and the
-node's totality), `crates/steins-infer/tests/cast_value_position.rs` (the
+Fixtures: `crates/steins-syntax/tests/it/cast_value.rs` (the token map and the
+node's totality), `crates/steins-infer/tests/it/cast_value_position.rs` (the
 one-grid-two-syntaxes property, the floors, the `(string)` ruling, the two
 lanes, the stratum split), the cast-grid unit tests in `coerce.rs`, and the
 `SCHEMA_VERSION` round-trip in `crates/steins-db/src/persist.rs`.
@@ -2076,7 +2076,7 @@ Worth recording because the review caught it and the diff did not show it.
 a float and an array by itself. So every pre-existing refusal fixture that
 asserted on the dump surface silently stopped observing `concat_cast` and
 started observing the cast grid instead: patching `concat_cast` to admit floats
-left `tests/concat.rs` entirely green while `strlen("f=" . 1e100)` rendered `103`
+left `tests/it/concat.rs` entirely green while `strlen("f=" . 1e100)` rendered `103`
 against PHP's `10`. `concat_cast` now lives only in the literal lane — argument
 position, `switch`/`match` subjects, `in_array` — so the refusals are pinned
 there, through a `strlen` observer that folds only on an `ArgValue::Str`. The
@@ -2084,9 +2084,9 @@ general rule for the next slice in this family: when a new rung is wired above a
 existing seam, re-derive which lane each existing fixture reaches; a green suite
 after the wiring is not evidence that it still pins what its name says.
 
-Fixtures: `crates/steins-infer/tests/concat_value_position.rs` (one test per
+Fixtures: `crates/steins-infer/tests/it/concat_value_position.rs` (one test per
 table cell, each pinned by a rendering only that cell decides; the identity, the
 floor's stratum normalization, the cap's decline, the four seams and the
-interpolation lowering), `crates/steins-infer/tests/concat.rs` (the refusals,
+interpolation lowering), `crates/steins-infer/tests/it/concat.rs` (the refusals,
 pinned in the literal lane and asserting the widened fact beside it), and the
 `SCHEMA_VERSION` round-trip in `crates/steins-db/src/persist.rs`.

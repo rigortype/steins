@@ -28,7 +28,7 @@
 //!   [`crate::sarif`].
 //!
 //! `text` and `json` moved here verbatim from `main.rs`, byte-identical by
-//! construction; `tests/format_recorded.rs` pins that against recorded output.
+//! construction; `tests/it/format_recorded.rs` pins that against recorded output.
 
 use std::collections::HashMap;
 
@@ -120,7 +120,7 @@ pub fn detect_from_env() -> CheckFormat {
 
 /// Detection **detects the consumer, never the context** (ADR-0054 §6): it only
 /// changes the spelling, never the surface, profile, pipeline or exit code
-/// (format invariance, §1, checked by `tests/format_github.rs`).
+/// (format invariance, §1, checked by `tests/it/format_github.rs`).
 ///
 /// Only `GITHUB_ACTIONS` detects. A generic `CI=true` is refused by §13 — "some
 /// CI" names no rendering, so `text` stays the answer there. `sarif` is never
@@ -352,7 +352,7 @@ fn json(report: &CheckReport<'_>) -> String {
 // github (ADR-0054 §4)
 
 /// GitHub's documented escaping has **two registers** (ADR-0054 §4, fixtures in
-/// `tests/format_github.rs`): the message is *data*, escaping `%`, `\r`, `\n`.
+/// `tests/it/format_github.rs`): the message is *data*, escaping `%`, `\r`, `\n`.
 /// `%` goes first or it would re-encode the escapes it just wrote.
 fn escape_data(s: &str) -> String {
     s.replace('%', "%25").replace('\r', "%0D").replace('\n', "%0A")

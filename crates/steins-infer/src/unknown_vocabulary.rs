@@ -232,7 +232,7 @@ fn report(
 
 /// The **allowlist seam** ADR-0091 §4.1 puts between the builtin tables and the
 /// plugin channel. What the walk does with a docblock is pinned end to end by
-/// `tests/unknown_vocabulary.rs`; what is pinned here is the one decision with
+/// `tests/it/unknown_vocabulary.rs`; what is pinned here is the one decision with
 /// no observable surface yet, because no manifest can populate the plugin half.
 #[cfg(test)]
 mod tests {
