@@ -1,6 +1,6 @@
 ---
 name: steins-release-prep
-description: Release a Steins version end to end — bump the workspace version, seal the changelog, reconcile the docs, run the full verification protocol, then open the release PR, drive CI green, and on the owner's Go merge, tag, and verify the published GitHub Release, binaries and Homebrew tap. Use when the user asks to prepare the next version, cut a release, tag a version, refresh release metadata, or make versioned files consistent before tagging.
+description: Prepare or publish a Steins release. Use for version bumps, changelog sealing, release metadata, or version tags.
 metadata:
   internal: true
 ---
