@@ -14,8 +14,10 @@
 # would silently drop the release skill from a clone — AGENTS.md points at it, so
 # it is repo content, not local scratch. Re-include the directory (a repo
 # .gitignore outranks the global excludes), then ignore everything in it EXCEPT
-# `skills/`; git cannot re-include a path whose parent stays excluded, hence the
-# three-step dance. `.claude/worktrees/` and any local settings stay ignored.
+# `skills/` and `CLAUDE.md`; git cannot re-include a path whose parent stays
+# excluded, hence the three-step dance. `.claude/worktrees/` and any local
+# settings stay ignored.
 !/.claude/
 /.claude/*
 !/.claude/skills/
+!/.claude/CLAUDE.md

@@ -1,31 +1,31 @@
 # Repository instructions
 
-Use progressive disclosure: match the task to one or more routes, then read
-only their linked documents. For implementation work, continue through
-affected verification and a diff review. User instructions take precedence over
-this file and linked skill guidance.
+Each route below names the document that holds this repository's non-obvious
+rules for one kind of task. Read it when the task matches its trigger.
 
 ## Route by task
 
-- **Issue or PR triage:** use `gh` for GitHub Issues and PRs; read
-  `docs/agents/issue-tracker.md`. Map triage roles to repository labels with
-  `docs/agents/triage-labels.md`.
-- **Domain terms, architecture, ADRs, or renames:** read
-  `docs/agents/domain.md`. It routes `CONTEXT.md` and the relevant ADRs; update
-  the glossary before a rename that changes a domain concept.
-- **Verification, CI, or CLI compatibility:** read
-  `docs/agents/verification.md` when the task touches CI, docs gates, local-only
-  corpus/oracle checks, or command dispatch and exit codes.
-- **Generated catalog tables:** read `docs/agents/mining.md` before mining or
-  regenerating a table.
-- **Profiling or performance:** read `docs/agents/profiling.md` before measuring.
-- **Release work:** read `.claude/skills/steins-release-prep/SKILL.md` when
-  preparing, tagging, or publishing a version. Pushing a branch or tag requires
-  the owner's explicit approval.
-- **Stacked PRs:** use `/gh-stack` and read `docs/agents/stacked-prs.md` for the
-  repository-specific dependency, adoption, sync, and exit rules.
+- **Triage** of issues or PRs: `docs/agents/issue-tracker.md`, and
+  `docs/agents/triage-labels.md` for the label strings.
+- **Domain vocabulary**, architecture, ADRs, or a rename:
+  `docs/agents/domain.md`.
+- **Verification** of a change to CI workflows, rustdoc, inference
+  compatibility, or command dispatch and exit codes:
+  `docs/agents/verification.md`. Several gates here pass without exercising
+  what changed.
+- **Mining** — running a `mine-*` xtask or editing a `*-mining/*.toml` table:
+  `docs/agents/mining.md`.
+- **Performance** — before profiling, or before proposing an optimization:
+  `docs/agents/profiling.md`. It carries the current baseline and what that
+  baseline rules out.
+- **Release** — a version bump, changelog seal, or version tag:
+  `.claude/skills/steins-release-prep/SKILL.md`. It owns the push approval
+  gates for releases.
+- **Stacking** dependent PRs: `/gh-stack` for commands,
+  `docs/agents/stacked-prs.md` for when to stack and how to adopt or exit.
 
-## Repository guardrail
+## Formatting
 
-Keep Rust hand-formatted; do not invoke `cargo fmt`. The policy and its
-formatting numbers live in `rustfmt.toml`.
+Rust here is hand-formatted to the policy in `rustfmt.toml`; match the
+surrounding code by hand and never run `cargo fmt`. CI has no fmt gate, so a
+tree-wide reformat lands unnoticed and buries every later `git blame`.

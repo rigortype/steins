@@ -1,26 +1,25 @@
 # Verification
 
-Use this guide when changing code, CI, documentation gates, generated
-artifacts, or CLI dispatch and exit codes.
+Use this guide when changing CI workflows, rustdoc, inference compatibility, or
+CLI dispatch and exit codes. `.github/workflows/ci.yml` defines the CI jobs and
+their commands; `.github/workflows/composer.yml` defines the Composer channel.
 
-## Default
+## Gates that pass without exercising the change
 
-Choose checks that cover the changed behavior, then review the diff. The current
-CI surface and commands are defined by `.github/workflows/ci.yml`; the Composer
-surface is defined by `.github/workflows/composer.yml`.
+- **`fp-gate`:** the private corpus is untracked and machine-local, so a
+  checkout without it silently measures only the public packages. Treat that
+  run as partial, and run the private half alongside CI when the change needs
+  the full corpus claim.
+- **`nsrt`:** `cargo xtask nsrt [DIR]` needs a local `phpstan-src` checkout and
+  does not run in CI. Run it alongside CI when the change affects inference
+  compatibility.
+- **Composer:** `composer.yml` is path-filtered, so a CLI change that breaks
+  the Composer channel stays green until the next `composer/**` PR. After
+  changing command dispatch or exit codes, dispatch that workflow explicitly.
 
-## Checks that need extra context
+## Gates that fail on something the diff hides
 
-- **`fp-gate`:** a checkout without the private, machine-local corpus silently
-  exercises only the public half. Treat that run as partial and run the private
-  half alongside CI when the task needs the full corpus claim.
-- **`nsrt`:** `cargo xtask nsrt [DIR]` needs a local `phpstan-src` checkout. Run it
-  against that checkout when the task changes inference compatibility.
-- **Rustdoc:** the docs job rejects public intra-doc links to private items. A
-  broken link is a gate failure, not a reason to add a warning suppression.
-- **Composer:** `composer.yml` is path-filtered. After changing command dispatch
-  or exit codes, dispatch or run the Composer workflow explicitly so that its
-  channel is exercised even when the path filter would skip it.
-
-The mining-specific Linux engine and generated-table rules live in
-`docs/agents/mining.md`; do not duplicate them here.
+- **Rustdoc:** the `docs` job rejects a public doc item that intra-doc-links a
+  private one. Fix the link; a warning suppression hides the break rather than
+  fixing it.
+- **Generated tables:** see `docs/agents/mining.md`.
