@@ -47,6 +47,7 @@ mod perf;
 mod phpdoc_oracle;
 mod sha256;
 mod sync;
+mod test_layout;
 
 use std::process::ExitCode;
 
