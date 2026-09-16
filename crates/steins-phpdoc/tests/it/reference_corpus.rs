@@ -119,8 +119,8 @@ fn our_verdict(input_line_bytes: &[u8]) -> OurVerdict {
 #[test]
 fn reference_corpus_compatibility() {
     // Bytes, not &str: input has one non-UTF-8 line (raw 0xA0 identifier byte).
-    let inputs_raw = include_bytes!("fixtures/reference-types.txt");
-    let expected_raw = include_bytes!("fixtures/reference-types.expected");
+    let inputs_raw = include_bytes!("../fixtures/reference-types.txt");
+    let expected_raw = include_bytes!("../fixtures/reference-types.expected");
 
     let input_lines: Vec<&[u8]> = split_lines(inputs_raw);
     // .expected has comment/blank header lines with nothing in the input to match.

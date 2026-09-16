@@ -51,7 +51,7 @@ fn spawn_leaves_no_temp_dir_behind() {
 /// OS argv limit: Linux caps at 128 KiB, macOS `ARG_MAX` ~1 MiB; 100,000 bytes is headroom.
 #[test]
 fn runner_size_stays_under_the_argv_limit() {
-    const RUNNER_SRC: &str = include_str!("../runner.php");
+    const RUNNER_SRC: &str = include_str!("../../runner.php");
     assert!(
         RUNNER_SRC.len() < 100_000,
         "runner.php is {} bytes, approaching Linux's 128 KiB MAX_ARG_STRLEN argv limit",
