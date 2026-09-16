@@ -1062,7 +1062,7 @@ fn generate() -> Vec<String> {
 }
 
 fn expected() -> Vec<String> {
-    let raw = include_str!("fixtures/lean-vectors.expected");
+    let raw = include_str!("../fixtures/lean-vectors.expected");
     raw.lines()
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
         .map(str::to_owned)
