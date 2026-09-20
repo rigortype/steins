@@ -92,6 +92,14 @@ thrown. Kind-sensitive: `fclose` warns and keeps a directory handle open.
 _Avoid_: "destructor", "release" (PHP closes a dropped handle silently, and
 that is not a closing call)
 
+**Place** (ADR-0098):
+What may name a heap entity — a variable (`h`), or one array element of one
+under a constant key (`bag[0]`). The heap's binding key, not a syntax node: a
+place is bound when something puts an allocation there and dropped whenever the
+base could have stopped holding it.
+_Avoid_: "lvalue" (a place is what the heap keys by, not what may be assigned
+to — `$a[$i]` is an lvalue and is no place), "path" (reserved for the file kind)
+
 **Surface floor** (ADR-0062 A-G10):
 The single registry attribute that places a diagnostic id on the profile
 ladder (`default ⊂ contracts ⊂ strict`): the lowest surface at which the id
