@@ -454,6 +454,84 @@ fn an_unproven_argument_is_silent() {
 }
 
 // ---------------------------------------------------------------------------
+// The element carrier (ADR-0098): a place, not only a variable, holds a handle
+// ---------------------------------------------------------------------------
+
+#[test]
+fn an_element_of_an_array_literal_is_the_handle_the_variable_holds() {
+    // Probed at 8.5.10: `$arr = [$h]; fclose($arr[0]);` leaves `is_resource($h)`
+    // false and `gettype($h)` reading `resource (closed)` — one handle, two
+    // names. So a use through EITHER name after a close through EITHER name is
+    // the same `TypeError`.
+    one_in_both_modes(
+        "$h = fopen('php://memory', 'r');\n\
+         if ($h === false) { throw new \\RuntimeException('x'); }\n\
+         $arr = [$h];\nfclose($arr[0]);\nfread($h, 1);\n",
+        "argument $h to fread() cannot become resource $stream — the handle is closed; proven TypeError (must be an open stream resource, in either mode)",
+    );
+    one_in_both_modes(
+        "$h = fopen('php://memory', 'r');\n\
+         if ($h === false) { throw new \\RuntimeException('x'); }\n\
+         $arr = [$h];\nfclose($h);\nfread($arr[0], 1);\n",
+        "argument $arr[0] to fread() cannot become resource $stream — the handle is closed; proven TypeError (must be an open stream resource, in either mode)",
+    );
+}
+
+#[test]
+fn a_string_key_names_a_place_too() {
+    one_in_both_modes(
+        "$h = fopen('php://memory', 'r');\n\
+         if ($h === false) { throw new \\RuntimeException('x'); }\n\
+         $arr = ['in' => $h];\nfclose($arr['in']);\nfread($arr['in'], 1);\n",
+        // The message renders the ARGUMENT, which spells its key the way every
+        // other value message does; the place key underneath it is canonical
+        // (`arr['in']`), and the two never have to agree.
+        "argument $arr[\"in\"] to fread() cannot become resource $stream — the handle is closed; proven TypeError (must be an open stream resource, in either mode)",
+    );
+}
+
+#[test]
+fn an_open_element_is_what_the_position_asks_for() {
+    silent_in_both_modes(
+        "$h = fopen('php://memory', 'r');\n\
+         if ($h === false) { throw new \\RuntimeException('x'); }\n\
+         $arr = [$h];\nfwrite($arr[0], 'y');\nfread($arr[0], 1);\nfclose($arr[0]);\n",
+    );
+}
+
+#[test]
+fn a_dynamic_key_names_no_place() {
+    // ADR-0098 §3: no place, no binding, silence — in both directions, since
+    // the walk cannot say which entry `$i` selects.
+    silent_in_both_modes(
+        "$h = fopen('php://memory', 'r');\n\
+         if ($h === false) { throw new \\RuntimeException('x'); }\n\
+         $i = 0;\n$arr = [$h];\nfclose($arr[$i]);\nfread($arr[0], 1);\n",
+    );
+}
+
+#[test]
+fn a_rebound_base_takes_its_places_with_it() {
+    // The sweep (§2.3): the place must not outlive the base. `$arr` is a fresh
+    // array by the time the read happens, and nothing is proven about `$arr[0]`.
+    silent_in_both_modes(
+        "$h = fopen('php://memory', 'r');\n\
+         if ($h === false) { throw new \\RuntimeException('x'); }\n\
+         $arr = [$h];\nfclose($arr[0]);\n$arr = [];\nfread($arr[0], 1);\n",
+    );
+}
+
+#[test]
+fn a_branch_that_may_not_have_closed_the_element_convicts_nothing() {
+    silent_in_both_modes(
+        "$h = fopen('php://memory', 'r');\n\
+         if ($h === false) { throw new \\RuntimeException('x'); }\n\
+         $arr = [$h];\n\
+         if (random_int(0, 1) === 1) { fclose($arr[0]); }\nfread($arr[0], 1);\n",
+    );
+}
+
+// ---------------------------------------------------------------------------
 // The gate: each condition, switched off one at a time
 // ---------------------------------------------------------------------------
 

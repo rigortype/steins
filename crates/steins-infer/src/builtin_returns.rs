@@ -451,9 +451,17 @@ pub(crate) fn resource_call_effects(
         let builtin = global_function_callee(cx, call).filter(|_| call.positional_only);
         for (position, arg) in call.args.iter().enumerate() {
             match &arg.value {
-                ArgValue::Var(v) => {
-                    let Some(res) = store.res_of(v) else { continue };
-                    let id = store.id_of(v).expect("a bound resource has an id");
+                // A place, not only a variable (ADR-0098 §2.4): `fclose($pipes[0])`
+                // closes the entry the element names, by the same id transition a
+                // bare `$h` takes. An offset whose key is not literal names no
+                // place and falls to the escape leg below, as it does today.
+                value if crate::offsets::place_of_static(cx, value)
+                    .is_some_and(|p| store.res_of(&p).is_some()) =>
+                {
+                    let place = crate::offsets::place_of_static(cx, value)
+                        .expect("the guard just resolved one");
+                    let res = store.res_of(&place).expect("the guard just found one");
+                    let id = store.id_of(&place).expect("a bound resource has an id");
                     let verdict = match builtin {
                         Some(name) => site_verdict(folder, name, position, res.kind),
                         None => SiteVerdict::Escape,
@@ -491,11 +499,28 @@ pub(crate) fn resource_call_effects(
         if entry.opaque || entry.sites.is_empty() {
             continue;
         }
-        let Some(res) = store.res_of(&entry.name) else { continue };
-        let kind = res.kind;
+        // The kinds this name's sites must all be keepers for: the handle it
+        // holds itself, or — ADR-0098 §2.3 — the handles its element places
+        // hold. `fclose($pipes[0])` records `pipes` as an occurrence, and the
+        // array is no more rebound by it than `$h` is by `fclose($h)`; without
+        // this leg the base is swept and its places die with it, which is the
+        // whole `proc_open` idiom lost one statement in.
+        let kinds: Vec<ResourceKind> = match store.res_of(&entry.name) {
+            Some(res) => vec![res.kind],
+            None => store
+                .places_under(&entry.name)
+                .iter()
+                .filter_map(|(_, id)| store.resources.get(id).map(|r| r.kind))
+                .collect(),
+        };
+        if kinds.is_empty() {
+            continue;
+        }
         let survives = entry.sites.iter().all(|(r, position)| {
             denotes_global_function(cx, r)
-                && site_verdict(folder, &r.raw, *position as usize, kind) != SiteVerdict::Escape
+                && kinds.iter().all(|kind| {
+                    site_verdict(folder, &r.raw, *position as usize, *kind) != SiteVerdict::Escape
+                })
         });
         if survives {
             effects.kept.insert(entry.name.clone());
