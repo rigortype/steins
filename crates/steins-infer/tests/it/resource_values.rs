@@ -624,16 +624,35 @@ fn is_resource_false_keeps_the_false_arm_beside_the_closed_handle() {
 }
 
 #[test]
-fn a_handle_stored_into_an_array_escapes() {
-    // `$arr = [$h]; fclose($arr[0])` closes the handle through a route the walk
-    // does not follow: the store is the escape (ADR-0097 §2.4), the state is
-    // `Unknown` from then on, and nothing convicts in either direction.
+fn a_handle_stored_into_an_array_literal_keeps_its_identity() {
+    // ADR-0098: the element is a **place**, and it names the very allocation
+    // `$h` holds — so `$arr = [$h]; fclose($arr[0]);` closes `$h`, which is what
+    // the engine does (probed at 8.5.10: `is_resource($h)` is then `false` and
+    // `gettype($h)` reads `resource (closed)`). Before the place carrier the
+    // store was treated as an escape and both spellings stayed silent.
+    let src = with_state_param(
+        "open-resource",
+        &format!("{OPEN_H}$arr = [$h];\nfclose($arr[0]);\nf($h);\n"),
+    );
+    assert_eq!(any_mismatch(&src, Engine::typeless()).len(), 1, "a closed handle is not open");
+    let src = with_state_param(
+        "closed-resource",
+        &format!("{OPEN_H}$arr = [$h];\nfclose($arr[0]);\nf($h);\n"),
+    );
+    assert!(any_mismatch(&src, Engine::typeless()).is_empty(), "it IS closed");
+}
+
+#[test]
+fn a_handle_stored_where_no_place_names_it_still_escapes() {
+    // The routes the carrier does not follow (ADR-0098 §3): a dynamic key names
+    // no place, and a property is the next increment rather than this one. Both
+    // leave the state `Unknown`, silent in either direction.
     for spelling in ["open-resource", "closed-resource"] {
-        let src = with_state_param(
+        let dynamic = with_state_param(
             spelling,
-            &format!("{OPEN_H}$arr = [$h];\nfclose($arr[0]);\nf($h);\n"),
+            &format!("{OPEN_H}$i = 0;\n$arr = [$h];\nfclose($arr[$i]);\nf($h);\n"),
         );
-        assert!(any_mismatch(&src, Engine::typeless()).is_empty(), "`@param {spelling}`");
+        assert!(any_mismatch(&dynamic, Engine::typeless()).is_empty(), "dynamic `{spelling}`");
     }
 }
 

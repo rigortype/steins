@@ -20,7 +20,7 @@ use crate::cond::{
 use crate::descent::summary_binds;
 use crate::env::{
     ContractArm, HeapSummary, Known, ReturnSummary, Store, Stratum, array_literal_fact,
-    class_const_class_fact, render_val, singleton_fact,
+    class_const_class_fact, elem_place, render_val, singleton_fact,
 };
 use crate::heap::{build_closure_val, build_new_object};
 use crate::offsets::{ShapeRead, offset_key_of, offset_operand_fact, shape_read, shape_read_at};
@@ -398,6 +398,7 @@ pub(crate) fn apply_assign(
                 {
                     env.insert(var.to_owned(), Known::value_strat(fact, line, None, strat));
                     store.unbind(var);
+                    bind_handle_elements(cx, var, items, store);
                 }
                 // The `::class` magic constant (issue #236): `$c = Foo::class`
                 // binds its FQN literal, `$c = static::class` the refinement.
@@ -887,6 +888,42 @@ pub(crate) fn cover_discharges(shape: &ShapeFact, key: &VKey, absent: &[VKey]) -
                     .is_some_and(|f| f.is_null().is_no())
             })
             .then_some(CoverFlavor::KeyExists),
+    }
+}
+
+/// Bind the element **places** of an array literal whose elements are handles
+/// (ADR-0098 §2.2): `$bag = [$h]` makes `bag[0]` name the very allocation `$h`
+/// holds, so `fclose($bag[0])` closes it for both — PHP's handle semantics, one
+/// level out.
+///
+/// The id is shared and the arm lane is copied, because both are what the
+/// element *is*: the heap answers its state, the lane answers that it is a
+/// resource at all (ADR-0056 §8.6's lock, which every resource consumer reads).
+///
+/// Declines whole rather than in part. A literal holding a non-literal key is
+/// declined by [`normalize_array`] itself — an unknown key may be an integer and
+/// would shift every following auto-index, so no position in it is nameable.
+fn bind_handle_elements(
+    cx: &crate::cx::Cx,
+    var: &str,
+    items: &[(steins_syntax::ArrayKey, ArgValue)],
+    store: &mut Store,
+) {
+    let Some(normalized) = steins_syntax::normalize_array(items, cx.php_minor) else { return };
+    for (key, value) in normalized {
+        let ArgValue::Var(source) = value else { continue };
+        let Some(id) = store.id_of(&source).filter(|id| store.resources.contains_key(id)) else {
+            continue;
+        };
+        let key = match key {
+            steins_syntax::NormKey::Int(i) => VKey::Int(i),
+            steins_syntax::NormKey::Str(s) => VKey::Str(s),
+        };
+        let place = elem_place(var, &key);
+        store.bind_place(place.clone(), id);
+        if let Some(arms) = store.contract.get(&source).cloned() {
+            store.contract.insert(place, arms);
+        }
     }
 }
 
