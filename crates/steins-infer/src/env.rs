@@ -543,6 +543,20 @@ impl HandleState {
     }
 }
 
+/// The [`Store`] key naming one array **element** of `var` (ADR-0098 §2.2):
+/// `bag[0]`, `opts['h']` — the rendering the syntax layer already uses for an
+/// offset. A PHP variable name cannot contain `[`, so this namespace and the
+/// plain variable one cannot collide, and no existing binding changes key.
+/// One renderer, deliberately: the binding site normalizes a literal's keys and
+/// the reading site resolves an offset's, and a place only works if both spell
+/// the same key the same way.
+pub(crate) fn elem_place(var: &str, key: &VKey) -> String {
+    match key {
+        VKey::Int(i) => format!("{var}[{i}]"),
+        VKey::Str(s) => format!("{var}[{}]", s.render_with('\'')),
+    }
+}
+
 /// A heap **resource** (ADR-0097 §2.3): the identity and state of a handle a
 /// producer call returned, allocation-keyed beside [`HeapObj`] so that aliases
 /// share it — `$b = $h; fclose($b)` closes the one entry both names refer to,
@@ -734,6 +748,14 @@ impl Store {
         self.refs.insert(var.to_owned(), id);
     }
 
+    /// Bind the **place** `place` to an allocation that already exists — the
+    /// element carrier of ADR-0098 §2.2. The id is shared, not copied: an
+    /// element of `[$h]` is the handle `$h` holds, so closing either closes the
+    /// one entry (PHP's handle semantics, one level out).
+    pub(crate) fn bind_place(&mut self, place: String, id: AllocId) {
+        self.refs.insert(place, id);
+    }
+
     /// Set the state of the heap resource `var` refers to. A no-op where `var`
     /// refers to none.
     pub(crate) fn set_resource_state(&mut self, var: &str, state: HandleState) {
@@ -779,6 +801,7 @@ impl Store {
     /// entries did, while the id lives on for its other aliases).
     pub(crate) fn unbind(&mut self, var: &str) {
         self.refs.remove(var);
+        self.drop_places_of(var);
         // Reassignment / invalidation also voids the guard-derived class facts and
         // the declared-type arm lane: a rebound `$var` no longer satisfies the
         // narrowed possibilities established for the old value (ADR-0052 §9 —
@@ -788,6 +811,34 @@ impl Store {
         // The narrowed mark describes THIS binding's guard history; a rebound var
         // starts a fresh one with none (issue #428).
         self.narrowed.remove(var);
+    }
+
+    /// Drop every element place under `var` (ADR-0098 §2.3). Called wherever
+    /// `var` could have stopped holding what it held — a rebind, a write under
+    /// a key this walk cannot name, an escape, a rearrangement.
+    ///
+    /// **Blunt on purpose.** The whole `var[` family goes, rather than the one
+    /// key a write touched: "which key" is exactly the question a non-constant
+    /// key cannot answer, and a place that outlives its base would be a stale
+    /// `Closed` — a false positive on the default surface. A dropped place is
+    /// silence, which is where the family started.
+    pub(crate) fn drop_places_of(&mut self, var: &str) {
+        let prefix = format!("{var}[");
+        self.refs.retain(|k, _| !k.starts_with(&prefix));
+        self.contract.retain(|k, _| !k.starts_with(&prefix));
+        self.members.retain(|k, _| !k.starts_with(&prefix));
+        self.narrowed.retain(|k| !k.starts_with(&prefix));
+    }
+
+    /// The element places bound under `var`, with the allocation each names
+    /// (ADR-0098). Empty for a variable nothing indexed into.
+    pub(crate) fn places_under(&self, var: &str) -> Vec<(&str, AllocId)> {
+        let prefix = format!("{var}[");
+        self.refs
+            .iter()
+            .filter(|(k, _)| k.starts_with(&prefix))
+            .map(|(k, id)| (k.as_str(), *id))
+            .collect()
     }
 
     /// Clear all bindings and the heap — a Barrier: nothing is reachable.

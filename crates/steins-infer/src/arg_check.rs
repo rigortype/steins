@@ -25,7 +25,7 @@ use crate::fold::Folder;
 use crate::{PHPDOC_MAYBE_ARGUMENT_MISMATCH_ID, TYPE_MAYBE_ARGUMENT_MISMATCH_ID, describe_fact};
 use crate::builtin_returns::{builtin_call_return_fact, builtin_return_floor, store_holds_resource};
 use crate::coerce::{member_accepts_coercive, member_accepts_strict};
-use crate::offsets::shape_read_at;
+use crate::offsets::{place_of, shape_read_at};
 
 // ---------------------------------------------------------------------------
 // Value / type helpers.
@@ -1019,14 +1019,15 @@ fn check_resource_position(
     in_descent: bool,
     out: &mut Vec<Diagnostic>,
 ) {
-    // A variable whose contract lane is a bare `Verified` resource (ADR-0056
+    // A **place** whose contract lane is a bare `Verified` resource (ADR-0056
     // §8.6's lock) IS what the position asks for; what remains to ask about it
-    // is its state, and that is the seam below.
+    // is its state, and that is the seam below. A bare variable is a place
+    // (ADR-0098 §2.2), and so is `$pipes[0]` once something bound it.
     if !poisoned
-        && let ArgValue::Var(v) = &arg.value
-        && store_holds_resource(store, v)
+        && let Some(place) = place_of(cx, folder, &arg.value, env, poisoned)
+        && store_holds_resource(store, &place)
     {
-        if let Some(d) = closed_handle_verdict(cx, row, callee, arg, store, v) {
+        if let Some(d) = closed_handle_verdict(cx, row, callee, arg, store, &place) {
             out.push(d);
         }
         return;

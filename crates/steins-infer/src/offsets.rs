@@ -60,6 +60,45 @@ pub(crate) enum OffsetGrade {
     Fatal,
 }
 
+/// The **place** an argument names, when it names one (ADR-0098 §2.4): a bare
+/// variable, or one element of one under a key this walk can prove constant.
+///
+/// The key goes through [`offset_key_of`], the same canonicalization the offset
+/// families use, so `$a[5]` and `$a["5"]` are one place, as they are one entry
+/// in PHP. A dynamic key (`$pipes[$i]`), a nested base (`$a[0][1]`) and a
+/// receiver that is not a plain variable answer `None` — no place, no binding,
+/// silence.
+pub(crate) fn place_of(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    value: &ArgValue,
+    env: &HashMap<String, Known>,
+    poisoned: bool,
+) -> Option<String> {
+    match value {
+        ArgValue::OffsetRead { base, key } => {
+            let ArgValue::Var(b) = &**base else { return None };
+            let lit = cx.resolve_literal(key, env, poisoned, folder)?;
+            Some(crate::env::elem_place(b, &crate::shapes::guard_key(&lit, cx.php_minor)?))
+        }
+        _ => place_of_static(cx, value),
+    }
+}
+
+/// [`place_of`] where no env is threaded: the key must already be a literal.
+/// `$pipes[0]` and `$opts['in']` resolve; `$pipes[$i]` does not, even where the
+/// env would prove `$i`. The narrower answer, at a seam that has no env to ask.
+pub(crate) fn place_of_static(cx: &Cx, value: &ArgValue) -> Option<String> {
+    match value {
+        ArgValue::Var(v) => Some(v.clone()),
+        ArgValue::OffsetRead { base, key } => {
+            let ArgValue::Var(b) = &**base else { return None };
+            Some(crate::env::elem_place(b, &crate::shapes::guard_key(key, cx.php_minor)?))
+        }
+        _ => None,
+    }
+}
+
 /// Canonicalize a proven key [`Val`] to a domain array key (ADR-0049 A10),
 /// reusing the SAME [`php_canonical_int_string`] primitive as the
 /// write/lowering side — `$a = [5 => 'x']; $a["5"]` resolves to key `5`,
