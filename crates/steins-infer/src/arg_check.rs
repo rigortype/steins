@@ -17,7 +17,7 @@ use crate::descent::{
     project_call_summary, project_method_summary, propagated_arg_value, summary_binds,
 };
 use crate::dump::render_contract_arms;
-use crate::env::{ContractArm, Known, Store, Stratum};
+use crate::env::{ContractArm, HandleState, Known, Store, Stratum};
 use crate::heap::simple_class;
 use crate::project::Diagnostic;
 use crate::return_arms::{call_return_arms_by_name, method_return_arms_by_callee};
@@ -978,8 +978,8 @@ pub(crate) fn check_builtin_call_args(
 // members, no coercion path in either direction. So the relation here has
 // exactly two cells and both are exact — a proven NON-resource is a `TypeError`
 // (`must be of type resource, string given`), and a proven resource is the
-// value the position asks for. The state cell (§2.5's second) is slice 1's; its
-// seam is `closed_handle_verdict` below.
+// value the position asks for. The state cell (§2.5's second) is
+// `closed_handle_verdict` below, reading the heap state §2.3 put there.
 // ===========================================================================
 
 /// Judge one argument at a builtin position whose admitted row says the pinned
@@ -1026,7 +1026,7 @@ fn check_resource_position(
         && let ArgValue::Var(v) = &arg.value
         && store_holds_resource(store, v)
     {
-        if let Some(d) = closed_handle_verdict(row, store, v) {
+        if let Some(d) = closed_handle_verdict(cx, row, callee, arg, store, v) {
             out.push(d);
         }
         return;
@@ -1099,24 +1099,32 @@ fn proven_non_resource(cx: &Cx, value: &ArgValue) -> bool {
     }
 }
 
-/// **The seam for ADR-0097 §2.5's second cell** — a proven CLOSED handle at a
-/// position whose row says `accepts_closed = false` is `type.argument-mismatch`
-/// with the state named (`must be an open stream resource`) — deliberately not
-/// reached here. Slice 1 of ADR-0097 (§2.3, §2.4) moves the handle's identity
-/// and state onto the heap; until it lands there is no proven `Closed` to read,
-/// only the arm lane's type, and "closed" is not a claim this slice can make.
+/// **ADR-0097 §2.5's second cell** — a proven CLOSED handle at a position whose
+/// row says `accepts_closed = false` is `type.argument-mismatch` with the state
+/// named. The row's bit and the heap state are read on the same id as the
+/// resource-ness judgment beside it.
 ///
-/// What the seam fixes is *where* the verdict will be reached and *what* it
-/// will read: the row's `accepts_closed` bit, beside the resource-ness judgment,
-/// on the same id. `get_resource_id` and `get_resource_type` (`accepts_closed`
-/// probed `true`) have no verdict to reach whatever the state turns out to be;
-/// every other row will convict on `Closed` and stay silent on `Open` and
-/// `Unknown` (§2.4: Unknown convicts nothing). `None` until then.
-fn closed_handle_verdict(row: ResourceParam, store: &Store, var: &str) -> Option<Diagnostic> {
+/// `get_resource_id` and `get_resource_type` are the only two rows the probe
+/// found that take a closed handle (`accepts_closed = true`), and they reach no
+/// verdict here whatever the state. Every other row convicts on `Closed` and
+/// stays silent on `Open` — which is what the position asks for — and on
+/// `Unknown`, because §2.4 is explicit that `Unknown` convicts nothing: an
+/// escape into a project call, a property store, a capture, a branch that may
+/// not have closed the handle and a loop that may have all land there, and each
+/// of them is a handle this walk cannot speak about.
+fn closed_handle_verdict(
+    cx: &Cx,
+    row: ResourceParam,
+    callee: &str,
+    arg: &Arg,
+    store: &Store,
+    var: &str,
+) -> Option<Diagnostic> {
     if row.accepts_closed {
         return None;
     }
-    // Slice 1: read the heap entry `var` is bound to; `Closed` convicts.
-    let _ = (store, var);
-    None
+    if store.res_of(var)?.state != HandleState::Closed {
+        return None;
+    }
+    Some(cx.resource_closed_diagnostic(arg.span.start, &arg.value, callee, row.name))
 }

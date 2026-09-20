@@ -1499,6 +1499,39 @@ impl<'a> Cx<'a> {
         }
     }
 
+    /// Build the closed-**state** flavour of a `type.argument-mismatch`
+    /// (ADR-0097 §2.5's second cell): a handle proven closed, handed to a
+    /// position whose row does not accept one. Same id and shape as
+    /// [`Self::resource_param_diagnostic`]; the tail is PHP's own sentence and
+    /// omits the coercion mode for the same reason — probed at 8.5.10,
+    /// `fclose($h); fread($h, 5)`, `ftell($h)`, a second `fclose($h)` and
+    /// `closedir($d); readdir($d)` are every one `TypeError: <f>(): Argument #1
+    /// ($p) must be an open stream resource`, with and without
+    /// `declare(strict_types=1)`. PHP says "stream" even for a directory
+    /// handle, so this quotes it rather than naming the kind.
+    pub(crate) fn resource_closed_diagnostic(
+        &self,
+        offset: u32,
+        value: &ArgValue,
+        callee: &str,
+        param_name: &str,
+    ) -> Diagnostic {
+        let pos = self.tree().position(offset);
+        let message = format!(
+            "argument {} to {callee}() cannot become resource ${param_name} — the handle is closed; proven TypeError (must be an open stream resource, in either mode)",
+            value.render(),
+        );
+        Diagnostic {
+            id: ID,
+            path: self.path().to_owned(),
+            line: pos.line,
+            column: pos.column,
+            message,
+            facet: None,
+            fix: None,
+        }
+    }
+
     /// Build a `type.return-mismatch` diagnostic. `display` is the owning
     /// function/method name (`f`, `Foo::bar`); `mode` is governed by the owning
     /// file's `declare(strict_types=1)` — the file this `Cx` points at.
