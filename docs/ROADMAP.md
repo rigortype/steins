@@ -12,7 +12,7 @@ position queries reachable — but they release after the checker is
 genuinely usable. The specifically protected LSP capability:
 type-directed member completion at a cursor position.
 
-## Current state (verified against the tree, 2026-09-12)
+## Current state (verified against the tree, 2026-09-21)
 
 Engine:
 
@@ -51,7 +51,31 @@ Engine:
   binds its literal. Mined tables (ADR-0069/0070/0094): builtin
   `Class::method` declared returns, by-value argument certification off
   arginfo, parameter facts as a union across platforms.
-- Diagnostic surface, through v0.1.7. Pre-existing: `type.argument-mismatch`,
+- **`resource` is a type (ADR-0097).** The docblock word is
+  non-shadowable; a handle's identity and open/closed state live on the
+  heap, so aliases share them, a closing call proves `Closed`, an escape
+  drops to `Unknown`, and `is_resource()` narrows over that state rather
+  than erasing the lane. Two mined tables carry the consuming direction:
+  the 100 stub-declared `@param resource` positions
+  (`resource_params.toml`) and the 27 classes PHP migrated its resources
+  into (`migrated_resource_classes.toml`). The **closed-handle cell** of
+  the consumer table is judged, and `gettype`, `get_debug_type`,
+  `get_resource_type` and `get_resource_id` answer from the handle rather
+  than the declaration (§2.7). **`Open` is never proven** (§2.3, retracted
+  2026-09-21): three probed routes close a handle while naming nothing —
+  an argument-less `closedir()`, `socket_import_stream` + `socket_close`,
+  and `bzopen`'s ownership of the stream it wraps — so a producer's
+  identity cannot vouch for a state that a later call can move. `Closed`
+  is unaffected; nothing reopens a handle.
+- **A place, not a variable, names a heap entity (ADR-0098).** An array
+  element under a key proven at `Verified` is a place that shares the
+  variable's allocation, so `$arr = [$h]; fclose($arr[0]);` closes `$h`,
+  and `stream_socket_pair()` and `proc_open()` bind their own places —
+  one per `pipe` descriptor of a proven spec, on a truthy return. The
+  sweep is blunt by design: when the base could have stopped holding what
+  it held, the places go. Left open: properties (`$this->stream`), a key
+  the walk cannot prove, and nesting past one level.
+- Diagnostic surface, through v0.1.8. Pre-existing: `type.argument-mismatch`,
   `type.return-mismatch`, `type.property-mismatch`, `call.on-null`,
   `readonly.reassigned`, `phpdoc.param-mismatch`,
   `phpdoc.return-mismatch`, `phpdoc.property-mismatch`,
@@ -114,6 +138,13 @@ Engine:
   49 at `throws-direct`, 66 at `contracts`, 74 at `strict`, 67 at
   `pedantic`. `call.too-many-arguments` remains the only id registered
   ahead of emission.
+- v0.1.8 added no id. The resource work (ADR-0097) reports under ids that
+  already existed: `type.argument-mismatch` at a builtin's stub-declared
+  resource position, `phpdoc.param-mismatch` for a state or migrated-class
+  mismatch against `@param resource`, and `class.undefined` — with a new
+  message — for a native `resource` hint. Re-measured on the built binary:
+  48 ids at `default`, 49 at `throws-direct`, 66 at `contracts`, 74 at
+  `strict`, 67 at `pedantic`, unchanged from v0.1.7.
 
 Verification apparatus (ADR-0013):
 
@@ -132,8 +163,9 @@ Verification apparatus (ADR-0013):
   twenty-two-PR ADR-0092 series moved no conformance row, which is an
   independent witness to its behaviour preservation alongside the fp-gate
   and the warm ≡ cold oracle. Of the 14 fails, three are registered
-  refusals (ADR-0030 entries 1–2) and one is the `resource`-domain
-  deferral (entry 4); the other ten arrived with cases the suite added
+  refusals (ADR-0030 entries 1–2) and one was the `resource`-domain
+  deferral (entry 4) — **whose subject shipped in v0.1.8** (ADR-0097), so
+  this total predates it; the other ten arrived with cases the suite added
   after the 2026-08-09 measurement and cluster in narrowing
   (`regressions_*_narrowing`, `regressions_string_narrowing_assert_if_true`),
   properties, and `phpdoc_advanced_member_tag_undefined_type`. One row

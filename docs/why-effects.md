@@ -2,7 +2,7 @@
 
 > [!NOTE]
 > This document narrates why the effect system exists and where the idea
-> came from. As of 2026-09-12, the core model it describes — labels,
+> came from. As of 2026-09-21, the core model it describes — labels,
 > envelopes, propagation, interface Liskov widening, the PHPStan interop
 > bridge below, and the decomposed "one bit" — is implemented, including
 > the dead-statement finding (`statement.no-effect`) and the
