@@ -19,8 +19,10 @@
 //! * the **shape declines**: by-reference and variadic positions, a union in the
 //!   stub, a name the engine lacks, a project shadow, a PHP off the pin.
 //!
-//! The closed-state cell (`fclose($h); fread($h, 1)`) is slice 1's and is pinned
-//! here as silence, so the day it lands the test says so.
+//! The closed-state cell (`fclose($h); fread($h, 1)`) reads the heap state §2.3
+//! put there: `Closed` convicts, `Open` is what the position asks for, and
+//! `Unknown` — an escape, a branch that may not have closed it — convicts
+//! nothing.
 
 use std::collections::HashMap;
 
@@ -343,17 +345,88 @@ fn an_any_state_position_accepts_the_handle_and_refuses_a_scalar() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// The state cell (§2.5's second): a CLOSED handle where the row wants an open one
+// ---------------------------------------------------------------------------
+
 #[test]
-fn the_closed_state_cell_is_slice_ones_and_stays_silent_here() {
-    // `fclose($h); fread($h, 1)` is `TypeError: fread(): Argument #1 ($stream)
-    // must be an open stream resource` at the engine, and ADR-0097 §2.5 names it
-    // as this family's second cell. It is reached through the heap state slice 1
-    // adds (§2.3/§2.4); until then the seam (`closed_handle_verdict`) answers
-    // nothing, and this test is the one that changes the day it lands.
-    silent_in_both_modes(
+fn a_closed_handle_where_the_position_wants_an_open_one_is_a_type_error_in_both_modes() {
+    // Probed at 8.5.10: `fclose($h); fread($h, 1)` is `TypeError: fread():
+    // Argument #1 ($stream) must be an open stream resource`, with and without
+    // `declare(strict_types=1)`.
+    one_in_both_modes(
         "$h = fopen('php://memory', 'r');\n\
          if ($h === false) { throw new \\RuntimeException('x'); }\n\
          fclose($h);\nfread($h, 1);\n",
+        "argument $h to fread() cannot become resource $stream — the handle is closed; proven TypeError (must be an open stream resource, in either mode)",
+    );
+}
+
+#[test]
+fn the_state_is_the_handles_so_an_alias_closes_what_the_original_holds() {
+    // §2.3: the state lives on the heap entry, not on the name. Closing through
+    // either name convicts a later use of the other.
+    one_in_both_modes(
+        "$h = fopen('php://memory', 'r');\n\
+         if ($h === false) { throw new \\RuntimeException('x'); }\n\
+         $b = $h;\nfclose($b);\nfread($h, 1);\n",
+        "argument $h to fread() cannot become resource $stream — the handle is closed; proven TypeError (must be an open stream resource, in either mode)",
+    );
+}
+
+#[test]
+fn closing_a_handle_twice_is_the_same_finding_because_fclose_wants_an_open_one() {
+    // `fclose`'s own row is `accepts_closed = false` — probed: a second
+    // `fclose($h)` raises the same `TypeError`.
+    one_in_both_modes(
+        "$h = fopen('php://memory', 'r');\n\
+         if ($h === false) { throw new \\RuntimeException('x'); }\n\
+         fclose($h);\nfclose($h);\n",
+        "argument $h to fclose() cannot become resource $stream — the handle is closed; proven TypeError (must be an open stream resource, in either mode)",
+    );
+}
+
+#[test]
+fn an_accepts_closed_position_takes_the_closed_handle() {
+    // `get_resource_id` and `get_resource_type` are the two probed rows that
+    // accept one — `get_resource_type` answers `'Unknown'` rather than raising.
+    silent_in_both_modes(
+        "$h = fopen('php://memory', 'r');\n\
+         if ($h === false) { throw new \\RuntimeException('x'); }\n\
+         fclose($h);\nget_resource_id($h);\nget_resource_type($h);\n",
+    );
+}
+
+#[test]
+fn a_branch_that_may_not_have_closed_the_handle_convicts_nothing() {
+    // §2.4: `Open ⊔ Closed` is `Unknown`, and `Unknown` convicts nothing. The
+    // handle here is closed on one path only, which is not a proof.
+    silent_in_both_modes(
+        "$h = fopen('php://memory', 'r');\n\
+         if ($h === false) { throw new \\RuntimeException('x'); }\n\
+         if (random_int(0, 1) === 1) { fclose($h); }\nfread($h, 1);\n",
+    );
+}
+
+#[test]
+fn a_handle_that_escaped_into_a_project_call_convicts_nothing() {
+    // The callee may close it or not; an escape drops the state to `Unknown`,
+    // and the closed cell asks for a proof it no longer has.
+    silent_in_both_modes(
+        "function sink($r): void {}\n\
+         $h = fopen('php://memory', 'r');\n\
+         if ($h === false) { throw new \\RuntimeException('x'); }\n\
+         sink($h);\nfread($h, 1);\n",
+    );
+}
+
+#[test]
+fn an_open_handle_stays_silent_at_the_same_positions() {
+    // The other half of the cell: `Open` is exactly what the position asks for.
+    silent_in_both_modes(
+        "$h = fopen('php://memory', 'r');\n\
+         if ($h === false) { throw new \\RuntimeException('x'); }\n\
+         fread($h, 1);\nfclose($h);\n",
     );
 }
 
