@@ -94,9 +94,15 @@ pub(crate) fn place_of(
     match value {
         ArgValue::OffsetRead { base, key } => {
             let ArgValue::Var(b) = &**base else { return None };
-            // `descent`/`out` are deliberately absent: see the module note above
-            // `place_of_static`. A key expression rich enough to carry a nested
-            // project call is not a place this slice names.
+            // No `descent`/`out`, and that is a known false negative rather than
+            // a proof of anything: a project call CAN resolve a key at
+            // `Verified` (`fread($arr[two()], 1)` names `arr[2]`), so a
+            // binding-specific finding raised inside that callee is dropped
+            // here where `$z = two();` would report it. Threading one needs a
+            // live `Descent`, which this whole file does not have — the
+            // argument check carries `in_descent: bool` and an `out` sink, not
+            // the on-stack guard — so it is its own change, with its own
+            // question about resolving one key expression twice.
             let (lit, strat) = cx.resolve_literal_strat(key, env, poisoned, folder)?;
             if strat != Stratum::Verified {
                 return None;
