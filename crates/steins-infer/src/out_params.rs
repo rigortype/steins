@@ -191,28 +191,68 @@ pub(crate) fn apply_stmt_out_param_seeds(
 /// therefore runs only on the path where the write did happen, which is the
 /// path the place describes.
 ///
-/// What the argument does **not** cover, named rather than implied: a produced
-/// place handed to a position that wants a non-resource (`strlen($pipes[0])`) is
-/// judged by the ordinary argument relation, which throws no `TypeError` of its
-/// own on the failure path. The window is a `proc_open` whose return is never
-/// guarded *and* a pipe passed somewhere no pipe belongs; fp-gate is the gate on
-/// it, and the honest place to narrow it is a carrier that ties the place to the
-/// return binding rather than a smaller table here.
+/// ## What the premise depends on, and what would break it
 ///
+/// The premise reads in full as *a closing call either closes what it was
+/// handed or does not return*. PHP has **one** exception to it, and the
+/// deferral above is standing on the fact that Steins cannot reach it. Probed at
+/// 8.5.10:
+///
+/// ```text
+/// $d = opendir('/tmp');   fclose($d);
+///   → Warning: fclose(): cannot close the provided stream, as it must not be
+///     manually closed;  returns false;  gettype($d) is still 'resource (stream)'
+///   readdir($d) then answers '.', so the program runs on
+/// ```
+///
+/// A cross-kind closer **returns without closing**. What keeps that out of this
+/// rung is not the shape of `proc_open` but [`CLOSERS`]: the closing table is
+/// keyed by handle kind, `fclose`/`gzclose`/`bzclose` do not list `dir`, and
+/// [`site_verdict`] answers `Keep` there — so no `Closed` is ever claimed and
+/// the statement after it is judged against an open handle. Measured on the
+/// binary: `$d = opendir('.'); fclose($d); fdatasync($d);` is silent, and
+/// `fdatasync` is a **rowed** position (ADR-0097 §2.5) with no kind of its own,
+/// which is exactly the shape a future `readdir` row would have. So the
+/// dependency is the kind table, not the absence of dir-handle rows in
+/// `docs/research/phpsrc-mining/resource_params.toml` — and it is already
+/// pinned, by `fclose_does_not_close_a_directory_handle` in
+/// `tests/it/resource_values.rs`, which fails loudly the day `dir` joins one of
+/// those three closers' kind lists.
+///
+/// The row absence is a second, independent shield, and it is the weaker one: it
+/// makes the whole dir family unjudgeable rather than judged-correctly. It is
+/// pinned beside the rest, in `tests/it/resource_producers.rs`
+/// (`no_dir_handle_consumer_carries_a_resource_row`), so that the next person to
+/// mine one arrives at this paragraph rather than at the bug.
+///
+/// What the argument does **not** cover, named rather than implied: a produced
+/// place handed to a position that wants a non-resource. That window is
+/// **closed, not merely gated** — the place carrier is a heap carrier and seeds
+/// no value-domain fact, because no `Val` is a resource (ADR-0035/0038), so the
+/// ordinary argument relation finds nothing at `$pipes[0]` and says nothing.
+/// `strlen($pipes[0])` is silent, pinned by
+/// `a_produced_place_speaks_only_at_a_resource_position`. The resource position
+/// (ADR-0097 §2.5) is the only seam that reads a place, and the only seam that
+/// could report one.
+///
+/// [`CLOSERS`]: crate::builtin_returns
+/// [`site_verdict`]: crate::builtin_returns
 /// [`WrittenWhen::ReturnTruthy`]: steins_catalog::WrittenWhen::ReturnTruthy
 pub(crate) fn stmt_produced_places(
     w: &WalkCx,
     folder: &mut dyn Folder,
     kind: &StmtKind,
     env: &HashMap<String, Known>,
-    store: &Store,
 ) -> Vec<(String, Vec<(VKey, HeapRes)>)> {
     let call = match kind {
+        // Both spellings seed, and the bare statement is not the rarer one:
+        // `proc_open($cmd, $spec, $pipes);` is what code that only wants the
+        // pipes writes, and it binds exactly what the assignment form does.
         StmtKind::Call(call) => call,
         StmtKind::Assign { call: Some(call), .. } => call,
         _ => return Vec::new(),
     };
-    produced_places(w, folder, call, env, store).into_iter().collect()
+    produced_places(w, folder, call, env).into_iter().collect()
 }
 
 /// The places a guard call fills, on the branch polarity that proves it wrote
@@ -229,10 +269,8 @@ pub(crate) fn seed_produced_places(
 ) {
     let mut calls = Vec::new();
     collect_truthy_calls(cond, then, w.cx.php_minor, &mut calls);
-    let seeds: Vec<_> = calls
-        .into_iter()
-        .filter_map(|call| produced_places(w, folder, call, env, store))
-        .collect();
+    let seeds: Vec<_> =
+        calls.into_iter().filter_map(|call| produced_places(w, folder, call, env)).collect();
     apply_produced_places(w, seeds, store);
 }
 
@@ -264,14 +302,68 @@ pub(crate) fn apply_produced_places(
 ///   local variable (the aliasing leg): `$this->pipes` and `$bag['p']` refuse,
 ///   because a place under them is the carrier ADR-0098 §3 holds back;
 /// * the spec must be proven, which [`proc_open_places`] owns.
+///
+/// **The two catalog legs are unobservable while this rung has one row, and
+/// they stay anyway.** [`proc_open_places`] answers `None` for every name but
+/// `proc_open`, so deleting either the `out_params` leg or the written-when leg
+/// changes no finding this test suite can construct — there is no second name to
+/// reach them with. They are not pinned for that reason, and no test below
+/// implies otherwise: `proc_open_is_rowed_at_position_two_with_a_return_truthy_witness`
+/// pins the catalog's answer, never that this walk asked. They are kept because
+/// the rung is written to take a second producer, and the day one arrives the
+/// legs are what stops it from being seeded off a row that states no witness.
+///
+/// # How a produced place differs from a literal's once the walk moves on
+///
+/// [`bind_produced_places`] and `bind_handle_elements` make the same kind of
+/// carrier, but the **base** they hang under is not in the same state, and that
+/// shows one statement later. `$bag = [$h]` and `$pair = stream_socket_pair(…)`
+/// both bind the base itself — a shape fact, a declared arm lane — while
+/// `proc_open`'s `$pipes` is an out-parameter: the walk binds places under the
+/// name and never binds the name. So at ADR-0070's by-value survival leg
+/// ([`is_value_semantic`]), `$pipes` reads as a name with no lane to save, the
+/// statement's conservative drop stands, and `unbind` takes the places with it
+/// (ADR-0098 §2.3).
+///
+/// Measured, all three carrying a proven `Closed` into the next statement:
+///
+/// ```text
+///                              $bag[0]   $pair[0]   $pipes[0]
+///   nothing in between          reports   reports    reports
+///   count($base);               reports   reports    silent
+///   helper($base);              reports   reports    silent
+///   helper($base[0]);           reports   reports    silent
+///   $copy = $base;              reports   reports    reports
+/// ```
+///
+/// It is not the project/builtin split and it is not the producer: it is whether
+/// the **base** was ever bound. Every cell of the bottom row errs toward
+/// silence, so there is no false positive in it; it is a missed finding, pinned
+/// by `a_produced_place_under_an_unbound_base_does_not_survive_a_call` so that
+/// the asymmetry is a decision rather than a surprise. Closing it is one clause
+/// in [`is_value_semantic`] — a name with element places has a lane to save —
+/// and that is a change to the ADR-0070 rung, not to this one.
+///
+/// [`bind_produced_places`]: crate::builtin_returns::bind_produced_places
+/// [`is_value_semantic`]: crate::walk
 fn produced_places(
     w: &WalkCx,
     folder: &mut dyn Folder,
     call: &CallExpr,
     env: &HashMap<String, Known>,
-    store: &Store,
 ) -> Option<(String, Vec<(VKey, HeapRes)>)> {
-    let _ = store;
+    // The poison gate (ADR-0046), the same one `out_param_seed` opens with: an
+    // `extract()` or a variable-variable can rewrite the frame the places would
+    // land in, so nothing here may name one.
+    //
+    // **Defence in depth, and measured to be exactly that.** Removing this leg,
+    // the `!w.scope.poisoned` leg on the `stream_socket_pair` rung in
+    // `assign.rs`, and the scope bit handed to `proc_open_places` below — all
+    // three at once — changes no finding: `resource_call_effects` refuses a
+    // poisoned scope before it records any closing call, and a place nothing
+    // closed convicts nothing. So no test claims these gates are pinned;
+    // `a_poisoned_scope_convicts_through_no_place` pins the posture they
+    // protect, and says so.
     if w.scope.poisoned {
         return None;
     }
@@ -284,6 +376,10 @@ fn produced_places(
     let ArgValue::Var(var) = &call.args.get(PROC_OPEN_PIPES)?.value else { return None };
     let spec = &call.args.get(PROC_OPEN_SPEC)?.value;
     let places = proc_open_places(w.cx, folder, name, spec, env, w.scope.poisoned)?;
+    // `store` is deliberately not a parameter: every leg above reads the call,
+    // the catalog or the env, and the one reader that would want the store —
+    // the spec held in a variable — goes through `Cx::resolve_literal`, which
+    // takes the env lane alone.
     Some((var.clone(), places))
 }
 
