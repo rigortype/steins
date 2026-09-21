@@ -17,7 +17,7 @@
 //     100  rows (one per exactly-`resource` position on a free function)
 //      42  positions declined — unions, by-ref, variadic, natively typed, null default
 //      15  method positions skipped (ADR-0056 §4's function-keyed bound)
-//      16  rows carrying a probe transcript
+//      94  rows carrying a probe transcript
 
 /// What one builtin position demands of a resource argument (ADR-0097 §2.5).
 ///
@@ -31,7 +31,11 @@ pub struct ResourceParam {
     /// it the way PHP's own `TypeError` does (`fwrite(): Argument #1 ($stream)`).
     pub name: &'static str,
     /// The position answers on a CLOSED handle (`get_resource_id`); everywhere
-    /// else a closed handle is a `TypeError` (`must be an open stream resource`).
+    /// else a closed handle is a `TypeError`. The SENTENCE varies by row —
+    /// `must be an open stream resource`, `must be a valid stream/context`,
+    /// `supplied resource is not a valid process resource` and more are all
+    /// on record in the table's probes — so a reader wanting PHP's own words
+    /// reads the row's `probe`, not this doc.
     pub accepts_closed: bool,
     /// The call leaves its argument closed when it returns (`fclose`, `pclose`,
     /// `gzclose`, `bzclose`, `proc_close`, `stream_filter_remove`).

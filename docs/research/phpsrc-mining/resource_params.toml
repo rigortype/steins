@@ -41,6 +41,16 @@
 # `true` bit. A row with no probe carries only the defaults, which are the
 # stub's claim and not a measurement.
 #
+# `accepts_closed` is the bit that CONVICTS, so every row owes a closed-handle
+# probe and `[meta] probed` counts the ones that have one. The rows that do not,
+# at the 8.5.10 run, are the four `ftp_*` ones — argument #0 is a declared
+# `FTP\Connection`, so the engine throws there before the resource position is
+# reached, and a live FTP server is needed to get past it — plus
+# `sapi_windows_vt100_support` (Windows-only) and
+# `stream_socket_get_crypto_status`, neither of which the probing build has.
+# Those rows convict on the default; every other row's transcript is the
+# measurement behind its bit.
+#
 # ─────────────────── What is deliberately NOT here ───────────────────
 # * Union positions (`resource|string`, `resource|null`, `resource|GdImage`):
 #   listed under [declined] with their spelling. The ordinary relation judges
@@ -63,7 +73,7 @@ declined = 42
 methods_skipped = 15
 zend_test_skipped = 1
 unpaired_docblocks = 0
-probed = 16
+probed = 94
 
 # Positions the scan saw and refused, verbatim, with the reason: a union naming
 # `resource`, a by-reference or variadic position, a position the stub types
@@ -127,6 +137,7 @@ name = "bz"
 stub = "ext/bz2/bz2.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$f=tempnam(sys_get_temp_dir(),\"sp\"); $h=bzopen($f,\"w\"); bzclose($h); bzerrno($h);' → TypeError: bzerrno(): Argument #1 ($bz) must be an open stream resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "bzerror"
@@ -135,6 +146,7 @@ name = "bz"
 stub = "ext/bz2/bz2.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$f=tempnam(sys_get_temp_dir(),\"sp\"); $h=bzopen($f,\"w\"); bzclose($h); bzerror($h);' → TypeError: bzerror(): Argument #1 ($bz) must be an open stream resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "bzerrstr"
@@ -143,6 +155,7 @@ name = "bz"
 stub = "ext/bz2/bz2.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$f=tempnam(sys_get_temp_dir(),\"sp\"); $h=bzopen($f,\"w\"); bzclose($h); bzerrstr($h);' → TypeError: bzerrstr(): Argument #1 ($bz) must be an open stream resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "bzflush"
@@ -151,6 +164,7 @@ name = "bz"
 stub = "ext/bz2/bz2.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$f=tempnam(sys_get_temp_dir(),\"sp\"); $h=bzopen($f,\"w\"); bzclose($h); bzflush($h);' → TypeError: bzflush(): Argument #1 ($bz) must be an open stream resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "bzread"
@@ -159,6 +173,7 @@ name = "bz"
 stub = "ext/bz2/bz2.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$f=tempnam(sys_get_temp_dir(),\"sp\"); $h=bzopen($f,\"w\"); bzclose($h); bzread($h, 1);' → TypeError: bzread(): Argument #1 ($bz) must be an open stream resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "bzwrite"
@@ -167,6 +182,7 @@ name = "bz"
 stub = "ext/bz2/bz2.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$f=tempnam(sys_get_temp_dir(),\"sp\"); $h=bzopen($f,\"w\"); bzclose($h); bzwrite($h, \"x\");' → TypeError: bzwrite(): Argument #1 ($bz) must be an open stream resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "fclose"
@@ -185,6 +201,7 @@ name = "stream"
 stub = "ext/standard/basic_functions.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$h=fopen(\"php://memory\",\"r+\"); fclose($h); fdatasync($h);' → TypeError: fdatasync(): Argument #1 ($stream) must be an open stream resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "feof"
@@ -203,6 +220,7 @@ name = "stream"
 stub = "ext/standard/basic_functions.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$h=fopen(\"php://memory\",\"r+\"); fclose($h); fflush($h);' → TypeError: fflush(): Argument #1 ($stream) must be an open stream resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "fgetc"
@@ -211,6 +229,7 @@ name = "stream"
 stub = "ext/standard/basic_functions.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$h=fopen(\"php://memory\",\"r+\"); fclose($h); fgetc($h);' → TypeError: fgetc(): Argument #1 ($stream) must be an open stream resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "fgetcsv"
@@ -219,6 +238,7 @@ name = "stream"
 stub = "ext/standard/basic_functions.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$h=fopen(\"php://memory\",\"r+\"); fclose($h); fgetcsv($h);' → TypeError: fgetcsv(): Argument #1 ($stream) must be an open stream resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "fgets"
@@ -227,6 +247,7 @@ name = "stream"
 stub = "ext/standard/basic_functions.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$h=fopen(\"php://memory\",\"r+\"); fclose($h); fgets($h);' → TypeError: fgets(): Argument #1 ($stream) must be an open stream resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "flock"
@@ -235,6 +256,7 @@ name = "stream"
 stub = "ext/standard/basic_functions.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$h=fopen(\"php://memory\",\"r+\"); fclose($h); flock($h, LOCK_SH);' → TypeError: flock(): Argument #1 ($stream) must be an open stream resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "fpassthru"
@@ -243,6 +265,7 @@ name = "stream"
 stub = "ext/standard/basic_functions.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$h=fopen(\"php://memory\",\"r+\"); fclose($h); fpassthru($h);' → TypeError: fpassthru(): Argument #1 ($stream) must be an open stream resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "fprintf"
@@ -251,6 +274,7 @@ name = "stream"
 stub = "ext/standard/basic_functions.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$h=fopen(\"php://memory\",\"r+\"); fclose($h); fprintf($h, \"x\");' → TypeError: fprintf(): Argument #1 ($stream) must be an open stream resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "fputcsv"
@@ -259,6 +283,7 @@ name = "stream"
 stub = "ext/standard/basic_functions.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$h=fopen(\"php://memory\",\"r+\"); fclose($h); fputcsv($h, [\"a\"]);' → TypeError: fputcsv(): Argument #1 ($stream) must be an open stream resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "fputs"
@@ -267,6 +292,7 @@ name = "stream"
 stub = "ext/standard/basic_functions.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$h=fopen(\"php://memory\",\"r+\"); fclose($h); fputs($h, \"x\");' → TypeError: fputs(): Argument #1 ($stream) must be an open stream resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "fread"
@@ -285,6 +311,7 @@ name = "stream"
 stub = "ext/standard/basic_functions.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$h=fopen(\"php://memory\",\"r+\"); fclose($h); fscanf($h, \"%d\");' → TypeError: fscanf(): supplied resource is not a valid File-Handle resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "fseek"
@@ -293,6 +320,7 @@ name = "stream"
 stub = "ext/standard/basic_functions.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$h=fopen(\"php://memory\",\"r+\"); fclose($h); fseek($h, 0);' → TypeError: fseek(): Argument #1 ($stream) must be an open stream resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "fstat"
@@ -301,6 +329,7 @@ name = "stream"
 stub = "ext/standard/basic_functions.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$h=fopen(\"php://memory\",\"r+\"); fclose($h); fstat($h);' → TypeError: fstat(): Argument #1 ($stream) must be an open stream resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "fsync"
@@ -309,6 +338,7 @@ name = "stream"
 stub = "ext/standard/basic_functions.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$h=fopen(\"php://memory\",\"r+\"); fclose($h); fsync($h);' → TypeError: fsync(): Argument #1 ($stream) must be an open stream resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "ftell"
@@ -359,6 +389,7 @@ name = "stream"
 stub = "ext/standard/basic_functions.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$h=fopen(\"php://memory\",\"r+\"); fclose($h); ftruncate($h, 0);' → TypeError: ftruncate(): Argument #1 ($stream) must be an open stream resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "fwrite"
@@ -404,6 +435,7 @@ name = "stream"
 stub = "ext/zlib/zlib.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$f=tempnam(sys_get_temp_dir(),\"sp\"); $h=gzopen($f,\"w\"); gzclose($h); gzeof($h);' → TypeError: gzeof(): Argument #1 ($stream) must be an open stream resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "gzgetc"
@@ -412,6 +444,7 @@ name = "stream"
 stub = "ext/zlib/zlib.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$f=tempnam(sys_get_temp_dir(),\"sp\"); $h=gzopen($f,\"w\"); gzclose($h); gzgetc($h);' → TypeError: gzgetc(): Argument #1 ($stream) must be an open stream resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "gzgets"
@@ -420,6 +453,7 @@ name = "stream"
 stub = "ext/zlib/zlib.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$f=tempnam(sys_get_temp_dir(),\"sp\"); $h=gzopen($f,\"w\"); gzclose($h); gzgets($h);' → TypeError: gzgets(): Argument #1 ($stream) must be an open stream resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "gzpassthru"
@@ -428,6 +462,7 @@ name = "stream"
 stub = "ext/zlib/zlib.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$f=tempnam(sys_get_temp_dir(),\"sp\"); $h=gzopen($f,\"w\"); gzclose($h); gzpassthru($h);' → TypeError: gzpassthru(): Argument #1 ($stream) must be an open stream resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "gzputs"
@@ -436,6 +471,7 @@ name = "stream"
 stub = "ext/zlib/zlib.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$f=tempnam(sys_get_temp_dir(),\"sp\"); $h=gzopen($f,\"w\"); gzclose($h); gzputs($h, \"x\");' → TypeError: gzputs(): Argument #1 ($stream) must be an open stream resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "gzread"
@@ -444,6 +480,7 @@ name = "stream"
 stub = "ext/zlib/zlib.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$f=tempnam(sys_get_temp_dir(),\"sp\"); $h=gzopen($f,\"w\"); gzclose($h); gzread($h, 1);' → TypeError: gzread(): Argument #1 ($stream) must be an open stream resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "gzrewind"
@@ -452,6 +489,7 @@ name = "stream"
 stub = "ext/zlib/zlib.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$f=tempnam(sys_get_temp_dir(),\"sp\"); $h=gzopen($f,\"w\"); gzclose($h); gzrewind($h);' → TypeError: gzrewind(): Argument #1 ($stream) must be an open stream resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "gzseek"
@@ -460,6 +498,7 @@ name = "stream"
 stub = "ext/zlib/zlib.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$f=tempnam(sys_get_temp_dir(),\"sp\"); $h=gzopen($f,\"w\"); gzclose($h); gzseek($h, 0);' → TypeError: gzseek(): Argument #1 ($stream) must be an open stream resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "gztell"
@@ -468,6 +507,7 @@ name = "stream"
 stub = "ext/zlib/zlib.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$f=tempnam(sys_get_temp_dir(),\"sp\"); $h=gzopen($f,\"w\"); gzclose($h); gztell($h);' → TypeError: gztell(): Argument #1 ($stream) must be an open stream resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "gzwrite"
@@ -476,6 +516,7 @@ name = "stream"
 stub = "ext/zlib/zlib.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$f=tempnam(sys_get_temp_dir(),\"sp\"); $h=gzopen($f,\"w\"); gzclose($h); gzwrite($h, \"x\");' → TypeError: gzwrite(): Argument #1 ($stream) must be an open stream resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "hash_update_stream"
@@ -493,6 +534,7 @@ name = "context"
 stub = "ext/libxml/libxml.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$h=fopen(\"php://memory\",\"r+\"); fclose($h); libxml_set_streams_context($h);' → TypeError: libxml_set_streams_context(): supplied resource is not a valid Stream-Context resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "pclose"
@@ -510,6 +552,7 @@ name = "socket"
 stub = "ext/pgsql/pgsql.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$h=fopen(\"php://memory\",\"r+\"); fclose($h); pg_socket_poll($h, 1, 0, 0);' → TypeError: pg_socket_poll(): Argument #1 ($socket) must be an open stream resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "proc_close"
@@ -548,6 +591,7 @@ name = "stream"
 stub = "ext/standard/basic_functions.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$h=fopen(\"php://memory\",\"r+\"); fclose($h); rewind($h);' → TypeError: rewind(): Argument #1 ($stream) must be an open stream resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "sapi_windows_vt100_support"
@@ -564,6 +608,7 @@ name = "stream"
 stub = "ext/standard/basic_functions.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$h=fopen(\"php://memory\",\"r+\"); fclose($h); set_file_buffer($h, 0);' → TypeError: set_file_buffer(): Argument #1 ($stream) must be an open stream resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "socket_get_status"
@@ -572,6 +617,7 @@ name = "stream"
 stub = "ext/standard/basic_functions.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$h=fopen(\"php://memory\",\"r+\"); fclose($h); socket_get_status($h);' → TypeError: socket_get_status(): Argument #1 ($stream) must be an open stream resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "socket_import_stream"
@@ -580,6 +626,7 @@ name = "stream"
 stub = "ext/sockets/sockets.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$h=fopen(\"php://memory\",\"r+\"); fclose($h); socket_import_stream($h);' → TypeError: socket_import_stream(): supplied resource is not a valid stream resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "socket_set_blocking"
@@ -588,6 +635,7 @@ name = "stream"
 stub = "ext/standard/basic_functions.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$h=fopen(\"php://memory\",\"r+\"); fclose($h); socket_set_blocking($h, true);' → TypeError: socket_set_blocking(): Argument #1 ($stream) must be an open stream resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "socket_set_timeout"
@@ -596,6 +644,7 @@ name = "stream"
 stub = "ext/standard/basic_functions.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$h=fopen(\"php://memory\",\"r+\"); fclose($h); socket_set_timeout($h, 1);' → TypeError: socket_set_timeout(): Argument #1 ($stream) must be an open stream resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "stream_bucket_append"
@@ -604,6 +653,7 @@ name = "brigade"
 stub = "ext/standard/basic_functions.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$h=fopen(\"php://memory\",\"r+\"); fclose($h); $g=fopen(\"php://memory\",\"r+\"); $b=stream_bucket_new($g,\"x\"); stream_bucket_append($h, $b);' → TypeError: stream_bucket_append(): supplied resource is not a valid userfilter.bucket brigade resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "stream_bucket_make_writeable"
@@ -612,6 +662,7 @@ name = "brigade"
 stub = "ext/standard/basic_functions.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$h=fopen(\"php://memory\",\"r+\"); fclose($h); stream_bucket_make_writeable($h);' → TypeError: stream_bucket_make_writeable(): supplied resource is not a valid userfilter.bucket brigade resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "stream_bucket_new"
@@ -620,6 +671,7 @@ name = "stream"
 stub = "ext/standard/basic_functions.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$h=fopen(\"php://memory\",\"r+\"); fclose($h); stream_bucket_new($h, \"x\");' → TypeError: stream_bucket_new(): Argument #1 ($stream) must be an open stream resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "stream_bucket_prepend"
@@ -628,6 +680,7 @@ name = "brigade"
 stub = "ext/standard/basic_functions.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$h=fopen(\"php://memory\",\"r+\"); fclose($h); $g=fopen(\"php://memory\",\"r+\"); $b=stream_bucket_new($g,\"x\"); stream_bucket_prepend($h, $b);' → TypeError: stream_bucket_prepend(): supplied resource is not a valid userfilter.bucket brigade resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "stream_context_get_options"
@@ -645,6 +698,7 @@ name = "context"
 stub = "ext/standard/basic_functions.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$h=fopen(\"php://memory\",\"r+\"); fclose($h); stream_context_get_params($h);' → TypeError: stream_context_get_params(): Argument #1 ($context) must be a valid stream/context; the same with declare(strict_types=1)"
 
 [[param]]
 function = "stream_context_set_option"
@@ -653,6 +707,7 @@ name = "context"
 stub = "ext/standard/basic_functions.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$h=fopen(\"php://memory\",\"r+\"); fclose($h); stream_context_set_option($h, \"http\", \"method\", \"GET\");' → TypeError: stream_context_set_option(): Argument #1 ($context) must be a valid stream/context; the same with declare(strict_types=1)"
 
 [[param]]
 function = "stream_context_set_options"
@@ -661,6 +716,7 @@ name = "context"
 stub = "ext/standard/basic_functions.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$h=fopen(\"php://memory\",\"r+\"); fclose($h); stream_context_set_options($h, []);' → TypeError: stream_context_set_options(): Argument #1 ($context) must be a valid stream/context; the same with declare(strict_types=1)"
 
 [[param]]
 function = "stream_context_set_params"
@@ -669,6 +725,7 @@ name = "context"
 stub = "ext/standard/basic_functions.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$h=fopen(\"php://memory\",\"r+\"); fclose($h); stream_context_set_params($h, []);' → TypeError: stream_context_set_params(): Argument #1 ($context) must be a valid stream/context; the same with declare(strict_types=1)"
 
 [[param]]
 function = "stream_copy_to_stream"
@@ -677,6 +734,7 @@ name = "from"
 stub = "ext/standard/basic_functions.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$h=fopen(\"php://memory\",\"r+\"); fclose($h); $o=fopen(\"php://memory\",\"r+\"); stream_copy_to_stream($h, $o);' → TypeError: stream_copy_to_stream(): Argument #1 ($from) must be an open stream resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "stream_copy_to_stream"
@@ -685,6 +743,7 @@ name = "to"
 stub = "ext/standard/basic_functions.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$h=fopen(\"php://memory\",\"r+\"); fclose($h); $o=fopen(\"php://memory\",\"r+\"); stream_copy_to_stream($o, $h);' → TypeError: stream_copy_to_stream(): Argument #2 ($to) must be an open stream resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "stream_filter_append"
@@ -693,6 +752,7 @@ name = "stream"
 stub = "ext/standard/basic_functions.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$h=fopen(\"php://memory\",\"r+\"); fclose($h); stream_filter_append($h, \"string.rot13\");' → TypeError: stream_filter_append(): Argument #1 ($stream) must be an open stream resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "stream_filter_prepend"
@@ -701,6 +761,7 @@ name = "stream"
 stub = "ext/standard/basic_functions.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$h=fopen(\"php://memory\",\"r+\"); fclose($h); stream_filter_prepend($h, \"string.rot13\");' → TypeError: stream_filter_prepend(): Argument #1 ($stream) must be an open stream resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "stream_filter_remove"
@@ -718,6 +779,7 @@ name = "stream"
 stub = "ext/standard/basic_functions.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$h=fopen(\"php://memory\",\"r+\"); fclose($h); stream_get_contents($h);' → TypeError: stream_get_contents(): Argument #1 ($stream) must be an open stream resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "stream_get_line"
@@ -726,6 +788,7 @@ name = "stream"
 stub = "ext/standard/basic_functions.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$h=fopen(\"php://memory\",\"r+\"); fclose($h); stream_get_line($h, 10);' → TypeError: stream_get_line(): Argument #1 ($stream) must be an open stream resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "stream_get_meta_data"
@@ -734,6 +797,7 @@ name = "stream"
 stub = "ext/standard/basic_functions.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$h=fopen(\"php://memory\",\"r+\"); fclose($h); stream_get_meta_data($h);' → TypeError: stream_get_meta_data(): Argument #1 ($stream) must be an open stream resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "stream_isatty"
@@ -742,6 +806,7 @@ name = "stream"
 stub = "ext/standard/basic_functions.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$h=fopen(\"php://memory\",\"r+\"); fclose($h); stream_isatty($h);' → TypeError: stream_isatty(): Argument #1 ($stream) must be an open stream resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "stream_set_blocking"
@@ -750,6 +815,7 @@ name = "stream"
 stub = "ext/standard/basic_functions.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$h=fopen(\"php://memory\",\"r+\"); fclose($h); stream_set_blocking($h, true);' → TypeError: stream_set_blocking(): Argument #1 ($stream) must be an open stream resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "stream_set_chunk_size"
@@ -758,6 +824,7 @@ name = "stream"
 stub = "ext/standard/basic_functions.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$h=fopen(\"php://memory\",\"r+\"); fclose($h); stream_set_chunk_size($h, 1);' → TypeError: stream_set_chunk_size(): Argument #1 ($stream) must be an open stream resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "stream_set_read_buffer"
@@ -766,6 +833,7 @@ name = "stream"
 stub = "ext/standard/basic_functions.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$h=fopen(\"php://memory\",\"r+\"); fclose($h); stream_set_read_buffer($h, 0);' → TypeError: stream_set_read_buffer(): Argument #1 ($stream) must be an open stream resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "stream_set_timeout"
@@ -774,6 +842,7 @@ name = "stream"
 stub = "ext/standard/basic_functions.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$h=fopen(\"php://memory\",\"r+\"); fclose($h); stream_set_timeout($h, 1);' → TypeError: stream_set_timeout(): Argument #1 ($stream) must be an open stream resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "stream_set_write_buffer"
@@ -782,6 +851,7 @@ name = "stream"
 stub = "ext/standard/basic_functions.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$h=fopen(\"php://memory\",\"r+\"); fclose($h); stream_set_write_buffer($h, 0);' → TypeError: stream_set_write_buffer(): Argument #1 ($stream) must be an open stream resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "stream_socket_accept"
@@ -790,6 +860,7 @@ name = "socket"
 stub = "ext/standard/basic_functions.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$h=fopen(\"php://memory\",\"r+\"); fclose($h); stream_socket_accept($h, 0);' → TypeError: stream_socket_accept(): Argument #1 ($socket) must be an open stream resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "stream_socket_enable_crypto"
@@ -798,6 +869,7 @@ name = "stream"
 stub = "ext/standard/basic_functions.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$h=fopen(\"php://memory\",\"r+\"); fclose($h); stream_socket_enable_crypto($h, false);' → TypeError: stream_socket_enable_crypto(): Argument #1 ($stream) must be an open stream resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "stream_socket_get_crypto_status"
@@ -814,6 +886,7 @@ name = "socket"
 stub = "ext/standard/basic_functions.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$h=fopen(\"php://memory\",\"r+\"); fclose($h); stream_socket_get_name($h, true);' → TypeError: stream_socket_get_name(): Argument #1 ($socket) must be an open stream resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "stream_socket_recvfrom"
@@ -822,6 +895,7 @@ name = "socket"
 stub = "ext/standard/basic_functions.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$h=fopen(\"php://memory\",\"r+\"); fclose($h); stream_socket_recvfrom($h, 1);' → TypeError: stream_socket_recvfrom(): Argument #1 ($socket) must be an open stream resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "stream_socket_sendto"
@@ -830,6 +904,7 @@ name = "socket"
 stub = "ext/standard/basic_functions.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$h=fopen(\"php://memory\",\"r+\"); fclose($h); stream_socket_sendto($h, \"x\");' → TypeError: stream_socket_sendto(): Argument #1 ($socket) must be an open stream resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "stream_socket_shutdown"
@@ -838,6 +913,7 @@ name = "stream"
 stub = "ext/standard/basic_functions.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$h=fopen(\"php://memory\",\"r+\"); fclose($h); stream_socket_shutdown($h, STREAM_SHUT_RDWR);' → TypeError: stream_socket_shutdown(): Argument #1 ($stream) must be an open stream resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "stream_supports_lock"
@@ -846,6 +922,7 @@ name = "stream"
 stub = "ext/standard/basic_functions.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$h=fopen(\"php://memory\",\"r+\"); fclose($h); stream_supports_lock($h);' → TypeError: stream_supports_lock(): Argument #1 ($stream) must be an open stream resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "vfprintf"
@@ -854,6 +931,7 @@ name = "stream"
 stub = "ext/standard/basic_functions.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$h=fopen(\"php://memory\",\"r+\"); fclose($h); vfprintf($h, \"x\", []);' → TypeError: vfprintf(): Argument #1 ($stream) must be an open stream resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "zip_close"
@@ -862,6 +940,7 @@ name = "zip"
 stub = "ext/zip/php_zip.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$h=fopen(\"php://memory\",\"r+\"); fclose($h); zip_close($h);' → TypeError: zip_close(): supplied resource is not a valid Zip Directory resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "zip_entry_close"
@@ -870,6 +949,7 @@ name = "zip_entry"
 stub = "ext/zip/php_zip.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$h=fopen(\"php://memory\",\"r+\"); fclose($h); zip_entry_close($h);' → TypeError: zip_entry_close(): supplied resource is not a valid Zip Entry resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "zip_entry_compressedsize"
@@ -878,6 +958,7 @@ name = "zip_entry"
 stub = "ext/zip/php_zip.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$h=fopen(\"php://memory\",\"r+\"); fclose($h); zip_entry_compressedsize($h);' → TypeError: zip_entry_compressedsize(): supplied resource is not a valid Zip Entry resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "zip_entry_compressionmethod"
@@ -886,6 +967,7 @@ name = "zip_entry"
 stub = "ext/zip/php_zip.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$h=fopen(\"php://memory\",\"r+\"); fclose($h); zip_entry_compressionmethod($h);' → TypeError: zip_entry_compressionmethod(): supplied resource is not a valid Zip Entry resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "zip_entry_filesize"
@@ -894,6 +976,7 @@ name = "zip_entry"
 stub = "ext/zip/php_zip.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$h=fopen(\"php://memory\",\"r+\"); fclose($h); zip_entry_filesize($h);' → TypeError: zip_entry_filesize(): supplied resource is not a valid Zip Entry resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "zip_entry_name"
@@ -902,6 +985,7 @@ name = "zip_entry"
 stub = "ext/zip/php_zip.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$h=fopen(\"php://memory\",\"r+\"); fclose($h); zip_entry_name($h);' → TypeError: zip_entry_name(): supplied resource is not a valid Zip Entry resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "zip_entry_open"
@@ -910,6 +994,7 @@ name = "zip_dp"
 stub = "ext/zip/php_zip.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$f=tempnam(sys_get_temp_dir(),\"sp\").\".zip\"; $za=new ZipArchive(); $za->open($f, ZipArchive::CREATE); $za->addFromString(\"a.txt\",\"hello\"); $za->close(); $z=zip_open($f); $e=zip_read($z); $h=fopen(\"php://memory\",\"r+\"); fclose($h); zip_entry_open($h, $e);' → TypeError: zip_entry_open(): supplied resource is not a valid Zip Directory resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "zip_entry_open"
@@ -918,6 +1003,7 @@ name = "zip_entry"
 stub = "ext/zip/php_zip.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$h=fopen(\"php://memory\",\"r+\"); fclose($h); $z=fopen(\"php://memory\",\"r+\"); zip_entry_open($z, $h);' → TypeError: zip_entry_open(): supplied resource is not a valid Zip Entry resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "zip_entry_read"
@@ -926,6 +1012,7 @@ name = "zip_entry"
 stub = "ext/zip/php_zip.stub.php"
 accepts_closed = false
 closes = false
+probe = "closed handle: php -r '$h=fopen(\"php://memory\",\"r+\"); fclose($h); zip_entry_read($h);' → TypeError: zip_entry_read(): supplied resource is not a valid Zip Entry resource; the same with declare(strict_types=1)"
 
 [[param]]
 function = "zip_read"
@@ -934,4 +1021,4 @@ name = "zip"
 stub = "ext/zip/php_zip.stub.php"
 accepts_closed = false
 closes = false
-
+probe = "closed handle: php -r '$h=fopen(\"php://memory\",\"r+\"); fclose($h); zip_read($h);' → TypeError: zip_read(): supplied resource is not a valid Zip Directory resource; the same with declare(strict_types=1)"

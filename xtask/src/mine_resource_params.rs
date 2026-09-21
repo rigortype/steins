@@ -590,6 +590,16 @@ fn render(pin: &str, probe_php: Option<&str>, scan: &Scan, curated: &CuratedRows
          # `true` bit. A row with no probe carries only the defaults, which are the\n\
          # stub's claim and not a measurement.\n\
          #\n\
+         # `accepts_closed` is the bit that CONVICTS, so every row owes a closed-handle\n\
+         # probe and `[meta] probed` counts the ones that have one. The rows that do not,\n\
+         # at the 8.5.10 run, are the four `ftp_*` ones — argument #0 is a declared\n\
+         # `FTP\\Connection`, so the engine throws there before the resource position is\n\
+         # reached, and a live FTP server is needed to get past it — plus\n\
+         # `sapi_windows_vt100_support` (Windows-only) and\n\
+         # `stream_socket_get_crypto_status`, neither of which the probing build has.\n\
+         # Those rows convict on the default; every other row's transcript is the\n\
+         # measurement behind its bit.\n\
+         #\n\
          # ─────────────────── What is deliberately NOT here ───────────────────\n\
          # * Union positions (`resource|string`, `resource|null`, `resource|GdImage`):\n\
          #   listed under [declined] with their spelling. The ordinary relation judges\n\
