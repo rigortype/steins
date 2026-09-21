@@ -370,11 +370,19 @@ impl Drop for FrameGuard {
     }
 }
 
+/// Whether the frame being walked is the top-level one, whose locals ARE the
+/// globals — so a name in it can be rebound by any code that runs, through
+/// `global $x` or `$GLOBALS['x']`, without the caller's source mentioning it.
+/// See [`FRAME_TOP_LEVEL`].
+pub(crate) fn frame_is_top_level() -> bool {
+    FRAME_TOP_LEVEL.get()
+}
+
 /// Whether the mined by-value arm may certify in the frame being walked — every
 /// frame but the top-level one. See [`FRAME_TOP_LEVEL`] and
 /// [`steins_catalog::by_value_arg_frame`].
 pub(crate) fn mined_arm_admitted() -> bool {
-    !FRAME_TOP_LEVEL.get()
+    !frame_is_top_level()
 }
 
 /// Whether a walked (sub-)trace runs off its end (its successor is reachable) or

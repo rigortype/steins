@@ -21,8 +21,8 @@
 //!
 //! The closed-state cell (`fclose($h); fread($h, 1)`) reads the heap state §2.3
 //! put there: `Closed` convicts, `Open` is what the position asks for, and
-//! `Unknown` — an escape, a branch that may not have closed it — convicts
-//! nothing.
+//! `Unknown` — an escape, a branch that may not have closed it, a top-level
+//! call that may have rebound the global — convicts nothing.
 
 use std::collections::HashMap;
 
@@ -71,7 +71,12 @@ impl Engine {
         params.insert("fclose".to_owned(), vec![p("stream", None)]);
         params.insert("fread".to_owned(), vec![p("stream", None), p("length", Some("int"))]);
         params.insert("feof".to_owned(), vec![p("stream", None)]);
+        // The two `accepts_closed = true` rows. BOTH are here: a name the mock
+        // omits is answered `function_exists: false`, which declines the row at
+        // the gate — so an assertion written over a missing name would pass for
+        // the wrong reason (it is the engine shrugging, not the bit speaking).
         params.insert("get_resource_id".to_owned(), vec![p("resource", None)]);
+        params.insert("get_resource_type".to_owned(), vec![p("resource", None)]);
         params.insert(
             "fopen".to_owned(),
             vec![
@@ -358,7 +363,7 @@ fn a_closed_handle_where_the_position_wants_an_open_one_is_a_type_error_in_both_
         "$h = fopen('php://memory', 'r');\n\
          if ($h === false) { throw new \\RuntimeException('x'); }\n\
          fclose($h);\nfread($h, 1);\n",
-        "argument $h to fread() cannot become resource $stream — the handle is closed; proven TypeError (must be an open stream resource, in either mode)",
+        "argument $h to fread() cannot become resource $stream — the handle is closed; proven TypeError (the position needs an open handle, in either mode)",
     );
 }
 
@@ -370,7 +375,7 @@ fn the_state_is_the_handles_so_an_alias_closes_what_the_original_holds() {
         "$h = fopen('php://memory', 'r');\n\
          if ($h === false) { throw new \\RuntimeException('x'); }\n\
          $b = $h;\nfclose($b);\nfread($h, 1);\n",
-        "argument $h to fread() cannot become resource $stream — the handle is closed; proven TypeError (must be an open stream resource, in either mode)",
+        "argument $h to fread() cannot become resource $stream — the handle is closed; proven TypeError (the position needs an open handle, in either mode)",
     );
 }
 
@@ -382,19 +387,39 @@ fn closing_a_handle_twice_is_the_same_finding_because_fclose_wants_an_open_one()
         "$h = fopen('php://memory', 'r');\n\
          if ($h === false) { throw new \\RuntimeException('x'); }\n\
          fclose($h);\nfclose($h);\n",
-        "argument $h to fclose() cannot become resource $stream — the handle is closed; proven TypeError (must be an open stream resource, in either mode)",
+        "argument $h to fclose() cannot become resource $stream — the handle is closed; proven TypeError (the position needs an open handle, in either mode)",
     );
 }
 
 #[test]
 fn an_accepts_closed_position_takes_the_closed_handle() {
     // `get_resource_id` and `get_resource_type` are the two probed rows that
-    // accept one — `get_resource_type` answers `'Unknown'` rather than raising.
-    silent_in_both_modes(
-        "$h = fopen('php://memory', 'r');\n\
-         if ($h === false) { throw new \\RuntimeException('x'); }\n\
-         fclose($h);\nget_resource_id($h);\nget_resource_type($h);\n",
-    );
+    // accept one — probed at 8.5.10, the closed handle answers `int(5)` and
+    // `string(7) "Unknown"` rather than raising.
+    //
+    // Both names are in `Engine::pinned()` on purpose: the silence has to come
+    // from `accepts_closed = true`, not from the gate declining a name the mock
+    // engine does not have. The guard below is what says so — swap either row's
+    // bit to `false` and it fires.
+    for callee in ["get_resource_id", "get_resource_type"] {
+        let src = format!(
+            "<?php\n$h = fopen('php://memory', 'r');\n\
+             if ($h === false) {{ throw new \\RuntimeException('x'); }}\n\
+             fclose($h);\n{callee}($h);\n",
+        );
+        assert!(mismatches(&src).is_empty(), "`{callee}` takes a closed handle");
+        // The engine DOES know the name, so the row is live: a scalar there is
+        // still the resource-ness finding. That is what rules out a silence
+        // bought with `function_exists: false`.
+        let scalar = format!("<?php\n{callee}('x');\n");
+        assert_eq!(
+            mismatches(&scalar),
+            vec![format!(
+                "argument \"x\" to {callee}() cannot become resource $resource — proven TypeError (must be of type resource, in either mode)"
+            )],
+            "the row must be admitted for the closed-handle silence to mean anything",
+        );
+    }
 }
 
 #[test]
@@ -409,14 +434,114 @@ fn a_branch_that_may_not_have_closed_the_handle_convicts_nothing() {
 }
 
 #[test]
-fn a_handle_that_escaped_into_a_project_call_convicts_nothing() {
-    // The callee may close it or not; an escape drops the state to `Unknown`,
-    // and the closed cell asks for a proof it no longer has.
+fn an_escape_keeps_closed_because_nothing_reopens_a_handle() {
+    // §2.4's monotonicity, which is the half of the escape rule this family CAN
+    // observe: `Closed` survives being handed to a project function, because no
+    // call reopens a handle. Probed at 8.5.10 — `fclose($h); sink($h);
+    // fread($h, 1);` inside a function body raises the `TypeError`.
+    //
+    // A function body, not file scope: at file scope `sink($h)` could rebind the
+    // global `$h` to a fresh handle, which is what
+    // `a_top_level_call_that_could_rebind_the_global_forgets_the_state` pins.
+    let src = "<?php\n\
+               function sink($r): void {}\n\
+               function g(): void {\n\
+               $h = fopen('php://memory', 'r');\n\
+               if ($h === false) { throw new \\RuntimeException('x'); }\n\
+               fclose($h);\nsink($h);\nfread($h, 1);\n}\n";
+    assert_eq!(
+        mismatches(src),
+        vec!["argument $h to fread() cannot become resource $stream — the handle is closed; proven TypeError (the position needs an open handle, in either mode)".to_owned()],
+    );
+
+    // The other half — an OPEN handle that escaped is `Unknown` — is silent, and
+    // this family cannot tell that silence from `Open`'s: the closed cell reads
+    // only `Closed`, so `Open` and `Unknown` both reach `None` here. The drop is
+    // observable in `resource_values.rs`, where `@param closed-resource` convicts
+    // an `Open` handle and declines an `Unknown` one. Kept as a smoke check, not
+    // as the pin for the escape.
     silent_in_both_modes(
         "function sink($r): void {}\n\
          $h = fopen('php://memory', 'r');\n\
          if ($h === false) { throw new \\RuntimeException('x'); }\n\
          sink($h);\nfread($h, 1);\n",
+    );
+}
+
+#[test]
+fn a_closed_handle_at_a_position_past_the_first_is_judged_and_named() {
+    // The state cell's twin of `a_position_past_the_first_is_judged_and_named`:
+    // `hash_update_stream(HashContext $context, $stream, …)` carries its row at
+    // position 1, so the finding must name `$stream` and not `$context`. Probed
+    // at 8.5.10: `TypeError: hash_update_stream(): Argument #2 ($stream) must be
+    // an open stream resource`, in either mode.
+    one_in_both_modes(
+        "$h = fopen('php://memory', 'r');\n\
+         if ($h === false) { throw new \\RuntimeException('x'); }\n\
+         fclose($h);\nhash_update_stream($ctx, $h);\n",
+        "argument $h to hash_update_stream() cannot become resource $stream — the handle is closed; proven TypeError (the position needs an open handle, in either mode)",
+    );
+}
+
+#[test]
+fn a_top_level_call_that_could_rebind_the_global_forgets_the_state() {
+    // At file scope the locals ARE the globals, so a callee can point the name
+    // at a fresh handle while mentioning nothing at the call site — no argument,
+    // no receiver, so §2.4's escape table never even sees it. All three exit 0
+    // at 8.5.10; `is_resource($h)` after the `$GLOBALS` one answers `true`.
+    for rebind in [
+        "function bump(): void { global $h; $h = fopen('php://memory', 'r'); }",
+        "function bump(): void { $GLOBALS['h'] = fopen('php://memory', 'r'); }",
+    ] {
+        silent_in_both_modes(&format!(
+            "{rebind}\n\
+             $h = fopen('php://memory', 'r');\n\
+             if ($h === false) {{ throw new \\RuntimeException('x'); }}\n\
+             fclose($h);\nbump();\nfread($h, 1);\n",
+        ));
+    }
+    // A method is the same call for this purpose: its body reaches the globals
+    // the same way.
+    silent_in_both_modes(
+        "class R { public function bump(): void { global $h; $h = fopen('php://memory', 'r'); } }\n\
+         $o = new R();\n\
+         $h = fopen('php://memory', 'r');\n\
+         if ($h === false) { throw new \\RuntimeException('x'); }\n\
+         fclose($h);\n$o->bump();\nfread($h, 1);\n",
+    );
+}
+
+#[test]
+fn the_top_level_forgetting_does_not_reach_a_builtin_or_a_local() {
+    // The other direction of the same rule, pinned so the conviction survives it.
+    //
+    // A builtin has no `global` statement in it, so a closing call and a keeper
+    // are both left alone: the plain file-scope bug still convicts, with a
+    // keeper (`feof`) standing between the close and the use.
+    for body in ["fclose($h);\nfread($h, 1);\n", "fclose($h);\nfeof($h);\nfread($h, 1);\n"] {
+        let src = format!(
+            "<?php\n$h = fopen('php://memory', 'r');\n\
+             if ($h === false) {{ throw new \\RuntimeException('x'); }}\n{body}",
+        );
+        let out = mismatches(&src);
+        assert!(
+            out.iter().any(|m| m.contains("to fread() cannot become resource $stream — the handle is closed")),
+            "a file-scope close with no project call between must still convict; got {out:?}",
+        );
+    }
+    // And inside a function body `$h` is a local the callee cannot reach, so the
+    // same shape stays a finding — probed at 8.5.10, `g()` below raises the
+    // `TypeError` even though `bump()` rebound the *global* `$h`.
+    let src = "<?php\n\
+               function bump(): void { global $h; $h = fopen('php://memory', 'r'); }\n\
+               function g(): void {\n\
+               $h = fopen('php://memory', 'r');\n\
+               if ($h === false) { throw new \\RuntimeException('x'); }\n\
+               fclose($h);\nbump();\nfread($h, 1);\n}\n";
+    let out = mismatches(src);
+    assert_eq!(
+        out,
+        vec!["argument $h to fread() cannot become resource $stream — the handle is closed; proven TypeError (the position needs an open handle, in either mode)".to_owned()],
     );
 }
 

@@ -253,6 +253,30 @@ handle in the unknown state is `Maybe` against both state spellings and
 against every consumer position that demands an open one; only `Open` and
 `Closed` are read.
 
+**One row was missing, and it is the top-level frame's** (found by the
+adversarial review of the §2.5 slice, 2026-09-21). Monotone `Closed` is a
+property of the **handle**; the store is keyed on the **name**, and at file
+scope every name is a global, so a callee can point one at a fresh handle
+through `global $h` or `$GLOBALS['h']` while the call site mentions
+nothing at all — no argument, no receiver, so no row above is even
+consulted. Probed at 8.5.10: `fclose($h); bump(); fread($h, 1);` with
+`function bump(): void { global $h; $h = fopen('php://memory', 'r'); }`
+exits 0. So the table gains a row for the top-level frame only:
+
+| the handle is … | state after |
+| --- | --- |
+| held by a name in the **top-level frame** when a call the walk cannot resolve to an engine builtin runs (a project function, a method, a constructor, a dynamic callee) | `Unknown` — **forgotten**, not escaped: the proof is about a handle the name may no longer hold, and `Closed` does not survive this one |
+
+Inside a function body the hole does not exist: `$h` is a local the callee
+cannot see, and the analyzed scope's own `global $h` already voids the
+binding. Builtins are left alone — a builtin has no `global` statement in
+it — so `fclose($h); fread($h, 1);` at file scope still convicts. What is
+left open is a builtin that runs userland behind its own signature (a
+callback, a user stream wrapper's `stream_tell` under `ftell`), which is
+the calibration this section already accepts for the wrapper. The same
+blind spot exists on the value lane and predates this ADR; closing it
+there is a separate question.
+
 This retires §8.8's two refusals for the reason §8.8 gave them. "Open is
 never proven" was true of an arm lane keyed per variable, where `$b = $h;
 fclose($b)` could not reach `$h`; on a heap entry the alias *is* `$h`, and
@@ -286,9 +310,33 @@ The judgment is §9.2's relation with two more cells, both mode-independent
 because §1.1 measured them so: a proven non-resource at a resource
 position is `type.argument-mismatch` (`must be of type resource, string
 given`); a proven **closed** handle at a position that demands an open
-one is the same id with the state named (`must be an open stream
-resource`). A kind mismatch (a `dir` handle into `fread`) is the same
-error and the same id, admitted per row only where the kind was probed.
+one is the same id with the state named. A kind mismatch (a `dir` handle
+into `fread`) is the same error and the same id, admitted per row only
+where the kind was probed.
+
+The closed cell's message **does not quote PHP's sentence**, corrected
+2026-09-21 after the probe run below: there is no one sentence to quote.
+`must be an open stream resource` is what most rows say, and at least five
+other wordings are on record at 8.5.10 — `fscanf(): supplied resource is
+not a valid File-Handle resource`, `stream_context_get_options():
+Argument #1 ($stream_or_context) must be a valid stream/context`,
+`proc_get_status(): supplied resource is not a valid process resource`,
+`socket_import_stream(): supplied resource is not a valid stream
+resource`, `zip_read(): supplied resource is not a valid Zip Directory
+resource`. What every row shares is the verdict, so the message says only
+that: a `TypeError` in either mode at a position that needs an open
+handle. Per-row quoting waits for a table column every row can fill.
+
+`accepts_closed` is the bit that convicts, and its default (`false`) is
+the convicting value, so **every row owes a closed-handle probe**. At the
+2026-09-21 run 94 of the 100 rows carry one: the two `true` rows answer
+(`get_resource_id` an `int`, `get_resource_type` `'Unknown'`), and the
+other 92 raise in both modes. The six that do not are the four `ftp_*`
+positions — argument #0 is a declared `FTP\Connection`, so the engine
+throws before the resource position is reached — and
+`sapi_windows_vt100_support` and `stream_socket_get_crypto_status`, which
+the probing build does not have. Those six convict on the default, and
+`resource_params.toml`'s header names them so the distinction survives.
 
 ### 2.6 An object against `@param resource`: `No`, except the migrated classes
 
