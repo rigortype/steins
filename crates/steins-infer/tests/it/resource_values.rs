@@ -469,40 +469,69 @@ fn the_assert_spelling_of_the_guard_convicts_the_same_way() {
 }
 
 #[test]
-fn a_fresh_handle_is_proven_open() {
-    // `Open` at allocation is a proof (ADR-0097 §2.3): the producer returned,
-    // `false` was subtracted, nothing has touched the handle — so
-    // `closed-resource` refuses it, and the other two spellings take it.
-    let src = with_state_param("closed-resource", &format!("{OPEN_H}f($h);\n"));
-    let out = phpdoc_mismatches(&src, Engine::typeless());
-    assert_eq!(out.len(), 1, "a fresh handle is an open resource; got {out:?}");
-    assert!(out[0].contains("open resource"), "the message must say why: {}", out[0]);
-    for spelling in ["resource", "open-resource"] {
+fn no_handle_is_ever_proven_open() {
+    // ADR-0097 §2.3's "`Open` at allocation is a proof" is retired: `Open` says
+    // only that nothing on this path NAMED the handle in a close, and three
+    // routes close one while naming nothing. Probed at 8.5.10, each of these
+    // leaves its subject at `resource (closed)`:
+    //
+    //   $d = opendir('/tmp'); closedir();
+    //        // no argument: closes the most recently opened directory handle
+    //        // (deprecated, and it closes). With two open it takes the later
+    //        // one and leaves the earlier open.
+    //   $h = fsockopen(…); $s = socket_import_stream($h); socket_close($s);
+    //        // the socket ADOPTS the stream; the closer names the socket
+    //   $m = fopen($p, 'r'); $bz = bzopen($m, 'r'); bzclose($bz);
+    //        // the same shape one library down
+    //
+    // Each was a `phpdoc.param-mismatch` on correct php at `--profile contracts`
+    // while a producer whitelist vouched for these rows. So the only answer a
+    // fresh handle carries is `Unknown`, which convicts nothing — the deliberate
+    // cost being the `closed-resource` conviction below, now silent.
+    for spelling in ["resource", "open-resource", "closed-resource"] {
         let src = with_state_param(spelling, &format!("{OPEN_H}f($h);\n"));
-        assert!(any_mismatch(&src, Engine::typeless()).is_empty(), "`@param {spelling}`");
+        assert!(
+            any_mismatch(&src, Engine::typeless()).is_empty(),
+            "`@param {spelling}` over a fresh handle: nothing proves it open",
+        );
     }
+    // What the retirement does NOT touch: `Closed` is durable — nothing reopens
+    // a handle — so the conviction the whole judgment carries is unchanged.
+    let src = with_state_param("open-resource", &format!("{OPEN_H}fclose($h);\nf($h);\n"));
+    assert_eq!(phpdoc_mismatches(&src, Engine::typeless()).len(), 1);
 }
 
 #[test]
-fn a_handle_its_producer_cannot_vouch_for_is_never_proven_open() {
-    // §2.3's "`Open` at allocation is a proof" rests on the handle changing only
-    // through itself, and three producers break that — measured at 8.5.10, each
-    // of these reads `resource (closed)` with nothing having named it:
+fn a_runtime_read_open_is_no_more_durable_than_a_minted_one() {
+    // The rule is not about who minted the handle but about what ran afterwards,
+    // which is why narrowing the answer to a whitelist of producers could not
+    // have worked. `is_resource($d)` is a read of the RUNTIME state: the handle
+    // really is open in the true branch. One call later it need not be — probed
+    // at 8.5.10, this leaves `$d` closed — and the walk sees no argument to take
+    // a verdict on:
     //
-    //   $f = stream_filter_append(fopen('php://memory', 'r'), 'string.rot13');
-    //        // the stream's last reference is gone, so the FILTER is closed —
-    //        // and `fclose`/`pclose`/`gzclose` on the stream do the same
-    //   proc_open('ls', [1 => ['pipe', 'w']], $pipes); proc_close($p);
-    //        // every pipe is closed, and dropping the process does it too
-    //   $a = pfsockopen($h, $p); $b = pfsockopen($h, $p);
-    //        // ONE handle under two names (`get_resource_id` answers 7 twice),
-    //        // so `fclose($a)` closes `$b`
-    //
-    // So those handles are `Unknown` where the table cannot vouch for them —
-    // which convicts nothing — and a producer added to the table later is
-    // `Unknown` until it is probed. The filter below is genuinely closed by the
-    // `fclose($m)` above it, so convicting `closed-resource` here would be a
-    // false positive on the default surface.
+    //   $d = opendir('/tmp'); if (is_resource($d)) { closedir(); /* $d closed */ }
+    let src = with_state_param(
+        "closed-resource",
+        "$d = opendir('.');\nif (is_resource($d)) { closedir(); f($d); }\n",
+    );
+    assert!(any_mismatch(&src, Engine::typeless()).is_empty());
+    // With nothing at all in between, the answer is the same one: the walk has
+    // no notion of distance from the guard, and needs none to be silent.
+    let src = with_state_param(
+        "closed-resource",
+        "$d = opendir('.');\nif (is_resource($d)) { f($d); }\n",
+    );
+    assert!(any_mismatch(&src, Engine::typeless()).is_empty());
+}
+
+#[test]
+fn a_handle_another_handle_can_close_is_judged_by_nothing() {
+    // The filter below is genuinely closed by the `fclose($m)` above it —
+    // probed at 8.5.10, closing a filter's stream closes the filter, and so
+    // does dropping the stream's last reference. Convicting `closed-resource`
+    // here would be a false positive on the default surface, and the `Unknown`
+    // answer is what keeps all three spellings silent.
     let engine = || Engine::typeless().taking("stream_filter_append", &["stream", "filter_name"]);
     let filtered = "$m = fopen('php://memory', 'r');\nif ($m === false) { return; }\n\
                     $f = stream_filter_append($m, 'string.rot13');\n\
@@ -587,14 +616,21 @@ fn a_callee_receiving_the_handle_is_an_escape() {
 }
 
 #[test]
-fn the_lane_survives_a_keeper_and_the_state_is_unchanged() {
+fn the_lane_survives_a_keeper_and_the_state_is_not_closed() {
     // `ftell($h)` reads the handle by value: a builtin cannot close a handle it
     // merely reads (ADR-0097 §2.4), so the lane survives — on `master` the call
-    // erased it to `unknown` — and the heap state stays `Open`.
+    // erased it to `unknown`.
+    //
+    // What the keeper leaves behind is "not proven closed", not "proven open":
+    // `open-resource` is silent because a CLOSED handle would convict there, and
+    // that silence is the only observable the state half has left. (The positive
+    // witness — the `gettype()` fold answering the two-member union after a
+    // keeper and the closed singleton after a closer — is in `resource_folds.rs`,
+    // whose engine reflects the arity the fold's ADR-0061 gate reads.)
     let src = with_state_param("open-resource", &format!("{OPEN_H}ftell($h);\nf($h);\n"));
     assert!(any_mismatch(&src, with_ftell()).is_empty());
     let src = with_state_param("closed-resource", &format!("{OPEN_H}ftell($h);\nf($h);\n"));
-    assert_eq!(phpdoc_mismatches(&src, with_ftell()).len(), 1, "still open after a keeper");
+    assert!(any_mismatch(&src, with_ftell()).is_empty(), "nothing proves a handle open");
     // The dump surface reads the lane: `resource`, not `unknown`.
     let src = format!("<?php\n{OPEN_H}ftell($h);\n\\PHPStan\\dumpType($h);\n");
     assert_eq!(dumped(&src, with_ftell()), vec!["dumped type: resource"]);
@@ -607,15 +643,18 @@ fn the_lane_survives_a_keeper_and_the_state_is_unchanged() {
 }
 
 #[test]
-fn is_resource_narrows_the_state_and_keeps_the_lane() {
-    // The true branch: the handle answered `true`, so it is open (ADR-0097
-    // §2.4) — `closed-resource` refuses it — and the lane is still `resource`
-    // on both branches (on `master` the guard erased it in both).
+fn is_resource_narrows_only_the_closed_half_and_keeps_the_lane() {
+    // The guard is TWO-sided on the heap and ONE-sided in what it proves. The
+    // lane is `resource` on both branches (on `master` the guard erased it in
+    // both) and the `false` branch narrows the state to `Closed`, which is
+    // durable and convicts. The `true` branch narrows it to `Open`, which is
+    // not durable and therefore answers `Unknown` — see
+    // `a_runtime_read_open_is_no_more_durable_than_a_minted_one`.
     let src = with_state_param(
         "closed-resource",
         &format!("{OPEN_H}if (is_resource($h)) {{ f($h); }}\n"),
     );
-    assert_eq!(phpdoc_mismatches(&src, Engine::typeless()).len(), 1);
+    assert!(any_mismatch(&src, Engine::typeless()).is_empty(), "the true branch convicts nothing");
     let src = format!(
         "<?php\n{OPEN_H}if (is_resource($h)) {{ \\PHPStan\\dumpType($h); }} \
          else {{ \\PHPStan\\dumpType($h); }}\n"
@@ -628,12 +667,13 @@ fn is_resource_narrows_the_state_and_keeps_the_lane() {
         &format!("{OPEN_H}if (!is_resource($h)) {{ f($h); }}\n"),
     );
     assert_eq!(phpdoc_mismatches(&src, Engine::typeless()).len(), 1);
-    // The guard-then-throw idiom keeps the lane and the open state after it.
+    // The guard-then-throw idiom keeps the lane after it, and the same one-sided
+    // answer: nothing downstream of the throw is proven open.
     let src = with_state_param(
         "closed-resource",
         &format!("{OPEN_H}if (!is_resource($h)) {{ throw new \\RuntimeException('x'); }}\nf($h);\n"),
     );
-    assert_eq!(phpdoc_mismatches(&src, Engine::typeless()).len(), 1);
+    assert!(any_mismatch(&src, Engine::typeless()).is_empty());
 }
 
 #[test]
@@ -772,18 +812,19 @@ fn fclose_does_not_close_a_directory_handle() {
     // handle warn, return `false` and leave it OPEN — the kind on the heap entry
     // is what the closing table reads. `closedir()` and `pclose()` close it.
     let dir = "$h = opendir('.');\nif ($h === false) { return; }\n";
+    //
+    // The keeper half is witnessed by the SILENCE of `open-resource`: had the
+    // call closed the handle, that position would convict. Nothing proves the
+    // handle open any more, so `closed-resource` is silent on both halves and
+    // cannot tell them apart; the fold in `resource_folds.rs` can.
     for closer in ["fclose", "gzclose", "bzclose"] {
-        let src = with_state_param("open-resource", &format!("{dir}{closer}($h);\nf($h);\n"));
-        assert!(
-            any_mismatch(&src, Engine::typeless()).is_empty(),
-            "`{closer}` leaves a directory handle open",
-        );
-        let src = with_state_param("closed-resource", &format!("{dir}{closer}($h);\nf($h);\n"));
-        assert_eq!(
-            phpdoc_mismatches(&src, Engine::typeless()).len(),
-            1,
-            "`{closer}` is a keeper over a directory handle: still open",
-        );
+        for spelling in ["open-resource", "closed-resource"] {
+            let src = with_state_param(spelling, &format!("{dir}{closer}($h);\nf($h);\n"));
+            assert!(
+                any_mismatch(&src, Engine::typeless()).is_empty(),
+                "`{closer}` leaves a directory handle open, so `@param {spelling}` is silent",
+            );
+        }
     }
     for closer in ["closedir", "pclose"] {
         let src = with_state_param("open-resource", &format!("{dir}{closer}($h);\nf($h);\n"));
