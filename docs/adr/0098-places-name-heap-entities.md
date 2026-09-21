@@ -63,8 +63,8 @@ The identity is therefore not missing from the heap; it is missing a *name*.
 variable name" and starts meaning "a place":
 
 ```
-Place ::= <var>                  the variable, as today
-        | <var>[<constant key>]  one array element of it
+Place ::= <var>                the variable, as today
+        | <var>[<proven key>]  one array element of it
 ```
 
 spelled with the rendering the syntax layer already uses for an offset
@@ -99,6 +99,42 @@ just another key in that map, so `if ($c) { fclose($pipes[0]); }` merges to
 - Nothing else. An element written later (`$bag[1] = fopen(…)`) is out of
   scope for the first slice and named in §4.
 
+**Amendment (2026-09-21): a key is `<proven key>`, not `<constant key>` — and
+the floor is `Stratum::Verified`.** This ADR was drafted saying "constant key",
+and §3 read that as "literal in the source". Slice 1 shipped a resolution that
+threads the env, and the two together were unsound in the one direction that
+matters: `Cx::resolve_literal` discards the stratum, so
+
+```php
+/** @phpstan-assert 0 $i */ function assert_zero(int $i): void {}
+$arr = [$h, $g]; fclose($arr[0]);
+$i = rnd(); assert_zero($i);   // a CLAIM — the body is empty
+fread($arr[$i], 1);            // $i is 1; this reads the OPEN handle
+```
+
+reported `type.argument-mismatch` while the file printed `ok` and exited 0
+(measured at 8.5.10 against the slice's own binary). A key does not merely
+*describe* the subject of a judgment, it **selects** it, so an unverified claim
+was picking which allocation the closed-state cell read — a false positive on
+the default surface, which §2.3's own bias exists to prevent.
+
+The rule is therefore the stratum rule this analyzer uses everywhere else, not
+a syntactic one: **a key the walk has proven at `Verified` names a place.**
+`$i = 0; fclose($arr[$i]);` is a proof and names `arr[0]`; `assert_zero($i)` is
+a docblock claim and names nothing. This is the same floor `offset_operand_fact`
+puts on an offset key one seam over — so §3's "the same rule the offset families
+already use" becomes true of the code rather than aspirational — and the same
+floor `check_resource_position` already put on the argument's *value*. A
+literal-only rule was the alternative; it was refused because it would make
+"proven" mean one thing for a value and another for a name, in one function.
+
+One asymmetry is left standing, deliberately: the **effect** seam
+(`resource_call_effects`) has no env threaded, so it stays literal-key only and
+`fclose($arr[$i])` moves no state even where `$i` is proven. That loses
+transitions and cannot invent one — a place is `Closed` only where a literal-key
+close put it there — so it is a false negative, not a false positive, and
+threading an env through that seam is its own change.
+
 ### 2.3 What unbinds one
 
 Every path that can make the base stop holding what it held must drop the
@@ -123,8 +159,9 @@ silence, which is the outcome the family already has today.
 
 ### 2.4 What reads one
 
-`ArgValue::OffsetRead { base: Var(v), key }` with a key that resolves to a
-constant `Key` is the place `v[k]`. Every consumer that today asks
+`ArgValue::OffsetRead { base: Var(v), key }` with a key the walk resolves to a
+`Key` **at `Stratum::Verified`** (§2.2's amendment) is the place `v[k]`. Every
+consumer that today asks
 `store.res_of(var)` asks it of that place instead, which is one resolution
 function and no new judgment: the resource-ness cell (ADR-0097 §2.5), the
 closed-state cell, and `is_resource()` narrowing all work unchanged once the
@@ -135,8 +172,16 @@ place resolves.
 - **Deeper nesting** (`$a[0][1]`). One level answers `$pipes[0]` and every
   producer this ADR seeds; a recursive place needs a recursive sweep, and it
   buys nothing measured.
-- **Dynamic keys** (`$pipes[$i]`). No place, no binding, silence — the same
-  rule the offset families already use.
+- **Unproven keys** (`$pipes[$i]` where nothing proves `$i`). No place, no
+  binding, silence — the same rule the offset families already use.
+
+  **Amendment (2026-09-21):** this bullet read "Dynamic keys (`$pipes[$i]`)"
+  and described the *syntax* of the key, which neither §2.4's implementation
+  nor the offset families it appeals to ever did — `offset_operand_fact`
+  resolves a `Verified` variable key and `offset.missing` fires on `$a[$i]`
+  accordingly. What stays out is a key the walk cannot prove, of which a
+  docblock-`Asserted` one is a case; see §2.2's amendment for the measurement
+  that forced the distinction.
 - **Properties** (`$this->stream`). The identical hole, one carrier away:
   `Place ::= <var>-><prop>` is the same change in the same map, and it is the
   intended next increment rather than a separate design. Held back only to
