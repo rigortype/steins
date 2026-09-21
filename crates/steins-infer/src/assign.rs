@@ -11,8 +11,8 @@ use crate::fold::Folder;
 use crate::annotate::{FactKind, LineFact};
 use crate::builtin_returns::{
     CATALOG_FLOOR, bind_produced_places, builtin_call_return_fact, builtin_resource_arms,
-    builtin_return_floor, socket_pair_places,
-    escape_mentioned_resources, floor_value_fact, shape_builtin_return_fact,
+    builtin_return_floor, escape_mentioned_resources, floor_value_fact, shape_builtin_return_fact,
+    socket_pair_places,
 };
 use crate::cond::{
     coalesce_lhs_proven_present, eval_binary_fact, eval_cast_fact, eval_concat_fact,
@@ -584,6 +584,12 @@ pub(crate) fn apply_assign(
     // same answer either way. Every arm above has already run `unbind(var)`,
     // which is what drops the previous binding's places (§2.3's sweep), so the
     // places minted here are this call's and no earlier one's.
+    //
+    // The poison leg (ADR-0046) is the twin of `produced_places`', and like it
+    // it is defence in depth: measured by mutation, removing it changes no
+    // finding, because `resource_call_effects` refuses a poisoned scope before
+    // any closing call is recorded. `a_poisoned_scope_convicts_through_no_place`
+    // pins the posture rather than this line.
     if let ArgValue::Call(name, _) = value
         && !w.scope.poisoned
         && let Some(places) = socket_pair_places(cx, folder, name)

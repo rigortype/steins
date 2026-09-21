@@ -929,7 +929,7 @@ pub(crate) fn walk_trace(
         // descriptor of a proven spec. Read here with the seeds above and for
         // the same reason — the spec is an argument, and step 4 is about to
         // forget the name it may be held in.
-        let stmt_places = stmt_produced_places(w, folder, &stmt.kind, env, store);
+        let stmt_places = stmt_produced_places(w, folder, &stmt.kind, env);
         // What this statement's calls do to the heap resources they are handed
         // (ADR-0097 §2.4) — a close, a keeper, an escape — read on the same
         // pre-call store and applied beside the out-parameter seeds, after the
