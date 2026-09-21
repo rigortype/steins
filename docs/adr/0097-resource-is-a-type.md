@@ -21,10 +21,14 @@ kinds Steins already models.
 `bool`, `int`, `float`, `string`, `array`, `object`, `resource`). A
 resource value has three attributes PHP exposes: an **id**
 (`get_resource_id`), a **kind** (`get_resource_type`: `stream`,
-`stream-context`, `stream-filter`, `process`, … — `get_debug_type` spells
-it `resource (stream)`), and a **state**, open or closed, that moves one
-way only. Everything below was run on the pinned engine, and every cell
-that matters to a verdict is recorded so no later reader has to recall it.
+`stream-context`, `stream filter`, `persistent stream`, `process`, … —
+`get_debug_type` spells it `resource (stream)`), and a **state**, open or
+closed, that moves one way only. *(The two multi-word spellings are
+PHP's, corrected 2026-09-21 by the §2.7 slice, which probed every producer
+the table can mint: they carry a SPACE, not the hyphen this ADR wrote, and
+a directory handle answers a plain `stream`.)* Everything below was run on
+the pinned engine, and every cell that matters to a verdict is recorded so
+no later reader has to recall it.
 
 **Membership.** A resource is none of the other kinds: `is_scalar`,
 `is_object`, `is_array`, `is_null`, `is_callable`, `is_iterable`,
@@ -32,7 +36,10 @@ that matters to a verdict is recorded so no later reader has to recall it.
 `is_resource` answers `true` for an open handle and **`false` for a closed
 one**; `gettype` says `resource` and `resource (closed)`;
 `get_resource_type` on a closed handle says `Unknown`; `get_resource_id`
-still answers.
+still answers, with the id the handle had while open. **`get_debug_type`
+of a closed handle is `resource (closed)`** and not the kind (measured
+2026-09-21): the kind is gone the moment the handle is, for every producer
+alike.
 
 **Typed boundaries.** A resource satisfies **`mixed` and nothing else**, in
 either coercion mode: `string`, `int`, `float`, `bool`, `false`, `null`,
@@ -160,8 +167,18 @@ partitions refine it and nothing else does:
 `dir` is Steins' own kind name: PHP reports a directory handle as
 `get_resource_type() === 'stream'` and then refuses to `fclose` it, so the
 distinction the closing table needs is one the runtime keeps private. Kind
-names are the `get_debug_type` spelling where PHP has one and this ADR's
-where it does not; they never reach a docblock.
+names are Steins' own throughout, and **three of them are not PHP's
+spelling** (measured 2026-09-21, correcting this paragraph's original
+claim that they were): PHP says `stream filter` and `persistent stream`
+with a space, and `stream` for a `dir`. They never reach a docblock, and
+the folds that must answer PHP's own string (§2.7) keep their own table of
+spellings rather than rendering the kind name.
+
+The kind is also **not a function of the row alone** in one measured case:
+`stream_socket_client` carries `stream`, and with
+`STREAM_CLIENT_PERSISTENT` it hands back a `persistent stream`. The
+closing table is unaffected (every closer that takes one takes the other),
+and §2.7's fold answers the union for that row.
 
 The **boundary table** is §1.1's, and it is closed: at a typed boundary a
 resource satisfies `mixed` and no declared type, in either mode; every
@@ -225,6 +242,31 @@ So the carrier splits along the line ADR-0036 already drew for objects:
 was subtracted, nothing has touched the handle. What can invalidate it is
 exactly what invalidates an object's property fact — an escape — and
 §2.4 says which calls escape.
+
+**Amendment (2026-09-21), and it is a correction rather than a detail:**
+that argument holds only where the handle can be closed through *itself*,
+and four producers break it, each probed at 8.5.10 while nothing named the
+handle:
+
+* a **stream filter** dies with its stream — `fclose`, `pclose` and
+  `gzclose` on the stream close the filter, and so does dropping the
+  stream's last reference, so
+  `stream_filter_append(fopen('php://memory', 'r'), 'string.rot13')`
+  answers a handle that is *already* closed;
+* a **`proc_open` pipe** dies with its process: `proc_close($p)` closes
+  every pipe, and so does `$p = null`;
+* **`socket_export_stream`**'s stream is closed by `socket_close($socket)`;
+* **`pfsockopen`**, and `stream_socket_client` with
+  `STREAM_CLIENT_PERSISTENT`, hand back the **same handle** on a second
+  call to one address (`get_resource_id` answers `7` twice), so
+  `fclose($a)` closes `$b`.
+
+So `Open` is read as a proof only for the producers a whitelist vouches
+for, and answers `Unknown` — which convicts nothing — for the rest and for
+any producer mined later that no probe has cleared. `Closed` needs no such
+qualification: nothing reopens a handle. This was a live false positive
+before the correction, not a hypothetical: a filter whose stream had been
+closed convicted against `@param closed-resource` while being closed.
 
 ### 2.4 State discipline: the object escape rule, with a table of closers
 
@@ -365,10 +407,44 @@ vocabulary has abandoned, and PHPStan reports it too.
 
 A proven resource folds `gettype` to `'resource'` (`Open`), `'resource
 (closed)'` (`Closed`) or their union (`Unknown`); `get_debug_type` to the
-kind spelling; `get_resource_type` to the kind (`'Unknown'` when closed);
-`get_resource_id` to `int<1, max>`; `is_resource` to `true`/`false` by
-state. Each is a one-row fold over §2.1's table, listed so the family is
-complete rather than discovered.
+kind spelling, and to `'resource (closed)'` when closed; `get_resource_type`
+to the kind (`'Unknown'` when closed); `get_resource_id` to `int<1, max>`;
+`is_resource` to `true`/`false` by state. Each is a one-row fold over
+§2.1's table, listed so the family is complete rather than discovered.
+
+**Landed 2026-09-21 (issue #756), with four things this section had
+wrong or unsaid**, each measured at the pin:
+
+1. **`get_debug_type` of a closed handle is `'resource (closed)'`**, not
+   the kind spelling this section promised — so the closed cell is the same
+   string `gettype` answers, and only `get_resource_type` answers a kind-
+   shaped string (`'Unknown'`) there.
+2. **The kind spelling is PHP's**, per §2.1's amendment: a filter folds to
+   `'stream filter'`, a persistent stream to `'persistent stream'`, a `dir`
+   handle to `'stream'`, and `stream_socket_client` to the union of the two
+   stream spellings. A producer with no probed spelling (`pg_socket`, which
+   needs a server) folds nothing.
+3. **Where the fold may be asked.** The state is read on the store the
+   statement began with, and a statement's own calls land after it, so the
+   pre-statement state is the handle's state at the fold's call **only when
+   no other call of the statement runs first**: in `fclose($h) . gettype($h)`
+   the close has already happened. The folds therefore answer at an
+   assignment whose right-hand side *is* the call, and at a dump whose other
+   arguments run no code; every composed spelling — a concatenation, a cast,
+   a ternary, a condition — keeps the declared answer. Two answers for one
+   value, and the weaker one is the sound one.
+4. **A fold reaches an element place** (ADR-0098 §2.2), which makes it the
+   second judgment to do so after the closed-state argument cell —
+   `gettype($pipes[0])` and `gettype($arr[$i])` with `$i` proven at
+   `Verified`. A key spelled as anything but a literal or a variable names
+   no place here, because `place_of` can resolve a key through a project
+   call and at top level such a call can rebind the base before the fold's
+   own call runs.
+
+What the folds are *for* is narrowing and value facts, not an id of their
+own: `$t = gettype($h); if ($t === 'resource (closed)')` is a live branch
+after a close and a dead one before it, which is the recall — and the
+hazard, since a wrong string would make a live branch look dead.
 
 ### 2.8 The retirement path is the design, not a risk to it
 
@@ -400,8 +476,14 @@ alone.
   `proc_open`'s `$pipes` need a shape field that holds a heap identity —
   the same carrier an object element needs and does not have today.
   Deferred with that design named; it is the next slice, not this one.
-- **Persistent streams** (`pfsockopen`) as a closer target: `fclose` on a
-  persistent stream was not probed; the row stays a keeper until it is.
+- ~~**Persistent streams** (`pfsockopen`) as a closer target~~ — probed
+  during the §2.4 slice and no longer deferred: `fclose`, `gzclose`,
+  `bzclose` and `pclose` all close a persistent stream (the handle reads
+  `resource (closed)`, `is_resource` answers `false`) while the underlying
+  connection lives on for the next `pfsockopen()`. The `PersistentStream`
+  kind is in each of those closers' rows. What the probe also found, and
+  what §2.3's amendment records, is that two `pfsockopen()` calls to one
+  address answer the **same handle**, so the kind proves no `Open`.
 - **Method-keyed consumers** (`SplFileObject::__construct`'s
   `resource|string`, `Phar::setStub`): §4's function-keyed bound.
 - **Operators.** §2.1's table says `$h + 1` is a `TypeError`;
