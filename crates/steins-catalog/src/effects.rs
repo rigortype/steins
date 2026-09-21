@@ -875,6 +875,13 @@ pub fn out_params(name: &str) -> Option<&'static [usize]> {
         // `is_callable(..., string &$callable_name = null)` — the one type
         // predicate with a reference parameter (issue #559).
         "is_callable" => Some(P2),
+        // `proc_open($command, array $descriptor_spec, &$pipes, …)` — the one
+        // out-parameter in this table that hands back **handles** rather than a
+        // value (ADR-0098 §2.2). Reflection at `PINNED_PHP` reports the
+        // parameter untyped and by reference, which is the shape a `resource`
+        // position has (ADR-0097 §2.5) and the reason the stubs cannot say more
+        // about it than `mixed`.
+        "proc_open" => Some(P2),
         "str_replace" | "str_ireplace" => Some(P3),
         "preg_replace_callback_array" => Some(P3),
         // `$count` is position **4**, not 3: the optional `$limit` sits between
@@ -1029,12 +1036,36 @@ pub enum WrittenWhen {
 /// The only outcome that writes nothing is the `TypeError`, and it does not
 /// return — so `CallReturns` again.
 ///
+/// **`proc_open`** position 2 (ADR-0098 §2.2) — the one row here whose witness
+/// is a *return value* because a probe said so rather than because the stub
+/// left room for it. `proc_open` declares no return type at `PINNED_PHP`; it
+/// answers a `resource (process)` or `false`, and on `false` it leaves `$pipes`
+/// **exactly as it found it**. Probed at 8.5.10, a sentinel in `$pipes` before
+/// each call:
+///
+/// ```text
+/// proc_open(['/no/such/binary/zzz'], [0=>['pipe','r'],1=>['pipe','w']], $p)
+///                                   ret=false   $p === 'SENTINEL'  (untouched)
+/// proc_open(['/bin/echo','x'], [1=>['bogus']], $p)
+///                                   ret=false   $p === 'SENTINEL'  (untouched)
+/// proc_open(['/bin/echo','x'], [0=>['pipe','r'],2=>['pipe','w']], $p)
+///                                   ret=resource  array_keys($p) === [0, 2]
+/// ```
+///
+/// So there IS a return that means "I did not write", and it is the falsy one:
+/// [`WrittenWhen::ReturnTruthy`], never `CallReturns`. The outcomes that do not
+/// return are `ValueError`s raised out of the spec — a string key (`proc_open():
+/// Argument #2 ($descriptor_spec) must be an integer indexed array`) and a
+/// `['pipe']` with no mode (`Missing mode parameter for 'pipe'`) — and neither
+/// reaches the next statement.
+///
 /// Every other [`out_params`] row's contract deserves the same treatment but
 /// stays a decline until measured (ADR-0077 §4). A witness is not by itself a
 /// fact: it says *where* a seed would be sound.
 #[must_use]
 pub fn out_param_written_when(name: &str, position: usize) -> Option<WrittenWhen> {
     match (name.to_ascii_lowercase().as_str(), position) {
+        ("proc_open", 2) => Some(WrittenWhen::ReturnTruthy),
         ("preg_match", 2) => Some(WrittenWhen::ReturnTruthy),
         ("preg_match_all", 2) => Some(WrittenWhen::ReturnTruthy),
         ("settype", 0) => Some(WrittenWhen::CallReturns),
