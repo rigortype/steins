@@ -125,6 +125,7 @@ mod region_purity;
 mod registry;
 mod replay_fold;
 mod resource_params;
+mod resource_producers;
 mod resource_values;
 mod return_missing;
 mod return_summary;
