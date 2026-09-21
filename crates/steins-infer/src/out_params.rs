@@ -201,7 +201,9 @@ pub(crate) fn apply_stmt_out_param_seeds(
 /// ```text
 /// $d = opendir('/tmp');   fclose($d);
 ///   → Warning: fclose(): cannot close the provided stream, as it must not be
-///     manually closed;  returns false;  gettype($d) is still 'resource (stream)'
+///     manually closed;  returns false;  gettype($d) is still 'resource'
+///     (and get_debug_type($d) 'resource (stream)' — corrected 2026-09-21,
+///     when the §2.7 folds probed both spellings)
 ///   readdir($d) then answers '.', so the program runs on
 /// ```
 ///
