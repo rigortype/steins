@@ -557,6 +557,15 @@ pub(crate) fn elem_place(var: &str, key: &VKey) -> String {
     }
 }
 
+/// Whether a [`Store`] key names an element **place** rather than a variable —
+/// the namespace test [`elem_place`]'s spelling makes decidable, since a PHP
+/// variable name cannot contain `[`. Every route that inserts a place must raise
+/// [`Store::may_hold_places`], and this is how a route that does not know it is
+/// inserting one still does.
+pub(crate) fn is_place_key(key: &str) -> bool {
+    key.contains('[')
+}
+
 /// A heap **resource** (ADR-0097 §2.3): the identity and state of a handle a
 /// producer call returned, allocation-keyed beside [`HeapObj`] so that aliases
 /// share it — `$b = $h; fclose($b)` closes the one entry both names refer to,
@@ -759,6 +768,19 @@ impl Store {
     pub(crate) fn bind_resource(&mut self, var: &str, id: AllocId, res: HeapRes) {
         self.resources.insert(id, res);
         self.refs.insert(var.to_owned(), id);
+        // A producer that hands back an array of handles (ADR-0098 §4 slice 2)
+        // mints its places HERE, not through `bind_place` — so the flag must be
+        // raised here too, or the sweep short-circuits over a place it should
+        // drop. That is not hypothetical: with the flag raised only in
+        // `bind_place`, `$pair = stream_socket_pair(…); fclose($pair[0]);
+        // $pair = []; fread($pair[0], 1);` convicted a line whose `$pair[0]` no
+        // longer exists — a place outliving its base, the one defect the sweep is
+        // for. The two slices were reviewed apart and only their composition
+        // broke; the place namespace (`[` in the key) is what decides, whoever
+        // does the inserting.
+        if is_place_key(var) {
+            self.may_hold_places = true;
+        }
     }
 
     /// Bind the **place** `place` to an allocation that already exists — the
@@ -766,6 +788,7 @@ impl Store {
     /// element of `[$h]` is the handle `$h` holds, so closing either closes the
     /// one entry (PHP's handle semantics, one level out).
     pub(crate) fn bind_place(&mut self, place: String, id: AllocId) {
+        debug_assert!(is_place_key(&place), "bind_place takes a place key, got {place:?}");
         self.refs.insert(place, id);
         self.may_hold_places = true;
     }

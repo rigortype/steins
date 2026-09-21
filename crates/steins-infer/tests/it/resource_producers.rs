@@ -243,7 +243,7 @@ fn both_halves_of_a_pair_are_open_stream_handles() {
 fn closing_one_half_convicts_a_later_use_of_that_half() {
     one_in_both_modes(
         &format!("{PAIR}fclose($pair[0]);\nfread($pair[0], 1);\n"),
-        "argument $pair[0] to fread() cannot become resource $stream — the handle is closed; proven TypeError (must be an open stream resource, in either mode)",
+        "argument $pair[0] to fread() cannot become resource $stream — the handle is closed; proven TypeError (the position needs an open handle, in either mode)",
     );
 }
 
@@ -341,7 +341,7 @@ fn a_pipe_descriptor_key_is_a_place() {
     // element holding `resource (closed)`.
     one_in_both_modes(
         &format!("{PIPES}fclose($pipes[2]);\nfread($pipes[2], 1);\n"),
-        "argument $pipes[2] to fread() cannot become resource $stream — the handle is closed; proven TypeError (must be an open stream resource, in either mode)",
+        "argument $pipes[2] to fread() cannot become resource $stream — the handle is closed; proven TypeError (the position needs an open handle, in either mode)",
     );
 }
 
@@ -374,7 +374,7 @@ fn a_key_the_spec_does_not_pipe_is_no_place() {
     one_in_both_modes(
         "$proc = proc_open('true', [0 => ['file', '/dev/null', 'r'], 1 => ['pipe', 'w']], $pipes);\n\
          fclose($pipes[1]);\nfread($pipes[1], 1);\n",
-        "argument $pipes[1] to fread() cannot become resource $stream — the handle is closed; proven TypeError (must be an open stream resource, in either mode)",
+        "argument $pipes[1] to fread() cannot become resource $stream — the handle is closed; proven TypeError (the position needs an open handle, in either mode)",
     );
 }
 
@@ -412,7 +412,7 @@ fn a_socket_descriptor_leaves_the_rest_of_the_spec_readable_and_a_pty_does_not()
     one_in_both_modes(
         "$proc = proc_open('true', [1 => ['socket'], 0 => ['pipe', 'r']], $pipes);\n\
          fclose($pipes[0]);\nfread($pipes[0], 1);\n",
-        "argument $pipes[0] to fread() cannot become resource $stream — the handle is closed; proven TypeError (must be an open stream resource, in either mode)",
+        "argument $pipes[0] to fread() cannot become resource $stream — the handle is closed; proven TypeError (the position needs an open handle, in either mode)",
     );
     // `pty` needs a build whose `proc_open` has pseudo-terminal support. This
     // one has it, but a build without it cannot both refuse the word and write
@@ -451,7 +451,7 @@ fn the_descriptor_word_is_compared_byte_for_byte() {
     one_in_both_modes(
         "$proc = proc_open('true', [0 => ['pipe', 'r']], $pipes);\n\
          fclose($pipes[0]);\nfread($pipes[0], 1);\n",
-        "argument $pipes[0] to fread() cannot become resource $stream — the handle is closed; proven TypeError (must be an open stream resource, in either mode)",
+        "argument $pipes[0] to fread() cannot become resource $stream — the handle is closed; proven TypeError (the position needs an open handle, in either mode)",
     );
     // The same case-sensitivity, on the words that produce no entry: probed,
     // `FILE`, `NULL` and `REDIRECT` each warn `… is not a valid descriptor
@@ -502,7 +502,7 @@ fn a_negative_key_refuses_the_whole_spec() {
     one_in_both_modes(
         "$proc = proc_open('true', [100 => ['pipe', 'r']], $pipes);\n\
          fclose($pipes[100]);\nfread($pipes[100], 1);\n",
-        "argument $pipes[100] to fread() cannot become resource $stream — the handle is closed; proven TypeError (must be an open stream resource, in either mode)",
+        "argument $pipes[100] to fread() cannot become resource $stream — the handle is closed; proven TypeError (the position needs an open handle, in either mode)",
     );
 }
 
@@ -543,7 +543,7 @@ fn only_the_presence_of_the_mode_cell_is_checked_and_never_its_value() {
                 "$proc = proc_open('true', [0 => ['pipe', {cell}]], $pipes);\n\
                  fclose($pipes[0]);\nfread($pipes[0], 1);\n"
             ),
-            "argument $pipes[0] to fread() cannot become resource $stream — the handle is closed; proven TypeError (must be an open stream resource, in either mode)",
+            "argument $pipes[0] to fread() cannot become resource $stream — the handle is closed; proven TypeError (the position needs an open handle, in either mode)",
         );
     }
 }
@@ -571,7 +571,7 @@ fn a_sparse_spec_keeps_its_own_numbers() {
     one_in_both_modes(
         "$proc = proc_open('true', [0 => ['pipe', 'r'], 5 => ['pipe', 'w']], $pipes);\n\
          fclose($pipes[5]);\nfread($pipes[5], 1);\n",
-        "argument $pipes[5] to fread() cannot become resource $stream — the handle is closed; proven TypeError (must be an open stream resource, in either mode)",
+        "argument $pipes[5] to fread() cannot become resource $stream — the handle is closed; proven TypeError (the position needs an open handle, in either mode)",
     );
     silent_in_both_modes(
         "$proc = proc_open('true', [0 => ['pipe', 'r'], 5 => ['pipe', 'w']], $pipes);\n\
@@ -586,7 +586,7 @@ fn a_list_spelled_spec_gets_the_auto_indexes() {
     one_in_both_modes(
         "$proc = proc_open('true', [['pipe', 'r'], ['pipe', 'w']], $pipes);\n\
          fclose($pipes[1]);\nfread($pipes[1], 1);\n",
-        "argument $pipes[1] to fread() cannot become resource $stream — the handle is closed; proven TypeError (must be an open stream resource, in either mode)",
+        "argument $pipes[1] to fread() cannot become resource $stream — the handle is closed; proven TypeError (the position needs an open handle, in either mode)",
     );
 }
 
@@ -602,7 +602,7 @@ fn a_spec_held_in_a_variable_is_proven_the_same_way() {
     one_in_both_modes(
         "$spec = [1 => ['pipe', 'w']];\n\
          $proc = proc_open('true', $spec, $pipes);\nfclose($pipes[1]);\nfread($pipes[1], 1);\n",
-        "argument $pipes[1] to fread() cannot become resource $stream — the handle is closed; proven TypeError (must be an open stream resource, in either mode)",
+        "argument $pipes[1] to fread() cannot become resource $stream — the handle is closed; proven TypeError (the position needs an open handle, in either mode)",
     );
 }
 
@@ -781,7 +781,7 @@ fn the_false_branch_of_the_pair_guard_has_no_places_in_it() {
     one_in_both_modes(
         "$pair = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, 0);\n\
          if ($pair !== false) { fclose($pair[0]); fread($pair[0], 1); }\n",
-        "argument $pair[0] to fread() cannot become resource $stream — the handle is closed; proven TypeError (must be an open stream resource, in either mode)",
+        "argument $pair[0] to fread() cannot become resource $stream — the handle is closed; proven TypeError (the position needs an open handle, in either mode)",
     );
 }
 
@@ -797,7 +797,7 @@ fn a_place_convicts_only_through_a_close_that_returned() {
     one_in_both_modes(
         "$pair = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, 0);\n\
          fclose($pair[0]);\nfread($pair[0], 1);\n",
-        "argument $pair[0] to fread() cannot become resource $stream — the handle is closed; proven TypeError (must be an open stream resource, in either mode)",
+        "argument $pair[0] to fread() cannot become resource $stream — the handle is closed; proven TypeError (the position needs an open handle, in either mode)",
     );
     // The same premise is the whole of `proc_open`'s statement-position claim,
     // whose witness is `ReturnTruthy` and whose guard — when the code writes one
@@ -807,7 +807,7 @@ fn a_place_convicts_only_through_a_close_that_returned() {
     // carrier tying the place to the return binding rather than a smaller table.
     one_in_both_modes(
         &format!("{PIPES}if ($proc === false) {{ fclose($pipes[0]); fread($pipes[0], 1); }}\n"),
-        "argument $pipes[0] to fread() cannot become resource $stream — the handle is closed; proven TypeError (must be an open stream resource, in either mode)",
+        "argument $pipes[0] to fread() cannot become resource $stream — the handle is closed; proven TypeError (the position needs an open handle, in either mode)",
     );
 }
 
@@ -845,7 +845,7 @@ fn the_row_does_not_change_the_statement_no_effect_verdict() {
 /// every guard-position pin below is the same two statements under a different
 /// header.
 const CLOSED_PIPE_0: &str =
-    "argument $pipes[0] to fread() cannot become resource $stream — the handle is closed; proven TypeError (must be an open stream resource, in either mode)";
+    "argument $pipes[0] to fread() cannot become resource $stream — the handle is closed; proven TypeError (the position needs an open handle, in either mode)";
 
 #[test]
 fn the_guard_position_seeds_on_every_shape_that_proves_the_call_returned_truthy() {
@@ -940,7 +940,7 @@ fn a_poisoned_scope_convicts_through_no_place() {
          $pair = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, 0);\n\
          if ($pair === false) { return; }\n\
          fclose($pair[0]);\nfread($pair[0], 1);\n}\n",
-        "argument $pair[0] to fread() cannot become resource $stream — the handle is closed; proven TypeError (must be an open stream resource, in either mode)",
+        "argument $pair[0] to fread() cannot become resource $stream — the handle is closed; proven TypeError (the position needs an open handle, in either mode)",
     );
 }
 
@@ -961,29 +961,30 @@ fn a_produced_place_under_an_unbound_base_does_not_survive_a_call() {
     // positive — it is a missed finding, and it is pinned so that the
     // asymmetry is a decision rather than a surprise. Closing it is one clause
     // in `is_value_semantic`, which is the ADR-0070 rung and not this one.
+    //
+    // The fixtures run inside a FUNCTION BODY on purpose. At top level a
+    // project call forgets every handle's state, because it could rebind a
+    // global (ADR-0097 §2.4, the `global`/`$GLOBALS` hole #758 closed) — which
+    // would silence the `helper(…)` rows for a reason that has nothing to do
+    // with the base's binding. In a function the locals are out of a callee's
+    // reach, so the only thing left to vary is the asymmetry this pins.
+    let in_fn = |body: String| {
+        format!("function helper(mixed $x = null): void {{}}\nfunction run(): void {{\n{body}}}\n")
+    };
     let bag = "$h = fopen('php://memory', 'r');\nif ($h === false) { return; }\n$bag = [$h];\n";
     for interposed in ["count($B);\n", "helper($B);\n", "helper($B[0]);\n"] {
         let pipes = interposed.replace("$B", "$pipes");
-        silent_in_both_modes(&format!(
-            "function helper(mixed $x = null): void {{}}\n\
-             {PIPES}fclose($pipes[0]);\n{pipes}fread($pipes[0], 1);\n"
-        ));
+        silent_in_both_modes(&in_fn(format!("{PIPES}fclose($pipes[0]);\n{pipes}fread($pipes[0], 1);\n")));
         // The same statement over a bound base keeps the place, both ways.
         let pair = interposed.replace("$B", "$pair");
         one_in_both_modes(
-            &format!(
-                "function helper(mixed $x = null): void {{}}\n\
-                 {PAIR}fclose($pair[0]);\n{pair}fread($pair[0], 1);\n"
-            ),
-            "argument $pair[0] to fread() cannot become resource $stream — the handle is closed; proven TypeError (must be an open stream resource, in either mode)",
+            &in_fn(format!("{PAIR}fclose($pair[0]);\n{pair}fread($pair[0], 1);\n")),
+            "argument $pair[0] to fread() cannot become resource $stream — the handle is closed; proven TypeError (the position needs an open handle, in either mode)",
         );
         let literal = interposed.replace("$B", "$bag");
         one_in_both_modes(
-            &format!(
-                "function helper(mixed $x = null): void {{}}\n\
-                 {bag}fclose($bag[0]);\n{literal}fread($bag[0], 1);\n"
-            ),
-            "argument $bag[0] to fread() cannot become resource $stream — the handle is closed; proven TypeError (must be an open stream resource, in either mode)",
+            &in_fn(format!("{bag}fclose($bag[0]);\n{literal}fread($bag[0], 1);\n")),
+            "argument $bag[0] to fread() cannot become resource $stream — the handle is closed; proven TypeError (the position needs an open handle, in either mode)",
         );
     }
     // It is the base's binding and not the call: a plain copy is no call at all,
