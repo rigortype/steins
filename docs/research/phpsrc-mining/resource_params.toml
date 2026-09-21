@@ -56,6 +56,15 @@
 #   listed under [declined] with their spelling. The ordinary relation judges
 #   them once the arms lower; a curated union row would be the parameter
 #   refinement ADR-0056 §9.6 refuses.
+#   THE WHOLE DIRECTORY-HANDLE FAMILY IS HERE, and its absence is this bound
+#   and not an oversight: `closedir`, `readdir` and `rewinddir` declare
+#   `@param resource|null $dir_handle` in the stubs at the pin — the `null`
+#   arm is "the handle `opendir()` last returned" — so the scan admits none of
+#   them and no `dir` position is judged. `closedir` still CLOSES a handle:
+#   that is the hand-probed closing table in steins-infer (ADR-0097 §2.4),
+#   which is keyed by name and needs no row here. A row for any of the three
+#   would also trip `no_dir_handle_consumer_carries_a_resource_row`, the pin
+#   that keeps the deferral argued on `stmt_produced_places` reachable.
 # * Method positions (`SplFileObject::__construct`'s `resource|string`,
 #   `Phar::setStub`): ADR-0056 §4's function-keyed bound, counted as
 #   `methods_skipped`.
