@@ -27,6 +27,7 @@ use crate::heap::{build_closure_val, build_new_object};
 use crate::offsets::{ShapeRead, offset_key_of, offset_operand_fact, shape_read, shape_read_at};
 use crate::project::Diagnostic;
 use crate::refine::{clear_null, seed_shape_fact};
+use crate::resource_folds::resource_fold_return_fact;
 use crate::return_arms::call_return_arms;
 use crate::walk::{WalkCx, mark_dead_span, value_stratum};
 
@@ -429,6 +430,32 @@ pub(crate) fn apply_assign(
                         });
                     }
                     env.insert(var.to_owned(), Known::value_strat(fact, line, Some(prov), strat));
+                    store.unbind(var);
+                }
+                // The §2.7 folds over a proven handle (ADR-0097): `gettype`,
+                // `get_debug_type`, `get_resource_type`, `get_resource_id`.
+                // Above the shape rung because the two cannot both answer, and
+                // asked HERE — where the right-hand side IS the call — rather
+                // than at the shared operand seam, so that no other call of the
+                // statement can have moved the state first (see the module doc).
+                ArgValue::Call(name, args)
+                    if let Some((fact, strat)) = resource_fold_return_fact(
+                        cx,
+                        folder,
+                        name,
+                        args,
+                        env,
+                        &*store,
+                        w.scope.poisoned,
+                    ) =>
+                {
+                    if let (Fact::Singleton(v), Some(facts)) = (&fact, facts.as_deref_mut()) {
+                        facts.push(LineFact {
+                            line,
+                            kind: FactKind::Value { var: var.to_owned(), rendered: render_val(v) },
+                        });
+                    }
+                    env.insert(var.to_owned(), Known::value_strat(fact, line, None, strat));
                     store.unbind(var);
                 }
                 // The type rung above the envelope (ADR-0061 §1): reads the call's

@@ -36,6 +36,7 @@ use crate::env::{
 };
 use crate::offsets::shape_read_at;
 use crate::project::{Diagnostic, Fix, FixEdit, Res};
+use crate::resource_folds::resource_fold_return_fact;
 use crate::return_arms::{call_return_arms_by_name, method_return_arms_by_callee};
 use crate::walk::{WalkCx, value_stratum};
 
@@ -620,6 +621,11 @@ fn best_dump_type(
     // value-lane descent below (its findings are suppressed, so this surfaces only
     // in the bound params' internal provenance strings).
     span_start: u32,
+    // Whether the §2.7 resource folds (ADR-0097) may answer for this argument:
+    // true only where nothing else in the dumping call runs before it, since the
+    // handle's state is read on the store the statement started with. See
+    // `resource_folds`' module doc.
+    fold_resources: bool,
 ) -> DumpRendering {
     let cx = w.cx;
     let poisoned = w.scope.poisoned;
@@ -1006,6 +1012,19 @@ fn best_dump_type(
             };
         }
     }
+    // The §2.7 folds over a proven handle (ADR-0097), where the assignment seam
+    // puts them: `dumpType(gettype($h))` and `$t = gettype($h); dumpType($t)`
+    // answer the same string.
+    if fold_resources
+        && let ArgValue::Call(name, args) = value
+        && let Some((fact, stratum)) =
+            resource_fold_return_fact(cx, folder, name, args, env, store, poisoned)
+    {
+        return DumpRendering {
+            text: render_dump_fact(&fact),
+            asserted: stratum == Stratum::Asserted,
+        };
+    }
     // Argument-dependent type rung (ADR-0061 §1) — `count`/`array_is_list` over an
     // abstract shape (ADR-0062 §4) — sits above the envelope, as at the assignment
     // seam, carrying the argument's stratum.
@@ -1193,6 +1212,11 @@ pub(crate) fn emit_dumps(
                 }],
             }
         });
+        // A dump with ONE argument runs nothing before that argument, so a
+        // resource fold in it reads the state the handle is in (`resource_folds`);
+        // a second argument could be a call that closes the handle first, and
+        // withholds the folds from every argument of the call.
+        let settled = call.args.len() == 1;
         if call.args.is_empty() {
             // Zero-argument explicit dump: still fail-level (§7) — the runtime fatal
             // stands regardless of what (nothing) it would dump.
@@ -1210,7 +1234,9 @@ pub(crate) fn emit_dumps(
         }
         for arg in &call.args {
             let rendering = match family {
-                DumpFamily::Type => best_dump_type(w, folder, &arg.value, env, store, arg.span.start),
+                DumpFamily::Type => {
+                    best_dump_type(w, folder, &arg.value, env, store, arg.span.start, settled)
+                }
                 DumpFamily::PhpDocType => {
                     best_dump_phpdoc_type(cx, folder, &arg.value, env, store, w.scope.poisoned)
                 }
@@ -1236,8 +1262,11 @@ pub(crate) fn emit_dumps(
         if is_first_class_callable(call) || call.args.is_empty() {
             return;
         }
+        // The same reading as the explicit family above.
+        let settled = call.args.len() == 1;
         for arg in &call.args {
-            let rendering = best_dump_type(w, folder, &arg.value, env, store, arg.span.start);
+            let rendering =
+                best_dump_type(w, folder, &arg.value, env, store, arg.span.start, settled);
             let pos = cx.tree().position(arg.span.start);
             out.push(Diagnostic {
                 id: DEBUG_VAR_DUMP_ID,
@@ -1325,6 +1354,8 @@ pub(crate) fn emit_trace_annotations(
             env,
             store,
             stmt.span.start,
+            // A trace tag names a variable, which is not a call: no fold to ask.
+            false,
         );
         // The diagnostic sits at the tag's own line/column: the tag span is
         // docblock-relative (`comment.text` is the exact source substring at
@@ -1383,7 +1414,11 @@ pub(crate) fn emit_asserts(
         return;
     }
     let expected = assert_expected_string(cx, &call.args[0].value, env, w.scope.poisoned, folder);
-    let rendering = best_dump_type(w, folder, &call.args[1].value, env, store, call.args[1].span.start);
+    // The expected-type argument is evaluated first; a literal there runs no
+    // code, and anything else withholds the resource folds (`resource_folds`).
+    let settled = call.args[0].value.is_literal();
+    let rendering =
+        best_dump_type(w, folder, &call.args[1].value, env, store, call.args[1].span.start, settled);
     let pos = cx.tree().position(call.span.start);
     let obs = AssertObservation {
         path: cx.path().to_owned(),

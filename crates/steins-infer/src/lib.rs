@@ -79,6 +79,7 @@ mod project;
 pub mod promote;
 mod purity;
 mod refine;
+mod resource_folds;
 mod return_arms;
 mod return_maybe;
 mod return_missing;
