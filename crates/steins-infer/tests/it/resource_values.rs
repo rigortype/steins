@@ -644,8 +644,11 @@ fn a_handle_stored_into_an_array_literal_keeps_its_identity() {
 
 #[test]
 fn a_handle_stored_where_no_place_names_it_still_escapes() {
-    // The routes the carrier does not follow (ADR-0098 §3): a dynamic key names
-    // no place, and a property is the next increment rather than this one. Both
+    // The routes the carrier does not follow. **The effect seam is literal-key
+    // only** — it has no env to ask, so `fclose($arr[$i])` moves no state even
+    // where `$i = 0` is proven (the *read* seam does resolve such a key; see
+    // `resource_params::a_dynamic_key_closes_no_place` for the asymmetry). And a
+    // **property** is ADR-0098 §3's next increment rather than this one. Both
     // leave the state `Unknown`, silent in either direction.
     for spelling in ["open-resource", "closed-resource"] {
         let dynamic = with_state_param(
@@ -653,6 +656,11 @@ fn a_handle_stored_where_no_place_names_it_still_escapes() {
             &format!("{OPEN_H}$i = 0;\n$arr = [$h];\nfclose($arr[$i]);\nf($h);\n"),
         );
         assert!(any_mismatch(&dynamic, Engine::typeless()).is_empty(), "dynamic `{spelling}`");
+        let property = with_state_param(
+            spelling,
+            &format!("{OPEN_H}$o = new \\stdClass();\n$o->s = $h;\nfclose($o->s);\nf($h);\n"),
+        );
+        assert!(any_mismatch(&property, Engine::typeless()).is_empty(), "property `{spelling}`");
     }
 }
 

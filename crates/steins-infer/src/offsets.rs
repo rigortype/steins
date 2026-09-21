@@ -61,13 +61,29 @@ pub(crate) enum OffsetGrade {
 }
 
 /// The **place** an argument names, when it names one (ADR-0098 §2.4): a bare
-/// variable, or one element of one under a key this walk can prove constant.
+/// variable, or one element of one under a key **this walk has proven** at
+/// [`Stratum::Verified`].
 ///
 /// The key goes through [`offset_key_of`], the same canonicalization the offset
 /// families use, so `$a[5]` and `$a["5"]` are one place, as they are one entry
-/// in PHP. A dynamic key (`$pipes[$i]`), a nested base (`$a[0][1]`) and a
-/// receiver that is not a plain variable answer `None` — no place, no binding,
-/// silence.
+/// in PHP. A nested base (`$a[0][1]`) and a receiver that is not a plain
+/// variable answer `None` — no place, no binding, silence.
+///
+/// **The key carries the same stratum floor as the value.** A place decides
+/// *which allocation* the closed-state judgment reads, so a key resolved from a
+/// docblock claim would let an unverified assertion pick the accusation's
+/// subject: `/** @phpstan-assert 0 $i */` on an empty body makes `$arr[$i]`
+/// answer `arr[0]` while PHP reads `arr[1]`, and the finding is a false
+/// positive on the default surface. [`offset_operand_fact`] refuses a
+/// non-`Verified` key for the same reason one seam over, and
+/// [`check_resource_position`] already requires `Verified` for the *value*;
+/// this is that floor applied to the name.
+///
+/// `$i = 0; fclose($arr[$i]);` is a proof and resolves; `assert_zero($i)` is a
+/// claim and does not.
+///
+/// [`offset_operand_fact`]: crate::offsets::offset_operand_fact
+/// [`check_resource_position`]: crate::arg_check::check_resource_position
 pub(crate) fn place_of(
     cx: &Cx,
     folder: &mut dyn Folder,
@@ -78,7 +94,13 @@ pub(crate) fn place_of(
     match value {
         ArgValue::OffsetRead { base, key } => {
             let ArgValue::Var(b) = &**base else { return None };
-            let lit = cx.resolve_literal(key, env, poisoned, folder)?;
+            // `descent`/`out` are deliberately absent: see the module note above
+            // `place_of_static`. A key expression rich enough to carry a nested
+            // project call is not a place this slice names.
+            let (lit, strat) = cx.resolve_literal_strat(key, env, poisoned, folder)?;
+            if strat != Stratum::Verified {
+                return None;
+            }
             Some(crate::env::elem_place(b, &crate::shapes::guard_key(&lit, cx.php_minor)?))
         }
         _ => place_of_static(cx, value),
@@ -88,6 +110,14 @@ pub(crate) fn place_of(
 /// [`place_of`] where no env is threaded: the key must already be a literal.
 /// `$pipes[0]` and `$opts['in']` resolve; `$pipes[$i]` does not, even where the
 /// env would prove `$i`. The narrower answer, at a seam that has no env to ask.
+///
+/// The effect side ([`resource_call_effects`]) is on this narrower seam and the
+/// judgment side is on [`place_of`]'s wider one, so a proven-dynamic key can
+/// *read* a place the same key could not have *closed*. That asymmetry only
+/// loses transitions (a missed close is silence); it cannot invent one, because
+/// a place is `Closed` only where a literal-key close put it there.
+///
+/// [`resource_call_effects`]: crate::builtin_returns::resource_call_effects
 pub(crate) fn place_of_static(cx: &Cx, value: &ArgValue) -> Option<String> {
     match value {
         ArgValue::Var(v) => Some(v.clone()),

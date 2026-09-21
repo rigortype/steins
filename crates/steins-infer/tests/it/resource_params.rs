@@ -624,14 +624,84 @@ fn an_open_element_is_what_the_position_asks_for() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Which keys name a place (ADR-0098 §2.2 as amended): the stratum floor
+// ---------------------------------------------------------------------------
+
 #[test]
-fn a_dynamic_key_names_no_place() {
-    // ADR-0098 §3: no place, no binding, silence — in both directions, since
-    // the walk cannot say which entry `$i` selects.
+fn a_key_the_walk_proved_names_the_place_it_proves() {
+    // The rule is not "a literal key" but "a key proven at `Verified`" — the
+    // same floor `offset_operand_fact` puts on an offset key one seam over, and
+    // the floor `check_resource_position` already puts on the argument's value.
+    // `$i = 0` is a proof, so `$arr[$i]` IS `arr[0]`, and reading it convicts.
+    one_in_both_modes(
+        "$h = fopen('php://memory', 'r');\n\
+         if ($h === false) { throw new \\RuntimeException('x'); }\n\
+         $arr = [$h];\nfclose($arr[0]);\n$i = 0;\nfread($arr[$i], 1);\n",
+        "argument $arr[$i] to fread() cannot become resource $stream — the handle is closed; proven TypeError (must be an open stream resource, in either mode)",
+    );
+    // …and it picks the RIGHT entry: `$i = 1` names the open sibling.
+    silent_in_both_modes(
+        "$h = fopen('php://memory', 'r');\n\
+         $g = fopen('php://memory', 'r');\n\
+         if ($h === false || $g === false) { throw new \\RuntimeException('x'); }\n\
+         $arr = [$h, $g];\nfclose($arr[0]);\n$i = 1;\nfread($arr[$i], 1);\n",
+    );
+}
+
+#[test]
+fn an_asserted_key_names_no_place() {
+    // The blocker this gate closes. `@phpstan-assert 0 $i` on an EMPTY body is a
+    // docblock claim, `Asserted`, never a proof — and a key decides WHICH
+    // allocation the closed-state judgment reads, so an unverified claim would
+    // pick the accusation's subject. Probed at 8.5.10: this file prints `ok` and
+    // exits 0, because `$i` is `1` and `$arr[1]` is the open handle.
+    silent_in_both_modes(
+        "/** @phpstan-assert 0 $i */\nfunction assert_zero(int $i): void {}\n\
+         function rnd(): int { return random_int(1, 1); }\n\
+         $h = fopen('php://memory', 'r');\n\
+         $g = fopen('php://memory', 'r');\n\
+         if ($h === false || $g === false) { throw new \\RuntimeException('x'); }\n\
+         $arr = [$h, $g];\nfclose($arr[0]);\n\
+         $i = rnd();\nassert_zero($i);\nfread($arr[$i], 1);\n",
+    );
+}
+
+#[test]
+fn an_unprovable_key_names_no_place() {
+    // Nothing proves `$i` at all: no place, no judgment, in either direction.
+    silent_in_both_modes(
+        "$h = fopen('php://memory', 'r');\n\
+         if ($h === false) { throw new \\RuntimeException('x'); }\n\
+         $arr = [$h];\nfclose($arr[0]);\n$i = random_int(0, 1);\nfread($arr[$i], 1);\n",
+    );
+}
+
+#[test]
+fn a_dynamic_key_closes_no_place() {
+    // The other half, and the asymmetry it pins: the EFFECT seam has no env to
+    // ask, so `fclose($arr[$i])` moves no state even where `$i` is proven. A
+    // missed close is silence; the read seam can name more places than the close
+    // seam can move, and a place is `Closed` only where a close put it there.
     silent_in_both_modes(
         "$h = fopen('php://memory', 'r');\n\
          if ($h === false) { throw new \\RuntimeException('x'); }\n\
          $i = 0;\n$arr = [$h];\nfclose($arr[$i]);\nfread($arr[0], 1);\n",
+    );
+    silent_in_both_modes(
+        "$h = fopen('php://memory', 'r');\n\
+         if ($h === false) { throw new \\RuntimeException('x'); }\n\
+         $i = 0;\n$arr = [$h];\nfclose($arr[$i]);\nfread($arr[$i], 1);\n",
+    );
+}
+
+#[test]
+fn a_branch_that_may_not_have_closed_the_element_convicts_nothing() {
+    silent_in_both_modes(
+        "$h = fopen('php://memory', 'r');\n\
+         if ($h === false) { throw new \\RuntimeException('x'); }\n\
+         $arr = [$h];\n\
+         if (random_int(0, 1) === 1) { fclose($arr[0]); }\nfread($arr[0], 1);\n",
     );
 }
 
@@ -643,16 +713,6 @@ fn a_rebound_base_takes_its_places_with_it() {
         "$h = fopen('php://memory', 'r');\n\
          if ($h === false) { throw new \\RuntimeException('x'); }\n\
          $arr = [$h];\nfclose($arr[0]);\n$arr = [];\nfread($arr[0], 1);\n",
-    );
-}
-
-#[test]
-fn a_branch_that_may_not_have_closed_the_element_convicts_nothing() {
-    silent_in_both_modes(
-        "$h = fopen('php://memory', 'r');\n\
-         if ($h === false) { throw new \\RuntimeException('x'); }\n\
-         $arr = [$h];\n\
-         if (random_int(0, 1) === 1) { fclose($arr[0]); }\nfread($arr[0], 1);\n",
     );
 }
 
