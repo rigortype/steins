@@ -1104,14 +1104,28 @@ fn proven_non_resource(cx: &Cx, value: &ArgValue) -> bool {
 /// named. The row's bit and the heap state are read on the same id as the
 /// resource-ness judgment beside it.
 ///
-/// `get_resource_id` and `get_resource_type` are the only two rows the probe
-/// found that take a closed handle (`accepts_closed = true`), and they reach no
-/// verdict here whatever the state. Every other row convicts on `Closed` and
-/// stays silent on `Open` — which is what the position asks for — and on
-/// `Unknown`, because §2.4 is explicit that `Unknown` convicts nothing: an
-/// escape into a project call, a property store, a capture, a branch that may
-/// not have closed the handle and a loop that may have all land there, and each
-/// of them is a handle this walk cannot speak about.
+/// **What the bit rests on.** `accepts_closed` defaults to `false`, which is the
+/// convicting value, so the table owes a probe per row and not per exception.
+/// At the 8.5.10 run 94 of the 100 rows carry a closed-handle transcript:
+/// `get_resource_id` and `get_resource_type` measured `true` (they answer —
+/// `int` and `'Unknown'`), and the other 92 measured a `TypeError` in both
+/// coercion modes. **Six rows still convict on the default**, which is the
+/// stub's claim and not a measurement: the four `ftp_*` positions, whose
+/// argument #0 is a declared `FTP\Connection` the engine rejects before the
+/// resource position is reached, and `sapi_windows_vt100_support` and
+/// `stream_socket_get_crypto_status`, which the probing build does not have.
+/// The four `ftp_*` rows are stream positions in a stream-reading family, so the
+/// default is the likely answer there; it is a default all the same, and
+/// `resource_params.toml`'s header names them so a reader can tell the two
+/// apart without counting rows.
+///
+/// A row whose bit is `true` reaches no verdict here whatever the state. Every
+/// other row convicts on `Closed` and stays silent on `Open` — which is what
+/// the position asks for — and on `Unknown`, because §2.4 is explicit that
+/// `Unknown` convicts nothing: an escape into a project call, a property store,
+/// a capture, a branch that may not have closed the handle, a loop that may
+/// have, and a top-level call that may have rebound the global all land there,
+/// and each of them is a handle this walk cannot speak about.
 fn closed_handle_verdict(
     cx: &Cx,
     row: ResourceParam,

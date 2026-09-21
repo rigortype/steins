@@ -394,6 +394,65 @@ fn site_verdict(
     }
 }
 
+/// Whether `call`, in the frame being walked, could **rebind a global name** to
+/// a different handle — in which case the state this walk proved belongs to the
+/// old handle and says nothing about what the name holds next.
+///
+/// [`HandleState::escaped`] keeps `Closed` across an escape on the ground that
+/// nothing reopens a handle. That is true of the *handle* and false of the
+/// *name*, and [`Store::res_of`] is keyed on the name. In the **top-level
+/// frame** the locals are the globals, so any userland body that runs can
+/// rebind one through `global $h` or `$GLOBALS['h']` while the call site
+/// mentions nothing — no argument, no receiver, so §2.4's escape table is never
+/// even consulted. Probed at 8.5.10, this exits 0:
+///
+/// ```php
+/// function bump(): void { global $h; $h = fopen('php://memory', 'r'); }
+/// $h = fopen('php://memory', 'r');
+/// if ($h === false) { throw new \RuntimeException('x'); }
+/// fclose($h);
+/// bump();
+/// fread($h, 1); // a fresh OPEN handle: no TypeError
+/// ```
+///
+/// So at top level such a call **forgets the state** of every heap resource the
+/// frame already held — `Unknown`, which convicts nothing (§2.4) — rather than
+/// leaving a `Closed` the name no longer answers for. Forgetting is strictly
+/// weaker than an escape: it drops a proof, never adds one.
+///
+/// Narrow in three ways, so the ordinary conviction survives:
+///
+/// * **Top-level frame only** ([`frame_is_top_level`], the carrier issue #637's
+///   review already installed for this exact hazard). Inside a function body
+///   `$h` is a local the callee cannot see; the one route in is the analyzed
+///   scope's own `global $h`, which voids the binding on its own.
+/// * **Calls the walk cannot resolve to an engine builtin only.** A global
+///   builtin the engine reflects has no `global` statement in it, so a closing
+///   call and a keeper are both left alone and `fclose($h); fread($h, 1);` at
+///   file scope still convicts. A project function, a method, a constructor, a
+///   dynamic callee and a global name the engine does not know are all opaque.
+/// * **The state only.** The binding, the type lane and the identity stay; only
+///   the one fact a rebind would invalidate is dropped.
+///
+/// What this does not close is a builtin that runs userland behind its own
+/// signature — a callback under `usort`, a user stream wrapper's `stream_tell`
+/// under `ftell` — which could `global $h` from there. That is the calibration
+/// [`site_verdict`] already records for the wrapper, unchanged here. The same
+/// blind spot on the *value* lane (`$s = 'abc'; bump(); intdiv($s, 1);`)
+/// predates this slice and is not this function's business.
+///
+/// [`frame_is_top_level`]: crate::walk::frame_is_top_level
+fn top_level_rebind_risk(cx: &Cx, folder: &mut dyn Folder, call: &CallExpr) -> bool {
+    if !crate::walk::frame_is_top_level() {
+        return false;
+    }
+    let Some(name) = global_function_callee(cx, call) else { return true };
+    // The closing table needs no reflection (its rows were probed by hand), so
+    // it answers first, exactly as `site_verdict` reads it.
+    !CLOSERS.iter().any(|(n, _)| name.eq_ignore_ascii_case(n))
+        && folder.builtin_param_types(name).is_none()
+}
+
 /// What a statement's calls do to the heap resources their arguments name
 /// (ADR-0097 §2.4), read on the pre-call store — where every binding the
 /// statement is about to forget still resolves — and applied by
@@ -405,6 +464,12 @@ pub(crate) struct ResourceEffects {
     /// (`false`), by allocation id — a binding the statement drops cannot be
     /// read back by name, and the entry outlives the name for its aliases.
     transitions: Vec<(AllocId, bool)>,
+    /// The heap resources whose **state** this statement forgot without
+    /// escaping them: at top level, everything the frame already held when a
+    /// call that could rebind a global ran ([`top_level_rebind_risk`]).
+    /// Pre-existing by construction — an entry the statement itself allocated
+    /// is a handle no call before it could have been handed.
+    forgotten: Vec<AllocId>,
     /// The variables whose **binding survives** the statement's conservative
     /// forgetting: every occurrence of the name in the statement's call
     /// arguments is a keeper or a closing call, so nothing the statement did
@@ -442,9 +507,17 @@ pub(crate) fn resource_call_effects(
     invalidated: Option<&[InvalidatedVar]>,
     store: &Store,
 ) -> ResourceEffects {
-    let mut effects = ResourceEffects { transitions: Vec::new(), kept: HashSet::new() };
+    let mut effects =
+        ResourceEffects { transitions: Vec::new(), forgotten: Vec::new(), kept: HashSet::new() };
     if poisoned || calls.is_empty() {
         return effects;
+    }
+    // Nothing to forget where the frame holds no handle — and asking is not free
+    // (it reflects the callee), so the emptiness check comes first.
+    if !store.resources.is_empty()
+        && calls.iter().any(|call| top_level_rebind_risk(cx, folder, call))
+    {
+        effects.forgotten.extend(store.resources.keys().copied());
     }
     let mut escaped_mentions: Vec<&str> = Vec::new();
     for call in calls {
@@ -508,10 +581,21 @@ pub(crate) fn resource_call_effects(
 /// entry goes `Closed`; an escaped one takes [`HandleState::escaped`]
 /// (`Closed` stays — nothing reopens a handle). By id, so a name the statement
 /// rebound or forgot still reaches the entry its aliases share.
+///
+/// Then the `forgotten` entries go `Unknown` outright — the top-level rebind
+/// rule ([`top_level_rebind_risk`]), which reaches every entry the frame held
+/// because at file scope every name is a global. Last, because it is the
+/// weakest claim of the three: a `Closed` proved about the handle the name used
+/// to hold must not outlive the call that may have pointed the name elsewhere.
 pub(crate) fn apply_resource_effects(effects: &ResourceEffects, store: &mut Store) {
     for (id, closed) in &effects.transitions {
         if let Some(r) = store.resources.get_mut(id) {
             r.state = if *closed { HandleState::Closed } else { r.state.escaped() };
+        }
+    }
+    for id in &effects.forgotten {
+        if let Some(r) = store.resources.get_mut(id) {
+            r.state = HandleState::Unknown;
         }
     }
 }

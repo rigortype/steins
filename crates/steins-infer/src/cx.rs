@@ -1502,13 +1502,26 @@ impl<'a> Cx<'a> {
     /// Build the closed-**state** flavour of a `type.argument-mismatch`
     /// (ADR-0097 §2.5's second cell): a handle proven closed, handed to a
     /// position whose row does not accept one. Same id and shape as
-    /// [`Self::resource_param_diagnostic`]; the tail is PHP's own sentence and
-    /// omits the coercion mode for the same reason — probed at 8.5.10,
-    /// `fclose($h); fread($h, 5)`, `ftell($h)`, a second `fclose($h)` and
-    /// `closedir($d); readdir($d)` are every one `TypeError: <f>(): Argument #1
-    /// ($p) must be an open stream resource`, with and without
-    /// `declare(strict_types=1)`. PHP says "stream" even for a directory
-    /// handle, so this quotes it rather than naming the kind.
+    /// [`Self::resource_param_diagnostic`], and the tail omits the coercion
+    /// mode for the same reason: every closed-handle probe in
+    /// `resource_params.toml` raised its `TypeError` with and without
+    /// `declare(strict_types=1)`.
+    ///
+    /// **The tail does not quote PHP's sentence**, because there is no one
+    /// sentence to quote. `must be an open stream resource` is what the
+    /// majority of the rows say, and the closed-handle probes found at least
+    /// five other wordings at 8.5.10 — `fscanf(): supplied resource is not a
+    /// valid File-Handle resource`, `stream_context_get_options(): Argument #1
+    /// ($stream_or_context) must be a valid stream/context`,
+    /// `proc_get_status(): supplied resource is not a valid process resource`,
+    /// `socket_import_stream(): supplied resource is not a valid stream
+    /// resource`, `zip_read(): supplied resource is not a valid Zip Directory
+    /// resource` — so a hardcoded quote was wrong for roughly a quarter of the
+    /// rows it appeared on. What every probed row DOES share is the verdict:
+    /// a `TypeError` in either mode, at a position that wants an open handle.
+    /// That is what this says. The per-row sentence is on record in the
+    /// table's `probe` transcripts, so parameterising the tail is a table
+    /// column away the day every row carries one.
     pub(crate) fn resource_closed_diagnostic(
         &self,
         offset: u32,
@@ -1518,7 +1531,7 @@ impl<'a> Cx<'a> {
     ) -> Diagnostic {
         let pos = self.tree().position(offset);
         let message = format!(
-            "argument {} to {callee}() cannot become resource ${param_name} — the handle is closed; proven TypeError (must be an open stream resource, in either mode)",
+            "argument {} to {callee}() cannot become resource ${param_name} — the handle is closed; proven TypeError (the position needs an open handle, in either mode)",
             value.render(),
         );
         Diagnostic {
