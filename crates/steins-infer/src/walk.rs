@@ -61,7 +61,10 @@ use crate::offsets::{
     check_coalesce_final_arm, check_destructure_source, check_offset_read, check_shape_read,
 };
 use crate::operands::check_operand_sites;
-use crate::out_params::{apply_stmt_out_param_seeds, check_preg_pattern, stmt_out_param_seeds};
+use crate::out_params::{
+    apply_produced_places, apply_stmt_out_param_seeds, check_preg_pattern, stmt_out_param_seeds,
+    stmt_produced_places,
+};
 use crate::predicates::apply_type_narrowing;
 use crate::project::{Diagnostic, FnResolution};
 use crate::refine::{
@@ -921,6 +924,12 @@ pub(crate) fn walk_trace(
         // before the call, and step 4 is about to forget exactly that — so the
         // read has to happen while the entry env still holds it.
         let stmt_out_seeds = stmt_out_param_seeds(w, folder, &stmt.kind, env, store);
+        // The out-parameter **places** of the same statement (ADR-0098 §2.2):
+        // `proc_open($cmd, $spec, $pipes)` hands back one handle per `pipe`
+        // descriptor of a proven spec. Read here with the seeds above and for
+        // the same reason — the spec is an argument, and step 4 is about to
+        // forget the name it may be held in.
+        let stmt_places = stmt_produced_places(w, folder, &stmt.kind, env, store);
         // What this statement's calls do to the heap resources they are handed
         // (ADR-0097 §2.4) — a close, a keeper, an escape — read on the same
         // pre-call store and applied beside the out-parameter seeds, after the
@@ -1712,6 +1721,10 @@ pub(crate) fn walk_trace(
         // rung: the callee's stated write REPLACES the conservative drop rather
         // than racing it. Empty for every statement that carries no such call.
         apply_stmt_out_param_seeds(stmt_out_seeds, env, store);
+        // The produced places, over the same forgetting: step 4's `unbind` of
+        // `$pipes` is what dropped the previous call's places (ADR-0098 §2.3),
+        // so these are this call's alone.
+        apply_produced_places(w, stmt_places, store);
         // The heap resources' state transitions (ADR-0097 §2.4): a closing call's
         // return proves `Closed`, an escape forgets. By allocation id, so a name
         // step 4 dropped or the statement rebound still reaches the entry its
