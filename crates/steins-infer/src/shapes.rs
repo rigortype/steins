@@ -949,6 +949,18 @@ fn write_is_frame_private(w: &WalkCx, base: &str) -> bool {
 /// receiver runs `offsetSet`, and nothing here bounds what that body reaches. Keeping
 /// them needs a reachability argument nobody has written; when someone does, this is
 /// the one function that changes.
+///
+/// The kept `contract` lane is where the **element places** of ADR-0098 §2.3
+/// need their own sweep, and `contract.remove(base)` does not reach them:
+/// clearing `refs` drops the heap half of `base[0]` while its arm list — still
+/// saying "resource" about an element the write has just made an `int` — lives
+/// on. That residue convicts nothing *today* (a lane with no `refs` entry has no
+/// state for [`closed_handle_verdict`] to read, so the cell declines), which is
+/// exactly why it would be found the hard way later. [`Store::drop_places_of`]
+/// is the sweep §2.3 already specifies, so it is what runs, and the base's
+/// whole family goes when the base does.
+///
+/// [`closed_handle_verdict`]: crate::arg_check
 fn open_offset_barrier(w: &WalkCx, base: &str, env: &mut HashMap<String, Known>, store: &mut Store) {
     if !write_is_frame_private(w, base) {
         env.clear();
@@ -961,6 +973,7 @@ fn open_offset_barrier(w: &WalkCx, base: &str, env: &mut HashMap<String, Known>,
     store.members.clear();
     store.narrowed.clear();
     store.contract.remove(base);
+    store.drop_places_of(base);
 }
 
 /// `$var[k] = v` / `$var[k1][k2] = v` and `unset($var[k])`, with `k` either a
