@@ -20,7 +20,7 @@ use crate::env::{
 };
 use crate::existence::{denotes_global_function, global_function_callee};
 use crate::refine::{flatten_arms, refine_declared_arms, seed_shape_fact};
-use crate::walk::value_stratum;
+use crate::walk::{WalkCx, value_stratum};
 use crate::fold::Folder;
 use crate::shape_projection::{
     shape_projection_fact, witnessed_family_fact, witnessed_projection_fact,
@@ -310,6 +310,236 @@ pub(crate) fn builtin_resource_arms(
         producer: name.trim_start_matches('\\').to_ascii_lowercase(),
     };
     Some((arms, res))
+}
+
+// ---------------------------------------------------------------------------
+// The array-of-handles producers (ADR-0098 §4 slice 2)
+// ---------------------------------------------------------------------------
+
+/// The contract arms an **element place** a producer minted carries
+/// (ADR-0098 §2.2): one `resource` arm, `Verified`, and no failure arm.
+///
+/// The failure arm belongs to the *container*, never to an element: PHP either
+/// hands back the array of handles or hands back nothing at all, and when it
+/// hands one back every entry in it is an open handle. So the lane that
+/// ADR-0056 §8.6's lock reads is already narrowed at the moment the place is
+/// bound, which is the difference between a minted place and one
+/// [`bind_handle_elements`] copied off a variable that still had to be guarded.
+///
+/// [`bind_handle_elements`]: crate::assign::bind_handle_elements
+pub(crate) fn produced_place_arms() -> Vec<ContractArm> {
+    vec![ContractArm {
+        ty: ContractTy::Resource { state: ResourceState::Any },
+        stratum: Stratum::Verified,
+    }]
+}
+
+/// The heap resource one produced element holds: a **fresh** allocation, `Open`,
+/// of the producer's kind. Fresh and not shared — `$pair[0]` and `$pair[1]` are
+/// two different handles with two different ids (probed at 8.5.10:
+/// `get_resource_id()` answers 4 and 5 for one pair, and `fclose($pair[0])`
+/// leaves `is_resource($pair[1])` true), so one id for both would make closing
+/// either close the other.
+fn produced_handle(producer: &str, kind: ResourceKind) -> HeapRes {
+    HeapRes { kind, state: HandleState::Open, producer: producer.to_ascii_lowercase() }
+}
+
+/// `stream_socket_pair`'s name, spelled once.
+const SOCKET_PAIR: &str = "stream_socket_pair";
+
+/// The return declaration `stream_socket_pair` must still carry for its row to
+/// be admitted — the ADR-0056 §8.2 tripwire in the one shape it can take for a
+/// producer whose return type PHP *can* spell.
+///
+/// `fopen`'s tripwire is silence: the engine declaring anything at all disowns
+/// the row. That reading is unavailable here, because `array|false` is exactly
+/// what this engine declares and always has. So the tripwire is the declaration
+/// itself: the day a PHP hands back `Socket[]|false`, an `iterable`, or a pair
+/// object, the string below stops matching and the row switches itself off with
+/// no denylist and no release of Steins.
+const SOCKET_PAIR_RETURN: &str = "array|false";
+
+/// The places `$pair = stream_socket_pair(…)` binds (ADR-0098 §2.2): **exactly
+/// two**, keyed `0` and `1`, each a fresh `Open` `stream` handle.
+///
+/// Probed at 8.5.10 — the count is the contract and not an observation of one
+/// call:
+///
+/// ```text
+/// $p = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, 0);
+///   gettype($p) === 'array'   array_keys($p) === [0, 1]   count($p) === 2
+///   get_debug_type($p[0]) === get_debug_type($p[1]) === 'resource (stream)'
+///   get_resource_id($p[0]) === 4   get_resource_id($p[1]) === 5   ($p[0] !== $p[1])
+///   array_is_list($p) === true
+/// $p = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_DGRAM, 0);   keys [0, 1] too
+/// $p = @stream_socket_pair(-1, -1, -1);   === false   (the whole failure shape)
+/// fclose($p[0]);   is_resource($p[0]) === false   is_resource($p[1]) === true
+/// ```
+///
+/// The failure arm is `false`, never a shorter array: there is no call that
+/// answers a one-element list, so "the array exists" and "both places hold an
+/// open handle" are the same statement, and `pair[0]` needs no guard of its own
+/// beyond the ordinary `=== false` on `$pair`.
+///
+/// Two gates, both the ones the `fopen` rung applies: a project function of the
+/// same simple name shadows the builtin and answers instead, and the engine's
+/// own declaration must still be [`SOCKET_PAIR_RETURN`]. Without a live sidecar
+/// there is no declaration to read and nothing is bound — the sound subset
+/// (ADR-0004), same as every other resource rung.
+pub(crate) fn socket_pair_places(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    name: &str,
+) -> Option<Vec<(VKey, HeapRes)>> {
+    if !name.eq_ignore_ascii_case(SOCKET_PAIR) || cx.index.has_simple_function(name) {
+        return None;
+    }
+    let declared = folder.builtin_return_type(name)?;
+    if !declared.eq_ignore_ascii_case(SOCKET_PAIR_RETURN) {
+        return None;
+    }
+    Some(vec![
+        (VKey::Int(0), produced_handle(SOCKET_PAIR, ResourceKind::Stream)),
+        (VKey::Int(1), produced_handle(SOCKET_PAIR, ResourceKind::Stream)),
+    ])
+}
+
+/// `proc_open`'s name, spelled once.
+pub(crate) const PROC_OPEN: &str = "proc_open";
+
+/// The descriptor word whose entries `proc_open` hands back in `$pipes`.
+const PIPE_DESCRIPTOR: &str = "pipe";
+
+/// The places `proc_open($cmd, $spec, $pipes, …)` binds (ADR-0098 §2.2): **one
+/// per `pipe` descriptor of `$spec`, at that descriptor's own key** — never one
+/// per position and never one per argument.
+///
+/// The key set is a function of the spec, which is the whole reason this cannot
+/// be a fixed row. Probed at 8.5.10:
+///
+/// ```text
+/// [0 => ['pipe','r'], 2 => ['pipe','w']]            array_keys($pipes) === [0, 2]
+/// [0 => ['file','/dev/null','r'], 1 => ['pipe','w']]                    === [1]
+/// [0 => ['pipe','r'], 1 => ['file','/dev/null','w']]                    === [0]
+/// [0 => ['pipe','r'], 5 => ['pipe','w']]                                === [0, 5]
+/// [3 => ['pipe','r']]                                                   === [3]
+/// [['pipe','r'], ['pipe','w']]                                          === [0, 1]
+/// [1 => ['null']]                                                       === []
+/// [1 => ['pipe','w'], 2 => ['redirect', 1]]                             === [1]
+/// [1 => $fh]           (a stream resource as the descriptor)            === []
+/// []                                                                    === []
+/// ```
+///
+/// Every entry is `resource (stream)` — `process` is the *return's* kind, not
+/// the pipes' — and each is closed by `fclose`, after which the element keeps
+/// holding the closed handle (`gettype($pipes[1])` reads `resource (closed)`).
+///
+/// # Two descriptor words that also produce an entry, and stay out anyway
+///
+/// `['socket']` and `['pty']` were probed here too, and both yield an entry
+/// (`[1 => ['socket']]` → key `1`; `[0 => ['pty'], 1 => ['pty']]` → keys `0` and
+/// `1`). Neither is admitted. A `pty` descriptor needs a build whose
+/// `proc_open` has pseudo-terminal support, which this probe cannot speak for
+/// and no table records; `socket` is left beside it rather than split from it,
+/// because one measured word is a row and two words with one measurement
+/// between them is a guess. What this costs is a missed finding on a spec that
+/// uses them, which is where the family already is. Adding either is a probe on
+/// a build that has the support, not a reading of this comment.
+///
+/// # What is refused, and it is refused whole
+///
+/// A spec the walk cannot prove is a spec whose key set is unknown, and an
+/// unknown key set cannot be bound *in part*: the unprovable entry may itself be
+/// a `pipe`, so binding the provable ones would claim `$pipes` has exactly the
+/// keys this returned — a claim about the entries as a set, which is the thing
+/// that was not proven. So a non-literal spec, a non-literal descriptor, a
+/// descriptor whose word is not a literal string, and a spec holding a key the
+/// walk cannot name all decline the **whole** call and bind nothing.
+///
+/// A **string key** in the spec is not a decline but a non-return: PHP raises
+/// `ValueError: proc_open(): Argument #2 ($descriptor_spec) must be an integer
+/// indexed array` (probed), so it is declined here for the ordinary reason
+/// rather than given a place.
+pub(crate) fn proc_open_places(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    name: &str,
+    spec: &ArgValue,
+    env: &HashMap<String, Known>,
+    poisoned: bool,
+) -> Option<Vec<(VKey, HeapRes)>> {
+    if !name.eq_ignore_ascii_case(PROC_OPEN) || cx.index.has_simple_function(name) {
+        return None;
+    }
+    // The producer row's own gate (ADR-0056 §8.2), which `proc_open` is already
+    // in: the engine has the name, declares no return type for it, and the
+    // project minor is the catalog pin. It answers about the *return*, and it
+    // is the right gate for the pipes too — a `proc_open` migrated to an object
+    // is a `proc_open` whose `$pipes` this probe no longer speaks for.
+    folder.builtin_resource_return(name)?;
+    // The by-reference tripwire: position 2 is where the handles land, and a
+    // position the engine reports by value is one this call cannot write.
+    let params = folder.builtin_param_types(name)?;
+    if !params.get(PROC_OPEN_PIPES).is_some_and(|p| p.by_ref) {
+        return None;
+    }
+    let Some(ArgValue::Array(items)) = cx.resolve_literal(spec, env, poisoned, folder) else {
+        return None;
+    };
+    let normalized = steins_syntax::normalize_array(&items, cx.php_minor)?;
+    let mut places = Vec::new();
+    for (key, descriptor) in normalized {
+        // A string key is the `ValueError` above; an integer key is a place.
+        let steins_syntax::NormKey::Int(index) = key else { return None };
+        let ArgValue::Array(cells) = descriptor else { return None };
+        let cells = steins_syntax::normalize_array(&cells, cx.php_minor)?;
+        // The descriptor's word is its element `0`. A descriptor whose first
+        // cell is not a literal string is one whose word is unknown — not a
+        // non-`pipe`, which is why it refuses the whole spec rather than
+        // contributing nothing.
+        let word = match cells.iter().find(|(k, _)| *k == steins_syntax::NormKey::Int(0)) {
+            Some((_, ArgValue::Str(s))) => s.clone(),
+            // No cell `0` at all is a `ValueError` out of the engine
+            // (`Missing handle qualifier in array`), so it never reaches a
+            // statement that could read a place; refused here regardless.
+            _ => return None,
+        };
+        if word.as_bytes().eq_ignore_ascii_case(PIPE_DESCRIPTOR.as_bytes()) {
+            places.push((VKey::Int(index), produced_handle(PROC_OPEN, ResourceKind::Stream)));
+        }
+    }
+    Some(places)
+}
+
+/// The 0-based position of `proc_open`'s `&$pipes` — the same index the
+/// catalog's [`steins_catalog::out_params`] row carries, spelled here because
+/// the two tripwires above read it directly.
+pub(crate) const PROC_OPEN_PIPES: usize = 2;
+
+/// Bind `places` as element places of `var` (ADR-0098 §2.2), each to an
+/// allocation **this walk mints**.
+///
+/// The producer twin of [`bind_handle_elements`], and the one line of it that
+/// differs is the id: a literal shares the id the source variable holds, a
+/// producer has no source to share with and every element is its own handle. So
+/// each place gets a [`WalkCx::fresh_id`] of its own, and closing one leaves the
+/// others exactly where they were — which is what PHP does (probed at 8.5.10:
+/// `fclose($pair[0])` leaves `is_resource($pair[1])` true).
+///
+/// The caller has already dropped `var`'s previous places; this only adds.
+///
+/// [`bind_handle_elements`]: crate::assign::bind_handle_elements
+pub(crate) fn bind_produced_places(
+    w: &WalkCx,
+    var: &str,
+    places: Vec<(VKey, HeapRes)>,
+    store: &mut Store,
+) {
+    for (key, res) in places {
+        let place = crate::env::elem_place(var, &key);
+        store.bind_resource(&place, w.fresh_id(), res);
+        store.contract.insert(place, produced_place_arms());
+    }
 }
 
 /// The **closing calls** (ADR-0097 §2.4; CONTEXT.md "Closing call") and, per
