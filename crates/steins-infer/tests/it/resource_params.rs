@@ -580,10 +580,82 @@ fn a_branch_that_may_not_have_closed_the_element_convicts_nothing() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// The sweep (ADR-0098 §2.3 / §4 slice 1): every point that must drop the family
+//
+// "The sweep pins are the slice." Each row is a statement placed BETWEEN a close
+// of `$arr[0]` and a read of it: if the sweep misses, the place outlives the
+// base it described and the read is convicted on a stale `Closed` — a false
+// positive on the default surface, which is the one thing this carrier may not
+// do. Every row is silent today (hand-probed against the built binary at
+// 8.5.10); the pins exist so a later narrowing of `Store::drop_places_of` or of
+// `open_offset_barrier` cannot take that silence away unnoticed.
+// ---------------------------------------------------------------------------
+
+/// `$arr[0]` is closed, then `sweep` runs, then `$arr[0]` is read. The control
+/// (`sweep` empty) is asserted separately in [`the_sweep_control_still_convicts`],
+/// so a suite that passes by breaking the whole carrier is not a passing suite.
+fn sweep_case(sweep: &str) -> String {
+    format!(
+        "$h = fopen('php://memory', 'r');\n\
+         if ($h === false) {{ throw new \\RuntimeException('x'); }}\n\
+         $arr = [$h];\nfclose($arr[0]);\n{sweep}\nfread($arr[0], 1);\n"
+    )
+}
+
+#[test]
+fn the_sweep_control_still_convicts() {
+    one_in_both_modes(
+        &sweep_case(""),
+        "argument $arr[0] to fread() cannot become resource $stream — the handle is closed; proven TypeError (must be an open stream resource, in either mode)",
+    );
+}
+
+#[test]
+fn every_sweep_point_drops_the_element_family() {
+    // The §2.3 enumeration, one row per way `$arr` can stop holding what it held.
+    let rows: &[(&str, &str)] = &[
+        // Writes into the base — the key the write touched is exactly the
+        // question a non-constant key cannot answer, so the whole family goes.
+        ("write at a literal key", "$arr[0] = fopen('php://memory', 'r');"),
+        ("write at a dynamic key", "$i = 0;\n$arr[$i] = 1;"),
+        ("append", "$arr[] = 1;"),
+        ("unset of the element", "unset($arr[0]);"),
+        ("unset of the base", "unset($arr);"),
+        // Rebinds of the base.
+        ("destructuring into the base", "[$arr, $z] = [[], 1];"),
+        ("reassign from a project call", "$arr = mk();"),
+        ("a loop rebind", "foreach ([[], []] as $arr) { }"),
+        // Exposures: another name can write through the base's cell.
+        ("a by-reference project parameter", "take($arr);"),
+        ("a reference to the base", "$b = &$arr;"),
+        ("a reference to the element", "$e = &$arr[0];"),
+        ("a by-reference closure capture", "$f = function () use (&$arr) { };\n$f();"),
+        ("a by-reference foreach", "foreach ($arr as &$v) { }"),
+        // The rearrangement family: elements move between keys.
+        ("array_shift", "array_shift($arr);"),
+        ("sort", "sort($arr);"),
+        ("array_splice", "array_splice($arr, 0, 1);"),
+        // The superglobal alias of the base.
+        ("a write through $GLOBALS", "$GLOBALS['arr'] = [];"),
+    ];
+    let prelude = "function mk(): array { return []; }\n\
+                   function take(array &$a): void { $a = []; }\n";
+    for (what, sweep) in rows {
+        let body = format!("{prelude}{}", sweep_case(sweep));
+        for src in [coercive(&body), strict(&body)] {
+            let out = mismatches(&src);
+            assert!(out.is_empty(), "{what}: expected silence, got {out:?} for:\n{src}");
+        }
+    }
+}
+
 #[test]
 fn a_rebound_base_takes_its_places_with_it() {
-    // The sweep (§2.3): the place must not outlive the base. `$arr` is a fresh
-    // array by the time the read happens, and nothing is proven about `$arr[0]`.
+    // The one sweep point the slice shipped pinned, kept as its own test because
+    // it is the shape the carrier is most obviously wrong about: `$arr` is a
+    // fresh array by the time the read happens, and nothing is proven of
+    // `$arr[0]`.
     silent_in_both_modes(
         "$h = fopen('php://memory', 'r');\n\
          if ($h === false) { throw new \\RuntimeException('x'); }\n\
