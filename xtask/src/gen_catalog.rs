@@ -496,7 +496,11 @@ fn render_resource_params(
          \x20   /// it the way PHP's own `TypeError` does (`fwrite(): Argument #1 ($stream)`).\n\
          \x20   pub name: &'static str,\n\
          \x20   /// The position answers on a CLOSED handle (`get_resource_id`); everywhere\n\
-         \x20   /// else a closed handle is a `TypeError` (`must be an open stream resource`).\n\
+         \x20   /// else a closed handle is a `TypeError`. The SENTENCE varies by row —\n\
+         \x20   /// `must be an open stream resource`, `must be a valid stream/context`,\n\
+         \x20   /// `supplied resource is not a valid process resource` and more are all\n\
+         \x20   /// on record in the table's probes — so a reader wanting PHP's own words\n\
+         \x20   /// reads the row's `probe`, not this doc.\n\
          \x20   pub accepts_closed: bool,\n\
          \x20   /// The call leaves its argument closed when it returns (`fclose`, `pclose`,\n\
          \x20   /// `gzclose`, `bzclose`, `proc_close`, `stream_filter_remove`).\n\
