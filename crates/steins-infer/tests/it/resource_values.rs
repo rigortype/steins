@@ -484,6 +484,39 @@ fn a_fresh_handle_is_proven_open() {
 }
 
 #[test]
+fn a_handle_its_producer_cannot_vouch_for_is_never_proven_open() {
+    // §2.3's "`Open` at allocation is a proof" rests on the handle changing only
+    // through itself, and three producers break that — measured at 8.5.10, each
+    // of these reads `resource (closed)` with nothing having named it:
+    //
+    //   $f = stream_filter_append(fopen('php://memory', 'r'), 'string.rot13');
+    //        // the stream's last reference is gone, so the FILTER is closed —
+    //        // and `fclose`/`pclose`/`gzclose` on the stream do the same
+    //   proc_open('ls', [1 => ['pipe', 'w']], $pipes); proc_close($p);
+    //        // every pipe is closed, and dropping the process does it too
+    //   $a = pfsockopen($h, $p); $b = pfsockopen($h, $p);
+    //        // ONE handle under two names (`get_resource_id` answers 7 twice),
+    //        // so `fclose($a)` closes `$b`
+    //
+    // So those handles are `Unknown` where the table cannot vouch for them —
+    // which convicts nothing — and a producer added to the table later is
+    // `Unknown` until it is probed. The filter below is genuinely closed by the
+    // `fclose($m)` above it, so convicting `closed-resource` here would be a
+    // false positive on the default surface.
+    let engine = || Engine::typeless().taking("stream_filter_append", &["stream", "filter_name"]);
+    let filtered = "$m = fopen('php://memory', 'r');\nif ($m === false) { return; }\n\
+                    $f = stream_filter_append($m, 'string.rot13');\n\
+                    if ($f === false) { return; }\nfclose($m);\n";
+    for spelling in ["open-resource", "closed-resource", "resource"] {
+        let src = with_state_param(spelling, &format!("{filtered}f($f);\n"));
+        assert!(
+            any_mismatch(&src, engine()).is_empty(),
+            "`@param {spelling}` cannot be judged against a filter its stream may have closed",
+        );
+    }
+}
+
+#[test]
 fn a_closed_handle_is_still_a_resource_and_a_closed_resource() {
     // `gettype()` says `resource (closed)`: the type survives the close.
     for spelling in ["resource", "closed-resource", "mixed", "non-empty-mixed"] {
