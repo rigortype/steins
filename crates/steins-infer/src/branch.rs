@@ -20,7 +20,7 @@ use crate::contract::ProjectIsa;
 use crate::descent::escape_and_sweep_calls;
 use crate::env::{ContractArm, Descent, Known, Store, Stratum, join_envs, val_of};
 use crate::existence::existence_vouch;
-use crate::out_params::{check_preg_pattern, seed_out_params};
+use crate::out_params::{check_preg_pattern, seed_out_params, seed_produced_places};
 use crate::predicates::apply_type_narrowing;
 use crate::project::Diagnostic;
 use crate::refine::{
@@ -230,6 +230,11 @@ fn apply_cond_side(
     // (!preg_match($re, $s, $m)) { return; }` reaches its else-branch with the call
     // proven truthy (ADR-0077 §3.1) — the polarity the witness survives under decides.
     seed_out_params(w, folder, cond, then, env, store);
+    // The out-parameter **places** a guard call filled (ADR-0098 §2.2), on the
+    // polarity that proves the call returned truthy — the strongest position
+    // the `proc_open` row has, and the one `if (proc_open($c, $s, $pipes))`
+    // lands in.
+    seed_produced_places(w, folder, cond, then, env, store);
 }
 
 /// Apply a break-free loop's **negated header** to its fall-through env

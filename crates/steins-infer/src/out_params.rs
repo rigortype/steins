@@ -17,10 +17,12 @@ use crate::fold::Folder;
 use crate::PREG_INVALID_PATTERN_ID;
 use crate::array_out_state::{array_out_rule, byref_array_shape};
 use crate::asserts::guard_call_line;
-use crate::builtin_returns::transfer_declaration_admits;
+use crate::builtin_returns::{
+    PROC_OPEN_PIPES, bind_produced_places, proc_open_places, transfer_declaration_admits,
+};
 use crate::coerce::{php_cast_fact, settype_cast_target};
 use crate::cx::Cx;
-use crate::env::{Known, Store, Stratum};
+use crate::env::{HeapRes, Known, Store, Stratum};
 use crate::existence::global_function_callee;
 use crate::project::Diagnostic;
 use crate::refine::collect_truthy_calls;
@@ -159,6 +161,135 @@ pub(crate) fn apply_stmt_out_param_seeds(
         seed_out_param(&var, fact, stratum, OUT_PARAM_SEEDED_STMT, line, env, store);
     }
 }
+
+/// The **out-parameter place seeds** a statement carries (ADR-0098 §2.2): the
+/// element places `proc_open($cmd, $spec, $pipes, …)` fills, read on the
+/// **pre-call** store and applied by [`apply_produced_places`] after the
+/// statement's by-reference invalidation has forgotten `$pipes` — the same two
+/// halves, in the same order, that [`stmt_out_param_seeds`] is split into, and
+/// for the same reason (ADR-0077 §3.4).
+///
+/// The statement and the assignment `$p = proc_open(…)` both seed, because the
+/// name the assignment rebinds (`$p`, the process handle) is never the name the
+/// write lands in (`$pipes`).
+///
+/// # Why the statement position and not only the guard
+///
+/// The catalog's witness for this row is [`WrittenWhen::ReturnTruthy`] (probed:
+/// a `proc_open` that answers `false` leaves `$pipes` byte for byte as it found
+/// it), and a bare statement proves only that the call returned. That is exactly
+/// the rule that keeps `preg_match`'s `$matches` **fact** out of this position —
+/// a fact stated on a path the callee never wrote is a fact about a value that
+/// never existed.
+///
+/// A place is not a fact, and its soundness argument is ADR-0097 §2.4's, which
+/// this position already rests on everywhere else: **a closing call's return is
+/// the whole premise.** The only way a place here reaches a finding is a closing
+/// call on it, and on the path where `proc_open` answered `false` that call is a
+/// `TypeError` — `$pipes` is untouched, `$pipes[1]` is not a handle, and
+/// `fclose()` of a non-resource throws (ADR-0097 §1.1). The statement after it
+/// therefore runs only on the path where the write did happen, which is the
+/// path the place describes.
+///
+/// What the argument does **not** cover, named rather than implied: a produced
+/// place handed to a position that wants a non-resource (`strlen($pipes[0])`) is
+/// judged by the ordinary argument relation, which throws no `TypeError` of its
+/// own on the failure path. The window is a `proc_open` whose return is never
+/// guarded *and* a pipe passed somewhere no pipe belongs; fp-gate is the gate on
+/// it, and the honest place to narrow it is a carrier that ties the place to the
+/// return binding rather than a smaller table here.
+///
+/// [`WrittenWhen::ReturnTruthy`]: steins_catalog::WrittenWhen::ReturnTruthy
+pub(crate) fn stmt_produced_places(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    kind: &StmtKind,
+    env: &HashMap<String, Known>,
+    store: &Store,
+) -> Vec<(String, Vec<(VKey, HeapRes)>)> {
+    let call = match kind {
+        StmtKind::Call(call) => call,
+        StmtKind::Assign { call: Some(call), .. } => call,
+        _ => return Vec::new(),
+    };
+    produced_places(w, folder, call, env, store).into_iter().collect()
+}
+
+/// The places a guard call fills, on the branch polarity that proves it wrote
+/// (ADR-0077 §3.1). `if (proc_open($cmd, $spec, $pipes)) { … }` is the one
+/// spelling that reaches here — the shapes that assign the return inside the
+/// condition lower to an opaque guard and are collected by nothing.
+pub(crate) fn seed_produced_places(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    cond: &CondExpr,
+    then: bool,
+    env: &HashMap<String, Known>,
+    store: &mut Store,
+) {
+    let mut calls = Vec::new();
+    collect_truthy_calls(cond, then, w.cx.php_minor, &mut calls);
+    let seeds: Vec<_> = calls
+        .into_iter()
+        .filter_map(|call| produced_places(w, folder, call, env, store))
+        .collect();
+    apply_produced_places(w, seeds, store);
+}
+
+/// Bind what [`stmt_produced_places`] computed, after the statement's by-ref
+/// invalidation forgot the same name — which is also what dropped the element
+/// places the previous binding had (ADR-0098 §2.3), so nothing here has to
+/// sweep.
+pub(crate) fn apply_produced_places(
+    w: &WalkCx,
+    seeds: Vec<(String, Vec<(VKey, HeapRes)>)>,
+    store: &mut Store,
+) {
+    for (var, places) in seeds {
+        bind_produced_places(w, &var, places, store);
+    }
+}
+
+/// One call's out-parameter places, or `None` where nothing is proven.
+///
+/// Every leg refuses **whole and silently**, and the legs are the out-parameter
+/// seed's own (ADR-0077 §3.2/§3.6) plus the producer row's:
+///
+/// * a poisoned scope (ADR-0046) cannot say which frame a name is in;
+/// * the callee must denote the **global** builtin, positionally
+///   ([`out_param_seed_callee`]);
+/// * the catalog must both row the position and state a written-when witness
+///   for it — nothing is inferred from the row's mere existence;
+/// * the call must supply the argument (the arity leg), and it must be a plain
+///   local variable (the aliasing leg): `$this->pipes` and `$bag['p']` refuse,
+///   because a place under them is the carrier ADR-0098 §3 holds back;
+/// * the spec must be proven, which [`proc_open_places`] owns.
+fn produced_places(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    call: &CallExpr,
+    env: &HashMap<String, Known>,
+    store: &Store,
+) -> Option<(String, Vec<(VKey, HeapRes)>)> {
+    let _ = store;
+    if w.scope.poisoned {
+        return None;
+    }
+    let name = out_param_seed_callee(w.cx, call)?;
+    if !steins_catalog::out_params(name)?.contains(&PROC_OPEN_PIPES)
+        || steins_catalog::out_param_written_when(name, PROC_OPEN_PIPES).is_none()
+    {
+        return None;
+    }
+    let ArgValue::Var(var) = &call.args.get(PROC_OPEN_PIPES)?.value else { return None };
+    let spec = &call.args.get(PROC_OPEN_SPEC)?.value;
+    let places = proc_open_places(w.cx, folder, name, spec, env, w.scope.poisoned)?;
+    Some((var.clone(), places))
+}
+
+/// The 0-based position of `proc_open`'s `array $descriptor_spec` — the argument
+/// whose proven shape decides the whole key set (ADR-0098 §2.2).
+const PROC_OPEN_SPEC: usize = 1;
 
 /// The [`Known::bound`] provenance an out-parameter seed stamps (ADR-0077), read
 /// as the clause it becomes: "from `$m`, written by the guard call on this
