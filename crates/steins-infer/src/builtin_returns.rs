@@ -407,8 +407,52 @@ pub(crate) fn socket_pair_places(
 /// `proc_open`'s name, spelled once.
 pub(crate) const PROC_OPEN: &str = "proc_open";
 
-/// The descriptor word whose entries `proc_open` hands back in `$pipes`.
-const PIPE_DESCRIPTOR: &str = "pipe";
+/// One descriptor word `proc_open` accepts, spelled the way php-src compares it
+/// — **byte for byte**. `'PIPE'` and `'Pipe'` are not this word (probed at
+/// 8.5.10: `proc_open(): PIPE is not a valid descriptor spec/mode`, the call
+/// answers `false` and leaves `$pipes` untouched), so a case-insensitive
+/// comparison here would mint a place for a call that never writes one — on
+/// EVERY execution, not on a failure path.
+struct DescriptorWord {
+    /// The word itself, lowercase, as php-src's `zend_string_equals_literal`
+    /// sees it.
+    word: &'static str,
+    /// Whether `proc_open` hands back an entry in `$pipes` at this descriptor's
+    /// key — and, for the two words where it does but this rung stays out, see
+    /// [`proc_open_places`]' "two descriptor words" section.
+    binds_place: bool,
+    /// The cells **after** `0` the engine demands beside this word. Each absent
+    /// one is a `ValueError` raised before `proc_open` returns anything, so a
+    /// descriptor missing one never reaches a statement that could read a place.
+    /// Probed at 8.5.10, one message per cell: `Missing mode parameter for
+    /// 'pipe'`, `Missing file name parameter for 'file'`, `Missing mode
+    /// parameter for 'file'`, `Missing redirection target`.
+    cells: &'static [i64],
+}
+
+/// **Every** descriptor word this rung will read a spec through, and no others.
+///
+/// A word outside this table refuses the **whole** spec, for the reason `PIPE`
+/// does: php-src warns `… is not a valid descriptor spec/mode`, the call answers
+/// `false`, and `$pipes` is left exactly as it was found — so no key of that
+/// spec is ever written, the readable ones included. `pty` is deliberately
+/// outside: it was probed to produce an entry *here*, but it needs a build whose
+/// `proc_open` has pseudo-terminal support, and a build without it cannot both
+/// refuse the word and write the other keys. Admitting it is a probe on such a
+/// build, not a reading of this comment.
+const DESCRIPTOR_WORDS: &[DescriptorWord] = &[
+    DescriptorWord { word: "pipe", binds_place: true, cells: &[1] },
+    DescriptorWord { word: "file", binds_place: false, cells: &[1, 2] },
+    DescriptorWord { word: "null", binds_place: false, cells: &[] },
+    DescriptorWord { word: "redirect", binds_place: false, cells: &[1] },
+    DescriptorWord { word: "socket", binds_place: false, cells: &[] },
+];
+
+/// The row for `word`, matched **case-sensitively**, or `None` for a word
+/// php-src does not accept — which is a refusal of the whole spec.
+fn descriptor_word(word: &[u8]) -> Option<&'static DescriptorWord> {
+    DESCRIPTOR_WORDS.iter().find(|d| d.word.as_bytes() == word)
+}
 
 /// The places `proc_open($cmd, $spec, $pipes, …)` binds (ADR-0098 §2.2): **one
 /// per `pipe` descriptor of `$spec`, at that descriptor's own key** — never one
@@ -424,6 +468,7 @@ const PIPE_DESCRIPTOR: &str = "pipe";
 /// [0 => ['pipe','r'], 5 => ['pipe','w']]                                === [0, 5]
 /// [3 => ['pipe','r']]                                                   === [3]
 /// [['pipe','r'], ['pipe','w']]                                          === [0, 1]
+/// [100 => ['pipe','r']]                                                 === [100]
 /// [1 => ['null']]                                                       === []
 /// [1 => ['pipe','w'], 2 => ['redirect', 1]]                             === [1]
 /// [1 => $fh]           (a stream resource as the descriptor)            === []
@@ -438,28 +483,48 @@ const PIPE_DESCRIPTOR: &str = "pipe";
 ///
 /// `['socket']` and `['pty']` were probed here too, and both yield an entry
 /// (`[1 => ['socket']]` → key `1`; `[0 => ['pty'], 1 => ['pty']]` → keys `0` and
-/// `1`). Neither is admitted. A `pty` descriptor needs a build whose
-/// `proc_open` has pseudo-terminal support, which this probe cannot speak for
-/// and no table records; `socket` is left beside it rather than split from it,
-/// because one measured word is a row and two words with one measurement
-/// between them is a guess. What this costs is a missed finding on a spec that
-/// uses them, which is where the family already is. Adding either is a probe on
-/// a build that has the support, not a reading of this comment.
+/// `1`). Neither is admitted, and they are held back differently because PHP
+/// treats them differently. `socket` is a word php-src accepts on any build, so
+/// a spec that uses one stays readable and the key it fills is simply not
+/// claimed — a missed finding, which is where the family already is. `pty`
+/// needs a build whose `proc_open` has pseudo-terminal support, which this probe
+/// cannot speak for, so it is outside [`DESCRIPTOR_WORDS`] and refuses the whole
+/// spec: on a build that lacks the support the call cannot succeed, and the
+/// other keys of that same spec would be places nothing ever wrote.
 ///
-/// # What is refused, and it is refused whole
+/// # What is checked, in the order it is checked
+///
+/// 1. the spec resolves to a **literal array** — else nothing is bound;
+/// 2. every key is an **integer**. A string key is `ValueError: proc_open():
+///    Argument #2 ($descriptor_spec) must be an integer indexed array` (probed),
+///    so the call raises before it returns and no statement after it runs;
+/// 3. every key is **non-negative**. Probed at 8.5.10, for every descriptor word
+///    alike: `[-1 => ['pipe','r']]` warns `Unable to copy file descriptor 5 (for
+///    pipe) into file descriptor -1: Bad file descriptor`, answers `false` and
+///    leaves `$pipes` untouched — on every execution, so a place minted from
+///    such a spec could never be read;
+/// 4. every descriptor is a **literal array** whose cell `0` is a **literal
+///    string** — a word this walk cannot name is not a non-`pipe`;
+/// 5. that word is one [`DESCRIPTOR_WORDS`] carries, compared **byte for
+///    byte** — the one php-src compares. Anything else is the `PIPE` case: a
+///    warning, `false`, and an untouched `$pipes`;
+/// 6. the cells php-src demands beside the word are **present**
+///    ([`DescriptorWord::cells`]) — `['pipe']` with no mode is `ValueError:
+///    Missing mode parameter for 'pipe'` (probed), which returns nothing at all.
+///    Only presence is checked: the mode's *value* is not validated by the
+///    engine either (probed: `['pipe','zzz']` and `['pipe', 5]` both open a
+///    pipe).
+///
+/// # And every refusal is refused whole
 ///
 /// A spec the walk cannot prove is a spec whose key set is unknown, and an
 /// unknown key set cannot be bound *in part*: the unprovable entry may itself be
 /// a `pipe`, so binding the provable ones would claim `$pipes` has exactly the
 /// keys this returned — a claim about the entries as a set, which is the thing
-/// that was not proven. So a non-literal spec, a non-literal descriptor, a
-/// descriptor whose word is not a literal string, and a spec holding a key the
-/// walk cannot name all decline the **whole** call and bind nothing.
-///
-/// A **string key** in the spec is not a decline but a non-return: PHP raises
-/// `ValueError: proc_open(): Argument #2 ($descriptor_spec) must be an integer
-/// indexed array` (probed), so it is declined here for the ordinary reason
-/// rather than given a place.
+/// that was not proven. Legs 2, 3, 5 and 6 refuse whole for a second reason on
+/// top of that one: each of them is a spec on which `proc_open` writes
+/// **nothing**, every time it runs, so a place bound beside it would be a
+/// finding on a line that is never reached.
 pub(crate) fn proc_open_places(
     cx: &Cx,
     folder: &mut dyn Folder,
@@ -489,14 +554,18 @@ pub(crate) fn proc_open_places(
     let normalized = steins_syntax::normalize_array(&items, cx.php_minor)?;
     let mut places = Vec::new();
     for (key, descriptor) in normalized {
-        // A string key is the `ValueError` above; an integer key is a place.
+        // Leg 2: a string key is the `ValueError` above; an integer key can be a
+        // place. Leg 3: a negative one never is — the call fails before writing.
         let steins_syntax::NormKey::Int(index) = key else { return None };
+        if index < 0 {
+            return None;
+        }
+        // Leg 4. The descriptor's word is its element `0`. A descriptor whose
+        // first cell is not a literal string is one whose word is unknown — not
+        // a non-`pipe`, which is why it refuses the whole spec rather than
+        // contributing nothing.
         let ArgValue::Array(cells) = descriptor else { return None };
         let cells = steins_syntax::normalize_array(&cells, cx.php_minor)?;
-        // The descriptor's word is its element `0`. A descriptor whose first
-        // cell is not a literal string is one whose word is unknown — not a
-        // non-`pipe`, which is why it refuses the whole spec rather than
-        // contributing nothing.
         let word = match cells.iter().find(|(k, _)| *k == steins_syntax::NormKey::Int(0)) {
             Some((_, ArgValue::Str(s))) => s.clone(),
             // No cell `0` at all is a `ValueError` out of the engine
@@ -504,7 +573,14 @@ pub(crate) fn proc_open_places(
             // statement that could read a place; refused here regardless.
             _ => return None,
         };
-        if word.as_bytes().eq_ignore_ascii_case(PIPE_DESCRIPTOR.as_bytes()) {
+        // Leg 5, byte for byte, and leg 6 beside it.
+        let row = descriptor_word(word.as_bytes())?;
+        let present =
+            |cell: &i64| cells.iter().any(|(k, _)| *k == steins_syntax::NormKey::Int(*cell));
+        if !row.cells.iter().all(present) {
+            return None;
+        }
+        if row.binds_place {
             places.push((VKey::Int(index), produced_handle(PROC_OPEN, ResourceKind::Stream)));
         }
     }
