@@ -593,6 +593,19 @@ pub(crate) struct Store {
     pub(crate) refs: HashMap<String, AllocId>,
     pub(crate) heap: HashMap<AllocId, HeapObj>,
     pub(crate) resources: HashMap<AllocId, HeapRes>,
+    /// Whether an element **place** (ADR-0098 §2.2) may be bound anywhere in this
+    /// store — the guard that keeps [`Store::drop_places_of`]'s four full-map
+    /// sweeps off the per-statement invalidation path of every file that never
+    /// indexes a handle, which is nearly all of them.
+    ///
+    /// **A one-way over-approximation, by construction.** Set by
+    /// [`Store::bind_place`], cleared only by [`Store::clear`], and OR-ed at a
+    /// join; no sweep ever clears it, because a place living in `contract` can
+    /// outlive its `refs` entry (a join keeps the arm lane where every branch
+    /// had it while dropping a ref the branches disagreed on). So `true` with
+    /// nothing left to sweep costs one wasted scan, and `false` is a proof that
+    /// nothing was ever bound — the sweep itself stays exactly as blunt as it is.
+    pub(crate) may_hold_places: bool,
     /// **Contract facts** (ADR-0052 §1): a variable's declared type as a lowered
     /// syntactic arm list, seeded at scope entry (§9) and narrowed by guards
     /// arm-wise (`instanceof`, `!== null`). Each arm carries its own trust stratum:
@@ -754,6 +767,7 @@ impl Store {
     /// one entry (PHP's handle semantics, one level out).
     pub(crate) fn bind_place(&mut self, place: String, id: AllocId) {
         self.refs.insert(place, id);
+        self.may_hold_places = true;
     }
 
     /// Set the state of the heap resource `var` refers to. A no-op where `var`
@@ -822,7 +836,16 @@ impl Store {
     /// key cannot answer, and a place that outlives its base would be a stale
     /// `Closed` — a false positive on the default surface. A dropped place is
     /// silence, which is where the family started.
+    ///
+    /// [`Store::may_hold_places`] short-circuits the whole body where nothing
+    /// was ever bound: this runs from [`Store::unbind`], at ~30 call sites
+    /// including the per-statement invalidation loop, and a file that never
+    /// indexes a handle should not pay a `format!` and four full-map `retain`s
+    /// per statement for a feature it does not use.
     pub(crate) fn drop_places_of(&mut self, var: &str) {
+        if !self.may_hold_places {
+            return;
+        }
         let prefix = format!("{var}[");
         self.refs.retain(|k, _| !k.starts_with(&prefix));
         self.contract.retain(|k, _| !k.starts_with(&prefix));
@@ -833,6 +856,9 @@ impl Store {
     /// The element places bound under `var`, with the allocation each names
     /// (ADR-0098). Empty for a variable nothing indexed into.
     pub(crate) fn places_under(&self, var: &str) -> Vec<(&str, AllocId)> {
+        if !self.may_hold_places {
+            return Vec::new();
+        }
         let prefix = format!("{var}[");
         self.refs
             .iter()
@@ -849,6 +875,7 @@ impl Store {
         self.members.clear();
         self.contract.clear();
         self.narrowed.clear();
+        self.may_hold_places = false;
     }
 
     /// The narrowed declared-type arm lane of `var` (ADR-0052 §3, consumer (d) —
@@ -1550,7 +1577,22 @@ pub(crate) fn join_stores(first: &Store, rest: &[&Store]) -> Store {
         .cloned()
         .collect();
 
-    Store { refs, heap, resources, contract, narrowed, members, vouched, guarded_calls }
+    // The place guard ORs rather than intersects (see [`Store::may_hold_places`]):
+    // the joined `contract` can keep a place lane whose `refs` entry the branches
+    // disagreed on, so a branch that bound one is enough to keep sweeping.
+    let may_hold_places = first.may_hold_places || rest.iter().any(|s| s.may_hold_places);
+
+    Store {
+        refs,
+        heap,
+        resources,
+        contract,
+        narrowed,
+        members,
+        vouched,
+        guarded_calls,
+        may_hold_places,
+    }
 }
 
 /// Remove contract arms another surviving arm subsumes (`Certainty::Yes`) — the
@@ -1622,5 +1664,79 @@ pub(crate) fn absorb_contract_arms(arms: &mut Vec<ContractArm>) {
         let Some((i, j, m)) = merged_at else { return };
         arms[i] = m;
         arms.remove(j);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use steins_contract::{ContractTy, ResourceState};
+
+    fn resource_arm() -> Vec<ContractArm> {
+        vec![ContractArm {
+            ty: ContractTy::resource(ResourceState::Open),
+            stratum: Stratum::Verified,
+        }]
+    }
+
+    /// The sweep takes the **whole** lane set under the base, not only `refs`
+    /// (ADR-0098 §2.3). The `contract` half is the one easy to leave behind: it
+    /// convicts nothing on its own, so a residue there gets found the hard way
+    /// rather than by a finding.
+    #[test]
+    fn dropping_a_base_drops_every_lane_of_its_places() {
+        let mut store = Store::default();
+        store.bind_place("arr[0]".to_owned(), 1);
+        store.contract.insert("arr[0]".to_owned(), resource_arm());
+        store.contract.insert("arr".to_owned(), resource_arm());
+        store.contract.insert("arrays[0]".to_owned(), resource_arm());
+        store.narrowed.insert("arr[0]".to_owned());
+
+        store.drop_places_of("arr");
+
+        assert!(!store.refs.contains_key("arr[0]"));
+        assert!(!store.contract.contains_key("arr[0]"));
+        assert!(!store.narrowed.contains("arr[0]"));
+        // The base itself is `unbind`'s business, and a DIFFERENT variable whose
+        // name merely starts the same way is nobody's: the prefix is `arr[`.
+        assert!(store.contract.contains_key("arr"));
+        assert!(store.contract.contains_key("arrays[0]"));
+    }
+
+    /// The guard that keeps the sweep off the per-statement invalidation path of
+    /// every file that never indexes a handle. `false` has to be a proof, so
+    /// nothing but [`Store::bind_place`] may set it and nothing but
+    /// [`Store::clear`] may clear it.
+    #[test]
+    fn the_place_guard_is_a_one_way_over_approximation() {
+        let mut store = Store::default();
+        assert!(!store.may_hold_places, "a fresh store binds no place");
+
+        store.bind_place("arr[0]".to_owned(), 1);
+        assert!(store.may_hold_places);
+
+        // A sweep that emptied the family does NOT clear the flag: a place can
+        // outlive its `refs` entry in `contract` (a join keeps the arm lane where
+        // every branch had it and drops a ref the branches disagreed on), so the
+        // next sweep must still run.
+        store.drop_places_of("arr");
+        assert!(store.may_hold_places);
+
+        store.clear();
+        assert!(!store.may_hold_places, "a Barrier reaches everything");
+    }
+
+    /// With the flag down the sweep is a no-op — safe only because the flag
+    /// cannot be down while a place exists.
+    #[test]
+    fn the_guard_short_circuits_the_sweep() {
+        let mut store = Store::default();
+        store.contract.insert("arr[0]".to_owned(), resource_arm());
+        store.drop_places_of("arr");
+        assert!(
+            store.contract.contains_key("arr[0]"),
+            "nothing bound a place, so nothing swept — and nothing could have put this here",
+        );
+        assert!(store.places_under("arr").is_empty());
     }
 }
