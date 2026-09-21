@@ -10,7 +10,8 @@ use steins_syntax::{ArgValue, CallExpr, Span, ValueOp};
 use crate::fold::Folder;
 use crate::annotate::{FactKind, LineFact};
 use crate::builtin_returns::{
-    CATALOG_FLOOR, builtin_call_return_fact, builtin_resource_arms, builtin_return_floor,
+    CATALOG_FLOOR, bind_produced_places, builtin_call_return_fact, builtin_resource_arms,
+    builtin_return_floor, socket_pair_places,
     escape_mentioned_resources, floor_value_fact, shape_builtin_return_fact,
 };
 use crate::cond::{
@@ -572,6 +573,22 @@ pub(crate) fn apply_assign(
                 }
             },
         },
+    }
+
+    // The array-of-handles producer rung (ADR-0098 §2.2): `$pair =
+    // stream_socket_pair(…)` binds two element PLACES where every rung above
+    // binds one variable. It runs after the match rather than inside an arm of
+    // it, because which arm answered the value lane is the engine's business —
+    // the reflected envelope seeds `array|false` with a live sidecar and the
+    // declared floor seeds the same arms without one — while the places are the
+    // same answer either way. Every arm above has already run `unbind(var)`,
+    // which is what drops the previous binding's places (§2.3's sweep), so the
+    // places minted here are this call's and no earlier one's.
+    if let ArgValue::Call(name, _) = value
+        && !w.scope.poisoned
+        && let Some(places) = socket_pair_places(cx, folder, name)
+    {
+        bind_produced_places(w, var, places, store);
     }
 
     if let Some(arms) = copied_arms {
