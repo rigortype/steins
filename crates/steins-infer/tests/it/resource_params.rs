@@ -592,13 +592,13 @@ fn an_element_of_an_array_literal_is_the_handle_the_variable_holds() {
         "$h = fopen('php://memory', 'r');\n\
          if ($h === false) { throw new \\RuntimeException('x'); }\n\
          $arr = [$h];\nfclose($arr[0]);\nfread($h, 1);\n",
-        "argument $h to fread() cannot become resource $stream — the handle is closed; proven TypeError (must be an open stream resource, in either mode)",
+        "argument $h to fread() cannot become resource $stream — the handle is closed; proven TypeError (the position needs an open handle, in either mode)",
     );
     one_in_both_modes(
         "$h = fopen('php://memory', 'r');\n\
          if ($h === false) { throw new \\RuntimeException('x'); }\n\
          $arr = [$h];\nfclose($h);\nfread($arr[0], 1);\n",
-        "argument $arr[0] to fread() cannot become resource $stream — the handle is closed; proven TypeError (must be an open stream resource, in either mode)",
+        "argument $arr[0] to fread() cannot become resource $stream — the handle is closed; proven TypeError (the position needs an open handle, in either mode)",
     );
 }
 
@@ -611,7 +611,7 @@ fn a_string_key_names_a_place_too() {
         // The message renders the ARGUMENT, which spells its key the way every
         // other value message does; the place key underneath it is canonical
         // (`arr['in']`), and the two never have to agree.
-        "argument $arr[\"in\"] to fread() cannot become resource $stream — the handle is closed; proven TypeError (must be an open stream resource, in either mode)",
+        "argument $arr[\"in\"] to fread() cannot become resource $stream — the handle is closed; proven TypeError (the position needs an open handle, in either mode)",
     );
 }
 
@@ -638,7 +638,7 @@ fn a_key_the_walk_proved_names_the_place_it_proves() {
         "$h = fopen('php://memory', 'r');\n\
          if ($h === false) { throw new \\RuntimeException('x'); }\n\
          $arr = [$h];\nfclose($arr[0]);\n$i = 0;\nfread($arr[$i], 1);\n",
-        "argument $arr[$i] to fread() cannot become resource $stream — the handle is closed; proven TypeError (must be an open stream resource, in either mode)",
+        "argument $arr[$i] to fread() cannot become resource $stream — the handle is closed; proven TypeError (the position needs an open handle, in either mode)",
     );
     // …and it picks the RIGHT entry: `$i = 1` names the open sibling.
     silent_in_both_modes(
@@ -732,7 +732,7 @@ fn sweep_case(sweep: &str) -> String {
 fn the_sweep_control_still_convicts() {
     one_in_both_modes(
         &sweep_case(""),
-        "argument $arr[0] to fread() cannot become resource $stream — the handle is closed; proven TypeError (must be an open stream resource, in either mode)",
+        "argument $arr[0] to fread() cannot become resource $stream — the handle is closed; proven TypeError (the position needs an open handle, in either mode)",
     );
 }
 
