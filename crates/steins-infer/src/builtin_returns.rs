@@ -260,11 +260,68 @@ pub(crate) fn store_holds_resource(store: &Store, var: &str) -> bool {
 /// `is_resource` guard or an escape moves its state, so a docblock's
 /// `open-resource`/`closed-resource` — `Asserted`, and heap-less — never
 /// reaches a state here.
+///
+/// An `Open` entry is answered as `Unknown` where [`open_is_a_proof`] says the
+/// handle can be closed by something that never names it. `Closed` needs no such
+/// check: nothing reopens a handle.
 pub(crate) fn proven_resource_state(store: &Store, var: &str) -> Option<HandleState> {
     if !store_holds_resource(store, var) {
         return None;
     }
-    Some(store.res_of(var).map_or(HandleState::Unknown, |r| r.state))
+    Some(match store.res_of(var) {
+        Some(r) if r.state == HandleState::Open && !open_is_a_proof(r) => HandleState::Unknown,
+        Some(r) => r.state,
+        None => HandleState::Unknown,
+    })
+}
+
+/// The producers whose `Open` survives until something **names** the handle —
+/// the premise of ADR-0097 §2.3's "`Open` at allocation is a proof", which
+/// holds for these rows and no others. Keyed by `(producer, kind)`, because
+/// `proc_open` mints both a `process` handle and its `stream` pipes and only the
+/// first is on this list.
+///
+/// Probed at 8.5.10, each handle below read `resource` after every other handle
+/// in its script was closed or dropped. The ones left off were closed without
+/// being named:
+///
+/// * `stream_filter_append`/`_prepend`: closing the filter's stream closes the
+///   filter (`fclose`, `pclose`, `gzclose` alike), and so does dropping the
+///   stream's last reference — `stream_filter_append(fopen(…), …)` answers a
+///   filter that reads `resource (closed)` on the next line.
+/// * `proc_open`'s pipes: `proc_close($p)` closes every pipe, and so does
+///   dropping the process (`$p = null`).
+/// * `pfsockopen`, and `stream_socket_client` with `STREAM_CLIENT_PERSISTENT`:
+///   a second call to the same address hands back the **same** handle
+///   (`get_resource_id` answers `7` twice), so `fclose($a)` closes `$b`.
+/// * `socket_export_stream`: `socket_close($socket)` closes the exported stream.
+/// * `pg_socket`: not probed (no server to connect to), so not on the list.
+///
+/// A producer added to `resource_returns.toml` later is off the list until it is
+/// probed: off the list, a handle is `Unknown` rather than `Open`, which
+/// convicts nothing.
+const OPEN_IS_A_PROOF: &[(&str, ResourceKind)] = &[
+    ("bzopen", ResourceKind::Stream),
+    ("fopen", ResourceKind::Stream),
+    ("fsockopen", ResourceKind::Stream),
+    ("gzopen", ResourceKind::Stream),
+    ("opendir", ResourceKind::Dir),
+    ("popen", ResourceKind::Stream),
+    ("proc_open", ResourceKind::Process),
+    ("stream_context_create", ResourceKind::StreamContext),
+    ("stream_context_get_default", ResourceKind::StreamContext),
+    ("stream_context_set_default", ResourceKind::StreamContext),
+    ("stream_socket_accept", ResourceKind::Stream),
+    ("stream_socket_pair", ResourceKind::Stream),
+    ("stream_socket_server", ResourceKind::Stream),
+    ("tmpfile", ResourceKind::Stream),
+];
+
+/// Whether an `Open` state on `res` is a proof that the handle is open, rather
+/// than only that nothing on this path named it in a close — see
+/// [`OPEN_IS_A_PROOF`].
+pub(crate) fn open_is_a_proof(res: &HeapRes) -> bool {
+    OPEN_IS_A_PROOF.iter().any(|(p, k)| *p == res.producer && *k == res.kind)
 }
 
 /// The **resource-return arms** of a builtin call (ADR-0056 §8): `resource` plus,
