@@ -1728,8 +1728,14 @@ mod tests {
 
     /// The guard that keeps the sweep off the per-statement invalidation path of
     /// every file that never indexes a handle. `false` has to be a proof, so
-    /// nothing but [`Store::bind_place`] may set it and nothing but
-    /// [`Store::clear`] may clear it.
+    /// EVERY route that inserts a place key must raise it and nothing but
+    /// [`Store::clear`] may lower it.
+    ///
+    /// This used to say "nothing but [`Store::bind_place`] may set it", and that
+    /// was the bug: the producers mint their places through
+    /// [`Store::bind_resource`], which did not know it was inserting one, so a
+    /// file whose places all came from `stream_socket_pair` skipped the sweep and
+    /// convicted a rebound `$pair[0]`. The flag now follows the key's namespace.
     #[test]
     fn the_place_guard_is_a_one_way_over_approximation() {
         let mut store = Store::default();
@@ -1737,6 +1743,18 @@ mod tests {
 
         store.bind_place("arr[0]".to_owned(), 1);
         assert!(store.may_hold_places);
+
+        // The producer route: a place minted with its own fresh resource.
+        let mut produced = Store::default();
+        let res = HeapRes {
+            kind: steins_catalog::ResourceKind::Stream,
+            state: HandleState::Open,
+            producer: "stream_socket_pair".to_owned(),
+        };
+        produced.bind_resource("h", 2, res.clone());
+        assert!(!produced.may_hold_places, "a variable is not a place");
+        produced.bind_resource("pair[0]", 3, res);
+        assert!(produced.may_hold_places, "a place minted by a producer must raise the flag too");
 
         // A sweep that emptied the family does NOT clear the flag: a place can
         // outlive its `refs` entry in `contract` (a join keeps the arm lane where
