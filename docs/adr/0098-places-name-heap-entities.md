@@ -50,9 +50,35 @@ The identity is therefore not missing from the heap; it is missing a *name*.
   **list of exactly two** `resource (stream)` handles, or `false`.
 - `proc_open()` writes `$pipes` with **one entry per `pipe` descriptor**,
   keyed by that descriptor's key in the spec — `[0 => ['pipe','r'], 2 => ['pipe','w']]`
-  yields keys `0` and `2`. A `file` descriptor produces **no** entry:
-  `[0 => ['file', …], 1 => ['pipe','w']]` yields the single key `1`. The key
-  set is a function of the spec argument, not of the arity.
+  yields keys `0` and `2`. A `file`, `null` or `redirect` descriptor produces
+  **no** entry: `[0 => ['file', …], 1 => ['pipe','w']]` yields the single key
+  `1`. A `socket` and a `pty` descriptor **do** produce one —
+  `[1 => ['socket'], 0 => ['pipe','r']]` yields `[1, 0]`, and
+  `[0 => ['pty'], 1 => ['pty']]` yields `[0, 1]` on a build with
+  pseudo-terminal support. The key set is a function of the spec argument, not
+  of the arity, and the key may be any non-negative integer:
+  `[100 => ['pipe','r']]` yields `[100]`.
+  *(Amended 2026-09-21 by the slice that mined it: the original bullet said
+  only `pipe` and only `file`, neither measured beyond those two words.)*
+- **On the failure path `$pipes` is not emptied — it is untouched.** With a
+  sentinel in `$pipes` before the call, a `proc_open()` that answers `false`
+  leaves the sentinel byte for byte. So the failure outcome is the *absence*
+  of a write, which is why the catalog's witness is `ReturnTruthy` and not
+  `CallReturns`.
+- **The spec has spellings on which `proc_open()` never writes at all**, on
+  every execution rather than on a failure path, and they are errors of the
+  caller's code rather than of its data. The descriptor word is compared
+  **case-sensitively**: `['PIPE','r']` warns
+  `proc_open(): PIPE is not a valid descriptor spec/mode`, answers `false` and
+  leaves `$pipes` untouched, as do `FILE`, `NULL`, `REDIRECT` and `PTY`. A
+  **negative** key warns `Unable to copy file descriptor 5 (for pipe) into
+  file descriptor -1: Bad file descriptor` and does the same, for every
+  descriptor word alike. A **string** key raises `ValueError: proc_open():
+  Argument #2 ($descriptor_spec) must be an integer indexed array`. A
+  descriptor **missing a cell** the word demands raises one too — `Missing
+  mode parameter for 'pipe'`, `Missing file name parameter for 'file'`,
+  `Missing redirection target` — while the mode's *value* is not validated at
+  all (`['pipe','zzz']` and `['pipe', 5]` both open a pipe).
 - Each such entry is `resource (stream)`, open, and closed by the ordinary
   closers — `fclose($pipes[0])` closes the handle the element holds, and the
   element keeps holding the closed handle.
@@ -95,7 +121,16 @@ just another key in that map, so `if ($c) { fclose($pipes[0]); }` merges to
 - **A producer's out-parameter**: `stream_socket_pair()` binds `pair[0]` and
   `pair[1]` to two fresh `Open` stream handles once the `=== false` guard has
   run; `proc_open()` binds one per `pipe` descriptor of a **proven** spec
-  array, at that descriptor's key. An unproven spec binds nothing.
+  array, at that descriptor's key. An unproven spec binds nothing — and so
+  does a spec PHP itself refuses. A descriptor word outside the accepted set,
+  a negative key, a string key and a descriptor missing a cell the engine
+  demands each bind **nothing at all**, the readable entries of the same spec
+  included, because on those specs `proc_open()` writes nothing on every run:
+  a place bound beside one would be a finding on a line that is never reached.
+  `socket` and `pty` are admitted differently for the same reason — a `socket`
+  leaves the rest of its spec readable and only its own key unclaimed, while a
+  `pty` refuses the whole spec, since a build without pseudo-terminal support
+  fails the call outright and this ADR cannot speak for the build.
 - Nothing else. An element written later (`$bag[1] = fopen(…)`) is out of
   scope for the first slice and named in §4.
 
