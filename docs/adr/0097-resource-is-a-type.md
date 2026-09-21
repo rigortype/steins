@@ -243,30 +243,71 @@ was subtracted, nothing has touched the handle. What can invalidate it is
 exactly what invalidates an object's property fact — an escape — and
 §2.4 says which calls escape.
 
-**Amendment (2026-09-21), and it is a correction rather than a detail:**
-that argument holds only where the handle can be closed through *itself*,
-and four producers break it, each probed at 8.5.10 while nothing named the
-handle:
+**Amendment (2026-09-21), and it is a retraction rather than a detail:**
+`Open` is **not** a proof, and the argument above is withdrawn. `Closed`
+stands unchanged and carries every finding this judgment has.
+
+The premise "a handle changes only through itself" is false. Each of these
+was probed at 8.5.10 with nothing having named the subject, and each was a
+live `phpdoc.param-mismatch` against `@param closed-resource` on **correct**
+PHP:
 
 * a **stream filter** dies with its stream — `fclose`, `pclose` and
   `gzclose` on the stream close the filter, and so does dropping the
-  stream's last reference, so
-  `stream_filter_append(fopen('php://memory', 'r'), 'string.rot13')`
-  answers a handle that is *already* closed;
+  stream's last reference;
 * a **`proc_open` pipe** dies with its process: `proc_close($p)` closes
   every pipe, and so does `$p = null`;
-* **`socket_export_stream`**'s stream is closed by `socket_close($socket)`;
+* **`socket_export_stream`**'s stream is closed by `socket_close($socket)`,
+  and its mirror **`socket_import_stream($h)`** hands out a socket that
+  owns `$h`, so `socket_close()` on the socket closes `$h` — which reaches
+  every socket-stream producer (`fsockopen`, `stream_socket_accept`,
+  `_pair`, `_server`);
+* **`bzopen($stream, 'r')`** takes ownership of the stream, so `bzclose()`
+  closes it too — which reaches `fopen` and `popen`;
+* **`closedir()`** takes **no argument** and closes the most recently
+  opened directory handle (with two open it takes the later one and leaves
+  the earlier open);
 * **`pfsockopen`**, and `stream_socket_client` with
   `STREAM_CLIENT_PERSISTENT`, hand back the **same handle** on a second
   call to one address (`get_resource_id` answers `7` twice), so
   `fclose($a)` closes `$b`.
 
-So `Open` is read as a proof only for the producers a whitelist vouches
-for, and answers `Unknown` — which convicts nothing — for the rest and for
-any producer mined later that no probe has cleared. `Closed` needs no such
-qualification: nothing reopens a handle. This was a live false positive
-before the correction, not a hypothetical: a filter whose stream had been
-closed convicted against `@param closed-resource` while being closed.
+An intermediate attempt kept `Open` for the producers a whitelist vouched
+for; the first three routes above were all on that whitelist. **How the
+vouching was probed is where the defect was**, so the method is recorded
+here rather than left implicit:
+
+1. *sibling drop and close* — read each handle after every other handle in
+   the script was closed or dropped. This is what the whitelist stood on,
+   and it structurally cannot reach a closer that takes no argument or a
+   call that adopts the handle.
+2. *closers with an optional handle parameter* — over
+   `get_defined_functions()['internal']`, every closer-shaped name whose
+   first parameter is optional. One at the pin: `closedir()`. Bounded and
+   re-runnable.
+3. *adoption* — every internal function with a `resource`/`mixed`/untyped
+   parameter returning a handle or an object (98 at the pin), probed for
+   whether closing the result closes the argument. `bzopen` and
+   `socket_import_stream` adopt; `stream_bucket_new`, a context handed to
+   `fopen`/`dir`, and a live stream in a `proc_open` descriptor spec do
+   not.
+
+Axes 2 and 3 see only the extensions the probing build loads, and neither
+sees a userland stream wrapper, whose methods run under `ftell($h)` and can
+reach the handle through `global` — the calibration §2.4 already records.
+`stream-context` is the one kind all three axes leave standing, PHP having
+no operation that closes one; it is **not** carried as a surviving row,
+because the only conviction it would buy is a handle at `@param
+closed-resource`, a contract no context can ever satisfy, and the price
+would be keeping a negative claim over an open surface alive for it.
+
+The deeper reason no whitelist of producers could have worked: the hazard
+is not *who minted the handle* but *what ran afterwards*. A runtime-read
+`Open` is no more durable than a minted one —
+`$d = opendir('/tmp'); if (is_resource($d)) { closedir(); … }` convicted on
+the same channel. `Open` would be a proof under "no call has run since the
+state was established", which this walk does not track; `Closed` needs no
+such qualification, because nothing reopens a handle.
 
 ### 2.4 State discipline: the object escape rule, with a table of closers
 
@@ -412,8 +453,17 @@ to the kind (`'Unknown'` when closed); `get_resource_id` to `int<1, max>`;
 `is_resource` to `true`/`false` by state. Each is a one-row fold over
 §2.1's table, listed so the family is complete rather than discovered.
 
-**Landed 2026-09-21 (issue #756), with four things this section had
+**Landed 2026-09-21 (issue #756), with five things this section had
 wrong or unsaid**, each measured at the pin:
+
+0. **The `Open` column is unreachable.** §2.3's amendment retires `Open`
+   as a proof, so every fold above answers either the `Closed` cell or the
+   union; a handle one line out of its producer folds to the union too.
+   The column stays written because the union is defined as the two cells
+   beside it, and because it is the row a re-established `Open` proof
+   would take. What the folds buy over the declared `string` is the kind
+   spelling, the closed spelling, and a two-member union a later guard can
+   still refute one half of.
 
 1. **`get_debug_type` of a closed handle is `'resource (closed)'`**, not
    the kind spelling this section promised — so the closed cell is the same
@@ -442,9 +492,12 @@ wrong or unsaid**, each measured at the pin:
    own call runs.
 
 What the folds are *for* is narrowing and value facts, not an id of their
-own: `$t = gettype($h); if ($t === 'resource (closed)')` is a live branch
-after a close and a dead one before it, which is the recall — and the
-hazard, since a wrong string would make a live branch look dead.
+own: `fclose($h); $t = gettype($h); if ($t === 'resource')` is a **dead**
+branch, which is the recall — and the hazard, since a wrong string would
+make a live branch look dead. The mirror (`if ($t === 'resource
+(closed)')` before any close) stays **live**, because under point 0 above
+nothing proves the handle open and the union admits both strings. Only the
+closed side refutes anything, which is the same asymmetry §2.3 ends on.
 
 ### 2.8 The retirement path is the design, not a risk to it
 
