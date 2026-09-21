@@ -392,15 +392,176 @@ fn the_other_descriptor_words_produce_no_entry_either() {
 #[test]
 fn socket_and_pty_descriptors_stay_out_although_they_do_produce_an_entry() {
     // The deliberate under-approximation on `proc_open_places`: both words were
-    // probed to yield an entry at 8.5.10, and neither is admitted — `pty` needs
-    // a build with pseudo-terminal support that no table records, and `socket`
-    // is held beside it rather than split from it on one measurement. A missed
-    // finding, which is where the family already was.
+    // probed to yield an entry at 8.5.10 (`[1 => ['socket']]` → key `1`;
+    // `[0 => ['pty'], 1 => ['pty']]` → keys `0` and `1`), and neither is
+    // admitted. A missed finding, which is where the family already was.
     for spec in ["[1 => ['socket']]", "[0 => ['pty'], 1 => ['pty']]"] {
         silent_in_both_modes(&format!(
             "$proc = proc_open('true', {spec}, $pipes);\nfclose($pipes[1]);\nfread($pipes[1], 1);\n"
         ));
     }
+}
+
+#[test]
+fn a_socket_descriptor_leaves_the_rest_of_the_spec_readable_and_a_pty_does_not() {
+    // The two words are held back DIFFERENTLY, because PHP treats them
+    // differently. `socket` is accepted on any build — probed at 8.5.10,
+    // `[1 => ['socket'], 0 => ['pipe','r']]` returns a process and fills keys
+    // `[1, 0]` — so the spec stays readable and only the socket's own key goes
+    // unclaimed.
+    one_in_both_modes(
+        "$proc = proc_open('true', [1 => ['socket'], 0 => ['pipe', 'r']], $pipes);\n\
+         fclose($pipes[0]);\nfread($pipes[0], 1);\n",
+        "argument $pipes[0] to fread() cannot become resource $stream — the handle is closed; proven TypeError (must be an open stream resource, in either mode)",
+    );
+    // `pty` needs a build whose `proc_open` has pseudo-terminal support. This
+    // one has it, but a build without it cannot both refuse the word and write
+    // the other keys — so the whole spec is refused rather than the word alone,
+    // and `$pipes[0]` beside a `pty` is not a place.
+    silent_in_both_modes(
+        "$proc = proc_open('true', [1 => ['pty'], 0 => ['pipe', 'r']], $pipes);\n\
+         fclose($pipes[0]);\nfread($pipes[0], 1);\n",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// `proc_open`: the specs on which PHP writes NOTHING, every time it runs
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_descriptor_word_is_compared_byte_for_byte() {
+    // php-src compares the word case-SENSITIVELY. Probed at 8.5.10, with a
+    // sentinel in `$pipes` before each call:
+    //
+    //   [0 => ['PIPE','r']]  → Warning: proc_open(): PIPE is not a valid
+    //                          descriptor spec/mode;  ret false;  $pipes untouched
+    //   [0 => ['Pipe','r']]  → the same, naming `Pipe`
+    //   [0 => ['pipe','r']]  → ret resource;  array_keys($pipes) === [0]
+    //
+    // The failure is not a path: it is every execution of that line. So a place
+    // minted for `PIPE` would convict a statement PHP never reaches.
+    for word in ["PIPE", "Pipe", "pIpE"] {
+        silent_in_both_modes(&format!(
+            "$proc = proc_open('true', [0 => ['{word}', 'r']], $pipes);\n\
+             fclose($pipes[0]);\nfread($pipes[0], 1);\n"
+        ));
+    }
+    // The other direction, so the silence above is the comparison and not a
+    // spec this walk stopped reading: the lowercase spelling still convicts.
+    one_in_both_modes(
+        "$proc = proc_open('true', [0 => ['pipe', 'r']], $pipes);\n\
+         fclose($pipes[0]);\nfread($pipes[0], 1);\n",
+        "argument $pipes[0] to fread() cannot become resource $stream — the handle is closed; proven TypeError (must be an open stream resource, in either mode)",
+    );
+    // The same case-sensitivity, on the words that produce no entry: probed,
+    // `FILE`, `NULL` and `REDIRECT` each warn `… is not a valid descriptor
+    // spec/mode` and leave `$pipes` untouched, so the `pipe` beside them is not
+    // a place either.
+    for spec in [
+        "[0 => ['FILE', '/dev/null', 'r'], 1 => ['pipe', 'w']]",
+        "[0 => ['NULL'], 1 => ['pipe', 'w']]",
+        "[1 => ['pipe', 'w'], 2 => ['REDIRECT', 1]]",
+    ] {
+        silent_in_both_modes(&format!(
+            "$proc = proc_open('true', {spec}, $pipes);\n\
+             fclose($pipes[1]);\nfread($pipes[1], 1);\n"
+        ));
+    }
+}
+
+#[test]
+fn an_unaccepted_descriptor_word_refuses_the_whole_spec() {
+    // Whole, not the one entry: PHP wrote nothing at all, so the readable pipe
+    // beside it describes no handle either.
+    silent_in_both_modes(
+        "$proc = proc_open('true', [0 => ['PIPE', 'r'], 1 => ['pipe', 'w']], $pipes);\n\
+         fclose($pipes[1]);\nfread($pipes[1], 1);\n",
+    );
+    silent_in_both_modes(
+        "$proc = proc_open('true', [0 => ['nonsense'], 1 => ['pipe', 'w']], $pipes);\n\
+         fclose($pipes[1]);\nfread($pipes[1], 1);\n",
+    );
+}
+
+#[test]
+fn a_negative_key_refuses_the_whole_spec() {
+    // Probed at 8.5.10, and for every descriptor word alike (`pipe`, `null`,
+    // `file`, `socket`, `pty`): `[-1 => …]` warns `proc_open(): Unable to copy
+    // file descriptor 5 (for pipe) into file descriptor -1: Bad file
+    // descriptor`, answers `false`, and leaves `$pipes` untouched.
+    silent_in_both_modes(
+        "$proc = proc_open('true', [-1 => ['pipe', 'r']], $pipes);\n\
+         fclose($pipes[-1]);\nfread($pipes[-1], 1);\n",
+    );
+    silent_in_both_modes(
+        "$proc = proc_open('true', [-1 => ['pipe', 'r'], 0 => ['pipe', 'r']], $pipes);\n\
+         fclose($pipes[0]);\nfread($pipes[0], 1);\n",
+    );
+    // …while a large NON-negative key is an ordinary place: probed,
+    // `[100 => ['pipe','r']]` yields `array_keys($pipes) === [100]`.
+    one_in_both_modes(
+        "$proc = proc_open('true', [100 => ['pipe', 'r']], $pipes);\n\
+         fclose($pipes[100]);\nfread($pipes[100], 1);\n",
+        "argument $pipes[100] to fread() cannot become resource $stream — the handle is closed; proven TypeError (must be an open stream resource, in either mode)",
+    );
+}
+
+#[test]
+fn a_descriptor_missing_a_cell_php_demands_refuses_the_whole_spec() {
+    // Each of these raises a `ValueError` before `proc_open` returns anything,
+    // so no statement after the call runs at all. Probed at 8.5.10, one message
+    // per line:
+    //
+    //   [0 => ['pipe']]                 ValueError: Missing mode parameter for 'pipe'
+    //   [0 => ['file']]                 ValueError: Missing file name parameter for 'file'
+    //   [0 => ['file','/dev/null']]     ValueError: Missing mode parameter for 'file'
+    //   [2 => ['redirect']]             ValueError: Missing redirection target
+    for spec in [
+        "[0 => ['pipe']]",
+        "[0 => ['pipe'], 1 => ['pipe', 'w']]",
+        "[0 => ['file'], 1 => ['pipe', 'w']]",
+        "[0 => ['file', '/dev/null'], 1 => ['pipe', 'w']]",
+        "[2 => ['redirect'], 1 => ['pipe', 'w']]",
+    ] {
+        silent_in_both_modes(&format!(
+            "$proc = proc_open('true', {spec}, $pipes);\n\
+             fclose($pipes[1]);\nfread($pipes[1], 1);\n\
+             fclose($pipes[0]);\nfread($pipes[0], 1);\n"
+        ));
+    }
+}
+
+#[test]
+fn only_the_presence_of_the_mode_cell_is_checked_and_never_its_value() {
+    // The engine does not validate the mode either. Probed at 8.5.10, both of
+    // these return a process and fill key `0`: `[0 => ['pipe','zzz']]` and
+    // `[0 => ['pipe', 5]]`. So a place is bound for both, and a rule that read
+    // the mode would refuse a spec PHP accepts.
+    for cell in ["'zzz'", "5", "''"] {
+        one_in_both_modes(
+            &format!(
+                "$proc = proc_open('true', [0 => ['pipe', {cell}]], $pipes);\n\
+                 fclose($pipes[0]);\nfread($pipes[0], 1);\n"
+            ),
+            "argument $pipes[0] to fread() cannot become resource $stream — the handle is closed; proven TypeError (must be an open stream resource, in either mode)",
+        );
+    }
+}
+
+#[test]
+fn a_string_key_in_the_spec_binds_nothing() {
+    // Probed: `ValueError: proc_open(): Argument #2 ($descriptor_spec) must be
+    // an integer indexed array`. The call raises before it returns, so the
+    // `pipe` under the string key is not a place — and neither is the integer
+    // key beside it.
+    silent_in_both_modes(
+        "$proc = proc_open('true', ['a' => ['pipe', 'r']], $pipes);\n\
+         fclose($pipes['a']);\nfread($pipes['a'], 1);\n",
+    );
+    silent_in_both_modes(
+        "$proc = proc_open('true', ['a' => ['pipe', 'r'], 0 => ['pipe', 'r']], $pipes);\n\
+         fclose($pipes[0]);\nfread($pipes[0], 1);\n",
+    );
 }
 
 #[test]
@@ -674,4 +835,193 @@ fn the_row_does_not_change_the_statement_no_effect_verdict() {
         .filter(|d| d.id == steins_infer::STATEMENT_NO_EFFECT_ID)
         .collect();
     assert!(out.is_empty(), "a `proc_open` statement has an effect: {out:?}");
+}
+
+// ---------------------------------------------------------------------------
+// The two positions the row is read at, and the gates that shut both
+// ---------------------------------------------------------------------------
+
+/// The finding `fclose($pipes[0]); fread($pipes[0], 1);` yields, spelled once —
+/// every guard-position pin below is the same two statements under a different
+/// header.
+const CLOSED_PIPE_0: &str =
+    "argument $pipes[0] to fread() cannot become resource $stream — the handle is closed; proven TypeError (must be an open stream resource, in either mode)";
+
+#[test]
+fn the_guard_position_seeds_on_every_shape_that_proves_the_call_returned_truthy() {
+    // `seed_produced_places` in `branch.rs`, which the PR calls the strongest
+    // position the row has and which nothing else here exercises. The witness is
+    // `ReturnTruthy` (probed: a `proc_open` that answers `false` leaves `$pipes`
+    // untouched), so a branch that proved the call truthy has proved the write.
+    let spec = "[0 => ['pipe', 'r']]";
+    let body = "fclose($pipes[0]);\nfread($pipes[0], 1);\n";
+    for header in [
+        format!("if (proc_open('true', {spec}, $pipes)) {{\n{body}}}\n"),
+        format!("while (proc_open('true', {spec}, $pipes)) {{\n{body}}}\n"),
+        format!("if (proc_open('true', {spec}, $pipes) && random_int(0, 1)) {{\n{body}}}\n"),
+    ] {
+        one_in_both_modes(&header, CLOSED_PIPE_0);
+    }
+    // …and the polarities that proved the opposite seed nothing. `!proc_open(…)`
+    // and `proc_open(…) === false` both reach their then-branch having proved
+    // the call answered falsy, which is the path where `$pipes` was never
+    // written — a place there would describe a handle that does not exist.
+    for header in [
+        format!("if (!proc_open('true', {spec}, $pipes)) {{\n{body}}}\n"),
+        format!("if (proc_open('true', {spec}, $pipes) === false) {{\n{body}}}\n"),
+    ] {
+        silent_in_both_modes(&header);
+    }
+}
+
+#[test]
+fn a_bare_proc_open_statement_binds_the_same_places_as_the_assignment_form() {
+    // `stmt_produced_places` takes `StmtKind::Call` as well as the assignment,
+    // and the bare form is what code that only wants the pipes writes. Every
+    // other pin here spells `$proc = proc_open(…)`, so without this one the
+    // `StmtKind::Call` arm is unexercised.
+    one_in_both_modes(
+        "proc_open('true', [0 => ['pipe', 'r']], $pipes);\nfclose($pipes[0]);\nfread($pipes[0], 1);\n",
+        CLOSED_PIPE_0,
+    );
+}
+
+#[test]
+fn a_poisoned_scope_convicts_through_no_place() {
+    // ADR-0046: `extract()` and a variable-variable can rewrite the frame under
+    // any name, so nothing in a poisoned scope may say which binding a place is.
+    //
+    // **What this pins, exactly.** It is the POSTURE, not either producer's own
+    // poison gate. Measured by mutation: deleting `!w.scope.poisoned` from the
+    // `stream_socket_pair` rung in `assign.rs`, deleting the `w.scope.poisoned`
+    // leg `produced_places` opens with, and handing `proc_open_places` a `false`
+    // in place of the scope's bit — all three at once — changes no finding this
+    // suite can construct, because `resource_call_effects` refuses a poisoned
+    // scope before any closing call is recorded, and a place that is never
+    // closed convicts nothing. The three gates are defence in depth and are
+    // deliberately not claimed to be pinned; what IS pinned is that a poisoned
+    // scope stays silent through this whole rung, which is the property the
+    // gates exist to protect.
+    for poison in ["extract($a);\n", "$$n = 1;\n", ""] {
+        let trailing = if poison.is_empty() { "extract($a);\n" } else { "" };
+        silent_in_both_modes(&format!(
+            "function f(array $a, string $n): void {{\n\
+             {poison}\
+             $proc = proc_open('true', [0 => ['pipe', 'r']], $pipes);\n\
+             fclose($pipes[0]);\nfread($pipes[0], 1);\n{trailing}}}\n"
+        ));
+        silent_in_both_modes(&format!(
+            "function f(array $a, string $n): void {{\n\
+             {poison}\
+             $pair = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, 0);\n\
+             if ($pair === false) {{ return; }}\n\
+             fclose($pair[0]);\nfread($pair[0], 1);\n{trailing}}}\n"
+        ));
+    }
+    // An ordinary unresolved call is NOT a poisoner, so the silence above is
+    // ADR-0046's and not "a function body the walk gave up on".
+    one_in_both_modes(
+        "function f(array $a): void {\n\
+         nope($a);\n\
+         $proc = proc_open('true', [0 => ['pipe', 'r']], $pipes);\n\
+         fclose($pipes[0]);\nfread($pipes[0], 1);\n}\n",
+        CLOSED_PIPE_0,
+    );
+    // …and the same two scopes clean, so the silence above is the poison and
+    // not the function body.
+    one_in_both_modes(
+        "function f(array $a): void {\n\
+         $proc = proc_open('true', [0 => ['pipe', 'r']], $pipes);\n\
+         fclose($pipes[0]);\nfread($pipes[0], 1);\n}\n",
+        CLOSED_PIPE_0,
+    );
+    one_in_both_modes(
+        "function f(array $a): void {\n\
+         $pair = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, 0);\n\
+         if ($pair === false) { return; }\n\
+         fclose($pair[0]);\nfread($pair[0], 1);\n}\n",
+        "argument $pair[0] to fread() cannot become resource $stream — the handle is closed; proven TypeError (must be an open stream resource, in either mode)",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Two measured asymmetries, pinned so that they stay decisions
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_produced_place_under_an_unbound_base_does_not_survive_a_call() {
+    // `$bag = [$h]` and `$pair = stream_socket_pair(…)` bind the BASE as well as
+    // the places; `proc_open`'s `$pipes` is an out-parameter, so the walk binds
+    // places under a name it never binds. At ADR-0070's by-value survival leg
+    // (`is_value_semantic`) that name reads as one with no lane to save, the
+    // statement's conservative drop stands, and `unbind` takes the places with
+    // it (ADR-0098 §2.3).
+    //
+    // Every cell here errs toward SILENCE, so nothing in it is a false
+    // positive — it is a missed finding, and it is pinned so that the
+    // asymmetry is a decision rather than a surprise. Closing it is one clause
+    // in `is_value_semantic`, which is the ADR-0070 rung and not this one.
+    let bag = "$h = fopen('php://memory', 'r');\nif ($h === false) { return; }\n$bag = [$h];\n";
+    for interposed in ["count($B);\n", "helper($B);\n", "helper($B[0]);\n"] {
+        let pipes = interposed.replace("$B", "$pipes");
+        silent_in_both_modes(&format!(
+            "function helper(mixed $x = null): void {{}}\n\
+             {PIPES}fclose($pipes[0]);\n{pipes}fread($pipes[0], 1);\n"
+        ));
+        // The same statement over a bound base keeps the place, both ways.
+        let pair = interposed.replace("$B", "$pair");
+        one_in_both_modes(
+            &format!(
+                "function helper(mixed $x = null): void {{}}\n\
+                 {PAIR}fclose($pair[0]);\n{pair}fread($pair[0], 1);\n"
+            ),
+            "argument $pair[0] to fread() cannot become resource $stream — the handle is closed; proven TypeError (must be an open stream resource, in either mode)",
+        );
+        let literal = interposed.replace("$B", "$bag");
+        one_in_both_modes(
+            &format!(
+                "function helper(mixed $x = null): void {{}}\n\
+                 {bag}fclose($bag[0]);\n{literal}fread($bag[0], 1);\n"
+            ),
+            "argument $bag[0] to fread() cannot become resource $stream — the handle is closed; proven TypeError (must be an open stream resource, in either mode)",
+        );
+    }
+    // It is the base's binding and not the call: a plain copy is no call at all,
+    // and `$pipes`' places survive it.
+    one_in_both_modes(
+        &format!("{PIPES}fclose($pipes[0]);\n$copy = $pipes;\nfread($pipes[0], 1);\n"),
+        CLOSED_PIPE_0,
+    );
+}
+
+#[test]
+fn no_dir_handle_consumer_carries_a_resource_row() {
+    // The tripwire for the deferral argued on `stmt_produced_places`. PHP has
+    // exactly one closing call that RETURNS without closing — probed at 8.5.10,
+    // `fclose($dirHandle)` warns `cannot close the provided stream, as it must
+    // not be manually closed`, answers `false`, leaves the handle open, and
+    // `readdir()` then succeeds — and the deferral's premise is that a closing
+    // call either closes or does not return.
+    //
+    // What actually keeps that out of reach is the kind-aware closing table
+    // (`fclose_does_not_close_a_directory_handle`, in `resource_values.rs`),
+    // which is the pin that fails loudly if `dir` ever joins `fclose`'s kinds.
+    // The row absence below is the second, weaker shield: it makes the whole
+    // dir family unjudgeable rather than judged correctly. It is pinned here so
+    // that mining one arrives at the paragraph on `stmt_produced_places` rather
+    // than at a surprise.
+    //
+    // All three are `resource|null $dir_handle` in the stubs at the pin, which
+    // is why `mine-resource-params` declines them (a union is judged by the
+    // ordinary relation once the arms lower).
+    for name in ["readdir", "rewinddir", "closedir"] {
+        assert!(
+            steins_catalog::resource_param(name, 0).is_none(),
+            "`{name}` has gained a resource row — read the deferral paragraph on \
+             `stmt_produced_places` before landing it",
+        );
+    }
+    // And the row this whole family does rest on is still there, so the loop
+    // above is an absence and not a broken accessor.
+    assert!(steins_catalog::resource_param("fread", 0).is_some());
 }
