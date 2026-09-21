@@ -135,8 +135,8 @@ const CLOSED_KIND: &str = "Unknown";
 /// Fires only where the argument judgments would read the same handle: a
 /// variable or an element place whose contract lane is one `Verified` resource
 /// arm ([`proven_resource_state`], the §8.6 lock), with the state that function
-/// answers — an `Open` a producer cannot vouch for comes back `Unknown` there.
-/// The kind is read off the heap entry and has to have a probed spelling.
+/// answers. The kind is read off the heap entry and has to have a probed
+/// spelling.
 ///
 /// | fold | `Open` | `Closed` | `Unknown` |
 /// | --- | --- | --- | --- |
@@ -144,6 +144,16 @@ const CLOSED_KIND: &str = "Unknown";
 /// | `get_debug_type` | `'resource (<kind>)'` | `'resource (closed)'` | both |
 /// | `get_resource_type` | `'<kind>'` | `'Unknown'` | both |
 /// | `get_resource_id` | `int<1, max>` | `int<1, max>` | `int<1, max>` |
+///
+/// **No handle reaches the `Open` column today**: [`proven_resource_state`]
+/// answers `Unknown` for every `Open`, because nothing makes that state durable
+/// across a call that closes the handle without naming it (a bare `closedir()`,
+/// an adopting `bzopen`/`socket_import_stream`). The column is the row a
+/// re-established `Open` proof would take, and it is what keeps the `Unknown`
+/// union honest: the union is exactly the two columns beside it. Everything the
+/// folds buy over the declared `string` — the kind spelling, the closed
+/// spelling, the two-member union a guard can still refute one half of — comes
+/// from the other two columns.
 ///
 /// The id is state-independent: a closed handle keeps its id (probed), and the
 /// engine never hands out `0` — the first resource of a CLI request is `STDIN`,
@@ -216,12 +226,56 @@ fn subject_place(
 ) -> Option<String> {
     match subject {
         ArgValue::Var(v) => Some(v.clone()),
-        ArgValue::OffsetRead { base, key }
-            if matches!(**base, ArgValue::Var(_))
-                && (key.is_literal() || matches!(**key, ArgValue::Var(_))) =>
+        // Only the KEY is checked here: `place_of` already refuses a base that
+        // is anything but a variable, so re-stating that would be a second copy
+        // of an invariant with one owner.
+        ArgValue::OffsetRead { key, .. }
+            if key.is_literal() || matches!(**key, ArgValue::Var(_)) =>
         {
             place_of(cx, folder, subject, env, false)
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod kind_spelling_table_tests {
+    //! The shape of [`KIND_SPELLINGS`], which the integration suite cannot see.
+    //! What each row ANSWERS is walked row by row over there
+    //! (`every_row_of_the_spelling_table_folds_to_the_spelling_php_uses`, one
+    //! fixture per row); what is pinned here is that the table has the rows that
+    //! suite carries fixtures for, and that no row can shadow another.
+    use super::KIND_SPELLINGS;
+
+    /// One fixture per row lives in `tests/it/resource_folds.rs`. A row added
+    /// here without one — or removed with one left behind — fails this.
+    const ROWS: usize = 20;
+
+    #[test]
+    fn kind_spellings_covers_every_row() {
+        assert_eq!(KIND_SPELLINGS.len(), ROWS, "add or remove the matching fixture row too");
+    }
+
+    #[test]
+    fn no_producer_kind_pair_is_spelled_twice() {
+        // `kind_spellings` answers with the FIRST match, so a duplicate key
+        // would make one row unreachable and untestable. `proc_open` appears
+        // twice on purpose — its process handle and its pipes — under two kinds.
+        let mut keys: Vec<(&str, String)> =
+            KIND_SPELLINGS.iter().map(|(p, k, _)| (*p, format!("{k:?}"))).collect();
+        keys.sort_unstable();
+        let before = keys.len();
+        keys.dedup();
+        assert_eq!(keys.len(), before, "a `(producer, kind)` key appears twice");
+    }
+
+    #[test]
+    fn every_row_carries_a_non_empty_spelling() {
+        // An empty spelling list would fold `get_resource_type()` to the closed
+        // singleton on an unknown state — a claim, not a decline.
+        for (producer, _, spellings) in KIND_SPELLINGS {
+            assert!(!spellings.is_empty(), "`{producer}` has no spelling");
+            assert!(spellings.iter().all(|s| !s.is_empty()), "`{producer}` has an empty spelling");
+        }
     }
 }

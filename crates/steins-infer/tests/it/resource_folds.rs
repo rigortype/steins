@@ -83,13 +83,87 @@ impl Engine {
                 optional("context", None),
             ],
         );
-        params.insert("opendir".to_owned(), vec![p("directory", Some("string"))]);
-        params.insert("tmpfile".to_owned(), Vec::new());
-        params.insert("stream_context_create".to_owned(), vec![optional("options", Some("?array"))]);
         params.insert(
-            "stream_filter_append".to_owned(),
-            vec![p("stream", None), p("filter_name", Some("string"))],
+            "opendir".to_owned(),
+            vec![p("directory", Some("string")), optional("context", None)],
         );
+        params.insert("tmpfile".to_owned(), Vec::new());
+        params.insert("popen".to_owned(), vec![p("command", Some("string")), p("mode", Some("string"))]);
+        params.insert(
+            "gzopen".to_owned(),
+            vec![
+                p("filename", Some("string")),
+                p("mode", Some("string")),
+                optional("use_include_path", Some("bool")),
+            ],
+        );
+        params.insert("bzopen".to_owned(), vec![p("file", None), p("mode", Some("string"))]);
+        params.insert("socket_export_stream".to_owned(), vec![p("socket", Some("Socket"))]);
+        for name in ["fsockopen", "pfsockopen"] {
+            params.insert(
+                name.to_owned(),
+                vec![
+                    p("hostname", Some("string")),
+                    optional("port", Some("int")),
+                    BuiltinParam { optional: true, ..by_ref("error_code") },
+                    BuiltinParam { optional: true, ..by_ref("error_message") },
+                    optional("timeout", Some("?float")),
+                ],
+            );
+        }
+        params.insert(
+            "stream_socket_server".to_owned(),
+            vec![
+                p("address", Some("string")),
+                BuiltinParam { optional: true, ..by_ref("error_code") },
+                BuiltinParam { optional: true, ..by_ref("error_message") },
+                optional("flags", Some("int")),
+                optional("context", None),
+            ],
+        );
+        params.insert(
+            "stream_socket_client".to_owned(),
+            vec![
+                p("address", Some("string")),
+                BuiltinParam { optional: true, ..by_ref("error_code") },
+                BuiltinParam { optional: true, ..by_ref("error_message") },
+                optional("timeout", Some("?float")),
+                optional("flags", Some("int")),
+                optional("context", None),
+            ],
+        );
+        params.insert(
+            "stream_socket_accept".to_owned(),
+            vec![
+                p("socket", None),
+                optional("timeout", Some("?float")),
+                BuiltinParam { optional: true, ..by_ref("peer_name") },
+            ],
+        );
+        params.insert(
+            "stream_socket_pair".to_owned(),
+            vec![p("domain", Some("int")), p("type", Some("int")), p("protocol", Some("int"))],
+        );
+        params.insert(
+            "stream_context_create".to_owned(),
+            vec![optional("options", Some("?array")), optional("params", Some("?array"))],
+        );
+        params.insert(
+            "stream_context_get_default".to_owned(),
+            vec![optional("options", Some("?array"))],
+        );
+        params.insert("stream_context_set_default".to_owned(), vec![p("options", Some("array"))]);
+        for name in ["stream_filter_append", "stream_filter_prepend"] {
+            params.insert(
+                name.to_owned(),
+                vec![
+                    p("stream", None),
+                    p("filter_name", Some("string")),
+                    optional("mode", Some("int")),
+                    optional("params", Some("mixed")),
+                ],
+            );
+        }
         params.insert(
             "proc_open".to_owned(),
             vec![
@@ -99,7 +173,9 @@ impl Engine {
             ],
         );
         params.insert("fclose".to_owned(), vec![p("stream", None)]);
-        params.insert("closedir".to_owned(), vec![p("dir_handle", None)]);
+        // Optional at 8.5.10, and that is the whole of finding F1: `closedir()`
+        // with no argument closes the most recently opened directory handle.
+        params.insert("closedir".to_owned(), vec![optional("dir_handle", None)]);
         params.insert("proc_close".to_owned(), vec![p("process", None)]);
         params.insert("ftell".to_owned(), vec![p("stream", None)]);
         params.insert("strlen".to_owned(), vec![p("string", Some("string"))]);
@@ -116,6 +192,10 @@ impl Engine {
             ("fclose", "bool"),
             ("closedir", "void"),
             ("proc_close", "int"),
+            // The one producer that declares a return type, and must keep
+            // declaring exactly this one: `socket_pair_places` reads it as its
+            // own tripwire (ADR-0098 §2.2).
+            ("stream_socket_pair", "array|false"),
         ] {
             returns.insert(name.to_owned(), ty.to_owned());
         }
@@ -246,15 +326,51 @@ fn folds_of(subject: &str) -> String {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn an_open_handle_folds_to_its_state_and_its_kind() {
+fn a_fresh_handle_folds_to_its_kind_and_to_both_states() {
     // Probed at 8.5.10 on the handle `fopen('php://memory', 'r')` answers:
     //   gettype()           => "resource"
     //   get_debug_type()    => "resource (stream)"
     //   get_resource_type() => "stream"
     //   get_resource_id()   => 5   (>= 1 for every handle the engine mints)
+    //
+    // The KIND half is what the fold proves here, and it is exact. The STATE
+    // half is not: `Open` is never a proof (`proven_resource_state`), because a
+    // bare `closedir()` or an adopting `bzopen`/`socket_import_stream` closes a
+    // handle while naming nothing. So both state-sensitive folds answer the
+    // union of the two states even one line after the producer returned —
+    // narrower than the declared `string`, and never an accusation.
     assert_eq!(
         dumped(&in_fn(&format!("{OPEN}{}", folds_of("$h"))), Engine::pinned()),
-        ["'resource'", "'resource (stream)'", "'stream'", "int<1, max>"],
+        [
+            "'resource'|'resource (closed)'",
+            "'resource (closed)'|'resource (stream)'",
+            "'Unknown'|'stream'",
+            "int<1, max>",
+        ],
+    );
+}
+
+#[test]
+fn a_keeper_and_a_closer_still_fold_apart() {
+    // What the state half can still tell apart, now that no handle is proven
+    // open: a CLOSER puts the fold on the closed singleton, and a keeper leaves
+    // it on the union. `ftell($h)` reads the handle by value (ADR-0097 §2.4's
+    // keeper row) — probed at 8.5.10, it leaves the handle open — and the
+    // difference between the two answers is the whole state half of §2.7.
+    let closed = in_fn(&format!("{OPEN}fclose($h);\n{}", folds_of("$h")));
+    assert_eq!(
+        dumped(&closed, Engine::pinned()),
+        ["'resource (closed)'", "'resource (closed)'", "'Unknown'", "int<1, max>"],
+    );
+    let kept = in_fn(&format!("{OPEN}ftell($h);\n{}", folds_of("$h")));
+    assert_eq!(
+        dumped(&kept, Engine::pinned()),
+        [
+            "'resource'|'resource (closed)'",
+            "'resource (closed)'|'resource (stream)'",
+            "'Unknown'|'stream'",
+            "int<1, max>",
+        ],
     );
 }
 
@@ -290,33 +406,139 @@ fn an_unknown_state_folds_to_the_union_of_both_states() {
     );
 }
 
+/// **Every row of `resource_folds.rs`'s `KIND_SPELLINGS`**, as a fixture: the
+/// statements that bind the subject, the subject itself, and the
+/// `get_resource_type()` spellings PHP answers for that handle while open.
+///
+/// The spellings are PHP's, not Steins' (`ResourceKind::as_str`): a directory
+/// handle is a plain `stream` — the `dir` kind exists only for the closing
+/// table — a filter is `stream filter` and a persistent stream `persistent
+/// stream`, both with a SPACE where `as_str` writes a hyphen, and a
+/// stream-context is `stream-context` with a hyphen in both. That a wrong
+/// character here is a wrong fact is the whole point of the table, so every row
+/// is walked rather than a representative pair; a row deleted from the table
+/// stops folding and fails its case, and `kind_spellings_covers_every_row`
+/// fails on a row added without one.
+const SPELLING_ROWS: &[(&str, &str, &str, &[&str])] = &[
+    // (label, the statements binding the subject, the subject, open spellings)
+    ("bzopen", "$h = bzopen('a.bz2', 'r');\nif ($h === false) { return; }\n", "$h", &["stream"]),
+    ("fopen", OPEN, "$h", &["stream"]),
+    (
+        "fsockopen",
+        "$h = fsockopen('localhost', 80);\nif ($h === false) { return; }\n",
+        "$h",
+        &["stream"],
+    ),
+    ("gzopen", "$h = gzopen('a.gz', 'r');\nif ($h === false) { return; }\n", "$h", &["stream"]),
+    ("opendir", "$h = opendir('.');\nif ($h === false) { return; }\n", "$h", &["stream"]),
+    (
+        "pfsockopen",
+        "$h = pfsockopen('localhost', 80);\nif ($h === false) { return; }\n",
+        "$h",
+        &["persistent stream"],
+    ),
+    ("popen", "$h = popen('ls', 'r');\nif ($h === false) { return; }\n", "$h", &["stream"]),
+    (
+        "proc_open (the process handle)",
+        "$h = proc_open('ls', [1 => ['pipe', 'w']], $pipes);\nif ($h === false) { return; }\n",
+        "$h",
+        &["process"],
+    ),
+    (
+        "proc_open (a pipe, minted under the producer's name)",
+        "$h = proc_open('ls', [1 => ['pipe', 'w']], $pipes);\nif ($h === false) { return; }\n",
+        "$pipes[1]",
+        &["stream"],
+    ),
+    (
+        "socket_export_stream",
+        "$h = socket_export_stream($s);\nif ($h === false) { return; }\n",
+        "$h",
+        &["stream"],
+    ),
+    ("stream_context_create", "$h = stream_context_create();\n", "$h", &["stream-context"]),
+    (
+        "stream_context_get_default",
+        "$h = stream_context_get_default();\n",
+        "$h",
+        &["stream-context"],
+    ),
+    (
+        "stream_context_set_default",
+        "$h = stream_context_set_default([]);\n",
+        "$h",
+        &["stream-context"],
+    ),
+    (
+        "stream_filter_append",
+        "$h = stream_filter_append($m, 'string.rot13');\nif ($h === false) { return; }\n",
+        "$h",
+        &["stream filter"],
+    ),
+    (
+        "stream_filter_prepend",
+        "$h = stream_filter_prepend($m, 'string.rot13');\nif ($h === false) { return; }\n",
+        "$h",
+        &["stream filter"],
+    ),
+    (
+        "stream_socket_accept",
+        "$h = stream_socket_accept($srv);\nif ($h === false) { return; }\n",
+        "$h",
+        &["stream"],
+    ),
+    // The surprising row (ADR-0097 §2.1): `STREAM_CLIENT_PERSISTENT` makes this
+    // one producer hand back a PERSISTENT stream under the row that says
+    // `stream`, so the row folds to the union of the two spellings.
+    (
+        "stream_socket_client",
+        "$h = stream_socket_client('tcp://127.0.0.1:1');\nif ($h === false) { return; }\n",
+        "$h",
+        &["persistent stream", "stream"],
+    ),
+    (
+        "stream_socket_pair (an element place)",
+        "$h = stream_socket_pair(1, 1, 0);\nif ($h === false) { return; }\n",
+        "$h[0]",
+        &["stream"],
+    ),
+    (
+        "stream_socket_server",
+        "$h = stream_socket_server('tcp://127.0.0.1:0');\nif ($h === false) { return; }\n",
+        "$h",
+        &["stream"],
+    ),
+    ("tmpfile", "$h = tmpfile();\nif ($h === false) { return; }\n", "$h", &["stream"]),
+];
+
+/// The dump rendering of a string union: every member quoted, sorted, `|`-joined.
+fn union_of(members: &[String]) -> String {
+    let mut quoted: Vec<String> = members.iter().map(|m| format!("'{m}'")).collect();
+    quoted.sort();
+    quoted.join("|")
+}
+
 #[test]
-fn every_probed_kind_folds_to_the_spelling_php_uses() {
-    // The kind spellings are PHP's, not Steins' (`ResourceKind::as_str`): a
-    // directory handle is a plain `stream` — the `dir` kind exists only for the
-    // closing table — and a filter is `stream filter` with a SPACE.
-    let cases = [
-        ("$h = opendir('.');\nif ($h === false) { return; }\n", "'resource (stream)'", "'stream'"),
-        (
-            "$h = stream_context_create();\n",
-            "'resource (stream-context)'",
-            "'stream-context'",
-        ),
-    ];
-    for (producer, debug, kind) in cases {
+fn every_row_of_the_spelling_table_folds_to_the_spelling_php_uses() {
+    for (label, prelude, subject, spellings) in SPELLING_ROWS {
         let src = in_fn(&format!(
-            "{producer}$a = get_debug_type($h);\n\\PHPStan\\dumpType($a);\n\
-             $b = get_resource_type($h);\n\\PHPStan\\dumpType($b);\n"
+            "{prelude}$a = get_debug_type({subject});\n\\PHPStan\\dumpType($a);\n\
+             $b = get_resource_type({subject});\n\\PHPStan\\dumpType($b);\n"
         ));
-        assert_eq!(dumped(&src, Engine::pinned()), [debug, kind], "for `{producer}`");
+        // No handle is proven open, so each answer is the row's spellings
+        // together with the closed one — which is what makes the row's own
+        // characters load-bearing in both renderings.
+        let mut debug: Vec<String> =
+            spellings.iter().map(|k| format!("resource ({k})")).collect();
+        debug.push("resource (closed)".to_owned());
+        let mut kind: Vec<String> = spellings.iter().map(|k| (*k).to_owned()).collect();
+        kind.push("Unknown".to_owned());
+        assert_eq!(
+            dumped(&src, Engine::pinned()),
+            [union_of(&debug), union_of(&kind)],
+            "for the `{label}` row",
+        );
     }
-    // The process handle of `proc_open`, whose pipes carry the `stream` spelling
-    // under the same producer name.
-    let src = in_fn(
-        "$p = proc_open('ls', [1 => ['pipe', 'w']], $pipes);\nif ($p === false) { return; }\n\
-         $a = get_debug_type($p);\n\\PHPStan\\dumpType($a);\n",
-    );
-    assert_eq!(dumped(&src, Engine::pinned()), ["'resource (process)'"]);
 }
 
 // ---------------------------------------------------------------------------
@@ -432,10 +654,10 @@ fn the_call_spelling_and_the_binding_spelling_agree() {
     // resolve, and a handle named inside its argument escapes (ADR-0097 §2.4)
     // exactly as it would into any project call.
     let src = format!(
-        "<?php\nfunction a(): void {{\n{OPEN}\\PHPStan\\dumpType(gettype($h));\n}}\n\
-         function b(): void {{\n{OPEN}$a = gettype($h);\n\\PHPStan\\dumpType($a);\n}}\n"
+        "<?php\nfunction a(): void {{\n{OPEN}fclose($h);\n\\PHPStan\\dumpType(gettype($h));\n}}\n\
+         function b(): void {{\n{OPEN}fclose($h);\n$a = gettype($h);\n\\PHPStan\\dumpType($a);\n}}\n"
     );
-    assert_eq!(dumped(&src, Engine::pinned()), ["'resource'", "'resource'"]);
+    assert_eq!(dumped(&src, Engine::pinned()), ["'resource (closed)'", "'resource (closed)'"]);
 }
 
 // ---------------------------------------------------------------------------
@@ -495,10 +717,21 @@ fn a_key_that_could_run_code_names_no_place() {
         "{OPEN}$bag = [$h];\n$a = gettype($bag[$k]);\n\\PHPStan\\dumpType($a);\n"
     ));
     assert_eq!(dumped(&src, Engine::pinned()), ["string"]);
+    // A CONSTANT key is refused by the same clause, and it is the one spelling
+    // that provably cannot run code: a `const` fetch resolves without a call.
+    // It is refused anyway, because the clause admits a literal or a variable
+    // and nothing else. Pinned so that widening it to `ConstFetch` — which
+    // would be sound, and would be a change of rule — cannot happen silently.
+    let src = format!(
+        "<?php\nconst KEY = 0;\n\
+         function subject(): void {{\n{OPEN}$bag = [$h];\n\
+         $a = gettype($bag[KEY]);\n\\PHPStan\\dumpType($a);\n}}\n"
+    );
+    assert_eq!(dumped(&src, Engine::pinned()), ["string"]);
 }
 
 // ---------------------------------------------------------------------------
-// `Open` is a proof only where the producer can vouch for it
+// `Open` is never a proof, so no fold ever answers the open spelling alone
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -507,10 +740,11 @@ fn a_handle_another_handle_can_close_never_folds_to_open() {
     // having named it:
     //   $f = stream_filter_append(fopen('php://memory','r'), 'string.rot13');
     //       -> the stream's last reference is gone, so the FILTER is closed
-    //   proc_open(…, $pipes); proc_close($p);      -> every pipe is closed
-    //   $a = pfsockopen(…); $b = pfsockopen(…);    -> ONE handle, two names
-    // So `Open` is not a proof for them, and both state-sensitive folds answer
-    // the union even on a handle this walk has only just seen produced.
+    //   $d = opendir('/tmp'); closedir();         -> no argument at all
+    //   $h = fsockopen(…); socket_close(socket_import_stream($h));
+    //   $m = fopen($p,'r'); bzclose(bzopen($m,'r'));
+    // So both state-sensitive folds answer the union even on a handle this walk
+    // has only just seen produced, whichever producer minted it.
     let src = in_fn(
         "$m = fopen('php://memory', 'r');\nif ($m === false) { return; }\n\
          $f = stream_filter_append($m, 'string.rot13');\nif ($f === false) { return; }\n\
@@ -521,6 +755,15 @@ fn a_handle_another_handle_can_close_never_folds_to_open() {
         dumped(&src, Engine::pinned()),
         ["'resource'|'resource (closed)'", "'Unknown'|'stream filter'"],
     );
+    // The `opendir` route, which the retired whitelist vouched for: a bare
+    // `closedir()` names nothing, so no site verdict applies and the state
+    // never moves — which is exactly why the state it never moved from must
+    // not be a proof.
+    let src = in_fn(
+        "$d = opendir('.');\nif ($d === false) { return; }\nclosedir();\n\
+         $a = gettype($d);\n\\PHPStan\\dumpType($a);\n",
+    );
+    assert_eq!(dumped(&src, Engine::pinned()), ["'resource'|'resource (closed)'"]);
 }
 
 // ---------------------------------------------------------------------------
@@ -537,18 +780,21 @@ fn guard(prelude: &str, cond: &str) -> String {
 fn a_guard_on_the_folded_value_stays_live_where_the_string_can_occur() {
     let src = guard("fclose($h);\n", "$t === 'resource (closed)'");
     assert_eq!(mismatches(&src, Engine::pinned()).len(), 1, "the closed branch must stay live");
-    let src = guard("", "$t === 'resource'");
-    assert_eq!(mismatches(&src, Engine::pinned()).len(), 1, "the open branch must stay live");
+    // A handle nothing has closed folds to the UNION, so both spellings are
+    // reachable and neither branch may be called dead.
+    for cond in ["$t === 'resource'", "$t === 'resource (closed)'"] {
+        let src = guard("", cond);
+        assert_eq!(mismatches(&src, Engine::pinned()).len(), 1, "`{cond}` must stay live");
+    }
 }
 
 #[test]
 fn a_guard_the_fold_refutes_is_dead() {
     // The other half, and the one a WRONG fold would produce on live code: with
-    // `gettype` answering `string`, both of these branches were live.
+    // `gettype` answering `string`, this branch was live. Only the CLOSED side
+    // refutes anything — `Closed` is the durable half of the state.
     let src = guard("fclose($h);\n", "$t === 'resource'");
     assert!(mismatches(&src, Engine::pinned()).is_empty(), "a closed handle is never 'resource'");
-    let src = guard("", "$t === 'resource (closed)'");
-    assert!(mismatches(&src, Engine::pinned()).is_empty(), "an open handle is never closed");
     // An unknown state refutes neither: the union keeps both branches alive.
     let unknown = format!(
         "{}function helper($x): void {{}}\n",
