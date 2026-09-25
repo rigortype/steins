@@ -1,3 +1,13 @@
+//! Fact and contract helpers that several passes share and none owns: the fact
+//! arithmetic of the shape projections and the transfers ([`join_into`],
+//! [`fact_admitting_null`], …), the abstract-argument arm and the
+//! class-touching contract valves of the phpdoc checks (ADR-0043 stage 4), and
+//! the two renderers a finding message names a value with — [`describe_fact`]
+//! for an abstract fact, [`rendered_cval`] for a proven value.
+//!
+//! Re-exported at the crate root, so consumers import `crate::describe_fact`
+//! and the like.
+
 use std::collections::HashMap;
 
 use steins_domain::{ArmKnown, Base, Fact, IntRange, Key as VKey, Refinement, StrPreds, Val};
@@ -31,6 +41,8 @@ pub(crate) fn val_of_key(k: &VKey) -> Val {
 /// Is every value this fact admits an `int`? (`null` is immaterial to
 /// [`project_flip`]'s question — a null value is skipped by the flip, not turned
 /// into a key.)
+///
+/// [`project_flip`]: crate::shape_projection::project_flip
 pub(crate) fn fact_is_int(f: &Fact) -> bool {
     match f.finite_members() {
         Some(vals) => vals.iter().all(|v| matches!(v, Val::Int(_) | Val::Null)),
@@ -74,6 +86,8 @@ pub(crate) fn arg_abstract_fact<'e>(
 /// Whether a lowered contract type contains a class-name node — a bare identifier
 /// that may actually be a template or a type-alias. The abstract-fact check stays
 /// silent on these (see [`check_phpdoc_param`]).
+///
+/// [`check_phpdoc_param`]: crate::generics::check_phpdoc_param
 pub(crate) fn contract_touches_class(ty: &steins_contract::ContractTy) -> bool {
     use steins_contract::ContractTy as C;
     match ty {
@@ -99,6 +113,8 @@ pub(crate) fn contract_touches_class(ty: &steins_contract::ContractTy) -> bool {
 /// in-body type guards on the rebound value are unmodeled. "Touches a class"
 /// means the proven value is an object, or the contract references a class name.
 /// Scalar-vs-scalar phpdoc checks are unaffected. Always `false` outside a descent.
+///
+/// [`object_world_guard_blind`]: crate::arg_check::object_world_guard_blind
 pub(crate) fn phpdoc_object_guard_blind(in_descent: bool, ty: &PType, cv: Option<&CVal>) -> bool {
     in_descent
         && (matches!(cv, Some(CVal::Object(..)))

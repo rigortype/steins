@@ -1,3 +1,14 @@
+//! The whole-project effect and throw fixpoints of one check run (issue #489,
+//! ADR-0092 §5): the call-graph node they are keyed by ([`Sym`]), the three
+//! textual gates that decide whether either is computed at all ([`Gate`]), and
+//! the lazy holder every consumer in the run reads ([`Fixpoints`]).
+//!
+//! [`Sym`] is re-exported at the crate root with the other two: the effects
+//! pass, the throw system, the escape sweep, the per-file facts and [`Cx`]'s
+//! purity question all key on it.
+//!
+//! [`Cx`]: crate::cx::Cx
+
 use std::collections::HashMap;
 
 use steins_db::{EffectsPolicy, PluginFacts};
@@ -5,8 +16,6 @@ use steins_db::{EffectsPolicy, PluginFacts};
 use crate::project::{FileUnit, Index};
 use crate::{clock, facts, ms, purity, throws};
 
-/// A node in the unified project effect call graph — a free function (keyed by
-/// FQN) or a class method (keyed by class FQN + method name).
 /// Which of the three whole-universe textual gates [`Fixpoints::any`] asks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Gate {
@@ -15,6 +24,8 @@ pub(crate) enum Gate {
     Throws,
 }
 
+/// A node in the unified project effect call graph — a free function (keyed by
+/// FQN) or a class method (keyed by class FQN + method name).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(
     not(target_arch = "wasm32"),
@@ -47,6 +58,8 @@ pub(crate) enum Sym {
 /// Standalone library entry points (`effect_summary`, `region_purity_project`,
 /// `sweep_escapes`, the JSON effect surface) run outside a check and keep
 /// computing their own copy — determinism makes those equal by construction.
+///
+/// [`check_units`]: crate::check_units
 pub(crate) struct Fixpoints<'a> {
     units: &'a [FileUnit<'a>],
     index: &'a Index,

@@ -5,8 +5,9 @@
 //! calls — feeding `effect.envelope-exceeded`, `effect.liskov-widened` and the
 //! label-vocabulary ids, the [`PurityOracle`] the walker consults, and the
 //! [`EffectSummary`] lane `annotate` and the JSON surface render. The graph's
-//! node key, [`Sym`], stays in the crate root: the throw system and the escape
-//! sweep key on it too.
+//! node key, [`Sym`], lives with the run's fixpoint holder in
+//! [`crate::fixpoints`], not here: the throw system and the escape sweep key on
+//! it too.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
