@@ -186,7 +186,7 @@ pub(crate) fn walk_if(
 /// because it is the only one that can mint a fact over an unfacted binding, which
 /// the scalar refinements must then see — `is_string($v) && $v !== ''` narrows to
 /// `non-empty-string` only in this order.
-fn apply_cond_side(
+pub(crate) fn apply_cond_side(
     w: &WalkCx,
     folder: &mut dyn Folder,
     cond: &CondExpr,
@@ -235,128 +235,6 @@ fn apply_cond_side(
     // the `proc_open` row has, and the one `if (proc_open($c, $s, $pipes))`
     // lands in.
     seed_produced_places(w, folder, cond, then, env, store);
-}
-
-/// Apply a break-free loop's **negated header** to its fall-through env
-/// (issue #651) — the mirror of the entry narrowing, and the same carrier.
-///
-/// A loop is left in exactly two ways: its condition went false, or a jump left the
-/// body. `break_free` is the lowering's answer to whether the second is possible
-/// (`StmtKind::While`'s docs carry the rule), and when it is not, the condition was
-/// evaluated **false immediately before** the statement that follows — with nothing
-/// running in between. That is a stronger position than an `if`'s else-branch, which
-/// takes the identical application for the identical reason, so [`apply_cond_side`]
-/// is used verbatim at the same strata (ADR-0052 §5: a `Verified` test refines at
-/// `Verified`, an `Asserted` envelope at `Asserted`, and nothing launders).
-///
-/// **It is applied to the post-forget env**, after [`loop_fallthrough_forget`], and
-/// that order is the soundness. The loop may have rewritten the very name the header
-/// tests, so the negation may not be read as refining what the name held *before*
-/// the loop; it refines what it holds *now*, which is precisely the value whose
-/// failing test ended the loop. Both halves of that fall out of the order: a name
-/// the loop wrote arrives here with its lanes gone, so only a refinement that mints
-/// its own fact (`while ($x !== null)` proving `$x === null`) can say anything about
-/// it, and a name the loop did not write arrives with its lanes intact, so a
-/// subtractive negation (`while ($x instanceof Node)`) has the base it subtracts
-/// from. Neither reading can state iteration 1's value as the exit's.
-///
-/// A `CondExpr::Opaque` — a `for (;;)`, or any header the lowering could not read —
-/// refines nothing and needs no gate of its own: it is the same inert value at the
-/// exit that it is at the entry.
-///
-/// [`loop_fallthrough_forget`]: crate::walk
-pub(crate) fn apply_loop_exit_negation(
-    w: &WalkCx,
-    folder: &mut dyn Folder,
-    cond: &CondExpr,
-    break_free: bool,
-    env: &mut HashMap<String, Known>,
-    store: &mut Store,
-) {
-    if !break_free {
-        return;
-    }
-    apply_cond_side(w, folder, cond, false, env, store);
-}
-
-/// Walk a structured `while` body (ADR-0027 amendment, issue #649).
-///
-/// `benv`/`bstore` are the body's **entry** pair, built by the caller from what the
-/// loop provably cannot change (`loop_entry_forget`), and this consumes them: a
-/// loop body contributes **findings**, never facts. The body's exit env is
-/// discarded, so the code after the loop sees what the construct's own sets left
-/// standing, plus the one thing the body did not compute: the negated header, when
-/// no jump can leave the body ([`apply_loop_exit_negation`], issue #651).
-///
-/// The entry env needs no fixpoint. Nothing in it is specific to one iteration —
-/// every name the loop can rebind is forgotten in it and the mutable state of every
-/// object it still names has been swept — and PHP evaluates the header before
-/// **every** entry to the body, the first included, so the true-side application is
-/// exactly as sound here as it is on an `if`'s then-branch. A body whose last
-/// statement reassigns the subject the header narrowed — the parent-pointer
-/// traversal that motivated the slice — is therefore no obstacle: the next
-/// iteration's entry re-derives the fact from the header.
-///
-/// A header the walk decides is false runs its body zero times, so the body is not
-/// walked. That reading is taken in the entry env for the same reason the narrowing
-/// is: the env holds at every evaluation of the header, so a `No` there is a `No`
-/// at all of them. The region is not marked dead: the env-free direct pass reports
-/// there today, and withdrawing those findings is a separate judgment from adding
-/// these.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn walk_while_body(
-    w: &WalkCx,
-    folder: &mut dyn Folder,
-    cond: &CondExpr,
-    body: &[Stmt],
-    mut benv: HashMap<String, Known>,
-    mut bstore: Store,
-    descent: &mut Option<Descent<'_>>,
-    facts: &mut Option<&mut Vec<LineFact>>,
-    out: &mut Vec<Diagnostic>,
-) -> Certainty {
-    // The verdict is on the ENTRY env, which holds at every header evaluation, so
-    // it is the verdict of every test the loop ever makes: `No` skips the body,
-    // and `Yes` is what the caller reads as "no failing test can ever leave this
-    // loop" (issue #651's reachability half).
-    let verdict = eval_cond(w, folder, cond, &benv, &bstore, w.scope.poisoned);
-    if verdict == Certainty::No {
-        return verdict;
-    }
-    apply_cond_side(w, folder, cond, true, &mut benv, &mut bstore);
-    walk_loop_body(w, folder, body, benv, bstore, descent, facts, out);
-    verdict
-}
-
-/// Walk a structured loop body from an entry pair the header has already had its
-/// say over — the half of [`walk_while_body`] that is not the header.
-///
-/// It is also the WHOLE of what a `foreach` and a `do`-`while` get (issue #650),
-/// and for opposite reasons. A `foreach` header binds rather than tests, so there is
-/// no condition to narrow by. A `do`-`while` has one and may not use it: the body's
-/// first iteration runs before it is ever evaluated, so narrowing the entry by it
-/// would state an untested fact, and reading it as false would skip a body that runs
-/// exactly once. Neither may take the `while` treatment, and neither loses anything
-/// else by it.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn walk_loop_body(
-    w: &WalkCx,
-    folder: &mut dyn Folder,
-    body: &[Stmt],
-    mut benv: HashMap<String, Known>,
-    mut bstore: Store,
-    descent: &mut Option<Descent<'_>>,
-    facts: &mut Option<&mut Vec<LineFact>>,
-    out: &mut Vec<Diagnostic>,
-) {
-    // The body's own `Flow` is discarded: a body that terminates on every path
-    // terminates an ITERATION, and a `while`, `for` or `foreach` whose condition is
-    // not decided may run none at all, so their successor stays reachable either
-    // way. A `do`-`while` body runs at least once, so there the discard is a
-    // widening — a successor the body provably never reaches is still walked
-    // (issue #679); it never under-reports, and it is the one caller for which
-    // the reasoning above does not hold.
-    let _ = walk_trace(w, folder, body, &mut benv, &mut bstore, descent, facts, true, out);
 }
 
 /// One name's pre-branch value and declared-arm lanes, held across the branches
