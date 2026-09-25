@@ -893,7 +893,7 @@ fn a_poisoned_scope_convicts_through_no_place() {
     //
     // **What this pins, exactly.** It is the POSTURE, not either producer's own
     // poison gate. Measured by mutation: deleting `!w.scope.poisoned` from the
-    // `stream_socket_pair` rung in `assign.rs`, deleting the `w.scope.poisoned`
+    // `stream_socket_pair` rung in `assign/call.rs`, deleting the `w.scope.poisoned`
     // leg `produced_places` opens with, and handing `proc_open_places` a `false`
     // in place of the scope's bit — all three at once — changes no finding this
     // suite can construct, because `resource_call_effects` refuses a poisoned

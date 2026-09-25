@@ -1,3 +1,9 @@
+//! What a statement's calls do to the caller's heap (ADR-0036): an object handed
+//! to a call escapes, and a passed object or an unresolved call sweeps every
+//! escaped object's non-readonly props ([`escape_and_sweep_calls`]). A call that
+//! runs with the same `$this` sweeps `$this` as well, and a resolved descent's
+//! snapshot is copied back over the sweep ([`ThisWriteBack`]).
+
 use steins_syntax::{ArgValue, CallExpr, Callee, NamedArg, Receiver, StaticClass, StmtKind};
 
 use crate::contract::IsA;
@@ -253,6 +259,7 @@ fn escape_nested_args(
 /// exactly the descent the seed runs.
 ///
 /// [`handle_method_call`]: crate::method_call::handle_method_call
+/// [`project_method_summary`]: crate::descent::project_method_summary
 pub(crate) fn runs_with_same_this(
     cx: &Cx,
     receiver: &Callee,
@@ -330,6 +337,7 @@ pub(crate) fn runs_with_same_this(
 ///
 /// [`PurityOracle`]: crate::purity::PurityOracle
 /// [`FunctionDecl::body_span`]: steins_syntax::FunctionDecl::body_span
+/// [`Scope::poisoned`]: steins_syntax::Scope::poisoned
 fn callee_cannot_reach_arg(cx: &Cx<'_>, call: &CallExpr, position: usize) -> bool {
     if !matches!(call.receiver, Callee::Function(_)) {
         return false;
