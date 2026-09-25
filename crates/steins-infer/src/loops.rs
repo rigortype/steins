@@ -1,3 +1,8 @@
+//! Structured loops (ADR-0027 amendment, issues #649 to #653): the env a `while`,
+//! `for`, `foreach` or `do`-`while` hands its body and the one it leaves for its
+//! fall-through, the `foreach` target binding, the header's negation at the exit,
+//! and the body walks.
+
 use std::collections::HashMap;
 
 use steins_domain::Certainty;
@@ -25,7 +30,7 @@ pub(crate) fn loop_flow(break_free: bool, verdict: Certainty) -> Flow {
 }
 
 /// The env a **structured loop's fall-through** starts in (issue #651) — the same
-/// two-set question [`forget_construct_sets`] answers for an `Opaque`, with the
+/// two-set question `forget_construct_sets` answers for an `Opaque`, with the
 /// `reads` half decided the other way.
 ///
 /// Forgetting `writes` stays, and for the reason it always had: the by-ref
@@ -223,8 +228,6 @@ pub(crate) fn bind_foreach_targets(
 /// A `CondExpr::Opaque` — a `for (;;)`, or any header the lowering could not read —
 /// refines nothing and needs no gate of its own: it is the same inert value at the
 /// exit that it is at the entry.
-///
-/// [`loop_fallthrough_forget`]: crate::walk
 pub(crate) fn apply_loop_exit_negation(
     w: &WalkCx,
     folder: &mut dyn Folder,
