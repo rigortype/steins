@@ -20,6 +20,7 @@ use crate::env::{
 };
 use crate::existence::{denotes_global_function, global_function_callee};
 use crate::refine::{flatten_arms, refine_declared_arms, seed_shape_fact};
+use crate::resource_folds::resource_fold_return_fact;
 use crate::walk::{WalkCx, value_stratum};
 use crate::fold::Folder;
 use crate::shape_projection::{
@@ -1288,6 +1289,93 @@ pub(crate) fn floor_value_fact(arms: &[ContractArm]) -> Option<Fact> {
     if nulls.is_empty() { Some(fact) } else { fact_with_null(&fact) }
 }
 
+/// Which rung of the builtin-call ladder answered ([`builtin_call_rung`]), with
+/// its answer.
+pub(crate) enum BuiltinRung {
+    /// A §2.7 fold over a proven handle (ADR-0097), at its stratum.
+    ResourceFold(Fact, Stratum),
+    /// The argument-dependent rung (ADR-0061 §1), at the argument's stratum.
+    Shape(Fact, Stratum),
+    /// The engine's reflected return envelope (ADR-0056 R1): `Verified`, read off
+    /// the running engine's own arginfo (§2).
+    Envelope(Fact),
+    /// The resource-return arms and the heap resource the binding takes beside
+    /// them (ADR-0056 §8, ADR-0097 §2.3).
+    ResourceArms(Vec<ContractArm>, HeapRes),
+    /// The declared-return floor (ADR-0069), every arm `Asserted`.
+    Floor(Vec<ContractArm>),
+}
+
+/// Which of the ladder's two seam-dependent rungs a seam asks
+/// ([`builtin_call_rung`]).
+#[derive(Clone, Copy)]
+pub(crate) struct OptionalRungs {
+    /// The §2.7 resource folds: only where no other call of the statement can
+    /// have moved the handle's state first (`resource_folds`' module doc).
+    pub(crate) resource_folds: bool,
+    /// The resource-return arms: only at a seam that binds, since they come with
+    /// a heap resource and only a binding has somewhere to put it.
+    pub(crate) resource_arms: bool,
+}
+
+/// **The builtin-call ladder**, walked once: the first rung that answers for
+/// `name(args)`, and which rung that was, or `None` when every rung declines.
+///
+/// 1. the §2.7 **resource folds** ([`resource_fold_return_fact`], ADR-0097),
+///    above the shape rung because the two cannot both answer;
+/// 2. the **argument-dependent** rung ([`shape_builtin_return_fact`], ADR-0061
+///    §1), carrying the argument's stratum;
+/// 3. the engine's **reflected envelope** ([`builtin_call_return_fact`]);
+/// 4. the **resource-return arms** ([`builtin_resource_arms`], ADR-0056 §8),
+///    below the envelope because they fire only where it structurally cannot
+///    (PHP has no `resource` return-type syntax), and above the floor;
+/// 5. the **declared-return floor** ([`builtin_return_floor`], ADR-0069),
+///    reached only where the engine said nothing about the name.
+///
+/// Three seams climb it and each keeps its own sink: the assignment binds
+/// (`apply_assign`), the dump renders, the operand position reads a fact
+/// ([`builtin_operand_fact`]). A new rung goes here, once. [`OptionalRungs`]
+/// says which of rungs 1 and 4 a seam asks.
+///
+/// **Poison.** Rungs 1 and 2 read the env and refuse a poisoned scope
+/// themselves. Rungs 3–5 read nothing of the scope, and the ladder does not
+/// refuse them: the assignment and the operand refuse a poisoned scope before
+/// they ask (they bind and answer nothing there), while the dump asks in one
+/// too and renders what the name declares.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn builtin_call_rung(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    name: &str,
+    args: &[ArgValue],
+    env: &HashMap<String, Known>,
+    store: Option<&Store>,
+    poisoned: bool,
+    rungs: OptionalRungs,
+) -> Option<BuiltinRung> {
+    if rungs.resource_folds
+        && let Some(store) = store
+        && let Some((fact, stratum)) =
+            resource_fold_return_fact(cx, folder, name, args, env, store, poisoned)
+    {
+        return Some(BuiltinRung::ResourceFold(fact, stratum));
+    }
+    if let Some((fact, stratum)) =
+        shape_builtin_return_fact(cx, folder, name, args, env, store, poisoned)
+    {
+        return Some(BuiltinRung::Shape(fact, stratum));
+    }
+    if let Some(fact) = builtin_call_return_fact(cx, folder, name) {
+        return Some(BuiltinRung::Envelope(fact));
+    }
+    if rungs.resource_arms
+        && let Some((arms, res)) = builtin_resource_arms(cx, folder, name)
+    {
+        return Some(BuiltinRung::ResourceArms(arms, res));
+    }
+    builtin_return_floor(cx, name).map(BuiltinRung::Floor)
+}
+
 /// **The fact a builtin call in OPERAND position denotes** (issue #646) — the
 /// same ladder the dump seam ([`crate::dump`]) and the assignment seam
 /// ([`crate::assign`]) already climb, so one value has one answer however it is
@@ -1298,23 +1386,25 @@ pub(crate) fn floor_value_fact(arms: &[ContractArm]) -> Option<Fact> {
 /// rung at all**. So `(string) rand()` reached the cast with nothing and took the
 /// operator's floor, while `$r = rand(); (string) $r` reached it with the
 /// catalog's `int` — two spellings of one value, two answers. This is the missing
-/// rung, and it is the assignment seam's own, in the assignment seam's order
-/// (ADR-0056 §9 made exactly this argument one seam earlier, for arguments):
+/// rung, and it is the assignment seam's own ladder ([`builtin_call_rung`]), in
+/// its order (ADR-0056 §9 made exactly this argument one seam earlier, for
+/// arguments): the shape rung at the argument's stratum, the reflected envelope
+/// at `Verified`, and the declared-return floor at `Asserted` — a catalog row is
+/// a declaration, not a runtime answer (ADR-0069), so `(string) rand()` prints
+/// `(asserted)` exactly as its hoisted twin does and can never premise a
+/// proof-layer finding (ADR-0061 §3).
 ///
-/// 1. the **argument-dependent** rung ([`shape_builtin_return_fact`], ADR-0061
-///    §1) — `count($x)` over a declared shape, carrying the argument's stratum;
-/// 2. the engine's **reflected envelope** ([`builtin_call_return_fact`]) at
-///    `Verified`: it is read off the running engine's own arginfo (ADR-0056 §2);
-/// 3. the **declared-return floor** ([`builtin_return_floor`]) at `Asserted`: a
-///    catalog row is a declaration, not a runtime answer (ADR-0069), so
-///    `(string) rand()` prints `(asserted)` exactly as its hoisted twin does and
-///    can never premise a proof-layer finding (ADR-0061 §3).
+/// Two rungs are not asked. The §2.7 resource folds read the handle's state as
+/// the statement started, and an operand is a composed spelling in which another
+/// call may have run first (`resource_folds`' module doc). The resource-return
+/// arms come with a heap resource, and an operand binds nothing.
 ///
 /// **It answers no more than those two seams do.** A name the engine is silent
 /// about and the catalog cannot describe declines, totally, and the operator
 /// takes its own floor — which is what every operand of a builtin did before this
 /// rung existed. A rung answering *more* would be a second source of truth and
-/// would reintroduce the drift it closes.
+/// would reintroduce the drift it closes. So a poisoned scope, in which the
+/// assignment binds nothing, answers nothing here either.
 pub(crate) fn builtin_operand_fact(
     cx: &Cx,
     folder: &mut dyn Folder,
@@ -1324,16 +1414,19 @@ pub(crate) fn builtin_operand_fact(
     store: Option<&Store>,
     poisoned: bool,
 ) -> Option<(Fact, Stratum)> {
-    if let Some(out) = shape_builtin_return_fact(cx, folder, name, args, env, store, poisoned) {
-        return Some(out);
-    }
     if poisoned {
         return None;
     }
-    if let Some(fact) = builtin_call_return_fact(cx, folder, name) {
-        return Some((fact, Stratum::Verified));
+    let rungs = OptionalRungs { resource_folds: false, resource_arms: false };
+    match builtin_call_rung(cx, folder, name, args, env, store, poisoned, rungs)? {
+        BuiltinRung::ResourceFold(fact, stratum) | BuiltinRung::Shape(fact, stratum) => {
+            Some((fact, stratum))
+        }
+        BuiltinRung::Envelope(fact) => Some((fact, Stratum::Verified)),
+        BuiltinRung::Floor(arms) => floor_operand_known(&arms),
+        // Not asked.
+        BuiltinRung::ResourceArms(..) => None,
     }
-    floor_operand_known(&builtin_return_floor(cx, name)?)
 }
 
 /// The floor's **two** carriers, read the way a variable bound to them is read.

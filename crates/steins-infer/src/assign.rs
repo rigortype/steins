@@ -10,9 +10,8 @@ use steins_syntax::{ArgValue, CallExpr, Span};
 use crate::fold::Folder;
 use crate::annotate::{FactKind, LineFact};
 use crate::builtin_returns::{
-    CATALOG_FLOOR, bind_produced_places, builtin_call_return_fact, builtin_resource_arms,
-    builtin_return_floor, escape_mentioned_resources, floor_value_fact, shape_builtin_return_fact,
-    socket_pair_places,
+    BuiltinRung, CATALOG_FLOOR, OptionalRungs, bind_produced_places, builtin_call_rung,
+    escape_mentioned_resources, floor_value_fact, socket_pair_places,
 };
 use crate::cond::{coalesce_lhs_proven_present, eval_ternary_fact_strat, total_op_fact};
 use crate::descent::summary_binds;
@@ -24,7 +23,6 @@ use crate::heap::{build_closure_val, build_new_object};
 use crate::offsets::{ShapeRead, offset_key_of, offset_operand_fact, shape_read, shape_read_at};
 use crate::project::Diagnostic;
 use crate::refine::{clear_null, seed_shape_fact};
-use crate::resource_folds::resource_fold_return_fact;
 use crate::return_arms::call_return_arms;
 use crate::walk::{WalkCx, mark_dead_span, value_stratum};
 
@@ -314,107 +312,26 @@ pub(crate) fn apply_assign(
                     env.insert(var.to_owned(), Known::value_strat(fact, line, Some(prov), strat));
                     store.unbind(var);
                 }
-                // The §2.7 folds over a proven handle (ADR-0097): `gettype`,
-                // `get_debug_type`, `get_resource_type`, `get_resource_id`.
-                // Above the shape rung because the two cannot both answer, and
-                // asked HERE — where the right-hand side IS the call — rather
-                // than at the shared operand seam, so that no other call of the
-                // statement can have moved the state first (see the module doc).
+                // The builtin-call ladder (`builtin_call_rung`), every rung of it:
+                // the §2.7 resource folds are asked HERE — where the right-hand
+                // side IS the call — so no other call of the statement can have
+                // moved the handle's state first, and the resource arms because
+                // this seam binds the heap resource they come with. A poisoned
+                // scope binds nothing and asks nothing.
                 ArgValue::Call(name, args)
-                    if let Some((fact, strat)) = resource_fold_return_fact(
-                        cx,
-                        folder,
-                        name,
-                        args,
-                        env,
-                        &*store,
-                        w.scope.poisoned,
-                    ) =>
-                {
-                    if let (Fact::Singleton(v), Some(facts)) = (&fact, facts.as_deref_mut()) {
-                        facts.push(LineFact {
-                            line,
-                            kind: FactKind::Value { var: var.to_owned(), rendered: render_val(v) },
-                        });
-                    }
-                    env.insert(var.to_owned(), Known::value_strat(fact, line, None, strat));
-                    store.unbind(var);
-                }
-                // The type rung above the envelope (ADR-0061 §1): reads the call's
-                // argument facts — ADR-0062 §4's `count`/`array_is_list` shape
-                // transfers. Enters at the argument's own stratum, not `Verified`.
-                ArgValue::Call(name, args)
-                    if let Some((fact, strat)) = shape_builtin_return_fact(
-                        cx,
-                        folder,
-                        name,
-                        args,
-                        env,
-                        Some(&*store),
-                        w.scope.poisoned,
-                    ) =>
-                {
-                    env.insert(var.to_owned(), Known::value_strat(fact, line, None, strat));
-                    store.unbind(var);
-                }
-                ArgValue::Call(name, _)
                     if !w.scope.poisoned
-                        && let Some(fact) = builtin_call_return_fact(cx, folder, name) =>
+                        && let Some(rung) = builtin_call_rung(
+                            cx,
+                            folder,
+                            name,
+                            args,
+                            env,
+                            Some(&*store),
+                            w.scope.poisoned,
+                            OptionalRungs { resource_folds: true, resource_arms: true },
+                        ) =>
                 {
-                    env.insert(var.to_owned(), Known::value(fact, line, None));
-                    store.unbind(var);
-                }
-                // The resource rung (ADR-0056 §8), below the reflected envelope and
-                // above the declared floor: fires only where the envelope
-                // structurally cannot (PHP has no `resource` return-type syntax, so
-                // `fopen` declares nothing). The gate confirms this engine still
-                // declares nothing for the name.
-                //
-                // Arm lane only, `Verified` — no `Val` is a resource (ADR-0035/0038),
-                // so `env` is cleared rather than left stale. The `false` arm is an
-                // ordinary literal arm, subtracted by ordinary guard machinery.
-                ArgValue::Call(name, _)
-                    if !w.scope.poisoned
-                        && let Some((arms, res)) = builtin_resource_arms(cx, folder, name) =>
-                {
-                    store.unbind(var);
-                    env.remove(var);
-                    store.contract.insert(var.to_owned(), arms);
-                    // The identity and the state (ADR-0097 §2.3): a fresh heap
-                    // resource, `Open`, bound exactly as `new` binds an object —
-                    // so `$b = $h` shares it and `fclose($b)` closes it for both.
-                    store.bind_resource(var, w.fresh_id(), res);
-                }
-                // The declared-return floor (ADR-0069): reached only where the
-                // engine said nothing about this name. Enters `Asserted` — a catalog
-                // declaration, not a runtime answer — carried down every derivation
-                // step.
-                //
-                // Both carriers are seeded, as `@param` entry seeding does: the arm
-                // lane holds the declaration itself, and the value lane holds the
-                // one fact the arms denote where they denote one. A multi-arm row
-                // lives in the arm lane alone.
-                ArgValue::Call(name, _)
-                    if !w.scope.poisoned && let Some(arms) = builtin_return_floor(cx, name) =>
-                {
-                    store.unbind(var);
-                    match floor_value_fact(&arms) {
-                        Some(fact) => {
-                            env.insert(
-                                var.to_owned(),
-                                Known::value_strat(
-                                    fact,
-                                    line,
-                                    Some(CATALOG_FLOOR.to_owned()),
-                                    Stratum::Asserted,
-                                ),
-                            );
-                        }
-                        None => {
-                            env.remove(var);
-                        }
-                    }
-                    store.contract.insert(var.to_owned(), arms);
+                    bind_builtin_rung(w, var, rung, line, env, store, facts);
                 }
                 // The return summary, then the arm floor (ADR-0057 T0/T1 /
                 // ADR-0052 §9). `unbind` first (voids any stale arm lane).
@@ -508,6 +425,89 @@ pub(crate) fn apply_assign(
 
     if let Some(arms) = copied_arms {
         store.contract.insert(var.to_owned(), arms);
+    }
+}
+
+/// Bind `$var = name(…)` from the builtin-call ladder's answer
+/// ([`builtin_call_rung`]): the assignment seam's sink, one arm per rung.
+fn bind_builtin_rung(
+    w: &WalkCx,
+    var: &str,
+    rung: BuiltinRung,
+    line: u32,
+    env: &mut HashMap<String, Known>,
+    store: &mut Store,
+    facts: &mut Option<&mut Vec<LineFact>>,
+) {
+    match rung {
+        // `gettype`, `get_debug_type`, `get_resource_type`, `get_resource_id`
+        // over a proven handle (ADR-0097 §2.7).
+        BuiltinRung::ResourceFold(fact, strat) => {
+            if let (Fact::Singleton(v), Some(facts)) = (&fact, facts.as_deref_mut()) {
+                facts.push(LineFact {
+                    line,
+                    kind: FactKind::Value { var: var.to_owned(), rendered: render_val(v) },
+                });
+            }
+            env.insert(var.to_owned(), Known::value_strat(fact, line, None, strat));
+            store.unbind(var);
+        }
+        // The type rung above the envelope (ADR-0061 §1): reads the call's
+        // argument facts — ADR-0062 §4's `count`/`array_is_list` shape transfers.
+        // Enters at the argument's own stratum, not `Verified`.
+        BuiltinRung::Shape(fact, strat) => {
+            env.insert(var.to_owned(), Known::value_strat(fact, line, None, strat));
+            store.unbind(var);
+        }
+        // The reflected return envelope: `Verified`, a native declaration
+        // (ADR-0056 R1, §2).
+        BuiltinRung::Envelope(fact) => {
+            env.insert(var.to_owned(), Known::value(fact, line, None));
+            store.unbind(var);
+        }
+        // The resource rung (ADR-0056 §8). The gate confirms this engine still
+        // declares nothing for the name (`fopen` declares nothing: PHP has no
+        // `resource` return-type syntax).
+        //
+        // Arm lane only, `Verified` — no `Val` is a resource (ADR-0035/0038), so
+        // `env` is cleared rather than left stale. The `false` arm is an ordinary
+        // literal arm, subtracted by ordinary guard machinery.
+        BuiltinRung::ResourceArms(arms, res) => {
+            store.unbind(var);
+            env.remove(var);
+            store.contract.insert(var.to_owned(), arms);
+            // The identity and the state (ADR-0097 §2.3): a fresh heap resource,
+            // `Open`, bound exactly as `new` binds an object — so `$b = $h`
+            // shares it and `fclose($b)` closes it for both.
+            store.bind_resource(var, w.fresh_id(), res);
+        }
+        // The declared-return floor (ADR-0069). Enters `Asserted` — a catalog
+        // declaration, not a runtime answer — carried down every derivation step.
+        //
+        // Both carriers are seeded, as `@param` entry seeding does: the arm lane
+        // holds the declaration itself, and the value lane holds the one fact the
+        // arms denote where they denote one. A multi-arm row lives in the arm lane
+        // alone.
+        BuiltinRung::Floor(arms) => {
+            store.unbind(var);
+            match floor_value_fact(&arms) {
+                Some(fact) => {
+                    env.insert(
+                        var.to_owned(),
+                        Known::value_strat(
+                            fact,
+                            line,
+                            Some(CATALOG_FLOOR.to_owned()),
+                            Stratum::Asserted,
+                        ),
+                    );
+                }
+                None => {
+                    env.remove(var);
+                }
+            }
+            store.contract.insert(var.to_owned(), arms);
+        }
     }
 }
 
