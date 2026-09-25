@@ -26,10 +26,7 @@ use crate::arity::{check_arity, check_printf_arity};
 use crate::assert_harness::{ASSERT_SINK, record_subject_probe};
 use crate::asserts::apply_stmt_asserts;
 use crate::assign::apply_assign;
-use crate::branch::{
-    GuardChainCoverage, apply_loop_exit_negation, guard_chain_subject, walk_if, walk_loop_body,
-    walk_match, walk_while_body,
-};
+use crate::branch::{GuardChainCoverage, guard_chain_subject, walk_if, walk_match};
 use crate::contract::accepts;
 use crate::builtin_returns::{
     apply_resource_effects, escape_mentioned_resources, resource_call_effects,
@@ -49,11 +46,14 @@ use crate::env::{
     AllocId, ContractArm, Descent, ExitContribution, HeapSummary, Known, ReturnSummary, Store,
     Stratum, SummaryCtx,
 };
-use crate::foreach_bind::element_binding;
 use crate::foreach_check::check_foreach_subject;
 use crate::heap::{apply_prop_assign, seed_declared_param_object, seed_this_object};
 use crate::inaccessible::{
     check_inaccessible_class_const, check_inaccessible_method, check_inaccessible_property,
+};
+use crate::loops::{
+    apply_loop_exit_negation, bind_foreach_targets, loop_entry_forget, loop_fallthrough_forget,
+    loop_flow, walk_loop_body, walk_while_body,
 };
 use crate::method_call::handle_method_call;
 use crate::non_object::{check_call_on_non_object, check_call_on_null, check_property_on_non_object};
@@ -644,7 +644,7 @@ fn forget_construct_sets(
 /// a hidden exit is an exit whose value and whose `$this` this walk never saw, so it
 /// ends the component exactly as an unbound one does. Shared by every construct that
 /// carries `may_return`, structured or not.
-fn push_hidden_exit_floor(w: &WalkCx, may_return: bool) {
+pub(crate) fn push_hidden_exit_floor(w: &WalkCx, may_return: bool) {
     if may_return
         && let Some(sc) = &w.summary
     {
@@ -652,191 +652,6 @@ fn push_hidden_exit_floor(w: &WalkCx, may_return: bool) {
         if let Some(te) = &sc.this_exits {
             te.borrow_mut().push(ExitContribution::Floor);
         }
-    }
-}
-
-/// What a `while` or `for` does to the code after it, given the header's verdict on
-/// the entry env (issue #651). That env holds at every header evaluation, so a
-/// `Yes` there is a `Yes` at all of them: no test ever fails, and with no jump able
-/// to leave the body either, the successor is unreachable — `while (true) { …;
-/// return; }` is the `if (true) { return; }` twin `walk_if` already terminates.
-/// Anything less than that pair falls through: an undecided header may fail, and a
-/// `break` leaves without failing it. A `do`-`while` is not this question (its body
-/// runs before any test; issue #679 owns its reachability).
-fn loop_flow(break_free: bool, verdict: Certainty) -> Flow {
-    if break_free && verdict == Certainty::Yes { Flow::Terminated } else { Flow::FellThrough }
-}
-
-/// The env a **structured loop's fall-through** starts in (issue #651) — the same
-/// two-set question [`forget_construct_sets`] answers for an `Opaque`, with the
-/// `reads` half decided the other way.
-///
-/// Forgetting `writes` stays, and for the reason it always had: the by-ref
-/// conservatism names everything the body may assign or hand to a call, and any of
-/// it may hold something else once the loop is over. Forgetting `reads` was the
-/// `Opaque` rule, and its justification is a construct whose control flow the trace
-/// does not model — a subtree that reads and branches may have early-returned, so
-/// the tail must exclude the value it branched on. A **loop** does not have that
-/// shape: a name in `reads` is assigned by nothing in the body and handed to no call
-/// in it, so it holds at the fall-through exactly what it held at the construct,
-/// under any iteration count including zero. This is [`loop_entry_forget`]'s
-/// argument verbatim, and it is as true after the loop as it is inside it.
-///
-/// Measured, it is what made a `foreach` subject unusable twice: `foreach ($xs as
-/// $v) {}` left `$xs` unknown, so a second `foreach` over the same declared subject
-/// bound nothing (issue #652's adversarial review). The subject is a read.
-///
-/// A kept name takes the same [`Store::sweep_object`] the entry gives it, for the
-/// same reason: the loop can mutate the object a read name points at even though it
-/// cannot rebind the name. `carried` has no counterpart here — a `for`'s `init` is
-/// walked into the body's entry env and never into this one, so there is no
-/// post-`init` binding at the fall-through to keep.
-fn loop_fallthrough_forget(
-    w: &WalkCx,
-    writes: &[String],
-    reads: &[String],
-    poisons: bool,
-    may_return: bool,
-    env: &mut HashMap<String, Known>,
-    store: &mut Store,
-) {
-    if poisons {
-        env.clear();
-        store.clear();
-    } else {
-        for v in writes {
-            // The handle a written name held may have been closed by the body
-            // through THAT name, and its entry outlives the name for every alias
-            // (ADR-0097 §2.4) — the resource half of the read names' sweep below.
-            store.escape_resource(v);
-            env.remove(v);
-            store.unbind(v);
-        }
-        for v in reads {
-            store.sweep_object(v);
-        }
-    }
-    push_hidden_exit_floor(w, may_return);
-}
-
-/// The env a structured loop's **body** starts each iteration in (issue #653) —
-/// what the loop provably cannot change, which is not what its fall-through keeps.
-///
-/// The construct's fall-through forgets both ADR-0027 sets, and only the `writes`
-/// half of that is right for an entry. `writes` is the by-ref conservatism — every
-/// name assigned in the subtree and every name handed to any call in it — so a name
-/// in it may hold something else on iteration 2 and has to go. `reads` is everything
-/// the subtree merely mentions: nothing in the loop assigns such a name and no call
-/// in the loop can rebind it, so its binding is the same on iteration 40 as on
-/// iteration 1. Forgetting it is right for the fall-through, where a construct that
-/// reads and branches may have early-returned, and wrong here — it is what made a
-/// method receiver, which is not an argument, arrive unknown, and what cost the
-/// subtractive guards (`!== null`, truthiness) the base they subtract from.
-///
-/// What a kept name may **not** keep is the mutable state of the object it points
-/// at: a method call the body makes writes through a receiver that never enters
-/// `writes`, so iteration 2 would otherwise read iteration 1's properties. Every
-/// object a kept name refers to therefore takes the sweep an escaping call already
-/// performs ([`Store::sweep_object`]) — the class and the readonly props survive it,
-/// the rest does not. This is why the rule is not simply "forget less".
-///
-/// `carried` is the `for` header's one exception (issue #650): a name its `init`
-/// writes and its condition, increments and body never write again is written once,
-/// before the first iteration, so it holds the same binding at every entry to the
-/// body. It is in `writes` — `init` is part of the construct — and is kept anyway,
-/// under exactly the argument `reads` is kept under, sweep included. Empty for every
-/// other loop form, which has no clause that runs once.
-///
-/// `poisons` clears everything, exactly as it does for the fall-through: a scope
-/// that aliases, `extract`s or `eval`s has no binding worth carrying anywhere.
-fn loop_entry_forget(
-    writes: &[String],
-    reads: &[String],
-    carried: &[String],
-    poisons: bool,
-    env: &mut HashMap<String, Known>,
-    store: &mut Store,
-) {
-    if poisons {
-        env.clear();
-        store.clear();
-        return;
-    }
-    for v in writes {
-        if carried.contains(v) {
-            store.sweep_object(v);
-            continue;
-        }
-        // Iteration 2 may see a handle iteration 1 closed through this name, and
-        // an alias outside `writes` still refers to the entry (ADR-0097 §2.4).
-        store.escape_resource(v);
-        env.remove(v);
-        store.unbind(v);
-    }
-    for v in reads {
-        store.sweep_object(v);
-    }
-}
-
-/// Bind a `foreach`'s `$k`/`$v` at the body entry from the subject's own element
-/// type (issue #652), into the env [`loop_entry_forget`] has just built.
-///
-/// Applied **after** the forgetting, never instead of it. Both targets are in
-/// `writes` — the `foreach`-binding row the write collector has always had — so the
-/// forgetting drops them first and this puts back only what the subject supports.
-/// That is the whole of the iteration-count-agnosticism: the fact comes from the
-/// subject as the entry env holds it, so a body that reassigns `$v` writes into an
-/// env this construct discards, and the next entry re-derives from the subject.
-///
-/// The subject is read from that same entry env, which is why a subject the body
-/// rebinds contributes nothing: it is in `writes` too, and is gone by the time this
-/// looks for it. A `poisons` scope has an empty env here for the same reason, so
-/// the lookup fails and nothing binds.
-///
-/// **Refusals**, both silent — the target keeps the defined-but-untyped binding the
-/// forgetting left it with:
-///
-/// * `by_ref` (`as &$v`) — the loop writes *through* the subject, and the trace
-///   models neither that write nor the alias it installs (issue #677). Typing `$v`
-///   from the subject would let iteration 2 read an element iteration 1 overwrote.
-/// * a target that is not a plain variable — a destructuring (`as [$a, $b]`) or a
-///   property/offset target (`as $this->x`) binds names this statement does not
-///   name, so there is nothing to bind and it stays a write alone.
-#[allow(clippy::too_many_arguments)]
-fn bind_foreach_targets(
-    w: &WalkCx,
-    stmt: &Stmt,
-    subject: Option<&str>,
-    key_var: Option<&str>,
-    value_var: Option<&str>,
-    by_ref: bool,
-    benv: &mut HashMap<String, Known>,
-    bstore: &mut Store,
-) {
-    if by_ref {
-        return;
-    }
-    let Some(subject) = subject else { return };
-    let binding = element_binding(benv.get(subject), bstore.contract_arms(subject));
-    let line = w.cx.tree().position(stmt.span.start).line;
-    // `foreach ($xs as $x => $x)` assigns the key first and the value last, so the
-    // name holds the value; binding the key too would leave the env and the arm
-    // lane disagreeing about one variable.
-    if let Some(name) = key_var
-        && key_var != value_var
-        && let Some(known) = binding.key_known(line)
-    {
-        benv.insert(name.to_owned(), known);
-    }
-    let Some(name) = value_var else { return };
-    if let Some(known) = binding.value_known(line) {
-        benv.insert(name.to_owned(), known);
-    }
-    // The declared lane too, and for the one thing the value lane cannot hold: a
-    // class element (`array<string, Foo>`) has no `Fact` to be (ADR-0035/0043), so
-    // `$v: Foo` exists only as an arm.
-    if let Some(arms) = binding.value_arms {
-        bstore.contract.insert(name.to_owned(), arms);
     }
 }
 

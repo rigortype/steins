@@ -99,6 +99,7 @@ mod fact_util;
 mod file_walk;
 mod fixpoints;
 mod pipeline;
+mod loops;
 
 pub use dam::{DamFacts, DamKind, DamSite, dam_facts};
 pub use ids::*;
