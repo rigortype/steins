@@ -264,3 +264,54 @@ fn fail(msg: &str) -> ExitCode {
     ExitCode::from(2)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A name listed twice would dispatch to its first entry only.
+    #[test]
+    fn command_names_are_unique_and_sorted() {
+        let names: Vec<&str> = COMMANDS.iter().map(|c| c.name).collect();
+        let mut sorted = names.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(names, sorted);
+    }
+
+    /// Issue #776: `fold-probe` was dispatched but missing from the usage text.
+    #[test]
+    fn every_command_heads_a_usage_line() {
+        let usage = usage();
+        let heads: Vec<&str> = usage
+            .lines()
+            .map(|l| l.trim_start_matches("usage: cargo xtask <").trim_start_matches([' ', '|']))
+            .map(|l| l.split(' ').next().unwrap_or_default().trim_end_matches('>'))
+            .collect();
+        let names: Vec<&str> = COMMANDS.iter().map(|c| c.name).collect();
+        assert_eq!(heads, names, "{usage}");
+    }
+
+    /// The module doc's command list is the one list still written by hand.
+    #[test]
+    fn the_module_doc_lists_every_command() {
+        let mut listed: Vec<&str> = include_str!("main.rs")
+            .lines()
+            .filter_map(|l| l.strip_prefix("//!   "))
+            .filter(|l| !l.starts_with(' '))
+            .map(|l| l.split(' ').next().unwrap_or_default())
+            .collect();
+        listed.dedup();
+        let names: Vec<&str> = COMMANDS.iter().map(|c| c.name).collect();
+        assert_eq!(listed, names);
+    }
+
+    /// CI reads 1 as a red gate and 2 as a command that could not run.
+    #[test]
+    fn exit_codes() {
+        assert_eq!(outcome(Ok(())), ExitCode::SUCCESS);
+        assert_eq!(outcome(Err("e".to_owned())), ExitCode::from(2));
+        assert_eq!(verdict(Ok(true)), ExitCode::SUCCESS);
+        assert_eq!(verdict(Ok(false)), ExitCode::FAILURE);
+        assert_eq!(verdict(Err("e".to_owned())), ExitCode::from(2));
+    }
+}
