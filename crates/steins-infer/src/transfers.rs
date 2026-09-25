@@ -11,12 +11,12 @@ use steins_domain::{
 };
 use steins_syntax::{ArgValue, ArrayKey, CastTarget, RefKind, ValueOp};
 
+use crate::by_value::value_stratum;
 use crate::coerce::php_cast_fact;
 use crate::cx::Cx;
 use crate::env::{
     ContractArm, Known, Store, Stratum, array_literal_fact, singleton_fact, val_of,
 };
-use crate::walk::value_stratum;
 use crate::fold::Folder;
 use crate::global_consts::global_const_fact;
 use crate::fact_is_int;

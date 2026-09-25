@@ -10,6 +10,7 @@ use steins_domain::{Base, Fact, Refinement, Val};
 use steins_phpdoc::AssertKind;
 use steins_syntax::{ArgValue, CallExpr, Callee, CondExpr, CondOperand, Param, Receiver, Scope};
 
+use crate::by_value::by_value_survivors;
 use crate::contract::{AssertSpec, ProjectIsa};
 use crate::cx::Cx;
 use crate::dispatch::resolve_call_target;
@@ -22,7 +23,7 @@ use crate::shapes::{
     apply_shape_guard, array_all_any_predicate, array_guard_base, array_guard_key_var,
     array_guard_predicate, collect_shape_guards,
 };
-use crate::walk::{WalkCx, by_value_survivors};
+use crate::walk::WalkCx;
 
 // ---------------------------------------------------------------------------
 // `@phpstan-assert` application (ADR-0030, Feature D). After a call to an

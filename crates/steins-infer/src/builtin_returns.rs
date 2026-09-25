@@ -12,6 +12,7 @@ use steins_syntax::{
     ArgValue, ArrayKey, CallExpr, Callee, ClosureRef, InvalidatedVar, Receiver,
 };
 
+use crate::by_value::value_stratum;
 use crate::cx::Cx;
 use crate::dispatch::BuiltinCallee;
 use crate::env::{
@@ -21,7 +22,7 @@ use crate::env::{
 use crate::existence::{denotes_global_function, global_function_callee};
 use crate::refine::{flatten_arms, refine_declared_arms, seed_shape_fact};
 use crate::resource_folds::resource_fold_return_fact;
-use crate::walk::{WalkCx, value_stratum};
+use crate::walk::WalkCx;
 use crate::fold::Folder;
 use crate::shape_projection::{
     shape_projection_fact, witnessed_family_fact, witnessed_projection_fact,
