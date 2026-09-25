@@ -12,8 +12,9 @@
 #              is genuinely OS-shaped. macOS runs are just not on the PR
 #              iteration loop's critical path; see the job comment.
 #   wasm      builds the playground module for wasm32-unknown-unknown and runs
-#             `apps/playground/smoke.mjs` over it in Node. The browser is the one
-#             surface that cannot buy stack headroom (issue #264) and the one
+#             `apps/playground/smoke.mjs` over it in Node, then
+#             `smoke-replay.mjs` over it and a real php-wasm. The browser is the
+#             one surface that cannot buy stack headroom (issue #264) and the one
 #             whose failures are invisible to every gate below, so the module is
 #             smoked where it is built rather than trusted at upload time.
 #   docs      rustdoc with `-D warnings`: intra-doc links across a 10-crate
@@ -200,8 +201,8 @@ jobs:
           node-version: "22"
 
       # The module the playground loads, built exactly as apps/playground/build.sh
-      # builds it (that script also vendors php-wasm from npm, which this gate has
-      # no need of — smoke.mjs drives the Steins module alone).
+      # builds it. That script also vendors php-wasm, which only the second smoke
+      # below needs.
       - name: Build the playground module
         run: cargo build -p steins-wasm --target wasm32-unknown-unknown --release --locked
 
@@ -212,6 +213,24 @@ jobs:
       # module a paste could kill. This is that gate, actually wired.
       - name: Node smoke over the module
         run: node apps/playground/smoke.mjs
+
+      # `smoke-replay.mjs` pins the replay loop against the 32-bit php-wasm the
+      # browser downloads, and no workflow ran it either: three of its assertions
+      # went stale behind catalog and transfer changes that were each deliberate,
+      # and nothing noticed. The pin lives in build.sh, so build.sh keys the
+      # cache; a hit skips the ~47 MB npm fetch, and a miss re-runs build.sh's
+      # license-text check against the fresh tarball. build.sh's own cargo build
+      # is a no-op after the step above.
+      - uses: actions/cache@v4
+        with:
+          path: apps/playground/vendor/php-wasm
+          key: php-wasm-${{ hashFiles('apps/playground/build.sh') }}
+
+      - name: Vendor the PHP engine
+        run: ./apps/playground/build.sh
+
+      - name: Node smoke over the real engine
+        run: node apps/playground/smoke-replay.mjs
 
   docs:
     name: docs
