@@ -168,7 +168,7 @@ for.
    insertion-order conflicts for one artefact to look for here: a
    **duplicated `###` heading**, where two branches each opened the same
    section under `[Unreleased]`. Merge the two, keeping Keep a Changelog's
-   order — nothing else catches this, so it is on this pass alone. The same
+   order; `cargo test -p xtask changelog` fails while one is left. The same
    silent fold can happen if the release branch gets rebased onto `master`
    mid-prep; re-check for a duplicate heading after any such rebase.
 5. **Classify against the last released version, not against the diff.** This is
