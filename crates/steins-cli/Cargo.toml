@@ -15,6 +15,9 @@ homepage.workspace = true
 readme.workspace = true
 authors.workspace = true
 
+[lints]
+workspace = true
+
 [[bin]]
 name = "steins"
 path = "src/main.rs"
