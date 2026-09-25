@@ -1,3 +1,8 @@
+//! The rungs of `$var = <value>` below the literal rung ([`bind_unfolded`]): an
+//! array literal's shape, `::class`, the union fold, the builtin-call ladder, and
+//! last a call's return summary or declared arms. Beside them, the element places
+//! a call right-hand side produces ([`bind_call_places`]).
+
 use std::collections::HashMap;
 
 use steins_domain::Key as VKey;
@@ -259,6 +264,8 @@ fn bind_builtin_rung(
 /// feed proof-layer findings), and it is written only into a value lane this
 /// assignment has already cleared — it can never overwrite a more precise fact,
 /// because every rung above this one returned before reaching here.
+///
+/// [`Fact::Shape`]: steins_domain::Fact::Shape
 fn seed_returned_shape(
     var: &str,
     arms: &[ContractArm],
@@ -284,6 +291,8 @@ fn seed_returned_shape(
 /// Declines whole rather than in part. A literal holding a non-literal key is
 /// declined by [`normalize_array`] itself — an unknown key may be an integer and
 /// would shift every following auto-index, so no position in it is nameable.
+///
+/// [`normalize_array`]: steins_syntax::normalize_array
 fn bind_handle_elements(
     cx: &crate::cx::Cx,
     var: &str,

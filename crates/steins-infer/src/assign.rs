@@ -1,6 +1,6 @@
-//! Assignment into the env: `$var = <value>` (extracted from the walk), the
-//! returned-shape seed, `??` coalesce facts and their projections, and the value
-//! fact of an argument.
+//! Assignment into the env: `$var = <value>` (extracted from the walk), and the
+//! [`AssignLhs`] its arms bind through. The rungs below the literal rung are in
+//! `call`; the fact of a `??` chain is in `coalesce`.
 
 mod call;
 mod coalesce;
@@ -293,7 +293,9 @@ pub(crate) fn apply_assign(
             // `$x = is_int($y)` and kin: the fold could not reach it, so seed the
             // uniquely-resolved builtin's reflected return envelope (ADR-0056 R1).
             // Enters at `Verified` — a native declaration (§2).
-            None => bind_unfolded(w, folder, &mut lhs, value, call, env, store, summary, return_arms),
+            None => bind_unfolded(
+                w, folder, &mut lhs, value, call, env, store, summary, return_arms,
+            ),
         },
     }
 
