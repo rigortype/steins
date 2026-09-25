@@ -188,6 +188,18 @@
     .diag-loc { color: var(--muted); font-size: 11.5px; }
     .diag-msg { font-size: 12.5px; line-height: 1.45; overflow-wrap: break-word; }
     .diag-id { font-family: var(--st-mono); font-size: 11px; color: var(--accent); margin-top: 2px; }
+    /* What the profiles above this one would add: the margin marks every
+       finding, so the panel says where the ones it does not list are. */
+    #diag-hidden {
+      margin: 0; padding: 7px 12px; font-size: 12.5px; color: var(--muted);
+      border-top: 1px solid var(--border);
+    }
+    #diag-hidden button {
+      font: 600 12.5px var(--st-sans); color: var(--accent);
+      background: none; border: none; padding: 0; cursor: pointer;
+      text-decoration: underline; text-underline-offset: 2px;
+    }
+    #diag-hidden button:hover { color: var(--text-strong); }
 
     /* The sound-subset banner: the envelope's `notice`, rendered as data. */
     #posture {
@@ -266,10 +278,11 @@
               title="Run real php-src in your browser (php-wasm) and let the analysis ask it directly — builtin folds, declared return types, and whether a name exists. The engine bar states exactly what that buys.">Load PHP engine (~4 MB)</button>
       <label class="ctl-label" for="profile-sel">Profile</label>
       <select class="ctl" id="profile-sel" aria-label="Analysis profile">
-        <option value="default" selected>default</option>
+        <option value="default">default</option>
         <option value="throws-direct">throws-direct</option>
-        <option value="contracts">contracts</option>
+        <option value="contracts" selected>contracts</option>
         <option value="strict">strict</option>
+        <option value="pedantic">pedantic</option>
       </select>
       <button class="btn active" id="type-btn" aria-pressed="true">Hide types</button>
       <button class="btn" id="theme-btn" title="Cycle theme">Auto</button>
@@ -282,10 +295,12 @@
     </div>
     <aside id="sidebar" aria-label="Findings">
       <div id="sidebar-header">
-        <span>Findings</span>
+        <span id="sidebar-title">Findings — contracts</span>
         <span id="diag-count">0</span>
       </div>
       <div id="diagnostics"><p class="diag-empty">No findings</p></div>
+      <p id="diag-hidden" hidden
+         title="The margin marks every finding the analysis proves; the profile decides which of them this panel lists."></p>
     </aside>
   </main>
 
@@ -325,10 +340,14 @@
     import LZString from "https://esm.sh/lz-string@1.5.0"
     import { driveReplay } from "./replay.mjs"
     import { renderBoundaryHtml } from "./boundary.mjs"
+    import { hiddenSteps } from "./hidden.mjs"
 
     // The seeded sample demonstrates the rung ladder (ADR-0062 A-G10):
     // findings APPEAR as the profile climbs — 1 at default, 2 at contracts,
-    // 3 at strict — so the cumulative model is visible in three clicks.
+    // 3 at strict. The page opens on `contracts`, so the panel lists two and
+    // its hidden-findings line points at the third on `strict`; one step down
+    // to `default` leaves one, and the same line counts what each rung above
+    // would add. The cumulative model is visible without leaving the panel.
     //
     // It is deliberately a small, plain program with almost no comments: the
     // page's own surfaces (the findings panel, the posture banner, the margin
@@ -668,6 +687,7 @@ $greeting = str_repeat("Hello, " . "World" . "! ", 2);
       const parseErrors = check.parse_errors
       applyLintMarkers(findings, parseErrors)
       renderSidebar(findings, parseErrors)
+      renderHidden(check.hidden)
 
       const failCount = findings.filter((f) => f.level === "fail").length
       if (failCount > 0) {
@@ -754,14 +774,41 @@ $greeting = str_repeat("Hello, " . "World" . "! ", 2);
       })
     }
 
+    // What the profiles this run did not select would add (the envelope's
+    // `hidden` object; `hidden.mjs` picks which of them are worth naming).
+    // Each name is a button that selects that profile.
+    function renderHidden(hidden) {
+      const el = document.getElementById("diag-hidden")
+      const steps = hiddenSteps(hidden)
+      el.hidden = steps.length === 0
+      if (el.hidden) { el.innerHTML = ""; return }
+      const parts = steps.map(({ profile, count }) =>
+        `${count} more on <button type="button" data-profile="${escHtml(profile)}">${escHtml(profile)}</button>`)
+      el.innerHTML = `Not listed on ${escHtml(currentProfile)}: ${parts.join(" · ")}`
+      el.querySelectorAll("button").forEach((b) => {
+        b.addEventListener("click", () => selectProfile(b.dataset.profile))
+      })
+    }
+
     // ── Profile selector (#57): the rung ladder, selected per run ────────
-    let currentProfile = "default"
+    // The page opens on `contracts` (the `selected` option): the margin marks
+    // every finding whatever the profile, and on `default` a contract-layer
+    // mark — a `@pure` function that echoes — sat beside an empty panel. The
+    // select is read rather than restated here, so a browser that restores
+    // form state on reload runs the profile it shows.
     const profileSel = document.getElementById("profile-sel")
-    profileSel.addEventListener("change", () => {
+    let currentProfile = profileSel.value
+    function showProfile() {
+      document.getElementById("sidebar-title").textContent = `Findings — ${currentProfile}`
+    }
+    function selectProfile(name) {
+      profileSel.value = name
       currentProfile = profileSel.value
-      document.querySelector("#sidebar-header > span").textContent = `Findings — ${currentProfile}`
+      showProfile()
       runCheck()
-    })
+    }
+    profileSel.addEventListener("change", () => selectProfile(profileSel.value))
+    showProfile()
 
     // ── Theme cycle (#57): Dark / Light / Auto, persisted ────────────────
     const THEME_CYCLE = ["dark", "light", "system"]

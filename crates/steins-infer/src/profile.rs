@@ -83,8 +83,9 @@ pub const DEFAULT: &str = "default";
 const RESERVED: &[&str] = &["boundary"];
 
 /// The built-in profile names (ADR-0050 §5 / G1 amendment, extended by ADR-0062
-/// A-G10's `strict` rung and by the `pedantic` branch).
-const BUILTINS: &[&str] = &["default", "contracts", "throws-direct", "strict", "pedantic"];
+/// A-G10's `strict` rung and by the `pedantic` branch). Public so the playground
+/// can say what each of them would show beside the one it ran.
+pub const BUILTINS: &[&str] = &["default", "contracts", "throws-direct", "strict", "pedantic"];
 
 /// Whether a surfaced finding fails the run or is merely reported (ADR-0050 §7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
