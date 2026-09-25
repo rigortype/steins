@@ -12,7 +12,7 @@
 //! declared answer behind.
 //!
 //! Every runtime claim was probed at 8.5.10 (the catalog pin); the transcripts
-//! live on `resource_folds.rs`'s tables. Two of them are worth naming here,
+//! live on `resource/folds.rs`'s tables. Two of them are worth naming here,
 //! because they contradict what §2.7 was drafted with:
 //!
 //! * `get_debug_type()` of a CLOSED handle is `'resource (closed)'`, not the
@@ -406,7 +406,7 @@ fn an_unknown_state_folds_to_the_union_of_both_states() {
     );
 }
 
-/// **Every row of `resource_folds.rs`'s `KIND_SPELLINGS`**, as a fixture: the
+/// **Every row of `resource/folds.rs`'s `KIND_SPELLINGS`**, as a fixture: the
 /// statements that bind the subject, the subject itself, and the
 /// `get_resource_type()` spellings PHP answers for that handle while open.
 ///

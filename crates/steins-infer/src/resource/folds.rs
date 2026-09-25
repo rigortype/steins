@@ -36,11 +36,12 @@ use steins_catalog::ResourceKind;
 use steins_domain::{Base, Fact, IntRange, PhpStr, Refinement, Val};
 use steins_syntax::ArgValue;
 
-use crate::builtin_returns::{proven_resource_state, transfer_envelope_admits};
+use crate::builtin_returns::transfer_envelope_admits;
 use crate::cx::Cx;
 use crate::env::{HandleState, HeapRes, Known, Store, Stratum};
 use crate::fold::Folder;
 use crate::offsets::place_of;
+use crate::resource::proven_resource_state;
 
 /// The four folds, by the builtin that asks.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

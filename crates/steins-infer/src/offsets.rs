@@ -123,7 +123,7 @@ pub(crate) fn place_of(
 /// loses transitions (a missed close is silence); it cannot invent one, because
 /// a place is `Closed` only where a literal-key close put it there.
 ///
-/// [`resource_call_effects`]: crate::builtin_returns::resource_call_effects
+/// [`resource_call_effects`]: crate::resource::resource_call_effects
 pub(crate) fn place_of_static(cx: &Cx, value: &ArgValue) -> Option<String> {
     match value {
         ArgValue::Var(v) => Some(v.clone()),

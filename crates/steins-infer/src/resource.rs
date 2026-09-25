@@ -1,3 +1,19 @@
+//! The resource family (ADR-0097, ADR-0098): what the walk knows about a PHP
+//! resource handle, from the call that produces it to the call that closes it.
+//!
+//! This file is the lock every consumer reads first: whether a binding provably
+//! holds a resource ([`store_holds_resource`]), and in which state
+//! ([`proven_resource_state`]). The rest is split by stage, and what other modules
+//! call is re-exported here:
+//!
+//! * [`producers`] — the arms and the heap resource a producer's return binds
+//!   (`fopen` and the other catalog rows), and the element places
+//!   `stream_socket_pair` and `proc_open` mint;
+//! * [`closers`] — what a statement's calls do to the handles they are handed:
+//!   close, keep, or let escape;
+//! * [`folds`] — `gettype`, `get_debug_type`, `get_resource_type` and
+//!   `get_resource_id` over a proven handle (§2.7).
+
 mod closers;
 mod folds;
 mod producers;
@@ -122,7 +138,7 @@ pub(crate) fn store_holds_resource(store: &Store, var: &str) -> bool {
 /// `Open` proof starts from it rather than from scratch, and answers all three
 /// axes.
 ///
-/// [`resource_call_effects`]: crate::builtin_returns::resource_call_effects
+/// [`site_verdict`]: crate::resource::closers
 pub(crate) fn proven_resource_state(store: &Store, var: &str) -> Option<HandleState> {
     if !store_holds_resource(store, var) {
         return None;
