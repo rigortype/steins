@@ -43,6 +43,7 @@ Status markers used inline are the same as in the type specification:
 | [syntax-tree-contract.md](syntax-tree-contract.md) | The owned, Mago-free CST contract; spans; the span+splice editing model; the encapsulation rule. |
 | [trace-ir.md](trace-ir.md) | The linear/structured trace IR per scope: statements, scopes, poisoning, the ratchet. |
 | [query-graph.md](query-graph.md) | The salsa database: inputs, tracked queries, the monolithic project index, and what deliberately runs outside the graph. |
+| [generation-schema.md](generation-schema.md) | `SCHEMA_VERSION`: every bump of the generation store's schema, its issue and its kind. |
 | [inference-engine.md](inference-engine.md) | The walk: environments, the store, binding descent and its budget, the effect/throw fixpoints, entry points. |
 | [folding-and-sidecar.md](folding-and-sidecar.md) | The `Folder` seam, the JSON-RPC sidecar protocol, its failure model, and the zero-FP contract. |
 | [catalog.md](catalog.md) | The builtin catalog: folding allowlist, effect coloring, label registry, generated class hierarchy, failure arms, invocation shapes. |
