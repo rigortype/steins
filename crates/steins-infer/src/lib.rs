@@ -101,6 +101,7 @@ mod fixpoints;
 mod pipeline;
 mod loops;
 mod stmt_calls;
+mod stmt_checks;
 
 pub use dam::{DamFacts, DamKind, DamSite, dam_facts};
 pub use ids::*;
