@@ -143,7 +143,7 @@ use crate::fold_persist::{FoldTableArtifact, RecordingEngine, fold_package};
 use crate::project::{FileUnit, Index, LazyTree, Res};
 use crate::summaries::{Summaries as StoredSummaries, SummaryRow, read_summaries, write_summaries};
 use crate::walk_fleet::{FolderFleet, WorkerBudget};
-use crate::walk_plan::{FilePlan, FileWalk, UniverseVerdict, WalkControl};
+use crate::walk_plan::{FilePlan, FileWalk, PassTimings, UniverseVerdict, WalkControl};
 use crate::{Diagnostic, Divergence, EngineFolder, ProcessEngine, RuntimePostures};
 
 // ---------------------------------------------------------------------------
@@ -620,6 +620,15 @@ fn deferred_tree(open: &Arc<OpenArtifact>, path: &str, text: &Arc<String>) -> La
 /// Run one generation lifecycle: open the store once, load `CURRENT` if it
 /// serves, rebuild what changed, analyze the whole universe, publish. See the
 /// module docs for the reuse and degradation rules.
+///
+/// After the store opens, the run is seven phases, each reading what the ones
+/// before it produced: the sealed capture (`capture`); the trees, loaded or
+/// parsed per package (`load_or_parse`); the changed files and the name delta
+/// (`name_delta`); the fold engine, whose boot surface completes the identity
+/// and so the replay stamp (`fold_engine`, `RunIdentity`); the analysis, which
+/// is the check pipeline with the walk plan seam open (`analyze`); the publish,
+/// or the decision to keep `CURRENT` (`publish_or_reuse`); and the outcome
+/// (`report`).
 pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, GenerationError> {
     let t_capture = Instant::now();
     let store = Store::open(p.store_root).map_err(GenerationError::Store)?;
@@ -632,7 +641,99 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
         }
     };
     let mode = if current.is_some() { GenerationMode::Warm } else { GenerationMode::Cold };
+    let (captured, inventories) = capture(p)?;
+    let capture_ms = ms(t_capture.elapsed());
 
+    let t_trees = Instant::now();
+    // The walk blocks the published generation carries — the replay
+    // candidates, keyed by path over the whole universe (issue #519 moved them
+    // out of the per-package artifacts, which had to become a function of the
+    // sources alone to be shareable). Whether any of them may actually be
+    // replayed is not knowable here: it needs the run's whole-universe
+    // verdicts, which only exist once the analysis has computed them.
+    let published: Option<StoredSummaries> = current
+        .as_ref()
+        .and_then(|generation| generation.summaries().ok())
+        .and_then(|mut reader| read_summaries(&mut reader).ok());
+    let mut loaded = load_or_parse(current.as_ref(), published.as_ref(), &captured, &mut notes);
+    // Which files moved, and which persisted block each of the others could
+    // replay. Computed here rather than beside the walk plan because the name
+    // delta is a question about the *files* that changed (issue #510), not
+    // about the packages holding them.
+    let blocks =
+        block_index(&captured.plans, &captured.diag, published.as_ref(), &captured.contents);
+    let delta = name_delta(current.as_ref(), &captured, &loaded, &blocks, &mut notes);
+    let trees_ms = ms(t_trees.elapsed());
+
+    let mut fold = fold_engine(p, current.as_ref(), &mut notes);
+    let identity = RunIdentity::read(p, &fold.folder);
+    let replay = Replay {
+        published: published.as_ref(),
+        candidates: published.as_ref().map_or(0, |s| s.rows().count()),
+        blocks,
+        stamp: identity.stamp(p),
+    };
+    let analysis = analyze(p, &captured, &mut loaded, &mut fold.folder, delta, &replay);
+    walk_notes(&analysis, replay.candidates, &mut notes);
+
+    // Identity, honestly filled (see the module docs for in/out reasoning).
+    let table = fold.folder.published_table();
+    let publishable = Publishable {
+        id: identity.generation_id(p, &captured.plans),
+        inventories,
+        captured: &captured,
+        loaded: &loaded,
+        fold: Fold { table: table.as_ref(), unchanged: fold.folder.table_unchanged() },
+        summaries: Summaries {
+            stamp: replay.stamp,
+            universe: analysis.universe,
+            diag: &captured.diag,
+            contents: &captured.contents,
+            ledger: &analysis.ledger,
+        },
+    };
+    let t_persist = Instant::now();
+    let (generation, shared_artifacts) =
+        publish_or_reuse(&store, current.as_ref(), publishable, fold.degraded, &mut notes);
+    let persist_ms = ms(t_persist.elapsed());
+
+    Ok(report(captured, loaded, analysis, RunRecord {
+        mode,
+        generation,
+        shared_artifacts,
+        fold: FoldReport {
+            loaded_rows: fold.loaded_rows,
+            fresh_rows: fold.folder.fresh_keys().len(),
+            table_published: table.is_some(),
+        },
+        notes,
+        capture_ms,
+        trees_ms,
+        persist_ms,
+    }))
+}
+
+/// The capture phase's product: the universe in slot order, partitioned into
+/// one [`Plan`] per package, with each file's text and content hash exactly as
+/// the sealed capture handed them over (issue #521).
+struct Captured {
+    /// Each file's diagnostic path, by universe slot.
+    diag: Vec<String>,
+    /// One plan per package, in package-name order.
+    plans: Vec<Plan>,
+    /// Diagnostic path → the file's text, shared with the deferred tree
+    /// handles that fall back to re-parsing it.
+    texts: HashMap<String, Arc<String>>,
+    /// Each file's sealed content fingerprint, by universe slot.
+    contents: Vec<Fingerprint>,
+}
+
+/// Partition the universe into packages and capture each behind its seal: one
+/// read and one hash per file. The inventories come back apart from the rest,
+/// because the publish is the one phase that reads them, and it consumes them.
+fn capture(
+    p: &GenerationParams<'_>,
+) -> Result<(Captured, Vec<SourceInventory>), GenerationError> {
     // The partition of this run's universe, and one sealed capture per package.
     let diag: Vec<String> = p.files.iter().map(|f| f.to_string_lossy().into_owned()).collect();
     let mut groups: BTreeMap<PackageName, Vec<usize>> = BTreeMap::new();
@@ -698,51 +799,67 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
         .into_iter()
         .map(|c| c.expect("every captured file has a sealed content hash"))
         .collect();
-    let capture_ms = ms(t_capture.elapsed());
+    Ok((Captured { diag, plans, texts, contents }, inventories))
+}
 
-    // Load-or-parse, per package. Any miss degrades that one package.
-    //
-    // "Load" no longer means *decode* (issue #516). A file the artifact can
-    // serve gets a deferred [`LazyTree`] and its persisted [`FileFacts`]; the
-    // facts answer every whole-universe phase, and the tree is decoded only if
-    // something reaches it — a walk of the file, or a walk that descends into
-    // it. A file the artifact cannot serve is parsed here and its facts are
-    // derived from that parse, which is the same value by construction.
-    let t_trees = Instant::now();
+/// The load-or-parse phase's product: per universe slot, what the analysis
+/// reads of each file; per package, in plan order, what the delta and the
+/// publish read of it.
+struct Loaded {
+    /// Per slot: the file's tree handle — deferred for a file the artifact
+    /// serves (issue #516), ready for one parsed here.
+    lazy: Vec<LazyTree<'static>>,
+    /// Per slot: the file's facts, persisted or derived from this run's parse.
+    facts: Vec<FileFacts>,
+    /// Per slot: whether this run's facts payload is the published one, so
+    /// republishing may copy its bytes instead of re-encoding them. The
+    /// analysis clears it for any file whose own rows it recomputes.
+    copyable: Vec<bool>,
+    /// Per package: its realized state.
+    states: Vec<PkgState>,
+    /// Per package: this run's shard, verbatim from the artifact or rebuilt
+    /// from the per-file facts in hand.
+    shards: Vec<PackageShard>,
+    /// Per package: the open artifact, kept for the run — a deferred tree load
+    /// reads one whenever a walk reaches its file, and the republish copies
+    /// per-file payloads out of it.
+    artifacts: Vec<Option<Arc<OpenArtifact>>>,
+    /// Per package: the name delta's old side. `None` means one of two things,
+    /// and the delta can tell them apart from the package's state: either the
+    /// old shard could not be read — which makes the delta unknowable and
+    /// walks the whole run, since a name whose disappearance is invisible
+    /// cannot be reasoned about — or it was taken to serve as this run's shard
+    /// verbatim, which only happens for a package whose sources did not move
+    /// and which therefore contributes no delta.
+    old_shards: Vec<Option<PackageShard>>,
+}
+
+/// Load-or-parse, per package. Any miss degrades that one package.
+///
+/// "Load" no longer means *decode* (issue #516). A file the artifact can
+/// serve gets a deferred [`LazyTree`] and its persisted [`FileFacts`]; the
+/// facts answer every whole-universe phase, and the tree is decoded only if
+/// something reaches it — a walk of the file, or a walk that descends into
+/// it. A file the artifact cannot serve is parsed here and its facts are
+/// derived from that parse, which is the same value by construction.
+fn load_or_parse(
+    current: Option<&Generation>,
+    published_summaries: Option<&StoredSummaries>,
+    captured: &Captured,
+    notes: &mut Vec<String>,
+) -> Loaded {
+    let Captured { diag, plans, texts, contents } = captured;
     let mut lazy_slots: Vec<Option<LazyTree<'static>>> =
         std::iter::repeat_with(|| None).take(diag.len()).collect();
     let mut fact_slots: Vec<Option<FileFacts>> =
         std::iter::repeat_with(|| None).take(diag.len()).collect();
-    // Per slot: whether this run's facts payload is the published one, so
-    // republishing may copy its bytes instead of re-encoding them. Cleared
-    // below for any file whose own rows this run recomputes.
     let mut facts_copyable: Vec<bool> = vec![false; diag.len()];
     let mut states: Vec<PkgState> = Vec::with_capacity(plans.len());
     let mut shards: Vec<PackageShard> = Vec::with_capacity(plans.len());
-    // The open artifacts, kept for the run: a deferred tree load reads one
-    // whenever a walk reaches its file, so the reader outlives this loop.
     let mut artifacts: Vec<Option<Arc<OpenArtifact>>> = Vec::with_capacity(plans.len());
-    // The walk blocks the published generation carries — the replay
-    // candidates, keyed by path over the whole universe (issue #519 moved them
-    // out of the per-package artifacts, which had to become a function of the
-    // sources alone to be shareable). Whether any of them may actually be
-    // replayed is not knowable here: it needs the run's whole-universe
-    // verdicts, which only exist once the analysis has computed them.
-    let published_summaries: Option<StoredSummaries> = current
-        .as_ref()
-        .and_then(|generation| generation.summaries().ok())
-        .and_then(|mut reader| read_summaries(&mut reader).ok());
-    // The name delta's old side, per package, in load order. `None` means one
-    // of two things, and the delta loop below can tell them apart from the
-    // package's state: either the old shard could not be read — which makes
-    // the delta unknowable and walks the whole run, since a name whose
-    // disappearance is invisible cannot be reasoned about — or it was taken to
-    // serve as this run's shard verbatim, which only happens for a package
-    // whose sources did not move and which therefore contributes no delta.
     let mut old_shards: Vec<Option<PackageShard>> = Vec::with_capacity(plans.len());
-    for plan in &plans {
-        let mut published =
-            read_published(current.as_ref(), published_summaries.as_ref(), plan, &diag, &contents);
+    for plan in plans {
+        let mut published = read_published(current, published_summaries, plan, diag, contents);
         let artifact = published.artifact.take();
         match published.fresh {
             Ok(loaded) => {
@@ -821,46 +938,64 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
         artifacts.push(artifact);
         old_shards.push(published.old_shard);
     }
-    let lazy: Vec<LazyTree<'static>> =
-        lazy_slots.into_iter().map(|t| t.expect("every slot is filled above")).collect();
-    let mut facts: Vec<FileFacts> =
-        fact_slots.into_iter().map(|f| f.expect("every slot is filled above")).collect();
-    let replay_candidates: usize =
-        published_summaries.as_ref().map_or(0, |s| s.rows().count());
+    Loaded {
+        lazy: lazy_slots.into_iter().map(|t| t.expect("every slot is filled above")).collect(),
+        facts: fact_slots.into_iter().map(|f| f.expect("every slot is filled above")).collect(),
+        copyable: facts_copyable,
+        states,
+        shards,
+        artifacts,
+        old_shards,
+    }
+}
 
-    // Which files moved, and which persisted block each of the others could
-    // replay. Computed here rather than beside the walk plan because the name
-    // delta is a question about the *files* that changed (issue #510), not
-    // about the packages holding them.
-    let blocks = block_index(&plans, &diag, published_summaries.as_ref(), &contents);
+/// The name delta and the changed-file set it was computed over — the two
+/// inputs [`affected_files`] takes besides the facts.
+struct NameDelta {
+    /// The universe slots whose file moved: no persisted row carries the
+    /// content fingerprint this run captured ([`block_index`]).
+    changed: HashSet<usize>,
+    /// The names that moved, hashed the way the persisted footprints are
+    /// (`facts::key_hash`), since that is the form the affected set compares
+    /// against.
+    names: HashSet<u64>,
+    /// Whether every old side could be read. `false` walks the whole run.
+    known: bool,
+}
+
+/// The name delta (issue #489 slice B, tightened to file granularity by
+/// issue #510): over every changed package, the names its OLD shard sites
+/// in a file that changed, and the names its NEW shard sites in one. A
+/// package whose sources did not move contributes nothing — both its sides
+/// are the same set — and a package that moved contributes only what its
+/// moved *files* declare, which is what makes the delta proportional to the
+/// edit rather than to the package. The one member with no site to answer
+/// for it — a package's ambiguity set — rides a changed package wholesale;
+/// `PackageShard::contributed_names_from` says why.
+///
+/// "Did not move" is the package's own source fingerprint and never "parsed
+/// nothing" (issue #512, `PkgState::sources_match`): under the per-file gate
+/// a package that *lost* a file loads every survivor and parses nothing at
+/// all, while the names the lost file declared are gone from the universe
+/// and must reach the delta.
+fn name_delta(
+    current: Option<&Generation>,
+    captured: &Captured,
+    loaded: &Loaded,
+    blocks: &[Option<&FileWalk>],
+    notes: &mut Vec<String>,
+) -> NameDelta {
+    let diag = &captured.diag;
     let changed: HashSet<usize> = (0..diag.len()).filter(|slot| blocks[*slot].is_none()).collect();
-
-    // The name delta (issue #489 slice B, tightened to file granularity by
-    // issue #510): over every changed package, the names its OLD shard sites
-    // in a file that changed, and the names its NEW shard sites in one. A
-    // package whose sources did not move contributes nothing — both its sides
-    // are the same set — and a package that moved contributes only what its
-    // moved *files* declare, which is what makes the delta proportional to the
-    // edit rather than to the package. The one member with no site to answer
-    // for it — a package's ambiguity set — rides a changed package wholesale;
-    // `PackageShard::contributed_names_from` says why.
-    //
-    // "Did not move" is the package's own source fingerprint and never "parsed
-    // nothing" (issue #512, `PkgState::sources_match`): under the per-file gate
-    // a package that *lost* a file loads every survivor and parses nothing at
-    // all, while the names the lost file declared are gone from the universe
-    // and must reach the delta.
     let now: HashMap<&str, usize> =
         diag.iter().enumerate().map(|(slot, path)| (path.as_str(), slot)).collect();
-    // Hashed the way the persisted footprints are (`facts::key_hash`), since
-    // that is the form the affected set now compares against.
     let mut delta: HashSet<u64> = HashSet::new();
     let mut delta_known = true;
-    for (i, plan) in plans.iter().enumerate() {
-        if states[i].sources_match && !states[i].degraded {
+    for (i, plan) in captured.plans.iter().enumerate() {
+        if loaded.states[i].sources_match && !loaded.states[i].degraded {
             continue;
         }
-        match &old_shards[i] {
+        match &loaded.old_shards[i] {
             // Old sites index the OLD universe, so they are resolved through
             // the old shard's own file map and compared as paths.
             Some(old) => {
@@ -883,14 +1018,14 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
         }
         let moved: HashSet<usize> =
             plan.slots.iter().copied().filter(|slot| changed.contains(slot)).collect();
-        delta.extend(shards[i].contributed_names_from(&moved).iter().map(|k| key_hash(k)));
+        delta.extend(loaded.shards[i].contributed_names_from(&moved).iter().map(|k| key_hash(k)));
     }
     // A package the published generation had and this run does not: its names
     // vanished, and the files that referenced them must be walked. Wholesale
     // and deliberately so — every file it held left it, so no unchanged file
     // of its own is left to narrow the set by.
-    if let Some(generation) = current.as_ref() {
-        let live: HashSet<&PackageName> = plans.iter().map(|plan| &plan.name).collect();
+    if let Some(generation) = current {
+        let live: HashSet<&PackageName> = captured.plans.iter().map(|plan| &plan.name).collect();
         let fold = fold_package();
         for gone in generation.packages().filter(|n| **n != fold && !live.contains(n)) {
             match generation.artifact(gone).and_then(|mut r| read_shard(&mut r)) {
@@ -904,14 +1039,31 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
             }
         }
     }
-    let trees_ms = ms(t_trees.elapsed());
+    NameDelta { changed, names: delta, known: delta_known }
+}
 
-    // The fold table (ADR-0092 §4): warm over the published artifact when it
-    // decodes, cold otherwise — a whole-table degradation, never a partial one.
+/// The run's folder, and what the fold table did as the engine came up.
+struct FoldSetup {
+    folder: crate::RecordingFolder,
+    /// Rows loaded from the published `__fold__` artifact (0 on a cold run or
+    /// after an identity/whole-table miss).
+    loaded_rows: usize,
+    /// The published table was there and would not decode — a degradation,
+    /// which republishes to repair it.
+    degraded: bool,
+}
+
+/// The fold table (ADR-0092 §4): warm over the published artifact when it
+/// decodes, cold otherwise — a whole-table degradation, never a partial one.
+fn fold_engine(
+    p: &GenerationParams<'_>,
+    current: Option<&Generation>,
+    notes: &mut Vec<String>,
+) -> FoldSetup {
     let live = if p.php { ProcessEngine::enabled() } else { ProcessEngine::new(true) };
     let mut fold_loaded_rows = 0usize;
     let mut fold_degraded = false;
-    let engine = match current.as_ref().filter(|g| g.has_package(&fold_package())) {
+    let engine = match current.filter(|g| g.has_package(&fold_package())) {
         Some(generation) => {
             match generation.artifact(&fold_package()).and_then(|mut r| FoldTableArtifact::read(&mut r))
             {
@@ -936,49 +1088,124 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
     // makes the engine posture, and therefore the replay stamp, available
     // before the first file is walked rather than after the last.
     crate::Folder::php_minor(&mut folder);
-    let engine_posture = posture_of(folder.engine_identity().as_ref());
-    let composer_lock = p
-        .layout
-        .roots()
-        .last()
-        .and_then(|root| std::fs::read(root.dir().join("composer.lock")).ok())
-        .map(|bytes| Fingerprint::of_bytes("steins-gen/composer.lock", &bytes));
-    // The replay stamp: the generation identity with the per-package source
-    // fingerprints left out, because those are gated per package by the
-    // `sources` section already. Everything else — the analyzer version, the
-    // lock, the catalog pin, the plugin channel, the engine posture, the
-    // finding-relevant config — must be unmoved before one persisted finding
-    // may be replayed. (This is the re-audit the issue asks for: under slice A
-    // an under-covered input cost a stale *cache*; here it would cost a stale
-    // *finding*, so the gate is the whole identity rather than its package
-    // half.)
-    let stamp = *GenerationInputs {
-        packages: Vec::new(),
-        ..identity_inputs(p, composer_lock, engine_posture.clone())
-    }
-    .generation_id()
-    .as_fingerprint();
+    FoldSetup { folder, loaded_rows: fold_loaded_rows, degraded: fold_degraded }
+}
 
-    // The analysis proper — the same `check_units` every entry point runs,
-    // over an index merged from the loaded-or-rebuilt shards (the merge is
-    // partition-invariant, so this equals the cold constructions exactly).
+/// The identity inputs the run establishes for itself rather than takes from
+/// its params: the `composer.lock` content hash, and the engine posture off
+/// the folder's own recorded boot surface. With [`identity_inputs`] they are
+/// the whole identity but its per-package half.
+struct RunIdentity {
+    composer_lock: Option<Fingerprint>,
+    engine: EnginePosture,
+}
+
+impl RunIdentity {
+    fn read(p: &GenerationParams<'_>, folder: &crate::RecordingFolder) -> Self {
+        let engine = posture_of(folder.engine_identity().as_ref());
+        let composer_lock = p
+            .layout
+            .roots()
+            .last()
+            .and_then(|root| std::fs::read(root.dir().join("composer.lock")).ok())
+            .map(|bytes| Fingerprint::of_bytes("steins-gen/composer.lock", &bytes));
+        Self { composer_lock, engine }
+    }
+
+    /// The replay stamp: the generation identity with the per-package source
+    /// fingerprints left out, because those are gated per package by the
+    /// `sources` section already. Everything else — the analyzer version, the
+    /// lock, the catalog pin, the plugin channel, the engine posture, the
+    /// finding-relevant config — must be unmoved before one persisted finding
+    /// may be replayed. (This is the re-audit the issue asks for: under slice A
+    /// an under-covered input cost a stale *cache*; here it would cost a stale
+    /// *finding*, so the gate is the whole identity rather than its package
+    /// half.)
+    fn stamp(&self, p: &GenerationParams<'_>) -> Fingerprint {
+        *GenerationInputs {
+            packages: Vec::new(),
+            ..identity_inputs(p, self.composer_lock, self.engine.clone())
+        }
+        .generation_id()
+        .as_fingerprint()
+    }
+
+    /// The generation id: the same inputs as [`Self::stamp`], with every
+    /// package's source fingerprint.
+    fn generation_id(self, p: &GenerationParams<'_>, plans: &[Plan]) -> GenerationId {
+        GenerationInputs {
+            packages: plans.iter().map(|plan| (plan.name.clone(), plan.fingerprint)).collect(),
+            ..identity_inputs(p, self.composer_lock, self.engine)
+        }
+        .generation_id()
+    }
+}
+
+/// What this run may replay, and on whose licence (issue #489 slice B).
+struct Replay<'a> {
+    /// The published generation's walk blocks, when its sidecar decoded.
+    published: Option<&'a StoredSummaries>,
+    /// How many blocks were on offer: zero on a cold run, which has no sidecar.
+    candidates: usize,
+    /// Per universe slot, the block that file could replay, or `None` for a
+    /// changed file ([`block_index`]).
+    blocks: Vec<Option<&'a FileWalk>>,
+    /// The stamp a block's sidecar must carry ([`RunIdentity::stamp`]).
+    stamp: Fingerprint,
+}
+
+/// What the analysis hands on: the findings and the notices, the walk's rows
+/// for the sidecar and its report, and where the time went.
+struct Analysis {
+    findings: Vec<Diagnostic>,
+    /// The `[effects.attribution]` keys naming no symbol, off the merged index.
+    attribution_notices: Vec<String>,
+    walk: WalkReport,
+    /// Per file, in unit order: the block its walk or replay produced.
+    ledger: Vec<FileWalk>,
+    /// The whole-universe verdict digest the planner was handed.
+    universe: Fingerprint,
+    passes: PassTimings,
+    merge_ms: f64,
+    analyze_ms: f64,
+}
+
+/// The analysis proper — the same `check_units` every entry point runs,
+/// over an index merged from the loaded-or-rebuilt shards (the merge is
+/// partition-invariant, so this equals the cold constructions exactly).
+///
+/// The walk plan (issue #489 slice B) is decided here too: the planner is
+/// asked once, after the run's whole-universe verdicts are computed and
+/// before the first file is walked, whether each file's persisted block may
+/// be replayed. The walk fans out over workers whose fold tables are folded
+/// back into `folder` before this returns.
+fn analyze(
+    p: &GenerationParams<'_>,
+    captured: &Captured,
+    loaded: &mut Loaded,
+    folder: &mut crate::RecordingFolder,
+    delta: NameDelta,
+    replay: &Replay<'_>,
+) -> Analysis {
     let t_analyze = Instant::now();
-    let index = Index::from_merged(merge_shards(&shards));
+    let index = Index::from_merged(merge_shards(&loaded.shards));
     let merge_ms = ms(t_analyze.elapsed());
+    let diag = &captured.diag;
     let units: Vec<FileUnit<'_>> =
-        diag.iter().zip(&lazy).map(|(path, tree)| FileUnit { path, tree }).collect();
-    // The walk plan (issue #489 slice B). The planner is asked once, after the
-    // run's whole-universe verdicts are computed and before the first file is
-    // walked; it decides per file whether the persisted block may be replayed.
+        diag.iter().zip(&loaded.lazy).map(|(path, tree)| FileUnit { path, tree }).collect();
     let paranoid = paranoid_enabled(p);
-    // `blocks` — every file's persisted block, by slot, with the package that
-    // carries it — was built with the delta above, so the licensing check
-    // (which needs the universe digest) is all the planner has left to do.
-    // Nothing may replay at all unless there is a published generation to
-    // replay from and the name delta could be read.
-    let replay_possible = current.is_some() && delta_known && replay_candidates > 0;
+    // `replay.blocks` — every file's persisted block, by slot — was built with
+    // the delta, so the licensing check (which needs the universe digest) is
+    // all the planner has left to do. Nothing may replay at all unless there
+    // is a published generation to replay from (a cold run has no candidates)
+    // and the name delta could be read.
+    let replay_possible = delta.known && replay.candidates > 0;
     let affected: HashSet<usize> = if replay_possible {
-        affected_files(&AffectedInputs { facts: &facts, changed, delta })
+        affected_files(&AffectedInputs {
+            facts: &loaded.facts,
+            changed: delta.changed,
+            delta: delta.names,
+        })
     } else {
         (0..diag.len()).collect()
     };
@@ -989,10 +1216,10 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
     // half of the same row is licensed by the content fingerprint alone). An
     // affected file is walked, so its tree is in hand either way.
     for slot in &affected {
-        facts[*slot].rows = None;
-        facts_copyable[*slot] = false;
+        loaded.facts[*slot].rows = None;
+        loaded.copyable[*slot] = false;
     }
-    fill_rows(&mut facts, &units, &index, p.plugins, p.effects);
+    fill_rows(&mut loaded.facts, &units, &index, p.plugins, p.effects);
     let mut universe: Option<Fingerprint> = None;
     let mut planner = |verdict: &UniverseVerdict<'_>| -> Vec<FilePlan> {
         let digest = universe_digest(verdict);
@@ -1003,11 +1230,9 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
         // The whole-universe leg: a moved verdict refuses every row of the
         // sidecar it stamped, so every file walks. One sidecar, one licence
         // check (issue #519).
-        let licensed = published_summaries
-            .as_ref()
-            .is_some_and(|s| s.licensed_by(&stamp, &digest));
+        let licensed = replay.published.is_some_and(|s| s.licensed_by(&replay.stamp, &digest));
         (0..diag.len())
-            .map(|slot| match blocks[slot] {
+            .map(|slot| match replay.blocks[slot] {
                 Some(block) if licensed && !affected.contains(&slot) => {
                     FilePlan::Replay(block.clone())
                 }
@@ -1031,11 +1256,11 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
     };
     let retire = |worker: crate::RecordingFolder| worker.harvest();
     let fleet = FolderFleet::new(WorkerBudget::read(), &hire, &retire);
-    let mut control = WalkControl::new(&mut planner, paranoid, &facts, Some(&fleet));
+    let mut control = WalkControl::new(&mut planner, paranoid, &loaded.facts, Some(&fleet));
     let findings = crate::check_units_controlled(
         &units,
         &index,
-        &mut folder,
+        folder,
         p.postures,
         p.layout,
         p.plugins,
@@ -1066,6 +1291,13 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
         folder.absorb_worker(harvest);
     }
     let universe = universe.expect("the planner runs before the first file is walked");
+    Analysis { findings, attribution_notices, walk, ledger, universe, passes, merge_ms, analyze_ms }
+}
+
+/// The walk's own notes: every paranoid divergence, the replay count whenever
+/// anything was on offer, and under the verifier the universe verdict.
+fn walk_notes(analysis: &Analysis, replay_candidates: usize, notes: &mut Vec<String>) {
+    let walk = &analysis.walk;
     for divergence in &walk.divergences {
         notes.push(format!("PARANOID DIVERGENCE {divergence}"));
     }
@@ -1075,7 +1307,7 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
             walk.replayed, walk.walked
         ));
     }
-    if paranoid {
+    if walk.paranoid {
         // Under the verifier, say which universe verdict this run computed:
         // over a corpus tree, two runs whose digests differ walked everything
         // for that reason, and the auditor should see that rather than infer
@@ -1085,72 +1317,83 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
             walk.walked,
             walk.would_skip,
             walk.divergence_count,
-            universe.to_hex(),
+            analysis.universe.to_hex(),
         ));
     }
+}
 
-    // Identity, honestly filled (see the module docs for in/out reasoning).
-    let fold_table = folder.published_table();
-    let fold_fresh = folder.fresh_keys().len();
-    let fold_unchanged = folder.table_unchanged();
-    let inputs = GenerationInputs {
-        packages: plans.iter().map(|plan| (plan.name.clone(), plan.fingerprint)).collect(),
-        ..identity_inputs(p, composer_lock, engine_posture)
-    };
-    let id = inputs.generation_id();
+/// Everything a publish writes: the identity, the sealed inventories the
+/// store begins the candidate from, the run's per-package and per-file
+/// products, the fold table and this run's walk blocks.
+struct Publishable<'a> {
+    id: GenerationId,
+    inventories: Vec<SourceInventory>,
+    captured: &'a Captured,
+    loaded: &'a Loaded,
+    fold: Fold<'a>,
+    summaries: Summaries<'a>,
+}
 
-    // Publish — or keep CURRENT when this run *is* the published generation
-    // and nothing degraded (a degradation republishes to repair the artifact).
-    let t_persist = Instant::now();
+/// Publish — or keep CURRENT when this run *is* the published generation
+/// and nothing degraded (a degradation republishes to repair the artifact).
+/// Returns the published (or confirmed-current) generation id, lowercase hex,
+/// or `None` when publication failed, which is a note; and how many artifacts
+/// the publish shared rather than wrote.
+fn publish_or_reuse(
+    store: &Store,
+    current: Option<&Generation>,
+    run: Publishable<'_>,
+    fold_degraded: bool,
+    notes: &mut Vec<String>,
+) -> (Option<String>, usize) {
+    let states = &run.loaded.states;
     let total_parsed: usize = states.iter().map(|s| s.parsed).sum();
     let any_degraded = states.iter().any(|s| s.degraded) || fold_degraded;
-    let reuse =
-        current.as_ref().is_some_and(|g| g.id() == &id) && total_parsed == 0 && !any_degraded;
-    let mut shared_artifacts = 0usize;
-    let generation_hex = if reuse {
+    let reuse = current.is_some_and(|g| g.id() == &run.id) && total_parsed == 0 && !any_degraded;
+    if reuse {
         notes.push("generation already current; nothing republished".to_owned());
-        Some(id.to_hex())
-    } else {
-        match publish(
-            &store,
-            id,
-            inventories,
-            &plans,
-            &states,
-            &shards,
-            current.as_ref(),
-            Fold { table: fold_table.as_ref(), unchanged: fold_unchanged },
-            &Summaries {
-                stamp,
-                universe,
-                diag: &diag,
-                contents: &contents,
-                ledger: &ledger,
-            },
-            &Payloads {
-                lazy: &lazy,
-                facts: &facts,
-                copyable: &facts_copyable,
-                artifacts: &artifacts,
-                diag: &diag,
-            },
-        ) {
-            Ok((hex, shared)) => {
-                shared_artifacts = shared.total();
-                notes.extend(shared.note());
-                Some(hex)
-            }
-            Err(detail) => {
-                notes.push(format!("publish failed ({detail}); this run's findings are unaffected"));
-                None
-            }
+        return (Some(run.id.to_hex()), 0);
+    }
+    match publish(store, current, run) {
+        Ok((hex, shared)) => {
+            notes.extend(shared.note());
+            (Some(hex), shared.total())
         }
-    };
-    let persist_ms = ms(t_persist.elapsed());
+        Err(detail) => {
+            notes.push(format!("publish failed ({detail}); this run's findings are unaffected"));
+            (None, 0)
+        }
+    }
+}
 
+/// What the orchestrator itself decided and timed, for [`report`] to file
+/// beside what the phases produced: the temperature the run started at, what
+/// it published, what the fold table did, the notes, and the three spans the
+/// analysis does not time for itself.
+struct RunRecord {
+    mode: GenerationMode,
+    generation: Option<String>,
+    shared_artifacts: usize,
+    fold: FoldReport,
+    notes: Vec<String>,
+    capture_ms: f64,
+    trees_ms: f64,
+    persist_ms: f64,
+}
+
+/// The outcome: the findings, the texts and tree handles the caller's
+/// downstream pipeline reads, and the run's ledger.
+fn report(
+    captured: Captured,
+    loaded: Loaded,
+    analysis: Analysis,
+    run: RunRecord,
+) -> GenerationOutcome {
+    let Captured { diag, plans, texts, .. } = captured;
+    let lazy = loaded.lazy;
     let packages = plans
         .iter()
-        .zip(&states)
+        .zip(&loaded.states)
         .map(|(plan, state)| PackageReport {
             name: plan.name.to_string(),
             kind: plan.kind,
@@ -1161,7 +1404,9 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
             disposition: state.disposition,
         })
         .collect();
-    Ok(GenerationOutcome {
+    let Analysis { findings, attribution_notices, walk, passes, merge_ms, analyze_ms, .. } =
+        analysis;
+    GenerationOutcome {
         findings,
         // Every deferred handle is dropped with `lazy` below, so the texts come
         // back without a copy in the ordinary case.
@@ -1174,18 +1419,14 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
         trees: diag.into_iter().zip(lazy).collect(),
         attribution_notices,
         report: GenerationReport {
-            mode,
-            generation: generation_hex,
+            mode: run.mode,
+            generation: run.generation,
             packages,
-            fold: FoldReport {
-                loaded_rows: fold_loaded_rows,
-                fresh_rows: fold_fresh,
-                table_published: fold_table.is_some(),
-            },
+            fold: run.fold,
             walk,
             timings: PhaseTimings {
-                capture_ms,
-                trees_ms,
+                capture_ms: run.capture_ms,
+                trees_ms: run.trees_ms,
                 analyze_ms,
                 merge_ms,
                 facts_ms: passes.facts_ms,
@@ -1203,12 +1444,12 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
                         - passes.walk_ms
                         - passes.report_ms)
                         .max(0.0),
-                persist_ms,
+                persist_ms: run.persist_ms,
             },
-            shared_artifacts,
-            notes,
+            shared_artifacts: run.shared_artifacts,
+            notes: run.notes,
         },
-    })
+    }
 }
 
 /// Per universe slot, the persisted walk block that file could replay and the
@@ -1277,7 +1518,7 @@ struct Published {
     /// This package's OLD shard — the delta's old side, and the verbatim
     /// shard when the load reuses it. `None` when the artifact could not give
     /// it, which makes the name delta *unknowable* and walks the whole run
-    /// (see [`generation_check`]).
+    /// (see [`name_delta`]).
     old_shard: Option<PackageShard>,
     /// The open artifact, kept alive for this run's deferred tree loads and
     /// for the republish path's per-file byte copies. `Some` whenever the
@@ -1501,22 +1742,23 @@ fn build_shard(plan: &Plan, facts: &[Option<FileFacts>]) -> PackageShard {
 /// hard link, which costs a directory entry instead of the package's bytes and
 /// its durability barrier. In the shape ADR-0092 §3 is built for that is every
 /// package but the edited one.
-#[allow(clippy::too_many_arguments)]
 fn publish(
     store: &Store,
-    id: GenerationId,
-    inventories: Vec<SourceInventory>,
-    plans: &[Plan],
-    states: &[PkgState],
-    shards: &[PackageShard],
     current: Option<&Generation>,
-    fold: Fold<'_>,
-    summaries: &Summaries<'_>,
-    payloads: &Payloads<'_>,
+    run: Publishable<'_>,
 ) -> Result<(String, Shared), String> {
+    let Publishable { id, inventories, captured, loaded, fold, summaries } = run;
+    let payloads = Payloads {
+        lazy: &loaded.lazy,
+        facts: &loaded.facts,
+        copyable: &loaded.copyable,
+        artifacts: &loaded.artifacts,
+        diag: &captured.diag,
+    };
     let mut candidate = store.begin(id, inventories).map_err(|e| format!("begin: {e}"))?;
     let mut shared = Shared::default();
-    for (package, ((plan, state), shard)) in plans.iter().zip(states).zip(shards).enumerate() {
+    let packages = captured.plans.iter().zip(&loaded.states).zip(&loaded.shards).enumerate();
+    for (package, ((plan, state), shard)) in packages {
         // A package that parsed nothing, kept its slots, rebuilt none of its
         // per-file facts and whose whole source fingerprint still matches would
         // republish the published artifact's exact bytes — so it takes them
@@ -1540,7 +1782,7 @@ fn publish(
         match adopted {
             Some(kind) => shared.count(kind),
             None => {
-                let builder = build_artifact(plan, shard, package, payloads);
+                let builder = build_artifact(plan, shard, package, &payloads);
                 candidate
                     .write_artifact(&plan.name, &builder)
                     .map_err(|e| format!("write {}: {e}", plan.name))?;
@@ -1554,7 +1796,7 @@ fn publish(
     // unmoved package's artifact shareable at all — and one sidecar for the
     // universe is one write and one barrier however many packages there are.
     let mut sidecar = ArtifactBuilder::new();
-    summaries.write(&mut sidecar, plans);
+    summaries.write(&mut sidecar, &captured.plans);
     candidate.write_summaries(&sidecar).map_err(|e| format!("write summaries: {e}"))?;
     if let Some(table) = fold.table {
         // The fold table gets the same treatment on the same terms: the engine
