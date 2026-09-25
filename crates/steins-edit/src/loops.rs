@@ -276,6 +276,10 @@ impl Candidate<'_> {
     /// The gate sequence, fixed order: shape gates first, then parity, then
     /// purity. Returns the replacement text plus the admitting trust lane, or
     /// the one named reason this loop is refused for.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "predates the #778 ratchet; split when next reworked"
+    )]
     fn decide(
         &self,
         subject_fact: &SubjectFact,

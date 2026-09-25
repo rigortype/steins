@@ -486,6 +486,7 @@ pub(crate) fn push_hidden_exit_floor(w: &WalkCx, may_return: bool) {
 /// Statements after a terminator are unreachable and are **not** walked (ADR-0031
 /// closes ADR-0027's dead-fallthrough gap).
 #[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_lines, reason = "the phase order and step-2 match stay together (#769)")]
 pub(crate) fn walk_trace(
     w: &WalkCx,
     folder: &mut dyn Folder,

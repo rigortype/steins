@@ -153,6 +153,7 @@ pub(crate) fn propagated_arg_value(
 /// Check a function call whose arguments may be propagated values (`Var`/`Call`/
 /// array). Runs the native runtime check and the phpdoc declared-contract check;
 /// a site where the native check fired is skipped by the phpdoc check.
+#[expect(clippy::too_many_lines, reason = "predates the #778 ratchet; split when next reworked")]
 pub(crate) fn check_propagated_call(
     w: &WalkCx,
     folder: &mut dyn Folder,

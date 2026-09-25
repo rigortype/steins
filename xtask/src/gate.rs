@@ -1011,6 +1011,7 @@ fn analyze_local(proj: &LocalProject, pins: &[ExpectedProofFinding]) -> PackageR
     }
 }
 
+#[expect(clippy::too_many_lines, reason = "cold in the #779 survey; split when next reworked")]
 fn print_report(
     baselines: &Baselines,
     reports: &[PackageReport],

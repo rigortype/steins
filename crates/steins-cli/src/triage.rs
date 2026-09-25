@@ -632,6 +632,7 @@ pub fn render_json(r: &TriageReport) -> String {
 /// The synopsis the no-argument usage and the `2` exits print.
 pub(crate) const USAGE: &str = "steins triage [--format text|json] [--input <file>|-] [--top <n>] [--profile <name>] [--no-php] [--no-cache] [--no-tolerated-effects] [--vendor-diagnostics] [--ignore-baseline] [--baseline <path>] [<paths...>]";
 
+#[expect(clippy::too_many_lines, reason = "predates the #778 ratchet; split when next reworked")]
 pub(crate) fn run_triage(args: &[String]) -> ExitCode {
     let mut format = Format::Text;
     let mut input: Option<String> = None;

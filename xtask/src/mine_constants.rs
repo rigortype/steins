@@ -989,6 +989,7 @@ fn base64_decode(s: &str) -> Option<Vec<u8>> {
 }
 
 /// Render the TOML source of record.
+#[expect(clippy::too_many_lines, reason = "predates the #778 ratchet; split when next reworked")]
 fn render(
     engines: &[Engine],
     rows: &BTreeMap<String, Row>,

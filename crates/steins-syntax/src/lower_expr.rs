@@ -505,6 +505,7 @@ pub(crate) fn lower_construct_call(inst: &Instantiation<'_>) -> Option<CallExpr>
 /// and assignment right-hand sides. Recognizes literals, bare local variables
 /// (`$x` → [`ArgValue::Var`]), and calls to a statically-named function
 /// (`f(...)` → [`ArgValue::Call`]); everything else is [`ArgValue::Other`].
+#[expect(clippy::too_many_lines, reason = "predates the #778 ratchet; split when next reworked")]
 pub(crate) fn lower_arg_value(expr: &Expression<'_>) -> ArgValue {
     // `$a[0][0][…]` and long `.` chains recurse once per level (issue #264). Out
     // of headroom the value is `Other` — the unproven answer this lowering

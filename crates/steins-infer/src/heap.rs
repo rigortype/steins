@@ -898,6 +898,7 @@ fn fact_is_nullish(f: &Fact) -> bool {
 /// fact in the heap. An unknown receiver (no tracked object) records nothing (but
 /// an object rvalue still escapes — it is now reachable via the property).
 #[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_lines, reason = "predates the #778 ratchet; split when next reworked")]
 pub(crate) fn apply_prop_assign(
     w: &WalkCx,
     folder: &mut dyn Folder,

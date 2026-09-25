@@ -412,6 +412,7 @@ fn family(spell: &str, param_name: &str) -> Option<(Vec<serde_json::Value>, Stri
 
 /// One arm of a declared union, or `None` when no literal can fill it — an
 /// object, a resource, an enum, `iterable`.
+#[expect(clippy::too_many_lines, reason = "predates the #778 ratchet; split when next reworked")]
 fn arm_family(arm: &str, param_name: &str) -> Option<(Vec<serde_json::Value>, &'static str)> {
     // A size-shaped `int` is a memory bomb from the POSITIVE side only. ADR-0066
     // left `str_pad("abc", "3000000000")` out of the hand-written families for
