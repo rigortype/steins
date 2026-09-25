@@ -27,6 +27,74 @@ use crate::refine::{clear_null, seed_shape_fact};
 use crate::return_arms::call_return_arms;
 use crate::walk::{WalkCx, mark_dead_span};
 
+/// The target of `$var = <value>;`: the variable, the statement's line, and the
+/// line-fact sink the margin display reads (ADR-0020).
+///
+/// The arms of [`apply_assign`] land their answers through these methods, so a
+/// rebinding drops the old binding's heap, place and arm lanes ([`Store::unbind`])
+/// together with its value lane. [`bind`](Self::bind) also shows a literal on the
+/// line and [`bind_quiet`](Self::bind_quiet) does not. The arms that bind quietly —
+/// an offset read, `??`, an array literal, `::class`, the shape rung and the
+/// envelope, and beside them a property read and the declared floor — have never
+/// shown one; that asymmetry is older than this struct and kept as it is.
+struct AssignLhs<'a> {
+    var: &'a str,
+    line: u32,
+    facts: Option<&'a mut Vec<LineFact>>,
+}
+
+impl AssignLhs<'_> {
+    /// Bind the value lane to `fact` at `strat`, and show it on the line when it
+    /// is one literal.
+    fn bind(
+        &mut self,
+        env: &mut HashMap<String, Known>,
+        store: &mut Store,
+        fact: Fact,
+        strat: Stratum,
+    ) {
+        self.note_literal(&fact);
+        self.bind_quiet(env, store, fact, strat);
+    }
+
+    /// Bind the value lane to `fact` at `strat`, showing nothing on the line.
+    fn bind_quiet(
+        &self,
+        env: &mut HashMap<String, Known>,
+        store: &mut Store,
+        fact: Fact,
+        strat: Stratum,
+    ) {
+        self.bind_known(env, store, Known::value_strat(fact, self.line, None, strat));
+    }
+
+    /// Bind the value lane to `known` as built, for the two arms that name where
+    /// the fact came from.
+    fn bind_known(&self, env: &mut HashMap<String, Known>, store: &mut Store, known: Known) {
+        env.insert(self.var.to_owned(), known);
+        store.unbind(self.var);
+    }
+
+    /// Drop the binding from every lane: the arm binds no value.
+    fn clear(&self, env: &mut HashMap<String, Known>, store: &mut Store) {
+        env.remove(self.var);
+        store.unbind(self.var);
+    }
+
+    /// Show `fact` on the line when it is one literal.
+    fn note_literal(&mut self, fact: &Fact) {
+        if let Fact::Singleton(v) = fact {
+            self.note(FactKind::Value { var: self.var.to_owned(), rendered: render_val(v) });
+        }
+    }
+
+    fn note(&mut self, kind: FactKind) {
+        if let Some(facts) = self.facts.as_deref_mut() {
+            facts.push(LineFact { line: self.line, kind });
+        }
+    }
+}
+
 /// Apply a plain `$var = <value>;` assignment to the env (extracted from the walk).
 /// `return_arms` is the declared return floor resolved at the call site **before**
 /// this assignment may unbind its own target (self-assign `$o = $o->m(1)`).
@@ -51,6 +119,7 @@ pub(crate) fn apply_assign(
 ) {
     let cx = w.cx;
     let line = cx.tree().position(span_start).line;
+    let mut lhs = AssignLhs { var, line, facts: facts.as_deref_mut() };
 
     // Any rvalue other than a plain copy that names a handle stores it somewhere
     // this walk cannot follow — an array literal, a ternary arm, a `(array)`
@@ -76,20 +145,8 @@ pub(crate) fn apply_assign(
             env,
             store,
         ) {
-            Some((fact, strat)) => {
-                if let (Fact::Singleton(lit), Some(facts)) = (&fact, facts.as_deref_mut()) {
-                    facts.push(LineFact {
-                        line,
-                        kind: FactKind::Value { var: var.to_owned(), rendered: render_val(lit) },
-                    });
-                }
-                env.insert(var.to_owned(), Known::value_strat(fact, line, None, strat));
-                store.unbind(var);
-            }
-            None => {
-                env.remove(var);
-                store.unbind(var);
-            }
+            Some((fact, strat)) => lhs.bind(env, store, fact, strat),
+            None => lhs.clear(env, store),
         }
         return;
     }
@@ -102,22 +159,14 @@ pub(crate) fn apply_assign(
     if let Some((fact, strat)) =
         total_op_fact(w, folder, value, env, Some(&*store), w.scope.poisoned)
     {
-        if let (Fact::Singleton(lit), Some(facts)) = (&fact, facts.as_deref_mut()) {
-            facts.push(LineFact {
-                line,
-                kind: FactKind::Value { var: var.to_owned(), rendered: render_val(lit) },
-            });
-        }
-        env.insert(var.to_owned(), Known::value_strat(fact, line, None, strat));
-        store.unbind(var);
+        lhs.bind(env, store, fact, strat);
         return;
     }
 
     // A closure value (ADR-0033): record a `ClosureVal` with its by-value capture
     // snapshot from the current (definition-site) env. A poisoned scope drops it.
     if let ArgValue::Closure(cref) = value {
-        env.remove(var);
-        store.unbind(var);
+        lhs.clear(env, store);
         if w.scope.poisoned {
             return;
         }
@@ -149,18 +198,12 @@ pub(crate) fn apply_assign(
         // `$x = new Foo(args)` (ADR-0036): a fresh allocation, class from resolution,
         // props populated from promoted ctor params + literal defaults.
         ArgValue::New(class_ref, args, named) => {
-            env.remove(var);
-            store.unbind(var);
+            lhs.clear(env, store);
             if !w.scope.poisoned {
                 let class = cx.class_fqn(class_ref);
                 let id = build_new_object(w, folder, &class, args, named, env, store, ctor_heap);
                 store.refs.insert(var.to_owned(), id);
-                if let Some(facts) = facts.as_deref_mut() {
-                    facts.push(LineFact {
-                        line,
-                        kind: FactKind::ExactClass { var: var.to_owned(), class },
-                    });
-                }
+                lhs.note(FactKind::ExactClass { var: var.to_owned(), class });
             }
         }
         // `$b = $a` where `$a` holds an object (ADR-0036 aliasing): copy the ObjRef
@@ -178,8 +221,7 @@ pub(crate) fn apply_assign(
             // binding too. PHP evaluates the rvalue before assigning, so the
             // pre-assignment id is the correct one to capture.
             let src_id = store.id_of(src).expect("bound var has an id");
-            env.remove(var);
-            store.unbind(var);
+            lhs.clear(env, store);
             if let Some(src_obj) = store.heap.get(&src_id) {
                 let mut copy = src_obj.clone();
                 copy.escaped = false; // a fresh, local clone has not escaped
@@ -191,8 +233,7 @@ pub(crate) fn apply_assign(
         // `$x = $o->p` (ADR-0036): a property read flows the prop's fact into `$x`,
         // carrying the prop's stratum (derivation clause — heap reads).
         ArgValue::PropFetch { var: recv, prop } if !w.scope.poisoned => {
-            env.remove(var);
-            store.unbind(var);
+            lhs.clear(env, store);
             if let Some(fact) = store.prop_fact(recv, prop).cloned() {
                 let strat = store.prop_stratum(recv, prop);
                 env.insert(var.to_owned(), Known::value_strat(fact, line, None, strat));
@@ -209,10 +250,9 @@ pub(crate) fn apply_assign(
             // first, so a self-read `$a = $a['k']` still reads the old `$a`.
             let read = shape_read_at(base, key, env, w.scope.poisoned, cx.php_minor)
                 .and_then(|(read, strat)| Some((read.into_fact()?, strat)));
-            env.remove(var);
-            store.unbind(var);
-            if let Some((fact, strat)) = read {
-                env.insert(var.to_owned(), Known::value_strat(fact, line, None, strat));
+            match read {
+                Some((fact, strat)) => lhs.bind_quiet(env, store, fact, strat),
+                None => lhs.clear(env, store),
             }
         }
         // `$x = $a ?? $b` (ADR-0052 §6): `clear_null(fact($a)) join fact($b)`. A
@@ -226,14 +266,8 @@ pub(crate) fn apply_assign(
             // predicate to pick the value, and one predicate cannot disagree with
             // itself. Stratum is the evaluator's own `min` over the spine's arms.
             match eval_coalesce_fact(w, folder, a, b, *rhs_span, env, Some(&*store)) {
-                Some((fact, strat)) => {
-                    env.insert(var.to_owned(), Known::value_strat(fact, line, None, strat));
-                    store.unbind(var);
-                }
-                None => {
-                    env.remove(var);
-                    store.unbind(var);
-                }
+                Some((fact, strat)) => lhs.bind_quiet(env, store, fact, strat),
+                None => lhs.clear(env, store),
             }
         }
         _ => match cx
@@ -248,19 +282,13 @@ pub(crate) fn apply_assign(
             .and_then(|(lit, strat)| singleton_fact(&lit, cx.php_minor).map(|f| (lit, f, strat)))
         {
             Some((lit, fact, strat)) => {
-                if let Some(facts) = facts.as_deref_mut() {
-                    facts.push(LineFact {
-                        line,
-                        kind: FactKind::Value { var: var.to_owned(), rendered: lit.render() },
-                    });
-                }
+                lhs.note(FactKind::Value { var: var.to_owned(), rendered: lit.render() });
                 // Derivation clause: folds and array composition resolve through
                 // `resolve_literal`, consuming env facts and nested project-call
                 // summary strata (issue #127) — stamp that min. Nested descents for
                 // fold args emit through `out` so findings under `strtoupper(g(1))`
                 // aren't discarded.
-                env.insert(var.to_owned(), Known::value_strat(fact, line, None, strat));
-                store.unbind(var);
+                lhs.bind_quiet(env, store, fact, strat);
             }
             // `$x = is_int($y)` and kin: the fold could not reach it, so seed the
             // uniquely-resolved builtin's reflected return envelope (ADR-0056 R1).
@@ -279,8 +307,7 @@ pub(crate) fn apply_assign(
                         Some(&*store),
                     ) =>
                 {
-                    env.insert(var.to_owned(), Known::value_strat(fact, line, None, strat));
-                    store.unbind(var);
+                    lhs.bind_quiet(env, store, fact, strat);
                     bind_handle_elements(cx, var, items, store);
                 }
                 // The `::class` magic constant (issue #236): `$c = Foo::class`
@@ -289,8 +316,7 @@ pub(crate) fn apply_assign(
                 ArgValue::ClassConst(sc, name)
                     if let Some(fact) = class_const_class_fact(cx, w.scope, sc, name) =>
                 {
-                    env.insert(var.to_owned(), Known::value(fact, line, None));
-                    store.unbind(var);
+                    lhs.bind_quiet(env, store, fact, Stratum::Verified);
                 }
                 // The member-wise union fold (issue #74): a bounded union-of-constants
                 // argument is enumerated and every combination answered by the real
@@ -301,17 +327,8 @@ pub(crate) fn apply_assign(
                         cx.try_union_fold(name, args, env, w.scope.poisoned, folder) =>
                 {
                     // A product whose members all agreed composes to a `Singleton`.
-                    if let (Fact::Singleton(v), Some(facts)) = (&fact, facts.as_deref_mut()) {
-                        facts.push(LineFact {
-                            line,
-                            kind: FactKind::Value {
-                                var: var.to_owned(),
-                                rendered: render_val(v),
-                            },
-                        });
-                    }
-                    env.insert(var.to_owned(), Known::value_strat(fact, line, Some(prov), strat));
-                    store.unbind(var);
+                    lhs.note_literal(&fact);
+                    lhs.bind_known(env, store, Known::value_strat(fact, line, Some(prov), strat));
                 }
                 // The builtin-call ladder (`builtin_call_rung`), every rung of it:
                 // the §2.7 resource folds are asked HERE — where the right-hand
@@ -332,7 +349,7 @@ pub(crate) fn apply_assign(
                             OptionalRungs { resource_folds: true, resource_arms: true },
                         ) =>
                 {
-                    bind_builtin_rung(w, var, rung, line, env, store, facts);
+                    bind_builtin_rung(w, &mut lhs, rung, env, store);
                 }
                 // The return summary, then the arm floor (ADR-0057 T0/T1 /
                 // ADR-0052 §9). `unbind` first (voids any stale arm lane).
@@ -356,8 +373,7 @@ pub(crate) fn apply_assign(
                 // COPY (PHP value semantics), so unlike the heap rung above it needs no
                 // fresh `AllocId` and shares no identity with anything the callee kept.
                 _ => {
-                    env.remove(var);
-                    store.unbind(var);
+                    lhs.clear(env, store);
                     if let Some(ReturnSummary { heap: Some(hs), .. }) = summary
                         && !w.scope.poisoned
                     {
@@ -433,39 +449,22 @@ pub(crate) fn apply_assign(
 /// ([`builtin_call_rung`]): the assignment seam's sink, one arm per rung.
 fn bind_builtin_rung(
     w: &WalkCx,
-    var: &str,
+    lhs: &mut AssignLhs,
     rung: BuiltinRung,
-    line: u32,
     env: &mut HashMap<String, Known>,
     store: &mut Store,
-    facts: &mut Option<&mut Vec<LineFact>>,
 ) {
     match rung {
         // `gettype`, `get_debug_type`, `get_resource_type`, `get_resource_id`
         // over a proven handle (ADR-0097 §2.7).
-        BuiltinRung::ResourceFold(fact, strat) => {
-            if let (Fact::Singleton(v), Some(facts)) = (&fact, facts.as_deref_mut()) {
-                facts.push(LineFact {
-                    line,
-                    kind: FactKind::Value { var: var.to_owned(), rendered: render_val(v) },
-                });
-            }
-            env.insert(var.to_owned(), Known::value_strat(fact, line, None, strat));
-            store.unbind(var);
-        }
+        BuiltinRung::ResourceFold(fact, strat) => lhs.bind(env, store, fact, strat),
         // The type rung above the envelope (ADR-0061 §1): reads the call's
         // argument facts — ADR-0062 §4's `count`/`array_is_list` shape transfers.
         // Enters at the argument's own stratum, not `Verified`.
-        BuiltinRung::Shape(fact, strat) => {
-            env.insert(var.to_owned(), Known::value_strat(fact, line, None, strat));
-            store.unbind(var);
-        }
+        BuiltinRung::Shape(fact, strat) => lhs.bind_quiet(env, store, fact, strat),
         // The reflected return envelope: `Verified`, a native declaration
         // (ADR-0056 R1, §2).
-        BuiltinRung::Envelope(fact) => {
-            env.insert(var.to_owned(), Known::value(fact, line, None));
-            store.unbind(var);
-        }
+        BuiltinRung::Envelope(fact) => lhs.bind_quiet(env, store, fact, Stratum::Verified),
         // The resource rung (ADR-0056 §8). The gate confirms this engine still
         // declares nothing for the name (`fopen` declares nothing: PHP has no
         // `resource` return-type syntax).
@@ -474,13 +473,12 @@ fn bind_builtin_rung(
         // `env` is cleared rather than left stale. The `false` arm is an ordinary
         // literal arm, subtracted by ordinary guard machinery.
         BuiltinRung::ResourceArms(arms, res) => {
-            store.unbind(var);
-            env.remove(var);
-            store.contract.insert(var.to_owned(), arms);
+            lhs.clear(env, store);
+            store.contract.insert(lhs.var.to_owned(), arms);
             // The identity and the state (ADR-0097 §2.3): a fresh heap resource,
             // `Open`, bound exactly as `new` binds an object — so `$b = $h`
             // shares it and `fclose($b)` closes it for both.
-            store.bind_resource(var, w.fresh_id(), res);
+            store.bind_resource(lhs.var, w.fresh_id(), res);
         }
         // The declared-return floor (ADR-0069). Enters `Asserted` — a catalog
         // declaration, not a runtime answer — carried down every derivation step.
@@ -490,24 +488,20 @@ fn bind_builtin_rung(
         // arms denote where they denote one. A multi-arm row lives in the arm lane
         // alone.
         BuiltinRung::Floor(arms) => {
-            store.unbind(var);
             match floor_value_fact(&arms) {
-                Some(fact) => {
-                    env.insert(
-                        var.to_owned(),
-                        Known::value_strat(
-                            fact,
-                            line,
-                            Some(CATALOG_FLOOR.to_owned()),
-                            Stratum::Asserted,
-                        ),
-                    );
-                }
-                None => {
-                    env.remove(var);
-                }
+                Some(fact) => lhs.bind_known(
+                    env,
+                    store,
+                    Known::value_strat(
+                        fact,
+                        lhs.line,
+                        Some(CATALOG_FLOOR.to_owned()),
+                        Stratum::Asserted,
+                    ),
+                ),
+                None => lhs.clear(env, store),
             }
-            store.contract.insert(var.to_owned(), arms);
+            store.contract.insert(lhs.var.to_owned(), arms);
         }
     }
 }
