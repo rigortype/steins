@@ -100,6 +100,7 @@ mod file_walk;
 mod fixpoints;
 mod pipeline;
 mod loops;
+mod stmt_calls;
 
 pub use dam::{DamFacts, DamKind, DamSite, dam_facts};
 pub use ids::*;
