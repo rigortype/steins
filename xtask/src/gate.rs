@@ -1343,11 +1343,11 @@ fn print_tripwire(family: &str, regressions: &[PhpdocRegression], local_reports:
 
 #[cfg(test)]
 mod tests {
-    use steins_infer::is_vendor_path;
+    use steins_infer::{is_vendor_path, layer};
 
     use super::{
-        RevisionStatus, WorktreeState, classify_revision, revision_summary_line,
-        revision_tripwire_line,
+        Baselines, GateBucket, RevisionStatus, WorktreeState, classify_revision, gate_bucket,
+        parse_pins, parse_table, revision_summary_line, revision_tripwire_line,
     };
 
     // Synthetic revisions only. A real private-corpus sha must never enter a
@@ -1375,6 +1375,56 @@ mod tests {
         assert!(!is_vendor_path("vendor_proj/app/Service.php")); // sibling, not a component
         assert!(!is_vendor_path("src/vendored/x.php"));
         assert!(!is_vendor_path("app/vendor.php")); // filename, not a directory
+    }
+
+    /// One well-formed pin, for the tests that spoil a field of it.
+    const PIN: &str = "[[finding]]\npackage = \"a/b\"\nid = \"variable.undefined\"\n\
+                       path_suffix = \"src/A.php\"\nline = 3\n\
+                       message_contains = \"$x is never bound\"\n";
+
+    #[test]
+    fn the_built_in_baselines_parse() {
+        if let Err(e) = Baselines::load() {
+            panic!("{e}");
+        }
+    }
+
+    #[test]
+    fn a_package_named_twice_is_refused_rather_than_shadowed() {
+        // The lookup has one answer per name. A first-match scan used to give
+        // a second row for the same name no effect at all; TOML refuses it.
+        let err = parse_table("t.toml", "\"a/b\" = 1\n\"a/b\" = 2\n").unwrap_err();
+        assert!(err.starts_with("xtask/fp-gate/t.toml:"), "{err}");
+        assert!(err.contains("duplicate key"), "{err}");
+        let once = parse_table("t.toml", "\"a/b\" = 1\n").map(|t| (t.expected("a/b"), t.total()));
+        assert_eq!(once, Ok((1, 1)));
+        assert_eq!(parse_table("t.toml", "\"a/b\" = 1\n").map(|t| t.expected("c/d")), Ok(0));
+    }
+
+    #[test]
+    fn a_pin_repeated_or_without_a_fingerprint_is_refused() {
+        assert_eq!(parse_pins("p.toml", PIN).map(|p| p.len()), Ok(1));
+        let twice = parse_pins("p.toml", &format!("{PIN}\n{PIN}")).unwrap_err();
+        assert!(twice.contains("is pinned twice"), "{twice}");
+        // An empty fingerprint matches every message at that line.
+        let blank = parse_pins("p.toml", &PIN.replace("$x is never bound", "")).unwrap_err();
+        assert!(blank.contains("needs a path suffix, a line and a message"), "{blank}");
+        // A misspelt field is an error, not a pin short of a field.
+        let typo = parse_pins("p.toml", &PIN.replace("path_suffix", "path_sufix")).unwrap_err();
+        assert!(typo.contains("unknown field"), "{typo}");
+    }
+
+    #[test]
+    fn every_pin_is_a_registered_id_the_gate_reds_on_sight() {
+        // Pins are consulted only once the contract and possibly-grade findings
+        // are split off, so a pin on one of those ids could never match, and a
+        // pin on an unregistered id is a misspelling of one that does.
+        let baselines = Baselines::load().unwrap_or_else(|e| panic!("{e}"));
+        for p in &baselines.proof {
+            let at = format!("{}:{} [{}]", p.path_suffix, p.line, p.id);
+            assert!(layer(&p.id).is_some(), "{at}: the id is not registered");
+            assert_eq!(gate_bucket(&p.id), GateBucket::RedOnSight, "{at}");
+        }
     }
 
     #[test]
