@@ -19,9 +19,7 @@ use crate::{
 };
 use crate::assert_harness::{ASSERT_SINK, AssertObservation};
 use crate::assign::eval_coalesce_fact;
-use crate::builtin_returns::{
-    builtin_call_return_fact, builtin_return_floor, shape_builtin_return_fact,
-};
+use crate::builtin_returns::{BuiltinRung, OptionalRungs, builtin_call_rung, builtin_return_floor};
 use crate::cond::{eval_ternary_fact_strat, total_op_fact};
 use crate::cx::Cx;
 use crate::declared_property::declared_property_arms;
@@ -32,7 +30,6 @@ use crate::env::{
 };
 use crate::offsets::shape_read_at;
 use crate::project::{Diagnostic, Fix, FixEdit, Res};
-use crate::resource_folds::resource_fold_return_fact;
 use crate::return_arms::{call_return_arms_by_name, method_return_arms_by_callee};
 use crate::walk::WalkCx;
 
@@ -944,49 +941,47 @@ fn best_dump_type(
             };
         }
     }
-    // The §2.7 folds over a proven handle (ADR-0097), where the assignment seam
-    // puts them: `dumpType(gettype($h))` and `$t = gettype($h); dumpType($t)`
-    // answer the same string.
-    if fold_resources
-        && let ArgValue::Call(name, args) = value
-        && let Some((fact, stratum)) =
-            resource_fold_return_fact(cx, folder, name, args, env, store, poisoned)
-    {
-        return DumpRendering {
-            text: render_dump_fact(&fact),
-            asserted: stratum == Stratum::Asserted,
-        };
-    }
-    // Argument-dependent type rung (ADR-0061 §1) — `count`/`array_is_list` over an
-    // abstract shape (ADR-0062 §4) — sits above the envelope, as at the assignment
-    // seam, carrying the argument's stratum.
+    // A builtin call the fold could not reach: the builtin-call ladder
+    // (`builtin_call_rung`) the assignment seam climbs, so `dumpType(gettype($h))`
+    // and `$t = gettype($h); dumpType($t)` answer the same string. The §2.7 folds
+    // only where `fold_resources` allows them; the resource arms not at all, since
+    // nothing binds here.
     if let ArgValue::Call(name, args) = value
-        && let Some((fact, stratum)) =
-            shape_builtin_return_fact(cx, folder, name, args, env, Some(store), poisoned)
+        && let Some(rung) = builtin_call_rung(
+            cx,
+            folder,
+            name,
+            args,
+            env,
+            Some(store),
+            poisoned,
+            OptionalRungs { resource_folds: fold_resources, resource_arms: false },
+        )
     {
-        return DumpRendering {
-            text: render_dump_fact(&fact),
-            asserted: stratum == Stratum::Asserted,
-        };
-    }
-
-    // A uniquely-resolved builtin call the fold could not reach: its reflected
-    // return envelope / admitted refinement (ADR-0056 R1). Always Verified — read
-    // off the engine's own arginfo.
-    if let ArgValue::Call(name, _) = value
-        && let Some(fact) = builtin_call_return_fact(cx, folder, name)
-    {
-        return DumpRendering { text: render_dump_fact(&fact), asserted: false };
-    }
-    // The declared-return floor (ADR-0069): reached only where the engine said
-    // nothing about this name. Always `(asserted)` — the row is a catalog
-    // declaration, not a runtime answer. Rendered through the same arm speller the
-    // project-call floor below uses.
-    if let ArgValue::Call(name, _) = value
-        && let Some(arms) = builtin_return_floor(cx, name)
-        && let Some(text) = render_contract_arms(cx, &arms)
-    {
-        return DumpRendering { text, asserted: true };
+        match rung {
+            BuiltinRung::ResourceFold(fact, stratum) | BuiltinRung::Shape(fact, stratum) => {
+                return DumpRendering {
+                    text: render_dump_fact(&fact),
+                    asserted: stratum == Stratum::Asserted,
+                };
+            }
+            // The reflected envelope / admitted refinement (ADR-0056 R1): always
+            // Verified, read off the engine's own arginfo.
+            BuiltinRung::Envelope(fact) => {
+                return DumpRendering { text: render_dump_fact(&fact), asserted: false };
+            }
+            // The declared-return floor (ADR-0069): always `(asserted)` — the row
+            // is a catalog declaration, not a runtime answer. Rendered through the
+            // same arm speller the project-call floor below uses; a row with no
+            // spelling falls through to it.
+            BuiltinRung::Floor(arms) => {
+                if let Some(text) = render_contract_arms(cx, &arms) {
+                    return DumpRendering { text, asserted: true };
+                }
+            }
+            // Not asked.
+            BuiltinRung::ResourceArms(..) => {}
+        }
     }
     // The declared-return floor of an unresolved project call (issue #60): the
     // callee's `: string` is a fact the caller should see even with no summary
