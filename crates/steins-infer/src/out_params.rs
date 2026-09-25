@@ -4,6 +4,7 @@
 //! out-state rows of [`crate::array_out_state`] (issue #635), the preg flag
 //! constants, and the `preg.invalid-pattern` entry points.
 
+// `proc_open`'s produced places live in `resource`; these keep their callers' paths.
 pub(crate) use crate::resource::{apply_produced_places, seed_produced_places, stmt_produced_places};
 
 use std::collections::HashMap;

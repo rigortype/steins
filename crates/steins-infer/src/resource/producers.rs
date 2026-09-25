@@ -1,3 +1,8 @@
+//! The resource producers (ADR-0056 §8, ADR-0098 §2.2): the arms and the heap resource
+//! a producer call's return binds ([`builtin_resource_arms`]), and the element places a
+//! producer mints — `stream_socket_pair`'s pair from its return, and `proc_open`'s pipes
+//! through its `$pipes` out-parameter, at a statement or a guard.
+
 use std::collections::HashMap;
 
 use steins_catalog::ResourceKind;
@@ -33,6 +38,8 @@ use crate::walk::WalkCx;
 /// [`store_holds_resource`] admits the lane at all.
 ///
 /// The project-shadowing check comes first, as for the floor.
+///
+/// [`store_holds_resource`]: crate::resource::store_holds_resource
 pub(crate) fn builtin_resource_arms(
     cx: &Cx,
     folder: &mut dyn Folder,
@@ -72,7 +79,7 @@ pub(crate) fn builtin_resource_arms(
 /// [`bind_handle_elements`] copied off a variable that still had to be guarded.
 ///
 /// [`bind_handle_elements`]: crate::assign::bind_handle_elements
-pub(crate) fn produced_place_arms() -> Vec<ContractArm> {
+fn produced_place_arms() -> Vec<ContractArm> {
     vec![ContractArm {
         ty: ContractTy::Resource { state: ResourceState::Any },
         stratum: Stratum::Verified,
@@ -150,7 +157,7 @@ pub(crate) fn socket_pair_places(
 }
 
 /// `proc_open`'s name, spelled once.
-pub(crate) const PROC_OPEN: &str = "proc_open";
+const PROC_OPEN: &str = "proc_open";
 
 /// One descriptor word `proc_open` accepts, spelled the way php-src compares it
 /// — **byte for byte**. `'PIPE'` and `'Pipe'` are not this word (probed at
@@ -270,7 +277,7 @@ fn descriptor_word(word: &[u8]) -> Option<&'static DescriptorWord> {
 /// top of that one: each of them is a spec on which `proc_open` writes
 /// **nothing**, every time it runs, so a place bound beside it would be a
 /// finding on a line that is never reached.
-pub(crate) fn proc_open_places(
+fn proc_open_places(
     cx: &Cx,
     folder: &mut dyn Folder,
     name: &str,
@@ -335,7 +342,7 @@ pub(crate) fn proc_open_places(
 /// The 0-based position of `proc_open`'s `&$pipes` — the same index the
 /// catalog's [`steins_catalog::out_params`] row carries, spelled here because
 /// the two tripwires above read it directly.
-pub(crate) const PROC_OPEN_PIPES: usize = 2;
+const PROC_OPEN_PIPES: usize = 2;
 
 /// Bind `places` as element places of `var` (ADR-0098 §2.2), each to an
 /// allocation **this walk mints**.
@@ -438,8 +445,9 @@ pub(crate) fn bind_produced_places(
 /// (ADR-0097 §2.5) is the only seam that reads a place, and the only seam that
 /// could report one.
 ///
-/// [`CLOSERS`]: crate::builtin_returns
-/// [`site_verdict`]: crate::builtin_returns
+/// [`CLOSERS`]: crate::resource::closers
+/// [`site_verdict`]: crate::resource::closers
+/// [`stmt_out_param_seeds`]: crate::out_params::stmt_out_param_seeds
 /// [`WrittenWhen::ReturnTruthy`]: steins_catalog::WrittenWhen::ReturnTruthy
 pub(crate) fn stmt_produced_places(
     w: &WalkCx,
@@ -547,7 +555,6 @@ pub(crate) fn apply_produced_places(
 /// in [`is_value_semantic`] — a name with element places has a lane to save —
 /// and that is a change to the ADR-0070 rung, not to this one.
 ///
-/// [`bind_produced_places`]: crate::builtin_returns::bind_produced_places
 /// [`is_value_semantic`]: crate::walk
 fn produced_places(
     w: &WalkCx,

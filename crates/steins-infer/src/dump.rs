@@ -632,7 +632,7 @@ struct DumpArg<'d, 'a, 'w> {
     /// Whether the §2.7 resource folds (ADR-0097) may answer for this argument:
     /// true only where nothing else in the dumping call runs before it, since the
     /// handle's state is read on the store the statement started with. See
-    /// `resource_folds`' module doc.
+    /// `resource::folds`' module doc.
     fold_resources: bool,
 }
 
@@ -1165,7 +1165,7 @@ pub(crate) fn emit_dumps(
             }
         });
         // A dump with ONE argument runs nothing before that argument, so a
-        // resource fold in it reads the state the handle is in (`resource_folds`);
+        // resource fold in it reads the state the handle is in (`resource::folds`);
         // a second argument could be a call that closes the handle first, and
         // withholds the folds from every argument of the call.
         let settled = call.args.len() == 1;
@@ -1367,7 +1367,7 @@ pub(crate) fn emit_asserts(
     }
     let expected = assert_expected_string(cx, &call.args[0].value, env, w.scope.poisoned, folder);
     // The expected-type argument is evaluated first; a literal there runs no
-    // code, and anything else withholds the resource folds (`resource_folds`).
+    // code, and anything else withholds the resource folds (`resource::folds`).
     let settled = call.args[0].value.is_literal();
     let rendering =
         best_dump_type(w, folder, &call.args[1].value, env, store, call.args[1].span.start, settled);

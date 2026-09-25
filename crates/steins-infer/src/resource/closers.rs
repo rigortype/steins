@@ -1,3 +1,8 @@
+//! What a statement's calls do to the heap resources they are handed (ADR-0097 §2.4):
+//! the closing table and the per-position verdict (close, keep or escape), the
+//! top-level rebind rule, and the escape of every handle a value mentions outside a
+//! call.
+
 use std::collections::HashSet;
 
 use steins_catalog::ResourceKind;
@@ -329,7 +334,7 @@ pub(crate) fn apply_resource_effects(effects: &ResourceEffects, store: &mut Stor
 /// concatenation and a binary operator, an offset read's base and key. A
 /// property fetch, an `isset` and the literal/constant leaves mention no
 /// binding a handle could ride.
-pub(crate) fn mentioned_vars<'a>(value: &'a ArgValue, out: &mut Vec<&'a str>) {
+fn mentioned_vars<'a>(value: &'a ArgValue, out: &mut Vec<&'a str>) {
     match value {
         ArgValue::Var(v) | ArgValue::Clone(v) => out.push(v),
         ArgValue::Call(_, args) => args.iter().for_each(|a| mentioned_vars(a, out)),

@@ -3,6 +3,7 @@
 //! factored into pure functions so every leg is unit-testable without a sidecar;
 //! the declared-return floor (ADR-0069) and the shape-builtin rows live here too.
 
+// The resource family lives in `resource`; these keep the paths its callers import.
 pub(crate) use crate::resource::{
     ResourceEffects, apply_resource_effects, bind_produced_places, escape_mentioned_resources,
     proven_resource_state, resource_call_effects, socket_pair_places, store_holds_resource,
@@ -439,7 +440,7 @@ pub(crate) enum BuiltinRung {
 #[derive(Clone, Copy)]
 pub(crate) struct OptionalRungs {
     /// The §2.7 resource folds: only where no other call of the statement can
-    /// have moved the handle's state first (`resource_folds`' module doc).
+    /// have moved the handle's state first (`resource::folds`' module doc).
     pub(crate) resource_folds: bool,
     /// The resource-return arms: only at a seam that binds, since they come with
     /// a heap resource and only a binding has somewhere to put it.
@@ -524,7 +525,7 @@ pub(crate) fn builtin_call_rung(
 ///
 /// Two rungs are not asked. The §2.7 resource folds read the handle's state as
 /// the statement started, and an operand is a composed spelling in which another
-/// call may have run first (`resource_folds`' module doc). The resource-return
+/// call may have run first (`resource::folds`' module doc). The resource-return
 /// arms come with a heap resource, and an operand binds nothing.
 ///
 /// **It answers no more than those two seams do.** A name the engine is silent
