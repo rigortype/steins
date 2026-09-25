@@ -12,6 +12,7 @@ mod assert_tag_scalar_negation;
 mod binding;
 mod bool_literal_narrowing;
 mod branch_analysis;
+mod builtin_call_ladder;
 mod builtin_method_returns;
 mod builtin_param_types;
 mod builtin_return_facts;
