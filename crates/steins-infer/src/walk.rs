@@ -693,8 +693,11 @@ pub(crate) fn walk_trace(
         let stmt_calls = check_stmt_calls(w, folder, stmt, env, store, descent, out);
 
         // 1z. The checks at the read positions this IR spells, judged against the
-        // pre-statement env (`check_read_positions`).
-        check_read_positions(w, folder, stmt, env, store, descent, out);
+        // pre-statement env (`check_read_positions`), once per site in the plain
+        // per-scope pass.
+        if descent.is_none() {
+            check_read_positions(w, folder, stmt, env, store, out);
+        }
 
         // 1a. Escape + sweep (ADR-0036): passing an object into a call escapes it;
         // an unknown/overridable call — or any call an object was passed into —
