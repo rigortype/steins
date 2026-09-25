@@ -49,6 +49,7 @@ pub(crate) struct MethodCallOutcome {
 /// constructor — the `$this` snapshot the object build consumes (ADR-0057 C7). A
 /// constructor's *value* summary stays unread, and for the reason ADR-0075 §3 gave:
 /// a constructor evaluates to an object, and an object is not a value.
+#[expect(clippy::too_many_lines, reason = "predates the #778 ratchet; split when next reworked")]
 pub(crate) fn handle_method_call(
     w: &WalkCx,
     folder: &mut dyn Folder,
@@ -313,6 +314,7 @@ pub(crate) fn display_of_call(receiver: &Callee, declaring_class: &str, method: 
 /// `class_file` locates the callee method's docblock context for class-name
 /// resolution.
 #[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_lines, reason = "predates the #778 ratchet; split when next reworked")]
 fn check_method_args(
     cx: &Cx,
     folder: &mut dyn Folder,

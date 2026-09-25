@@ -361,6 +361,7 @@ pub(crate) fn witnessed_projection_fact(
 /// is a `Singleton` when every slot it needed was proven — for `array_keys`
 /// that is always — and a witnessed `Fact::Shape` otherwise, so an unknown
 /// element costs one slot rather than the sequence.
+#[expect(clippy::too_many_lines, reason = "predates the #778 ratchet; split when next reworked")]
 pub(crate) fn witnessed_family_fact(
     cx: &Cx,
     folder: &mut dyn Folder,

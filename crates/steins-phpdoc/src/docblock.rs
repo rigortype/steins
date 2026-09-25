@@ -255,6 +255,7 @@ fn skip_gutter(bytes: &[u8], line_start: usize, line_end: usize) -> usize {
     i
 }
 
+#[expect(clippy::too_many_lines, reason = "predates the #778 ratchet; split when next reworked")]
 fn scan_line(text: &str, line_start: usize, line_end: usize, tags: &mut Vec<DocTag>) {
     let bytes = text.as_bytes();
     let i = skip_gutter(bytes, line_start, line_end);

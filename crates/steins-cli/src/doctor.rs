@@ -742,6 +742,7 @@ fn human_bytes(bytes: u64) -> String {
 /// 5. The sound-subset id list (A2(ii)) — only when no sidecar answered.
 /// 6. The vendor posture (ADR-0015) — static, printed always.
 /// 7. The `[transform.vouch]` count (ADR-0046 §2) — not yet dam-consulted (`dam.rs`).
+#[expect(clippy::too_many_lines, reason = "predates the #778 ratchet; split when next reworked")]
 fn section_coverage(
     root: &Path,
     files: &[ParsedFile],

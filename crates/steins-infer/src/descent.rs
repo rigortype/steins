@@ -627,6 +627,7 @@ pub(crate) enum ThisSeed<'a> {
 /// descent ran (unbound, by-ref, depth-exhausted, recursive) or no summarizable exit
 /// remained. The caller consumes it as the call-result value floor above the arms.
 #[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_lines, reason = "cold in the #779 survey; split when next reworked")]
 pub(crate) fn descend(
     cx: &Cx,
     folder: &mut dyn Folder,

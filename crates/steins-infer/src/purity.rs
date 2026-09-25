@@ -579,6 +579,7 @@ fn propagate_effects(
 /// the whole body is asked, through exactly the same code: the loop→`array_map`
 /// transform's purity precondition is the fixpoint's own verdict restricted to
 /// the loop body, never a second opinion about what an effect is.
+#[expect(clippy::too_many_lines, reason = "predates the #778 ratchet; split when next reworked")]
 pub(crate) fn classify_effect_origins(
     cx: &Cx,
     class_fqn: Option<&str>,
@@ -1664,6 +1665,7 @@ impl OperativeBound<'_> {
 
 /// Emit the diagnostics for one declared-envelope unit (ADR-0005/0018).
 #[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_lines, reason = "predates the #778 ratchet; split when next reworked")]
 fn report_unit(
     out: &mut Vec<Diagnostic>,
     cx: &Cx,

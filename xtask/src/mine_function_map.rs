@@ -198,6 +198,7 @@ fn veto(
 }
 
 /// Entry point for `cargo xtask mine-function-map`.
+#[expect(clippy::too_many_lines, reason = "predates the #778 ratchet; split when next reworked")]
 pub fn run(checkout: Option<&str>, halves: Halves, php_bins: &[String]) -> Result<(), String> {
     let root = match checkout {
         Some(p) => PathBuf::from(p),
@@ -1106,6 +1107,7 @@ fn countersigned(row: &[ContractTy], engine_ty: &str) -> bool {
 
 /// Render the committed mining TOML.
 #[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_lines, reason = "predates the #778 ratchet; split when next reworked")]
 fn render(
     pin: &str,
     engine_version: &str,
@@ -1418,6 +1420,7 @@ fn builtin_ancestors(class: &str) -> Vec<String> {
 /// counts alongside the method rows have no source here at all. Nor could they be
 /// countersigned if they did — `ReflectedProperty` carries a name, a static bit and a
 /// visibility, and no type.
+#[expect(clippy::too_many_lines, reason = "predates the #778 ratchet; split when next reworked")]
 fn mine_methods(
     mined: &Mined,
     pin: &str,
@@ -1639,6 +1642,7 @@ fn mine_methods(
 
 /// Render the committed method-mining TOML.
 #[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_lines, reason = "predates the #778 ratchet; split when next reworked")]
 fn render_methods(
     pin: &str,
     engine_version: &str,

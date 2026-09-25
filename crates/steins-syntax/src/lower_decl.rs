@@ -43,6 +43,7 @@ use crate::{bytes_to_string, children, strip_dollar, to_span};
 // ---------------------------------------------------------------------------
 
 #[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_lines, reason = "predates the #778 ratchet; split when next reworked")]
 pub(crate) fn walk(
     node: &Node<'_, '_>,
     aliases: &SteinsAttrAliases,

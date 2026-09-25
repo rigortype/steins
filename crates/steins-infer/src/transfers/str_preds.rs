@@ -127,6 +127,7 @@ pub(super) fn str_pred_transfer(
 /// name is not a member (or its arity is not one this rule was written against).
 /// Every arm is authored from `php -r` probes at `PINNED_PHP` and php.net's
 /// documented semantics — see [`str_pred_transfer`] for the reasoning per row.
+#[expect(clippy::too_many_lines, reason = "one match of short arms, kept whole (#773)")]
 fn str_pred_out(
     cx: &Cx,
     folder: &mut dyn Folder,

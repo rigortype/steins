@@ -907,6 +907,7 @@ fn scan_local_variable(
 /// `guarded` marks a subtree PHP legalizes a read in (`isset`/`empty`/`unset`, the
 /// left operand of `??`, and the `@` error-control operand — all witnessed silent at
 /// 8.5.9). Bindings are still collected there; only the read is withheld.
+#[expect(clippy::too_many_lines, reason = "predates the #778 ratchet; split when next reworked")]
 pub(crate) fn scan_var_usage(node: &Node<'_, '_>, guarded: bool, shielded: &[String], acc: &mut VarUsage) {
     match node {
         // --- Nested scopes: their reads are their own scope's question. ---

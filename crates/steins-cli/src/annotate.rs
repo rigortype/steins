@@ -18,6 +18,7 @@ use crate::project::{collect_sources, load_plugins, resolve_layout};
 /// `steins annotate [--no-php] [--format text|json] <file.php>` — reprint one
 /// file with a right-margin column of proven facts (ADR-0020), or (JSON) the
 /// same effect summaries (issue #65). Never modifies the file; exit 2 on usage error.
+#[expect(clippy::too_many_lines, reason = "predates the #778 ratchet; split when next reworked")]
 pub(crate) fn run_annotate(args: &[String]) -> ExitCode {
     let mut no_php = false;
     let mut format = Format::Text;

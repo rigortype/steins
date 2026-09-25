@@ -720,6 +720,7 @@ pub(crate) fn scan_method_calls(node: &Node<'_, '_>, out: &mut Vec<CallExpr>) {
 ///   clause but inside outer trys; `finally` absorbs nothing).
 /// * `throw new X` records the class; `throw $e` of an enclosing catch parameter
 ///   re-emits that catch's absorbed set (rethrow); any other throw taints.
+#[expect(clippy::too_many_lines, reason = "predates the #778 ratchet; split when next reworked")]
 pub(crate) fn scan_throw_origins(
     node: &Node<'_, '_>,
     guards: &[Vec<CatchClause>],
