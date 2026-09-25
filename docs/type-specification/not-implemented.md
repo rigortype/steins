@@ -10,22 +10,302 @@ the semantic inventory.
 
 ## Designed, no code
 
+Each table keeps a one-line status per surface, and a surface with more to say
+links to its own subsection after the table — a table row cannot wrap, so the
+detail lives where it can.
+
 ### Type and inference machinery
 
 | Surface | ADR | Note |
 | --- | --- | --- |
 | Narrowing N5 — property-chain guards, static-prop channel | 0052 | Deferred out of v0.1.0 by owner decision; designed in full in ADR-0052 §7. N6's structured loops **landed** under ADR-0027's 2026-09 amendments instead (see [Control flow](#known-imprecision) below for what a loop still does not carry). |
 | Template scope transfer | 0051 | Templates as functions, render sites as call sites. Out of v0.1.0 scope by owner decision; promoted only if dogfooding demands it. |
-| `template-type<Subject, Owner, 'TName'>` resolution | 0032 | **Resolves on the declared side** (issue #361): a spelled parameterization of the owner, a one-level inheritance edge to it, or the template name itself is rewritten into the type it names before lowering, and judged exactly as that type is. **A `@return` whose subject is a class-level template of the receiver's class resolves too** (issue #362), off the generics carry the receiver object holds at the call site — two lookups, one level each, seeding the arms a hand-written `@return` would seed. **A subject naming the declaration's own function- or method-level `@template` resolves too** (issue #363), bound from the carry of the argument that flowed into a top-level `@param Owner<…, T, …>` (or, for `@param T $p`, from the argument's proven value) — and since #361 rewrites `template-type<Box<T>, Box, 'T'>` to `T`, the same read serves both spellings. The spelling was made recognized vocabulary first (issue #360), which is also why its owner argument is exempt from `untyped.generics` — a class-reference position, not a missing type argument. What still floors to `Opaque`: a receiver that carries nothing to read (a `$this`, static, non-exact or **declared** receiver, or one whose value carry an earlier method call swept — a registered divergence, entry 13); a **union or intersection subject**, where PHPStan unions over the subject's class names; a subject reaching the owner only through a **generic intermediate**, which is substitution rather than lookup (ADR-0032's amendment: one level, no recursion); every argument spelling outside #363's binding rule (a nested or nullable `@param`, a named or spread argument list, a by-ref or variadic parameter, two occurrences that disagree, a **bounded** template — which reads its bound instead); and the resolution does not run over `@var`/property docblocks at all, which keep the #360 floor. |
-| Derived type operators past `key-of` / `value-of` | 0089, 0090 | **The `lower_generic` roster has landed** (#473): `non-nullable<T>`, `return-type<F>`, `parameters-of<F>`, `exclude-from<T, U>` and `extract-from<T, U>` project into an existing `ContractTy` and are judged, spelled and round-tripped as the type they project to. With them, the three rules ADR-0089 fixes for the whole family: **kebab-case** naming (a hyphenated spelling is not a legal PHP identifier, so nothing can shadow it — the lowercase spelling the family was proposed in could not have done this, since PHP class names are case-insensitive); **projection over representation** (no new `ContractTy` variant, so the operator spelling does not survive lowering and `annotate` never emits one); and an **arity-blind `Opaque` floor** through `DERIVED_OPERATORS`, which also closed a live wrong-`No` — `key-of<int, int>` used to lower to `Class("key-of")` and answer a definite `No` for every non-object value. **Deferred**: `constructor-parameters-of<C>` (#474), the one operator whose operand resolves against machinery that already exists, held back because it reads the class registry and so lowers as a pre-lowering rewrite at the seam `Cx::resolve_template_types` runs at rather than in `lower_generic` — `template-type`'s declared-side precedent. And the six **shape modifiers** (ADR-0090, #475), one pair per part of ADR-0062's shape fact: `partial-of` / `required-of` on the presence axis, `unsealed-of` / `sealed-of` on the seal axis, `pick-of` / `omit-of` on the field set. All six require a `ContractTy::Shape` operand — the rule that keeps `sealed-of<array<string, int>>` from sealing a field-less `MapOf` into `array{}` and answering a confident `No` for every non-empty array it was written to describe; `pick-of` / `omit-of` additionally require a *sealed* one, since an unsealed tail re-admits the key they claim to remove. `isList` is recomputed by `ShapeFact::normalize` rather than carried, so a modified `list{…}` generally spells back as `array{…}` under divergence entry 2. **Refused, not deferred**: `Record` (denotes `array<K, V>` exactly; ADR-0030's entry 6 is the measured precedent for refusing a re-spelling), `Readonly` (PHP arrays are value types, so it denotes the same set), `InstanceType` (`class-string`'s bound is dropped at lowering by design, issue #236, so the operand carries nothing to read — and the container idiom is issue #363's argument carry), `NoInfer` (ADR-0032: no solver to steer), `ThisType` / `ThisParameterType` / `OmitThisParameter` (no `this` parameter in a PHP callable type), `Awaited` (no promise in PHP core), and the four casing intrinsics (the refined-string grid holds the predicates, issue #240; the sidecar folds the transforms). A test pins that these keep the ordinary class reading, so the absence is not read later as an oversight. **What the shape modifiers wait on**: an operand that is a *name*. Written inline, every modifier is longer than the type it projects to, so they earn their keep only over a name. ADR-0090 §7 makes issue #472 the prerequisite, and **#472 has landed**: a class-like's `@phpstan-type` / `@psalm-type` declarations are resolved where envelopes are built, so a modifier written over an alias name now has a shape operand to read (within #472's own bound — see the type-alias entry below for the positions that stay dark). **Left open**: whether an operator that provably states nothing — `omit-of` with a key the shape lacks, `non-nullable<null>` yielding `never` — should raise a `phpdoc.*` id at the contracts floor. One id or neither, in its own slice with its own fp-gate evidence. |
-| The hyphen reservation, and the unknown-vocabulary id | 0091 | **Both slices have landed; one deferral is left.** A phpdoc type identifier containing `-` is vocabulary and never a class: no namespace resolution, no shadowing, and never `ContractTy::Class`. §3's rule is now structural rather than a maintenance property — `lower_identifier`'s last arm answers `Opaque` for an unrecognized hyphenated name instead of falling to `Class(norm)`, so `@param non-empy-string $s` (one letter) no longer reads as a contract that rejects every string, and `KNOWN_UNENFORCED` / `DERIVED_OPERATORS` stopped being the safety valve. §6's id ships as `phpdoc.unknown-vocabulary` (issue #479, `Floor::Contracts`), and since issue #472 it speaks at the **declaration** as well as the use site: a hyphenated `@phpstan-type` name is refused whole and reported, which is what keeps the third possibility closed rather than merely unexercised. The declaration half speaks on a class, interface, trait or enum docblock only (issue #668) — the same tag on a function or a method declares nothing upstream and nothing here, so a refusal there would be a claim about a declaration nobody attempted — and it reads the alias **body** as a type position too (issue #669), through the same walk and the same allowlist the use site gets, where `@phpstan-type Row foo-bar` used to floor in silence. **Still deferred**: the plugin registration kind that makes the allowlist *builtin ∪ plugin* (§4.1, issue #551) — `VocabularyAllowlist` holds the seam and every project's plugin half is empty. **Not a Steins-only defect**: on the conformance suite's namespaced `int-range` fixture, 5 of 16 analyzer configurations reject a call the fixture marks valid, having resolved the keyword into a class that cannot exist. Across the 69 namespaced fixtures using a hyphenated keyword, 84 over-rejections in 48 fixture-instances across 7 tools carry the fingerprint — a floor, since Qodana exhibits the defect without printing a qualified name. Phan is the control (it implements `int-range`, passes, and its over-rejections elsewhere drop out); PHPStan already behaves as ADR-0091 proposes, reporting `parameter.unresolvableType` rather than manufacturing a contract. **Why the reservation is airtight**: a hyphenated identifier cannot be a class (PHP's compiler rejects it — zero hyphenated class-likes in the seeded catalog, zero in 6,670 corpus PHP files), cannot be a `@template` name and cannot be a `@phpstan-type` alias (the tag scanner's `is_ident_byte` excludes `-` while the type lexer's `is_ident_cont` includes it, so a tag-position name stops at the hyphen). All three of the possibilities that force silence on an unrecognized identifier are therefore closed, which is what makes an unrecognized *hyphenated* one a **provable** docblock defect rather than an undecidable one. **Two slices, deliberately not bundled**: ADR-0091 §3 is the rule and strictly removes wrong answers, needing no calibration; §6's `phpdoc.*` id for unrecognized vocabulary is a judgement call whose one FP source is other tools' spellings Steins does not model, so its surface floor is measured against the fp-gate rather than assumed, and is not `default`. Under the rule `KNOWN_UNENFORCED` stops being a safety valve and becomes that id's allowlist, and `DERIVED_OPERATORS` is subsumed for flooring. `unset` is **not** an instance: it carries no hyphen and is safe because PHP reserves the word (ADR-0087 §2.2) — a sibling reason, same shape. **Owner ruling 2026-08-24** (ADR-0091 §4.1): a user-defined type alias may be named `foo_bar` (PHPStan/Psalm compatible) and may **not** be named `foo-bar` — rejected outright rather than silently truncated at the hyphen. Issue #472 implemented that: the scanner carries the whole spelling so the refusal can name what the author wrote, and the divergence from the phpdoc-parser oracle is divergence-registry entry 17. The space is reserved, not frozen: a plugin registers utility types into it as a second registration kind on the existing `steins-plugin.json` manifest (ADR-0039/0068), which is what keeps §6's allowlist open. That makes the diagnostic **plugin-set dependent** — dropping a plugin introduces findings on the docblocks that used its vocabulary, a baseline that moves with configuration rather than code, which ADR-0022 has to be told about. |
+| [`template-type<Subject, Owner, 'TName'>` resolution](#template-type-resolution) | 0032 | Resolves on the declared side and off a receiver's or an argument's carry (issues #361–#363); the rest floors to `Opaque`. |
+| [Derived type operators past `key-of` / `value-of`](#derived-type-operators) | 0089, 0090 | The `lower_generic` roster has **landed**; `constructor-parameters-of<C>` and the six shape modifiers are deferred. |
+| [The hyphen reservation, and the unknown-vocabulary id](#the-hyphen-reservation) | 0091 | **Both slices have landed**; the plugin half of the allowlist (issue #551) is deferred. |
 | Callable signatures beyond the closure-variance arm | 0033 | A declared `callable(P): R` is checked against a *closure argument*; nothing else consumes it. |
-| Arrays *of* resources | 0056 §8.7, 0097 §2.5, §3 | The resource leaf itself has **landed** (ADR-0056 §8): 19 stub-mined producers seed a `resource`(`\|false`) arm lane, the ordinary `=== false` subtraction narrows it, and a scalar/class parameter handed the result is a mode-independent finding. **The consuming direction has landed too** (ADR-0097 §2.5): 100 stub-mined `@param resource` positions (`resource_params.toml`, the producer table's twin) are admitted by the same gate in the parameter direction — the engine reporting no type at the position is the tripwire — and a proven non-resource there (`fwrite('x', …)`, `fclose(null)`, `fread([], …)`, a `new`) is `type.argument-mismatch` in either mode; a declared `string $s` forwarded is a type and not a proven value, and stays silent. The **state** has landed too (ADR-0097 §2.3–§2.4): a producer's handle is a heap resource — identity shared by aliases, `Open` at allocation, `Closed` after a closing call returns, `Unknown` after an escape — so `@param open-resource` refuses a closed handle, the lane survives a by-value builtin (`ftell($h)`), and `is_resource()` narrows the state on its false branch. (`@param closed-resource` refusing a *fresh* handle was the other half, and it is retired — see the `Open` retraction below.) The **closed-state** cell of the consumer table has landed with it: `fclose($h); fread($h, …)` reads the heap state through `closed_handle_verdict`, convicts on a proven `Closed` at any row whose `accepts_closed` is false (98 of the 100, 92 of them with a closed-handle probe behind the bit), and stays silent on `Open` and on `Unknown` — including the `Unknown` a top-level call that could rebind the global leaves behind. **Arrays of resources have a carrier now** (ADR-0098): an array element under a key the walk has **proven** at `Stratum::Verified` is a **place** that names the same allocation the variable does, so `$arr = [$h]; fclose($arr[0]);` closes `$h`. **Two** judgments read the place so far — the closed-state cell at a builtin resource position (`fclose($arr[0]); fread($arr[0], 1);`) and the §2.7 folds (`gettype($pipes[0])`), which additionally take a key spelled as a variable and refuse one spelled as anything that could run code. The two **producers** that hand back an array of fresh handles have landed on that carrier (ADR-0098 §4 slice 2): `stream_socket_pair()` binds `pair[0]` and `pair[1]` to two distinct fresh `Open` stream handles, and `proc_open()` — which now has the `out_params` row at position 2 it had none of — binds one place per `pipe` descriptor of a **proven** spec, at that descriptor's own key, so `$pipes[0]` is a resource from the moment it exists. **The §2.7 folds have landed** (ADR-0097, issue #756): `gettype`, `get_debug_type`, `get_resource_type` and `get_resource_id` answer from the handle's state and kind instead of the declared `string`/`int`, at an assignment whose right-hand side is the call and at a single-argument dump — a composed spelling keeps the declared answer, because another call in the same statement can close the handle before this one reads it. The measurement that came with them retired **`Open` as a proof outright**: three routes close a handle while naming nothing — `closedir()` with no argument, `socket_import_stream()` handing out a socket that owns the stream, `bzopen()` taking ownership of the stream it wraps — and between them they reach every producer, while a stream filter dies with its stream, a `proc_open` pipe with its process, and two `pfsockopen()` calls answer one handle. So an open state reads `Unknown`, which convicts nothing, and `@param closed-resource` no longer convicts a handle that really is closed. `Closed` is untouched: nothing reopens a handle, so every closed-handle finding stands. What that costs, deliberately: a fresh handle at `@param closed-resource` stops reporting, and `is_resource()`'s true branch proves nothing judgeable. What is left there: the resource-**ness** cell (`fwrite($arr[0], …)` on a proven non-resource), the `@param open-resource`/`closed-resource` state check and `is_resource()` narrowing, all three of which still read a bare variable only; the folds in a composed expression, and a condition that compares one directly (`if (gettype($h) === 'resource')`, which reads the declared `string` while the two-statement spelling decides); `pg_socket`'s kind spelling, unprobed for want of a server, and `stream_socket_client`'s, which is the union of the two stream spellings since `STREAM_CLIENT_PERSISTENT` changes it; the **operators** (`$h + 1` is a `TypeError` §2.1's table states and `type.invalid-operand` does not yet read); a spec the walk cannot read whole binds nothing at all, and so do the `socket` and `pty` descriptor words, which were probed to produce an entry and are held back until a build with pseudo-terminal support can be probed; a produced place is read only at a resource position, since the carrier is the heap's and seeds no value fact; a `proc_open` whose *return* a branch proved false still carries its `$pipes` places, because the guard names the return and nothing ties the two; **properties** (`$this->stream` forgets a handle's state for the same reason an element used to); an **unproven key** (`$arr[$i]` where nothing proves `$i`, a docblock `@phpstan-assert` included — a claim is not a proof and names no place); the closing seam, which is literal-key only and so moves no state through `fclose($arr[$i])` even where `$i` is proven; and nesting past one level. |
-| A **function-scope** `T\|unset` that reports | 0087 §5.6 | The **vocabulary** (issue #395), the **top-level semantics** (issue #396) and the **positions** (issue #397) have all landed: `unset` lowers to its own leaf instead of a class named `unset`, is non-shadowable, round-trips through the speller, contributes no value — `\DateTime\|unset` accepts and refuses exactly what `\DateTime` does, in every position — and a **top-level inline** `@var T\|unset $x` seeds the name as possibly-unbound, reported by `phpdoc.maybe-undefined` (`Layer::Contract`, `Floor::Contracts`) on any read `isset`/`empty`/`??`/`??=`/an assignment/the defaulting idiom has not discharged. Every other position is **inert** by ruling, not by omission (ADR-0087 §5). What is deferred is one leg: an inline `@var T\|unset $x` inside a **function, method or closure** never emits the id, although `include`-inside-a-function is a real idiom and §8.3's positional dam rule is the machinery it would need. The premise does not transfer — a script scope has no proof of absence, which is what makes the declaration the only premise there, while a function scope *does*, so the declared and the proven claims would have to be ordered before the id could speak. Until then a function-scope local keeps `variable.undefined` / `variable.maybe-undefined` unchanged. One residue of the landed slice (ADR-0087 §8): where two docblocks declare the same name the read attributes to the later one. |
+| [Arrays *of* resources](#arrays-of-resources) | 0056 §8.7, 0097 §2.5, §3 | The resource leaf, its closed state and one level of array elements have **landed**; properties, unproven keys, deeper nesting and the operators have not. |
+| [A **function-scope** `T\|unset` that reports](#function-scope-unset) | 0087 §5.6 | The vocabulary, the top-level semantics and the positions have **landed**; `phpdoc.maybe-undefined` stays silent inside a function, method or closure. |
 | Value-provenance labels | 0038 | Reserved as the general mechanism in place of taint analysis. |
 | Ecosystem packs — PSL, Serde, Valinor, PSR | 0044, 0045 | Dependent shapes, witness refs, mapper returns as runtime truth. The mapper-boundary types are exactly where legacy modernization needs truth. |
-| Plugin contract | 0012, 0039, 0068 | **Partial.** The manifest channel has **landed**: a `type: steins-plugin` Composer package's `steins-plugin.json` registers effect labels (vendor-root checked) and colors plain functions, whose labels enter the *declared* lane with the taint kept. Deferred: everything the sidecar half was for — synthetic declarations, pattern subscriptions, booting the real framework (the `plugin` JSON-RPC method is still the stub returning `widen`), method colorings, value-provenance registrations, response caching by environment fingerprint, and the ADR-0044/0045 packs. |
+| [Plugin contract](#plugin-contract) | 0012, 0039, 0068 | **Partial.** The manifest channel has **landed**; everything the sidecar half was for is deferred. |
 | Per-package vendor budgets | 0015 | Descent into `vendor/` bodies is implemented (diagnostics off); the budget cap that would bound it, naming its cutoff per the Certainty discipline, has no code. Vendor propagation runs uncapped today. |
+
+#### `template-type` resolution
+
+**Resolves on the declared side** (issue #361): a spelled parameterization of
+the owner, a one-level inheritance edge to it, or the template name itself is
+rewritten into the type it names before lowering, and judged exactly as that
+type is.
+
+**A `@return` whose subject is a class-level template of the receiver's class
+resolves too** (issue #362), off the generics carry the receiver object holds at
+the call site — two lookups, one level each, seeding the arms a hand-written
+`@return` would seed.
+
+**A subject naming the declaration's own function- or method-level `@template`
+resolves too** (issue #363), bound from the carry of the argument that flowed
+into a top-level `@param Owner<…, T, …>` (or, for `@param T $p`, from the
+argument's proven value) — and since #361 rewrites
+`template-type<Box<T>, Box, 'T'>` to `T`, the same read serves both spellings.
+The spelling was made recognized vocabulary first (issue #360), which is also
+why its owner argument is exempt from `untyped.generics` — a class-reference
+position, not a missing type argument.
+
+What still floors to `Opaque`: a receiver that carries nothing to read (a
+`$this`, static, non-exact or **declared** receiver, or one whose value carry an
+earlier method call swept — a registered divergence, entry 13); a **union or
+intersection subject**, where PHPStan unions over the subject's class names; a
+subject reaching the owner only through a **generic intermediate**, which is
+substitution rather than lookup (ADR-0032's amendment: one level, no recursion);
+every argument spelling outside #363's binding rule (a nested or nullable
+`@param`, a named or spread argument list, a by-ref or variadic parameter, two
+occurrences that disagree, a **bounded** template — which reads its bound
+instead); and the resolution does not run over `@var`/property docblocks at all,
+which keep the #360 floor.
+
+#### Derived type operators
+
+**The `lower_generic` roster has landed** (#473): `non-nullable<T>`,
+`return-type<F>`, `parameters-of<F>`, `exclude-from<T, U>` and
+`extract-from<T, U>` project into an existing `ContractTy` and are judged,
+spelled and round-tripped as the type they project to. With them, the three
+rules ADR-0089 fixes for the whole family: **kebab-case** naming (a hyphenated
+spelling is not a legal PHP identifier, so nothing can shadow it — the lowercase
+spelling the family was proposed in could not have done this, since PHP class
+names are case-insensitive); **projection over representation** (no new
+`ContractTy` variant, so the operator spelling does not survive lowering and
+`annotate` never emits one); and an **arity-blind `Opaque` floor** through
+`DERIVED_OPERATORS`, which also closed a live wrong-`No` — `key-of<int, int>`
+used to lower to `Class("key-of")` and answer a definite `No` for every
+non-object value.
+
+**Deferred**: `constructor-parameters-of<C>` (#474), the one operator whose
+operand resolves against machinery that already exists, held back because it
+reads the class registry and so lowers as a pre-lowering rewrite at the seam
+`Cx::resolve_template_types` runs at rather than in `lower_generic` —
+`template-type`'s declared-side precedent. And the six **shape modifiers**
+(ADR-0090, #475), one pair per part of ADR-0062's shape fact: `partial-of` /
+`required-of` on the presence axis, `unsealed-of` / `sealed-of` on the seal
+axis, `pick-of` / `omit-of` on the field set. All six require a
+`ContractTy::Shape` operand — the rule that keeps
+`sealed-of<array<string, int>>` from sealing a field-less `MapOf` into `array{}`
+and answering a confident `No` for every non-empty array it was written to
+describe; `pick-of` / `omit-of` additionally require a *sealed* one, since an
+unsealed tail re-admits the key they claim to remove. `isList` is recomputed by
+`ShapeFact::normalize` rather than carried, so a modified `list{…}` generally
+spells back as `array{…}` under divergence entry 2.
+
+**Refused, not deferred**: `Record` (denotes `array<K, V>` exactly; ADR-0030's
+entry 6 is the measured precedent for refusing a re-spelling), `Readonly` (PHP
+arrays are value types, so it denotes the same set), `InstanceType`
+(`class-string`'s bound is dropped at lowering by design, issue #236, so the
+operand carries nothing to read — and the container idiom is issue #363's
+argument carry), `NoInfer` (ADR-0032: no solver to steer), `ThisType` /
+`ThisParameterType` / `OmitThisParameter` (no `this` parameter in a PHP callable
+type), `Awaited` (no promise in PHP core), and the four casing intrinsics (the
+refined-string grid holds the predicates, issue #240; the sidecar folds the
+transforms). A test pins that these keep the ordinary class reading, so the
+absence is not read later as an oversight.
+
+**What the shape modifiers wait on**: an operand that is a *name*. Written
+inline, every modifier is longer than the type it projects to, so they earn
+their keep only over a name. ADR-0090 §7 makes issue #472 the prerequisite, and
+**#472 has landed**: a class-like's `@phpstan-type` / `@psalm-type` declarations
+are resolved where envelopes are built, so a modifier written over an alias name
+now has a shape operand to read (within #472's own bound — see the type-alias
+entry below for the positions that stay dark).
+
+**Left open**: whether an operator that provably states nothing — `omit-of` with
+a key the shape lacks, `non-nullable<null>` yielding `never` — should raise a
+`phpdoc.*` id at the contracts floor. One id or neither, in its own slice with
+its own fp-gate evidence.
+
+#### The hyphen reservation
+
+**Both slices have landed; one deferral is left.** A phpdoc type identifier
+containing `-` is vocabulary and never a class: no namespace resolution, no
+shadowing, and never `ContractTy::Class`. §3's rule is now structural rather
+than a maintenance property — `lower_identifier`'s last arm answers `Opaque` for
+an unrecognized hyphenated name instead of falling to `Class(norm)`, so
+`@param non-empy-string $s` (one letter) no longer reads as a contract that
+rejects every string, and `KNOWN_UNENFORCED` / `DERIVED_OPERATORS` stopped being
+the safety valve. §6's id ships as `phpdoc.unknown-vocabulary` (issue #479,
+`Floor::Contracts`), and since issue #472 it speaks at the **declaration** as
+well as the use site: a hyphenated `@phpstan-type` name is refused whole and
+reported, which is what keeps the third possibility closed rather than merely
+unexercised. The declaration half speaks on a class, interface, trait or enum
+docblock only (issue #668) — the same tag on a function or a method declares
+nothing upstream and nothing here, so a refusal there would be a claim about a
+declaration nobody attempted — and it reads the alias **body** as a type
+position too (issue #669), through the same walk and the same allowlist the use
+site gets, where `@phpstan-type Row foo-bar` used to floor in silence.
+
+**Still deferred**: the plugin registration kind that makes the allowlist
+*builtin ∪ plugin* (§4.1, issue #551) — `VocabularyAllowlist` holds the seam and
+every project's plugin half is empty.
+
+**Not a Steins-only defect**: on the conformance suite's namespaced `int-range`
+fixture, 5 of 16 analyzer configurations reject a call the fixture marks valid,
+having resolved the keyword into a class that cannot exist. Across the 69
+namespaced fixtures using a hyphenated keyword, 84 over-rejections in 48
+fixture-instances across 7 tools carry the fingerprint — a floor, since Qodana
+exhibits the defect without printing a qualified name. Phan is the control (it
+implements `int-range`, passes, and its over-rejections elsewhere drop out);
+PHPStan already behaves as ADR-0091 proposes, reporting
+`parameter.unresolvableType` rather than manufacturing a contract.
+
+**Why the reservation is airtight**: a hyphenated identifier cannot be a class
+(PHP's compiler rejects it — zero hyphenated class-likes in the seeded catalog,
+zero in 6,670 corpus PHP files), cannot be a `@template` name and cannot be a
+`@phpstan-type` alias (the tag scanner's `is_ident_byte` excludes `-` while the
+type lexer's `is_ident_cont` includes it, so a tag-position name stops at the
+hyphen). All three of the possibilities that force silence on an unrecognized
+identifier are therefore closed, which is what makes an unrecognized
+*hyphenated* one a **provable** docblock defect rather than an undecidable one.
+
+**Two slices, deliberately not bundled**: ADR-0091 §3 is the rule and strictly
+removes wrong answers, needing no calibration; §6's `phpdoc.*` id for
+unrecognized vocabulary is a judgement call whose one FP source is other tools'
+spellings Steins does not model, so its surface floor is measured against the
+fp-gate rather than assumed, and is not `default`. Under the rule
+`KNOWN_UNENFORCED` stops being a safety valve and becomes that id's allowlist,
+and `DERIVED_OPERATORS` is subsumed for flooring. `unset` is **not** an
+instance: it carries no hyphen and is safe because PHP reserves the word
+(ADR-0087 §2.2) — a sibling reason, same shape.
+
+**Owner ruling 2026-08-24** (ADR-0091 §4.1): a user-defined type alias may be
+named `foo_bar` (PHPStan/Psalm compatible) and may **not** be named `foo-bar` —
+rejected outright rather than silently truncated at the hyphen. Issue #472
+implemented that: the scanner carries the whole spelling so the refusal can name
+what the author wrote, and the divergence from the phpdoc-parser oracle is
+divergence-registry entry 17. The space is reserved, not frozen: a plugin
+registers utility types into it as a second registration kind on the existing
+`steins-plugin.json` manifest (ADR-0039/0068), which is what keeps §6's
+allowlist open. That makes the diagnostic **plugin-set dependent** — dropping a
+plugin introduces findings on the docblocks that used its vocabulary, a baseline
+that moves with configuration rather than code, which ADR-0022 has to be told
+about.
+
+#### Arrays *of* resources
+
+The resource leaf itself has **landed** (ADR-0056 §8): 19 stub-mined producers
+seed a `resource`(`|false`) arm lane, the ordinary `=== false` subtraction
+narrows it, and a scalar/class parameter handed the result is a mode-independent
+finding.
+
+**The consuming direction has landed too** (ADR-0097 §2.5): 100 stub-mined
+`@param resource` positions (`resource_params.toml`, the producer table's twin)
+are admitted by the same gate in the parameter direction — the engine reporting
+no type at the position is the tripwire — and a proven non-resource there
+(`fwrite('x', …)`, `fclose(null)`, `fread([], …)`, a `new`) is
+`type.argument-mismatch` in either mode; a declared `string $s` forwarded is a
+type and not a proven value, and stays silent.
+
+The **state** has landed too (ADR-0097 §2.3–§2.4): a producer's handle is a heap
+resource — identity shared by aliases, `Open` at allocation, `Closed` after a
+closing call returns, `Unknown` after an escape — so `@param open-resource`
+refuses a closed handle, the lane survives a by-value builtin (`ftell($h)`), and
+`is_resource()` narrows the state on its false branch. (`@param closed-resource`
+refusing a *fresh* handle was the other half, and it is retired — see the `Open`
+retraction below.) The **closed-state** cell of the consumer table has landed
+with it: `fclose($h); fread($h, …)` reads the heap state through
+`closed_handle_verdict`, convicts on a proven `Closed` at any row whose
+`accepts_closed` is false (98 of the 100, 92 of them with a closed-handle probe
+behind the bit), and stays silent on `Open` and on `Unknown` — including the
+`Unknown` a top-level call that could rebind the global leaves behind.
+
+**Arrays of resources have a carrier now** (ADR-0098): an array element under a
+key the walk has **proven** at `Stratum::Verified` is a **place** that names the
+same allocation the variable does, so `$arr = [$h]; fclose($arr[0]);` closes
+`$h`. **Two** judgments read the place so far — the closed-state cell at a
+builtin resource position (`fclose($arr[0]); fread($arr[0], 1);`) and the §2.7
+folds (`gettype($pipes[0])`), which additionally take a key spelled as a
+variable and refuse one spelled as anything that could run code.
+
+The two **producers** that hand back an array of fresh handles have landed on
+that carrier (ADR-0098 §4 slice 2): `stream_socket_pair()` binds `pair[0]` and
+`pair[1]` to two distinct fresh `Open` stream handles, and `proc_open()` — which
+now has the `out_params` row at position 2 it had none of — binds one place per
+`pipe` descriptor of a **proven** spec, at that descriptor's own key, so
+`$pipes[0]` is a resource from the moment it exists.
+
+**The §2.7 folds have landed** (ADR-0097, issue #756): `gettype`,
+`get_debug_type`, `get_resource_type` and `get_resource_id` answer from the
+handle's state and kind instead of the declared `string`/`int`, at an assignment
+whose right-hand side is the call and at a single-argument dump — a composed
+spelling keeps the declared answer, because another call in the same statement
+can close the handle before this one reads it.
+
+The measurement that came with them retired **`Open` as a proof outright**:
+three routes close a handle while naming nothing — `closedir()` with no
+argument, `socket_import_stream()` handing out a socket that owns the stream,
+`bzopen()` taking ownership of the stream it wraps — and between them they reach
+every producer, while a stream filter dies with its stream, a `proc_open` pipe
+with its process, and two `pfsockopen()` calls answer one handle. So an open
+state reads `Unknown`, which convicts nothing, and `@param closed-resource` no
+longer convicts a handle that really is closed. `Closed` is untouched: nothing
+reopens a handle, so every closed-handle finding stands. What that costs,
+deliberately: a fresh handle at `@param closed-resource` stops reporting, and
+`is_resource()`'s true branch proves nothing judgeable.
+
+What is left there: the resource-**ness** cell (`fwrite($arr[0], …)` on a proven
+non-resource), the `@param open-resource`/`closed-resource` state check and
+`is_resource()` narrowing, all three of which still read a bare variable only;
+the folds in a composed expression, and a condition that compares one directly
+(`if (gettype($h) === 'resource')`, which reads the declared `string` while the
+two-statement spelling decides); `pg_socket`'s kind spelling, unprobed for want
+of a server, and `stream_socket_client`'s, which is the union of the two stream
+spellings since `STREAM_CLIENT_PERSISTENT` changes it; the **operators**
+(`$h + 1` is a `TypeError` §2.1's table states and `type.invalid-operand` does
+not yet read); a spec the walk cannot read whole binds nothing at all, and so do
+the `socket` and `pty` descriptor words, which were probed to produce an entry
+and are held back until a build with pseudo-terminal support can be probed; a
+produced place is read only at a resource position, since the carrier is the
+heap's and seeds no value fact; a `proc_open` whose *return* a branch proved
+false still carries its `$pipes` places, because the guard names the return and
+nothing ties the two; **properties** (`$this->stream` forgets a handle's state
+for the same reason an element used to); an **unproven key** (`$arr[$i]` where
+nothing proves `$i`, a docblock `@phpstan-assert` included — a claim is not a
+proof and names no place); the closing seam, which is literal-key only and so
+moves no state through `fclose($arr[$i])` even where `$i` is proven; and nesting
+past one level.
+
+#### Function-scope `unset`
+
+The **vocabulary** (issue #395), the **top-level semantics** (issue #396) and
+the **positions** (issue #397) have all landed: `unset` lowers to its own leaf
+instead of a class named `unset`, is non-shadowable, round-trips through the
+speller, contributes no value — `\DateTime|unset` accepts and refuses exactly
+what `\DateTime` does, in every position — and a **top-level inline**
+`@var T|unset $x` seeds the name as possibly-unbound, reported by
+`phpdoc.maybe-undefined` (`Layer::Contract`, `Floor::Contracts`) on any read
+`isset`/`empty`/`??`/`??=`/an assignment/the defaulting idiom has not
+discharged. Every other position is **inert** by ruling, not by omission
+(ADR-0087 §5).
+
+What is deferred is one leg: an inline `@var T|unset $x` inside a **function,
+method or closure** never emits the id, although `include`-inside-a-function is
+a real idiom and §8.3's positional dam rule is the machinery it would need. The
+premise does not transfer — a script scope has no proof of absence, which is
+what makes the declaration the only premise there, while a function scope
+*does*, so the declared and the proven claims would have to be ordered before
+the id could speak. Until then a function-scope local keeps
+`variable.undefined` / `variable.maybe-undefined` unchanged.
+
+One residue of the landed slice (ADR-0087 §8): where two docblocks declare the
+same name the read attributes to the later one.
+
+#### Plugin contract
+
+**Partial.** The manifest channel has **landed**: a `type: steins-plugin`
+Composer package's `steins-plugin.json` registers effect labels (vendor-root
+checked) and colors plain functions, whose labels enter the *declared* lane with
+the taint kept. Deferred: everything the sidecar half was for — synthetic
+declarations, pattern subscriptions, booting the real framework (the `plugin`
+JSON-RPC method is still the stub returning `widen`), method colorings,
+value-provenance registrations, response caching by environment fingerprint, and
+the ADR-0044/0045 packs.
 
 ### Diagnostics and CLI
 
@@ -33,20 +313,66 @@ the semantic inventory.
 | --- | --- | --- |
 | `call.too-many-arguments` | 0049 §6 | Internal targets only — userland too-many runs clean and is never a finding. Waits on the sidecar reflect slice. The only registered id with no emitter. |
 | Scoped policy — `[paths.sets]`, `[[policy]]` | 0023 | Designed in full, including semantic `where` matchers. The pipeline stage exists as a no-op with a seam. |
-| `doctor` (full report) | 0054 | The **minimal** `doctor` (ADR-0054 C3 scope — index-bound posture report, runs no emitter) has **landed**, and so has `--format json` and part of the richer ADR-0054 C4 audit: Catalog (builtin catalog pin vs. analysis version, hierarchy/foldable table sizes) and Registry totality (emittable/pending id partition) sections. Deferred: the dump-site count (waits on the unlanded D3/D4 recognizer) and `contract_touches_class`'s project-wide count (needs a second, index-only entry point the checker does not expose yet). |
-| `check --fix` fix-its | 0010 | Autofix as a first-class diagnostic payload has **landed**: a finding may carry a `Fix` (a title plus byte-span `FixEdit`s), `--format json` shows it as an additive key, and `check --fix` pours a run's fixes into one atomic plan that writes only past the ADR-0034 dual-verification post-check — a refusal is named and nothing touches disk. One family ships: deleting a committed `\PHPStan\dumpType()` / `\PHPStan\dumpPhpDocType()` statement (`debug.type`, `debug.phpdoc-type`), the remedy ADR-0053 names. Deferred: every further fix family. `debug.var-dump` carries no fix by decision, not by deferral — deleting legal working PHP is the author's call. |
+| [`doctor` (full report)](#doctor) | 0054 | The minimal report, `--format json` and part of the C4 audit have **landed**; two counts are deferred. |
+| [`check --fix` fix-its](#fix-its) | 0010 | Fix payloads and `check --fix` have **landed** with one family; every further fix family is deferred. |
 | `lsp` | 0048, roadmap M6 | Position queries are *constrained* today (replay over retention, canonical entry states, no global-ordering dependence) but not built. The flagship capability is type-directed member completion. |
-| `mcp` | 0010, roadmap M7 | The agent-driven dry-run → diff → approve → apply loop has **landed** as `steins mcp`: an MCP server on stdio with four tools (`list_transforms`, `plan_transform`, `apply_plan`, `check`), plan and apply deliberately separate, and a plan handle scoped to the serving process. Deferred: an `annotate` tool, MCP resources and prompts, and a tool that applies a finding's `fix` payload (the payload is returned; the agent applies it). Also **landed** (#491, #534): `check` answers from the published generation, warm ≡ cold asserted at the MCP surface, so the resident process gets ADR-0092's warm path there. `plan_transform` and `apply_plan` still re-analyze from scratch on every call — deliberately, since their post-check verifies the plan against hypothetical edited text no generation holds (the dirty-buffer lane, ADR-0092 §6, issue #492). |
+| [`mcp`](#mcp) | 0010, roadmap M7 | `steins mcp` has **landed** with four tools; an `annotate` tool, resources, prompts and a fix-applying tool are deferred. |
 | `init` / config generators | 0020 | **Refused**, not deferred — zero-config is the banner. |
+
+#### `doctor`
+
+The **minimal** `doctor` (ADR-0054 C3 scope — index-bound posture report, runs
+no emitter) has **landed**, and so has `--format json` and part of the richer
+ADR-0054 C4 audit: Catalog (builtin catalog pin vs. analysis version,
+hierarchy/foldable table sizes) and Registry totality (emittable/pending id
+partition) sections. Deferred: the dump-site count (waits on the unlanded D3/D4
+recognizer) and `contract_touches_class`'s project-wide count (needs a second,
+index-only entry point the checker does not expose yet).
+
+#### Fix-its
+
+Autofix as a first-class diagnostic payload has **landed**: a finding may carry
+a `Fix` (a title plus byte-span `FixEdit`s), `--format json` shows it as an
+additive key, and `check --fix` pours a run's fixes into one atomic plan that
+writes only past the ADR-0034 dual-verification post-check — a refusal is named
+and nothing touches disk. One family ships: deleting a committed
+`\PHPStan\dumpType()` / `\PHPStan\dumpPhpDocType()` statement (`debug.type`,
+`debug.phpdoc-type`), the remedy ADR-0053 names. Deferred: every further fix
+family. `debug.var-dump` carries no fix by decision, not by deferral — deleting
+legal working PHP is the author's call.
+
+#### `mcp`
+
+The agent-driven dry-run → diff → approve → apply loop has **landed** as
+`steins mcp`: an MCP server on stdio with four tools (`list_transforms`,
+`plan_transform`, `apply_plan`, `check`), plan and apply deliberately separate,
+and a plan handle scoped to the serving process. Deferred: an `annotate` tool,
+MCP resources and prompts, and a tool that applies a finding's `fix` payload
+(the payload is returned; the agent applies it). Also **landed** (#491, #534):
+`check` answers from the published generation, warm ≡ cold asserted at the MCP
+surface, so the resident process gets ADR-0092's warm path there.
+`plan_transform` and `apply_plan` still re-analyze from scratch on every call —
+deliberately, since their post-check verifies the plan against hypothetical
+edited text no generation holds (the dirty-buffer lane, ADR-0092 §6,
+issue #492).
 
 ### Runtime knowledge
 
 | Surface | Note |
 | --- | --- |
-| Extension-class reflection, past the first slice | The sidecar's `reflect()` **does** resolve extension classes against the project's own PHP (#269): a class an installed extension provides carries its methods, constants, properties and inheritance edges. What stays out: a class the runtime cannot reflect — an unloaded extension, `--no-php`, no `php` on `PATH` — is `Unknown`-silent exactly as before, and no absence-family finding is ever premised on a reflected declaration (it resolves; it does not convict). |
+| [Extension-class reflection, past the first slice](#extension-class-reflection) | Resolves against the project's own PHP (#269); a class the runtime cannot reflect stays `Unknown`-silent. |
 | The full effect catalog | What ships is a frequency-seeded starter set; ADR-0014's php-src stub sourcing is not built. |
 | Computed folding purity | Folding permission is a hand-picked allowlist, not a derived property. |
 | Locale/timezone pseudo-constants | The ADR-0008 opt-in that would let `mb_*` and locale-sensitive functions fold. |
+
+#### Extension-class reflection
+
+The sidecar's `reflect()` **does** resolve extension classes against the
+project's own PHP (#269): a class an installed extension provides carries its
+methods, constants, properties and inheritance edges. What stays out: a class
+the runtime cannot reflect — an unloaded extension, `--no-php`, no `php` on
+`PATH` — is `Unknown`-silent exactly as before, and no absence-family finding is
+ever premised on a reflected declaration (it resolves; it does not convict).
 
 ## Known imprecision
 
