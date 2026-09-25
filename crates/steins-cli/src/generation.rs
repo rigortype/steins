@@ -39,11 +39,12 @@ use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
 
 use steins_db::{EffectsPolicy, PluginFacts, ProjectLayout};
-use steins_infer::{Diagnostic, GenerationParams, INLINE_IGNORE, LazyTree, generation_check};
+use steins_infer::{
+    Diagnostic, GenerationParams, INLINE_IGNORE, LazyTree, RuntimePostures, generation_check,
+};
 use steins_syntax::SourceTree;
 
 use crate::check::suppression_over;
-use crate::config::RuntimePostures;
 use crate::profile;
 use crate::project::{LoadedProject, assemble_loaded, resolve_layout};
 
