@@ -75,8 +75,8 @@
 //! content (registered labels + colorings, not package names); the engine
 //! posture off this run's own recorded boot surface (or `Off`); and the
 //! finding-relevant config — the `[effects]` policy (tolerance + attribution),
-//! both `[runtime]` postures (`warning-handler`, `final-keyword`), and the
-//! resolved [`ProjectLayout`] (vendor boundary + PHP target; its `Debug`
+//! every `[runtime]` posture ([`RuntimePostures`]: `warning-handler`,
+//! `final-keyword`, `os`), and the resolved [`ProjectLayout`] (vendor boundary + PHP target; its `Debug`
 //! rendering is deterministic — ordered `Vec`s throughout — and
 //! over-invalidating on a spelling change costs a rebuild, never meaning).
 //! Deliberately left out: everything display-side — profiles/surfaces,
@@ -144,7 +144,7 @@ use crate::project::{FileUnit, Index, LazyTree, Res};
 use crate::summaries::{Summaries as StoredSummaries, SummaryRow, read_summaries, write_summaries};
 use crate::walk_fleet::{FolderFleet, WorkerBudget};
 use crate::walk_plan::{FilePlan, FileWalk, UniverseVerdict, WalkControl};
-use crate::{Diagnostic, Divergence, EngineFolder, FinalKeyword, ProcessEngine, RuntimePostures};
+use crate::{Diagnostic, Divergence, EngineFolder, ProcessEngine, RuntimePostures};
 
 // ---------------------------------------------------------------------------
 // The orchestrator's own section: which sources an artifact was built from.
@@ -272,12 +272,9 @@ pub struct GenerationParams<'a> {
     pub partition: &'a PackagePartition,
     pub plugins: &'a PluginFacts,
     pub effects: &'a EffectsPolicy,
-    /// The `[runtime] warning-handler` posture (ADR-0049 §7).
-    pub warning_handler_abort: bool,
-    /// The `[runtime] final-keyword` posture (issue #234).
-    pub final_keyword: FinalKeyword,
-    /// The `[runtime] os` pin (ADR-0094 §3). `None` is the default union.
-    pub os_pin: Option<crate::OsFamily>,
+    /// The `[runtime]` postures (ADR-0037 §2). Every one of them is identity:
+    /// `config_identity` destructures the value whole.
+    pub postures: RuntimePostures,
     /// Whether the PHP sidecar may run (the inverse of the CLI's `--no-php`).
     pub php: bool,
     /// Run the paranoid walk verifier ([`PARANOID_ENV`]) whatever the
@@ -1039,11 +1036,7 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
         &units,
         &index,
         &mut folder,
-        RuntimePostures {
-            warning_handler_abort: p.warning_handler_abort,
-            final_keyword: p.final_keyword,
-            os_pin: p.os_pin,
-        },
+        p.postures,
         p.layout,
         p.plugins,
         p.effects,
@@ -1831,17 +1824,21 @@ fn plugin_identity(plugins: &PluginFacts) -> Vec<String> {
 
 /// The finding-relevant config as identity pairs — see the module docs for
 /// what is covered and what is deliberately out.
+///
+/// The postures are destructured with no rest pattern, so a new
+/// [`RuntimePostures`] field does not compile until it has a row here. Every
+/// posture decides findings, so a posture without a row would let two runs of
+/// one build under different values share a generation, and the second would
+/// replay what the first found (ADR-0092 §2).
 fn config_identity(p: &GenerationParams<'_>) -> Vec<(String, String)> {
+    let RuntimePostures { warning_handler_abort, final_keyword, os_pin } = p.postures;
     let mut config = vec![
         ("effects.tolerated".to_owned(), p.effects.tolerated().join(",")),
-        (
-            "runtime.warning-handler-abort".to_owned(),
-            p.warning_handler_abort.to_string(),
-        ),
-        ("runtime.final-keyword".to_owned(), format!("{:?}", p.final_keyword)),
+        ("runtime.warning-handler-abort".to_owned(), warning_handler_abort.to_string()),
+        ("runtime.final-keyword".to_owned(), format!("{final_keyword:?}")),
         // ADR-0094 §3: the pin decides `PHP_EOL` and its three siblings, so it
         // decides findings — a run under a different pin is a different run.
-        ("runtime.os".to_owned(), format!("{:?}", p.os_pin)),
+        ("runtime.os".to_owned(), format!("{os_pin:?}")),
         ("layout".to_owned(), format!("{:?}", p.layout)),
     ];
     for key in p.effects.attribution_keys() {
@@ -1920,7 +1917,7 @@ mod tests {
     use steins_db::{EffectsPolicy, PackagePartition, PluginFacts, ProjectLayout};
 
     use super::{GenerationParams, config_identity};
-    use crate::{FinalKeyword, OsFamily};
+    use crate::{FinalKeyword, OsFamily, RuntimePostures};
 
     /// Render `config_identity` for fixed params, as `(key, value)` string pairs.
     fn identity_rows(
@@ -1941,9 +1938,7 @@ mod tests {
             partition: &partition,
             plugins: &plugins,
             effects,
-            warning_handler_abort,
-            final_keyword,
-            os_pin,
+            postures: RuntimePostures { warning_handler_abort, final_keyword, os_pin },
             php: false,
             paranoid: false,
         };

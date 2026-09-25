@@ -31,7 +31,7 @@ use std::path::{Path, PathBuf};
 
 use steins_db::{EffectsPolicy, PluginFacts, composer};
 use steins_infer::{
-    Diagnostic, FinalKeyword, GenerationMode, GenerationOutcome, GenerationParams, PackageKind,
+    Diagnostic, GenerationMode, GenerationOutcome, GenerationParams, PackageKind, RuntimePostures,
     generation_check,
 };
 use steins_sidecar::Sidecar;
@@ -155,9 +155,7 @@ fn run_with(
         partition: &partition,
         plugins: &plugins,
         effects: &effects,
-        warning_handler_abort: true,
-        final_keyword: FinalKeyword::Enforced,
-        os_pin: None,
+        postures: RuntimePostures::default(),
         php: true,
         paranoid,
     };

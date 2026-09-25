@@ -55,7 +55,7 @@ use rayon::prelude::*;
 use steins_db::composer;
 use steins_db::{EffectsPolicy, PluginFacts, ProjectLayout};
 use steins_infer::{
-    Diagnostic, FinalKeyword, Floor, GenerationMode, GenerationParams, Layer, generation_check,
+    Diagnostic, Floor, GenerationMode, GenerationParams, Layer, RuntimePostures, generation_check,
     layer, surface_floor,
 };
 
@@ -2279,9 +2279,7 @@ fn analyze_through_generations(
         partition: &partition,
         plugins: &plugins,
         effects: &effects,
-        warning_handler_abort: true,
-        final_keyword: FinalKeyword::Enforced,
-        os_pin: None,
+        postures: RuntimePostures::default(),
         php: true,
         // The paranoid walk verifier stays environment-driven
         // (`STEINS_GENERATIONS_PARANOID=1`) — it walks every file and would
