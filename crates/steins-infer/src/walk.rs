@@ -48,7 +48,7 @@ use crate::refine::{
 };
 use crate::return_arms::return_envelope_arms;
 use crate::shapes::{apply_offset_append, apply_offset_write, apply_shape_narrowing};
-use crate::stmt_calls::check_stmt_calls;
+use crate::stmt_calls::{StmtCalls, check_stmt_calls};
 use crate::stmt_checks::{check_read_positions, check_return_value};
 
 /// Walk one scope's trace with a given initial environment.
@@ -717,68 +717,7 @@ pub(crate) fn walk_trace(
         // carries the escape bit it had **before** the return marked it (§2.1's
         // escaped-before-return). The join is deferred to `descend`; here we only
         // classify the exit (A2 drop/cross, A3 floor, T1 allocation).
-        //
-        // The `$this` channel first, and independently (ADR-0057 C2 as generalized by
-        // D3): where this walk's `$this` came from a caller object, every exit records
-        // what it holds — a constructor's bare `return;`, and an ordinary method's
-        // value `return`, which summarizes its value on the other channel at the very
-        // same exit. Read at the same instant, before the return's own effects.
-        if let StmtKind::Return { .. } = &stmt.kind
-            && let Some(te) = w.summary.as_ref().and_then(|sc| sc.this_exits.as_ref())
-        {
-            te.borrow_mut().push(this_exit_contribution(store));
-        }
-        if let StmtKind::Return { value, .. } = &stmt.kind
-            && let Some(sc) = &w.summary
-        {
-            // Composition (A1): when the returned expression IS a call whose
-            // summary step 1 captured, that summary is this exit's fact — `return
-            // g(...)`, `return $o->m(...)`/`C::m(...)` (ADR-0075) cross the proven
-            // fact. A constructor `return new Foo(...)` never composes (object
-            // return is T1). A recursive/unbindable inner call left `stmt_calls.summary`
-            // empty, falling through to the direct value fact (thence A3 floor).
-            let composed = if matches!(value, ArgValue::New(..)) {
-                None
-            } else {
-                stmt_calls.summary
-                    .as_ref()
-                    .and_then(|s| s.value.as_ref())
-                    .map(|sv| (sv.fact.clone(), sv.stratum))
-            };
-            let exit_fact = composed.or_else(|| return_value_fact(w, folder, value, env, store));
-            let contrib = match exit_fact {
-                // A2 — native-envelope violation: a proven boundary `TypeError`, the
-                // value never reaches the caller. Drop the exit (record nothing); the
-                // callee's own `type.return-mismatch` is the standing record.
-                Some((fact, _)) if sc.native_violates(&fact) => None,
-                // An informative exit within the envelope: it crosses with its stratum
-                // (a phpdoc-only violation crosses HERE — the walk truth, A2).
-                Some((fact, strat)) => Some(ExitContribution::Fact(fact, strat)),
-                // A factless returning exit. T1: when it returns a locally-held
-                // ALLOCATION, its snapshot is the heap component's contribution —
-                // read strictly under the value classification, so the value
-                // component's A3 semantics are what they were (a `Heap` exit joins
-                // as a `Floor` on that side, which is what an object exit always
-                // was). Otherwise A3 verbatim: degrade to the declared arm floor.
-                None => Some(
-                    match return_heap_object(
-                        w,
-                        folder,
-                        value,
-                        env,
-                        store,
-                        stmt_calls.summary.as_ref(),
-                        stmt_calls.ctor_heap.as_ref(),
-                    ) {
-                        Some(obj) => ExitContribution::Heap(Box::new(obj)),
-                        None => ExitContribution::Floor,
-                    },
-                ),
-            };
-            if let Some(c) = contrib {
-                sc.exits.borrow_mut().push(c);
-            }
-        }
+        record_return_exit(w, folder, stmt, env, store, &stmt_calls);
 
         // 2. Apply the statement's own effect on the environment + compute its flow.
         let flow = match &stmt.kind {
@@ -1042,6 +981,81 @@ impl PreCall {
             store,
         );
         Self { seeds: stmt_out_seeds, places: stmt_places, resources: stmt_resources }
+    }
+}
+
+/// Step 1c of [`walk_trace`]: while a descent is building this callee's summary,
+/// classify a `return`'s exit on the `$this` channel and the value channel
+/// (ADR-0057). Nothing for any other statement, or outside a summary walk.
+fn record_return_exit(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    stmt: &Stmt,
+    env: &HashMap<String, Known>,
+    store: &Store,
+    stmt_calls: &StmtCalls,
+) {
+    // The `$this` channel first, and independently (ADR-0057 C2 as generalized by
+    // D3): where this walk's `$this` came from a caller object, every exit records
+    // what it holds — a constructor's bare `return;`, and an ordinary method's
+    // value `return`, which summarizes its value on the other channel at the very
+    // same exit. Read at the same instant, before the return's own effects.
+    if let StmtKind::Return { .. } = &stmt.kind
+        && let Some(te) = w.summary.as_ref().and_then(|sc| sc.this_exits.as_ref())
+    {
+        te.borrow_mut().push(this_exit_contribution(store));
+    }
+    if let StmtKind::Return { value, .. } = &stmt.kind
+        && let Some(sc) = &w.summary
+    {
+        // Composition (A1): when the returned expression IS a call whose
+        // summary step 1 captured, that summary is this exit's fact — `return
+        // g(...)`, `return $o->m(...)`/`C::m(...)` (ADR-0075) cross the proven
+        // fact. A constructor `return new Foo(...)` never composes (object
+        // return is T1). A recursive/unbindable inner call left `stmt_calls.summary`
+        // empty, falling through to the direct value fact (thence A3 floor).
+        let composed = if matches!(value, ArgValue::New(..)) {
+            None
+        } else {
+            stmt_calls
+                .summary
+                .as_ref()
+                .and_then(|s| s.value.as_ref())
+                .map(|sv| (sv.fact.clone(), sv.stratum))
+        };
+        let exit_fact = composed.or_else(|| return_value_fact(w, folder, value, env, store));
+        let contrib = match exit_fact {
+            // A2 — native-envelope violation: a proven boundary `TypeError`, the
+            // value never reaches the caller. Drop the exit (record nothing); the
+            // callee's own `type.return-mismatch` is the standing record.
+            Some((fact, _)) if sc.native_violates(&fact) => None,
+            // An informative exit within the envelope: it crosses with its stratum
+            // (a phpdoc-only violation crosses HERE — the walk truth, A2).
+            Some((fact, strat)) => Some(ExitContribution::Fact(fact, strat)),
+            // A factless returning exit. T1: when it returns a locally-held
+            // ALLOCATION, its snapshot is the heap component's contribution —
+            // read strictly under the value classification, so the value
+            // component's A3 semantics are what they were (a `Heap` exit joins
+            // as a `Floor` on that side, which is what an object exit always
+            // was). Otherwise A3 verbatim: degrade to the declared arm floor.
+            None => Some(
+                match return_heap_object(
+                    w,
+                    folder,
+                    value,
+                    env,
+                    store,
+                    stmt_calls.summary.as_ref(),
+                    stmt_calls.ctor_heap.as_ref(),
+                ) {
+                    Some(obj) => ExitContribution::Heap(Box::new(obj)),
+                    None => ExitContribution::Floor,
+                },
+            ),
+        };
+        if let Some(c) = contrib {
+            sc.exits.borrow_mut().push(c);
+        }
     }
 }
 
