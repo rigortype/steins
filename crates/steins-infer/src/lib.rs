@@ -95,6 +95,8 @@ mod untyped;
 mod walk;
 mod walk_fleet;
 mod walk_plan;
+mod fact_util;
+mod fixpoints;
 
 pub use dam::{DamFacts, DamKind, DamSite, dam_facts};
 pub use ids::*;
@@ -116,13 +118,10 @@ use overrides::check_declaration_fatals;
 use return_missing::check_return_missing;
 
 use arg_check::{implicit_null_accepted, is_type_error};
-use builtin_returns::fact_with_null;
-use contract::CVal;
 use generics::{check_callable_arg, check_phpdoc_param};
 
 use cx::Cx;
-use dump::render_shape_fact;
-use env::{HandleState, Known, Store};
+use env::{Known, Store};
 use project::Index;
 use walk::{analyze_scope, in_dead};
 use walk_fleet::WalkFleet;
@@ -131,6 +130,12 @@ use walk_plan::{FilePlan, FileWalk, PassTimings, UniverseVerdict, WalkControl};
 pub use walk_plan::Divergence;
 
 use fold_args::effective_php_view;
+
+pub(crate) use fact_util::{
+    arg_abstract_fact, contract_touches_class, describe_fact, fact_admitting_null, fact_is_int,
+    is_pure_class_contract, join_into, phpdoc_object_guard_blind, rendered_cval, val_of_key,
+};
+pub(crate) use fixpoints::{Fixpoints, Gate, Sym};
 
 /// The `[runtime] final-keyword` posture (issue #234), re-exported so the CLI can
 /// resolve `steins.toml` into [`RuntimePostures`] without depending on
@@ -209,7 +214,7 @@ use steins_db::{
     Db, EffectsPolicy, PluginFacts, Project, ProjectLayout, SourceFile, parse, project_index,
 };
 use steins_syntax::Span;
-use steins_syntax::{ArgValue, ArrayKey, FunctionDecl, NormKey, SourceTree};
+use steins_syntax::{ArgValue, FunctionDecl, SourceTree};
 // return missing (ADR-0078, issue #199)
 pub use steins_syntax::{BodyEnd, body_end, body_has_terminator};
 pub use fold::{
@@ -233,10 +238,6 @@ pub use generation::{
 pub use summaries::SUMMARIES_SECTION;
 pub use fold_table::{TableEngine, TableFolder, request_key};
 // end return missing (ADR-0078, issue #199)
-
-use steins_phpdoc::ast::TypeKind as PKind;
-use steins_domain::{ArmKnown, Base, Fact, IntRange, Key as VKey, Refinement, StrPreds, Val};
-use steins_phpdoc::Type as PType;
 
 use docblock_hygiene::docblock_hygiene;
 use purity::{PurityOracle, effect_diagnostics};
@@ -1156,447 +1157,4 @@ fn walk_one_file(
 fn dedup(out: &mut Vec<Diagnostic>) {
     let mut seen: HashSet<Diagnostic> = HashSet::new();
     out.retain(|d| seen.insert(d.clone()));
-}
-
-/// A node in the unified project effect call graph — a free function (keyed by
-/// FQN) or a class method (keyed by class FQN + method name).
-/// Which of the three whole-universe textual gates [`Fixpoints::any`] asks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Gate {
-    Purity,
-    Envelope,
-    Throws,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[cfg_attr(
-    not(target_arch = "wasm32"),
-    derive(serde::Serialize, serde::Deserialize),
-    serde(deny_unknown_fields)
-)]
-enum Sym {
-    Func(String),
-    Method(String, String),
-    /// A closure/arrow body (ADR-0033), keyed by file path + definition-site
-    /// offset (closures are same-file, so this key is stable within a project).
-    Closure(String, u32),
-}
-
-/// The whole-project effect and throw fixpoint results of ONE check run,
-/// computed at most once each (issue #489 / ADR-0092 §5).
-///
-/// Before this holder, [`check_units`] ran the effect fixpoint inside every
-/// consumer that wanted it — `PurityOracle::build` and `effect_diagnostics`
-/// each computed their own copy, and `throw_diagnostics` its own throw
-/// fixpoint. The fixpoints are deterministic and order-independent (ADR-0048
-/// §4), so those copies were byte-identical; this makes the sharing structural:
-/// one producer per run, every internal consumer reads the same value.
-///
-/// Laziness is load-bearing, not an optimization nicety: each consumer keeps
-/// its own cheap textual gate (a project with no envelope, no purity-bearing
-/// callable and no `@throws` never pays for a fixpoint at all), and the holder
-/// computes on the first gate that passes.
-///
-/// Standalone library entry points (`effect_summary`, `region_purity_project`,
-/// `sweep_escapes`, the JSON effect surface) run outside a check and keep
-/// computing their own copy — determinism makes those equal by construction.
-pub(crate) struct Fixpoints<'a> {
-    units: &'a [FileUnit<'a>],
-    index: &'a Index,
-    plugins: &'a PluginFacts,
-    policy: &'a EffectsPolicy,
-    /// This run's per-file facts, in unit order — empty on every path but the
-    /// generation orchestrator's (issue #516). Where a file has them, its own
-    /// rows come from there and its tree is never decoded; where it does not,
-    /// the classifier reads the tree exactly as it always did.
-    facts: &'a [facts::FileFacts],
-    effects: std::cell::OnceCell<HashMap<Sym, purity::EffectSet>>,
-    throws: std::cell::OnceCell<HashMap<Sym, throws::ThrowSet>>,
-    /// Wall-clock milliseconds each fixpoint cost, recorded at the one place
-    /// each is computed (issue #516 asks where the warm run's remaining time
-    /// goes, and "analyze" was one undifferentiated number). Zero for a
-    /// fixpoint no consumer's gate ever forced.
-    spent: std::cell::Cell<(f64, f64)>,
-}
-
-impl<'a> Fixpoints<'a> {
-    pub(crate) fn new(
-        units: &'a [FileUnit<'a>],
-        index: &'a Index,
-        plugins: &'a PluginFacts,
-        policy: &'a EffectsPolicy,
-        facts: &'a [facts::FileFacts],
-    ) -> Self {
-        Self {
-            units,
-            index,
-            plugins,
-            policy,
-            facts,
-            effects: std::cell::OnceCell::new(),
-            throws: std::cell::OnceCell::new(),
-            spent: std::cell::Cell::new((0.0, 0.0)),
-        }
-    }
-
-    /// `(effects, throws)` fixpoint milliseconds — see [`Self::spent`].
-    pub(crate) fn spent(&self) -> (f64, f64) {
-        self.spent.get()
-    }
-
-    pub(crate) fn units(&self) -> &'a [FileUnit<'a>] {
-        self.units
-    }
-
-    pub(crate) fn index(&self) -> &'a Index {
-        self.index
-    }
-
-    pub(crate) fn plugins(&self) -> &'a PluginFacts {
-        self.plugins
-    }
-
-    pub(crate) fn policy(&self) -> &'a EffectsPolicy {
-        self.policy
-    }
-
-    /// Whether **any** declaration in the universe spells a purity-bearing
-    /// callable, an effect envelope or an interop one, or `@throws` — the three
-    /// cheap textual gates that decide whether a fixpoint runs at all.
-    ///
-    /// Read off the per-file facts where the run has them, so a project that
-    /// spells none of the three answers `false` without decoding a tree (issue
-    /// #516: this gate alone used to force the whole universe).
-    pub(crate) fn any(&self, gate: Gate) -> bool {
-        (0..self.units.len()).any(|fi| self.spells(fi, gate))
-    }
-
-    /// The same question for one file — what `throw_diagnostics` skips on.
-    pub(crate) fn spells(&self, fi: usize, gate: Gate) -> bool {
-        if let Some(facts) = self.facts.get(fi) {
-            return match gate {
-                Gate::Purity => facts.spells_purity,
-                Gate::Envelope => facts.spells_envelope,
-                Gate::Throws => facts.spells_throws,
-            };
-        }
-        let tree = self.units[fi].tree;
-        let doc = |doc: Option<&String>| match gate {
-            Gate::Purity => {
-                doc.is_some_and(|t| t.contains("pure-callable") || t.contains("pure-closure"))
-            }
-            Gate::Envelope => purity::spells_interop_envelope(doc),
-            Gate::Throws => doc.is_some_and(|t| t.contains("throws")),
-        };
-        let envelope = matches!(gate, Gate::Envelope);
-        tree.functions()
-            .iter()
-            .any(|f| doc(f.docblock.as_ref()) || (envelope && f.effect_envelope.is_some()))
-            || tree.classes().iter().any(|c| {
-                (envelope && purity::spells_interop_envelope(c.docblock.as_ref()))
-                    || c.methods.iter().any(|m| {
-                        doc(m.docblock.as_ref()) || (envelope && m.effect_envelope.is_some())
-                    })
-            })
-    }
-
-    /// The effect fixpoint result, computed on first request.
-    pub(crate) fn effects(&self) -> &HashMap<Sym, purity::EffectSet> {
-        self.effects.get_or_init(|| {
-            let t = clock();
-            let out = purity::compute_effects(
-                self.units,
-                self.index,
-                self.plugins,
-                self.policy,
-                self.facts,
-            );
-            let (_, throws) = self.spent.get();
-            self.spent.set((ms(t), throws));
-            out
-        })
-    }
-
-    /// The throw fixpoint result, computed on first request.
-    pub(crate) fn throws(&self) -> &HashMap<Sym, throws::ThrowSet> {
-        self.throws.get_or_init(|| {
-            let t = clock();
-            let out = throws::compute_throws(self.units, self.index, self.facts);
-            let (effects, _) = self.spent.get();
-            self.spent.set((effects, ms(t)));
-            out
-        })
-    }
-}
-
-/// Join `f` into an accumulator that may still be empty; `None` propagates the
-/// unrepresentable join as the unknown floor.
-fn join_into(acc: Option<Fact>, f: &Fact) -> Option<Option<Fact>> {
-    match acc {
-        None => Some(Some(f.clone())),
-        Some(a) => a.join(f).map(Some),
-    }
-}
-
-/// The domain value a shape key denotes (`Key::Int(5)` is the value `5`).
-fn val_of_key(k: &VKey) -> Val {
-    match k {
-        VKey::Int(i) => Val::Int(*i),
-        VKey::Str(s) => Val::Str(s.clone()),
-    }
-}
-
-/// Is every value this fact admits an `int`? (`null` is immaterial to
-/// [`project_flip`]'s question — a null value is skipped by the flip, not turned
-/// into a key.)
-fn fact_is_int(f: &Fact) -> bool {
-    match f.finite_members() {
-        Some(vals) => vals.iter().all(|v| matches!(v, Val::Int(_) | Val::Null)),
-        None => matches!(
-            f,
-            Fact::General { base: Base::Int, .. } | Fact::Refined { base: Base::Int, .. }
-        ),
-    }
-}
-
-/// Add `null` to a fact's denotation — the finite layers by value, the abstract
-/// ones through their own `nullable` flag. `None` when the result is not
-/// representable (a shape fact, or an over-cap finite widening).
-fn fact_admitting_null(f: &Fact) -> Option<Fact> {
-    match f.finite_members() {
-        Some(vals) => {
-            let mut vals = vals.to_vec();
-            vals.push(Val::Null);
-            Fact::from_vals(vals)
-        }
-        None => fact_with_null(f),
-    }
-}
-
-/// The abstract fact an argument resolves to: a bare `$var` whose env fact is an
-/// abstract layer (no finite members). Finite/proven values go through
-/// `resolve_cval` instead, so this is the disjoint "abstract" arm of Feature E.
-fn arg_abstract_fact<'e>(
-    value: &ArgValue,
-    env: &'e HashMap<String, Known>,
-    poisoned: bool,
-) -> Option<&'e Fact> {
-    if poisoned {
-        return None;
-    }
-    let ArgValue::Var(name) = value else { return None };
-    let f = env.get(name)?.fact.as_ref()?;
-    f.finite_members().is_none().then_some(f)
-}
-
-/// Whether a lowered contract type contains a class-name node — a bare identifier
-/// that may actually be a template or a type-alias. The abstract-fact check stays
-/// silent on these (see [`check_phpdoc_param`]).
-fn contract_touches_class(ty: &steins_contract::ContractTy) -> bool {
-    use steins_contract::ContractTy as C;
-    match ty {
-        C::Class(_) => true,
-        C::Union(m) | C::Inter(m) => m.iter().any(contract_touches_class),
-        C::ListOf { elem, .. } => contract_touches_class(elem),
-        C::MapOf { key, val, .. } | C::IterableOf { key, val } => {
-            contract_touches_class(key) || contract_touches_class(val)
-        }
-        C::Shape { fields, unsealed, .. } => {
-            fields.iter().any(|f| contract_touches_class(&f.ty))
-                || unsealed.as_ref().is_some_and(|(k, v)| {
-                    k.as_ref().is_some_and(|k| contract_touches_class(k))
-                        || contract_touches_class(v)
-                })
-        }
-        _ => false,
-    }
-}
-
-/// ADR-0043 stage 4 — the phpdoc-side analogue of [`object_world_guard_blind`]. A
-/// class-touching phpdoc verdict is unsound inside a binding descent: the callee's
-/// in-body type guards on the rebound value are unmodeled. "Touches a class"
-/// means the proven value is an object, or the contract references a class name.
-/// Scalar-vs-scalar phpdoc checks are unaffected. Always `false` outside a descent.
-fn phpdoc_object_guard_blind(in_descent: bool, ty: &PType, cv: Option<&CVal>) -> bool {
-    in_descent
-        && (matches!(cv, Some(CVal::Object(..)))
-            || contract_touches_class(&steins_contract::lower(ty)))
-}
-
-/// ADR-0043 stage 4 — is `ty` a **pure class contract**: a known class name, or a
-/// union/nullable built only from known class names and `null` (e.g. `Foo`,
-/// `Foo|null`, `?Foo`, `A|B`)? Only such a contract may let a definite scalar fact
-/// open the [`contract_touches_class`] valve. `is_known_class` is the safety
-/// valve — an unresolved bare identifier may be a `@template`/`@phpstan-type`
-/// alias denoting a scalar, disqualifying the whole contract. A contract touching
-/// array/generic/shape/intersection/callable, or any scalar/pseudo-type keyword,
-/// is *not* pure-class.
-fn is_pure_class_contract(cx: &Cx, cfile: usize, coff: u32, ty: &PType) -> bool {
-    fn walk(cx: &Cx, cfile: usize, coff: u32, ty: &PType, saw_class: &mut bool) -> bool {
-        match &ty.kind {
-            PKind::Identifier(name) => {
-                // A `null` companion (the `class|null` shape) is allowed but is not
-                // itself the class that satisfies the "at least one class" rule.
-                if name.eq_ignore_ascii_case("null") {
-                    return true;
-                }
-                let target = cx.resolve_pclass(cfile, coff, name);
-                if cx.is_known_class(&target) {
-                    *saw_class = true;
-                    true
-                } else {
-                    false
-                }
-            }
-            PKind::Nullable(inner) => walk(cx, cfile, coff, inner, saw_class),
-            PKind::Union { types, .. } => {
-                types.iter().all(|t| walk(cx, cfile, coff, t, saw_class))
-            }
-            _ => false,
-        }
-    }
-    let mut saw_class = false;
-    walk(cx, cfile, coff, ty, &mut saw_class) && saw_class
-}
-
-/// A short, phpdoc-flavored description of an abstract fact for a diagnostic
-/// message (`a value of type int`, `a non-empty-string value`, `an int|null
-/// value`). Finite facts never reach here (they render as concrete values).
-fn describe_fact(f: &Fact) -> String {
-    let base_kw = |b: Base| match b {
-        Base::Int => "int",
-        Base::Float => "float",
-        Base::String => "string",
-        Base::Bool => "bool",
-    };
-    let (name, nullable) = match f {
-        Fact::General { base, nullable } => (base_kw(*base).to_owned(), *nullable),
-        Fact::Refined { base: Base::Int, refinement: Refinement::Int(r), nullable } => {
-            let n = if *r == IntRange::POSITIVE {
-                "positive-int".to_owned()
-            } else if *r == IntRange::NEGATIVE {
-                "negative-int".to_owned()
-            } else if *r == IntRange::NON_NEGATIVE {
-                "non-negative-int".to_owned()
-            } else {
-                format!("int<{}, {}>", r.lo(), r.hi())
-            };
-            (n, *nullable)
-        }
-        Fact::Refined { base: Base::String, refinement: Refinement::Str(p), nullable } => {
-            let casing = match (
-                p.contains_all(StrPreds::LOWERCASE),
-                p.contains_all(StrPreds::UPPERCASE),
-            ) {
-                (true, false) => Some("lowercase"),
-                (false, true) => Some("uppercase"),
-                // Neither, or both (nothing cased to change): no single keyword.
-                _ => None,
-            };
-            let n = if p.contains_all(StrPreds::NON_FALSY) {
-                "non-falsy-string".to_owned()
-            } else if p.contains_all(StrPreds::NUMERIC) {
-                "numeric-string".to_owned()
-            } else if let Some(c) = casing {
-                if p.contains_all(StrPreds::NON_EMPTY) {
-                    format!("non-empty-{c}-string")
-                } else {
-                    format!("{c}-string")
-                }
-            } else if p.contains_all(StrPreds::NON_EMPTY) {
-                "non-empty-string".to_owned()
-            } else {
-                "string".to_owned()
-            };
-            (n, *nullable)
-        }
-        Fact::Refined { base, nullable, .. } => (base_kw(*base).to_owned(), *nullable),
-        // A union spells arm by arm through this same speller, joined by `|`
-        // (issue #339). The arms carry no `null` of their own — the union's
-        // flag does — so each is rendered non-nullable and the null half is
-        // added once, below, exactly as it is for a single base.
-        Fact::Union { arms, nullable } => {
-            let spelled: Vec<String> = arms
-                .iter()
-                .map(|(base, known)| {
-                    // A bool-literal arm is one value (ADR-0093 §2), and the message
-                    // names it: `string|true`, not `string|bool`. It is spelled here
-                    // rather than through a `Fact`, because the finite layers do not
-                    // reach this speller at all — its callers gate on
-                    // `finite_members`, and the arm below answers `"value"`.
-                    let arm = match known {
-                        ArmKnown::Bool(b) => {
-                            return if *b { "true" } else { "false" }.to_owned();
-                        }
-                        ArmKnown::Refined(r) => Fact::refined(*base, *r, false),
-                        ArmKnown::Whole => Fact::General { base: *base, nullable: false },
-                    };
-                    describe_fact(&arm)
-                        .trim_start_matches("a value of type ")
-                        .to_owned()
-                })
-                .collect();
-            (spelled.join("|"), *nullable)
-        }
-        // The array stratum reaches this surface as of ADR-0072 (a shape fact is
-        // now judged against a contract, so it can be the thing a
-        // `phpdoc.*-mismatch` names). It spells through the ONE speller the dump
-        // surface uses — `render_shape_fact` already carries the null half, so
-        // the `nullable` flag stays `false` here rather than doubling it.
-        Fact::Shape { shape, nullable } => (render_shape_fact(shape, *nullable), false),
-        // Finite facts do not reach here: the callers gate on `finite_members`.
-        Fact::Singleton(_) | Fact::OneOf(_) => ("value".to_owned(), false),
-    };
-    if nullable {
-        format!("a value of type {name}|null")
-    } else {
-        format!("a value of type {name}")
-    }
-}
-
-/// Render a proven [`CVal`] for a diagnostic message (delegates arrays/scalars to
-/// [`ArgValue::render`]; objects show `new Class()`).
-fn rendered_cval(v: &CVal) -> String {
-    match v {
-        CVal::Scalar(s) => s.render(),
-        CVal::Object(class, _) => format!("new {}()", class.rsplit('\\').next().unwrap_or(class)),
-        CVal::Resource { state: HandleState::Open } => "an open resource".to_owned(),
-        CVal::Resource { state: HandleState::Closed } => "a closed resource".to_owned(),
-        CVal::Resource { state: HandleState::Unknown } => "a resource".to_owned(),
-        CVal::Array(entries) => {
-            // Rebuild an `ArgValue::Array` with explicit keys so the shared compact
-            // renderer applies (it re-normalizes; explicit keys round-trip).
-            let items: Vec<(ArrayKey, ArgValue)> = entries
-                .iter()
-                .map(|(k, cv)| {
-                    let key = match k {
-                        NormKey::Int(i) => ArrayKey::Int(*i),
-                        NormKey::Str(s) => ArrayKey::Str(s.clone()),
-                    };
-                    (key, cval_to_argvalue(cv))
-                })
-                .collect();
-            ArgValue::Array(items).render()
-        }
-    }
-}
-
-/// A best-effort [`ArgValue`] reconstruction of a [`CVal`], for rendering only.
-fn cval_to_argvalue(v: &CVal) -> ArgValue {
-    match v {
-        CVal::Scalar(s) => s.clone(),
-        CVal::Object(..) | CVal::Resource { .. } => ArgValue::Other,
-        CVal::Array(entries) => ArgValue::Array(
-            entries
-                .iter()
-                .map(|(k, cv)| {
-                    let key = match k {
-                        NormKey::Int(i) => ArrayKey::Int(*i),
-                        NormKey::Str(s) => ArrayKey::Str(s.clone()),
-                    };
-                    (key, cval_to_argvalue(cv))
-                })
-                .collect(),
-        ),
-    }
 }
