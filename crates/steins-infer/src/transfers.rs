@@ -1,7 +1,18 @@
-//! The argument-dispatched transfers (ADR-0064 seam (iii)): per-builtin rungs that
-//! carry a fact through `explode`, `range`, `preg_replace`, `min` / `max`,
-//! `abs`, `pow`, `var_export`, `sscanf`, the string predicates, `sprintf` and the
-//! list transfers.
+//! The argument-dispatched transfers (ADR-0064 seam (ii)): per-builtin rungs that
+//! read a call's arguments and answer a sharper fact than the declared return.
+//!
+//! This file is the dispatch ([`arg_dispatch_return_fact`]), the argument readers
+//! every rule shares ([`transfer_arg_fact`], [`transfer_arg_known`]), and the three
+//! rules that are one function each: `array_key_exists`, `preg_replace` and
+//! `var_export`. Each larger family is a module that reads the readers here and
+//! nothing of another family:
+//!
+//! * [`arith`] — `min` / `max`, `abs` and `pow`;
+//! * [`curl`] — `curl_getinfo`;
+//! * [`filter_var`];
+//! * [`lists`] — `explode`, `range`, and the list fact other modules build too;
+//! * [`scanf`] — `sscanf`;
+//! * [`str_preds`] — the string predicates, `strlen` and `sprintf`.
 
 mod arith;
 mod curl;

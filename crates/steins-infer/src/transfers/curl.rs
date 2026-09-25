@@ -1,3 +1,6 @@
+//! `curl_getinfo($handle, CURLINFO_X)` (issue #594): the fixed type each recognized
+//! `CURLINFO_*` constant names, keyed by the constant's name alone.
+
 use steins_domain::{Base, Fact};
 use steins_syntax::{ArgValue, RefKind};
 

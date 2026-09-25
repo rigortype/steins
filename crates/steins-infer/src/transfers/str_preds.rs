@@ -1,3 +1,7 @@
+//! The string-predicate transfers (issue #77): which [`StrPreds`] bits a string
+//! builtin keeps and which it forces, `strlen` of a non-empty string, and the two
+//! `sprintf` format scanners the table reads.
+
 use std::collections::HashMap;
 
 use steins_domain::{Base, Fact, IntRange, Refinement, StrPreds, Val};
