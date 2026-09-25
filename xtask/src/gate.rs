@@ -578,13 +578,37 @@ pub fn run() -> Result<bool, String> {
 
     // Measurement-mode regression tripwires (see `PHPDOC_EXPECTED` /
     // `THROW_EXPECTED`): a package regresses iff its count exceeds the baseline.
-    let regressions = measurement_regressions(&reports, &local_reports, "phpdoc", |r| r.phpdoc.len(), &baselines.phpdoc);
-    let throw_regressions = measurement_regressions(&reports, &local_reports, "throw", |r| r.throws.len(), &baselines.throw);
+    let regressions = measurement_regressions(
+        &reports,
+        &local_reports,
+        "phpdoc",
+        |r| r.phpdoc.len(),
+        &baselines.phpdoc,
+    );
+    let throw_regressions = measurement_regressions(
+        &reports,
+        &local_reports,
+        "throw",
+        |r| r.throws.len(),
+        &baselines.throw,
+    );
     // ADR-0050 §9 delta family: `effect.*`-contract findings gate as an increase
     // tripwire too, same shape as `phpdoc.*`/`throw.*`.
-    let effect_regressions = measurement_regressions(&reports, &local_reports, "effect", |r| r.effects.len(), &baselines.effect);
+    let effect_regressions = measurement_regressions(
+        &reports,
+        &local_reports,
+        "effect",
+        |r| r.effects.len(),
+        &baselines.effect,
+    );
     // ADR-0081 §8: the possibly-grade proof ids gate as an increase tripwire too.
-    let possibly_regressions = measurement_regressions(&reports, &local_reports, "possibly", |r| r.possibly.len(), &baselines.possibly);
+    let possibly_regressions = measurement_regressions(
+        &reports,
+        &local_reports,
+        "possibly",
+        |r| r.possibly.len(),
+        &baselines.possibly,
+    );
 
     print_report(
         &baselines,
