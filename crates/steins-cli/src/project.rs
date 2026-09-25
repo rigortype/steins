@@ -153,32 +153,18 @@ pub(crate) fn load_plugins(layout: &ProjectLayout, allow: Option<&[String]>) -> 
     facts
 }
 
-/// `[effects.attribution]` keys naming no symbol (ADR-0084 §5). Tried against
-/// all four symbol kinds; for `Class::method` only the class resolves.
+/// `[effects.attribution]` keys naming no symbol (ADR-0084 §5), by
+/// [`steins_infer::attribution_notices`] over the salsa project's index. An
+/// empty table builds no index.
 fn attribution_notices(db: &SteinsDatabase, project: Project) -> Vec<String> {
     let policy = project.effects(db);
     if policy.is_empty() {
         return Vec::new();
     }
     let index = project_index(db, project);
-    let known = |name: &str| {
+    steins_infer::attribution_notices(policy, |name| {
         !matches!(index.resolve_class(name), Resolve::Absent)
             || !matches!(index.resolve_function(name), Resolve::Absent)
-            // Same test the checker uses to decide builtin vs. unresolved userland call.
-            || steins_catalog::effect_labels(name).is_some()
-            || steins_catalog::out_params(name).is_some()
-            || steins_catalog::builtin_class_display(name).is_some()
-    };
-    policy
-        .attribution_keys()
-        .filter(|key| {
-            let symbol = key.trim_start_matches('\\');
-            let named = symbol.split("::").next().unwrap_or(symbol);
-            !known(named) && !known(&named.to_ascii_lowercase())
-        })
-        .map(|key| {
-            format!("steins.toml [effects.attribution]: \"{key}\" names no symbol this project defines")
-        })
-        .collect()
+    })
 }
 

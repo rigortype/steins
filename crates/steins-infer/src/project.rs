@@ -1,12 +1,13 @@
 //! The project view: the files analyzed together and their symbol index —
 //! [`FileUnit`], [`Index`], the magic-member obstacles (ADR-0046), the `Diagnostic` /
-//! `Fix` records every pass emits, and the vendor-path test.
+//! `Fix` records every pass emits, the vendor-path test, and the
+//! `[effects.attribution]` keys that name nothing in the index.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use steins_db::{
-    DeclSite, MergedTables, PackageShard, ProjectIndex, Resolve, ShardSite, SourceFile,
-    fallback_package_key, merge_shards,
+    DeclSite, EffectsPolicy, MergedTables, PackageShard, ProjectIndex, Resolve, ShardSite,
+    SourceFile, fallback_package_key, merge_shards,
 };
 use steins_syntax::{NameRef, RefKind, SourceTree};
 
@@ -535,6 +536,37 @@ pub fn resolves_to_user_function(index: &ProjectIndex, tree: &SourceTree, r: &Na
             unique(&fqn.to_ascii_lowercase())
         }
     }
+}
+
+/// The `[effects.attribution]` keys naming no symbol (ADR-0084 §5), one
+/// config-hygiene notice each, `steins: `-less. Never a diagnostic: a key naming
+/// an unvendored class is a stale config line.
+///
+/// A key is tried against all four symbol kinds. `defined` answers for the
+/// project's own classes and functions, over whichever index the caller holds —
+/// the salsa project's on the cold path, the generation run's merged one on the
+/// gated path, which must not force a salsa parse just to print these. The
+/// builtin catalog answers for the rest. For `Class::method` only the class
+/// resolves.
+pub fn attribution_notices(policy: &EffectsPolicy, defined: impl Fn(&str) -> bool) -> Vec<String> {
+    let known = |name: &str| {
+        defined(name)
+            // Same test the checker uses to decide builtin vs. unresolved userland call.
+            || steins_catalog::effect_labels(name).is_some()
+            || steins_catalog::out_params(name).is_some()
+            || steins_catalog::builtin_class_display(name).is_some()
+    };
+    policy
+        .attribution_keys()
+        .filter(|key| {
+            let symbol = key.trim_start_matches('\\');
+            let named = symbol.split("::").next().unwrap_or(symbol);
+            !known(named) && !known(&named.to_ascii_lowercase())
+        })
+        .map(|key| {
+            format!("steins.toml [effects.attribution]: \"{key}\" names no symbol this project defines")
+        })
+        .collect()
 }
 
 /// How an unqualified/qualified/FQ **function** call resolves (ADR-0001).

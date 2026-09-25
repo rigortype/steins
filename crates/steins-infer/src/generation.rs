@@ -300,9 +300,10 @@ pub struct GenerationOutcome {
     /// touch only the files it needs (the CLI's inline-suppression scan reads
     /// the files a finding names, and no others).
     pub trees: Vec<(String, LazyTree<'static>)>,
-    /// The `[effects.attribution]` keys naming no symbol (ADR-0084 §5),
-    /// rendered exactly as `steins-cli`'s own notice — computed here because
-    /// the gated path must not force a salsa parse just to print it.
+    /// The `[effects.attribution]` keys naming no symbol (ADR-0084 §5), by
+    /// the cold path's own [`crate::attribution_notices`] over this run's
+    /// merged index — computed here because the gated path must not force a
+    /// salsa parse just to print them.
     pub attribution_notices: Vec<String>,
     pub report: GenerationReport,
 }
@@ -1268,7 +1269,12 @@ fn analyze(
         Some(&mut control),
     );
     drop(units);
-    let attribution_notices = attribution_notices(&index, p.effects);
+    // Off the merged index: the gated path must not force a salsa parse just to
+    // print them.
+    let attribution_notices = crate::attribution_notices(p.effects, |name| {
+        !matches!(index.resolve_class(name), Res::Absent)
+            || !matches!(index.resolve_function(name), Res::Absent)
+    });
     let analyze_ms = ms(t_analyze.elapsed());
     let walk = WalkReport {
         walked: control.walked,
@@ -1975,33 +1981,6 @@ impl Summaries<'_> {
             .collect();
         write_summaries(builder, &self.stamp, &self.universe, &rows);
     }
-}
-
-/// The `[effects.attribution]` config-hygiene notices, mirroring
-/// `steins-cli/src/project.rs::attribution_notices` byte-for-byte (the gated
-/// path computes them here so no salsa parse is forced just to print them).
-fn attribution_notices(index: &Index, policy: &EffectsPolicy) -> Vec<String> {
-    if policy.is_empty() {
-        return Vec::new();
-    }
-    let known = |name: &str| {
-        !matches!(index.resolve_class(name), Res::Absent)
-            || !matches!(index.resolve_function(name), Res::Absent)
-            || steins_catalog::effect_labels(name).is_some()
-            || steins_catalog::out_params(name).is_some()
-            || steins_catalog::builtin_class_display(name).is_some()
-    };
-    policy
-        .attribution_keys()
-        .filter(|key| {
-            let symbol = key.trim_start_matches('\\');
-            let named = symbol.split("::").next().unwrap_or(symbol);
-            !known(named) && !known(&named.to_ascii_lowercase())
-        })
-        .map(|key| {
-            format!("steins.toml [effects.attribution]: \"{key}\" names no symbol this project defines")
-        })
-        .collect()
 }
 
 /// The engine posture from the run's own recorded boot surface, or
