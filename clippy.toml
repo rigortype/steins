@@ -10,3 +10,17 @@
 # Keep this in lockstep with `rust-version` in Cargo.toml: raising the floor
 # means raising both, in one commit, deliberately.
 msrv = "1.97"
+
+# The function-length ratchet (#778). `too_many_lines` warns in every crate
+# through `[workspace.lints]` in Cargo.toml; clippy's count skips blank and
+# comment-only lines. Each function that was over this line when the ratchet
+# landed carries `#[expect(clippy::too_many_lines, reason = "…")]`. A new
+# function over it fails `-D warnings`, and so does an `expect` on a function
+# that has shrunk under it (`unfulfilled_lint_expectations`), so the marked set
+# can only shrink. At 125 that set was 26 functions; 100 (clippy's default)
+# would have marked 43, and 150 only 15.
+#
+# The count is clippy's own, so a toolchain bump can move a function that sits
+# near the line: CI's clippy (the floor above) decides, and raising the floor
+# adds or drops markers in the same commit.
+too-many-lines-threshold = 125

@@ -12,6 +12,9 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
+[lints]
+workspace = true
+
 [dependencies]
 steins-syntax = { path = "../crates/steins-syntax" }
 steins-db = { path = "../crates/steins-db" }

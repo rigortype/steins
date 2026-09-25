@@ -7,6 +7,9 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 # `persist` only (ADR-0092 §2, issue #487): the Serialize/Deserialize impls a
 # stored generation needs. Optional so the default build — and everything the

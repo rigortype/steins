@@ -46,6 +46,13 @@ description = "A value-precise static analyzer for PHP that reports only what pr
 # skill. Revisit only if the Mago fork's crates are ever published.
 publish = false
 
+# Lint levels every member inherits through `[lints] workspace = true`. The one
+# entry is the function-length ratchet (#778); its threshold, and why today's
+# offenders carry `#[expect]`, are in clippy.toml. Every other lint keeps its
+# default level, and CI's `-D warnings` is what makes a warning blocking.
+[workspace.lints.clippy]
+too_many_lines = "warn"
+
 # Release profile — shared by CI's release build and the artifacts the release
 # workflow ships, so what is measured is what is distributed (one profile, no
 # divergence). `lto = "thin"` + `codegen-units = 1` buys cross-crate inlining
