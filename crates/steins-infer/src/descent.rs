@@ -582,24 +582,23 @@ pub(crate) fn propagated_arg_value(
 /// Check a function call whose arguments may be propagated values (`Var`/`Call`/
 /// array). Runs the native runtime check and the phpdoc declared-contract check;
 /// a site where the native check fired is skipped by the phpdoc check.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn check_propagated_call(
-    cx: &Cx,
+    w: &WalkCx,
     folder: &mut dyn Folder,
-    poisoned: bool,
     in_descent: bool,
     call: &CallExpr,
     env: &HashMap<String, Known>,
     store: &Store,
-    // The caller's own frame, for a method-call ARGUMENT whose receiver is
-    // `$this`/`self::`/`parent::` (issue #386). The dump surface reads the same two
-    // off its `WalkCx`; this check is called from the same statement walk, so
-    // threading them costs one call site and buys the receiver spellings a
-    // frame-less seam has to decline.
-    this_exact: Option<&str>,
-    enclosing_class: Option<&str>,
     out: &mut Vec<Diagnostic>,
 ) {
+    let cx = w.cx;
+    let poisoned = w.scope.poisoned;
+    // The caller's own frame, for a method-call ARGUMENT whose receiver is
+    // `$this`/`self::`/`parent::` (issue #386): read off the `WalkCx` as the dump
+    // surface reads it, which buys the receiver spellings a frame-less seam has to
+    // decline.
+    let this_exact = w.this_exact;
+    let enclosing_class = w.enclosing_class;
     // Resolve non-positional calls too (Gap A): the positional prefix and the named
     // arguments are contract-checked here; only the binding descent stays positional.
     let Some(site) = cx.resolve_user_fn_any(call) else { return };
