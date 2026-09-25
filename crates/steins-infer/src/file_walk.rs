@@ -1,3 +1,14 @@
+//! One file's walk and the fan-out that runs many (issue #490): the run's
+//! shared inputs every walk reads ([`WalkInputs`]), the sink each fills
+//! ([`FileSink`]), and the walk itself — the scope walk, then the file's own
+//! passes in a fixed order ([`walk_one_file`]).
+//!
+//! Nothing here decides the run's diagnostic vector: [`check_units_controlled`]
+//! merges the sinks in unit order, wherever and in whatever order they were
+//! filled.
+//!
+//! [`check_units_controlled`]: crate::check_units_controlled
+
 use std::collections::{HashMap, HashSet};
 
 use steins_db::{PluginFacts, ProjectLayout};
@@ -30,6 +41,8 @@ use crate::RuntimePostures;
 /// made. The same two values [`FileWalk`] records — this is the in-flight form,
 /// held per file so the walk can run out of unit order and the merge can put it
 /// back in.
+///
+/// [`FileWalk`]: crate::walk_plan::FileWalk
 pub(crate) struct FileSink {
     pub(crate) diagnostics: Vec<Diagnostic>,
     pub(crate) uncovered: Option<Vec<u32>>,
@@ -180,6 +193,8 @@ pub(crate) fn fan_out(
 /// verbatim so the replay seam has something to be a peer of. Appends
 /// everything the block produces to `out` and returns the `uncovered_matches`
 /// entry it makes — `None` for an unparsable file, which makes none.
+///
+/// [`check_units_controlled`]: crate::check_units_controlled
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn walk_one_file(
     units: &[FileUnit],
