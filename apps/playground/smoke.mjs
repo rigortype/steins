@@ -12,6 +12,7 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { loadSteins } from "./steins.mjs";
+import { hiddenSteps } from "./hidden.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const wasmPath =
@@ -52,11 +53,47 @@ assert(ann.ok === true, "annotate envelope ok");
 assert(Array.isArray(ann.lines) && ann.lines.length > 0, `annotate returns margin facts (${ann.lines.length} lines)`);
 
 // 3. The rung ladder resolves; unknown profile is data, not a trap.
-for (const p of ["default", "contracts", "throws-direct", "strict"]) {
+for (const p of ["default", "contracts", "throws-direct", "strict", "pedantic"]) {
   assert(steins.check(snippet, p).ok === true, `profile ${p} resolves`);
 }
 const bad = steins.check(snippet, "nope");
 assert(bad.ok === false && bad.error.includes("unknown profile"), "unknown profile is a structured error");
+
+// 3b. `hidden`: what the other built-ins would list that this profile does not.
+// The margin is profile-blind, so a `@pure` function that echoes is marked there
+// on every profile — and on `default` the panel alone would say nothing.
+const pureEcho = `<?php
+/** @pure */
+function shout(string $s): void { echo $s; }
+`;
+const quiet = steins.check(pureEcho);
+assert(quiet.findings.length === 0, "the contract finding is off the default surface");
+assert(
+  quiet.hidden.contracts === 1 && quiet.hidden.strict === 1 && quiet.hidden["throws-direct"] === 0,
+  `default counts it at contracts and strict (got ${JSON.stringify(quiet.hidden)})`,
+);
+assert(!Object.hasOwn(quiet.hidden, "default"), "the selected profile is never listed");
+assert(
+  steins.annotate(pureEcho).lines.some((l) => l.text === "✗ effect.envelope-exceeded"),
+  "…while the margin marks it: the contradiction `hidden` exists to explain",
+);
+assert(
+  JSON.stringify(hiddenSteps(quiet.hidden)) ===
+    JSON.stringify([{ profile: "contracts", count: 1 }, { profile: "strict", count: 1 }]),
+  `the panel points up the ladder, and not at pedantic for the same finding (got ${JSON.stringify(hiddenSteps(quiet.hidden))})`,
+);
+const loud = steins.check(pureEcho, "contracts");
+assert(loud.findings.some((f) => f.id === "effect.envelope-exceeded"), "contracts lists it");
+assert(hiddenSteps(loud.hidden).length === 0, "…and then nothing is left to point at");
+
+// `pedantic` is named only for what the ladder does not show: from `strict`, an
+// untyped class constant is on no rung at all.
+const untyped = steins.check(`<?php\nclass Limits { const MAX = 10; }\n`, "strict");
+assert(
+  JSON.stringify(hiddenSteps(untyped.hidden)) === JSON.stringify([{ profile: "pedantic", count: 1 }]),
+  `strict points at pedantic for an untyped constant (got ${JSON.stringify(untyped.hidden)})`,
+);
+assert(hiddenSteps(undefined).length === 0, "an error envelope has nothing to point at");
 
 // 4. Broken syntax: recovered analysis + reported parse errors, no trap.
 const broken = steins.check("<?php\nfunction f( {\n");
@@ -164,6 +201,7 @@ const ANSWERS = {
 
 const empty = steins.checkReplay(flagship, {});
 assert(empty.ok === true, "replay envelope ok with an empty table");
+assert(typeof empty.hidden === "object" && empty.hidden !== null, "the replay envelope carries `hidden` too");
 assert(Array.isArray(empty.pending) && empty.pending.length > 0, "an empty table reports pending requests");
 assert(
   empty.pending.every((k) => {
