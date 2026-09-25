@@ -1,0 +1,74 @@
+# EFFECT_EXPECTED: the fp-gate's per-package baselines for the `effect.*`
+# contract ids, built into `cargo xtask fp-gate` by `xtask/src/gate.rs`. One
+# row per corpus package or local project, `"<name>" = <expected count>`; a
+# name with no row expects zero. A row's triage note is the comment block
+# directly above it.
+#
+# Permanent gate policy for the `effect.*` **contract** ids
+# (`effect.envelope-exceeded`, `effect.liskov-widened`, and since issue #311
+# `effect.interop-unknown-label`), the ADR-0050 §9 recorded delta: these gate as
+# the same per-package **increase** tripwire as [`PHPDOC_EXPECTED`] /
+# [`THROW_EXPECTED`], matching their declared-contract semantics (a proven
+# behavior exceeds an envelope the code *declares* about itself; it still runs).
+#
+# Seeded **empty** in 2026-08, on the reading that no ADR-0006 envelope exists in
+# the corpus. The reading was about *Steins* annotations: all three ids fire on
+# upstream's spellings too — `@phpstan-impure` since #311, and the envelope pair
+# since #303 taught the scanner `@phpstan-all-methods-pure` — so "no envelopes in
+# the corpus" stopped being true the day it was read for upstream's vocabulary.
+
+# **0 → 4442, 2026-08-15**, the first row in this table and it carries no Steins
+# annotation: the private monorepo declares `@phpstan-all-methods-pure` on three
+# classes, and #303 (master 7b3ecab, 2026-08-12) made that an operative bound.
+# Measured, not inferred — a binary at 93eff42 (the merge before #303) reports 0
+# over the 5041-file subtree holding all 4442; one at 7b3ecab reports 4442.
+#
+# NOT the resource-value run (#341), which the first reading blamed: findings
+# over that subtree are byte-identical on both sides of it (27,332 = 27,332),
+# and the gate re-run at 040658c — the commit whose record claims green at
+# 526/0 — reproduces 536/4442 today. `corpus.local.toml` is gitignored, so an
+# agent worktree measures public packages only; this was simply the first run
+# with the private corpus mounted since 2026-08-12.
+#
+# One root, one shape. Names below are **placeholders**, since the corpus's own
+# identifiers are not written into this repo — do not grep for them. Every
+# finding sits in one of the three declaring classes (`MyApp\Route\UrlBuilder`
+# 4376, `MyApp\Util\Validator` 54, `MyApp\Util\Filter` 12), across 795 call
+# sites in 555 declared-pure methods, and each reaches the same house logger
+# `MyApp\Log\Debug`: an assertion helper delegates to `Validator`, which
+# delegates to `Filter`, whose `true`-rejecting arm logs. One finding per
+# (label, origin) group, six for most sites — which is how 795 becomes 4442.
+#
+# TRUE, and the corpus says so in its own source: that logging call carries a
+# `@phpstan-ignore impure.methodCall`, so upstream reports the same violation at
+# the same line and suppresses it there. PHPStan then reads the callee as pure
+# for everyone above it; the proven lane does not (ADR-0067 — a declaration
+# neither manufactures nor erases a finding), so the effect travels to every
+# caller declaring purity over it.
+#
+# What the count is made of: 2148 `nondet.time` (a datetime utility wrapping
+# `\time`/`\date`), 716 `nondet.random` (`mt_rand`, the log's sampling gate),
+# 716 `global.read` (a `getenv`), 86 `io` (a `file_exists`), and 776
+# `io.output.buffer` — the one soft class, where `print_r($x, true)` /
+# `var_export($x, true)` are pure in return-mode and the source proves the
+# `true` at each of the three origins. That label is this catalog's
+# deliberately arg-blind row, which `effect_labels`' own doc already calls an
+# over-approximation; the fix is a sibling of `narrowed_stream_labels` and will
+# move this row DOWN, which never trips the tripwire.
+#
+# 2026-09-12, issue #352: that fix landed. `narrowed_output_labels` drops the
+# label at a call site that proves the `true`, so those 776 findings are gone
+# and this row should read roughly 3666. It is deliberately NOT reseeded here:
+# `corpus.local.toml` is gitignored, the agent worktree that landed the change
+# measures public packages only, and the seeding discipline for this row is a
+# count re-MEASURED rather than computed. Leaving 4442 standing is safe in the
+# meantime — the gate is an increase tripwire and a decrease never trips it —
+# and costs only this row's sharpness until someone with the corpus mounted
+# re-runs and reseeds.
+#
+# Seeding rather than fixing is the zero-FP posture, not a retreat from it: the
+# violations are real, and what makes 4442 of them is a house logger three hops
+# under an assertion helper — the shape ADR-0084's `[effects]` attribution
+# exists to discharge on the corpus owner's side. Until then this row's job is
+# to notice the 4443rd.
+"pxxxx-monorepo" = 4442

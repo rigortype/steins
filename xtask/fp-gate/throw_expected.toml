@@ -1,0 +1,96 @@
+# THROW_EXPECTED: the fp-gate's per-package baselines for the `throw.*` ids,
+# built into `cargo xtask fp-gate` by `xtask/src/gate.rs`. One row per corpus
+# package or local project, `"<name>" = <expected count>`; a name with no row
+# expects zero. A row's triage note is the comment block directly above it.
+#
+# Permanent gate policy for `throw.*` findings (ADR-0040/0007), identical in
+# spirit to [`PHPDOC_EXPECTED`]: an undeclared **checked** throw escaping a
+# written `@throws`, or a Liskov-widened override, is a contract-layer claim
+# about the code's own documentation, not a runtime-breakage proof. Such
+# findings saturate working code (the checked-exception volume ADR-0007 keeps
+# quiet by default), so they are held in measurement mode and gate only as a
+# per-package **increase** tripwire. Packages absent expect **zero**.
+#
+# Seeded from the first landing run of the throw system (ADR-0040); the monorepo
+# count is dominated by two pervasive base exceptions thrown far below
+# `@throws`-annotated controllers. It rose 35614 → 43963 with the closure wave
+# (ADR-0033), which propagates throws through higher-order-builtin callbacks and
+# body-local `$fn()` closures that were previously opaque taints — triaged
+# 5-sample, every one a TRUE undeclared checked throw through a real callback
+# edge, with the by-ref-invalidation guard keeping `$fn()` resolution sound.
+
+# Reconciled to actual after closure-wave Stage D (interface/parent `@throws`
+# Liskov + `implements` lowering): the increases are new `throw.liskov-widened`
+# (phpunit +4, pxxxx +1 — an override declaring a narrower exception than the
+# abstraction it implements), and the decreases (symfony/console 12→10, nikic
+# 2→1) are `undeclared` counts that fell because lowering `implements` enriched
+# the class chain, letting subtype/absorption checks resolve where they widened.
+
+"composer/composer" = 93
+"sebastianbergmann/phpunit" = 84
+"guzzle/guzzle" = 2
+"Seldaek/monolog" = 7
+"symfony/console" = 10
+"thephpleague/flysystem" = 3
+"nikic/PHP-Parser" = 1
+
+# Registered 2026-07-24 (v0.1.0 run, oracle idea A): PHPStan's own `src/` as a
+# local project. First run 0 proof-layer / 0 phpdoc.* / 20 throw.undeclared,
+# triaged verbatim — homogeneous checked-exception debt (a `ShouldNotHappen`
+# escaping a narrower `@throws`), the exact ADR-0040/0007 pattern tripwire mode
+# exists for.
+#   20 → 21  2026-07-26, the checkout advanced (192 src/ files). One rewritten
+#            extension grew a second `ShouldNotHappenException` escaping a caller
+#            declaring something else. Triaged against the pre-advance tree: that
+#            file held one before and two now, the other 20 unchanged in file,
+#            line and escaping method — a transitive catch, which is what the
+#            damming machinery is for.
+#   2026-08-08 (#186): scope moved from an `exclude` denylist to the positive
+#            `paths = ["src", "vendor"]` key — PHPStan's `tests/` is that
+#            project's own rule-fixture corpus, INPUTS written to be broken, so
+#            outside a gate whose bar is zero FPs on working code (ADR-0079 §2.3
+#            applied to a whole tree). Re-measured unchanged at 21 / 0, because
+#            the denylist already named the same directories. The key buys
+#            enforcement: an allowlist cannot silently readmit a fixture tree
+#            added later, a denylist can.
+"phpstan/phpstan-src" = 21
+
+# Ledger. Every move on this row has been corpus state, not a checker change,
+# and the standing class is the same: an `@throws`-annotated declaration with an
+# undeclared base-exception escape, arriving with new application code. The
+# proof layer stayed 0 across all of them.
+#   43964 → 44372  2026-07-24, live-tree drift (~210 files gained: 84,038 →
+#                  84,248). 3-sample verbatim triage, all TRUE.
+#   44372 → 44343  2026-08-01, the standing DOWNWARD drift, reseeded in its own
+#                  pass (never inside a fix commit). Observed unchanged across
+#                  every session since 2026-07-25 — cross-commit stability plus
+#                  the #63 determinism fix rule out a checker cause.
+#   44343 → 44374  2026-08-05, the corpus-state movement `PHPDOC_EXPECTED`
+#                  records in the same run, established the same two ways (every
+#                  public count exact; the gate at the 44343-seed commit
+#                  reproduces 44374 today). NOT triaged finding-by-finding — at
+#                  this volume the attribution is the only honest evidence, and a
+#                  finding-level diff needs a corpus state nobody retained.
+#   44374 → 43886  **Reseed 2026-08-09, downward**, with the corpus pin, and this
+#                  one has a direct attribution: the measured revision replaces a
+#                  bespoke exception class with concrete assertions across the
+#                  tree, and an assertion where a `throw` used to be is exactly
+#                  one `throw.undeclared` fewer. A baseline 488 above the truth
+#                  would swallow the next 488 real regressions in silence.
+#   43886 → 44112  2026-08-19, **two components, measured separately** so that
+#                  neither hides behind the other:
+#                  * +206 is live-tree drift. Unmodified master measures 44092
+#                    at the corpus revision this run saw, against a baseline
+#                    seeded at an earlier one — established by running the gate
+#                    on master itself, not inferred. Not triaged
+#                    finding-by-finding; at this volume the attribution is the
+#                    only honest evidence, as the 2026-08-05 row already records.
+#                  * +20 is issue #433's `\UnhandledMatchError` origin, and this
+#                    half IS triaged finding-by-finding: 4 distinct sites,
+#                    multiplied to 20 by propagation to declaring callers. Every
+#                    one is a `default`-less `match` over a subject the engine
+#                    types wider than its docblock does — native `string` with a
+#                    `@phpstan-param 'asc'|'desc'`, and its kin. The docblock is
+#                    unenforced, so the throw is real, which is exactly the cell
+#                    ADR-0088 §5 gates on the Verified grade.
+"pxxxx-monorepo" = 44112

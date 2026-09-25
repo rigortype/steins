@@ -1,0 +1,685 @@
+# EXPECTED_PROOF_FINDINGS: the fp-gate's pinned proof-layer findings, built
+# into `cargo xtask fp-gate` by `xtask/src/gate.rs`, whose
+# `ExpectedProofFinding` documents the fields. One `[[finding]]` per pin; a
+# row's triage note is the comment block directly above it.
+#
+# Triaged TRUE proof-layer positives (ADR-0043 §5). Each row's triage is in
+# the comment beside it; adding a row is a conscious, orchestrator-visible act.
+
+# monolog's own test deliberately constructs `new MongoDBHandler(new
+# \stdClass, …)` and asserts the TypeError; `stdClass` is a mined root with
+# no supers (ADR-0043), so it is-a-NOs the `Client|Manager` union. TRUE.
+[[finding]]
+package = "Seldaek/monolog"
+id = "type.argument-mismatch"
+path_suffix = "tests/Monolog/Handler/MongoDBHandlerTest.php"
+line = 27
+# Source-cased since `TypeMember::Instance` grew its `display` field
+# (diagnostics render the declared casing; matching stays lowercased).
+message_contains = "cannot become MongoDB\\Client|MongoDB\\Driver\\Manager"
+
+# ADR-0049 S2: `call.undefined-method` fired 10 times, all monorepo, all
+# static calls into a final/trait-free/fully-enumerated chain — genuine
+# `Error: Call to undefined method` fatals. TRUE, all 10. OSS packages:
+# zero. A DAO batch calls a legacy accessor removed/renamed from its
+# final DAO class.
+[[finding]]
+package = "pxxxx-monorepo"
+id = "call.undefined-method"
+path_suffix = "Batch/UnifyThumbnailSchemaBatch.php"
+line = 16
+message_contains = "getLegacyArticleThumbnailArticleIds() — hierarchy fully enumerated"
+
+# A sample test drifted out of sync with its sample class: `Sample_Common`
+# (`final`, methods `get`/`addData`/`swapData` only) is called with eight names
+# it never declares. Each `Sample_Common::x()` would fatal when the test runs —
+# exactly the ROADMAP gap-1 adoption case (a checker silent here is not adopted).
+[[finding]]
+package = "pxxxx-monorepo"
+id = "call.undefined-method"
+path_suffix = "tests/SampleTest.php"
+line = 79
+message_contains = "Sample_Common::getByHogeIds() — hierarchy fully enumerated"
+
+[[finding]]
+package = "pxxxx-monorepo"
+id = "call.undefined-method"
+path_suffix = "tests/SampleTest.php"
+line = 105
+message_contains = "Sample_Common::isPrime() — hierarchy fully enumerated"
+
+[[finding]]
+package = "pxxxx-monorepo"
+id = "call.undefined-method"
+path_suffix = "tests/SampleTest.php"
+line = 134
+message_contains = "Sample_Common::throwException() — hierarchy fully enumerated"
+
+[[finding]]
+package = "pxxxx-monorepo"
+id = "call.undefined-method"
+path_suffix = "tests/SampleTest.php"
+line = 164
+message_contains = "Sample_Common::getValuesFromExternalServer() — hierarchy fully enumerated"
+
+[[finding]]
+package = "pxxxx-monorepo"
+id = "call.undefined-method"
+path_suffix = "tests/SampleTest.php"
+line = 179
+message_contains = "Sample_Common::printToStandardOutput() — hierarchy fully enumerated"
+
+[[finding]]
+package = "pxxxx-monorepo"
+id = "call.undefined-method"
+path_suffix = "tests/SampleTest.php"
+line = 192
+# Method name omitted (it carries a private-corpus token); line 192 +
+# path + id keep this row 1:1.
+message_contains = "— hierarchy fully enumerated"
+
+[[finding]]
+package = "pxxxx-monorepo"
+id = "call.undefined-method"
+path_suffix = "tests/SampleTest.php"
+line = 211
+message_contains = "Sample_Common::setSampleCookie() — hierarchy fully enumerated"
+
+[[finding]]
+package = "pxxxx-monorepo"
+id = "call.undefined-method"
+path_suffix = "tests/SampleTest.php"
+line = 229
+message_contains = "Sample_Common::hasCookie() — hierarchy fully enumerated"
+
+# `OAuth2Model::checkPassword()` is called statically, but exists only as an
+# instance method on the caller `OAuth2ClientModel`; `OAuth2Model` is final
+# with no such method — genuine undefined-static-method fatal.
+[[finding]]
+package = "pxxxx-monorepo"
+id = "call.undefined-method"
+path_suffix = "util/src/Model/Auth/OAuth2ClientModel.php"
+line = 106
+message_contains = "OAuth2Model::checkPassword() — hierarchy fully enumerated"
+
+# ADR-0049 S5: `call.too-few-arguments` fired twice on the monorepo, both
+# TRUE ArgumentCountErrors (two grouped-`use` `Query::__construct` FPs from
+# an unlowered import are fixed in the paired commit and no longer fire).
+# An admin mail-preview handler calls `getEmailExamples($lang)` with no args.
+[[finding]]
+package = "pxxxx-monorepo"
+id = "call.too-few-arguments"
+path_suffix = "email_preview.php"
+line = 64
+message_contains = "getEmailExamples(): 0 passed, 1 required"
+
+# A test script calls `requestToAllAppApiEndpoints($host, $header, $token)`
+# with one argument — ArgumentCountError (1 passed, 3 required).
+[[finding]]
+package = "pxxxx-monorepo"
+id = "call.too-few-arguments"
+path_suffix = "test/testall.php"
+line = 14
+message_contains = "AppApi_Testing::requestToAllAppApiEndpoints(): 1 passed, 3 required"
+
+# ADR-0078 #190: `dataProviderThatTriggersPhpError` (`$foo = []; $foo->bar();`)
+# is issue 5451's reproduction fixture — genuinely fatals by design. TRUE.
+[[finding]]
+package = "sebastianbergmann/phpunit"
+id = "call.on-non-object"
+path_suffix = "regression/5451/Issue5451Test.php"
+line = 20
+message_contains = "proven array on this path"
+
+# ADR-0078 #184: issue 6294's reproduction fixture deliberately weakens a
+# parent's visibility to observe the engine fatal. TRUE, same class as above.
+[[finding]]
+package = "sebastianbergmann/phpunit"
+id = "override.visibility-weakened"
+path_suffix = "regression/6294/B.php"
+line = 17
+message_contains = "weakens the visibility"
+
+# ADR-0078 #187: `array.duplicate-key` fired 19 times, all monorepo, all
+# TRUE: 1 config key overwritten (dead value), 12 duplicate allowlist ids,
+# 1 series-options key, 1 analytics path key, 3 test-fixture keys, 1
+# view-parameter key. Mechanics/red-on-sight (ADR-0050 §1); a corpus
+# reseed may move these lines. A config accessor literal binds
+# 'x_restricts' twice below; the earlier value is dead.
+[[finding]]
+package = "pxxxx-monorepo"
+id = "array.duplicate-key"
+path_suffix = "Illust/Common.php"
+line = 2495
+message_contains = "array key 'x_restricts' is declared twice"
+
+# An append-grown integer allowlist literal: 12 ids duplicated across its
+# history, each overwriting an identical value — churn, no information.
+[[finding]]
+package = "pxxxx-monorepo"
+id = "array.duplicate-key"
+path_suffix = "Novel/NovelsAllowedCoverReupload.php"
+line = 1680
+message_contains = "array key 8317821 is declared twice"
+
+[[finding]]
+package = "pxxxx-monorepo"
+id = "array.duplicate-key"
+path_suffix = "Novel/NovelsAllowedCoverReupload.php"
+line = 2450
+message_contains = "array key 8279354 is declared twice"
+
+[[finding]]
+package = "pxxxx-monorepo"
+id = "array.duplicate-key"
+path_suffix = "Novel/NovelsAllowedCoverReupload.php"
+line = 2451
+message_contains = "array key 8317785 is declared twice"
+
+[[finding]]
+package = "pxxxx-monorepo"
+id = "array.duplicate-key"
+path_suffix = "Novel/NovelsAllowedCoverReupload.php"
+line = 2452
+message_contains = "array key 8318880 is declared twice"
+
+[[finding]]
+package = "pxxxx-monorepo"
+id = "array.duplicate-key"
+path_suffix = "Novel/NovelsAllowedCoverReupload.php"
+line = 2453
+message_contains = "array key 7886722 is declared twice"
+
+[[finding]]
+package = "pxxxx-monorepo"
+id = "array.duplicate-key"
+path_suffix = "Novel/NovelsAllowedCoverReupload.php"
+line = 2454
+message_contains = "array key 8267865 is declared twice"
+
+[[finding]]
+package = "pxxxx-monorepo"
+id = "array.duplicate-key"
+path_suffix = "Novel/NovelsAllowedCoverReupload.php"
+line = 2455
+message_contains = "array key 8168208 is declared twice"
+
+[[finding]]
+package = "pxxxx-monorepo"
+id = "array.duplicate-key"
+path_suffix = "Novel/NovelsAllowedCoverReupload.php"
+line = 2456
+message_contains = "array key 8315952 is declared twice"
+
+[[finding]]
+package = "pxxxx-monorepo"
+id = "array.duplicate-key"
+path_suffix = "Novel/NovelsAllowedCoverReupload.php"
+line = 2457
+message_contains = "array key 8240621 is declared twice"
+
+[[finding]]
+package = "pxxxx-monorepo"
+id = "array.duplicate-key"
+path_suffix = "Novel/NovelsAllowedCoverReupload.php"
+line = 2458
+message_contains = "array key 8204566 is declared twice"
+
+[[finding]]
+package = "pxxxx-monorepo"
+id = "array.duplicate-key"
+path_suffix = "Novel/NovelsAllowedCoverReupload.php"
+line = 2459
+message_contains = "array key 8214002 is declared twice"
+
+[[finding]]
+package = "pxxxx-monorepo"
+id = "array.duplicate-key"
+path_suffix = "Novel/NovelsAllowedCoverReupload.php"
+line = 2460
+message_contains = "array key 8166826 is declared twice"
+
+# A series-options literal binds 'ai_type' twice.
+[[finding]]
+package = "pxxxx-monorepo"
+id = "array.duplicate-key"
+path_suffix = "NovelSeries/Common.php"
+line = 1727
+message_contains = "array key 'ai_type' is declared twice"
+
+# An analytics referer-config literal binds the same path twice.
+[[finding]]
+package = "pxxxx-monorepo"
+id = "array.duplicate-key"
+path_suffix = "UserAnalytics/RefererConfig.php"
+line = 554
+message_contains = "array key '/novel/index.php' is declared twice"
+
+# A test fixture rebinds 'illust_sanity_level' 3x across 3 literals — copy-paste drift.
+[[finding]]
+package = "pxxxx-monorepo"
+id = "array.duplicate-key"
+path_suffix = "SanityLevelTest.php"
+line = 29
+message_contains = "array key 'illust_sanity_level' is declared twice"
+
+[[finding]]
+package = "pxxxx-monorepo"
+id = "array.duplicate-key"
+path_suffix = "SanityLevelTest.php"
+line = 54
+message_contains = "array key 'illust_sanity_level' is declared twice"
+
+[[finding]]
+package = "pxxxx-monorepo"
+id = "array.duplicate-key"
+path_suffix = "SanityLevelTest.php"
+line = 79
+message_contains = "array key 'illust_sanity_level' is declared twice"
+
+# A controller's view-parameter literal binds 'tag' twice.
+[[finding]]
+package = "pxxxx-monorepo"
+id = "array.duplicate-key"
+path_suffix = "AllController.php"
+line = 236
+message_contains = "array key 'tag' is declared twice"
+
+# ADR-0078 #183: the declaration-fatal tracer's one corpus finding, TRUE.
+# A ClockMock test double extends a `final` class, relying on ext-uopz to
+# strip `final` at runtime; Steins's analyzed PHP has no uopz loaded, so the
+# fatal is real. Issue #205 tracks demoting this once the sidecar reports a
+# final-stripping extension.
+[[finding]]
+package = "pxxxx-monorepo"
+id = "class.extends-final"
+path_suffix = "tests/lib/ExDateTimeImmutableMock.php"
+line = 14
+message_contains = "cannot extend final class ExDateTimeImmutable"
+
+# Docblock hygiene (ADR-0078 / issue #186), triaged 2026-08-08: six
+# mechanics ids, red-on-sight. All 11 public-corpus sites read TRUE at
+# source; the private corpus is measured only, not pinned here. The
+# fuzzing driver captures `$lexer` into a closure that never reads it
+# (works off the parser it also captures) — a dead, by-value capture.
+[[finding]]
+package = "nikic/PHP-Parser"
+id = "closure.unused-use"
+path_suffix = "tools/fuzzing/target.php"
+line = 111
+message_contains = "`use ($lexer)` is never read"
+
+# The mock generator stacks three `@var` docblocks above one `return`.
+# ADR-0073: only the LAST of a run adopts, so `$className` and `$type`
+# (the first two) are inert — correctly silent on the third. TRUE.
+[[finding]]
+package = "sebastianbergmann/phpunit"
+id = "phpdoc.misplaced-var"
+path_suffix = "src/Framework/MockObject/Generator/Generator.php"
+line = 577
+message_contains = "sits where nothing adopts it"
+
+[[finding]]
+package = "sebastianbergmann/phpunit"
+id = "phpdoc.misplaced-var"
+path_suffix = "src/Framework/MockObject/Generator/Generator.php"
+line = 578
+message_contains = "sits where nothing adopts it"
+
+# The same virtual-parameter idiom as the symfony group below, in a
+# vendored `symfony/filesystem` copy inside a fixture tree:
+# `tempnam($dir, $prefix/*, $suffix=''*/)` documents `@param $suffix` for
+# an argument read via `func_get_arg(2)`. TRUE. Pinned, not
+# vendor-suppressed, because pinned packages are analyzed whole
+# (ADR-0015's vendor split is local-project only).
+[[finding]]
+package = "composer/composer"
+id = "phpdoc.stale-param"
+path_suffix = "installed-versions2/vendor/symfony/filesystem/Filesystem.php"
+line = 586
+message_contains = "`@param $suffix` names no parameter"
+
+# Two deliberate idioms that still leave a tag declaring nothing:
+#   * `@return list<\SIG*>` wildcards the `SIG*` constant family — no
+#     PHPDoc grammar admits it (PHPStan's parser rejects it too). TRUE.
+#   * `SymfonyStyle`'s progress helpers document a virtual `$format` param
+#     (real signature comments it out for BC, read via `func_get_arg(1)`) —
+#     names no parameter of the declaration. TRUE; PHPStan reports
+#     `parameter.notFound` on the same shape.
+[[finding]]
+package = "symfony/console"
+id = "phpdoc.unparsable"
+path_suffix = "Command/SignalableCommandInterface.php"
+line = 24
+message_contains = "does not parse (expected CloseAngle, found Wildcard)"
+
+[[finding]]
+package = "symfony/console"
+id = "phpdoc.stale-param"
+path_suffix = "Style/SymfonyStyle.php"
+line = 305
+message_contains = "`@param $format` names no parameter"
+
+[[finding]]
+package = "symfony/console"
+id = "phpdoc.stale-param"
+path_suffix = "Style/SymfonyStyle.php"
+line = 327
+message_contains = "`@param $format` names no parameter"
+
+[[finding]]
+package = "symfony/console"
+id = "phpdoc.stale-param"
+path_suffix = "Style/SymfonyStyle.php"
+line = 355
+message_contains = "`@param $format` names no parameter"
+
+[[finding]]
+package = "symfony/process"
+id = "phpdoc.unparsable"
+path_suffix = "Process.php"
+line = 1276
+message_contains = "does not parse (expected CloseAngle, found Wildcard)"
+
+# Three inert `@var` casts in `MountManager`, two shapes: `move()`/`copy()`
+# (245, 262) follow a real `/** @var */` with a single-star `/* @var */`
+# (a plain comment), breaking ADR-0073 adjacency; `determineFilesystemAndPath()`
+# (358) stacks two docblocks, shadowing the first (phpunit shape above). TRUE.
+[[finding]]
+package = "thephpleague/flysystem"
+id = "phpdoc.misplaced-var"
+path_suffix = "src/MountManager.php"
+line = 245
+message_contains = "sits where nothing adopts it"
+
+[[finding]]
+package = "thephpleague/flysystem"
+id = "phpdoc.misplaced-var"
+path_suffix = "src/MountManager.php"
+line = 262
+message_contains = "sits where nothing adopts it"
+
+[[finding]]
+package = "thephpleague/flysystem"
+id = "phpdoc.misplaced-var"
+path_suffix = "src/MountManager.php"
+line = 358
+message_contains = "sits where nothing adopts it"
+
+# The monorepo's five, verified at source 2026-08-08, all TRUE. Path
+# suffixes are cut to the shortest 1:1-keying fragment (private-corpus
+# naming rule) — a checkout re-cut can move a line and re-red the gate,
+# which is the pin working, not drift to paper over. A `@phpstan-param`
+# below names a parameter the signature lacks — refactor rot.
+[[finding]]
+package = "pxxxx-monorepo"
+id = "phpdoc.stale-param"
+path_suffix = "AppApi/IllustRecommend.php"
+line = 35
+message_contains = "names no parameter"
+
+# A stacked duplicate `@phpstan-var`: its twin adopts the property below, and
+# this one adopts nothing at all.
+[[finding]]
+package = "pxxxx-monorepo"
+id = "phpdoc.misplaced-var"
+path_suffix = "Search/Illust.php"
+line = 105
+message_contains = "sits where nothing adopts it"
+
+# Two `@var` casts as the last statement of a branch, meant for the code
+# after `}` — but ADR-0073 next-statement adoption ends at the brace, so
+# both are inert as written.
+[[finding]]
+package = "pxxxx-monorepo"
+id = "phpdoc.misplaced-var"
+path_suffix = "View/NovelCreateBookController.php"
+line = 313
+message_contains = "sits where nothing adopts it"
+
+[[finding]]
+package = "pxxxx-monorepo"
+id = "phpdoc.misplaced-var"
+path_suffix = "View/NovelCreateBookController.php"
+line = 317
+message_contains = "sits where nothing adopts it"
+
+# A pseudo-tuple `@return [$total, $illust_ids]` — no PHPDoc grammar admits
+# it, so the tag declares nothing.
+[[finding]]
+package = "pxxxx-monorepo"
+id = "phpdoc.unparsable"
+path_suffix = "Controller/V1SearchWorks.php"
+line = 91
+message_contains = "does not parse"
+
+# `type.return-missing` (ADR-0078 §5, issue #199), triaged 2026-08-08: every
+# row is a deliberately-stub test double — an empty/never-returning body
+# carrying a real return type, which would fatal if invoked. Not bugs, not
+# FPs — fixtures. Its `maybe-` sibling moved to `POSSIBLY_EXPECTED` under
+# ADR-0081 §8 (a possibly-grade id claims only that *a* path reaches the site).
+
+# Two macro bodies registered only so the PHPStan extension under test can
+# read their declared return type; the closure body is `{}`, never called.
+[[finding]]
+package = "briannesbitt/Carbon"
+id = "type.return-missing"
+path_suffix = "tests/PHPStan/MacroExtensionTest.php"
+line = 66
+message_contains = "Return value must be of type CarbonInterval, none returned"
+
+[[finding]]
+package = "briannesbitt/Carbon"
+id = "type.return-missing"
+path_suffix = "tests/PHPStan/MacroExtensionTest.php"
+line = 238
+message_contains = "Return value must be of type Carbon, none returned"
+
+# Eight `FnStream`/`MockHandler` decorator closures whose body is
+# `self::fail(...)` — reaching one IS the test's failure condition.
+# `Assert::fail(): never` would silence these, but PHPUnit is outside
+# guzzle's analysed universe here. Expected to disappear once cross-package
+# callee resolution reaches them — that disappearance is a gate event.
+[[finding]]
+package = "guzzle/guzzle"
+id = "type.return-missing"
+path_suffix = "tests/Handler/CurlFactoryTest.php"
+line = 6812
+message_contains = "Return value must be of type bool, none returned"
+
+[[finding]]
+package = "guzzle/guzzle"
+id = "type.return-missing"
+path_suffix = "tests/Handler/CurlFactoryTest.php"
+line = 6815
+message_contains = "Return value must be of type string, none returned"
+
+[[finding]]
+package = "guzzle/guzzle"
+id = "type.return-missing"
+path_suffix = "tests/Handler/RequestFramingTest.php"
+line = 417
+message_contains = "Return value must be of type bool, none returned"
+
+[[finding]]
+package = "guzzle/guzzle"
+id = "type.return-missing"
+path_suffix = "tests/Handler/RequestFramingTest.php"
+line = 423
+message_contains = "Return value must be of type string, none returned"
+
+[[finding]]
+package = "guzzle/guzzle"
+id = "type.return-missing"
+path_suffix = "tests/Handler/StreamHandlerTest.php"
+line = 4516
+message_contains = "Return value must be of type string, none returned"
+
+[[finding]]
+package = "guzzle/guzzle"
+id = "type.return-missing"
+path_suffix = "tests/Handler/StreamHandlerTest.php"
+line = 4519
+message_contains = "Return value must be of type string, none returned"
+
+[[finding]]
+package = "guzzle/guzzle"
+id = "type.return-missing"
+path_suffix = "tests/PrepareBodyMiddlewareTest.php"
+line = 329
+message_contains = "Return value must be of type ResponseInterface, none returned"
+
+[[finding]]
+package = "guzzle/guzzle"
+id = "type.return-missing"
+path_suffix = "tests/PrepareBodyMiddlewareTest.php"
+line = 380
+message_contains = "Return value must be of type ResponseInterface, none returned"
+
+# A `tests/_files` fixture implementing `Event` with two empty method
+# bodies carrying the interface's declared return types.
+[[finding]]
+package = "sebastianbergmann/phpunit"
+id = "type.return-missing"
+path_suffix = "tests/_files/DummyEvent.php"
+line = 17
+message_contains = "DummyEvent::telemetryInfo(): Return value must be of type Info"
+
+[[finding]]
+package = "sebastianbergmann/phpunit"
+id = "type.return-missing"
+path_suffix = "tests/_files/DummyEvent.php"
+line = 21
+message_contains = "DummyEvent::asString(): Return value must be of type string"
+
+# `NonStringInput`: an `Input` subclass whose three overrides are empty
+# bodies carrying the parent's return types; the test drives the listener,
+# never these methods.
+[[finding]]
+package = "symfony/console"
+id = "type.return-missing"
+path_suffix = "Tests/EventListener/ErrorListenerTest.php"
+line = 118
+message_contains = "NonStringInput::getFirstArgument(): Return value must be of type ?string"
+
+[[finding]]
+package = "symfony/console"
+id = "type.return-missing"
+path_suffix = "Tests/EventListener/ErrorListenerTest.php"
+line = 122
+message_contains = "NonStringInput::hasParameterOption(): Return value must be of type bool"
+
+[[finding]]
+package = "symfony/console"
+id = "type.return-missing"
+path_suffix = "Tests/EventListener/ErrorListenerTest.php"
+line = 126
+message_contains = "NonStringInput::getParameterOption(): Return value must be of type mixed"
+
+# `variable.undefined` (ADR-0078, issue #194), triaged 2026-08-08. Eleven
+# TRUE positives — reads of a name bound nowhere in scope. Two FP-shaped
+# sites from the same run (a same-variable `empty($x)?:` ternary) are fixed
+# at source (both isset/empty arms now shield) and not pinned here. The ten
+# monorepo ones: 4 exception-message typos (incl. `$this->$mode` for
+# `->mode`, `$withd` for `$width`), 1 renamed logger field, 1 KVS setter
+# always storing 0 (live defect), 2 accidental-pass `$offset` reads
+# (`array_splice(…, null)` degrades gracefully), 1 deleted-parameter read,
+# 1 stale fixture. Path suffixes are kept short — full paths carry the
+# private project's name. `$a = $b;` below (no `$b` anywhere) is written
+# to make PHPUnit observe a PHP warning; the `@`-suppressed twin beneath
+# stays silent, correctly.
+[[finding]]
+package = "sebastianbergmann/phpunit"
+id = "variable.undefined"
+path_suffix = "event/_files/PhpWarningTest.php"
+line = 18
+message_contains = "$b is never bound"
+
+# Exception-message reads of names that do not exist.
+[[finding]]
+package = "pxxxx-monorepo"
+id = "variable.undefined"
+path_suffix = "Model/Illust/ContentsType.php"
+line = 29
+message_contains = "$type is never bound"
+
+[[finding]]
+package = "pxxxx-monorepo"
+id = "variable.undefined"
+path_suffix = "Model/Illust/IllustModel.php"
+line = 134
+message_contains = "$withd is never bound"
+
+[[finding]]
+package = "pxxxx-monorepo"
+id = "variable.undefined"
+path_suffix = "Ranking.php"
+line = 109
+message_contains = "$mode is never bound"
+
+[[finding]]
+package = "pxxxx-monorepo"
+id = "variable.undefined"
+path_suffix = "PPoint/PaymentMethodCode.php"
+line = 71
+message_contains = "$payment_method_code is never bound"
+
+# The two `$offset` reads below rely on that same accidental degrade.
+[[finding]]
+package = "pxxxx-monorepo"
+id = "variable.undefined"
+path_suffix = "script/get_event_circle_user.php"
+line = 78
+message_contains = "$offset is never bound"
+
+[[finding]]
+package = "pxxxx-monorepo"
+id = "variable.undefined"
+path_suffix = "script/get_event_circle_user.php"
+line = 82
+message_contains = "$offset is never bound"
+
+# A KVS setter storing `(int)$count` of a never-bound name: always zero.
+[[finding]]
+package = "pxxxx-monorepo"
+id = "variable.undefined"
+path_suffix = "Group/Base.php"
+line = 1381
+message_contains = "$count is never bound"
+
+# A deleted parameter, still read on a return path.
+[[finding]]
+package = "pxxxx-monorepo"
+id = "variable.undefined"
+path_suffix = "stacc/api.php"
+line = 574
+message_contains = "$display_m is never bound"
+
+# A stale test fixture.
+[[finding]]
+package = "pxxxx-monorepo"
+id = "variable.undefined"
+path_suffix = "tests/SampleTest.php"
+line = 215
+message_contains = "$cookie_store is never bound"
+
+# A logger field silently null since its variable was renamed.
+[[finding]]
+package = "pxxxx-monorepo"
+id = "variable.undefined"
+path_suffix = "Log/FluentdLogger.php"
+line = 41
+message_contains = "$write_time is never bound"
+
+# Builtin parameter types (issue #423): a date helper forwards its
+# `$timestamp` to `\date()`, and its own test hands it a non-numeric string
+# on purpose — the test's `expectException(TypeError::class)` names exactly
+# this "must be of type ?int, string given". A non-numeric string is a
+# TypeError for an `int` parameter in BOTH modes, so the descent-bound
+# literal convicts the forwarding line. TRUE, and asserted by its own test.
+[[finding]]
+package = "pxxxx-monorepo"
+id = "type.argument-mismatch"
+path_suffix = "Util/DateTime.php"
+line = 65
+message_contains = "to date() cannot become ?int $timestamp"
