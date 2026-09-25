@@ -342,7 +342,7 @@ fn cmp_operand_candidates(
 /// totality true of its type (issue #615): [`ValueOp::BitOr`] joined the enum for
 /// a carrier the `filter_var` flags roster reads by constant NAME, and a bitwise
 /// `|` has NO total floor — GMP overloads it to return an object, so even
-/// `int|string` would be a lie. So the four callers match [`ValueOp::Cmp`] and a
+/// `int|string` would be a lie. So [`total_op_fact`] matches [`ValueOp::Cmp`] and a
 /// `|` simply falls through to the lower rungs, which say nothing.
 ///
 /// # Stratum: the undecided arm is Verified, the decided arms are derived
@@ -435,18 +435,70 @@ fn value_truthiness(
     }
 }
 
+/// **The fact of a total operator form**, or `None` for any other shape: a
+/// comparison, `<=>`, a logical connective, `!`, a cast, a concatenation or
+/// `isset(…)`. The one dispatch to their evaluators — the assignment seam, a
+/// returning exit, the dump surface and [`value_operand_fact`] each ask it once,
+/// so the same expression answers the same fact at all four, and a new operator
+/// is one arm here.
+///
+/// Total, so a caller binds the answer unconditionally and the rungs below it
+/// never see one of these forms. Each floor is PHP's guarantee for every operand:
+///
+/// * a comparison (issue #260) is a `bool`. Only [`ValueOp::Cmp`] is matched: a
+///   bitwise `|` (issue #615) has no floor — GMP overloads it to return an object
+///   — so it falls through and answers nothing;
+/// * `<=>` (issue #625) is `int<-1, 1>`, arrays and objects included;
+/// * `&& || and or xor` and `!` (issue #625) are a `bool`: PHP has no operator
+///   overloading for them. A decided `&&`/`||` also records its unevaluated right
+///   operand dead (ADR-0052 §6);
+/// * a cast (issue #626) is its target's base, and a concatenation (issue #627) a
+///   `string`: either completes to that or throws, and a throw has no value;
+/// * `isset(…)` (issue #579) is a `bool`.
+///
+/// The floor is a claim about the operator, owed to no operand, so it enters
+/// `Verified`; a decided answer rests on the operands and carries their `min`
+/// (the issue #260 ruling, as each evaluator applies it).
+pub(crate) fn total_op_fact(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    value: &ArgValue,
+    env: &HashMap<String, Known>,
+    store: Option<&Store>,
+    poisoned: bool,
+) -> Option<(Fact, Stratum)> {
+    Some(match value {
+        ArgValue::Binary { op: ValueOp::Cmp(op), lhs, rhs } => {
+            eval_binary_fact(w.cx, folder, *op, lhs, rhs, env, store, poisoned)
+        }
+        ArgValue::Binary { op: ValueOp::Spaceship, lhs, rhs } => {
+            eval_spaceship_fact(w.cx, folder, lhs, rhs, env, store, poisoned)
+        }
+        ArgValue::Isset(ops) => eval_isset_fact(w.cx, ops, env, poisoned),
+        ArgValue::Logical { op, lhs, rhs, rhs_span } => {
+            eval_logical_fact(w, folder, *op, lhs, rhs, *rhs_span, env, store, poisoned)
+        }
+        ArgValue::Not(inner) => eval_not_fact(w, folder, inner, env, store, poisoned),
+        ArgValue::Cast { target, operand } => {
+            eval_cast_fact(w, folder, *target, operand, env, store, poisoned)
+        }
+        ArgValue::Concat(lhs, rhs) => eval_concat_fact(w, folder, lhs, rhs, env, store, poisoned),
+        _ => return None,
+    })
+}
+
 /// **The fact a value-position expression denotes**, or `None` when nothing at
 /// all is known about it — the one reader the composed operator family shares
 /// ([`value_truthiness`] and [`eval_cast_fact`] both go through it).
 ///
-/// The dispatch above the plain value lane is what makes the family
-/// **compositional**: a comparison, an `isset`, a connective, a negation and a
-/// cast each already answer for themselves, so `!isset($foo)`, `$a && ($b || $c)`
-/// and `(int) ($a === $b)` fold rather than bottoming out. Every other shape goes
-/// to [`transfer_arg_known`], the same argument-fact reader every transfer rule
-/// uses — which resolves a literal operand to its `Singleton` on the way down —
-/// and a **call** falls from there to [`builtin_operand_fact`], the rung that
-/// reader never had (issue #646).
+/// The [`total_op_fact`] rung above the plain value lane is what makes the family
+/// **compositional**: a comparison, an `isset`, a connective, a negation, a cast
+/// and a concatenation each already answer for themselves, so `!isset($foo)`,
+/// `$a && ($b || $c)`, `(int) ($a === $b)` and a left-nested `a . b . c` fold
+/// rather than bottoming out. Every other shape goes to [`transfer_arg_known`],
+/// the same argument-fact reader every transfer rule uses — which resolves a
+/// literal operand to its `Singleton` on the way down — and a **call** falls from
+/// there to [`builtin_operand_fact`], the rung that reader never had (issue #646).
 fn value_operand_fact(
     w: &WalkCx,
     folder: &mut dyn Folder,
@@ -455,28 +507,10 @@ fn value_operand_fact(
     store: Option<&Store>,
     poisoned: bool,
 ) -> Option<(Fact, Stratum)> {
+    if let Some(answer) = total_op_fact(w, folder, value, env, store, poisoned) {
+        return Some(answer);
+    }
     match value {
-        ArgValue::Binary { op: ValueOp::Cmp(op), lhs, rhs } => {
-            Some(eval_binary_fact(w.cx, folder, *op, lhs, rhs, env, store, poisoned))
-        }
-        ArgValue::Binary { op: ValueOp::Spaceship, lhs, rhs } => {
-            Some(eval_spaceship_fact(w.cx, folder, lhs, rhs, env, store, poisoned))
-        }
-        ArgValue::Isset(ops) => Some(eval_isset_fact(w.cx, ops, env, poisoned)),
-        ArgValue::Logical { op, lhs, rhs, rhs_span } => {
-            Some(eval_logical_fact(w, folder, *op, lhs, rhs, *rhs_span, env, store, poisoned))
-        }
-        ArgValue::Not(inner) => Some(eval_not_fact(w, folder, inner, env, store, poisoned)),
-        ArgValue::Cast { target, operand } => {
-            Some(eval_cast_fact(w, folder, *target, operand, env, store, poisoned))
-        }
-        // A nested concatenation (issue #627). `a . b . c` lowers left-nested, so
-        // without this arm the inner `Concat` would be the one operand of the
-        // outer one that knows nothing — the compositionality the whole family
-        // rests on, spelled for `.`.
-        ArgValue::Concat(lhs, rhs) => {
-            Some(eval_concat_fact(w, folder, lhs, rhs, env, store, poisoned))
-        }
         // A **builtin call** as the operand (issue #646). The reader below has no
         // rung for a call, so `(string) rand()` answered nothing while
         // `$r = rand(); (string) $r` answered the catalog — one value, two
@@ -1338,6 +1372,28 @@ pub(crate) fn eval_ternary_fact(
             t.join(&e)
         }
     }
+}
+
+/// [`eval_ternary_fact`] with the stratum its fact enters at: the `min` over the
+/// two arms (derivation clause, ADR-0052 §5), either of which could be the taken
+/// one under a `Maybe` verdict. The assignment seam, a returning exit and the dump
+/// surface all read a ternary through this, so they agree about `(asserted)` as
+/// they do about the fact.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn eval_ternary_fact_strat(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    cond: &CondExpr,
+    then_val: &ArgValue,
+    else_val: &ArgValue,
+    arms: (Span, Span),
+    env: &HashMap<String, Known>,
+    store: &Store,
+) -> Option<(Fact, Stratum)> {
+    let fact = eval_ternary_fact(w, folder, cond, then_val, else_val, arms, env, store)?;
+    let strat = value_stratum(w.cx, then_val, env, Some(store))
+        .min(value_stratum(w.cx, else_val, env, Some(store)));
+    Some((fact, strat))
 }
 
 /// The candidate values of a condition operand: the fact's value set for a known

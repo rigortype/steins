@@ -10,7 +10,7 @@ use steins_domain::Certainty;
 use steins_domain::{Base, Fact, PhpStr};
 use steins_syntax::{
     ArgValue, CallExpr, Callee, NameRef, NamedArg, NativeType, Param, Receiver, RefKind,
-    RetHintKind, ScalarType, Scope, ScopeOwner, StaticClass, StmtKind, TypeMember, ValueOp,
+    RetHintKind, ScalarType, Scope, ScopeOwner, StaticClass, StmtKind, TypeMember,
 };
 
 use crate::fold::Folder;
@@ -22,10 +22,7 @@ use crate::arg_check::{
 use crate::assign::eval_coalesce_fact;
 use crate::builtin_returns::store_holds_resource;
 use crate::coerce::{coerce_fact_to_native, coerce_into_param};
-use crate::cond::{
-    eval_binary_fact, eval_cast_fact, eval_concat_fact, eval_isset_fact, eval_logical_fact,
-    eval_not_fact, eval_spaceship_fact, eval_ternary_fact,
-};
+use crate::cond::{eval_ternary_fact_strat, total_op_fact};
 use crate::contract::IsA;
 use crate::cx::Cx;
 use crate::dispatch::resolve_call_target;
@@ -44,7 +41,7 @@ use crate::offsets::shape_read_at;
 use crate::project::{Diagnostic, Site};
 use crate::refine::refine_contract_arms;
 use crate::return_arms::{enforced_top_arms, fn_return_arms, native_arms};
-use crate::walk::{WalkCx, analyze_scope, value_stratum};
+use crate::walk::{WalkCx, analyze_scope};
 
 /// The class FQN that lexically owns a method scope; `None` for function/top.
 pub(crate) fn scope_class(scope: &Scope) -> Option<&str> {
@@ -2046,8 +2043,7 @@ pub(crate) fn return_value_fact(
     // a ternary it did not: the evaluator was wired into the assignment seam
     // alone.
     //
-    // The stratum is the assignment seam's, `min` over the arms: either could be
-    // the taken one under a `Maybe` verdict.
+    // The stratum is the assignment seam's: both read `eval_ternary_fact_strat`.
     //
     // This rung's `mark_dead_span` side effect is discarded, and correctly so:
     // `return_value_fact` runs under a binding descent whose `WalkCx` owns its own
@@ -2055,11 +2051,17 @@ pub(crate) fn return_value_fact(
     // walk's regions are universal truths — a descent's are dead for that binding
     // only). So the marking discipline needs nothing from this call site.
     if let ArgValue::Ternary { cond, then_val, then_span, else_val, else_span } = value
-        && let Some(fact) =
-            eval_ternary_fact(w, folder, cond, then_val, else_val, (*then_span, *else_span), env, store)
+        && let Some((fact, strat)) = eval_ternary_fact_strat(
+            w,
+            folder,
+            cond,
+            then_val,
+            else_val,
+            (*then_span, *else_span),
+            env,
+            store,
+        )
     {
-        let strat = value_stratum(w.cx, then_val, env, Some(store))
-            .min(value_stratum(w.cx, else_val, env, Some(store)));
         return Some((fact, strat));
     }
     // A `??` chain (ADR-0052 §6 + ADR-0062 A-G11, S5): the spine's join under the
@@ -2071,52 +2073,13 @@ pub(crate) fn return_value_fact(
     {
         return Some((fact, strat));
     }
-    // A value-position comparison (issue #260): total, so lower rungs never see
-    // one — `true`/`false` when `eval_cmp` decides, the Verified `bool` floor when
-    // it doesn't. An undecided exit's `General` still degrades to the arm floor at
-    // the caller's binding, exactly as a factless exit does (A3). A
-    // `ValueOp::BitOr` (issue #615) has no floor and is not matched.
-    if let ArgValue::Binary { op: ValueOp::Cmp(op), lhs, rhs } = value {
-        return Some(eval_binary_fact(w.cx, folder, *op, lhs, rhs, env, Some(store), poisoned));
-    }
-    // A value-position `<=>` (issue #625): total one layer up from the
-    // comparison — the `int<-1, 1>` floor at worst, never a factless exit.
-    if let ArgValue::Binary { op: ValueOp::Spaceship, lhs, rhs } = value {
-        return Some(eval_spaceship_fact(w.cx, folder, lhs, rhs, env, Some(store), poisoned));
-    }
-    // A value-position logical connective and its negation (issue #625): total
-    // for the strongest reason in this group — PHP has no operator overloading
-    // for `&& || and or xor !`.
-    if let ArgValue::Logical { op, lhs, rhs, rhs_span } = value {
-        return Some(eval_logical_fact(
-            w,
-            folder,
-            *op,
-            lhs,
-            rhs,
-            *rhs_span,
-            env,
-            Some(store),
-            poisoned,
-        ));
-    }
-    if let ArgValue::Not(inner) = value {
-        return Some(eval_not_fact(w, folder, inner, env, Some(store), poisoned));
-    }
-    // A value-position cast (issue #626): total like the group above, so an exit
-    // crossing one carries the target's base at worst rather than no fact.
-    if let ArgValue::Cast { target, operand } = value {
-        return Some(eval_cast_fact(w, folder, *target, operand, env, Some(store), poisoned));
-    }
-    // A value-position concatenation (issue #627): total like the cast above, so
-    // an exit crossing one carries `string` at worst rather than no fact.
-    if let ArgValue::Concat(lhs, rhs) = value {
-        return Some(eval_concat_fact(w, folder, lhs, rhs, env, Some(store), poisoned));
-    }
-    // A value-position `isset(…)` (issue #579): total like the comparison above,
-    // so an exit crossing one carries a `bool` at worst rather than no fact.
-    if let ArgValue::Isset(ops) = value {
-        return Some(eval_isset_fact(w.cx, ops, env, poisoned));
+    // A value-position operator — a comparison, `<=>`, a connective, `!`, a cast,
+    // a concatenation or `isset(…)`, through `total_op_fact`: total, so lower rungs
+    // never see one, and an exit crossing one carries the operator's floor at worst
+    // rather than no fact. An undecided comparison's `General` still degrades to
+    // the arm floor at the caller's binding, exactly as a factless exit does (A3).
+    if let Some((fact, strat)) = total_op_fact(w, folder, value, env, Some(store), poisoned) {
+        return Some((fact, strat));
     }
     // Stratum from the resolution itself (issue #127 review): a fold over an
     // Asserted project-call summary stays Asserted — never re-read from the
