@@ -1,0 +1,342 @@
+use std::collections::{HashMap, HashSet};
+use std::time::Instant;
+
+use steins_db::{EffectsPolicy, PluginFacts, ProjectLayout};
+
+use crate::file_walk::{FileSink, WalkInputs, fan_out};
+use crate::fold::Folder;
+use crate::fold_args::effective_php_view;
+use crate::mechanics::emit_parse_failure;
+use crate::project::{Diagnostic, FileUnit, Index};
+use crate::purity::{PurityOracle, effect_diagnostics};
+use crate::throws::throw_diagnostics;
+use crate::walk_plan::{FilePlan, FileWalk, PassTimings, UniverseVerdict, WalkControl};
+use crate::{Fixpoints, RuntimePostures, SYNTAX_UNPARSABLE_ID, facts};
+
+/// The project checking core: direct + propagation passes over every file's
+/// calls and scopes, then the one project-wide effects pass.
+pub(crate) fn check_units(
+    units: &[FileUnit],
+    index: &Index,
+    folder: &mut dyn Folder,
+    postures: RuntimePostures,
+    layout: &ProjectLayout,
+    plugins: &PluginFacts,
+    policy: &EffectsPolicy,
+) -> Vec<Diagnostic> {
+    check_units_controlled(units, index, folder, postures, layout, plugins, policy, None)
+}
+
+/// [`check_units`] with the walk plan seam of issue #489 slice B open.
+///
+/// `control` is `Some` only on the frozen-generation path, where the caller
+/// holds a published generation and may replay a file's persisted walk block
+/// instead of walking it (see [`walk_plan`] for why a block is the right unit
+/// and what makes replaying one sound). With `control` `None` — every other
+/// entry point, every ungated `steins check`, every test — the planner never
+/// runs, every file walks, and nothing is recorded: the default behaviour is
+/// byte-identical because it is the *same* code path, not a compared one.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub(crate) fn check_units_controlled(
+    units: &[FileUnit],
+    index: &Index,
+    folder: &mut dyn Folder,
+    postures: RuntimePostures,
+    layout: &ProjectLayout,
+    plugins: &PluginFacts,
+    policy: &EffectsPolicy,
+    mut control: Option<&mut WalkControl<'_>>,
+) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    // Issue #516: the analysis phase was one number, and the whole first move
+    // of that issue is finding out which part of it is the wall. Each span is
+    // recorded where it runs and handed back on the control, which only the
+    // generation orchestrator holds — every other entry point passes `None`
+    // and pays two `Instant::now()` calls per run for the arithmetic.
+    let mut passes = PassTimings::default();
+    let t_facts = clock();
+
+    // This run's per-file facts (issue #516), or an empty slice on every path
+    // but the generation orchestrator's. Where a file has them, the phases
+    // below read them instead of its tree; where it does not, they read the
+    // tree exactly as they always did — the two are the same value by
+    // construction, and `FileFacts::from_tree` is the one producer.
+    let facts: &[facts::FileFacts] = control.as_deref().map_or(&[], |c| c.facts);
+
+    // The whole-universe dam fact (ADR-0049 §2): one query answer per run, shared by
+    // every file's context. Consumed by the absence family's conditional-decl leg.
+    let dam_rows: Vec<crate::dam::DamRow> = units
+        .iter()
+        .enumerate()
+        .map(|(fi, u)| match facts.get(fi) {
+            Some(f) => (f.parse_error.clone(), f.dynamism.clone()),
+            None => (facts::parse_error_of(u.tree), facts::dam_candidates_of(u.path, u.tree)),
+        })
+        .collect();
+    let dam = crate::dam::dam_facts_from(units, layout, &dam_rows);
+
+    // The analysis PHP view (issue #28): the TARGET the project declares
+    // (`config.platform.php` / `require.php`, via the layout) is what
+    // version-sensitive decisions key on; the sidecar's runtime minor is the
+    // fallback when the project declares nothing. One computation per run,
+    // shared by every file's context — ADR-0052 A11 (catalog skew) and
+    // ADR-0049 A12 (the next-int rule, through `normalize_array`) both follow
+    // this one seam.
+    let runtime_minor = folder.php_minor();
+    let view = effective_php_view(runtime_minor, layout.php_target());
+    let (php_minor, catalog_skew) = (view.effective_minor, view.catalog_skew);
+    // The PHP_VERSION_ID guard fold (issue #29) is disabled project-wide the
+    // moment any file declares a userland constant of that name — constant
+    // resolution is otherwise unmodeled, so the conservative reading is the
+    // only sound one.
+    let version_id = if units.iter().enumerate().any(|(fi, u)| match facts.get(fi) {
+        Some(f) => f.version_id_declared,
+        None => u.tree.php_version_id_declared(),
+    }) {
+        None
+    } else {
+        view.version_id
+    };
+
+    // The run's shared fixpoint holder (issue #489): the effect and throw
+    // fixpoints are computed at most once here, lazily, and every internal
+    // consumer — the purity oracle, `effect_diagnostics`, `throw_diagnostics` —
+    // reads the same result. Each consumer keeps its own cheap gate, so a
+    // project spelling none of the triggering constructs still pays nothing.
+    let fixpoints = Fixpoints::new(units, index, plugins, policy, facts);
+
+    // The callable-purity oracle (ADR-0063 P3): the shared whole-project effect
+    // fixpoint, consulted by every file's context, and built only when some
+    // docblock actually spells a purity-bearing callable.
+    passes.facts_ms += ms(t_facts);
+    let t_oracle = clock();
+    let purity = PurityOracle::build(&fixpoints);
+    let oracle_ms = ms(t_oracle);
+    let t_facts = clock();
+
+    // parse failure (ADR-0079, issue #180): `parse_errors()`'s first real consumer.
+    // One finding per broken file at its first error, and then NOTHING else from
+    // that file — its recovered tree may misattribute anything locally, and a
+    // finding built on a misparse is the manufactured-FP shape ADR-0002 forbids
+    // (§2.4). The declarations the recovery kept still sit in the index, where they
+    // can only *silence* an absence claim, never fire one.
+    //
+    // Vendor is NOT special here, only in the dam (§2.3): a broken vendor file
+    // emits the finding too and it rides the CLI's ordinary vendor filter, exactly
+    // as the ADR-0046 §2 presumption prescribes.
+    for (fi, u) in units.iter().enumerate() {
+        emit_parse_failure(u.path, dam_rows[fi].0.as_ref(), dam.file_is_unparsable(u.path), &mut out);
+    }
+    let unparsable: HashSet<&str> = units
+        .iter()
+        .enumerate()
+        .filter(|(fi, _)| dam_rows[*fi].0.is_some())
+        .map(|(_, u)| u.path)
+        .collect();
+    // end parse failure (ADR-0079, issue #180)
+
+    // return missing (ADR-0078, issue #199): the whole-run veto set, computed once
+    // because a never-returning helper is routinely declared in a different file
+    // from the body that calls it.
+    let never_returning: HashSet<String> = units
+        .iter()
+        .enumerate()
+        .flat_map(|(fi, u)| match facts.get(fi) {
+            Some(f) => f.never_returning.clone(),
+            None => facts::never_returning_of(u.tree),
+        })
+        .collect();
+    // end return missing (ADR-0078, issue #199)
+
+    // ADR-0088 §5 (issue #433): the dataflow walk's own verdict on which
+    // default-less `match` statements do NOT cover their subject's Verified
+    // domain, keyed by (file, span-start) — the same key the structural throw
+    // scan's `ThrowKind::New` origin for the same construct carries (both trace
+    // back to the same CST `Match` node). Populated below, read by
+    // `throw_diagnostics` at the end.
+    let mut uncovered_matches: HashMap<usize, HashSet<u32>> = HashMap::new();
+    passes.facts_ms += ms(t_facts);
+
+    // The walk plan (issue #489 slice B). Every whole-universe verdict a walk
+    // can read is in hand by now, so this is the one point at which the
+    // planner can be asked — and the plan it returns is per file, applied
+    // inside the loop below and nowhere else.
+    let mut plan: Vec<FilePlan> = match control.as_deref_mut() {
+        Some(control) => {
+            let verdict = UniverseVerdict {
+                dam: &dam,
+                unparsable: sorted(unparsable.iter().copied()),
+                purity: purity.as_ref().map(PurityOracle::impurity_answers),
+                never_returning: sorted(never_returning.iter().map(String::as_str)),
+                php_minor,
+                catalog_skew,
+                version_id,
+                property_writes: {
+                    let (names, computed) = index.property_write_table();
+                    (sorted(names.iter().map(String::as_str)), computed)
+                },
+            };
+            (control.planner)(&verdict)
+        }
+        None => Vec::new(),
+    };
+    plan.resize_with(units.len(), || FilePlan::Walk);
+
+    let paranoid = control.as_deref().is_some_and(|c| c.paranoid);
+    let inputs = WalkInputs {
+        units,
+        index,
+        dam: &dam,
+        unparsable: &unparsable,
+        postures,
+        php_minor,
+        catalog_skew,
+        version_id,
+        purity: purity.as_ref(),
+        layout,
+        plugins,
+        never_returning: &never_returning,
+    };
+    // Which files this run actually walks. A replayed block is not walked —
+    // except under the verifier, which walks everything precisely so it has a
+    // fresh answer to grade the replay against.
+    let order: Vec<usize> = (0..units.len())
+        .filter(|&fi| paranoid || matches!(plan[fi], FilePlan::Walk))
+        .collect();
+
+    let t_walk = clock();
+    // Per-file sinks, filled either in place or by the fan-out (issue #490),
+    // and merged below in unit order either way. The merge — not the walk — is
+    // what decides the diagnostic vector, so the two paths produce the same
+    // bytes by construction rather than by comparison.
+    let mut sinks: Vec<Option<FileSink>> =
+        std::iter::repeat_with(|| None).take(units.len()).collect();
+    let fleet = control
+        .as_deref()
+        .and_then(|c| c.fleet)
+        .filter(|fleet| fleet.width(order.len()) > 1);
+    let workers = match fleet {
+        Some(fleet) => fan_out(&inputs, &order, fleet, &mut sinks),
+        None => {
+            for &fi in &order {
+                sinks[fi] = Some(inputs.walk(folder, fi));
+            }
+            1
+        }
+    };
+    if let Some(control) = control.as_deref_mut() {
+        control.workers = workers;
+    }
+
+    for fi in 0..units.len() {
+        let before = out.len();
+        // A replayed file's block is appended verbatim, in the very position
+        // the walk would have appended it — which is what makes the whole
+        // vector (and so the tail's retain and dedup) indistinguishable.
+        // Paranoid mode walks anyway and keeps the walked answer; the replayed
+        // one is only ever the thing being graded.
+        let replayed = match &plan[fi] {
+            FilePlan::Walk => None,
+            FilePlan::Replay(block) => Some(block),
+        };
+        if let Some(block) = replayed
+            && !paranoid
+        {
+            out.extend_from_slice(&block.diagnostics);
+            if let Some(uncovered) = &block.uncovered {
+                uncovered_matches.insert(fi, uncovered.iter().copied().collect());
+            }
+            if let Some(control) = control.as_deref_mut() {
+                control.replayed += 1;
+                control.would_skip += 1;
+                control.ledger.push(block.clone());
+            }
+            continue;
+        }
+        let sink = sinks[fi].take().expect("every walked file left a sink");
+        out.extend(sink.diagnostics);
+        let uncovered_entry = sink.uncovered;
+        if let Some(uncovered) = &uncovered_entry {
+            uncovered_matches.insert(fi, uncovered.iter().copied().collect());
+        }
+        if let Some(control) = control.as_deref_mut() {
+            let walked = FileWalk {
+                diagnostics: out[before..].to_vec(),
+                uncovered: uncovered_entry,
+            };
+            control.walked += 1;
+            if let Some(block) = replayed {
+                control.would_skip += 1;
+                control.verify(units[fi].path, block, &walked);
+            }
+            control.ledger.push(walked);
+        }
+    }
+
+    passes.walk_ms = ms(t_walk);
+    let t_report = clock();
+
+    // --- Effects pass (ADR-0005), computed once over the whole project. ------
+    out.extend(effect_diagnostics(&fixpoints));
+
+    // --- Throw system (ADR-0040/0007): `@throws` envelope + Liskov. ----------
+    out.extend(throw_diagnostics(&fixpoints, &uncovered_matches));
+
+    // parse failure (ADR-0079, issue #180): drop whatever the two project-wide
+    // passes above attributed to a broken file. §2.4 is about the file, not about
+    // which pass produced the finding.
+    if !unparsable.is_empty() {
+        out.retain(|d| d.id == SYNTAX_UNPARSABLE_ID || !unparsable.contains(d.path.as_str()));
+    }
+
+    dedup(&mut out);
+    // The two fixpoints are lazy and forced from three places (the oracle
+    // above, and each reporting pass here), so their own cost is subtracted
+    // out of whichever span forced them rather than attributed to it.
+    let (effects_ms, throws_ms) = fixpoints.spent();
+    passes.effects_ms = effects_ms;
+    passes.throws_ms = throws_ms;
+    passes.report_ms = (oracle_ms + ms(t_report) - effects_ms - throws_ms).max(0.0);
+    if let Some(control) = control {
+        control.passes = passes;
+    }
+    out
+}
+
+/// A monotonic instant, or `None` where the target has no clock.
+///
+/// `wasm32-unknown-unknown` has no time source and `Instant::now` **panics**
+/// there, so the phase ledger — which is read by the generation orchestrator
+/// and by nothing else — must not reach for one. The browser build measures
+/// nothing and reports zeros, which is the honest answer for a target that
+/// cannot measure.
+pub(crate) fn clock() -> Option<Instant> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        None
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        Some(Instant::now())
+    }
+}
+
+/// Milliseconds since `t`, the one spelling the phase ledger uses. Zero for a
+/// target with no clock.
+pub(crate) fn ms(t: Option<Instant>) -> f64 {
+    t.map_or(0.0, |t| t.elapsed().as_secs_f64() * 1000.0)
+}
+
+/// Collect an iterator of borrowed names into a sorted vector — the canonical
+/// form every whole-universe verdict is digested in.
+fn sorted<'a>(names: impl Iterator<Item = &'a str>) -> Vec<&'a str> {
+    let mut out: Vec<&str> = names.collect();
+    out.sort_unstable();
+    out
+}
+
+/// Drop exact-duplicate diagnostics, preserving first-occurrence order.
+fn dedup(out: &mut Vec<Diagnostic>) {
+    let mut seen: HashSet<Diagnostic> = HashSet::new();
+    out.retain(|d| seen.insert(d.clone()));
+}
