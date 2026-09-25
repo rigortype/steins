@@ -1,3 +1,6 @@
+//! `sscanf` (issue #617): the fact its argument count and literal format prove, and
+//! the format scanner that reads one slot per conversion.
+
 use std::collections::HashMap;
 
 use steins_domain::{

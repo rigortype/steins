@@ -1,3 +1,8 @@
+//! `filter_var` (issues #597, #608 and #615): the answer the (filter × flags × input)
+//! grid on [`filter_var_transfer`] proves, the readers that turn the filter and flags
+//! arguments into [`FilterKind`]s and [`FilterFlags`], and the wrapping the two array
+//! flags apply.
+
 use std::collections::HashMap;
 
 use steins_domain::{Base, Certainty, Fact, Refinement, ShapeFact, StrPreds, Tail, Val};
@@ -12,6 +17,8 @@ use crate::transfers::transfer_arg_fact;
 /// What one recognized `FILTER_*` filter constant does to a value, as the grid on
 /// [`filter_var_transfer`] measures it. The constant NAME is the key; its value is
 /// never read (issue #168), exactly as in [`curl_getinfo_transfer`].
+///
+/// [`curl_getinfo_transfer`]: crate::transfers::curl::curl_getinfo_transfer
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FilterKind {
     /// `FILTER_DEFAULT` / `FILTER_UNSAFE_RAW` (one engine value, two names) under
@@ -433,6 +440,8 @@ fn filter_kind_of_id(id: i64) -> Option<FilterKind> {
 /// match is exact. A `Qualified`/`Relative` spelling never denotes the global
 /// `FILTER_*` constant — the same `FullyQualified`/`Unqualified` split
 /// [`curl_getinfo_transfer`] applies.
+///
+/// [`curl_getinfo_transfer`]: crate::transfers::curl::curl_getinfo_transfer
 fn filter_kind(value: &ArgValue) -> Option<FilterKind> {
     let ArgValue::GlobalConst(r) = value else { return None };
     if !matches!(r.kind, RefKind::FullyQualified | RefKind::Unqualified) {

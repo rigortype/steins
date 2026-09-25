@@ -1,3 +1,7 @@
+//! The arithmetic transfers: `min` / `max` (issue #118), `abs` and `pow` (issue #40).
+//! Each answers from what its arguments' facts already say — an interval, a base, a
+//! union of the arguments — and computes no value; a value is the fold lane's.
+
 use std::collections::HashMap;
 
 use steins_domain::{ArmKnown, Base, Fact, IntRange, Refinement, ShapeFact, UnionArm, Val};
@@ -50,6 +54,8 @@ use crate::transfers::transfer_arg_fact;
 /// `min([])` throwing a `ValueError` costs the rule nothing: a throw is the
 /// *absence* of a return, so there is no value for the claim to be wrong about
 /// (the same vacuity [`range_transfer`] leans on).
+///
+/// [`range_transfer`]: crate::transfers::lists::range_transfer
 pub(super) fn min_max_transfer(
     cx: &Cx,
     folder: &mut dyn Folder,

@@ -1,3 +1,7 @@
+//! The list transfers: `explode` and `range`, which always answer a non-empty list,
+//! and [`list_transfer_fact`], the `list<T>` constructor the array out-state rows and
+//! the out-parameter seeds build with too.
+
 use std::collections::HashMap;
 
 use steins_domain::{Base, Certainty, Fact, Refinement, ShapeFact, StrPreds, Val};
