@@ -51,6 +51,7 @@ mod declared_return_floor;
 mod destructure_source_read;
 mod docblock_hygiene;
 mod dump_surface;
+mod dynamic_code_effects;
 mod effects;
 mod embedded_writes;
 mod enforced_top_return;

@@ -36,7 +36,7 @@ pub fn known_labels() -> &'static [&'static str] {
 /// registry entries — root ownership applies to the namespace.
 #[must_use]
 pub fn core_roots() -> &'static [&'static str] {
-    &["exit", "failure", "ffi", "global", "io", "mutate", "nondet"]
+    &["eval", "exit", "failure", "ffi", "global", "io", "mutate", "nondet"]
 }
 
 /// Whether `label` lies under some [`core_roots`] entry — equal to a root, or a
@@ -52,6 +52,9 @@ pub fn is_core_label(label: &str) -> bool {
 const BUILTIN_LABELS: &[&str] = {
     // Sorted; ADR-0018's taxonomy plus every label `effect_labels` uses.
     &[
+        // Code-as-data escape hatch beside `ffi` (ADR-0046 amendment): an
+        // `eval(...)` site. Its payload is unseen, so the body is also `…?`.
+        "eval",
         "exit",
         // Failure-cause provenance family (ADR-0042): labels value provenance,
         // not an effect. See [`failure_arms`].
@@ -332,7 +335,7 @@ mod tests {
         for label in [
             "io.output", "io", "io.fs", "io.fs.read", "io.fs.write", "io.net", "io.net.http",
             "io.db", "io.process", "global.read", "global.write", "nondet", "nondet.random",
-            "nondet.time", "exit", "mutate",
+            "nondet.time", "exit", "mutate", "eval",
         ] {
             assert!(is_known_label(label), "{label} should be a known registry label");
         }
@@ -441,6 +444,11 @@ mod tests {
         assert!(is_core_label("io.output.buffer"));
         assert!(!is_core_label("email.send"));
         assert!(!is_core_label("iota.thing"));
+        // ADR-0046 amendment: `eval` is Steins' own root, so a plugin may
+        // refine it but never claim it as a vendor root.
+        assert!(is_core_label("eval"));
+        assert!(is_core_label("eval.literal"));
+        assert!(!is_core_label("evaluator"));
     }
 
     #[test]
@@ -463,6 +471,17 @@ mod tests {
         );
         assert!(!subsumes("io.signal", "io.ipc"), "siblings do not subsume");
         assert!(!subsumes("io", "ffi"));
+    }
+
+    #[test]
+    fn eval_is_a_top_level_escape_hatch_beside_ffi() {
+        // ADR-0046 amendment (owner ruling 2026-09-26): a root of its own, so no
+        // coarser label admits it — reading a file is `io`, running code is not.
+        assert!(is_known_label("eval"));
+        assert!(!subsumes("io", "eval"));
+        assert!(!subsumes("ffi", "eval"));
+        assert!(!subsumes("eval", "evaluate"), "segment-aware");
+        assert_eq!(nearest_label("evl"), Some("eval"));
     }
 
     #[test]
