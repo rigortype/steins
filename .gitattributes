@@ -70,8 +70,7 @@
 #
 # Residual risk: when both sides open the SAME new `###` heading under
 # `[Unreleased]`, union keeps both copies silently rather than conflicting.
-# Steins has no automated check for a duplicated heading (rigor's equivalent
-# change is backed by a changelog conformance spec that happens to catch it);
-# the steins-release-prep skill's sealing step is the backstop instead — see
-# its "split merge artefacts" step.
+# A test catches the duplicate instead (`xtask/src/changelog.rs`, issue #777,
+# the role rigor's changelog conformance spec plays there), and the
+# steins-release-prep skill's "split merge artefacts" step names it.
 CHANGELOG.md merge=union

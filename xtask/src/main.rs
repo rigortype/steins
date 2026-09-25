@@ -32,6 +32,7 @@
 //! binary) so it reads parse errors and call data straight off `SourceTree`.
 
 mod artifact_bytes;
+mod changelog;
 mod corpus;
 mod corpus_local;
 mod fold_probe;
