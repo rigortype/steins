@@ -3,7 +3,8 @@
 //! ```text
 //! cargo xtask <command>
 //!
-//!   artifact-bytes <DIR>…   where a package artifact's bytes go (issue #504)
+//!   artifact-bytes <DIR>… [--no-php]
+//!                            where a package artifact's bytes go (issue #504)
 //!   corpus-sync [--update]   materialize the pinned FP-gate corpus into corpus/
 //!   fold-probe [--names …]   differential 32/64-bit width probe over the fold allowlist
 //!   fp-gate                  run the proof-layer pipeline over the corpus (gate)
@@ -22,7 +23,8 @@
 //!   mine-resource-params [--php-src DIR]
 //!                            scan php-src's stubs for `@param resource` positions into the resource-params TOML
 //!   nsrt [DIR]               assertType harness (oracle idea B) over phpstan-src nsrt
-//!   perf <DIR>… [--bless]    cold perf baseline + the determinism half of warm ≡ cold (ADR-0092 §5)
+//!   perf <DIR>… [--runs N] [--bless] [--no-php] [--warm] [--paranoid]
+//!                            cold perf baseline + the determinism half of warm ≡ cold (ADR-0092 §5)
 //!   phpdoc-oracle [--check]  diff steins-phpdoc against the real phpstan/phpdoc-parser
 //! ```
 //!
@@ -100,7 +102,7 @@ const COMMANDS: &[Command] = &[
     Command { name: "freq", usage: "", run: |_| outcome(freq::run()) },
     Command {
         name: "gen-catalog",
-        usage: "",
+        usage: "[--check]",
         run: |args| outcome(gen_catalog::run(args.iter().any(|a| a == "--check"))),
     },
     Command {
@@ -202,7 +204,7 @@ const COMMANDS: &[Command] = &[
     // ADR-0092 §5: a determinism or blessed-findings break blocks; timing never does.
     Command {
         name: "perf",
-        usage: "<DIR>… [--runs N] [--bless] [--no-php]",
+        usage: "<DIR>… [--runs N] [--bless] [--no-php] [--warm] [--paranoid]",
         run: |args| verdict(perf::run(args)),
     },
     Command {
