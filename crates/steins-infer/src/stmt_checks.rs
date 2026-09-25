@@ -23,7 +23,8 @@ use crate::string_context::check_string_contexts;
 use crate::walk::WalkCx;
 
 /// Step 1z of [`walk_trace`]: the checks that fire at the read positions this IR
-/// spells, against the env and store the statement is entered with.
+/// spells, against the env and store the statement is entered with. Plain per-scope
+/// pass only, which is the caller's gate: a descent must not re-judge the same site.
 ///
 /// [`walk_trace`]: crate::walk::walk_trace
 pub(crate) fn check_read_positions(
@@ -32,7 +33,6 @@ pub(crate) fn check_read_positions(
     stmt: &Stmt,
     env: &HashMap<String, Known>,
     store: &Store,
-    descent: &Option<Descent<'_>>,
     out: &mut Vec<Diagnostic>,
 ) {
     let cx = w.cx;
@@ -44,9 +44,8 @@ pub(crate) fn check_read_positions(
     // (`descent.is_none()`), reading the pre-statement env (which already carries
     // this sub-trace's branch refinements — e.g. an `=== []` guard narrowing the
     // container to `Singleton([])`).
-    if descent.is_none()
-        && let StmtKind::Assign { value: ArgValue::OffsetRead { base, key }, span, .. }
-        | StmtKind::Return { value: ArgValue::OffsetRead { base, key }, span, .. } = &stmt.kind
+    if let StmtKind::Assign { value: ArgValue::OffsetRead { base, key }, span, .. }
+    | StmtKind::Return { value: ArgValue::OffsetRead { base, key }, span, .. } = &stmt.kind
     {
         check_offset_read(cx, folder, base, key, env, scope.poisoned, *span, out);
         // The strict leg (ADR-0062 S6 / A-G10) at the SAME whitelisted position:
@@ -61,9 +60,7 @@ pub(crate) fn check_read_positions(
     // position: `[$a, $b] = $m;` / `list($a, $b) = $m;` reads `$m[0]`, `$m[1]`
     // exactly as the assignment-RHS position reads `$m[0]`, and PHP warns per
     // absent key. The targets are writes and stay silent (audit note G7(e)).
-    if descent.is_none()
-        && let StmtKind::Destructure { source, call, reads, span } = &stmt.kind
-    {
+    if let StmtKind::Destructure { source, call, reads, span } = &stmt.kind {
         check_destructure_source(
             w, folder, source, call.as_ref(), reads, env, store, *span, out,
         );
@@ -73,9 +70,8 @@ pub(crate) fn check_read_positions(
     // is a silence carrier for every arm it protects, but the right-most arm is a
     // plain read — the value whenever everything left fell through. Judged under
     // the accumulated `¬isset` premise ladder S5 built.
-    if descent.is_none()
-        && let StmtKind::Assign { value: value @ ArgValue::Coalesce(..), span, .. }
-        | StmtKind::Return { value: value @ ArgValue::Coalesce(..), span, .. } = &stmt.kind
+    if let StmtKind::Assign { value: value @ ArgValue::Coalesce(..), span, .. }
+    | StmtKind::Return { value: value @ ArgValue::Coalesce(..), span, .. } = &stmt.kind
     {
         check_coalesce_final_arm(cx, value, env, scope.poisoned, *span, out);
     }
@@ -85,9 +81,8 @@ pub(crate) fn check_read_positions(
     // pre-statement env — so a branch that narrowed the receiver is already in
     // force. Argument/echo/condition positions are outside the whitelist,
     // like `offset.missing`.
-    if descent.is_none()
-        && let StmtKind::Assign { value: ArgValue::PropFetch { var, prop }, span, .. }
-        | StmtKind::Return { value: ArgValue::PropFetch { var, prop }, span, .. } = &stmt.kind
+    if let StmtKind::Assign { value: ArgValue::PropFetch { var, prop }, span, .. }
+    | StmtKind::Return { value: ArgValue::PropFetch { var, prop }, span, .. } = &stmt.kind
     {
         check_property_on_non_object(cx, var, prop, env, scope.poisoned, *span, out);
     }
@@ -95,36 +90,32 @@ pub(crate) fn check_read_positions(
     // 1z-ter. String context (ADR-0078, issue #193): every value this statement
     // hands to PHP's string conversion, judged against the pre-statement env,
     // the env PHP evaluates the operands in.
-    if descent.is_none() {
-        check_string_contexts(w, folder, stmt, env, store, out);
-    }
+    check_string_contexts(w, folder, stmt, env, store, out);
 
     // 1z-quater. `property.inaccessible` / `class-const.inaccessible` (ADR-0078,
     // issue #185) at the member-access positions this IR spells: the same two
     // whitelisted read positions the offset family uses, plus the property write
     // statement, itself a member access (`Cannot access private property C::$p`
     // is witnessed both directions).
-    if descent.is_none() {
-        match &stmt.kind {
-            StmtKind::Assign { value: ArgValue::PropFetch { var, prop }, span, .. }
-            | StmtKind::Return { value: ArgValue::PropFetch { var, prop }, span, .. } => {
-                check_inaccessible_property(w, var, prop, store, false, *span, out);
-                // Absence twin (ADR-0078, issue #197), read position only — the
-                // write side is `property.dynamic-write`, deferred with its own
-                // design. Disjoint by construction from the inaccessible check
-                // above (that requires a *declared* property).
-                check_undefined_property(w, folder, var, prop, store, *span, out);
-            }
-            StmtKind::PropAssign { target_var, prop, span, .. } => {
-                check_inaccessible_property(w, target_var, prop, store, true, *span, out);
-            }
-            StmtKind::Assign { value: ArgValue::ClassConst(sc, name), span, .. }
-            | StmtKind::Return { value: ArgValue::ClassConst(sc, name), span, .. } => {
-                check_inaccessible_class_const(w, sc, name, *span, out);
-                check_undefined_class_const(w, folder, sc, name, *span, out);
-            }
-            _ => {}
+    match &stmt.kind {
+        StmtKind::Assign { value: ArgValue::PropFetch { var, prop }, span, .. }
+        | StmtKind::Return { value: ArgValue::PropFetch { var, prop }, span, .. } => {
+            check_inaccessible_property(w, var, prop, store, false, *span, out);
+            // Absence twin (ADR-0078, issue #197), read position only — the
+            // write side is `property.dynamic-write`, deferred with its own
+            // design. Disjoint by construction from the inaccessible check
+            // above (that requires a *declared* property).
+            check_undefined_property(w, folder, var, prop, store, *span, out);
         }
+        StmtKind::PropAssign { target_var, prop, span, .. } => {
+            check_inaccessible_property(w, target_var, prop, store, true, *span, out);
+        }
+        StmtKind::Assign { value: ArgValue::ClassConst(sc, name), span, .. }
+        | StmtKind::Return { value: ArgValue::ClassConst(sc, name), span, .. } => {
+            check_inaccessible_class_const(w, sc, name, *span, out);
+            check_undefined_class_const(w, folder, sc, name, *span, out);
+        }
+        _ => {}
     }
 }
 
