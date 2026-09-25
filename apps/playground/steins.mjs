@@ -24,6 +24,10 @@
 // iteration cap is the caller's, and exhausting it means falling back to the
 // non-replay call, never to showing a half-converged run.
 //
+// Every check envelope, replay or not, also carries `hidden`: per other built-in
+// profile, how many findings it would list that the selected one does not
+// (`hidden.mjs` decides which of them the panel names).
+//
 // Views into wasm memory are recreated after every call: a call can grow the
 // memory, and growth detaches every existing ArrayBuffer view.
 
