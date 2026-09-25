@@ -14,7 +14,9 @@
 //! plain cold pipeline under `--no-cache` or on any degradation. The two
 //! arms differ in cost and in nothing else: same findings, same channels, same
 //! stderr — see [`crate::generation`] for why that silence is a property
-//! rather than a preference.
+//! rather than a preference. The config read and both arms are
+//! [`analyze_check`], which the MCP `check` tool calls too; the baseline
+//! channel, `--fix` and the render are this command's own.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -23,13 +25,15 @@ use std::process::ExitCode;
 use steins_db::{Project, SteinsDatabase, parse as parse_tree};
 use steins_edit::{ByteSpan, Edit, EditPlan};
 use steins_infer::{
-    Diagnostic, SOUND_SUBSET_NOTICE, SidecarFolder, apply_inline_ignores, check_project_under,
+    Diagnostic, InlineOutcome, SOUND_SUBSET_NOTICE, SidecarFolder, apply_inline_ignores,
+    check_project_under,
 };
 use steins_syntax::SourceTree;
 
 use crate::config::{
     allow_list, effects_from_config, profiles_from_config, read_steins_config, runtime_from_config,
 };
+use crate::generation::{consume_cached_run, try_generation_check};
 use crate::project::{LoadedProject, collect_files, load_project, reject_missing_paths};
 use crate::transform::{PostCheckSurface, post_check};
 use crate::{baseline, profile, render};
@@ -103,6 +107,21 @@ impl CheckArgs {
         Ok(parsed)
     }
 
+    /// The analysis this command line asks for over `files`. `check` says the
+    /// `[runtime]` warnings on stderr, after the boundary notices.
+    fn request<'a>(&'a self, files: &'a [PathBuf]) -> CheckRequest<'a> {
+        CheckRequest {
+            files,
+            paths: &self.paths,
+            profile: self.profile.as_deref(),
+            no_tolerated_effects: self.no_tolerated_effects,
+            no_php: self.no_php,
+            no_cache: self.no_cache,
+            vendor_diagnostics: self.vendor_diagnostics,
+            runtime_warnings_on_stderr: true,
+        }
+    }
+
     /// Auto-detection (ADR-0054 §6): explicit `--format` wins, else env may
     /// name a consumer (GitHub Actions) — only the spelling changes.
     fn format(&self) -> render::CheckFormat {
@@ -139,12 +158,11 @@ pub(crate) fn run_check(args: &[String]) -> ExitCode {
         Ok(args) => args,
         Err(code) => return code,
     };
-    let paths = &args.paths;
-    if let Err(code) = reject_missing_paths(paths) {
+    if let Err(code) = reject_missing_paths(&args.paths) {
         return code;
     }
 
-    let files = collect_files(paths);
+    let files = collect_files(&args.paths);
 
     // Coverage posture (ADR-0004): `--no-php` runs the sound subset (notice up
     // front); otherwise folds via a lazily-spawned sidecar.
@@ -152,84 +170,14 @@ pub(crate) fn run_check(args: &[String]) -> ExitCode {
         errln!("{SOUND_SUBSET_NOTICE}");
     }
 
-    // Parse `./steins.toml` once, up front (ADR-0050 §7/ADR-0052 §5 N2): a
-    // malformed file (incl. an unknown `[runtime]` key) is exit 2, never warn-and-proceed.
-    let config = match read_steins_config() {
-        Ok(c) => c,
-        Err(e) => {
-            errln!("steins: {e}");
-            return ExitCode::from(2);
-        }
-    };
-    let (check_cfg, profile_tbl, runtime_cfg, plugin_allow, effects_cfg) = match config {
-        Some(c) => (c.check, c.profile, c.runtime, allow_list(c.plugins), c.effects),
-        None => (None, None, None, None, None),
-    };
-    let effects_policy = effects_from_config(effects_cfg, args.no_tolerated_effects);
-
-    // Active display surface (ADR-0050 §5), resolved before analysis (config
-    // error fails fast, exit 2). Precedence: `--profile` > `[check] profile` > `default`.
-    let (config_profile, profile_configs) = profiles_from_config(check_cfg, profile_tbl);
-    let selected = args.profile.as_deref().or(config_profile.as_deref());
-    let surface = match profile_configs.resolve(selected) {
-        Ok(s) => s,
-        Err(e) => {
-            errln!("steins: {e}");
-            return ExitCode::from(2);
-        }
-    };
-
-    // `[runtime]` pseudo-constants (ADR-0037 §2), resolved up front (pure;
-    // an unknown value on a known key warns — printed in each arm below at
-    // the same point it always was — and keeps the safe default).
-    let (postures, runtime_warnings) = runtime_from_config(runtime_cfg);
-
-    // The frozen-generation lifecycle (ADR-0092 §5): how a check runs unless
-    // `--no-cache` says otherwise (ADR-0020 amendment, issue #525). Silent in
-    // both directions — the cached arm prints the boundary notices the cold
-    // arm prints and nothing more, and any degradation falls through to the
-    // cold arm below with stderr still untouched.
-    let cached = if args.no_cache {
-        None
-    } else {
-        crate::generation::try_generation_check(
-            &files,
-            paths,
-            plugin_allow.as_deref(),
-            &effects_policy,
-            &postures,
-            args.no_php,
-            &runtime_warnings,
-        )
-    };
-
-    // Suppression channels, ADR-0050 §6 order (vendor → surface → policy →
-    // inline). Baseline stays out: it's the CI ratchet, this command's own
-    // argument. The cached arm supplies the orchestrator's own trees so the
-    // inline scan re-parses nothing; the cold arm reads the salsa parse memo.
-    let (loaded, inline, vendor_suppressed) = match cached {
-        Some(run) => crate::generation::consume_cached_run(run, &surface, args.vendor_diagnostics),
-        None => {
-            // One folder for the whole run: owns the sidecar + fold memo, so repeated
-            // calls across files never re-spawn or re-fold.
-            let mut folder =
-                if args.no_php { SidecarFolder::new(true) } else { SidecarFolder::enabled() };
-
-            // Project mode (ADR-0009/0015): all `.php` files form ONE project (one salsa
-            // DB) so cross-file calls, class chains, effects resolve.
-            let loaded = load_project(&files, paths, plugin_allow.as_deref(), effects_policy);
-            // Target PHP range (issue #28) gates the folder's absence family and curated facts.
-            folder.set_php_target(loaded.layout.php_target().cloned());
-            for w in &runtime_warnings {
-                errln!("steins: {w}");
+    let CheckOutcome { surface, loaded, inline, vendor_suppressed, .. } =
+        match analyze_check(&args.request(&files)) {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                errln!("steins: {e}");
+                return ExitCode::from(2);
             }
-            let findings: Vec<Diagnostic> =
-                check_project_under(&loaded.db, loaded.project, &mut folder, postures);
-            let (inline, vendor_suppressed) =
-                suppression_pipeline(&loaded, findings, &surface, args.vendor_diagnostics);
-            (loaded, inline, vendor_suppressed)
-        }
-    };
+        };
     let (db, project, texts) = (&loaded.db, loaded.project, &loaded.texts);
 
     let baseline_file = args.baseline_file();
@@ -238,22 +186,13 @@ pub(crate) fn run_check(args: &[String]) -> ExitCode {
         return write_baseline(&file, &inline.kept, texts, &surface);
     }
 
-    // Baseline channel: partitions survivors into baselined (excluded) and
-    // reported; no file → all report. Staleness is surface-aware (ADR-0050 §8).
-    let (reported, baselined, stale, surface_notice) = match &baseline_file {
-        Some(file) => match std::fs::read_to_string(file) {
-            Ok(text) => match_baseline(file, &text, inline.kept, texts, &surface),
-            Err(_) => (inline.kept, 0, 0, None),
-        },
-        None => (inline.kept, 0, 0, None),
-    };
+    let (reported, baselined, stale, surface_notice) =
+        baseline_channel(baseline_file.as_deref(), inline.kept, texts, &surface);
 
     // Displayed = survivors + meta-diagnostics (exempt from both channels), sorted.
     let mut displayed = reported;
     displayed.extend(inline.meta);
-    displayed.sort_by(|a, b| {
-        (a.path.as_str(), a.line, a.column, a.id).cmp(&(b.path.as_str(), b.line, b.column, b.id))
-    });
+    sort_displayed(&mut displayed);
 
     // `check --fix` (ADR-0010): applies fix payloads under ADR-0034's
     // transformed-or-refused discipline. Without the flag, `None` — unchanged.
@@ -292,6 +231,144 @@ pub(crate) fn run_check(args: &[String]) -> ExitCode {
     // 0 (warn-only); fixed findings are already gone from `displayed`.
     let any_fail = displayed.iter().any(|d| surface.level(d.id) == profile::Level::Fail);
     if any_fail { ExitCode::FAILURE } else { ExitCode::SUCCESS }
+}
+
+/// One check as its caller spells it: what to analyze, the caller's own
+/// selections, and where the `[runtime]` warnings go.
+pub(crate) struct CheckRequest<'a> {
+    pub(crate) files: &'a [PathBuf],
+    pub(crate) paths: &'a [String],
+    /// The caller's profile selection, which beats `[check] profile`.
+    pub(crate) profile: Option<&'a str>,
+    /// `--no-tolerated-effects` (ADR-0084 §1).
+    pub(crate) no_tolerated_effects: bool,
+    pub(crate) no_php: bool,
+    /// Skip the generation lifecycle and run the cold pipeline.
+    pub(crate) no_cache: bool,
+    pub(crate) vendor_diagnostics: bool,
+    /// Whether the `[runtime]` warnings are said on stderr, after the boundary
+    /// notices. `check` says them there; the MCP tool carries them in its reply
+    /// document instead, and saying them on stderr too would say them twice.
+    pub(crate) runtime_warnings_on_stderr: bool,
+}
+
+/// What a check hands its report: the surface it displays under, the
+/// `[runtime]` warnings, the salsa view (for `--fix` and the baseline
+/// machinery), the inline outcome and the vendor count.
+pub(crate) struct CheckOutcome {
+    pub(crate) surface: profile::Surface,
+    pub(crate) runtime_warnings: Vec<String>,
+    pub(crate) loaded: LoadedProject,
+    pub(crate) inline: InlineOutcome,
+    pub(crate) vendor_suppressed: usize,
+}
+
+/// Why a check could not start: exit 2 on the command line, a named refusal
+/// over MCP.
+pub(crate) enum SetupError {
+    /// `steins.toml` does not parse, an unknown `[runtime]` key included.
+    Config(String),
+    /// The selected profile does not resolve.
+    Profile(profile::ConfigError),
+}
+
+impl std::fmt::Display for SetupError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SetupError::Config(e) => write!(f, "{e}"),
+            SetupError::Profile(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+/// Resolve `./steins.toml` and analyze — the one path `steins check` and the
+/// MCP `check` tool share, so the two cannot answer differently.
+///
+/// The analysis comes through the generation lifecycle unless the request says
+/// `no_cache`, and falls back to the cold pipeline in silence. Either arm
+/// prints the same boundary notices in the same order — plugin refusals, the
+/// effect label vocabulary, attribution hygiene, then the `[runtime]` warnings
+/// when the request wants them on stderr — and runs the `[runtime]` postures
+/// whole: every posture is part of the generation's identity, so declaring
+/// some of them on one arm and all of them on the other would key two stores
+/// over one tree.
+pub(crate) fn analyze_check(req: &CheckRequest<'_>) -> Result<CheckOutcome, SetupError> {
+    // Parse `./steins.toml` once, up front (ADR-0050 §7/ADR-0052 §5 N2): a
+    // malformed file (incl. an unknown `[runtime]` key) is exit 2, never warn-and-proceed.
+    let config = read_steins_config().map_err(SetupError::Config)?;
+    let (check_cfg, profile_tbl, runtime_cfg, plugin_allow, effects_cfg) = match config {
+        Some(c) => (c.check, c.profile, c.runtime, allow_list(c.plugins), c.effects),
+        None => (None, None, None, None, None),
+    };
+    let effects_policy = effects_from_config(effects_cfg, req.no_tolerated_effects);
+
+    // Active display surface (ADR-0050 §5), resolved before analysis (config
+    // error fails fast, exit 2). Precedence: `--profile` > `[check] profile` > `default`.
+    let (config_profile, profile_configs) = profiles_from_config(check_cfg, profile_tbl);
+    let selected = req.profile.or(config_profile.as_deref());
+    let surface = profile_configs.resolve(selected).map_err(SetupError::Profile)?;
+
+    // `[runtime]` pseudo-constants (ADR-0037 §2), resolved up front (pure;
+    // an unknown value on a known key warns — printed in each arm below at
+    // the same point it always was — and keeps the safe default).
+    let (postures, runtime_warnings) = runtime_from_config(runtime_cfg);
+    let said: &[String] = if req.runtime_warnings_on_stderr { &runtime_warnings } else { &[] };
+
+    // The frozen-generation lifecycle (ADR-0092 §5): how a check runs unless
+    // `--no-cache` says otherwise (ADR-0020 amendment, issue #525). Silent in
+    // both directions — the cached arm prints the boundary notices the cold
+    // arm prints and nothing more, and any degradation falls through to the
+    // cold arm below with stderr still untouched.
+    let cached = if req.no_cache {
+        None
+    } else {
+        try_generation_check(
+            req.files,
+            req.paths,
+            plugin_allow.as_deref(),
+            &effects_policy,
+            &postures,
+            req.no_php,
+            said,
+        )
+    };
+
+    // Suppression channels, ADR-0050 §6 order (vendor → surface → policy →
+    // inline). Baseline stays out: it's the CI ratchet, this command's own
+    // argument. The cached arm supplies the orchestrator's own trees so the
+    // inline scan re-parses nothing; the cold arm reads the salsa parse memo.
+    let (loaded, inline, vendor_suppressed) = match cached {
+        Some(run) => consume_cached_run(run, &surface, req.vendor_diagnostics),
+        None => {
+            // One folder for the whole run: owns the sidecar + fold memo, so repeated
+            // calls across files never re-spawn or re-fold.
+            let mut folder =
+                if req.no_php { SidecarFolder::new(true) } else { SidecarFolder::enabled() };
+
+            // Project mode (ADR-0009/0015): all `.php` files form ONE project (one salsa
+            // DB) so cross-file calls, class chains, effects resolve.
+            let loaded =
+                load_project(req.files, req.paths, plugin_allow.as_deref(), effects_policy);
+            // Target PHP range (issue #28) gates the folder's absence family and curated facts.
+            folder.set_php_target(loaded.layout.php_target().cloned());
+            for w in said {
+                errln!("steins: {w}");
+            }
+            let findings: Vec<Diagnostic> =
+                check_project_under(&loaded.db, loaded.project, &mut folder, postures);
+            let (inline, vendor_suppressed) =
+                suppression_pipeline(&loaded, findings, &surface, req.vendor_diagnostics);
+            (loaded, inline, vendor_suppressed)
+        }
+    };
+    Ok(CheckOutcome { surface, runtime_warnings, loaded, inline, vendor_suppressed })
+}
+
+/// The one order a check displays findings in: path, line, column, id.
+pub(crate) fn sort_displayed(displayed: &mut [Diagnostic]) {
+    displayed.sort_by(|a, b| {
+        (a.path.as_str(), a.line, a.column, a.id).cmp(&(b.path.as_str(), b.line, b.column, b.id))
+    });
 }
 
 /// Outcome of a `check --fix` run. `applied` is true iff edits were written; a
@@ -460,6 +537,24 @@ fn write_baseline(
             errln!("steins: cannot write baseline {}: {e}", file.display());
             ExitCode::from(2)
         }
+    }
+}
+
+/// Baseline channel: partitions survivors into baselined (excluded) and
+/// reported; no file (or an unreadable one) → all report. Staleness is
+/// surface-aware (ADR-0050 §8). Returns what [`match_baseline`] returns.
+fn baseline_channel(
+    file: Option<&Path>,
+    kept: Vec<Diagnostic>,
+    texts: &HashMap<String, String>,
+    surface: &profile::Surface,
+) -> (Vec<Diagnostic>, usize, usize, Option<String>) {
+    match file {
+        Some(file) => match std::fs::read_to_string(file) {
+            Ok(text) => match_baseline(file, &text, kept, texts, surface),
+            Err(_) => (kept, 0, 0, None),
+        },
+        None => (kept, 0, 0, None),
     }
 }
 

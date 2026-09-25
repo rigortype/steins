@@ -36,10 +36,10 @@ pub(crate) use steins_infer::profile;
 use std::io::Write as _;
 use std::process::ExitCode;
 
-pub(crate) use check::suppression_pipeline;
+pub(crate) use check::{CheckRequest, analyze_check, sort_displayed};
 pub(crate) use config::{
-    RuntimeConfig, allow_list, allow_list_from_disk, effects_from_config, effects_policy_from_disk,
-    profiles_from_config, read_steins_config, runtime_from_config,
+    RuntimeConfig, allow_list_from_disk, effects_policy_from_disk, profiles_from_config,
+    read_steins_config, runtime_from_config,
 };
 pub(crate) use project::{
     collect_files, collect_sources, load_project, missing_paths, reject_missing_paths,
