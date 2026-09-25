@@ -69,9 +69,9 @@ use std::process::ExitCode;
 
 use serde_json::{Value, json};
 use steins_edit::{CompletenessOracle, EditPlan, unified_diff};
-use steins_infer::{Diagnostic, SidecarFolder, check_project_under};
+use steins_infer::Diagnostic;
 
-use crate::profile;
+use crate::check::{CheckOutcome, SetupError};
 use crate::transform::TransformKind;
 
 /// The MCP revision this server implements. `initialize` echoes the client's
@@ -701,62 +701,36 @@ fn tool_check(_session: &Session, args: &Value) -> Result<Reply, ToolError> {
     let vendor_diagnostics = bool_arg(args, "vendor_diagnostics")?;
     let requested_profile = optional_string_arg(args, "profile")?;
 
-    // Same config read as `check`: a malformed steins.toml is a refusal.
-    let config = crate::read_steins_config().map_err(|e| ToolError::new("config-error", e))?;
-    let (check_cfg, profile_tbl, runtime_cfg, plugin_allow, effects_cfg) = match config {
-        Some(c) => (c.check, c.profile, c.runtime, crate::allow_list(c.plugins), c.effects),
-        None => (None, None, None, None, None),
-    };
-    let (config_profile, profile_configs) = crate::profiles_from_config(check_cfg, profile_tbl);
-    let selected = requested_profile.as_deref().or(config_profile.as_deref());
-    let surface: profile::Surface = profile_configs
-        .resolve(selected)
-        .map_err(|e| ToolError::new("unknown-profile", e.to_string()))?;
-
-    let files = crate::collect_files(&paths);
-    let effects_policy = crate::effects_from_config(effects_cfg, false);
-    let (postures, runtime_notices) = crate::runtime_from_config(runtime_cfg);
-
-    // The frozen-generation lifecycle (ADR-0092 §5, issue #491), resolved from
-    // *this request's* paths: capture root and store root come out of the files
-    // named here, never out of the process, so a server asked about two
+    // The same config read and the same analysis as `check`: a malformed
+    // steins.toml is a refusal, and so is a profile that does not resolve.
+    //
+    // The frozen-generation lifecycle (ADR-0092 §5, issue #491) is resolved
+    // from *this request's* paths: capture root and store root come out of the
+    // files named here, never out of the process, so a server asked about two
     // projects answers each from that project's store. The `[runtime]`
-    // warnings are deliberately not handed to the collector — this surface
-    // carries them in the reply document below, where a cold answer carries
-    // them too, and stderr is the log channel rather than the answer.
-    let cached = crate::generation::try_generation_check(
-        &files,
-        &paths,
-        plugin_allow.as_deref(),
-        &effects_policy,
-        &postures,
+    // warnings stay off stderr — this surface carries them in the reply
+    // document below, where a cold answer carries them too, and stderr is the
+    // log channel rather than the answer.
+    let files = crate::collect_files(&paths);
+    let checked = crate::analyze_check(&crate::CheckRequest {
+        files: &files,
+        paths: &paths,
+        profile: requested_profile.as_deref(),
+        no_tolerated_effects: false,
         no_php,
-        &[],
-    );
-    let (_loaded, inline, vendor_suppressed) = match cached {
-        Some(run) => crate::generation::consume_cached_run(run, &surface, vendor_diagnostics),
-        None => {
-            let mut folder =
-                if no_php { SidecarFolder::new(true) } else { SidecarFolder::enabled() };
-            let loaded =
-                crate::load_project(&files, &paths, plugin_allow.as_deref(), effects_policy);
-            folder.set_php_target(loaded.layout.php_target().cloned());
-            // The `[runtime]` postures whole, as `steins check` runs them: a
-            // warm arm and a cold arm must be one analysis, and every posture
-            // is part of the generation's identity — declaring some of them
-            // here and all of them there would key two stores over one tree.
-            let findings = check_project_under(&loaded.db, loaded.project, &mut folder, postures);
-            let (inline, vendor_suppressed) =
-                crate::suppression_pipeline(&loaded, findings, &surface, vendor_diagnostics);
-            (loaded, inline, vendor_suppressed)
-        }
-    };
+        no_cache: false,
+        vendor_diagnostics,
+        runtime_warnings_on_stderr: false,
+    })
+    .map_err(|e| match e {
+        SetupError::Config(e) => ToolError::new("config-error", e),
+        SetupError::Profile(e) => ToolError::new("unknown-profile", e.to_string()),
+    })?;
+    let CheckOutcome { surface, runtime_warnings, inline, vendor_suppressed, .. } = checked;
 
     let mut displayed = inline.kept;
     displayed.extend(inline.meta);
-    displayed.sort_by(|a, b| {
-        (a.path.as_str(), a.line, a.column, a.id).cmp(&(b.path.as_str(), b.line, b.column, b.id))
-    });
+    crate::sort_displayed(&mut displayed);
     let findings: Vec<Value> =
         displayed.iter().map(|d| crate::render::finding_json(d, &surface)).collect();
 
@@ -766,7 +740,7 @@ fn tool_check(_session: &Session, args: &Value) -> Result<Reply, ToolError> {
         "vendor_suppressed": vendor_suppressed,
         "suppressed": inline.suppressed,
         "sound_subset": no_php,
-        "notices": runtime_notices,
+        "notices": runtime_warnings,
     })))
 }
 

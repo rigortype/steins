@@ -6,14 +6,15 @@
 //! boundary inputs, call the orchestrator, and hand back what the unchanged
 //! downstream pipeline needs.
 //!
-//! **Two callers, one consumption.** [`try_generation_check`] resolves capture
+//! **Two surfaces, one caller.** [`try_generation_check`] resolves capture
 //! root and store root from the run's own files, so nothing here is process
 //! state: a resident MCP server pointed at two projects answers each from that
-//! project's store, because a store is addressed by the tree it caches. What
-//! the two callers do with a [`CachedRun`] is [`consume_cached_run`] — the
-//! inline scan over the orchestrator's trees, the suppression channels, the
-//! notice ordering — so a warm reply differs from its cold twin in cost and in
-//! nothing else.
+//! project's store, because a store is addressed by the tree it caches. `steins
+//! check` and the MCP `check` tool both come through
+//! [`crate::check::analyze_check`], which hands a [`CachedRun`] to
+//! [`consume_cached_run`] — the inline scan over the orchestrator's trees, the
+//! suppression channels, the notice ordering — so a warm reply differs from its
+//! cold twin in cost and in nothing else.
 //!
 //! **The surface** (ADR-0020 amendment, issue #525). The lifecycle is on
 //! unless `--no-cache` turns it off. There is no environment variable and no
@@ -97,7 +98,7 @@ pub(crate) fn try_generation_check(
     let plugins = PluginFacts::discover(&layout, plugin_allow);
     // The cold path's order, kept here so the two stderrs are one stderr:
     // `load_project` prints plugin refusals, then the effect label vocabulary,
-    // then attribution hygiene; `run_check` prints the `[runtime]` warnings
+    // then attribution hygiene; `analyze_check` prints the `[runtime]` warnings
     // after it returns.
     let mut notices: Vec<String> = plugins.notices().to_vec();
     notices.extend(effects.label_notices(plugins.registry()));
@@ -155,12 +156,12 @@ pub(crate) fn try_generation_check(
 }
 
 /// Consume a cached run: print the notices it collected, then run the
-/// suppression channels over the orchestrator's own trees. Returns what both
-/// callers' cold arms hand their reports — the salsa view, the inline outcome,
-/// and the vendor count — so warm and cold meet at one shape.
+/// suppression channels over the orchestrator's own trees. Returns what the
+/// cold arm hands the report — the salsa view, the inline outcome, and the
+/// vendor count — so warm and cold meet at one shape.
 ///
-/// The notices print here because here is where each caller's cold path prints
-/// its own: `load_project` says them while loading, before a finding is
+/// The notices print here because here is where the cold path prints its
+/// own: `load_project` says them while loading, before a finding is
 /// rendered either way. They were collected rather than printed so that a
 /// degraded run says them once, from the cold path.
 pub(crate) fn consume_cached_run(
