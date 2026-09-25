@@ -382,3 +382,50 @@ fn repeated_edits_do_not_grow_the_store() {
         previous = now;
     }
 }
+
+/// The boundary notices a check owes stderr come in the cold path's order
+/// whichever arm served the run: the effect label vocabulary, the attribution
+/// hygiene, then the `[runtime]` warnings. The cached arm collects them and
+/// prints them where the cold arm would have, so its stderr is the uncached
+/// run's byte for byte, cold build and warm replay alike.
+#[test]
+fn the_boundary_notices_keep_the_cold_order_on_both_arms() {
+    let tree = TempDir::new("notices-tree");
+    let elsewhere = TempDir::new("notices-cwd");
+    write_fixture(&tree.dir);
+    // `steins.toml` is read from the working directory, not the analyzed tree.
+    std::fs::write(
+        elsewhere.dir.join("steins.toml"),
+        "[runtime]\nwarning-handler = \"bogus\"\n\n\
+         [effects]\ntolerated = [\"bogus.label\"]\n\n\
+         [effects.attribution]\n\"NoSuchClass\" = [\"io\"]\n",
+    )
+    .unwrap();
+    let paths = [tree.dir.as_path()];
+
+    let uncached = check(&elsewhere.dir, &paths, false);
+    let order = [
+        "running as sound subset",
+        "steins: steins.toml [effects] tolerated: unknown effect label 'bogus.label'",
+        "steins: steins.toml [effects.attribution]: \"NoSuchClass\" names no symbol",
+        "steins: steins.toml [runtime] warning-handler: unknown value `bogus`",
+    ];
+    let at: Vec<usize> = order
+        .iter()
+        .map(|needle| {
+            uncached.stderr.find(needle).unwrap_or_else(|| {
+                panic!("the uncached run must say {needle:?}; stderr:\n{}", uncached.stderr)
+            })
+        })
+        .collect();
+    assert!(at.is_sorted(), "the notices come in the cold path's order:\n{}", uncached.stderr);
+
+    let cold = check(&elsewhere.dir, &paths, true);
+    assert!(current_generation(&tree.dir).is_some(), "the cold run publishes a generation");
+    assert_eq!(cold.stderr, uncached.stderr, "a cold build says what an uncached run says");
+    assert_eq!(cold.stdout, uncached.stdout, "the cache must not move a finding");
+
+    let warm = check(&elsewhere.dir, &paths, true);
+    assert_eq!(warm.stderr, uncached.stderr, "a warm replay says it in the same order");
+    assert_eq!(warm.stdout, uncached.stdout, "warm findings are the uncached findings");
+}
