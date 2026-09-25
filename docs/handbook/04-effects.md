@@ -53,7 +53,7 @@ is closed today — the taxonomy roots plus whatever the builtin
 catalog can color a function with:
 
 ```text
-exit   ffi
+eval   exit   ffi
 global.read   global.write
 io   io.db   io.fs   io.fs.read   io.fs.write   io.input   io.ipc
      io.net   io.net.http   io.process   io.signal
@@ -354,13 +354,18 @@ back.
 
 Effects have exactly two origins: **catalogued builtin/extension
 functions** and **language constructs** (`echo`/`print`/inline
-HTML → `io.output.buffer`, `exit`/`die` → `exit`). Nothing
+HTML → `io.output.buffer`, `exit`/`die` → `exit`, `eval` →
+`eval`, `include`/`require` → `io.fs.read`). Nothing
 else *creates* an effect — user code only propagates what it
 calls. An uncatalogued function widens to *unknown effect*,
 which taints the `…?` exhaustiveness bit but never produces a
 finding. That seeding order — color what you know, widen the
 rest — is the only one compatible with the zero-false-positive
 bar.
+
+`eval` and the inclusions are both at once: the construct itself
+is proven, and the code it runs is not seen, so a body holding
+one reads `effects: {eval, …?}` or `effects: {io.fs.read, …?}`.
 
 This also connects back to Chapter 1's sidecar: Steins may fold a
 value by executing it in the sidecar **only when its effect set

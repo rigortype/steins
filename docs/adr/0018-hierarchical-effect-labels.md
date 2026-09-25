@@ -3,6 +3,9 @@
 > Amended by ADR-0083: the taxonomy's shape is unchanged, but the `output`
 > root it inherited from ADR-0008 is retired in favour of `io.output` (plus
 > `io.input`) — so a bare `io` envelope now admits output.
+>
+> Amended by ADR-0046's 2026-09-26 amendment: `eval` joins the core roots as
+> an escape hatch beside `ffi`, outside `io`.
 
 Supersedes the enum sketch in ADR-0006/0008. Three pressures killed the enum:
 PHP enums are closed-world, so ecosystem and **private effects** could never
