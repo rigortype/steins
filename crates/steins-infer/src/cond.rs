@@ -360,7 +360,7 @@ fn cmp_operand_candidates(
 /// `$x = ($a === $b); f($x);` against `function f(int $i)` is now a definite No
 /// instead of silence.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn eval_binary_fact(
+fn eval_binary_fact(
     cx: &Cx<'_>,
     folder: &mut dyn Folder,
     cop: CmpOp,
@@ -573,7 +573,7 @@ fn bool_verdict_fact(verdict: Certainty, derived: Stratum) -> (Fact, Stratum) {
 /// reason: an expression PHP never evaluates is not evidence for the verdict.
 /// `xor` never short-circuits, so both of its operands always count.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn eval_logical_fact(
+fn eval_logical_fact(
     w: &WalkCx,
     folder: &mut dyn Folder,
     op: LogicalOp,
@@ -617,7 +617,7 @@ pub(crate) fn eval_logical_fact(
 /// Issue #579 taught the value seam to answer the inner `isset` and the negation
 /// around it still widened to `Other`, so the expression answered `unknown` while
 /// its own subexpression answered `false`.
-pub(crate) fn eval_not_fact(
+fn eval_not_fact(
     w: &WalkCx,
     folder: &mut dyn Folder,
     operand: &ArgValue,
@@ -675,7 +675,7 @@ pub(crate) fn eval_not_fact(
 /// truncates through the grid's own `is_finite`-gated reader, `(int)` of an int
 /// is the identity, and `(string)` of an int prints exactly.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn eval_cast_fact(
+fn eval_cast_fact(
     w: &WalkCx,
     folder: &mut dyn Folder,
     target: CastTarget,
@@ -814,7 +814,7 @@ fn cast_floor(target: CastTarget) -> Fact {
 /// about the operator, owed to no operand — `Verified`, always. A value or a
 /// predicate set rests on the operands' facts, so it carries their `min`.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn eval_concat_fact(
+fn eval_concat_fact(
     w: &WalkCx,
     folder: &mut dyn Folder,
     lhs: &ArgValue,
@@ -1059,7 +1059,7 @@ pub(crate) fn spaceship_pole(l: &[ArgValue], r: &[ArgValue], php_minor: Option<(
 /// engine-int-width trap it walks into. The answer is pinned to `-1|0|1` without
 /// it.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn eval_spaceship_fact(
+fn eval_spaceship_fact(
     cx: &Cx<'_>,
     folder: &mut dyn Folder,
     lhs: &ArgValue,
@@ -1129,7 +1129,7 @@ pub(crate) fn eval_spaceship_fact(
 /// exactly as it keeps every other shape-derived fact out. A decided verdict
 /// takes the `min` over every operand rather than only the deciding one: less
 /// trust is always the safe side of this ledger.
-pub(crate) fn eval_isset_fact(
+fn eval_isset_fact(
     cx: &Cx<'_>,
     ops: &[IssetOperand],
     env: &HashMap<String, Known>,
@@ -1318,7 +1318,7 @@ pub(crate) fn coalesce_lhs_proven_present(
 /// proven `1` never runs `f` at all, and a finding on it would be a false positive.
 /// `arms` carries the two source extents for exactly that record.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn eval_ternary_fact(
+fn eval_ternary_fact(
     w: &WalkCx,
     folder: &mut dyn Folder,
     cond: &CondExpr,
