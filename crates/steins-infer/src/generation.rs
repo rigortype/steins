@@ -88,7 +88,7 @@
 //! A tree fingerprint licenses loading a *parse*, because parsing is a pure
 //! function of bytes; replaying a *finding* needs every other input above to
 //! be unmoved too, and the per-package half is already gated per package by
-//! the `sources` section. So [`identity_inputs`] is filled once and used
+//! the `sources` section. So `identity_inputs` is filled once and used
 //! twice — with `packages` as the generation id, with `packages` emptied as
 //! the stamp the `summaries` section carries — and the two cannot drift. This
 //! is issue #489's closing re-audit answered: an under-covered input cost a
@@ -114,6 +114,16 @@
 //! name; anything opened after would be a [`Miss`], which is a rebuild and the
 //! same findings. The published artifacts this run adopted from are hard links
 //! or clones by then, so dropping the old directory drops names, never bytes.
+//!
+//! **Where the run lives.** This file holds the public types, the orchestrator,
+//! and the fold, analysis and report phases. Its child [`load`] holds what a
+//! run reads before it analyzes (the capture, the load-or-parse, the changed
+//! files and the name delta), [`publish`] what it writes after, and
+//! [`identity`] what identifies it.
+//!
+//! [`SourceTree`]: steins_syntax::SourceTree
+//! [`Miss`]: steins_gen::Miss
+//! [`GenerationInputs`]: steins_gen::GenerationInputs
 
 mod identity;
 mod load;
@@ -153,6 +163,8 @@ use self::publish::{Fold, Publishable, Summaries, publish_or_reuse};
 /// gates the package's whole load; the fingerprint is the shortcut that says
 /// *every* file is unmoved, and when it does not match the load falls to the
 /// per-file gate rather than to reparsing the package.
+///
+/// [`SourceInventory::fingerprint`]: steins_gen::SourceInventory::fingerprint
 pub const SOURCES_SECTION: &str = "sources";
 
 fn sources_section() -> SectionName {
