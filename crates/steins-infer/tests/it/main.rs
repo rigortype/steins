@@ -9,6 +9,7 @@ mod assert_harness;
 mod assert_helper_discharge;
 mod assert_tag_class_lane;
 mod assert_tag_scalar_negation;
+mod assign_margin;
 mod binding;
 mod bool_literal_narrowing;
 mod branch_analysis;

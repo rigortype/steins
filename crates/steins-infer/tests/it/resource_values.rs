@@ -697,6 +697,15 @@ fn is_resource_false_keeps_the_false_arm_beside_the_closed_handle() {
 }
 
 #[test]
+fn a_producer_rebinding_a_variable_drops_the_value_it_held() {
+    // The resource rung binds the arm lane alone (§8): no `Val` is a resource,
+    // so it clears the value lane, and what the variable held before the
+    // producer does not answer beside the handle.
+    let src = "<?php\n$h = 5;\n$h = fopen('php://memory', 'r');\n\\PHPStan\\dumpType($h);\n";
+    assert_eq!(dumped(src, Engine::typeless()), vec!["dumped type: false|resource"]);
+}
+
+#[test]
 fn a_handle_stored_into_an_array_literal_keeps_its_identity() {
     // ADR-0098: the element is a **place**, and it names the very allocation
     // `$h` holds — so `$arr = [$h]; fclose($arr[0]);` closes `$h`, which is what
