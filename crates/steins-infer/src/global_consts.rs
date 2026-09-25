@@ -114,7 +114,7 @@ impl OsFamily {
 /// the only four whose value can ever be `Asserted` — every other answer this
 /// module gives is true of every host the project can run on.
 ///
-/// Read by [`crate::walk::value_stratum`], which derives the stratum of a
+/// Read by [`crate::by_value::value_stratum`], which derives the stratum of a
 /// composed expression without a `Cx` to consult. That is sound in both
 /// directions: with a pin these four ARE the user's claim, and without one they
 /// resolve to a union rather than a literal, so nothing downstream decides on
@@ -166,7 +166,7 @@ const PLATFORM_RULED: &[&str] = &[
 /// dumped `true` with no `(asserted)` marker on it. It is the aliasing hole issue
 /// #279 closed for `use function trim as t;`, in the constant lane.
 ///
-/// Read by [`crate::walk::value_stratum`], and true whether or not a pin is set.
+/// Read by [`crate::by_value::value_stratum`], and true whether or not a pin is set.
 /// That is sound in both directions: with a pin these four ARE the user's claim,
 /// and without one they resolve to a union rather than a literal, so nothing
 /// downstream decides on them and the stratum is never consulted for a verdict.

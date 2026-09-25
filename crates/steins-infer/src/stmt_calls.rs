@@ -1,3 +1,7 @@
+//! Step 1 of the statement walk: check and descend every statically-named call a
+//! statement carries, and hand the phases after it what the descents learned
+//! ([`StmtCalls`]).
+
 use std::collections::HashMap;
 
 use steins_syntax::{Callee, Stmt, StmtKind};

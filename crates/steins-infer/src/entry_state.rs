@@ -1,3 +1,6 @@
+//! The state a scope's walk enters with (ADR-0048 §3): the parameters' facts and
+//! contract lanes, and the `$this` and declared-parameter objects on the heap.
+
 use std::collections::HashMap;
 
 use steins_syntax::Scope;
