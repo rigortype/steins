@@ -13,8 +13,9 @@ use std::collections::HashMap;
 
 use steins_db::{EffectsPolicy, PluginFacts};
 
+use crate::pipeline::{clock, ms};
 use crate::project::{FileUnit, Index};
-use crate::{clock, facts, ms, purity, throws};
+use crate::{facts, purity, throws};
 
 /// Which of the three whole-universe textual gates [`Fixpoints::any`] asks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
