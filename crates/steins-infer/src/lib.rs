@@ -115,8 +115,8 @@ pub use annotate::{
 };
 pub use assert_harness::{AssertObservation, SubjectFact, collect_assert_types, probe_subjects};
 pub use project::{
-    Diagnostic, FileUnit, Fix, FixEdit, LazyTree, MagicObstacle, is_vendor_path, magic_obstacles,
-    magic_obstacles_reaching, resolves_to_user_function,
+    Diagnostic, FileUnit, Fix, FixEdit, LazyTree, MagicObstacle, attribution_notices,
+    is_vendor_path, magic_obstacles, magic_obstacles_reaching, resolves_to_user_function,
 };
 
 use project::Index;
