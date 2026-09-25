@@ -279,36 +279,14 @@ pub const SIDECAR_HANDSHAKE_NOTICE: &str = "note: PHP sidecar stopped answering 
 /// subset — [`NoFold`], no PHP). Analyzes the file as a one-file project.
 #[salsa::tracked]
 pub fn diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
-    let lazy = LazyTree::borrowed(parse(db, file));
-    let units = [FileUnit { path: file.path(db), tree: &lazy }];
-    let index = Index::from_units(&units);
-    check_units(
-        &units,
-        &index,
-        &mut NoFold,
-        RuntimePostures::default(),
-        &ProjectLayout::fallback(),
-        &PluginFacts::none(),
-        &EffectsPolicy::none(),
-    )
+    check_one_file(parse(db, file), file.path(db), &mut NoFold, RuntimePostures::default())
 }
 
 /// The folding-aware check for one file (run **outside** salsa; ADR-0004),
 /// analyzed as a one-file project.
 #[must_use]
 pub fn check_file(db: &dyn Db, file: SourceFile, folder: &mut dyn Folder) -> Vec<Diagnostic> {
-    let lazy = LazyTree::borrowed(parse(db, file));
-    let units = [FileUnit { path: file.path(db), tree: &lazy }];
-    let index = Index::from_units(&units);
-    check_units(
-        &units,
-        &index,
-        folder,
-        RuntimePostures::default(),
-        &ProjectLayout::fallback(),
-        &PluginFacts::none(),
-        &EffectsPolicy::none(),
-    )
+    check_one_file(parse(db, file), file.path(db), folder, RuntimePostures::default())
 }
 
 /// The folding-aware check for a whole **project** (ADR-0009/0015): every file
@@ -420,18 +398,7 @@ pub fn check_with(
     folder: &mut dyn Folder,
 ) -> Vec<Diagnostic> {
     let _ = functions; // authoritative list comes from `tree.functions()`
-    let lazy = LazyTree::borrowed(tree);
-    let units = [FileUnit { path, tree: &lazy }];
-    let index = Index::from_units(&units);
-    check_units(
-        &units,
-        &index,
-        folder,
-        RuntimePostures::default(),
-        &ProjectLayout::fallback(),
-        &PluginFacts::none(),
-        &EffectsPolicy::none(),
-    )
+    check_one_file(tree, path, folder, RuntimePostures::default())
 }
 
 /// The single-file check with a folder **and** the `warning-handler` posture
@@ -447,6 +414,20 @@ pub fn check_full(
     folder: &mut dyn Folder,
     warning_handler_abort: bool,
 ) -> Vec<Diagnostic> {
+    let postures = RuntimePostures { warning_handler_abort, ..RuntimePostures::default() };
+    check_one_file(tree, path, folder, postures)
+}
+
+/// Every single-file entry point's body: `tree` analyzed as a one-file project
+/// with its own index, the no-manifest layout, no plugin and no effects policy.
+/// The entry points differ only in where the tree comes from and in the folder
+/// and postures they pass.
+fn check_one_file(
+    tree: &SourceTree,
+    path: &str,
+    folder: &mut dyn Folder,
+    postures: RuntimePostures,
+) -> Vec<Diagnostic> {
     let lazy = LazyTree::borrowed(tree);
     let units = [FileUnit { path, tree: &lazy }];
     let index = Index::from_units(&units);
@@ -454,7 +435,7 @@ pub fn check_full(
         &units,
         &index,
         folder,
-        RuntimePostures { warning_handler_abort, ..RuntimePostures::default() },
+        postures,
         &ProjectLayout::fallback(),
         &PluginFacts::none(),
         &EffectsPolicy::none(),
