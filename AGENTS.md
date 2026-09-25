@@ -29,3 +29,10 @@ rules for one kind of task. Read it when the task matches its trigger.
 Rust here is hand-formatted to the policy in `rustfmt.toml`; match the
 surrounding code by hand and never run `cargo fmt`. CI has no fmt gate, so a
 tree-wide reformat lands unnoticed and buries every later `git blame`.
+
+## Function length
+
+Split a function before it passes `too-many-lines-threshold` in `clippy.toml`
+(#778); test code allows the lint at its module or crate root. A new `#[expect]`
+for it needs a `reason` a reviewer would accept, and one left on a function
+that shrank under the line fails as `unfulfilled_lint_expectations`: delete it.
