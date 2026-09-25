@@ -215,9 +215,13 @@ assert(
   boot.refusals.every((r) => r.name && r.axis && r.witness.includes(" / ")),
   "each reason names the row, its axis, and both engines' answers",
 );
+// The rows that are not about the word size are the three PCRE matchers: issue
+// #382 put `preg_match` beside `preg_split`, and wave 3 added `preg_match_all`.
+// `steins-catalog`'s axis test owns the same list upstream.
 assert(
-  boot.refusals.filter((r) => r.axis === "build_option").map((r) => r.name).join(",") === "preg_split",
-  `preg_split is the row that is not about the word size (got ${JSON.stringify(boot.refusals.filter((r) => r.axis === "build_option"))})`,
+  boot.refusals.filter((r) => r.axis === "build_option").map((r) => r.name).join(",") ===
+    "preg_split,preg_match,preg_match_all",
+  `the PCRE matchers are the rows that are not about the word size (got ${JSON.stringify(boot.refusals.filter((r) => r.axis === "build_option"))})`,
 );
 // …and the panel the visitor reads is composed from that, checked here rather
 // than only in a browser. The boot object carrying eleven reasons and the panel
@@ -295,14 +299,15 @@ assert(steins.annotateReplay(FLAGSHIP, table).boot.fold_lane === boot.fold_lane,
 assert(steins.check(FLAGSHIP).boot === undefined, "the engine-free envelope carries no boot object at all");
 
 // 5. …and the boundary is honest in the other direction: `abs` is a REFUSED
-//    name on a 32-bit engine (`abs("3000000000")` is int there and float here —
-//    the type tag flips), so it must not fold. What comes back is a TYPE, not a
-//    wrong value: the fold declines, the reflected `int|float` envelope is not a
-//    single fact either, and the answer falls to ADR-0069's Asserted declared-
-//    return floor. Since issue #79 that floor states functionMap's own
-//    `positive-int|0|float` — a multi-base union #73 counted and dropped — and the
-//    `(asserted)` marker is what says a declaration answered rather than a fold.
-const REFUSED = '<?php\n\\PHPStan\\dumpType(abs(-3));\n';
+//    name on a 32-bit engine (`abs("3000000000")` is int on a 64-bit engine and
+//    float here — the type tag flips), so it must not fold. The snippet is the
+//    refusal's own witness, so a regression admitting the name would show up as
+//    this engine's float rather than as a type. What comes back is a TYPE: the
+//    fold declines, `abs`'s transfer declines a string argument (the width
+//    question is the fold's, not the type rung's), and the answer falls to
+//    ADR-0069's Asserted declared-return floor, whose `(asserted)` marker says a
+//    declaration answered rather than a fold.
+const REFUSED = '<?php\n\\PHPStan\\dumpType(abs("3000000000"));\n';
 const refused = await driveReplay({ analyze: analyzer(REFUSED), answer, table });
 assert(refused.status === "converged", `the refused-fold snippet converges (got ${refused.status})`);
 const refusedDump = refused.value.findings.find((f) => f.id === "debug.type");
@@ -312,8 +317,32 @@ assert(
   `a width-refused builtin widens to a declared type instead of folding (got: ${refusedDump && refusedDump.message})`,
 );
 assert(
-  refusedDump.message !== "dumped type: 3",
-  "the value a 64-bit engine would have folded never appears on a 32-bit one",
+  refusedDump !== undefined && !refusedDump.message.includes("3000000000"),
+  "the value this 32-bit engine would have folded never appears",
+);
+
+// 5a. An INT argument is not the width question, and since issue #40 `abs`
+//     answers it on the transfer seam from the argument alone: `abs(-3)` is `3`
+//     on every engine. The rule fires only once the engine's reflected
+//     declaration countersigns it (ADR-0061 §2), so the plain run keeps the
+//     floor — and neither run ever asks the engine to fold `abs`, which is the
+//     refusal holding on the wire rather than only in the boot object.
+const TRANSFER = '<?php\n\\PHPStan\\dumpType(abs(-3));\n';
+const transfer = await driveReplay({ analyze: analyzer(TRANSFER), answer, table });
+const transferDump = transfer.value.findings.find((f) => f.id === "debug.type");
+console.log(`transfer dump: ${transferDump && transferDump.message}`);
+assert(
+  transfer.status === "converged" && transferDump !== undefined && transferDump.message === "dumped type: 3",
+  `an int argument answers on the transfer seam (got: ${transferDump && transferDump.message})`,
+);
+const transferPlain = steins.check(TRANSFER).findings.find((f) => f.id === "debug.type");
+assert(
+  transferPlain !== undefined && transferPlain.message.endsWith(" (asserted)"),
+  `…and without the engine's declaration the same snippet keeps the floor (got: ${transferPlain && transferPlain.message})`,
+);
+assert(
+  asked.flat().every((k) => !(k.includes('"method":"fold"') && k.includes('"function":"abs"'))),
+  "the engine is never asked to fold the refused `abs`",
 );
 
 // 5b. Issue #354, both verdicts against the REAL engine rather than a table.

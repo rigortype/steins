@@ -124,10 +124,11 @@ once the table is complete, and the `boot` object of a 64-bit engine) against a
 canned table captured from a real `php`. `smoke-replay.mjs` pins the loop against
 php-src itself: the flagship `dumpType(greet(2, "World"))` inlining to
 `'Hello, World! Hello, World! '`, issue #61's own two table rows folding in the
-margin and being absent without the engine, `abs(-3)` widening because the name is
-refused on this build's integer width, the `boot` object matching the engine that actually booted, the
-absence family lighting up with the engine and silent without it, and `env` being
-asked once and never again.
+margin and being absent without the engine, `abs("3000000000")` widening because
+the name is refused on this build's integer width while `abs(-3)` still answers
+`3` on the transfer seam, the `boot` object matching the engine that actually
+booted, the absence family lighting up with the engine and silent without it, and
+`env` being asked once and never again. CI's `wasm` job runs both.
 
 ## Attribution
 
