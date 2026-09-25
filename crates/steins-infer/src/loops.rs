@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 
 use steins_domain::Certainty;
-use steins_syntax::{CondExpr, Stmt};
+use steins_syntax::{CondExpr, Stmt, StmtKind};
 
 use crate::fold::Folder;
 use crate::annotate::LineFact;
@@ -17,6 +17,126 @@ use crate::foreach_bind::element_binding;
 use crate::project::Diagnostic;
 use crate::walk::{Flow, WalkCx, push_hidden_exit_floor, walk_trace};
 
+/// Walk one structured loop statement, a `while`, `for`, `foreach` or `do`-`while`
+/// ([`walk_trace`]'s step 2 hands over exactly those four), and answer whether the
+/// code after it is reachable.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn walk_loop(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    stmt: &Stmt,
+    env: &mut HashMap<String, Known>,
+    store: &mut Store,
+    descent: &mut Option<Descent<'_>>,
+    facts: &mut Option<&mut Vec<LineFact>>,
+    guarded: bool,
+    out: &mut Vec<Diagnostic>,
+) -> Flow {
+    match &stmt.kind {
+        // A structured `while` (ADR-0027 amendment, issues #649, #653 and #651).
+        // Two envs from the same starting one, neither able to see the other,
+        // and nothing the body computes reaches either. The body's ENTRY keeps
+        // what the loop cannot change and is narrowed by the header. The
+        // FALL-THROUGH keeps the same `reads` for the same reason (#651's
+        // second half) and is narrowed by the header's NEGATION when no jump
+        // can leave the body — the loop was then left by a failing test of the
+        // value this env holds. Both narrowings are applied after the
+        // forgetting; see `apply_loop_exit_negation` for why that order is what
+        // makes the exit one sound.
+        StmtKind::While { cond, body, break_free, writes, reads, poisons, may_return } => {
+            let mut benv = env.clone();
+            let mut bstore = store.clone();
+            loop_entry_forget(writes, reads, &[], *poisons, &mut benv, &mut bstore);
+            loop_fallthrough_forget(w, writes, reads, *poisons, *may_return, env, store);
+            apply_loop_exit_negation(w, folder, cond, *break_free, env, store);
+            let verdict = walk_while_body(w, folder, cond, body, benv, bstore, descent, facts, out);
+            loop_flow(*break_free, verdict)
+        }
+        // A structured `for` (issue #650). The `while` arm above plus its two
+        // extra clauses: `init` is WALKED — it runs once, here, in the env as it
+        // stands, so its findings are a top-level statement's and its bindings
+        // are what the header reads — and `carried` names the part of `writes`
+        // that survives the entry forgetting because only `init` wrote it. The
+        // increments are not walked: they run in the body's exit env, which this
+        // construct discards.
+        StmtKind::For {
+            init,
+            cond,
+            body,
+            carried,
+            break_free,
+            writes,
+            reads,
+            poisons,
+            may_return,
+        } => {
+            let mut benv = env.clone();
+            let mut bstore = store.clone();
+            let _ =
+                walk_trace(w, folder, init, &mut benv, &mut bstore, descent, facts, guarded, out);
+            loop_entry_forget(writes, reads, carried, *poisons, &mut benv, &mut bstore);
+            loop_fallthrough_forget(w, writes, reads, *poisons, *may_return, env, store);
+            apply_loop_exit_negation(w, folder, cond, *break_free, env, store);
+            let verdict = walk_while_body(w, folder, cond, body, benv, bstore, descent, facts, out);
+            loop_flow(*break_free, verdict)
+        }
+        // A structured `foreach` (issues #650 and #652): the same entry env, with
+        // no header to narrow it — a `foreach` header binds rather than tests —
+        // and then the binding it DOES perform, applied to that env. The order is
+        // the soundness: `$k`/`$v` are ordinary writes, so the entry forgetting
+        // drops them first and the element fact is put back afterwards, from the
+        // subject as the entry env holds it. A body that reassigns `$v` therefore
+        // cannot reach the next entry through it.
+        StmtKind::Foreach {
+            subject,
+            key_var,
+            value_var,
+            by_ref,
+            body,
+            writes,
+            reads,
+            poisons,
+            may_return,
+        } => {
+            let mut benv = env.clone();
+            let mut bstore = store.clone();
+            loop_entry_forget(writes, reads, &[], *poisons, &mut benv, &mut bstore);
+            bind_foreach_targets(
+                w,
+                stmt,
+                subject.as_deref(),
+                key_var.as_deref(),
+                value_var.as_deref(),
+                *by_ref,
+                &mut benv,
+                &mut bstore,
+            );
+            loop_fallthrough_forget(w, writes, reads, *poisons, *may_return, env, store);
+            walk_loop_body(w, folder, body, benv, bstore, descent, facts, out);
+            Flow::FellThrough
+        }
+        // A structured `do`-`while` (issues #650 and #651): the condition
+        // applied to the EXIT and to nothing else. The first iteration runs
+        // before the condition is ever evaluated, so narrowing the entry by it
+        // would state a fact that has not been tested yet and reading it as
+        // false would skip a body that always runs — which is why the entry
+        // takes `walk_loop_body`, the half of the `while` rule that is not the
+        // header. The fall-through is the opposite case and needs no exception:
+        // the condition is evaluated immediately before it, exactly as a
+        // `while`'s is.
+        StmtKind::DoWhile { cond, body, break_free, writes, reads, poisons, may_return } => {
+            let mut benv = env.clone();
+            let mut bstore = store.clone();
+            loop_entry_forget(writes, reads, &[], *poisons, &mut benv, &mut bstore);
+            loop_fallthrough_forget(w, writes, reads, *poisons, *may_return, env, store);
+            apply_loop_exit_negation(w, folder, cond, *break_free, env, store);
+            walk_loop_body(w, folder, body, benv, bstore, descent, facts, out);
+            Flow::FellThrough
+        }
+        _ => unreachable!("walk_trace hands walk_loop the four loop kinds only"),
+    }
+}
+
 /// What a `while` or `for` does to the code after it, given the header's verdict on
 /// the entry env (issue #651). That env holds at every header evaluation, so a
 /// `Yes` there is a `Yes` at all of them: no test ever fails, and with no jump able
@@ -25,7 +145,7 @@ use crate::walk::{Flow, WalkCx, push_hidden_exit_floor, walk_trace};
 /// Anything less than that pair falls through: an undecided header may fail, and a
 /// `break` leaves without failing it. A `do`-`while` is not this question (its body
 /// runs before any test; issue #679 owns its reachability).
-pub(crate) fn loop_flow(break_free: bool, verdict: Certainty) -> Flow {
+fn loop_flow(break_free: bool, verdict: Certainty) -> Flow {
     if break_free && verdict == Certainty::Yes { Flow::Terminated } else { Flow::FellThrough }
 }
 
@@ -53,7 +173,7 @@ pub(crate) fn loop_flow(break_free: bool, verdict: Certainty) -> Flow {
 /// cannot rebind the name. `carried` has no counterpart here — a `for`'s `init` is
 /// walked into the body's entry env and never into this one, so there is no
 /// post-`init` binding at the fall-through to keep.
-pub(crate) fn loop_fallthrough_forget(
+fn loop_fallthrough_forget(
     w: &WalkCx,
     writes: &[String],
     reads: &[String],
@@ -111,7 +231,7 @@ pub(crate) fn loop_fallthrough_forget(
 ///
 /// `poisons` clears everything, exactly as it does for the fall-through: a scope
 /// that aliases, `extract`s or `eval`s has no binding worth carrying anywhere.
-pub(crate) fn loop_entry_forget(
+fn loop_entry_forget(
     writes: &[String],
     reads: &[String],
     carried: &[String],
@@ -165,7 +285,7 @@ pub(crate) fn loop_entry_forget(
 ///   property/offset target (`as $this->x`) binds names this statement does not
 ///   name, so there is nothing to bind and it stays a write alone.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn bind_foreach_targets(
+fn bind_foreach_targets(
     w: &WalkCx,
     stmt: &Stmt,
     subject: Option<&str>,
@@ -228,7 +348,7 @@ pub(crate) fn bind_foreach_targets(
 /// A `CondExpr::Opaque` — a `for (;;)`, or any header the lowering could not read —
 /// refines nothing and needs no gate of its own: it is the same inert value at the
 /// exit that it is at the entry.
-pub(crate) fn apply_loop_exit_negation(
+fn apply_loop_exit_negation(
     w: &WalkCx,
     folder: &mut dyn Folder,
     cond: &CondExpr,
@@ -267,7 +387,7 @@ pub(crate) fn apply_loop_exit_negation(
 /// there today, and withdrawing those findings is a separate judgment from adding
 /// these.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn walk_while_body(
+fn walk_while_body(
     w: &WalkCx,
     folder: &mut dyn Folder,
     cond: &CondExpr,
@@ -302,7 +422,7 @@ pub(crate) fn walk_while_body(
 /// exactly once. Neither may take the `while` treatment, and neither loses anything
 /// else by it.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn walk_loop_body(
+fn walk_loop_body(
     w: &WalkCx,
     folder: &mut dyn Folder,
     body: &[Stmt],

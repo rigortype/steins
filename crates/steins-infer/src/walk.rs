@@ -51,10 +51,7 @@ use crate::heap::{apply_prop_assign, seed_declared_param_object, seed_this_objec
 use crate::inaccessible::{
     check_inaccessible_class_const, check_inaccessible_method, check_inaccessible_property,
 };
-use crate::loops::{
-    apply_loop_exit_negation, bind_foreach_targets, loop_entry_forget, loop_fallthrough_forget,
-    loop_flow, walk_loop_body, walk_while_body,
-};
+use crate::loops::walk_loop;
 use crate::method_call::handle_method_call;
 use crate::non_object::{check_call_on_non_object, check_call_on_null, check_property_on_non_object};
 use crate::offsets::{
@@ -1233,105 +1230,12 @@ pub(crate) fn walk_trace(
                 forget_construct_sets(w, writes, reads, *poisons, *may_return, env, store);
                 Flow::FellThrough
             }
-            // A structured `while` (ADR-0027 amendment, issues #649, #653 and #651).
-            // Two envs from the same starting one, neither able to see the other,
-            // and nothing the body computes reaches either. The body's ENTRY keeps
-            // what the loop cannot change and is narrowed by the header. The
-            // FALL-THROUGH keeps the same `reads` for the same reason (#651's
-            // second half) and is narrowed by the header's NEGATION when no jump
-            // can leave the body — the loop was then left by a failing test of the
-            // value this env holds. Both narrowings are applied after the
-            // forgetting; see `apply_loop_exit_negation` for why that order is what
-            // makes the exit one sound.
-            StmtKind::While { cond, body, break_free, writes, reads, poisons, may_return } => {
-                let mut benv = env.clone();
-                let mut bstore = store.clone();
-                loop_entry_forget(writes, reads, &[], *poisons, &mut benv, &mut bstore);
-                loop_fallthrough_forget(w, writes, reads, *poisons, *may_return, env, store);
-                apply_loop_exit_negation(w, folder, cond, *break_free, env, store);
-                let verdict = walk_while_body(w, folder, cond, body, benv, bstore, descent, facts, out);
-                loop_flow(*break_free, verdict)
-            }
-            // A structured `for` (issue #650). The `while` arm above plus its two
-            // extra clauses: `init` is WALKED — it runs once, here, in the env as it
-            // stands, so its findings are a top-level statement's and its bindings
-            // are what the header reads — and `carried` names the part of `writes`
-            // that survives the entry forgetting because only `init` wrote it. The
-            // increments are not walked: they run in the body's exit env, which this
-            // construct discards.
-            StmtKind::For {
-                init,
-                cond,
-                body,
-                carried,
-                break_free,
-                writes,
-                reads,
-                poisons,
-                may_return,
-            } => {
-                let mut benv = env.clone();
-                let mut bstore = store.clone();
-                let _ =
-                    walk_trace(w, folder, init, &mut benv, &mut bstore, descent, facts, guarded, out);
-                loop_entry_forget(writes, reads, carried, *poisons, &mut benv, &mut bstore);
-                loop_fallthrough_forget(w, writes, reads, *poisons, *may_return, env, store);
-                apply_loop_exit_negation(w, folder, cond, *break_free, env, store);
-                let verdict = walk_while_body(w, folder, cond, body, benv, bstore, descent, facts, out);
-                loop_flow(*break_free, verdict)
-            }
-            // A structured `foreach` (issues #650 and #652): the same entry env, with
-            // no header to narrow it — a `foreach` header binds rather than tests —
-            // and then the binding it DOES perform, applied to that env. The order is
-            // the soundness: `$k`/`$v` are ordinary writes, so the entry forgetting
-            // drops them first and the element fact is put back afterwards, from the
-            // subject as the entry env holds it. A body that reassigns `$v` therefore
-            // cannot reach the next entry through it.
-            StmtKind::Foreach {
-                subject,
-                key_var,
-                value_var,
-                by_ref,
-                body,
-                writes,
-                reads,
-                poisons,
-                may_return,
-            } => {
-                let mut benv = env.clone();
-                let mut bstore = store.clone();
-                loop_entry_forget(writes, reads, &[], *poisons, &mut benv, &mut bstore);
-                bind_foreach_targets(
-                    w,
-                    stmt,
-                    subject.as_deref(),
-                    key_var.as_deref(),
-                    value_var.as_deref(),
-                    *by_ref,
-                    &mut benv,
-                    &mut bstore,
-                );
-                loop_fallthrough_forget(w, writes, reads, *poisons, *may_return, env, store);
-                walk_loop_body(w, folder, body, benv, bstore, descent, facts, out);
-                Flow::FellThrough
-            }
-            // A structured `do`-`while` (issues #650 and #651): the condition
-            // applied to the EXIT and to nothing else. The first iteration runs
-            // before the condition is ever evaluated, so narrowing the entry by it
-            // would state a fact that has not been tested yet and reading it as
-            // false would skip a body that always runs — which is why the entry
-            // takes `walk_loop_body`, the half of the `while` rule that is not the
-            // header. The fall-through is the opposite case and needs no exception:
-            // the condition is evaluated immediately before it, exactly as a
-            // `while`'s is.
-            StmtKind::DoWhile { cond, body, break_free, writes, reads, poisons, may_return } => {
-                let mut benv = env.clone();
-                let mut bstore = store.clone();
-                loop_entry_forget(writes, reads, &[], *poisons, &mut benv, &mut bstore);
-                loop_fallthrough_forget(w, writes, reads, *poisons, *may_return, env, store);
-                apply_loop_exit_negation(w, folder, cond, *break_free, env, store);
-                walk_loop_body(w, folder, body, benv, bstore, descent, facts, out);
-                Flow::FellThrough
+            // The structured loops (ADR-0027 amendment): `walk_loop` holds each one's rule.
+            StmtKind::While { .. }
+            | StmtKind::For { .. }
+            | StmtKind::Foreach { .. }
+            | StmtKind::DoWhile { .. } => {
+                walk_loop(w, folder, stmt, env, store, descent, facts, guarded, out)
             }
             // A statement-position call to a resolved `: never` callee is a
             // terminator (issue #599), and the arm below is the `Throw`/`Exit` arm
