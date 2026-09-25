@@ -1,7 +1,13 @@
-//! Interprocedural descent (Feature B, ADR-0009 budget): escaping and sweeping
-//! calls, propagating a proven argument into a resolved callee, the project call /
-//! method summaries, `$this` seeding across the call, and joining the callee's exits
-//! back into the caller's env.
+//! Interprocedural descent (Feature B, ADR-0009 budget): the entry points that
+//! resolve a callee and bind its arguments — a function, a method, a value-position
+//! call, a `$fn(…)` variable call — and the [`descend`] driver that walks the callee
+//! under those bindings and memoizes its [`ReturnSummary`]. The two recurse into
+//! each other, so they stay together here.
+//!
+//! Around them: `call_sweep` escapes and sweeps what a statement's calls can reach,
+//! `arg_propagation` checks a propagated argument against a resolved callee,
+//! `summary_join` joins the callee's exits into its summary, and `exit_facts` reads
+//! what one returning exit hands back.
 
 mod arg_propagation;
 mod call_sweep;

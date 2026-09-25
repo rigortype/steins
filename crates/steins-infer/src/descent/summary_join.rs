@@ -1,3 +1,7 @@
+//! The join of a callee's returning exits into its [`ReturnSummary`] (ADR-0057
+//! T0/T1, [`join_summary`]): the value, heap and `$this` components, each joined
+//! and refused on its own.
+
 use steins_domain::Certainty;
 use steins_domain::{Base, Fact};
 use steins_syntax::{NativeType, RetHintKind, ScalarType, Scope, TypeMember};

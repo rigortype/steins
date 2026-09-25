@@ -1,3 +1,7 @@
+//! The argument check of a resolved project function call whose arguments carry
+//! propagated values — a `$var`, a call, a method call ([`check_propagated_call`])
+//! — and the one resolver it shares with the builtin arm, [`propagated_arg_value`].
+
 use std::collections::HashMap;
 
 use steins_domain::Fact;

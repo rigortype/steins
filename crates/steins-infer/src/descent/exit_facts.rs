@@ -1,3 +1,7 @@
+//! What one returning exit hands back (ADR-0057 T0/T1): its value fact
+//! ([`return_value_fact`]) and its allocation ([`return_heap_object`]); and whether
+//! a summary's value fact binds at the caller ([`summary_binds`]).
+
 use std::collections::HashMap;
 
 use steins_domain::Fact;
