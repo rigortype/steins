@@ -16,13 +16,9 @@ use crate::{
     RETURN_MISMATCH_ID, arg_abstract_fact, contract_touches_class, describe_fact,
     is_dump_family_fqn, is_pure_class_contract, phpdoc_object_guard_blind, rendered_cval,
 };
-use crate::absence::{
-    check_undefined_class_const, check_undefined_function, check_undefined_method,
-    check_undefined_property,
-};
+use crate::absence::{check_undefined_class_const, check_undefined_property};
 use crate::annotate::LineFact;
-use crate::arg_check::{check_builtin_call_args, is_type_error, object_world_guard_blind};
-use crate::arity::{check_arity, check_printf_arity};
+use crate::arg_check::{is_type_error, object_world_guard_blind};
 use crate::assert_harness::{ASSERT_SINK, record_subject_probe};
 use crate::asserts::apply_stmt_asserts;
 use crate::assign::apply_assign;
@@ -32,35 +28,29 @@ use crate::builtin_returns::{
     ResourceEffects, apply_resource_effects, escape_mentioned_resources, resource_call_effects,
 };
 use crate::cx::Cx;
-use crate::declared_receiver::check_phpdoc_undefined_method;
 use crate::descent::{
-    ThisWriteBack, apply_call_escape_and_sweep, check_propagated_call, checkable_calls,
-    handle_var_call, return_heap_object, return_value_fact, scope_class, try_descend_function,
+    apply_call_escape_and_sweep, checkable_calls, return_heap_object, return_value_fact,
+    scope_class,
 };
 use crate::dispatch::resolve_call_target;
 use crate::dump::{
-    ASSERT_TYPE_FQN, adopted_trace_docblock, emit_asserts, emit_dumps, emit_trace_annotations,
-    name_reaches_global_var_dump, resolved_fn_fqn,
+    ASSERT_TYPE_FQN, adopted_trace_docblock, emit_trace_annotations, name_reaches_global_var_dump,
+    resolved_fn_fqn,
 };
 use crate::env::{
-    AllocId, ContractArm, Descent, ExitContribution, HeapRes, HeapSummary, Known, ReturnSummary,
-    Store, Stratum, SummaryCtx,
+    AllocId, Descent, ExitContribution, HeapRes, Known, Store, Stratum, SummaryCtx,
 };
 use crate::foreach_check::check_foreach_subject;
 use crate::heap::{apply_prop_assign, seed_declared_param_object, seed_this_object};
-use crate::inaccessible::{
-    check_inaccessible_class_const, check_inaccessible_method, check_inaccessible_property,
-};
+use crate::inaccessible::{check_inaccessible_class_const, check_inaccessible_property};
 use crate::loops::walk_loop;
-use crate::method_call::handle_method_call;
-use crate::non_object::{check_call_on_non_object, check_call_on_null, check_property_on_non_object};
+use crate::non_object::check_property_on_non_object;
 use crate::offsets::{
     check_coalesce_final_arm, check_destructure_source, check_offset_read, check_shape_read,
 };
 use crate::operands::check_operand_sites;
 use crate::out_params::{
-    apply_produced_places, apply_stmt_out_param_seeds, check_preg_pattern, stmt_out_param_seeds,
-    stmt_produced_places,
+    apply_produced_places, apply_stmt_out_param_seeds, stmt_out_param_seeds, stmt_produced_places,
 };
 use crate::predicates::apply_type_narrowing;
 use crate::project::{Diagnostic, FnResolution};
@@ -69,9 +59,10 @@ use crate::refine::{
     expand_enum_case_arms, seed_contract_arms, seed_fact, seed_refined_scalar_fact, seed_shape_fact,
     then_refinements,
 };
-use crate::return_arms::{bindable_args, fn_return_arms_at_call, return_envelope_arms};
+use crate::return_arms::return_envelope_arms;
 use crate::return_maybe::check_maybe_return_mismatch;
 use crate::shapes::{apply_offset_append, apply_offset_write, apply_shape_narrowing};
+use crate::stmt_calls::check_stmt_calls;
 use crate::string_context::check_string_contexts;
 
 /// Walk one scope's trace with a given initial environment.
@@ -709,199 +700,11 @@ pub(crate) fn walk_trace(
         } else {
             None
         };
-        // The return-fact summary of a `$x = f(...)` / `$x = $o->m(...)` RHS
-        // descent (ADR-0057 T0; ADR-0075 for methods/statics), captured in step 1
-        // and consumed by `apply_assign` in step 2. For an `Assign` statement
-        // `checkable_calls` yields exactly the RHS call. Constructors keep
-        // descending for diagnostics but never fill this slot (ADR-0075 §3).
-        //
-        // `stmt_return_arms` is the declared return floor resolved before
-        // `apply_assign` unbinds the assignment target (self-assign
-        // `$o = $o->m(1)` would otherwise drop the exact receiver first).
-        let mut stmt_summary: Option<ReturnSummary> = None;
-        let mut stmt_return_arms: Option<Vec<ContractArm>> = None;
-        // The constructor descent's `$this` snapshot for the `new` this statement
-        // carries (ADR-0057's constructor-summary amendment, C7): captured in step 1,
-        // where the `Callee::Construct` rung already walked the body, and consumed by
-        // the object build — `apply_assign`'s `New` arm in step 2, or the
-        // `return new C()` arm of step 1c's classifier. One walk, one site.
-        let mut stmt_ctor_heap: Option<HeapSummary> = None;
-        // The `$this` snapshots this statement's descents came back with (ADR-0057's
-        // 2026-08-17 amendment, D4), applied by step 1a AFTER its sweeps — a list
-        // rather than a slot because an `echo` carries several calls, and because it
-        // is the list that lets that step decline a pair naming one object.
-        let mut stmt_this_backs: Vec<ThisWriteBack> = Vec::new();
         // What the calls will do to the names and resources they are handed, read
         // before step 1 runs any of them and applied in step 5.
         let pre_call = PreCall::read(w, folder, stmt, env, store);
         // 1. Check + descend every statically-named call this statement carries.
-        for call in checkable_calls(&stmt.kind) {
-            match &call.receiver {
-                Callee::Function(_) => {
-                    // Where this call's findings begin: the discarded-call
-                    // judgment below reads what the checkers between here and
-                    // there concluded about the same call (ADR-0096 §3).
-                    let before = out.len();
-                    check_propagated_call(
-                        cx,
-                        folder,
-                        scope.poisoned,
-                        descent.is_some(),
-                        call,
-                        env,
-                        store,
-                        w.this_exact,
-                        w.enclosing_class,
-                        out,
-                    );
-                    // The builtin arm of the same judgment (ADR-0056 §9): the check
-                    // above returns early for a callee it cannot resolve to a
-                    // project function, and this one answers exactly there, off the
-                    // engine's own reflected parameter list.
-                    check_builtin_call_args(
-                        cx,
-                        folder,
-                        scope.poisoned,
-                        descent.is_some(),
-                        call,
-                        env,
-                        store,
-                        w.this_exact,
-                        w.enclosing_class,
-                        out,
-                    );
-                    // Userland function arity (ADR-0049 §6 / S5): judged once in the
-                    // plain per-scope pass, like the checks below.
-                    if descent.is_none() {
-                        check_arity(cx, folder, call, store, scope.poisoned, out);
-                        // Printf-family arity (ADR-0078, issue #188): a folded literal
-                        // format string demanding more placeholders than proven.
-                        check_printf_arity(cx, folder, call, env, scope.poisoned, out);
-                        // Existence flagship (ADR-0049 §3 / S4): a call to a
-                        // provably-undefined function behind a clear dam. The branch
-                        // store carries the FP-15 `function_exists` vouch.
-                        check_undefined_function(cx, folder, call, store, out);
-                        // Pattern-refusal check (ADR-0078 / issue #189): a `preg_*`
-                        // call whose proven-literal pattern the project's own PCRE
-                        // refuses to compile.
-                        check_preg_pattern(w, folder, call, env, out);
-                        // Dump surface (ADR-0053 D3/D4): a recognized
-                        // `PHPStan\dumpType`-family or `var_dump` call emits its fact
-                        // rendering here. A statement-position call also hands its
-                        // statement span down, so its finding can carry the
-                        // statement-deletion fix payload (ADR-0010, issue #114).
-                        let removal =
-                            matches!(stmt.kind, StmtKind::Call(_)).then_some(stmt.span);
-                        // Discarded calls (ADR-0096, issue #320): the statement
-                        // IS the call, so its result is unused by construction,
-                        // and the oracle answers what the callee's summary
-                        // proves. Same statement span the dump family's deletion
-                        // fix uses — the thing a reader would delete.
-                        // `value_position` is the one thing `StmtKind::Call`
-                        // cannot say for itself: a `match` arm's body lowers to
-                        // one and its result is the construct's value.
-                        if let Some(span) = removal
-                            && !stmt.value_position
-                        {
-                            crate::no_effect::check_no_effect(cx, span, call, before, out);
-                        }
-                        emit_dumps(w, folder, call, env, store, removal, out);
-                        // Oracle idea B (harness-only): when the assertType sink is
-                        // installed, record this call's (expected, rendering) pair —
-                        // a no-op in every normal check (sink absent).
-                        emit_asserts(w, folder, call, env, store);
-                    }
-                    stmt_summary = try_descend_function(
-                        cx, folder, call, env, store, scope.poisoned, descent.as_mut(), out,
-                    );
-                    // The declared floor, resolved with this call's own arguments in
-                    // hand (issue #363): a function-level `@template T` bound from
-                    // an argument's carry lets the callee's `@return T` name a type
-                    // here. Read at the same point the receiver twin is — before the
-                    // statement's escape/sweep pass — so the carry the read wants is
-                    // still the one the call was made against.
-                    let bindable = bindable_args(call);
-                    stmt_return_arms = cx.resolve_user_fn_any(call).and_then(|site| {
-                        fn_return_arms_at_call(
-                            cx,
-                            folder,
-                            site,
-                            &bindable,
-                            env,
-                            store,
-                            scope.poisoned,
-                        )
-                    });
-                }
-                Callee::Method { .. } | Callee::Static { .. } | Callee::Construct { .. } => {
-                    // Branch-sensitive null-dereference proof (ADR-0031): a `$v->m()`
-                    // whose receiver is proven `Singleton(null)` on this path.
-                    check_call_on_null(w, call, env, store, out);
-                    // Sibling on the same receiver fact (ADR-0078, issue #190): a
-                    // `$v->m()` whose receiver is proven a non-null non-object — same
-                    // fatal, different id, disjoint from the null case by construction.
-                    check_call_on_non_object(w, call, env, store, out);
-                    // Absence flagship (ADR-0049 §4 / S2): fire only in the plain
-                    // per-scope pass — a descent must not re-judge the same site.
-                    if descent.is_none() {
-                        // Absence flagship's positive twin (ADR-0078, issue #185): the
-                        // method IS there, hidden by declared visibility.
-                        check_inaccessible_method(w, call, store, out);
-                        check_undefined_method(cx, folder, call, store, scope.poisoned, out);
-                        // Declared-receiver lane (ADR-0049 §8 / S6): a method absent on
-                        // a phpdoc-declared receiver narrowed by branch analysis.
-                        // Disjoint from S2 by construction — S2 fires on class_exact
-                        // receivers, S6 only on non-exact ones with a narrowed arm lane.
-                        check_phpdoc_undefined_method(cx, folder, call, store, scope.poisoned, out);
-                        // Method / constructor / static arity (ADR-0049 §6 / S5), under
-                        // a proven-exact receiver only (the declared-receiver variant
-                        // is unsound — see `resolve_arity_method`).
-                        check_arity(cx, folder, call, store, scope.poisoned, out);
-                    }
-                    let outcome = handle_method_call(
-                        cx,
-                        folder,
-                        scope,
-                        call,
-                        env,
-                        store,
-                        w.this_exact,
-                        w.enclosing_class,
-                        descent.as_mut(),
-                        out,
-                    );
-                    // ADR-0075: a resolved method/static summary rebinds on the same
-                    // rungs as a function's. A constructor keeps its exactness lane
-                    // (ADR-0036) and takes the other channel: its `$this` snapshot,
-                    // which the object build binds later in this statement (ADR-0057
-                    // C7).
-                    if matches!(call.receiver, Callee::Construct { .. }) {
-                        stmt_ctor_heap = outcome.ctor_heap;
-                    } else {
-                        stmt_summary = outcome.summary;
-                        stmt_return_arms = outcome.return_arms;
-                    }
-                    // …and, for a call that ran with a `$this` seeded from a caller
-                    // object, the snapshot step 1a copies back (D4).
-                    stmt_this_backs.extend(outcome.this_back);
-                }
-                // `$fn(...)` — resolve the callee variable against the env: a proven
-                // closure value descends into its scope (ADR-0033), a proven string
-                // resolves as a function name.
-                Callee::DynamicVar(name) => {
-                    // Issue #128: a `$fn(...)` on a proven closure rebinds its
-                    // return summary on the same rungs as free functions / methods.
-                    let outcome = handle_var_call(
-                        cx, folder, scope, name, call, env, store, descent.as_mut(), out,
-                    );
-                    stmt_summary = outcome.summary;
-                    if stmt_return_arms.is_none() {
-                        stmt_return_arms = outcome.return_arms;
-                    }
-                }
-                Callee::Dynamic => {}
-            }
-        }
+        let stmt_calls = check_stmt_calls(w, folder, stmt, env, store, descent, out);
 
         // 1z. Offset family (ADR-0049 §7 / S3): fire `offset.missing` /
         // `offset.on-unsupported` at the whitelisted read positions only (A7) — a
@@ -999,7 +802,7 @@ pub(crate) fn walk_trace(
         // so an overridable call on it sweeps it, while a resolved private/final
         // call with no object args leaves it intact. Then the `$this` copy-backs, over
         // whatever the sweeps left (ADR-0057's 2026-08-17 amendment, D4).
-        apply_call_escape_and_sweep(w, &stmt.kind, store, &stmt_this_backs);
+        apply_call_escape_and_sweep(w, &stmt.kind, store, &stmt_calls.this_backs);
 
         // 1b. Return-type check (native + phpdoc contract).
         if let StmtKind::Return { value, span, .. } = &stmt.kind {
@@ -1116,12 +919,12 @@ pub(crate) fn walk_trace(
             // summary step 1 captured, that summary is this exit's fact — `return
             // g(...)`, `return $o->m(...)`/`C::m(...)` (ADR-0075) cross the proven
             // fact. A constructor `return new Foo(...)` never composes (object
-            // return is T1). A recursive/unbindable inner call left `stmt_summary`
+            // return is T1). A recursive/unbindable inner call left `stmt_calls.summary`
             // empty, falling through to the direct value fact (thence A3 floor).
             let composed = if matches!(value, ArgValue::New(..)) {
                 None
             } else {
-                stmt_summary
+                stmt_calls.summary
                     .as_ref()
                     .and_then(|s| s.value.as_ref())
                     .map(|sv| (sv.fact.clone(), sv.stratum))
@@ -1148,8 +951,8 @@ pub(crate) fn walk_trace(
                         value,
                         env,
                         store,
-                        stmt_summary.as_ref(),
-                        stmt_ctor_heap.as_ref(),
+                        stmt_calls.summary.as_ref(),
+                        stmt_calls.ctor_heap.as_ref(),
                     ) {
                         Some(obj) => ExitContribution::Heap(Box::new(obj)),
                         None => ExitContribution::Floor,
@@ -1304,9 +1107,9 @@ pub(crate) fn walk_trace(
                     env,
                     store,
                     facts,
-                    stmt_summary.as_ref(),
-                    stmt_ctor_heap.as_ref(),
-                    stmt_return_arms.as_deref(),
+                    stmt_calls.summary.as_ref(),
+                    stmt_calls.ctor_heap.as_ref(),
+                    stmt_calls.return_arms.as_deref(),
                     out,
                 );
                 Flow::FellThrough
