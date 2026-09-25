@@ -4,7 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use steins_domain::{Certainty, Fact, Val};
+use steins_domain::{Certainty, Fact, Key, Val};
 use steins_phpdoc::Type as PType;
 use steins_syntax::{
     ArgValue, CallExpr, Callee, CondExpr, InvalidatedVar, NameRef, NamedArg, NativeType, Receiver,
@@ -29,7 +29,7 @@ use crate::assign::apply_assign;
 use crate::branch::{GuardChainCoverage, guard_chain_subject, walk_if, walk_match};
 use crate::contract::accepts;
 use crate::builtin_returns::{
-    apply_resource_effects, escape_mentioned_resources, resource_call_effects,
+    ResourceEffects, apply_resource_effects, escape_mentioned_resources, resource_call_effects,
 };
 use crate::cx::Cx;
 use crate::declared_receiver::check_phpdoc_undefined_method;
@@ -43,8 +43,8 @@ use crate::dump::{
     name_reaches_global_var_dump, resolved_fn_fqn,
 };
 use crate::env::{
-    AllocId, ContractArm, Descent, ExitContribution, HeapSummary, Known, ReturnSummary, Store,
-    Stratum, SummaryCtx,
+    AllocId, ContractArm, Descent, ExitContribution, HeapRes, HeapSummary, Known, ReturnSummary,
+    Store, Stratum, SummaryCtx,
 };
 use crate::foreach_check::check_foreach_subject;
 use crate::heap::{apply_prop_assign, seed_declared_param_object, seed_this_object};
@@ -731,29 +731,9 @@ pub(crate) fn walk_trace(
         // rather than a slot because an `echo` carries several calls, and because it
         // is the list that lets that step decline a pair naming one object.
         let mut stmt_this_backs: Vec<ThisWriteBack> = Vec::new();
-        // The statement-position out-parameter seeds (issue #595), read HERE and
-        // applied in step 5. The input a cast consumes is what the variable held
-        // before the call, and step 4 is about to forget exactly that — so the
-        // read has to happen while the entry env still holds it.
-        let stmt_out_seeds = stmt_out_param_seeds(w, folder, &stmt.kind, env, store);
-        // The out-parameter **places** of the same statement (ADR-0098 §2.2):
-        // `proc_open($cmd, $spec, $pipes)` hands back one handle per `pipe`
-        // descriptor of a proven spec. Read here with the seeds above and for
-        // the same reason — the spec is an argument, and step 4 is about to
-        // forget the name it may be held in.
-        let stmt_places = stmt_produced_places(w, folder, &stmt.kind, env);
-        // What this statement's calls do to the heap resources they are handed
-        // (ADR-0097 §2.4) — a close, a keeper, an escape — read on the same
-        // pre-call store and applied beside the out-parameter seeds, after the
-        // checks above have judged the arguments in the state they were passed in.
-        let stmt_resources = resource_call_effects(
-            cx,
-            folder,
-            scope.poisoned,
-            &checkable_calls(&stmt.kind),
-            Some(&stmt.invalidated),
-            store,
-        );
+        // What the calls will do to the names and resources they are handed, read
+        // before step 1 runs any of them and applied in step 5.
+        let pre_call = PreCall::read(w, folder, stmt, env, store);
         // 1. Check + descend every statically-named call this statement carries.
         for call in checkable_calls(&stmt.kind) {
             match &call.receiver {
@@ -1381,74 +1361,8 @@ pub(crate) fn walk_trace(
             ),
         };
 
-        // 3. Apply `@phpstan-assert` (Always) narrowings from every call in this
-        // statement (Feature D), collecting the vars they establish. This runs
-        // BEFORE the by-ref invalidation below so the replace-if-weaker decision
-        // sees a proven `Singleton`/`OneOf` (kept over a weaker asserted fact); the
-        // asserted vars are then protected from the conservative forget, since the
-        // assertion helper's contract is a *stronger* statement than "the call may
-        // have mutated this by reference".
-        let mut asserted: HashSet<String> = HashSet::new();
-        for call in checkable_calls(&stmt.kind) {
-            apply_stmt_asserts(
-                cx, scope, call, env, store, w.this_exact, w.enclosing_class, &mut asserted,
-            );
-        }
-
-        // 4. After the statement, invalidate any variable handed to a call — except
-        // one an assertion just narrowed (its post-call fact is known), except
-        // one every occurrence of which is a proven by-value argument (ADR-0070),
-        // and except a handle every occurrence of which a keeper or a closing
-        // call received (ADR-0097 §2.4): a by-value builtin argument never rebinds
-        // the variable, so the resource lane survives and only the heap state
-        // moves (step 5).
-        let (by_value, object_kept) =
-            by_value_survivors(cx, scope.poisoned, &stmt.invalidated, env, store);
-        for v in &stmt.invalidated {
-            if asserted.contains(&v.name)
-                || by_value.contains(v.name.as_str())
-                || stmt_resources.kept.contains(&v.name)
-            {
-                continue;
-            }
-            env.remove(&v.name);
-            store.unbind(&v.name);
-        }
-        // A kept object handle that reached a by-value call site OTHER than as a
-        // direct argument — an offset root, `strstr($a['k'], …)` on an `ArrayAccess`
-        // receiver — keeps the handle and loses the mutable state
-        // (`by_value_survivors`' second set). A direct object argument is the
-        // ADR-0036 escape rule's, which sweeps only for a callee that can reach
-        // the object and keeps the carry through one that provably cannot; this
-        // sweep must not second-guess it.
-        let direct: HashSet<&str> = checkable_calls(&stmt.kind)
-            .iter()
-            .flat_map(|c| c.args.iter())
-            .filter_map(|a| match &a.value {
-                ArgValue::Var(v) => Some(v.as_str()),
-                _ => None,
-            })
-            .collect();
-        for v in object_kept {
-            if !direct.contains(v) {
-                store.sweep_object(v);
-            }
-        }
-
-        // 5. Rebind what a proven by-ref write left behind (issue #595), over the
-        // forgetting step 4 just did — the ADR-0077 §3.4 ordering at the statement
-        // rung: the callee's stated write REPLACES the conservative drop rather
-        // than racing it. Empty for every statement that carries no such call.
-        apply_stmt_out_param_seeds(stmt_out_seeds, env, store);
-        // The produced places, over the same forgetting: step 4's `unbind` of
-        // `$pipes` is what dropped the previous call's places (ADR-0098 §2.3),
-        // so these are this call's alone.
-        apply_produced_places(w, stmt_places, store);
-        // The heap resources' state transitions (ADR-0097 §2.4): a closing call's
-        // return proves `Closed`, an escape forgets. By allocation id, so a name
-        // step 4 dropped or the statement rebound still reaches the entry its
-        // aliases share.
-        apply_resource_effects(&stmt_resources, store);
+        // 3 to 5. The asserts, the by-ref invalidation, then what `pre_call` read.
+        settle_stmt(w, stmt, pre_call, env, store);
 
         // Flush the pending trace annotation at the iteration's common exit —
         // the statement's own effect (step 2), its assert narrowings (step 3)
@@ -1465,6 +1379,137 @@ pub(crate) fn walk_trace(
         }
     }
     Flow::FellThrough
+}
+
+/// What a statement's calls do to the names and heap resources they are handed (the
+/// out-parameter seeds, the produced places and the resource effects), read on the
+/// entry env and store before step 1 checks or descends any of them, and applied by
+/// [`settle_stmt`] over step 4's forgetting.
+struct PreCall {
+    seeds: Vec<(String, Fact, Stratum, u32)>,
+    places: Vec<(String, Vec<(Key, HeapRes)>)>,
+    resources: ResourceEffects,
+}
+
+impl PreCall {
+    fn read(
+        w: &WalkCx,
+        folder: &mut dyn Folder,
+        stmt: &Stmt,
+        env: &HashMap<String, Known>,
+        store: &Store,
+    ) -> Self {
+        // The statement-position out-parameter seeds (issue #595), read HERE and
+        // applied in step 5. The input a cast consumes is what the variable held
+        // before the call, and step 4 is about to forget exactly that — so the
+        // read has to happen while the entry env still holds it.
+        let stmt_out_seeds = stmt_out_param_seeds(w, folder, &stmt.kind, env, store);
+        // The out-parameter **places** of the same statement (ADR-0098 §2.2):
+        // `proc_open($cmd, $spec, $pipes)` hands back one handle per `pipe`
+        // descriptor of a proven spec. Read here with the seeds above and for
+        // the same reason — the spec is an argument, and step 4 is about to
+        // forget the name it may be held in.
+        let stmt_places = stmt_produced_places(w, folder, &stmt.kind, env);
+        // What this statement's calls do to the heap resources they are handed
+        // (ADR-0097 §2.4) — a close, a keeper, an escape — read on the same
+        // pre-call store and applied beside the out-parameter seeds, after the
+        // statement's checks have judged the arguments in the state they were passed in.
+        let stmt_resources = resource_call_effects(
+            w.cx,
+            folder,
+            w.scope.poisoned,
+            &checkable_calls(&stmt.kind),
+            Some(&stmt.invalidated),
+            store,
+        );
+        Self { seeds: stmt_out_seeds, places: stmt_places, resources: stmt_resources }
+    }
+}
+
+/// Steps 3 to 5 of [`walk_trace`]: the `@phpstan-assert` narrowings, the by-ref
+/// invalidation they and the by-value survivors are exempt from, and then what
+/// [`PreCall`] read before the calls ran. The step-2 arms that return from the walk
+/// directly skip all three.
+fn settle_stmt(
+    w: &WalkCx,
+    stmt: &Stmt,
+    pre_call: PreCall,
+    env: &mut HashMap<String, Known>,
+    store: &mut Store,
+) {
+    let cx = w.cx;
+    let scope = w.scope;
+    let PreCall { seeds: stmt_out_seeds, places: stmt_places, resources: stmt_resources } =
+        pre_call;
+
+    // 3. Apply `@phpstan-assert` (Always) narrowings from every call in this
+    // statement (Feature D), collecting the vars they establish. This runs
+    // BEFORE the by-ref invalidation below so the replace-if-weaker decision
+    // sees a proven `Singleton`/`OneOf` (kept over a weaker asserted fact); the
+    // asserted vars are then protected from the conservative forget, since the
+    // assertion helper's contract is a *stronger* statement than "the call may
+    // have mutated this by reference".
+    let mut asserted: HashSet<String> = HashSet::new();
+    for call in checkable_calls(&stmt.kind) {
+        apply_stmt_asserts(
+            cx, scope, call, env, store, w.this_exact, w.enclosing_class, &mut asserted,
+        );
+    }
+
+    // 4. After the statement, invalidate any variable handed to a call — except
+    // one an assertion just narrowed (its post-call fact is known), except
+    // one every occurrence of which is a proven by-value argument (ADR-0070),
+    // and except a handle every occurrence of which a keeper or a closing
+    // call received (ADR-0097 §2.4): a by-value builtin argument never rebinds
+    // the variable, so the resource lane survives and only the heap state
+    // moves (step 5).
+    let (by_value, object_kept) =
+        by_value_survivors(cx, scope.poisoned, &stmt.invalidated, env, store);
+    for v in &stmt.invalidated {
+        if asserted.contains(&v.name)
+            || by_value.contains(v.name.as_str())
+            || stmt_resources.kept.contains(&v.name)
+        {
+            continue;
+        }
+        env.remove(&v.name);
+        store.unbind(&v.name);
+    }
+    // A kept object handle that reached a by-value call site OTHER than as a
+    // direct argument — an offset root, `strstr($a['k'], …)` on an `ArrayAccess`
+    // receiver — keeps the handle and loses the mutable state
+    // (`by_value_survivors`' second set). A direct object argument is the
+    // ADR-0036 escape rule's, which sweeps only for a callee that can reach
+    // the object and keeps the carry through one that provably cannot; this
+    // sweep must not second-guess it.
+    let direct: HashSet<&str> = checkable_calls(&stmt.kind)
+        .iter()
+        .flat_map(|c| c.args.iter())
+        .filter_map(|a| match &a.value {
+            ArgValue::Var(v) => Some(v.as_str()),
+            _ => None,
+        })
+        .collect();
+    for v in object_kept {
+        if !direct.contains(v) {
+            store.sweep_object(v);
+        }
+    }
+
+    // 5. Rebind what a proven by-ref write left behind (issue #595), over the
+    // forgetting step 4 just did — the ADR-0077 §3.4 ordering at the statement
+    // rung: the callee's stated write REPLACES the conservative drop rather
+    // than racing it. Empty for every statement that carries no such call.
+    apply_stmt_out_param_seeds(stmt_out_seeds, env, store);
+    // The produced places, over the same forgetting: step 4's `unbind` of
+    // `$pipes` is what dropped the previous call's places (ADR-0098 §2.3),
+    // so these are this call's alone.
+    apply_produced_places(w, stmt_places, store);
+    // The heap resources' state transitions (ADR-0097 §2.4): a closing call's
+    // return proves `Closed`, an escape forgets. By allocation id, so a name
+    // step 4 dropped or the statement rebound still reaches the entry its
+    // aliases share.
+    apply_resource_effects(&stmt_resources, store);
 }
 
 /// The variables `stmt` hands to a call whose facts nevertheless **survive** it
