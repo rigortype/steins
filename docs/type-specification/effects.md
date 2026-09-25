@@ -38,6 +38,7 @@ The **builtin** label set is the union of every label the catalog can color a
 builtin with, plus the ADR-0018 taxonomy roots:
 
 ```text
+eval
 exit
 ffi
 global.read   global.write
@@ -120,6 +121,15 @@ it exists, the coarse-but-true label is preferred to a precise guess.
 `ffi` is a deliberate top-level escape hatch beside `exit`: FFI runs arbitrary C,
 so the catalog can prove nothing about it. No plain builtin is colored `ffi`
 (FFI is OO-only); the label exists so `#[\Steins\Effect('ffi')]` is valid.
+
+`eval` is the second escape hatch beside it (ADR-0046 amendment, owner ruling
+2026-09-26), and unlike `ffi` it has an origin: every `eval(...)` construct is a
+proven `eval` at its span. The payload is never inspected, and a literal one
+earns no exception — `eval($c ? 'return 1;' : 'return 2;')` is `$c ? 1 : 2`
+written the long way — so a pure envelope over any `eval` is exceeded. Because
+the code it runs is unseen, the body is also `…?`: `effects: {eval, …?}`. The
+same goes for the four inclusion constructs, which read a file whatever the
+file holds: `effects: {io.fs.read, …?}`.
 
 **Ecosystem and private labels** (`io.redis`, `email.send`) are not builtin, and
 before issue #68 they were *correctly* unknown, because nothing could open the
@@ -220,6 +230,8 @@ Recognized origins in a body:
 | a statically-named function call | the catalog's labels for it — narrowed by a proven stream target, see below — or a propagation edge to a project function |
 | `echo` / `print` / `<?=` / inline HTML | `io.output.buffer` |
 | `exit` / `die` | `exit` (ADR-0019 rule 4 — `Pure` forbids exit) |
+| `eval(...)` | `eval`, **and** exhaustiveness is tainted: the payload is unseen (ADR-0046 amendment) |
+| `include` / `include_once` / `require` / `require_once` | `io.fs.read`, **and** exhaustiveness is tainted: the included file's code is unseen (ADR-0046 amendment) |
 | a resolvable method call (`$this->`, `self::`, `parent::`, `Foo::`, `new Foo()->`) | a method→method propagation edge into the project class, else the catalog's labels for the *builtin* class's method |
 | a higher-order builtin with a resolvable callback | the callback's effects, per the [invocation shape](closures.md) |
 | a `$fn()` call resolved to a known callback | the callback's effects |
