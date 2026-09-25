@@ -1,3 +1,7 @@
+//! The fact of a `??` chain (ADR-0052 §6, ADR-0062 A-G11 / S5):
+//! [`eval_coalesce_fact`], and the projection and cover predicates the offset
+//! family reads too, so that a premise and a cover cannot disagree.
+
 use std::collections::HashMap;
 
 use steins_domain::{CoverFlavor, Fact, ShapeFact, Val, Key as VKey};
