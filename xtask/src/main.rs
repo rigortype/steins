@@ -66,54 +66,53 @@ use std::process::ExitCode;
 /// committed, so the reservation costs nothing until frames are touched.
 const RAYON_STACK_SIZE: usize = 256 * 1024 * 1024;
 
-fn main() -> ExitCode {
-    // Sized before any `par_iter` runs — `build_global` refuses once the default
-    // pool exists.
-    if let Err(e) = rayon::ThreadPoolBuilder::new().stack_size(RAYON_STACK_SIZE).build_global() {
-        return fail(&format!("failed to size the rayon worker stacks: {e}"));
-    }
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    match args.first().map(String::as_str) {
-        Some("artifact-bytes") => match artifact_bytes::run(&args[1..]) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(e) => fail(&e),
-        },
-        Some("corpus-sync") => {
-            let update = args[1..].iter().any(|a| a == "--update");
-            match sync::run(update) {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(e) => fail(&e),
-            }
-        }
-        Some("fold-probe") => match fold_probe::run(&args[1..]) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(e) => fail(&e),
-        },
-        Some("fp-gate") => match gate::run() {
-            Ok(true) => ExitCode::SUCCESS,
-            Ok(false) => ExitCode::FAILURE, // ADR-0013: any diagnostic on clean code blocks release.
-            Err(e) => fail(&e),
-        },
-        Some("freq") => match freq::run() {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(e) => fail(&e),
-        },
-        Some("gen-catalog") => match gen_catalog::run(args[1..].iter().any(|a| a == "--check")) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(e) => fail(&e),
-        },
-        Some("lean-check") => {
-            let bless = args[1..].iter().any(|a| a == "--bless");
-            match lean_check::run(bless) {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(e) => fail(&e),
-            }
-        }
-        Some("licenses") => match licenses::run() {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(e) => fail(&e),
-        },
-        Some("mine-constants") => {
+/// One `cargo xtask` command.
+///
+/// The dispatch, the unknown-command list and the usage text are all read off
+/// [`COMMANDS`], so a command is listed wherever it is dispatched (issue #776).
+struct Command {
+    name: &'static str,
+    /// The arguments as the usage text spells them after the name; empty for none.
+    usage: &'static str,
+    /// Runs the command on the arguments after its name, which it parses itself.
+    run: fn(&[String]) -> ExitCode,
+}
+
+/// Every command, in the order the usage text lists them.
+const COMMANDS: &[Command] = &[
+    Command {
+        name: "artifact-bytes",
+        usage: "<DIR>… [--no-php]",
+        run: |args| outcome(artifact_bytes::run(args)),
+    },
+    Command {
+        name: "corpus-sync",
+        usage: "[--update]",
+        run: |args| outcome(sync::run(args.iter().any(|a| a == "--update"))),
+    },
+    Command {
+        name: "fold-probe",
+        usage: "[--names a,b,c] [--strict] [--json OUT] [--unsafe]",
+        run: |args| outcome(fold_probe::run(args)),
+    },
+    // ADR-0013: any diagnostic on clean code blocks release.
+    Command { name: "fp-gate", usage: "", run: |_| verdict(gate::run()) },
+    Command { name: "freq", usage: "", run: |_| outcome(freq::run()) },
+    Command {
+        name: "gen-catalog",
+        usage: "",
+        run: |args| outcome(gen_catalog::run(args.iter().any(|a| a == "--check"))),
+    },
+    Command {
+        name: "lean-check",
+        usage: "[--bless]",
+        run: |args| outcome(lean_check::run(args.iter().any(|a| a == "--bless"))),
+    },
+    Command { name: "licenses", usage: "", run: |_| outcome(licenses::run()) },
+    Command {
+        name: "mine-constants",
+        usage: "[--php PATH]…",
+        run: |args| {
             // `--php PATH`, repeatable: the engines the run diffs, one per minor
             // (ADR-0094 §2 — the generator runs over the minors the corpus
             // harness scopes, and one engine cannot disagree with itself). Since
@@ -124,13 +123,14 @@ fn main() -> ExitCode {
                 .filter(|w| w[0] == "--php")
                 .map(|w| w[1].clone())
                 .collect();
-            match mine_constants::run(&php) {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(e) => fail(&e),
-            }
-        }
-        Some("mine-function-map") => {
-            let dir = args.get(1).filter(|a| !a.starts_with("--")).map(String::as_str);
+            outcome(mine_constants::run(&php))
+        },
+    },
+    Command {
+        name: "mine-function-map",
+        usage: "[DIR] [--functions] [--methods] [--migrated] [--php PATH]…",
+        run: |args| {
+            let dir = args.first().filter(|a| !a.starts_with("--")).map(String::as_str);
             // `--php PATH`, repeatable: the countersigning engines (issue #714).
             // The top minor decides each row's bucket; the rest are vetoes.
             let php: Vec<String> = args
@@ -142,10 +142,7 @@ fn main() -> ExitCode {
             // nothing else: it reads functionMap at `declared_returns.toml`'s own
             // pin, so the two declared-return TOMLs stay byte-identical.
             if args.iter().any(|a| a == "--migrated") {
-                return match mine_function_map::run_migrated(dir, &php) {
-                    Ok(()) => ExitCode::SUCCESS,
-                    Err(e) => fail(&e),
-                };
+                return outcome(mine_function_map::run_migrated(dir, &php));
             }
             // Neither flag means both halves; either one alone narrows the run
             // (see `mine_function_map::Halves`).
@@ -155,12 +152,13 @@ fn main() -> ExitCode {
                 functions: functions || !methods,
                 methods: methods || !functions,
             };
-            match mine_function_map::run(dir, halves, &php) {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(e) => fail(&e),
-            }
-        }
-        Some("mine-param-facts") => {
+            outcome(mine_function_map::run(dir, halves, &php))
+        },
+    },
+    Command {
+        name: "mine-param-facts",
+        usage: "[--php PATH]… [--merge TOML]…",
+        run: |args| {
             // `--php PATH`, repeatable: the engines whose rows the run unions
             // (issue #703 — a build is one operating system, and `chroot` is a
             // Linux builtin). `--merge TOML` takes a previously-mined table as one
@@ -176,12 +174,13 @@ fn main() -> ExitCode {
                 .filter(|w| w[0] == "--merge")
                 .map(|w| w[1].clone())
                 .collect();
-            match mine_param_facts::run(&php, &merges) {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(e) => fail(&e),
-            }
-        }
-        Some("mine-resource-params") => {
+            outcome(mine_param_facts::run(&php, &merges))
+        },
+    },
+    Command {
+        name: "mine-resource-params",
+        usage: "[--php-src DIR]",
+        run: |args| {
             // `--php-src DIR`: the pinned php-src checkout whose stubs are scanned
             // (ADR-0097 §2.5); the default is the checkout `resource_returns.toml`
             // was read from.
@@ -189,40 +188,74 @@ fn main() -> ExitCode {
                 .windows(2)
                 .find(|w| w[0] == "--php-src")
                 .map(|w| w[1].as_str());
-            match mine_resource_params::run(php_src) {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(e) => fail(&e),
-            }
-        }
-        Some("nsrt") => {
-            let dir = args.get(1).filter(|a| !a.starts_with("--")).map(String::as_str);
-            match nsrt::run(dir) {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(e) => fail(&e),
-            }
-        }
-        Some("perf") => match perf::run(&args[1..]) {
-            Ok(true) => ExitCode::SUCCESS,
-            // ADR-0092 §5: a determinism or blessed-findings break blocks; timing never does.
-            Ok(false) => ExitCode::FAILURE,
-            Err(e) => fail(&e),
+            outcome(mine_resource_params::run(php_src))
         },
-        Some("phpdoc-oracle") => {
-            let check = args[1..].iter().any(|a| a == "--check");
-            match phpdoc_oracle::run(check) {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(e) => fail(&e),
-            }
-        }
-        Some(other) => fail(&format!(
-            "unknown command `{other}` (artifact-bytes | corpus-sync | fp-gate | freq | gen-catalog | lean-check | licenses | mine-constants | mine-function-map | mine-param-facts | mine-resource-params | nsrt | perf | phpdoc-oracle)"
-        )),
+    },
+    Command {
+        name: "nsrt",
+        usage: "[DIR]",
+        run: |args| {
+            let dir = args.first().filter(|a| !a.starts_with("--")).map(String::as_str);
+            outcome(nsrt::run(dir))
+        },
+    },
+    // ADR-0092 §5: a determinism or blessed-findings break blocks; timing never does.
+    Command {
+        name: "perf",
+        usage: "<DIR>… [--runs N] [--bless] [--no-php]",
+        run: |args| verdict(perf::run(args)),
+    },
+    Command {
+        name: "phpdoc-oracle",
+        usage: "[--check]",
+        run: |args| outcome(phpdoc_oracle::run(args.iter().any(|a| a == "--check"))),
+    },
+];
+
+fn main() -> ExitCode {
+    // Sized before any `par_iter` runs — `build_global` refuses once the default
+    // pool exists.
+    if let Err(e) = rayon::ThreadPoolBuilder::new().stack_size(RAYON_STACK_SIZE).build_global() {
+        return fail(&format!("failed to size the rayon worker stacks: {e}"));
+    }
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let Some(name) = args.first().map(String::as_str) else {
+        eprintln!("{}", usage());
+        return ExitCode::from(2);
+    };
+    match COMMANDS.iter().find(|c| c.name == name) {
+        Some(command) => (command.run)(&args[1..]),
         None => {
-            eprintln!(
-                "usage: cargo xtask <artifact-bytes <DIR>… [--no-php] | corpus-sync [--update] | fp-gate | freq | gen-catalog | lean-check [--bless] | licenses | mine-constants [--php PATH]… | mine-function-map [DIR] [--functions] [--methods] [--migrated] [--php PATH]… | mine-param-facts [--php PATH]… [--merge TOML]… | mine-resource-params [--php-src DIR] | nsrt [DIR] | perf <DIR>… [--runs N] [--bless] [--no-php] | phpdoc-oracle [--check]>"
-            );
-            ExitCode::from(2)
+            let names: Vec<&str> = COMMANDS.iter().map(|c| c.name).collect();
+            fail(&format!("unknown command `{name}` ({})", names.join(" | ")))
         }
+    }
+}
+
+/// The usage text: every command with its arguments, one per line.
+fn usage() -> String {
+    let lines: Vec<String> = COMMANDS
+        .iter()
+        .map(|c| format!("{} {}", c.name, c.usage).trim_end().to_owned())
+        .collect();
+    format!("usage: cargo xtask <{}>", lines.join("\n                  | "))
+}
+
+/// A command that did its work, or could not (exit 2).
+fn outcome(result: Result<(), String>) -> ExitCode {
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => fail(&e),
+    }
+}
+
+/// A command that passes a verdict: `Ok(false)` is a red one, exit 1, which CI
+/// reads apart from a command that could not run (exit 2).
+fn verdict(result: Result<bool, String>) -> ExitCode {
+    match result {
+        Ok(true) => ExitCode::SUCCESS,
+        Ok(false) => ExitCode::FAILURE,
+        Err(e) => fail(&e),
     }
 }
 
@@ -230,3 +263,4 @@ fn fail(msg: &str) -> ExitCode {
     eprintln!("xtask: {msg}");
     ExitCode::from(2)
 }
+
