@@ -74,14 +74,14 @@ pub(crate) struct Cx<'a> {
     /// minor when the project declares nothing (the pre-#28 behavior).
     /// Computed once per run by [`effective_php_view`].
     ///
-    /// [`effective_php_view`]: crate::effective_php_view
+    /// [`effective_php_view`]: crate::fold_args::effective_php_view
     pub(crate) php_minor: Option<(u16, u16)>,
     /// Whether a catalog-backed is-a verdict used for **arm deletion** must be
     /// demoted to `Unknown` (ADR-0052 A11): some version the analysis is about
     /// — any minor of the declared target range, else the runtime minor — is
     /// not the catalog pin. Computed once per run by [`effective_php_view`].
     ///
-    /// [`effective_php_view`]: crate::effective_php_view
+    /// [`effective_php_view`]: crate::fold_args::effective_php_view
     pub(crate) catalog_skew: bool,
     /// The `PHP_VERSION_ID` interval the analysis is about (issue #29), for the
     /// version-guard fold — already `None` when a userland constant of that

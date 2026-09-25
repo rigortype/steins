@@ -1,3 +1,17 @@
+//! The check pipeline: one run over a universe of [`FileUnit`]s, from the
+//! whole-universe facts through every file's walk to the project-wide passes.
+//! Every entry point in the crate root lands in [`check_units`]; the
+//! frozen-generation path lands in [`check_units_controlled`] with a
+//! [`WalkControl`], which is the same code path with the walk plan seam open.
+//!
+//! The order of the returned vector is part of that contract: parse failures
+//! first, then each walked or replayed file's block in unit order at any
+//! fan-out width, then the effects and throw passes, the unparsable-file filter
+//! and the dedup.
+//!
+//! [`clock`] and [`ms`] are the phase ledger's one spelling of a timed span;
+//! the run's fixpoint holder times its two fixpoints with them too.
+
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
@@ -36,6 +50,8 @@ pub(crate) fn check_units(
 /// entry point, every ungated `steins check`, every test — the planner never
 /// runs, every file walks, and nothing is recorded: the default behaviour is
 /// byte-identical because it is the *same* code path, not a compared one.
+///
+/// [`walk_plan`]: crate::walk_plan
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(crate) fn check_units_controlled(
     units: &[FileUnit],
