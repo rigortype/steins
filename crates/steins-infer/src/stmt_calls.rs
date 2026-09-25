@@ -74,34 +74,12 @@ pub(crate) fn check_stmt_calls(
                 // judgment below reads what the checkers between here and
                 // there concluded about the same call (ADR-0096 §3).
                 let before = out.len();
-                check_propagated_call(
-                    cx,
-                    folder,
-                    scope.poisoned,
-                    descent.is_some(),
-                    call,
-                    env,
-                    store,
-                    w.this_exact,
-                    w.enclosing_class,
-                    out,
-                );
+                check_propagated_call(w, folder, descent.is_some(), call, env, store, out);
                 // The builtin arm of the same judgment (ADR-0056 §9): the check
                 // above returns early for a callee it cannot resolve to a
                 // project function, and this one answers exactly there, off the
                 // engine's own reflected parameter list.
-                check_builtin_call_args(
-                    cx,
-                    folder,
-                    scope.poisoned,
-                    descent.is_some(),
-                    call,
-                    env,
-                    store,
-                    w.this_exact,
-                    w.enclosing_class,
-                    out,
-                );
+                check_builtin_call_args(w, folder, descent.is_some(), call, env, store, out);
                 // Userland function arity (ADR-0049 §6 / S5): judged once in the
                 // plain per-scope pass, like the checks below.
                 if descent.is_none() {
@@ -190,18 +168,8 @@ pub(crate) fn check_stmt_calls(
                     // is unsound — see `resolve_arity_method`).
                     check_arity(cx, folder, call, store, scope.poisoned, out);
                 }
-                let outcome = handle_method_call(
-                    cx,
-                    folder,
-                    scope,
-                    call,
-                    env,
-                    store,
-                    w.this_exact,
-                    w.enclosing_class,
-                    descent.as_mut(),
-                    out,
-                );
+                let outcome =
+                    handle_method_call(w, folder, call, env, store, descent.as_mut(), out);
                 // ADR-0075: a resolved method/static summary rebinds on the same
                 // rungs as a function's. A constructor keeps its exactness lane
                 // (ADR-0036) and takes the other channel: its `$this` snapshot,

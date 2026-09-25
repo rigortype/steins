@@ -76,18 +76,24 @@ fn with_nullable(f: Fact) -> Fact {
 /// to the caller's env (Feature D) — the fall-through position. `-if-true`/
 /// `-if-false` asserts are conditional on the boolean result and belong to guard
 /// position (see [`apply_guard_asserts`]).
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_stmt_asserts(
-    cx: &Cx,
-    scope: &Scope,
+    w: &WalkCx,
     call: &CallExpr,
     env: &mut HashMap<String, Known>,
     store: &mut Store,
-    this_exact: Option<&str>,
-    enclosing_class: Option<&str>,
     asserted: &mut HashSet<String>,
 ) {
-    apply_call_asserts(cx, scope, call, env, store, this_exact, enclosing_class, AssertKind::Always, asserted);
+    apply_call_asserts(
+        w.cx,
+        w.scope,
+        call,
+        env,
+        store,
+        w.this_exact,
+        w.enclosing_class,
+        AssertKind::Always,
+        asserted,
+    );
 }
 
 /// The source line of a guard call — the provenance line an out-parameter seed

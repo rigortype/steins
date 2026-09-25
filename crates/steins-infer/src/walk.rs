@@ -1254,9 +1254,7 @@ fn settle_stmt(
     // have mutated this by reference".
     let mut asserted: HashSet<String> = HashSet::new();
     for call in checkable_calls(&stmt.kind) {
-        apply_stmt_asserts(
-            cx, scope, call, env, store, w.this_exact, w.enclosing_class, &mut asserted,
-        );
+        apply_stmt_asserts(w, call, env, store, &mut asserted);
     }
 
     // 4. After the statement, invalidate any variable handed to a call — except

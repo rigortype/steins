@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 
 use steins_domain::Fact;
-use steins_syntax::{ArgValue, CallExpr, Callee, MethodDecl, Receiver, Scope};
+use steins_syntax::{ArgValue, CallExpr, Callee, MethodDecl, Receiver};
 
 use crate::fold::Folder;
 use crate::arg_check::{
@@ -23,6 +23,7 @@ use crate::generics::{check_callable_arg, check_named_phpdoc_params, check_phpdo
 use crate::heap::{CtorDefaults, constructed_object, new_heap_object, simple_class};
 use crate::project::Diagnostic;
 use crate::return_arms::{bindable_args, method_return_arms_at_call};
+use crate::walk::WalkCx;
 
 /// Outcome of a resolved method/static call (ADR-0075): return-fact summary
 /// **and** declared return arms, both computed against the store **before** the
@@ -48,19 +49,19 @@ pub(crate) struct MethodCallOutcome {
 /// constructor — the `$this` snapshot the object build consumes (ADR-0057 C7). A
 /// constructor's *value* summary stays unread, and for the reason ADR-0075 §3 gave:
 /// a constructor evaluates to an object, and an object is not a value.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn handle_method_call(
-    cx: &Cx,
+    w: &WalkCx,
     folder: &mut dyn Folder,
-    scope: &Scope,
     call: &CallExpr,
     env: &HashMap<String, Known>,
     store: &Store,
-    this_exact: Option<&str>,
-    enclosing_class: Option<&str>,
     mut descent: Option<&mut Descent<'_>>,
     out: &mut Vec<Diagnostic>,
 ) -> MethodCallOutcome {
+    let cx = w.cx;
+    let scope = w.scope;
+    let this_exact = w.this_exact;
+    let enclosing_class = w.enclosing_class;
     let empty =
         MethodCallOutcome { summary: None, return_arms: None, ctor_heap: None, this_back: None };
     let Some(mut target) =

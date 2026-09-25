@@ -21,6 +21,7 @@ use crate::env::{ContractArm, HandleState, Known, Store, Stratum};
 use crate::heap::simple_class;
 use crate::project::Diagnostic;
 use crate::return_arms::{call_return_arms_by_name, method_return_arms_by_callee};
+use crate::walk::WalkCx;
 use crate::fold::Folder;
 use crate::{PHPDOC_MAYBE_ARGUMENT_MISMATCH_ID, TYPE_MAYBE_ARGUMENT_MISMATCH_ID, describe_fact};
 use crate::builtin_returns::{builtin_call_return_fact, builtin_return_floor, store_holds_resource};
@@ -820,20 +821,20 @@ fn builtin_param_as_param(bp: &BuiltinParam, ty: NativeType, span: Span) -> Para
 /// object, the proven resource, and — only where none of those fired — the
 /// possibly pair.
 ///
-/// [`check_propagated_call`]: crate::check_propagated_call
-#[allow(clippy::too_many_arguments)]
+/// [`check_propagated_call`]: crate::descent::check_propagated_call
 pub(crate) fn check_builtin_call_args(
-    cx: &Cx,
+    w: &WalkCx,
     folder: &mut dyn Folder,
-    poisoned: bool,
     in_descent: bool,
     call: &CallExpr,
     env: &HashMap<String, Known>,
     store: &Store,
-    this_exact: Option<&str>,
-    enclosing_class: Option<&str>,
     out: &mut Vec<Diagnostic>,
 ) {
+    let cx = w.cx;
+    let poisoned = w.scope.poisoned;
+    let this_exact = w.this_exact;
+    let enclosing_class = w.enclosing_class;
     // A named argument or an argument unpacking breaks the position→parameter map
     // this whole judgment is indexed by (§9.4, v1). `positional_only` is `false`
     // for both, and for the first-class-callable shape `f(...)`, which is a value
