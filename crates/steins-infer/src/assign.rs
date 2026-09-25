@@ -293,128 +293,7 @@ pub(crate) fn apply_assign(
             // `$x = is_int($y)` and kin: the fold could not reach it, so seed the
             // uniquely-resolved builtin's reflected return envelope (ADR-0056 R1).
             // Enters at `Verified` — a native declaration (§2).
-            None => match value {
-                // An array literal the rung above could not prove whole (issue
-                // #327): keys, count, and sealing are known even when an element's
-                // value is not, so it seeds a `Fact::Shape` rather than dropping.
-                ArgValue::Array(items)
-                    if let Some((fact, strat)) = array_literal_fact(
-                        cx,
-                        folder,
-                        items,
-                        env,
-                        w.scope.poisoned,
-                        Some(&*store),
-                    ) =>
-                {
-                    lhs.bind_quiet(env, store, fact, strat);
-                    bind_handle_elements(cx, var, items, store);
-                }
-                // The `::class` magic constant (issue #236): `$c = Foo::class`
-                // binds its FQN literal, `$c = static::class` the refinement.
-                // Verified: PHP's own guarantee, not a declaration's.
-                ArgValue::ClassConst(sc, name)
-                    if let Some(fact) = class_const_class_fact(cx, w.scope, sc, name) =>
-                {
-                    lhs.bind_quiet(env, store, fact, Stratum::Verified);
-                }
-                // The member-wise union fold (issue #74): a bounded union-of-constants
-                // argument is enumerated and every combination answered by the real
-                // engine. Binds where a folded literal binds, carrying the input
-                // union's own stratum (N2's min), not the engine's `Verified`.
-                ArgValue::Call(name, args)
-                    if let Some((fact, strat, prov)) =
-                        cx.try_union_fold(name, args, env, w.scope.poisoned, folder) =>
-                {
-                    // A product whose members all agreed composes to a `Singleton`.
-                    lhs.note_literal(&fact);
-                    lhs.bind_known(env, store, Known::value_strat(fact, line, Some(prov), strat));
-                }
-                // The builtin-call ladder (`builtin_call_rung`), every rung of it:
-                // the §2.7 resource folds are asked HERE — where the right-hand
-                // side IS the call — so no other call of the statement can have
-                // moved the handle's state first, and the resource arms because
-                // this seam binds the heap resource they come with. A poisoned
-                // scope binds nothing and asks nothing.
-                ArgValue::Call(name, args)
-                    if !w.scope.poisoned
-                        && let Some(rung) = builtin_call_rung(
-                            cx,
-                            folder,
-                            name,
-                            args,
-                            env,
-                            Some(&*store),
-                            w.scope.poisoned,
-                            OptionalRungs { resource_folds: true, resource_arms: true },
-                        ) =>
-                {
-                    bind_builtin_rung(w, &mut lhs, rung, env, store);
-                }
-                // The return summary, then the arm floor (ADR-0057 T0/T1 /
-                // ADR-0052 §9). `unbind` first (voids any stale arm lane).
-                //
-                // The HEAP rung first (T1, §1's rebind): a summary carrying an
-                // allocation binds `var` to a **fresh object in this walk's own heap**
-                // — a copy, no shared identity, so no callee-side name survives and no
-                // aliasing question crosses the boundary. Ordering the two rungs is
-                // formality: an object return carries no value fact (ADR-0035), so
-                // they are exclusive by construction.
-                //
-                // Then the value rung: the summary is the value floor above the
-                // declared arms (A1): a bindable value fact binds as `var`'s value fact
-                // at its joined stratum, sitting where a folded literal would.
-                // Otherwise the summary degraded to the floor and the declared arms
-                // stand. Since issue #596 a `Fact::Shape` is bindable, so this rung is
-                // also the sharp twin of `seed_returned_shape` below: the same lane,
-                // the same consumers, a proven shape instead of a declared one — and,
-                // crucially, the summary's own stratum instead of that seed's flat
-                // `Asserted`. No heap question arises for it: a returned array is a
-                // COPY (PHP value semantics), so unlike the heap rung above it needs no
-                // fresh `AllocId` and shares no identity with anything the callee kept.
-                _ => {
-                    lhs.clear(env, store);
-                    if let Some(ReturnSummary { heap: Some(hs), .. }) = summary
-                        && !w.scope.poisoned
-                    {
-                        // The snapshot, verbatim (§1's field-by-field list): class and
-                        // exactness copied never promoted, props with their strata,
-                        // readonly bookkeeping transferred (sweep immunity does not
-                        // stop at a `return`), carries kept, and `escaped` = the
-                        // summary's escaped-BEFORE-return bit — `false` meaning the
-                        // caller now holds the sole reference, so the object survives
-                        // an unrelated unknown call exactly as a local `new` does.
-                        let id = w.fresh_id();
-                        store.heap.insert(id, hs.obj.clone());
-                        store.refs.insert(var.to_owned(), id);
-                    } else if let Some(ReturnSummary { value: Some(sv), .. }) = summary
-                        && summary_binds(&sv.fact)
-                    {
-                        env.insert(
-                            var.to_owned(),
-                            Known::value_strat(sv.fact.clone(), line, None, sv.stratum),
-                        );
-                    } else if let Some(arms) = return_arms {
-                        // Prefer arms captured at resolution (before this unbind),
-                        // so method self-assign keeps the declared floor.
-                        seed_returned_shape(var, arms, line, env);
-                        store.contract.insert(var.to_owned(), arms.to_vec());
-                    } else if let Some(c) = call
-                        && let Some(arms) = call_return_arms(
-                            cx,
-                            c,
-                            store,
-                            w.this_exact,
-                            w.enclosing_class,
-                            w.scope.poisoned,
-                        )
-                    {
-                        // Fallback: free-function / non-self-assign paths.
-                        seed_returned_shape(var, &arms, line, env);
-                        store.contract.insert(var.to_owned(), arms);
-                    }
-                }
-            },
+            None => bind_unfolded(w, folder, &mut lhs, value, call, env, store, summary, return_arms),
         },
     }
 
@@ -427,7 +306,163 @@ pub(crate) fn apply_assign(
     // same answer either way. Every arm above has already run `unbind(var)`,
     // which is what drops the previous binding's places (§2.3's sweep), so the
     // places minted here are this call's and no earlier one's.
-    //
+    bind_call_places(w, folder, var, value, store);
+
+    if let Some(arms) = copied_arms {
+        store.contract.insert(var.to_owned(), arms);
+    }
+}
+
+/// Bind a right-hand side the literal rung could not fold: an array literal's
+/// shape, `::class`, the union fold, the builtin-call ladder, and last a call's
+/// return summary or declared arms, the first that answers.
+#[allow(clippy::too_many_arguments)]
+fn bind_unfolded(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    lhs: &mut AssignLhs,
+    value: &ArgValue,
+    call: Option<&CallExpr>,
+    env: &mut HashMap<String, Known>,
+    store: &mut Store,
+    summary: Option<&ReturnSummary>,
+    return_arms: Option<&[ContractArm]>,
+) {
+    let cx = w.cx;
+    let (var, line) = (lhs.var, lhs.line);
+    match value {
+        // An array literal the rung above could not prove whole (issue
+        // #327): keys, count, and sealing are known even when an element's
+        // value is not, so it seeds a `Fact::Shape` rather than dropping.
+        ArgValue::Array(items)
+            if let Some((fact, strat)) = array_literal_fact(
+                cx,
+                folder,
+                items,
+                env,
+                w.scope.poisoned,
+                Some(&*store),
+            ) =>
+        {
+            lhs.bind_quiet(env, store, fact, strat);
+            bind_handle_elements(cx, var, items, store);
+        }
+        // The `::class` magic constant (issue #236): `$c = Foo::class`
+        // binds its FQN literal, `$c = static::class` the refinement.
+        // Verified: PHP's own guarantee, not a declaration's.
+        ArgValue::ClassConst(sc, name)
+            if let Some(fact) = class_const_class_fact(cx, w.scope, sc, name) =>
+        {
+            lhs.bind_quiet(env, store, fact, Stratum::Verified);
+        }
+        // The member-wise union fold (issue #74): a bounded union-of-constants
+        // argument is enumerated and every combination answered by the real
+        // engine. Binds where a folded literal binds, carrying the input
+        // union's own stratum (N2's min), not the engine's `Verified`.
+        ArgValue::Call(name, args)
+            if let Some((fact, strat, prov)) =
+                cx.try_union_fold(name, args, env, w.scope.poisoned, folder) =>
+        {
+            // A product whose members all agreed composes to a `Singleton`.
+            lhs.note_literal(&fact);
+            lhs.bind_known(env, store, Known::value_strat(fact, line, Some(prov), strat));
+        }
+        // The builtin-call ladder (`builtin_call_rung`), every rung of it:
+        // the §2.7 resource folds are asked HERE — where the right-hand
+        // side IS the call — so no other call of the statement can have
+        // moved the handle's state first, and the resource arms because
+        // this seam binds the heap resource they come with. A poisoned
+        // scope binds nothing and asks nothing.
+        ArgValue::Call(name, args)
+            if !w.scope.poisoned
+                && let Some(rung) = builtin_call_rung(
+                    cx,
+                    folder,
+                    name,
+                    args,
+                    env,
+                    Some(&*store),
+                    w.scope.poisoned,
+                    OptionalRungs { resource_folds: true, resource_arms: true },
+                ) =>
+        {
+            bind_builtin_rung(w, lhs, rung, env, store);
+        }
+        // The return summary, then the arm floor (ADR-0057 T0/T1 /
+        // ADR-0052 §9). `unbind` first (voids any stale arm lane).
+        //
+        // The HEAP rung first (T1, §1's rebind): a summary carrying an
+        // allocation binds `var` to a **fresh object in this walk's own heap**
+        // — a copy, no shared identity, so no callee-side name survives and no
+        // aliasing question crosses the boundary. Ordering the two rungs is
+        // formality: an object return carries no value fact (ADR-0035), so
+        // they are exclusive by construction.
+        //
+        // Then the value rung: the summary is the value floor above the
+        // declared arms (A1): a bindable value fact binds as `var`'s value fact
+        // at its joined stratum, sitting where a folded literal would.
+        // Otherwise the summary degraded to the floor and the declared arms
+        // stand. Since issue #596 a `Fact::Shape` is bindable, so this rung is
+        // also the sharp twin of `seed_returned_shape` below: the same lane,
+        // the same consumers, a proven shape instead of a declared one — and,
+        // crucially, the summary's own stratum instead of that seed's flat
+        // `Asserted`. No heap question arises for it: a returned array is a
+        // COPY (PHP value semantics), so unlike the heap rung above it needs no
+        // fresh `AllocId` and shares no identity with anything the callee kept.
+        _ => {
+            lhs.clear(env, store);
+            if let Some(ReturnSummary { heap: Some(hs), .. }) = summary
+                && !w.scope.poisoned
+            {
+                // The snapshot, verbatim (§1's field-by-field list): class and
+                // exactness copied never promoted, props with their strata,
+                // readonly bookkeeping transferred (sweep immunity does not
+                // stop at a `return`), carries kept, and `escaped` = the
+                // summary's escaped-BEFORE-return bit — `false` meaning the
+                // caller now holds the sole reference, so the object survives
+                // an unrelated unknown call exactly as a local `new` does.
+                let id = w.fresh_id();
+                store.heap.insert(id, hs.obj.clone());
+                store.refs.insert(var.to_owned(), id);
+            } else if let Some(ReturnSummary { value: Some(sv), .. }) = summary
+                && summary_binds(&sv.fact)
+            {
+                env.insert(
+                    var.to_owned(),
+                    Known::value_strat(sv.fact.clone(), line, None, sv.stratum),
+                );
+            } else if let Some(arms) = return_arms {
+                // Prefer arms captured at resolution (before this unbind),
+                // so method self-assign keeps the declared floor.
+                seed_returned_shape(var, arms, line, env);
+                store.contract.insert(var.to_owned(), arms.to_vec());
+            } else if let Some(c) = call
+                && let Some(arms) = call_return_arms(
+                    cx,
+                    c,
+                    store,
+                    w.this_exact,
+                    w.enclosing_class,
+                    w.scope.poisoned,
+                )
+            {
+                // Fallback: free-function / non-self-assign paths.
+                seed_returned_shape(var, &arms, line, env);
+                store.contract.insert(var.to_owned(), arms);
+            }
+        }
+    }
+}
+
+/// Bind the element places a call right-hand side produces (ADR-0098 §2.2):
+/// `$pair = stream_socket_pair(…)`.
+fn bind_call_places(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    var: &str,
+    value: &ArgValue,
+    store: &mut Store,
+) {
     // The poison leg (ADR-0046) is the twin of `produced_places`', and like it
     // it is defence in depth: measured by mutation, removing it changes no
     // finding, because `resource_call_effects` refuses a poisoned scope before
@@ -435,13 +470,9 @@ pub(crate) fn apply_assign(
     // pins the posture rather than this line.
     if let ArgValue::Call(name, _) = value
         && !w.scope.poisoned
-        && let Some(places) = socket_pair_places(cx, folder, name)
+        && let Some(places) = socket_pair_places(w.cx, folder, name)
     {
         bind_produced_places(w, var, places, store);
-    }
-
-    if let Some(arms) = copied_arms {
-        store.contract.insert(var.to_owned(), arms);
     }
 }
 
