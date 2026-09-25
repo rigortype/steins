@@ -605,6 +605,22 @@ pub(crate) fn scan_effect_origins(node: &Node<'_, '_>, cx: &EffectScanCx, out: &
         Node::DieConstruct(d) => {
             out.push(EffectOrigin::Exit { keyword: "die", span: to_span(d.span()) });
         }
+        // Dynamic code (ADR-0046 amendment): `eval` is its own label, a file
+        // inclusion reads a file. Both run code this scan never sees. The
+        // operand is still walked below — `eval(f())` calls `f`.
+        Node::EvalConstruct(ec) => out.push(EffectOrigin::Eval { span: to_span(ec.span()) }),
+        Node::IncludeConstruct(ic) => {
+            out.push(EffectOrigin::Include { keyword: "include", span: to_span(ic.span()) });
+        }
+        Node::IncludeOnceConstruct(ic) => {
+            out.push(EffectOrigin::Include { keyword: "include_once", span: to_span(ic.span()) });
+        }
+        Node::RequireConstruct(rq) => {
+            out.push(EffectOrigin::Include { keyword: "require", span: to_span(rq.span()) });
+        }
+        Node::RequireOnceConstruct(rq) => {
+            out.push(EffectOrigin::Include { keyword: "require_once", span: to_span(rq.span()) });
+        }
         // Instance / static method calls with a statically-resolvable receiver
         // become effect edges (`$this->`, `self::`, `parent::`, `Foo::`,
         // `new Foo()->`). Dynamic receivers record nothing.

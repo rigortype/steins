@@ -689,7 +689,7 @@ mod tests {
     /// (contract inputs), namespaced declarations with `use` imports (the
     /// `ctx` leg), value-IR corners the codec exceptions exist for (a
     /// non-finite float literal, a non-UTF-8 string literal), effect-origin
-    /// keywords (`echo`, `exit`), trace-IR control flow (`if`/`foreach`/
+    /// keywords (`echo`, `exit`, `require_once`), trace-IR control flow (`if`/`foreach`/
     /// closures), magic-member tags, alias edges, constants, and property
     /// writes.
     fn fixture() -> Vec<(&'static str, &'static str)> {
@@ -697,6 +697,10 @@ mod tests {
             (
                 "src/app.php",
                 "<?php\nnamespace App;\nuse Lib\\A\\Widget;\n/** @param int $n @return string */\nfunction run(int $n): string {\n  $f = 1e999;\n  $g = 2.5;\n  $s = \"\\xC0\\xC1\";\n  $a = [1 => 'one', 'k' => $s];\n  if ($n === 1) { echo $s; } else { exit; }\n  foreach ($a as $k => $v) { $b[] = $v; }\n  $c = fn (int $x): int => $x + 1;\n  return dup((string) $n);\n}\nconst LIMIT = 3;\n$k->written = 1;\nclass_alias('lib\\\\a\\\\widget', 'app\\\\widget');\n",
+            ),
+            (
+                "src/dynamic.php",
+                "<?php\nnamespace App;\nfunction load(string $c, string $f): mixed {\n  eval($c);\n  return require_once $f;\n}\n",
             ),
             (
                 "vendor/lib/a/src/widget.php",
@@ -730,6 +734,8 @@ mod tests {
             O::Opaque { .. } => "Opaque",
             O::HigherOrder { .. } => "HigherOrder",
             O::Callback { .. } => "Callback",
+            O::Eval { .. } => "Eval",
+            O::Include { .. } => "Include",
         }
     }
 
@@ -844,12 +850,13 @@ mod tests {
         assert!(app.functions()[0].docblock.is_some(), "a docblocked function");
         // The payload codec carries an enum by variant index, and
         // `EffectOrigin`'s inverse is the one hand-written twin in the graph
-        // (`steins-syntax::persist`), so its seven variants have to survive
+        // (`steins-syntax::persist`), so its nine variants have to survive
         // the disk boundary *by position*. They only can if they are here.
         let kinds = fixture_origin_kinds(&parsed);
-        for variant in
-            ["Call", "Output", "Exit", "MethodCall", "Opaque", "HigherOrder", "Callback"]
-        {
+        for variant in [
+            "Call", "Output", "Exit", "MethodCall", "Opaque", "HigherOrder", "Callback", "Eval",
+            "Include",
+        ] {
             assert!(kinds.contains_key(variant), "the fixture must carry an {variant} origin");
         }
         // Schema 20 (issue #603): `ret_top` sits between `ret` and `ret_span` on
