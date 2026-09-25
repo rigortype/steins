@@ -67,7 +67,7 @@ fn check_string_context_site(
     // The array leg. Warning-grade, so it rides the ADR-0049 §7 lever: under a
     // declared `warning-handler = "null"` the application tolerates the warning and
     // the finding leaves the proof surface, exactly as `offset.missing` does.
-    if cx.warning_handler_abort && string_context_is_array(w, folder, &site.value, env) {
+    if cx.postures.warning_handler_abort && string_context_is_array(w, folder, &site.value, env) {
         let pos = cx.tree().position(site.span.start);
         out.push(Diagnostic {
             id: STRING_ARRAY_CONVERSION_ID,

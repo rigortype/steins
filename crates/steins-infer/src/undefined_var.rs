@@ -54,7 +54,7 @@ use crate::docblock_hygiene::hygiene_diag;
 /// Gating on the flag would silence every scope that merely declares a
 /// `global`.
 pub(crate) fn check_undefined_variables(cx: &Cx, out: &mut Vec<Diagnostic>) {
-    if !cx.warning_handler_abort {
+    if !cx.postures.warning_handler_abort {
         return;
     }
     // Nothing to judge in most files: skip the call-site sweep entirely then.

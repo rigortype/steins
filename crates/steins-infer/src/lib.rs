@@ -133,15 +133,66 @@ pub use walk_plan::Divergence;
 use fold_args::effective_php_view;
 
 /// The `[runtime] final-keyword` posture (issue #234), re-exported so the CLI can
-/// resolve `steins.toml` into it without depending on steins-contract directly —
-/// mirrors [`check_project_with_runtime`]'s `warning_handler_abort` parameter.
-/// Unused until intersection consumption (issue #238) joins it on `Cx`.
+/// resolve `steins.toml` into [`RuntimePostures`] without depending on
+/// steins-contract directly.
 pub use steins_contract::normalize::FinalKeyword;
 
 /// The `[runtime] os` pin (ADR-0094 §3): the deployment host a project declares,
 /// which fixes `PHP_OS_FAMILY`, `PHP_EOL`, `DIRECTORY_SEPARATOR` and
 /// `PATH_SEPARATOR` together. Absent, each is the union of what it can be.
 pub use global_consts::OsFamily;
+
+/// The `[runtime]` pseudo-constants a run analyzes under (ADR-0037 §2): boot
+/// truths no amount of reading source settles, which the project declares and
+/// Steins reasons under.
+///
+/// One value, resolved once at the caller's config boundary and passed whole to
+/// every file's analysis context, so a new posture is a field here rather than
+/// an argument at every layer between. The generation identity destructures it
+/// without a rest pattern, so the field does not compile until it has an
+/// identity row either — a run under a different value is a different run
+/// (ADR-0092 §2).
+///
+/// These describe the *analyzed* runtime. The coverage posture (sidecar or sound
+/// subset, ADR-0004) and a generation's engine posture describe the analyzing
+/// engine instead, and live elsewhere.
+///
+/// [`Default`] is what declaring nothing means: `"abort"`, `"enforced"`, and no
+/// OS pin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimePostures {
+    /// `warning-handler` (ADR-0049 §7 amendment). `true` = `"abort"` (the
+    /// owner-confirmed realistic-app default: a warning handler converts an
+    /// `E_WARNING` to an exception/halts, so a *proven* warning is a proven
+    /// runtime break — warning-grade offset findings emit). `false` = `"null"`:
+    /// the application tolerates the warning and continues, so warning-grade
+    /// offset findings stay silent (v1 simplification: the ADR-0050
+    /// layer-demotion + value-side `null`/`""` adoption is deferred). The
+    /// Error-grade `offset.on-unsupported` object case (not yet implemented) is
+    /// posture-independent and would emit under both.
+    pub warning_handler_abort: bool,
+    /// `final-keyword` (issue #234) — what the runtime this project is analyzed
+    /// for does with `final`. Read by the declared-receiver lane's intersection
+    /// leg (issue #238) through [`steins_contract::normalize::provably_uninhabited`],
+    /// and by nothing else: the posture governs *inhabitance*, never a `final`
+    /// diagnostic (#234's own out-of-scope list). [`FinalKeyword::Enforced`] is
+    /// the absence default, so a project declaring nothing gets the language's
+    /// own rule.
+    pub final_keyword: FinalKeyword,
+    /// `os` (ADR-0094 §3) — the deployment host the project declares. Read only
+    /// by the global-constant resolver, and only for the four constants a host
+    /// fixes together (`PHP_OS_FAMILY`, `PHP_EOL`, `DIRECTORY_SEPARATOR`,
+    /// `PATH_SEPARATOR`). `None` is the default and the sound one: the union of
+    /// what each can be, since a library cannot assume its host.
+    pub os_pin: Option<OsFamily>,
+}
+
+impl Default for RuntimePostures {
+    fn default() -> Self {
+        Self { warning_handler_abort: true, final_keyword: FinalKeyword::Enforced, os_pin: None }
+    }
+}
+
 /// The catalog's refusal axis, re-exported: a consumer of [`SurfaceSummary`]
 /// reads the classification without naming `steins-catalog`.
 pub use steins_catalog::{RefusalAxis, ResourceParam};
@@ -235,9 +286,7 @@ pub fn diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         &units,
         &index,
         &mut NoFold,
-        true,
-        FinalKeyword::Enforced,
-        None,
+        RuntimePostures::default(),
         &ProjectLayout::fallback(),
         &PluginFacts::none(),
         &EffectsPolicy::none(),
@@ -255,9 +304,7 @@ pub fn check_file(db: &dyn Db, file: SourceFile, folder: &mut dyn Folder) -> Vec
         &units,
         &index,
         folder,
-        true,
-        FinalKeyword::Enforced,
-        None,
+        RuntimePostures::default(),
         &ProjectLayout::fallback(),
         &PluginFacts::none(),
         &EffectsPolicy::none(),
@@ -267,63 +314,22 @@ pub fn check_file(db: &dyn Db, file: SourceFile, folder: &mut dyn Folder) -> Vec
 /// The folding-aware check for a whole **project** (ADR-0009/0015): every file
 /// in `project` is analyzed as one unit, so cross-file calls, class chains, and
 /// effects resolve. Resolution is driven by the salsa [`project_index`] query.
+/// Runs under the default [`RuntimePostures`]; [`check_project_under`] takes the
+/// ones a project declares.
 #[must_use]
 pub fn check_project(db: &dyn Db, project: Project, folder: &mut dyn Folder) -> Vec<Diagnostic> {
-    check_project_with_runtime(db, project, folder, true)
+    check_project_under(db, project, folder, RuntimePostures::default())
 }
 
-/// [`check_project`] with the `[runtime]` pseudo-constants declared (ADR-0049 §7):
-/// `warning_handler_abort` (the `warning-handler` posture) is `true` for the default
-/// `"abort"` — proven warning-grade offset findings emit — and `false` for `"null"`,
-/// which silences them. The default entry point ([`check_project`]) passes `true`:
-/// the safe production default. (The former `zend_assertions` knob was abolished by
-/// the 2026-07-25 owner ruling — `assert($expr)` is `Verified` unconditionally.)
+/// [`check_project`] under the `[runtime]` postures a project declares
+/// (ADR-0037 §2), passed whole: the entry point for a caller that has resolved
+/// `steins.toml`, and the one every `check_project_with_*` below delegates to.
 #[must_use]
-pub fn check_project_with_runtime(
+pub fn check_project_under(
     db: &dyn Db,
     project: Project,
     folder: &mut dyn Folder,
-    warning_handler_abort: bool,
-) -> Vec<Diagnostic> {
-    check_project_with_postures(db, project, folder, warning_handler_abort, FinalKeyword::Enforced)
-}
-
-/// [`check_project_with_runtime`] plus the `[runtime] final-keyword` posture
-/// (issue #234, consumed by #238).
-///
-/// Both `[runtime]` pseudo-constants in one entry point, since they are one
-/// family (ADR-0037 §2): a boot truth no amount of reading source settles,
-/// which the project declares and Steins reasons under. `final_keyword` reaches
-/// exactly one consumer — the declared-receiver lane's intersection leg — and
-/// [`FinalKeyword::Enforced`] is what declaring nothing means, so
-/// [`check_project_with_runtime`] delegating with it keeps every existing
-/// caller's semantics byte-identical.
-#[must_use]
-pub fn check_project_with_postures(
-    db: &dyn Db,
-    project: Project,
-    folder: &mut dyn Folder,
-    warning_handler_abort: bool,
-    final_keyword: FinalKeyword,
-) -> Vec<Diagnostic> {
-    check_project_with_os(db, project, folder, warning_handler_abort, final_keyword, None)
-}
-
-/// [`check_project_with_postures`] plus the `[runtime] os` pin (ADR-0094 §3).
-///
-/// The third member of the same `[runtime]` family (ADR-0037 §2), and the same
-/// shape of delegation: `None` is what declaring nothing means — every
-/// host-dependent constant answers the union of what it can be, which is sound on
-/// every host — so the caller that does not pass one keeps byte-identical
-/// semantics.
-#[must_use]
-pub fn check_project_with_os(
-    db: &dyn Db,
-    project: Project,
-    folder: &mut dyn Folder,
-    warning_handler_abort: bool,
-    final_keyword: FinalKeyword,
-    os_pin: Option<OsFamily>,
+    postures: RuntimePostures,
 ) -> Vec<Diagnostic> {
     let handles: Vec<SourceFile> = project.files(db).to_vec();
     // One `LazyTree` per file, borrowing the database's own parse: the salsa
@@ -343,13 +349,58 @@ pub fn check_project_with_os(
         &units,
         &index,
         folder,
-        warning_handler_abort,
-        final_keyword,
-        os_pin,
+        postures,
         project.layout(db),
         project.plugins(db),
         project.effects(db),
     )
+}
+
+/// [`check_project`] with the `warning-handler` posture declared (ADR-0049 §7):
+/// `warning_handler_abort` is `true` for the default `"abort"` — proven
+/// warning-grade offset findings emit — and `false` for `"null"`, which silences
+/// them. Every other posture keeps its default. (The former `zend_assertions` knob
+/// was abolished by the 2026-07-25 owner ruling — `assert($expr)` is `Verified`
+/// unconditionally.)
+#[must_use]
+pub fn check_project_with_runtime(
+    db: &dyn Db,
+    project: Project,
+    folder: &mut dyn Folder,
+    warning_handler_abort: bool,
+) -> Vec<Diagnostic> {
+    let postures = RuntimePostures { warning_handler_abort, ..RuntimePostures::default() };
+    check_project_under(db, project, folder, postures)
+}
+
+/// [`check_project_with_runtime`] plus the `[runtime] final-keyword` posture
+/// (issue #234, consumed by #238). The OS pin keeps its default.
+#[must_use]
+pub fn check_project_with_postures(
+    db: &dyn Db,
+    project: Project,
+    folder: &mut dyn Folder,
+    warning_handler_abort: bool,
+    final_keyword: FinalKeyword,
+) -> Vec<Diagnostic> {
+    let postures =
+        RuntimePostures { warning_handler_abort, final_keyword, ..RuntimePostures::default() };
+    check_project_under(db, project, folder, postures)
+}
+
+/// [`check_project_with_postures`] plus the `[runtime] os` pin (ADR-0094 §3):
+/// every [`RuntimePostures`] field spelled as an argument of its own.
+#[must_use]
+pub fn check_project_with_os(
+    db: &dyn Db,
+    project: Project,
+    folder: &mut dyn Folder,
+    warning_handler_abort: bool,
+    final_keyword: FinalKeyword,
+    os_pin: Option<OsFamily>,
+) -> Vec<Diagnostic> {
+    let postures = RuntimePostures { warning_handler_abort, final_keyword, os_pin };
+    check_project_under(db, project, folder, postures)
 }
 
 /// The pure single-file check (sound subset). Kept for unit tests and callers
@@ -376,9 +427,7 @@ pub fn check_with(
         &units,
         &index,
         folder,
-        true,
-        FinalKeyword::Enforced,
-        None,
+        RuntimePostures::default(),
         &ProjectLayout::fallback(),
         &PluginFacts::none(),
         &EffectsPolicy::none(),
@@ -405,9 +454,7 @@ pub fn check_full(
         &units,
         &index,
         folder,
-        warning_handler_abort,
-        FinalKeyword::Enforced,
-        None,
+        RuntimePostures { warning_handler_abort, ..RuntimePostures::default() },
         &ProjectLayout::fallback(),
         &PluginFacts::none(),
         &EffectsPolicy::none(),
@@ -416,30 +463,16 @@ pub fn check_full(
 
 /// The project checking core: direct + propagation passes over every file's
 /// calls and scopes, then the one project-wide effects pass.
-#[allow(clippy::too_many_arguments)]
 fn check_units(
     units: &[FileUnit],
     index: &Index,
     folder: &mut dyn Folder,
-    warning_handler_abort: bool,
-    final_keyword: FinalKeyword,
-    os_pin: Option<OsFamily>,
+    postures: RuntimePostures,
     layout: &ProjectLayout,
     plugins: &PluginFacts,
     policy: &EffectsPolicy,
 ) -> Vec<Diagnostic> {
-    check_units_controlled(
-        units,
-        index,
-        folder,
-        warning_handler_abort,
-        final_keyword,
-        os_pin,
-        layout,
-        plugins,
-        policy,
-        None,
-    )
+    check_units_controlled(units, index, folder, postures, layout, plugins, policy, None)
 }
 
 /// [`check_units`] with the walk plan seam of issue #489 slice B open.
@@ -456,9 +489,7 @@ fn check_units_controlled(
     units: &[FileUnit],
     index: &Index,
     folder: &mut dyn Folder,
-    warning_handler_abort: bool,
-    final_keyword: FinalKeyword,
-    os_pin: Option<OsFamily>,
+    postures: RuntimePostures,
     layout: &ProjectLayout,
     plugins: &PluginFacts,
     policy: &EffectsPolicy,
@@ -605,9 +636,7 @@ fn check_units_controlled(
         index,
         dam: &dam,
         unparsable: &unparsable,
-        warning_handler_abort,
-        final_keyword,
-        os_pin,
+        postures,
         php_minor,
         catalog_skew,
         version_id,
@@ -777,12 +806,7 @@ struct WalkInputs<'a> {
     index: &'a Index,
     dam: &'a DamFacts,
     unparsable: &'a HashSet<&'a str>,
-    warning_handler_abort: bool,
-    final_keyword: FinalKeyword,
-    /// The `[runtime] os` pin (ADR-0094 §3), read only by the global-constant
-    /// resolver. `None` — the default — is the union of what a host-dependent
-    /// constant can be.
-    os_pin: Option<OsFamily>,
+    postures: RuntimePostures,
     php_minor: Option<(u16, u16)>,
     catalog_skew: bool,
     version_id: Option<(u32, Option<u32>)>,
@@ -806,9 +830,7 @@ impl WalkInputs<'_> {
             fi,
             self.dam,
             self.unparsable,
-            self.warning_handler_abort,
-            self.final_keyword,
-            self.os_pin,
+            self.postures,
             self.php_minor,
             self.catalog_skew,
             self.version_id,
@@ -924,9 +946,7 @@ fn walk_one_file(
     fi: usize,
     dam: &DamFacts,
     unparsable: &HashSet<&str>,
-    warning_handler_abort: bool,
-    final_keyword: FinalKeyword,
-    os_pin: Option<OsFamily>,
+    postures: RuntimePostures,
     php_minor: Option<(u16, u16)>,
     catalog_skew: bool,
     version_id: Option<(u32, Option<u32>)>,
@@ -949,14 +969,12 @@ fn walk_one_file(
             index,
             fi,
             dam,
-            warning_handler_abort,
-            final_keyword,
+            postures,
             php_minor,
             catalog_skew,
             version_id,
             purity,
             layout.php_target(),
-            os_pin,
         );
 
         // --- Propagation pass FIRST: it walks every scope and, as a side

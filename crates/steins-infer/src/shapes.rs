@@ -1357,7 +1357,7 @@ pub(crate) fn emit_offset(
     message: String,
     out: &mut Vec<Diagnostic>,
 ) {
-    if grade == OffsetGrade::Warning && !cx.warning_handler_abort {
+    if grade == OffsetGrade::Warning && !cx.postures.warning_handler_abort {
         return;
     }
     let pos = cx.tree().position(span.start);

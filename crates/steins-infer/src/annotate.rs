@@ -5,7 +5,6 @@
 
 use std::collections::HashMap;
 
-use steins_contract::normalize::FinalKeyword;
 use steins_db::{
     Db, EffectsPolicy, PluginFacts, Project, ProjectLayout, SourceFile, parse, project_index,
 };
@@ -16,7 +15,7 @@ use crate::env::Store;
 use crate::project::{Diagnostic, FileUnit, Index, LazyTree};
 use crate::walk::analyze_scope;
 use crate::fold::Folder;
-use crate::check_units;
+use crate::{RuntimePostures, check_units};
 use crate::purity::{EffectSummary, effect_summary_units};
 
 // ---------------------------------------------------------------------------
@@ -269,7 +268,7 @@ fn annotate_units(
     // 3. Findings on the target file (project-wide check, filtered by path).
     let target_path = units[target].path;
     for d in
-        check_units(units, index, folder, true, FinalKeyword::Enforced, None, layout, plugins, policy)
+        check_units(units, index, folder, RuntimePostures::default(), layout, plugins, policy)
     {
         if d.path == target_path {
             facts.push(LineFact { line: d.line, kind: FactKind::Finding { id: d.id } });

@@ -7,7 +7,6 @@
 
 use std::collections::{HashMap, HashSet};
 
-use steins_contract::normalize::FinalKeyword;
 use steins_domain::{Certainty, Fact, PhpStr, Val};
 use steins_phpdoc::Type as PType;
 use steins_phpdoc::ast::TypeKind as PKind;
@@ -17,9 +16,9 @@ use steins_syntax::{
 };
 
 use crate::fold::Folder;
-use crate::global_consts::{OsFamily, global_const_literal};
+use crate::global_consts::global_const_literal;
 use crate::fold_args::{UNION_FOLD_COMBINATION_CAP, UNION_FOLD_MEMBER_CAP, concat_cast, is_fold_arg};
-use crate::{ID, RETURN_ID, Sym};
+use crate::{ID, RETURN_ID, RuntimePostures, Sym};
 use crate::arg_check::render_call;
 use crate::builtin_returns::shape_builtin_return_fact;
 use crate::coerce::php_cast_fact;
@@ -61,24 +60,12 @@ pub(crate) struct Cx<'a> {
     /// (A2i): a chain containing a conditional declaration re-dams the claim, so it
     /// fires only when the dam is clear. The auxiliary passes point at [`EMPTY_DAM`].
     pub(crate) dam: &'a DamFacts,
-    /// The `[runtime] warning-handler` pseudo-constant (ADR-0049 §7 amendment,
-    /// ADR-0037 §2 family). `true` = `"abort"` (the owner-confirmed realistic-app
-    /// default: a warning handler converts an `E_WARNING` to an exception/halts, so
-    /// a *proven* warning is a proven runtime break — warning-grade offset findings
-    /// emit). `false` = `"null"`: the application tolerates the warning and continues,
-    /// so warning-grade offset findings stay silent (v1 simplification: the
-    /// ADR-0050 layer-demotion + value-side `null`/`""` adoption is deferred). The
-    /// Error-grade `offset.on-unsupported` object case (not yet implemented) is
-    /// posture-independent and would emit under both.
-    pub(crate) warning_handler_abort: bool,
-    /// The `[runtime] final-keyword` pseudo-constant (issue #234, ADR-0037 §2
-    /// family) — what the runtime this project is analyzed for does with `final`.
-    /// Read by the declared-receiver lane's intersection leg (issue #238) through
-    /// [`steins_contract::normalize::provably_uninhabited`], and by nothing else:
-    /// the posture governs *inhabitance*, never a `final` diagnostic (#234's own
-    /// out-of-scope list). [`FinalKeyword::Enforced`] is the absence default, so a
-    /// project declaring nothing gets the language's own rule.
-    pub(crate) final_keyword: FinalKeyword,
+    /// The `[runtime]` pseudo-constants the project declares (ADR-0037 §2): the
+    /// `warning-handler` gate the warning-grade ids read, the `final-keyword`
+    /// posture the declared-receiver lane's intersection leg reads, and the `os`
+    /// pin the global-constant resolver reads. The auxiliary passes carry the
+    /// defaults.
+    pub(crate) postures: RuntimePostures,
     /// The **effective analysis minor** for version-keyed value rules (issue
     /// #28): the target floor when the project declares a target whose range
     /// agrees on the ADR-0049 A12 next-int boundary, `None` when the declared
@@ -115,13 +102,6 @@ pub(crate) struct Cx<'a> {
     /// declared range lies at or above one builtin's change boundary. `None` is an
     /// undeclared target, which the floor admits.
     pub(crate) php_target: Option<&'a steins_db::PhpTarget>,
-    /// The `[runtime] os` pin (ADR-0094 §3, ADR-0037 §2 family) — the deployment
-    /// host the project declares. Read only by the global-constant resolver, and
-    /// only for the four constants a host fixes together (`PHP_OS_FAMILY`,
-    /// `PHP_EOL`, `DIRECTORY_SEPARATOR`, `PATH_SEPARATOR`). `None` is the
-    /// default and the sound one: the union of what each can be, since a library
-    /// cannot assume its host.
-    pub(crate) os_pin: Option<OsFamily>,
 }
 
 impl<'a> Cx<'a> {
@@ -131,14 +111,12 @@ impl<'a> Cx<'a> {
             index,
             cur,
             dam: &EMPTY_DAM,
-            warning_handler_abort: true,
-            final_keyword: FinalKeyword::Enforced,
+            postures: RuntimePostures::default(),
             php_minor: None,
             catalog_skew: false,
             version_id: None,
             purity: None,
             php_target: None,
-            os_pin: None,
         }
     }
 
@@ -149,28 +127,24 @@ impl<'a> Cx<'a> {
         index: &'a Index,
         cur: usize,
         dam: &'a DamFacts,
-        warning_handler_abort: bool,
-        final_keyword: FinalKeyword,
+        postures: RuntimePostures,
         php_minor: Option<(u16, u16)>,
         catalog_skew: bool,
         version_id: Option<(u32, Option<u32>)>,
         purity: Option<&'a PurityOracle<'a>>,
         php_target: Option<&'a steins_db::PhpTarget>,
-        os_pin: Option<OsFamily>,
     ) -> Self {
         Self {
             units,
             index,
             cur,
             dam,
-            warning_handler_abort,
-            final_keyword,
+            postures,
             php_minor,
             catalog_skew,
             version_id,
             purity,
             php_target,
-            os_pin,
         }
     }
 
@@ -182,14 +156,12 @@ impl<'a> Cx<'a> {
             index: self.index,
             cur: file,
             dam: self.dam,
-            warning_handler_abort: self.warning_handler_abort,
-            final_keyword: self.final_keyword,
+            postures: self.postures,
             php_minor: self.php_minor,
             catalog_skew: self.catalog_skew,
             version_id: self.version_id,
             purity: self.purity,
             php_target: self.php_target,
-            os_pin: self.os_pin,
         }
     }
 

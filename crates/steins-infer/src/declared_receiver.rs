@@ -258,9 +258,11 @@ fn arm_provably_lacks_method(
 /// no-conjunct lane would make every method call on it provably-absent —
 /// under `dg/bypass-finals`, where the mock subclass genuinely exists, a
 /// false positive on the proof layer (ADR-0049 A13). Posture is read from
-/// [`Cx::final_keyword`], never assumed: under [`FinalKeyword::Stripped`]
-/// the emptiness leg doesn't run and members are looked up as the union.
+/// the context's [`RuntimePostures::final_keyword`], never assumed: under
+/// [`FinalKeyword::Stripped`] the emptiness leg doesn't run and members are
+/// looked up as the union.
 ///
+/// [`RuntimePostures::final_keyword`]: crate::RuntimePostures::final_keyword
 /// [`FinalKeyword::Stripped`]: steins_contract::normalize::FinalKeyword::Stripped
 pub(crate) fn declared_receiver_conjuncts(cx: &Cx, arms: &[ContractArm]) -> Option<Vec<Vec<String>>> {
     let oracle = ProjectIsa { cx, demote_catalog: cx.a11_demote_catalog() };
@@ -279,7 +281,7 @@ pub(crate) fn declared_receiver_conjuncts(cx: &Cx, arms: &[ContractArm]) -> Opti
                     return None;
                 }
                 // #234: an arm no value can inhabit is not a receiver.
-                if normalize::provably_uninhabited(&a.ty, &oracle, cx.final_keyword) {
+                if normalize::provably_uninhabited(&a.ty, &oracle, cx.postures.final_keyword) {
                     return None;
                 }
                 lane.push(conjuncts);

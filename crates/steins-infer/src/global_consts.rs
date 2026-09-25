@@ -476,7 +476,7 @@ fn platform_fact(cx: &Cx, name: &str) -> Option<(Fact, Stratum)> {
     // three, so each set has two members — and a pin picks one of them, at
     // `Asserted`, because it is the user's claim and not the language's.
     let host = |windows: &'static str, other: &'static str| -> Option<(Fact, Stratum)> {
-        match cx.os_pin {
+        match cx.postures.os_pin {
             Some(os) => Some((
                 Fact::Singleton(Val::Str(PhpStr::from_bytes(if os.is_windows() { windows } else { other }.as_bytes()))),
                 Stratum::Asserted,
@@ -495,7 +495,7 @@ fn platform_fact(cx: &Cx, name: &str) -> Option<(Fact, Stratum)> {
         "DIRECTORY_SEPARATOR" => return host("\\", "/"),
         "PATH_SEPARATOR" => return host(";", ":"),
         "PHP_OS_FAMILY" => {
-            return match cx.os_pin {
+            return match cx.postures.os_pin {
                 Some(os) => Some((
                     Fact::Singleton(Val::Str(PhpStr::from_bytes(os.php_os_family().as_bytes()))),
                     Stratum::Asserted,
