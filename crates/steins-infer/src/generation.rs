@@ -1912,4 +1912,77 @@ mod tests {
             );
         }
     }
+
+    use std::path::{Path, PathBuf};
+
+    use steins_db::{EffectsPolicy, PackagePartition, PluginFacts, ProjectLayout};
+
+    use super::{GenerationParams, config_identity};
+    use crate::{FinalKeyword, OsFamily};
+
+    /// Render `config_identity` for fixed params, as `(key, value)` string pairs.
+    fn identity_rows(
+        effects: &EffectsPolicy,
+        warning_handler_abort: bool,
+        final_keyword: FinalKeyword,
+        os_pin: Option<OsFamily>,
+    ) -> Vec<(String, String)> {
+        let layout = ProjectLayout::fallback();
+        let partition = PackagePartition::from_lock(&layout, None);
+        let plugins = PluginFacts::none();
+        let files: [PathBuf; 0] = [];
+        let params = GenerationParams {
+            store_root: Path::new("store"),
+            capture_root: Path::new("capture"),
+            files: &files,
+            layout: &layout,
+            partition: &partition,
+            plugins: &plugins,
+            effects,
+            warning_handler_abort,
+            final_keyword,
+            os_pin,
+            php: false,
+            paranoid: false,
+        };
+        config_identity(&params)
+    }
+
+    fn rows(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs.iter().map(|&(k, v)| (k.to_owned(), v.to_owned())).collect()
+    }
+
+    /// The config identity rows are hashed into every published generation id
+    /// and every replay stamp, so their keys, values and order are a persisted
+    /// format: a byte that moves here invalidates every existing store. Pinned
+    /// for the defaults and for every `[runtime]` posture moved off its default.
+    #[test]
+    fn config_identity_rows_are_byte_stable() {
+        let layout = r#"ProjectLayout { cwd: "", roots: [], extra_vendor_dirs: [] }"#;
+        assert_eq!(
+            identity_rows(&EffectsPolicy::none(), true, FinalKeyword::Enforced, None),
+            rows(&[
+                ("effects.tolerated", ""),
+                ("runtime.warning-handler-abort", "true"),
+                ("runtime.final-keyword", "Enforced"),
+                ("runtime.os", "None"),
+                ("layout", layout),
+            ]),
+        );
+        let effects = EffectsPolicy::new(
+            vec!["io".to_owned(), "db".to_owned()],
+            vec![("App\\Log::debug".to_owned(), vec!["io".to_owned()])],
+        );
+        assert_eq!(
+            identity_rows(&effects, false, FinalKeyword::Stripped, Some(OsFamily::Linux)),
+            rows(&[
+                ("effects.tolerated", "db,io"),
+                ("runtime.warning-handler-abort", "false"),
+                ("runtime.final-keyword", "Stripped"),
+                ("runtime.os", "Some(Linux)"),
+                ("layout", layout),
+                ("effects.attribution:App\\Log::debug", "io"),
+            ]),
+        );
+    }
 }
