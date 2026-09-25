@@ -89,34 +89,88 @@ mod constants_generated;
 // own module doc, so this stays a plain comment to avoid merging headers.
 pub mod preg;
 
+// Each re-export list is one name per line, in byte order (so types first): a
+// new table's name is then one added line, not a rewrapped block (issue #777).
 mod fold;
 pub use fold::{
-    PortabilityClass, Refusal, RefusalAxis, foldable, foldable_entry_count, portability_class,
-    portable, portable_names, refusal, refused_names, unverified_names,
+    PortabilityClass,
+    Refusal,
+    RefusalAxis,
+    foldable,
+    foldable_entry_count,
+    portability_class,
+    portable,
+    portable_names,
+    refusal,
+    refused_names,
+    unverified_names,
 };
 
 mod effects;
 pub use effects::{
-    CallbackCarrier, CallbackCarriers, CarrierShape, StreamTarget, WrittenWhen, by_value_arg,
-    by_value_arg_frame, callables_in_array_param, callback_carriers,
-    effect_labels, method_effect_labels, narrowed_output_labels, narrowed_stream_labels,
-    out_param_written_when, out_params,
+    CallbackCarrier,
+    CallbackCarriers,
+    CarrierShape,
+    StreamTarget,
+    WrittenWhen,
+    by_value_arg,
+    by_value_arg_frame,
+    callables_in_array_param,
+    callback_carriers,
+    effect_labels,
+    method_effect_labels,
+    narrowed_output_labels,
+    narrowed_stream_labels,
+    out_param_written_when,
+    out_params,
     variadic_tail_is_data,
 };
 
 mod labels;
 pub use labels::{
-    LabelIntent, LabelRegistry, RetiredLabel, core_roots, is_core_label, is_known_label,
-    known_labels, nearest_label, retired_label, subsumes,
+    LabelIntent,
+    LabelRegistry,
+    RetiredLabel,
+    core_roots,
+    is_core_label,
+    is_known_label,
+    known_labels,
+    nearest_label,
+    retired_label,
+    subsumes,
 };
 
 mod builtins;
 pub use builtins::{
-    ArgSource, ConstRow, ConstValue, FailureArms, FailureCause, Invocation, InvocationShape,
-    ParamFacts, ResourceKind, ResourceParam, ResourceReturn, builtin_class_display,
-    builtin_class_supers, builtin_exception_parent, builtin_throws, declared_method_return,
-    declared_method_return_blocked, declared_method_return_changed_at, declared_return,
-    declared_return_changed_at, engine_constant, engine_constant_count, failure_arms,
-    hierarchy_entry_count, invocation_shape, is_migrated_resource_class, param_facts,
-    param_facts_mined, resource_param, resource_return, return_fact,
+    ArgSource,
+    ConstRow,
+    ConstValue,
+    FailureArms,
+    FailureCause,
+    Invocation,
+    InvocationShape,
+    ParamFacts,
+    ResourceKind,
+    ResourceParam,
+    ResourceReturn,
+    builtin_class_display,
+    builtin_class_supers,
+    builtin_exception_parent,
+    builtin_throws,
+    declared_method_return,
+    declared_method_return_blocked,
+    declared_method_return_changed_at,
+    declared_return,
+    declared_return_changed_at,
+    engine_constant,
+    engine_constant_count,
+    failure_arms,
+    hierarchy_entry_count,
+    invocation_shape,
+    is_migrated_resource_class,
+    param_facts,
+    param_facts_mined,
+    resource_param,
+    resource_return,
+    return_fact,
 };
