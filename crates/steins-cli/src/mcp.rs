@@ -69,7 +69,7 @@ use std::process::ExitCode;
 
 use serde_json::{Value, json};
 use steins_edit::{CompletenessOracle, EditPlan, unified_diff};
-use steins_infer::{Diagnostic, SidecarFolder, check_project_with_os};
+use steins_infer::{Diagnostic, SidecarFolder, check_project_under};
 
 use crate::profile;
 use crate::transform::TransformKind;
@@ -741,18 +741,11 @@ fn tool_check(_session: &Session, args: &Value) -> Result<Reply, ToolError> {
             let loaded =
                 crate::load_project(&files, &paths, plugin_allow.as_deref(), effects_policy);
             folder.set_php_target(loaded.layout.php_target().cloned());
-            // Both `[runtime]` postures, as `steins check` runs them: a warm
-            // arm and a cold arm must be one analysis, and the posture pair is
-            // part of the generation's identity — declaring one of them here
-            // and both of them there would key two stores over one tree.
-            let findings = check_project_with_os(
-                &loaded.db,
-                loaded.project,
-                &mut folder,
-                postures.warning_handler_abort,
-                postures.final_keyword,
-                postures.os_pin,
-            );
+            // The `[runtime]` postures whole, as `steins check` runs them: a
+            // warm arm and a cold arm must be one analysis, and every posture
+            // is part of the generation's identity — declaring some of them
+            // here and all of them there would key two stores over one tree.
+            let findings = check_project_under(&loaded.db, loaded.project, &mut folder, postures);
             let (inline, vendor_suppressed) =
                 crate::suppression_pipeline(&loaded, findings, &surface, vendor_diagnostics);
             (loaded, inline, vendor_suppressed)

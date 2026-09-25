@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 use steins_db::EffectsPolicy;
 use steins_edit::{PartitionMap, VouchSet};
-use steins_infer::{FinalKeyword, OsFamily};
+use steins_infer::{FinalKeyword, OsFamily, RuntimePostures};
 
 use crate::profile;
 
@@ -249,22 +249,10 @@ pub(crate) fn read_steins_config() -> Result<Option<SteinsConfig>, String> {
         .map_err(|e| format!("{}: parse error ({e})", path.display()))
 }
 
-/// The `[runtime]` pseudo-constants a run analyzes under (ADR-0037 §2). Every
-/// slot has a safe default, resolved by [`runtime_from_config`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct RuntimePostures {
-    /// `warning-handler` (ADR-0049 §7 amendment): `true` for `"abort"`.
-    pub(crate) warning_handler_abort: bool,
-    /// `final-keyword` (issue #234), consumed by steins-contract's inhabitance judgment.
-    pub(crate) final_keyword: FinalKeyword,
-    /// `os` (ADR-0094 §3), consumed by the global-constant resolver. `None` is
-    /// the default union.
-    pub(crate) os_pin: Option<OsFamily>,
-}
-
-/// Derive the `[runtime]` pseudo-constants from the already-parsed config.
-/// Returns [`RuntimePostures`] plus warnings for an unrecognized value on a
-/// known key. Absence defaults to `"abort"`/`"enforced"`.
+/// Derive the `[runtime]` pseudo-constants (ADR-0037 §2) from the
+/// already-parsed config, as the [`RuntimePostures`] the engine takes whole.
+/// Returns them plus warnings for an unrecognized value on a known key. Every
+/// key has a safe default: absence is `"abort"`/`"enforced"`/no OS pin.
 pub(crate) fn runtime_from_config(runtime: Option<RuntimeConfig>) -> (RuntimePostures, Vec<String>) {
     let mut warnings = Vec::new();
     let runtime = runtime.unwrap_or_default();

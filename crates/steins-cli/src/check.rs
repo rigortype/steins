@@ -23,8 +23,7 @@ use std::process::ExitCode;
 use steins_db::{Project, SteinsDatabase, parse as parse_tree};
 use steins_edit::{ByteSpan, Edit, EditPlan};
 use steins_infer::{
-    Diagnostic, SOUND_SUBSET_NOTICE, SidecarFolder, apply_inline_ignores,
-    check_project_with_os,
+    Diagnostic, SOUND_SUBSET_NOTICE, SidecarFolder, apply_inline_ignores, check_project_under,
 };
 use steins_syntax::SourceTree;
 
@@ -218,14 +217,8 @@ pub(crate) fn run_check(args: &[String]) -> ExitCode {
             for w in &runtime_warnings {
                 errln!("steins: {w}");
             }
-            let findings: Vec<Diagnostic> = check_project_with_os(
-                &loaded.db,
-                loaded.project,
-                &mut folder,
-                postures.warning_handler_abort,
-                postures.final_keyword,
-                postures.os_pin,
-            );
+            let findings: Vec<Diagnostic> =
+                check_project_under(&loaded.db, loaded.project, &mut folder, postures);
             let (inline, vendor_suppressed) =
                 suppression_pipeline(&loaded, findings, &surface, vendor_diagnostics);
             (loaded, inline, vendor_suppressed)
