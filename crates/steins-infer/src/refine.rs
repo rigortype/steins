@@ -1307,10 +1307,9 @@ mod n4_carrier_tests {
     //! Unknown-keeps-both, emptied-lane-is-no-fact, Asserted-never-launders, and the
     //! A11 catalog-skew demotion scoped to arm deletion.
     use super::*;
-    use crate::FileUnit;
+    use crate::{FileUnit, RuntimePostures};
     use crate::fold_args::effective_php_view;
     use crate::project::{Index, LazyTree};
-    use steins_contract::normalize::FinalKeyword;
     use steins_syntax::SourceTree;
     use crate::fold_args::parse_php_minor;
     use crate::contract::ProjectIsa;
@@ -1334,12 +1333,10 @@ mod n4_carrier_tests {
             &index,
             0,
             &EMPTY_DAM,
-            true,
-            FinalKeyword::Enforced,
+            RuntimePostures::default(),
             view.effective_minor,
             view.catalog_skew,
             view.version_id,
-            None,
             None,
             None,
         );

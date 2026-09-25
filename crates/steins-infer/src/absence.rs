@@ -665,7 +665,7 @@ pub(crate) fn check_undefined_property(
     out: &mut Vec<Diagnostic>,
 ) {
     let cx = w.cx;
-    if !cx.warning_handler_abort || w.scope.poisoned {
+    if !cx.postures.warning_handler_abort || w.scope.poisoned {
         return;
     }
     // The dynamic-write obstacle. A name written anywhere in the project could have

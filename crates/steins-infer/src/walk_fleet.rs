@@ -276,7 +276,7 @@ mod fan_out {
 
     use crate::project::{FileUnit, Index, LazyTree};
     use crate::walk_plan::{FilePlan, FileWalk, UniverseVerdict, WalkControl};
-    use crate::{Diagnostic, FinalKeyword, NoFold};
+    use crate::{Diagnostic, NoFold, RuntimePostures};
 
     /// One declaration file plus callers that each violate it — so every
     /// caller's block is non-empty and the merge has something to get wrong,
@@ -317,9 +317,7 @@ mod fan_out {
             &units,
             &index,
             &mut NoFold,
-            true,
-            FinalKeyword::Enforced,
-            None,
+            RuntimePostures::default(),
             &ProjectLayout::fallback(),
             &PluginFacts::none(),
             &EffectsPolicy::none(),

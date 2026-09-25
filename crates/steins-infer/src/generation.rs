@@ -144,7 +144,7 @@ use crate::project::{FileUnit, Index, LazyTree, Res};
 use crate::summaries::{Summaries as StoredSummaries, SummaryRow, read_summaries, write_summaries};
 use crate::walk_fleet::{FolderFleet, WorkerBudget};
 use crate::walk_plan::{FilePlan, FileWalk, UniverseVerdict, WalkControl};
-use crate::{Diagnostic, Divergence, EngineFolder, FinalKeyword, ProcessEngine};
+use crate::{Diagnostic, Divergence, EngineFolder, FinalKeyword, ProcessEngine, RuntimePostures};
 
 // ---------------------------------------------------------------------------
 // The orchestrator's own section: which sources an artifact was built from.
@@ -1039,9 +1039,11 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
         &units,
         &index,
         &mut folder,
-        p.warning_handler_abort,
-        p.final_keyword,
-        p.os_pin,
+        RuntimePostures {
+            warning_handler_abort: p.warning_handler_abort,
+            final_keyword: p.final_keyword,
+            os_pin: p.os_pin,
+        },
         p.layout,
         p.plugins,
         p.effects,

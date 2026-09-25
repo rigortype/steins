@@ -87,7 +87,7 @@ pub(crate) fn check_foreach_subject(
     // The warning-handler posture (ADR-0049 §7): a refusal is warning-plus-a-
     // skipped-body, silenced under a declared `warning-handler = "null"` posture
     // exactly as `offset.missing` is.
-    if !cx.warning_handler_abort {
+    if !cx.postures.warning_handler_abort {
         return;
     }
     if poisoned {

@@ -1035,7 +1035,7 @@ pub(crate) fn check_preg_pattern(
     out: &mut Vec<Diagnostic>,
 ) {
     let cx = w.cx;
-    if !cx.warning_handler_abort {
+    if !cx.postures.warning_handler_abort {
         return;
     }
     let Some(entry) = preg_entry_point(cx, call) else {

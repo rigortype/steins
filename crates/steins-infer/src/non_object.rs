@@ -224,7 +224,7 @@ pub(crate) fn check_property_on_non_object(
     span: Span,
     out: &mut Vec<Diagnostic>,
 ) {
-    if poisoned || !cx.warning_handler_abort {
+    if poisoned || !cx.postures.warning_handler_abort {
         return;
     }
     let Some(k) = env.get(var) else { return };
