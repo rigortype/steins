@@ -99,6 +99,7 @@ mod fact_util;
 mod file_walk;
 mod fixpoints;
 mod pipeline;
+mod by_value;
 mod entry_state;
 mod loops;
 mod stmt_calls;

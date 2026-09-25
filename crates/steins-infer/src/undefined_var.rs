@@ -9,10 +9,10 @@ use steins_contract::ContractTy;
 use steins_phpdoc::{TagKind, scan_docblock};
 use steins_syntax::{ArgValue, NameRef};
 
+use crate::by_value::arg_is_by_value;
 use crate::contract::parse_tag_type;
 use crate::cx::Cx;
 use crate::project::{Diagnostic, FnResolution};
-use crate::walk::arg_is_by_value;
 use crate::{PHPDOC_MAYBE_UNDEFINED_ID, VARIABLE_MAYBE_UNDEFINED_ID, VARIABLE_UNDEFINED_ID};
 use crate::docblock_hygiene::hygiene_diag;
 

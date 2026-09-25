@@ -14,6 +14,7 @@ use steins_syntax::{
     Span, ValueOp,
 };
 
+use crate::by_value::value_stratum;
 use crate::fold::Folder;
 use crate::asserts::cond_invalidations;
 use crate::builtin_returns::builtin_operand_fact;
@@ -27,7 +28,7 @@ use crate::offsets::{ShapeRead, offset_key_of, offset_operand_fact, shape_read_a
 use crate::predicates::apply_type_narrowing;
 use crate::refine::{apply_refinements, collect_refine};
 use crate::transfers::{transfer_arg_fact, transfer_arg_known};
-use crate::walk::{WalkCx, mark_dead_cond_calls, mark_dead_span, value_stratum};
+use crate::walk::{WalkCx, mark_dead_cond_calls, mark_dead_span};
 
 // ---------------------------------------------------------------------------
 // Condition evaluation → `Certainty` (ADR-0031 stage 1).

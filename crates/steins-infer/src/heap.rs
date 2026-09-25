@@ -10,6 +10,7 @@ use steins_phpdoc::{Type as PType, TagKind, scan_docblock};
 use steins_phpdoc::ast::TypeKind as PKind;
 use steins_syntax::{ArgValue, NamedArg, Param, PropertyDecl, TypeMember};
 
+use crate::by_value::value_stratum;
 use crate::fold::Folder;
 use crate::{
     PHPDOC_PROP_MISMATCH_ID, PROP_MISMATCH_ID, READONLY_REASSIGNED_ID, arg_abstract_fact,
@@ -31,7 +32,7 @@ use crate::env::{
 use crate::project::Diagnostic;
 use crate::refine::seed_fact;
 use crate::return_arms::mentioned_templates;
-use crate::walk::{WalkCx, value_stratum};
+use crate::walk::WalkCx;
 
 /// Allocate a fresh heap object for `new Class(args)` (ADR-0036) into the walk's
 /// store, under a fresh allocation id. Returns that id.

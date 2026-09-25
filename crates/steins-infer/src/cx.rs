@@ -15,6 +15,7 @@ use steins_syntax::{
     Param, PropertyDecl, RefKind, RetHintKind, Scope, ScopeOwner, SourceTree, StmtKind, ValueOp,
 };
 
+use crate::by_value::value_stratum;
 use crate::fold::Folder;
 use crate::global_consts::global_const_literal;
 use crate::fold_args::{UNION_FOLD_COMBINATION_CAP, UNION_FOLD_MEMBER_CAP, concat_cast, is_fold_arg};
@@ -33,7 +34,6 @@ use crate::env::{Descent, Known, Store, Stratum, arg_of_val, singleton_fact, val
 use crate::project::{Diagnostic, FileUnit, FnResolution, Index, Res, Site};
 use crate::purity::PurityOracle;
 use crate::return_arms::class_template_names;
-use crate::walk::value_stratum;
 
 // ---------------------------------------------------------------------------
 // The project-aware analysis context.

@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use steins_domain::{CoverFlavor, Fact, ShapeFact, Val, Key as VKey};
 use steins_syntax::{ArgValue, CallExpr, Span};
 
+use crate::by_value::value_stratum;
 use crate::fold::Folder;
 use crate::annotate::{FactKind, LineFact};
 use crate::builtin_returns::{
@@ -24,7 +25,7 @@ use crate::offsets::{ShapeRead, offset_key_of, offset_operand_fact, shape_read, 
 use crate::project::Diagnostic;
 use crate::refine::{clear_null, seed_shape_fact};
 use crate::return_arms::call_return_arms;
-use crate::walk::{WalkCx, mark_dead_span, value_stratum};
+use crate::walk::{WalkCx, mark_dead_span};
 
 /// Apply a plain `$var = <value>;` assignment to the env (extracted from the walk).
 /// `return_arms` is the declared return floor resolved at the call site **before**
