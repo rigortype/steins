@@ -339,6 +339,21 @@ pub enum EffectOrigin {
     /// A direct `$fn()` call resolved (body-local single-assignment) to a known
     /// callback (ADR-0033); its effects join the caller's. Unresolvable stays [`Self::Opaque`].
     Callback { cbref: CallbackRef, span: Span },
+    /// An `eval(...)` construct at `span` — the `eval` effect (ADR-0046
+    /// amendment), and, since the payload is code the scan never sees, also
+    /// **non-exhaustive** like [`Self::Opaque`]. Appended after the existing
+    /// variants so no persisted variant index moves.
+    Eval { span: Span },
+    /// An `include`/`include_once`/`require`/`require_once` at `span` — a
+    /// proven `io.fs.read` whatever the file holds (ADR-0046 amendment), and
+    /// non-exhaustive for the same reason as [`Self::Eval`]: the included
+    /// file's top-level code runs in this frame, unseen. `keyword` is the
+    /// spelling for diagnostics.
+    Include {
+        #[cfg_attr(feature = "persist", serde(serialize_with = "crate::persist::keyword::serialize"))]
+        keyword: &'static str,
+        span: Span,
+    },
 }
 
 /// One call argument in the form a **structural** scan can prove constant

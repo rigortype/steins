@@ -9,7 +9,7 @@
 //! decode failure is the reader's miss.
 //!
 //! The one hand-written `Deserialize` is [`EffectOrigin`]'s. Its
-//! `Output`/`Exit` variants carry a `&'static str` keyword, and serde's
+//! `Output`/`Exit`/`Include` variants carry a `&'static str` keyword, and serde's
 //! derive *implicitly borrows* every `&str` field from the input — a bound
 //! (`'de: 'static`) no deserializer satisfies, and one `serde(with)` does not
 //! lift. The inverse goes through [`EffectOriginWire`], a twin whose variant
@@ -24,12 +24,22 @@ use crate::ast::{
 };
 
 /// `&'static str` keyword serialization ([`EffectOrigin::Output`] /
-/// [`EffectOrigin::Exit`]): the spelling, verbatim.
+/// [`EffectOrigin::Exit`] / [`EffectOrigin::Include`]): the spelling, verbatim.
 pub(crate) mod keyword {
     /// Every `keyword` spelling `lower_effect.rs` constructs. Adding one
     /// there without extending this table makes the steins-db round-trip
     /// tests fail loudly, which is the point.
-    pub(crate) const KNOWN: [&str; 5] = ["echo", "print", "inline HTML", "exit", "die"];
+    pub(crate) const KNOWN: [&str; 9] = [
+        "echo",
+        "print",
+        "inline HTML",
+        "exit",
+        "die",
+        "include",
+        "include_once",
+        "require",
+        "require_once",
+    ];
 
     pub(crate) fn serialize<S: serde::Serializer>(
         v: &&'static str,
@@ -85,6 +95,8 @@ enum EffectOriginWire {
         span: Span,
     },
     Callback { cbref: CallbackRef, span: Span },
+    Eval { span: Span },
+    Include { keyword: String, span: Span },
 }
 
 impl<'de> serde::Deserialize<'de> for EffectOrigin {
@@ -123,6 +135,11 @@ impl<'de> serde::Deserialize<'de> for EffectOrigin {
                 span,
             },
             EffectOriginWire::Callback { cbref, span } => EffectOrigin::Callback { cbref, span },
+            EffectOriginWire::Eval { span } => EffectOrigin::Eval { span },
+            EffectOriginWire::Include { keyword: kw, span } => EffectOrigin::Include {
+                keyword: keyword::intern(&kw).ok_or_else(|| unknown(&kw))?,
+                span,
+            },
         })
     }
 }

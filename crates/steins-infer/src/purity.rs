@@ -831,6 +831,27 @@ pub(crate) fn classify_effect_origins(
                 add_callback_effects(cx, cbref, *span, policy, row);
             }
             EffectOrigin::Opaque { .. } => row.exhaustive = false,
+            // Dynamic code (ADR-0046 amendment): the construct itself is proven
+            // — `eval`, or the file read an inclusion is — and the code it runs
+            // is unseen, so the body is `…?` beside it.
+            EffectOrigin::Eval { span } => {
+                row.findings.insert(EffectFinding::direct(
+                    "eval".to_owned(),
+                    "eval".to_owned(),
+                    cx.tree().position(span.start).line,
+                    cx.path().to_owned(),
+                ));
+                row.exhaustive = false;
+            }
+            EffectOrigin::Include { keyword, span } => {
+                row.findings.insert(EffectFinding::direct(
+                    "io.fs.read".to_owned(),
+                    (*keyword).to_owned(),
+                    cx.tree().position(span.start).line,
+                    cx.path().to_owned(),
+                ));
+                row.exhaustive = false;
+            }
         }
     }
 }
@@ -1232,7 +1253,9 @@ const fn effect_origin_span(o: &EffectOrigin) -> steins_syntax::Span {
         | EffectOrigin::MethodCall { span, .. }
         | EffectOrigin::Opaque { span }
         | EffectOrigin::HigherOrder { span, .. }
-        | EffectOrigin::Callback { span, .. } => *span,
+        | EffectOrigin::Callback { span, .. }
+        | EffectOrigin::Eval { span }
+        | EffectOrigin::Include { span, .. } => *span,
     }
 }
 
@@ -1758,6 +1781,13 @@ fn report_unit(
                 let prefix = format!("{keyword} has effect exit");
                 out.push(exceeded_diag(cx, span.start, &prefix, display, bound, "exit"));
             }
+            EffectOrigin::Eval { span } if bound.exceeds("eval") => {
+                out.push(exceeded_diag(cx, span.start, "eval has effect eval", display, bound, "eval"));
+            }
+            EffectOrigin::Include { keyword, span } if bound.exceeds("io.fs.read") => {
+                let prefix = format!("{keyword} has effect io.fs.read");
+                out.push(exceeded_diag(cx, span.start, &prefix, display, bound, "io.fs.read"));
+            }
             EffectOrigin::MethodCall { receiver, method, span } => {
                 if let Some(callee) = resolve_effect_edge(cx, class_fqn, receiver, method) {
                     emit_transitive(out, cx, &callee, effects, span.start, display, bound);
@@ -1853,7 +1883,10 @@ fn report_unit(
             EffectOrigin::Callback { cbref, span } => {
                 report_callback(out, cx, cbref, effects, span.start, display, bound);
             }
-            EffectOrigin::Output { .. } | EffectOrigin::Exit { .. } => {}
+            EffectOrigin::Output { .. }
+            | EffectOrigin::Exit { .. }
+            | EffectOrigin::Eval { .. }
+            | EffectOrigin::Include { .. } => {}
             EffectOrigin::Opaque { .. } => {}
         }
     }
