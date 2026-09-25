@@ -51,15 +51,21 @@
 //! pipeline is the CLI's minus channels meaningless for a pasted snippet:
 //! vendor filtering, `[[policy]]`, baseline. Inline `@steins-ignore` **is**
 //! applied, including `suppress.unmatched` anti-rot.
+//!
+//! `hidden` has no CLI counterpart: per other built-in profile, how many
+//! findings it would display that this run's profile does not. The margin
+//! (annotate) is profile-blind, so without it a `✗` there could sit beside an
+//! empty findings panel with nothing saying which rung shows it.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use steins_db::{PluginFacts, Project, ProjectLayout, SourceFile, SteinsDatabase, parse};
-use steins_infer::profile::ProfileConfigs;
-use steins_infer::suppress::apply_inline_ignores;
+use steins_infer::profile::{BUILTINS, ProfileConfigs, Surface};
+use steins_infer::suppress::{InlineOutcome, apply_inline_ignores};
 use steins_infer::{
-    Folder, NoFold, SOUND_SUBSET_NOTICE, TableFolder, annotate_project, check_project_with_runtime,
+    Diagnostic, Folder, NoFold, SOUND_SUBSET_NOTICE, TableFolder, annotate_project,
+    check_project_with_runtime,
 };
 
 /// The diagnostic path a playground snippet analyzes under (stable,
@@ -332,15 +338,13 @@ fn check_with_folder(
     // `warning_handler_abort = true` is the CLI DEFAULT (ADR-0049 §7): only
     // `[runtime] warning-handler = "null"` opts out, and a browser snippet has
     // no steins.toml to set it.
-    let mut findings = check_project_with_runtime(&db, project, folder, true);
+    let findings = check_project_with_runtime(&db, project, folder, true);
 
-    // The CLI pipeline (ADR-0050 §6) minus the snippet-meaningless channels:
-    // vendor (nothing here is vendored), policy (no config), baseline (no fs).
-    findings.retain(|d| surface.is_surfaced(d));
     let tree = parse(&db, file);
     let pairs: Vec<(String, &steins_syntax::SourceTree)> =
         vec![(SNIPPET_PATH.to_owned(), tree)];
-    let inline = apply_inline_ignores(findings, &pairs);
+    let inline = displayed_under(&surface, &findings, &pairs);
+    let hidden = hidden_by(&surface, &configs, &findings, &pairs, &inline.kept);
 
     let mut displayed = inline.kept;
     displayed.extend(inline.meta);
@@ -382,8 +386,60 @@ fn check_with_folder(
         "profile": surface.name,
         "findings": findings_json,
         "suppressed": inline.suppressed,
+        "hidden": hidden,
         "parse_errors": parse_errors,
     })
+}
+
+/// The CLI pipeline (ADR-0050 §6) minus the snippet-meaningless channels:
+/// vendor (nothing here is vendored), policy (no config), baseline (no fs).
+/// The profile surface first, then inline ignores over what it admits.
+fn displayed_under(
+    surface: &Surface,
+    findings: &[Diagnostic],
+    pairs: &[(String, &steins_syntax::SourceTree)],
+) -> InlineOutcome {
+    let on: Vec<Diagnostic> =
+        findings.iter().filter(|d| surface.is_surfaced(d)).cloned().collect();
+    apply_inline_ignores(on, pairs)
+}
+
+/// The `hidden` object: for every OTHER built-in profile, how many findings it
+/// would display that `surface` does not. The analysis runs once — a profile is
+/// a display surface, never an inference change (ADR-0050 §10) — so this is the
+/// same finding set filtered again, not another check.
+///
+/// Counted as a set difference over the kept findings, not as a difference of
+/// totals: the built-ins are not one chain (`pedantic` and `strict` are
+/// incomparable), so "strict shows 3, this shows 2" would not say which one is
+/// new. The inline-ignore meta findings stay out of it: an ignore whose finding
+/// a narrower profile filters out reads as unmatched there, which is a
+/// difference in bookkeeping, not a finding the profile hides.
+///
+/// Every other built-in is listed, zeros included; which of them are worth
+/// pointing at is the page's call, not the envelope's.
+fn hidden_by(
+    surface: &Surface,
+    configs: &ProfileConfigs,
+    findings: &[Diagnostic],
+    pairs: &[(String, &steins_syntax::SourceTree)],
+    kept: &[Diagnostic],
+) -> serde_json::Value {
+    let shown: HashSet<&Diagnostic> = kept.iter().collect();
+    let mut hidden = serde_json::Map::new();
+    for &name in BUILTINS {
+        if name == surface.name {
+            continue;
+        }
+        let Ok(other) = configs.resolve(Some(name)) else { continue };
+        let more = displayed_under(&other, findings, pairs)
+            .kept
+            .iter()
+            .filter(|d| !shown.contains(d))
+            .count();
+        hidden.insert(name.to_owned(), serde_json::json!(more));
+    }
+    serde_json::Value::Object(hidden)
 }
 
 /// The target-agnostic body of [`sw_annotate`].
@@ -440,10 +496,11 @@ mod tests {
         assert!(msg.contains("strict"), "the ladder names its rungs: {msg}");
     }
 
-    /// The four built-in profiles all resolve, strict included, same as the CLI.
+    /// The built-in profiles all resolve, strict and pedantic included, same as
+    /// the CLI.
     #[test]
     fn builtin_profiles_resolve() {
-        for p in ["default", "contracts", "throws-direct", "strict"] {
+        for p in ["default", "contracts", "throws-direct", "strict", "pedantic"] {
             let v = check_impl("<?php\n", Some(p));
             assert_eq!(v["ok"], true, "{p}");
             assert_eq!(v["profile"], p);
@@ -1022,6 +1079,79 @@ mod strict_leg {
         // And the same read is quiet one rung down — the ladder is the point.
         let v = check_impl(src, Some("contracts"));
         assert_eq!(v["findings"].as_array().unwrap().len(), 0, "quiet at contracts");
+    }
+}
+
+/// The `hidden` object: what the profiles this run did not select would show,
+/// so the page can say where a margin `✗` lands when the panel is empty.
+#[cfg(test)]
+mod hidden {
+    use super::*;
+
+    /// A `@pure` function that echoes: `effect.envelope-exceeded`, a contract-layer
+    /// id — the margin marks it on every profile, the panel only from `contracts`.
+    const PURE_ECHO: &str = "<?php\n/** @pure */\nfunction f(string $s): void { echo $s; }\n";
+    /// The optional-key read: `offset.maybe-missing`, on the strict rung only.
+    const OPTIONAL_READ: &str =
+        "<?php\n/** @param array{a?: string} $d */\nfunction f(array $d): void { $x = $d[\"a\"]; }\n";
+
+    fn ids(v: &serde_json::Value) -> Vec<&str> {
+        v["findings"].as_array().unwrap().iter().map(|f| f["id"].as_str().unwrap()).collect()
+    }
+
+    /// Every other built-in is listed, zeros included, and the run's own profile
+    /// is not — "hidden by default, shown at default" is not a sentence.
+    #[test]
+    fn every_other_builtin_is_listed_and_the_selected_one_is_not() {
+        for &p in BUILTINS {
+            let v = check_impl("<?php\n", Some(p));
+            let hidden = v["hidden"].as_object().expect("hidden is an object");
+            assert!(!hidden.contains_key(p), "{p} lists itself");
+            for &other in BUILTINS.iter().filter(|&&o| o != p) {
+                assert_eq!(hidden[other], 0, "{p}: an empty file hides nothing at {other}");
+            }
+        }
+    }
+
+    /// The case that motivated it: silent at `default`, and the envelope says the
+    /// contract layer holds one finding.
+    #[test]
+    fn a_contract_finding_is_counted_as_hidden_by_default() {
+        let v = check_impl(PURE_ECHO, None);
+        assert!(!ids(&v).contains(&"effect.envelope-exceeded"), "got {:?}", ids(&v));
+        let hidden = &v["hidden"];
+        assert_eq!(hidden["contracts"], 1);
+        assert_eq!(hidden["strict"], 1, "cumulative: strict shows what contracts shows");
+        assert_eq!(hidden["pedantic"], 1, "pedantic branches off contracts");
+        assert_eq!(hidden["throws-direct"], 0, "a branch off default, not a contract rung");
+
+        let v = check_impl(PURE_ECHO, Some("contracts"));
+        assert!(ids(&v).contains(&"effect.envelope-exceeded"), "got {:?}", ids(&v));
+        assert_eq!(v["hidden"]["strict"], 0);
+        assert_eq!(v["hidden"]["default"], 0, "a set difference, never a negative count");
+    }
+
+    /// One rung up the ladder: `contracts` hides the strict-floor read, and
+    /// `pedantic` — incomparable with `strict` — does not show it either.
+    #[test]
+    fn a_strict_finding_is_counted_against_strict_only() {
+        let v = check_impl(OPTIONAL_READ, Some("contracts"));
+        assert_eq!(v["findings"].as_array().unwrap().len(), 0);
+        assert_eq!(v["hidden"]["strict"], 1);
+        assert_eq!(v["hidden"]["pedantic"], 0);
+        let v = check_impl(OPTIONAL_READ, Some("pedantic"));
+        assert_eq!(v["hidden"]["strict"], 1, "the branch does not inherit the strict rung");
+    }
+
+    /// A finding an inline ignore suppresses is not hidden by the profile: it is
+    /// suppressed on every profile that would show it, so it is counted nowhere.
+    #[test]
+    fn a_suppressed_finding_is_not_counted_as_hidden() {
+        let src = "<?php\n/** @param array{a?: string} $d */\nfunction f(array $d): void {\n    \
+                   // @steins-ignore offset.maybe-missing\n    $x = $d[\"a\"];\n}\n";
+        assert_eq!(check_impl(src, Some("strict"))["suppressed"], 1);
+        let v = check_impl(src, Some("contracts"));
+        assert_eq!(v["hidden"]["strict"], 0, "got {:?}", v["hidden"]);
     }
 }
 
