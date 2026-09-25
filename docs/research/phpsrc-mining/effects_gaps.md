@@ -40,7 +40,7 @@ gap I propose a dot-path label in the registry's prefix-subsumption style.
 ## Steins' current registry (`known_labels()`)
 
 ```
-exit   ffi
+eval   exit   ffi
 global.read   global.write
 io   io.db   io.fs   io.fs.read   io.fs.write   io.input   io.ipc
      io.net   io.net.http   io.process   io.signal

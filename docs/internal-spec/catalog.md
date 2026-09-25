@@ -218,7 +218,9 @@ Recorded imprecisions, stated rather than hidden:
   from the RNG stays `nondet.random` — seeding writes the state a draw reads,
   and conflating the two would lose both.
 - `exit` / `die` are **language constructs**, not functions; they never reach
-  this table and are detected structurally.
+  this table and are detected structurally. So are `eval` (the `eval` label)
+  and the four inclusion constructs (`io.fs.read`), each of which also taints
+  exhaustiveness (ADR-0046 amendment).
 
 ## `narrowed_stream_labels(name, first, second)` — call-site narrowing
 

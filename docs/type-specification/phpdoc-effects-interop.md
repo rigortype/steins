@@ -69,6 +69,7 @@ The v1 vocabulary (Steins' builtin registry, minus its `failure.*` family,
 which names value provenance rather than an effect and is out of scope here):
 
 ```text
+eval
 exit
 ffi
 global.read   global.write
