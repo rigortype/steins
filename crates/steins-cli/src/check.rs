@@ -34,115 +34,121 @@ use crate::project::{LoadedProject, collect_files, load_project, reject_missing_
 use crate::transform::{PostCheckSurface, post_check};
 use crate::{baseline, profile, render};
 
-pub(crate) fn run_check(args: &[String]) -> ExitCode {
-    // `None` until `--format` names one: absence is what auto-detection reads
-    // (ADR-0054 §6), so a default here would defeat GitHub Actions detection.
-    let mut format: Option<render::CheckFormat> = None;
-    let mut no_php = false;
-    let mut no_cache = false;
-    let mut no_tolerated_effects = false;
-    let mut fix_requested = false;
-    let mut set_baseline = false;
-    let mut ignore_baseline = false;
-    let mut vendor_diagnostics = false;
-    let mut baseline_path: Option<String> = None;
-    let mut profile_flag: Option<String> = None;
-    let mut paths: Vec<String> = Vec::new();
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--no-php" => {
-                no_php = true;
-                i += 1;
-            }
-            // The generation cache is on by default (ADR-0020 amendment, issue
-            // #525); this is the opt-out, spelled like `--no-php` because it
-            // switches off the same kind of thing — a capability the run would
-            // otherwise use. Cost-only in both directions: a run without the
-            // cache finds exactly what a run with it finds.
-            "--no-cache" => {
-                no_cache = true;
-                i += 1;
-            }
-            // ADR-0084 §1 audit switch: empties tolerance; attribution table unaffected.
-            "--no-tolerated-effects" => {
-                no_tolerated_effects = true;
-                i += 1;
-            }
-            "--fix" => {
-                fix_requested = true;
-                i += 1;
-            }
-            "--vendor-diagnostics" => {
-                vendor_diagnostics = true;
-                i += 1;
-            }
-            "--profile" => {
-                let Some(value) = args.get(i + 1) else {
-                    errln!("steins: --profile requires a name argument");
-                    return ExitCode::from(2);
-                };
-                profile_flag = Some(value.clone());
-                i += 2;
-            }
-            "--set-baseline" => {
-                set_baseline = true;
-                i += 1;
-            }
-            "--ignore-baseline" => {
-                ignore_baseline = true;
-                i += 1;
-            }
-            "--baseline" => {
-                let Some(value) = args.get(i + 1) else {
-                    errln!("steins: --baseline requires a path argument");
-                    return ExitCode::from(2);
-                };
-                baseline_path = Some(value.clone());
-                i += 2;
-            }
-            "--format" => {
-                let Some(value) = args.get(i + 1) else {
-                    errln!("steins: --format requires an argument (text|json|github|sarif)");
-                    return ExitCode::from(2);
-                };
-                let Some(parsed) = render::CheckFormat::parse(value) else {
-                    errln!("steins: unknown format `{value}` (text|json|github|sarif)");
-                    return ExitCode::from(2);
-                };
-                format = Some(parsed);
-                i += 2;
-            }
-            other => {
-                paths.push(other.to_owned());
-                i += 1;
+/// `steins check`'s command line, parsed. Every usage error is said on stderr as
+/// it is found, and is exit 2.
+#[derive(Default)]
+struct CheckArgs {
+    /// `None` until `--format` names one: absence is what auto-detection reads
+    /// (ADR-0054 §6), so a default here would defeat GitHub Actions detection.
+    format: Option<render::CheckFormat>,
+    no_php: bool,
+    no_cache: bool,
+    no_tolerated_effects: bool,
+    fix: bool,
+    vendor_diagnostics: bool,
+    profile: Option<String>,
+    set_baseline: bool,
+    ignore_baseline: bool,
+    baseline: Option<String>,
+    paths: Vec<String>,
+}
+
+impl CheckArgs {
+    fn parse(args: &[String]) -> Result<Self, ExitCode> {
+        let mut parsed = CheckArgs::default();
+        let mut args = args.iter();
+        while let Some(arg) = args.next() {
+            match arg.as_str() {
+                "--no-php" => parsed.no_php = true,
+                // The generation cache is on by default (ADR-0020 amendment,
+                // issue #525); this is the opt-out, spelled like `--no-php`
+                // because it switches off the same kind of thing — a capability
+                // the run would otherwise use. Cost-only in both directions: a
+                // run without the cache finds exactly what a run with it finds.
+                "--no-cache" => parsed.no_cache = true,
+                // ADR-0084 §1 audit switch: empties tolerance; attribution table unaffected.
+                "--no-tolerated-effects" => parsed.no_tolerated_effects = true,
+                "--fix" => parsed.fix = true,
+                "--vendor-diagnostics" => parsed.vendor_diagnostics = true,
+                "--profile" => {
+                    parsed.profile = Some(flag_value(arg, args.next(), "a name argument")?);
+                }
+                "--set-baseline" => parsed.set_baseline = true,
+                "--ignore-baseline" => parsed.ignore_baseline = true,
+                "--baseline" => {
+                    parsed.baseline = Some(flag_value(arg, args.next(), "a path argument")?);
+                }
+                "--format" => {
+                    let value =
+                        flag_value(arg, args.next(), "an argument (text|json|github|sarif)")?;
+                    let Some(format) = render::CheckFormat::parse(&value) else {
+                        errln!("steins: unknown format `{value}` (text|json|github|sarif)");
+                        return Err(ExitCode::from(2));
+                    };
+                    parsed.format = Some(format);
+                }
+                other => parsed.paths.push(other.to_owned()),
             }
         }
+        if parsed.paths.is_empty() {
+            errln!("steins: no paths given");
+            return Err(ExitCode::from(2));
+        }
+        // `--set-baseline` and `--fix` cannot combine (ambiguous which state the
+        // baseline would capture) — usage error.
+        if parsed.fix && parsed.set_baseline {
+            errln!("steins: --fix cannot be combined with --set-baseline");
+            return Err(ExitCode::from(2));
+        }
+        Ok(parsed)
     }
 
-    // Auto-detection (ADR-0054 §6): explicit `--format` wins, else env may
-    // name a consumer (GitHub Actions) — only the spelling changes.
-    let format = format.unwrap_or_else(render::detect_from_env);
+    /// Auto-detection (ADR-0054 §6): explicit `--format` wins, else env may
+    /// name a consumer (GitHub Actions) — only the spelling changes.
+    fn format(&self) -> render::CheckFormat {
+        self.format.unwrap_or_else(render::detect_from_env)
+    }
 
-    if paths.is_empty() {
-        errln!("steins: no paths given");
-        return ExitCode::from(2);
+    /// The baseline file (ADR-0022): `--set-baseline`/`--baseline` name one
+    /// explicitly, else the default auto-loads unless `--ignore-baseline`.
+    fn baseline_file(&self) -> Option<PathBuf> {
+        if self.set_baseline {
+            Some(PathBuf::from(self.baseline.as_deref().unwrap_or(baseline::DEFAULT_FILE)))
+        } else if self.ignore_baseline {
+            None
+        } else if let Some(p) = &self.baseline {
+            Some(PathBuf::from(p))
+        } else if Path::new(baseline::DEFAULT_FILE).exists() {
+            Some(PathBuf::from(baseline::DEFAULT_FILE))
+        } else {
+            None
+        }
     }
-    // `--set-baseline` and `--fix` cannot combine (ambiguous which state the
-    // baseline would capture) — usage error.
-    if fix_requested && set_baseline {
-        errln!("steins: --fix cannot be combined with --set-baseline");
-        return ExitCode::from(2);
-    }
-    if let Err(code) = reject_missing_paths(&paths) {
+}
+
+/// The value `flag` takes, or the usage error saying it `requires` one.
+fn flag_value(flag: &str, value: Option<&String>, requires: &str) -> Result<String, ExitCode> {
+    value.cloned().ok_or_else(|| {
+        errln!("steins: {flag} requires {requires}");
+        ExitCode::from(2)
+    })
+}
+
+pub(crate) fn run_check(args: &[String]) -> ExitCode {
+    let args = match CheckArgs::parse(args) {
+        Ok(args) => args,
+        Err(code) => return code,
+    };
+    let paths = &args.paths;
+    if let Err(code) = reject_missing_paths(paths) {
         return code;
     }
 
-    let files = collect_files(&paths);
+    let files = collect_files(paths);
 
     // Coverage posture (ADR-0004): `--no-php` runs the sound subset (notice up
     // front); otherwise folds via a lazily-spawned sidecar.
-    if no_php {
+    if args.no_php {
         errln!("{SOUND_SUBSET_NOTICE}");
     }
 
@@ -159,12 +165,12 @@ pub(crate) fn run_check(args: &[String]) -> ExitCode {
         Some(c) => (c.check, c.profile, c.runtime, allow_list(c.plugins), c.effects),
         None => (None, None, None, None, None),
     };
-    let effects_policy = effects_from_config(effects_cfg, no_tolerated_effects);
+    let effects_policy = effects_from_config(effects_cfg, args.no_tolerated_effects);
 
     // Active display surface (ADR-0050 §5), resolved before analysis (config
     // error fails fast, exit 2). Precedence: `--profile` > `[check] profile` > `default`.
     let (config_profile, profile_configs) = profiles_from_config(check_cfg, profile_tbl);
-    let selected = profile_flag.as_deref().or(config_profile.as_deref());
+    let selected = args.profile.as_deref().or(config_profile.as_deref());
     let surface = match profile_configs.resolve(selected) {
         Ok(s) => s,
         Err(e) => {
@@ -183,16 +189,16 @@ pub(crate) fn run_check(args: &[String]) -> ExitCode {
     // both directions — the cached arm prints the boundary notices the cold
     // arm prints and nothing more, and any degradation falls through to the
     // cold arm below with stderr still untouched.
-    let cached = if no_cache {
+    let cached = if args.no_cache {
         None
     } else {
         crate::generation::try_generation_check(
             &files,
-            &paths,
+            paths,
             plugin_allow.as_deref(),
             &effects_policy,
             &postures,
-            no_php,
+            args.no_php,
             &runtime_warnings,
         )
     };
@@ -202,16 +208,16 @@ pub(crate) fn run_check(args: &[String]) -> ExitCode {
     // argument. The cached arm supplies the orchestrator's own trees so the
     // inline scan re-parses nothing; the cold arm reads the salsa parse memo.
     let (loaded, inline, vendor_suppressed) = match cached {
-        Some(run) => crate::generation::consume_cached_run(run, &surface, vendor_diagnostics),
+        Some(run) => crate::generation::consume_cached_run(run, &surface, args.vendor_diagnostics),
         None => {
             // One folder for the whole run: owns the sidecar + fold memo, so repeated
             // calls across files never re-spawn or re-fold.
             let mut folder =
-                if no_php { SidecarFolder::new(true) } else { SidecarFolder::enabled() };
+                if args.no_php { SidecarFolder::new(true) } else { SidecarFolder::enabled() };
 
             // Project mode (ADR-0009/0015): all `.php` files form ONE project (one salsa
             // DB) so cross-file calls, class chains, effects resolve.
-            let loaded = load_project(&files, &paths, plugin_allow.as_deref(), effects_policy);
+            let loaded = load_project(&files, paths, plugin_allow.as_deref(), effects_policy);
             // Target PHP range (issue #28) gates the folder's absence family and curated facts.
             folder.set_php_target(loaded.layout.php_target().cloned());
             for w in &runtime_warnings {
@@ -220,27 +226,14 @@ pub(crate) fn run_check(args: &[String]) -> ExitCode {
             let findings: Vec<Diagnostic> =
                 check_project_under(&loaded.db, loaded.project, &mut folder, postures);
             let (inline, vendor_suppressed) =
-                suppression_pipeline(&loaded, findings, &surface, vendor_diagnostics);
+                suppression_pipeline(&loaded, findings, &surface, args.vendor_diagnostics);
             (loaded, inline, vendor_suppressed)
         }
     };
     let (db, project, texts) = (&loaded.db, loaded.project, &loaded.texts);
 
-    // Baseline file (ADR-0022): `--set-baseline`/`--baseline` name one
-    // explicitly, else the default auto-loads unless `--ignore-baseline`.
-    let baseline_file: Option<PathBuf> = if set_baseline {
-        Some(PathBuf::from(baseline_path.as_deref().unwrap_or(baseline::DEFAULT_FILE)))
-    } else if ignore_baseline {
-        None
-    } else if let Some(p) = &baseline_path {
-        Some(PathBuf::from(p))
-    } else if Path::new(baseline::DEFAULT_FILE).exists() {
-        Some(PathBuf::from(baseline::DEFAULT_FILE))
-    } else {
-        None
-    };
-
-    if set_baseline {
+    let baseline_file = args.baseline_file();
+    if args.set_baseline {
         let file = baseline_file.expect("set-baseline names a file");
         return write_baseline(&file, &inline.kept, texts, &surface);
     }
@@ -264,7 +257,7 @@ pub(crate) fn run_check(args: &[String]) -> ExitCode {
 
     // `check --fix` (ADR-0010): applies fix payloads under ADR-0034's
     // transformed-or-refused discipline. Without the flag, `None` — unchanged.
-    let fix_run = fix_requested.then(|| apply_fixes(db, project, &displayed, texts));
+    let fix_run = args.fix.then(|| apply_fixes(db, project, &displayed, texts));
 
     // A fixed finding leaves both display and exit; the plan is atomic, so
     // payload presence is the partition key.
@@ -289,21 +282,10 @@ pub(crate) fn run_check(args: &[String]) -> ExitCode {
         },
         texts,
     };
-    out!("{}", render::render(&report, format));
+    out!("{}", render::render(&report, args.format()));
 
-    // Fix-run accounting, after the report like other maintenance confirmations.
     if let Some(run) = &fix_run {
-        if run.applied {
-            errln!(
-                "steins: fixed {} finding(s) ({} file(s) written)",
-                fixed.len(),
-                run.files_written
-            );
-        } else if let Some(r) = &run.refusal {
-            errln!("steins: fix refused ({}): {}", r.reason, r.detail);
-        } else {
-            errln!("steins: no fixable findings");
-        }
+        report_fix_run(run, fixed.len());
     }
 
     // Exit level (ADR-0050 §7): 1 iff any fail-level finding is displayed, else
@@ -326,6 +308,17 @@ pub(crate) struct FixRefusal {
     pub(crate) reason: &'static str,
     pub(crate) detail: String,
     pub(crate) new_diagnostics: Vec<Diagnostic>,
+}
+
+/// Fix-run accounting, after the report like other maintenance confirmations.
+fn report_fix_run(run: &FixRun, fixed: usize) {
+    if run.applied {
+        errln!("steins: fixed {fixed} finding(s) ({} file(s) written)", run.files_written);
+    } else if let Some(r) = &run.refusal {
+        errln!("steins: fix refused ({}): {}", r.reason, r.detail);
+    } else {
+        errln!("steins: no fixable findings");
+    }
 }
 
 /// Apply fix payloads (ADR-0010): pour every edit into ONE atomic
