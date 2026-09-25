@@ -1,3 +1,11 @@
+//! What a generation run writes after it analyzes: nothing, when this run is
+//! the published generation and nothing degraded; otherwise a candidate — each
+//! unmoved package's artifact shared with the published generation, every
+//! other package's reassembled per file, this run's walk blocks in the one
+//! sidecar, the fold table — published over `CURRENT`. A failure here is a note
+//! and never the run's verdict: the findings are computed, and persistence is a
+//! cache.
+
 use std::sync::Arc;
 
 use steins_db::persist::{

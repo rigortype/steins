@@ -1,3 +1,10 @@
+//! What identifies a generation (ADR-0092 §2): the analyzer's own version; the
+//! identity inputs, filled once and used twice — as the generation id with
+//! every package's source fingerprint, and as the replay stamp without them;
+//! and the universe verdict digest a replayed block must also match. The config
+//! rows are a persisted format, pinned by this module's tests: a byte that
+//! moves in them invalidates every existing store.
+
 use steins_db::PluginFacts;
 use steins_gen::{EnginePosture, FieldHasher, Fingerprint, GenerationId, GenerationInputs};
 

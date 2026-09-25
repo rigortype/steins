@@ -1,3 +1,10 @@
+//! What a generation run reads before it analyzes: the sealed capture of the
+//! universe, each package loaded from the published generation or parsed from
+//! its sources, and the changed files with the name delta they imply. The
+//! reuse rules — the per-file gate, the verbatim shard, the two readings of an
+//! unreadable old side — are set out in [`crate::generation`]'s docs; this is
+//! where they are applied, and every miss degrades one package, never the run.
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
@@ -17,7 +24,7 @@ use crate::project::LazyTree;
 use crate::summaries::Summaries as StoredSummaries;
 use crate::walk_plan::FileWalk;
 
-/// Strict inverse of [`sources_payload`]; any deviation is a [`Miss`].
+/// Strict inverse of `publish::sources_payload`; any deviation is a [`Miss`].
 fn read_sources(
     reader: &mut steins_gen::ArtifactReader,
 ) -> Result<(String, Fingerprint), Miss> {
@@ -404,6 +411,8 @@ pub(super) fn load_or_parse(
 
 /// The name delta and the changed-file set it was computed over — the two
 /// inputs [`affected_files`] takes besides the facts.
+///
+/// [`affected_files`]: crate::affected::affected_files
 pub(super) struct NameDelta {
     /// The universe slots whose file moved: no persisted row carries the
     /// content fingerprint this run captured ([`block_index`]).
@@ -778,7 +787,7 @@ fn build_shard(plan: &Plan, facts: &[Option<FileFacts>]) -> PackageShard {
 
 /// One sealed file's bytes as the text the analysis reads — the same
 /// lossy-UTF-8 spelling `steins-cli`'s cold path produces (`project.rs`), and
-/// the same one [`generation_check`] produced when it read through the seal.
+/// the same one [`super::generation_check`] produced when it read through the seal.
 ///
 /// Written as `from_utf8` with a lossy fallback rather than as
 /// `from_utf8_lossy(&bytes).into_owned()` so that the ordinary case — a valid
