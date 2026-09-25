@@ -58,20 +58,24 @@ is stated.
 **Measurement mode.** Contract-layer families (`phpdoc.*`, `throw.*`,
 `effect.*`) are held separately: they are true findings that legitimately abound
 in released code, so they gate as **per-package increase tripwires**, not
-red-on-sight (ADR-0050 §9). The seeded expectations are hand-maintained tables
-in `gate.rs`: `PHPDOC_EXPECTED` (784 findings across nine entries as of the
+red-on-sight (ADR-0050 §9). The seeded expectations are hand-maintained tables:
+`PHPDOC_EXPECTED` (784 findings across nine entries as of the
 #665–#670 alias-body reseed — the legacy monorepo alone at 617, and the table's
 own triage comments are the authority on every move since), `THROW_EXPECTED`
 (44,592 — dominated by the legacy monorepo's 44,372, and including the 20
 `throw.undeclared` TRUEs seeded for phpstan-src at its registration), and
 `EFFECT_EXPECTED`, seeded **empty**: an all-zero tripwire that is vacuous until
-an envelope-annotated package lands, and correct the day one does. Moving a
-count is a conscious, comment-triaged act, never a drive-by.
+an envelope-annotated package lands, and correct the day one does. Each table is
+a TOML file under `xtask/fp-gate/` named after it (`PHPDOC_EXPECTED` is
+`phpdoc_expected.toml`), built into the xtask binary so a malformed one stops
+the gate before it runs, and a row's triage note is the comment block directly
+above it. Moving a count is a conscious, comment-triaged act, never a drive-by.
 
 Triaged true positives in the proof layer are **fingerprint-pinned**
-(`EXPECTED_PROOF_FINDINGS`), matched at finding precision — package + id +
-path suffix + line + a message substring — so a known-good finding does not
-re-block, and *any* drift does. Currently **13 pins**: the monolog
+(`EXPECTED_PROOF_FINDINGS`, `xtask/fp-gate/expected_proof_findings.toml`),
+matched at finding precision — package + id + path suffix + line + a message
+substring — so a known-good finding does not re-block, and *any* drift does.
+Currently **13 pins**: the monolog
 `stdClass`-into-`MongoDBHandler` TypeError the package's own test expects, ten
 S2 `call.undefined-method` findings on the legacy monorepo, and two S5
 `call.too-few-arguments` findings there (path suffixes deliberately shortened
@@ -127,13 +131,13 @@ content counts as dirty without exception — the gate walks the filesystem, not
 the index, so an untracked `.php` file is measured like any other.
 
 What this cannot do is keep the two halves in sync. The counts live in tracked
-Rust; the revision lives in an untracked file no check in this repository can
-read. A reseed that updates the count and forgets the revision leaves a record
-that is not merely stale but actively wrong — it will assert the confident
-verdict against a baseline seeded somewhere else. That is why the revision
-prints on every run including green ones: putting both halves in front of the
-operator at every reseed opportunity is the only available mitigation, and it
-is a discipline rather than a guarantee.
+TOML under `xtask/fp-gate/`; the revision lives in an untracked file no check
+in this repository can read. A reseed that updates the count and forgets the
+revision leaves a record that is not merely stale but actively wrong — it will
+assert the confident verdict against a baseline seeded somewhere else. That is
+why the revision prints on every run including green ones: putting both halves
+in front of the operator at every reseed opportunity is the only available
+mitigation, and it is a discipline rather than a guarantee.
 
 Held-out projects used for adoption drills are never used for tuning; that
 separation is what makes an adoption-drill number mean anything. See
