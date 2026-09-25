@@ -25,8 +25,7 @@ use crate::cx::Cx;
 use crate::declared_property::declared_property_arms;
 use crate::descent::{project_call_summary, project_method_summary, summary_binds};
 use crate::env::{
-    ContractArm, Known, ReturnSummary, Store, Stratum, array_literal_fact, class_const_class_fact,
-    singleton_fact,
+    ContractArm, Known, Store, Stratum, array_literal_fact, class_const_class_fact, singleton_fact,
 };
 use crate::offsets::shape_read_at;
 use crate::project::{Diagnostic, Fix, FixEdit, Res};
@@ -71,6 +70,25 @@ enum DumpFamily {
 struct DumpRendering {
     text: String,
     asserted: bool,
+}
+
+impl DumpRendering {
+    /// A value fact, marked when it rode an `Asserted` premise.
+    fn of_fact(fact: &Fact, stratum: Stratum) -> Self {
+        DumpRendering { text: render_dump_fact(fact), asserted: stratum == Stratum::Asserted }
+    }
+
+    /// A declared arm list, marked when any arm is `Asserted`; `None` when the list
+    /// has no faithful spelling and the next rung should answer.
+    fn of_arms(cx: &Cx, arms: &[ContractArm]) -> Option<Self> {
+        let text = render_contract_arms(cx, arms)?;
+        let asserted = arms.iter().any(|a| a.stratum == Stratum::Asserted);
+        Some(DumpRendering { text, asserted })
+    }
+
+    fn unknown() -> Self {
+        DumpRendering { text: DUMP_UNKNOWN.to_owned(), asserted: false }
+    }
 }
 
 /// The resolved function FQN a call names (ADR-0001), lowercase-normalized —
@@ -600,425 +618,432 @@ fn shape_is_flow_refined(fact: &Fact, known: &Known) -> bool {
         .any(|(_, p, _)| matches!(p, steins_domain::Presence::Required { witnessed: true }))
 }
 
+/// A dump argument and what it is read against: the one context every rung of
+/// [`best_dump_type`] reads.
+struct DumpArg<'d, 'a, 'w> {
+    w: &'d WalkCx<'a, 'w>,
+    value: &'d ArgValue,
+    env: &'d HashMap<String, Known>,
+    store: &'d Store,
+    /// The argument's span start — the provenance anchor for the issue-#60
+    /// value-lane descent (its findings are suppressed, so this surfaces only in
+    /// the bound params' internal provenance strings).
+    span_start: u32,
+    /// Whether the §2.7 resource folds (ADR-0097) may answer for this argument:
+    /// true only where nothing else in the dumping call runs before it, since the
+    /// handle's state is read on the store the statement started with. See
+    /// `resource_folds`' module doc.
+    fold_resources: bool,
+}
+
+/// One rung of [`best_dump_type`]: its rendering of the argument, or `None` to
+/// let the next rung answer.
+type DumpRung = fn(&DumpArg, &mut dyn Folder) -> Option<DumpRendering>;
+
+/// The rungs of [`best_dump_type`], in trust order. Strictly first-match: no rung
+/// carries state to a later one. The ternary and `??` rungs record the arms PHP
+/// never evaluates as they answer ([`dump_ternary`]); that is a fact about the
+/// source, and the same whichever rung runs next.
+const DUMP_RUNGS: &[DumpRung] = &[
+    dump_var,
+    dump_offset_read,
+    dump_ternary,
+    dump_coalesce,
+    dump_total_op,
+    dump_prop_fact,
+    dump_prop_declared,
+    dump_global_const,
+    dump_literal,
+    dump_array_literal,
+    dump_class_const,
+    dump_union_fold,
+    dump_call_summary,
+    dump_method_summary,
+    dump_builtin_call,
+    dump_call_floor,
+    dump_method_floor,
+];
+
 /// The best value fact of a dump argument, in the trust order (ADR-0052 §1 /
 /// ADR-0037): a proven value fact, else the object holder's exact class / membership,
 /// else the narrowed declared-arm list, else honest unknown. Drives `debug.type` and
 /// `debug.var-dump` (identical rendering, identical fact source, ADR-0053 §2).
+///
+/// The ladder is [`DUMP_RUNGS`]; the first rung to answer wins.
 fn best_dump_type(
     w: &WalkCx,
     folder: &mut dyn Folder,
     value: &ArgValue,
     env: &HashMap<String, Known>,
     store: &Store,
-    // The dump argument's span start — the provenance anchor for the issue-#60
-    // value-lane descent below (its findings are suppressed, so this surfaces only
-    // in the bound params' internal provenance strings).
     span_start: u32,
-    // Whether the §2.7 resource folds (ADR-0097) may answer for this argument:
-    // true only where nothing else in the dumping call runs before it, since the
-    // handle's state is read on the store the statement started with. See
-    // `resource_folds`' module doc.
     fold_resources: bool,
 ) -> DumpRendering {
-    let cx = w.cx;
-    let poisoned = w.scope.poisoned;
-    if let ArgValue::Var(name) = value {
-        // 1. A proven value fact (the four-layer value domain), carrying its stratum.
-        if let Some(known) = env.get(name)
-            && let Some(fact) = &known.fact
-        {
-            // A-G1a, applied to spelling: declared fidelity the fact domain cannot
-            // express (class-typed slots, exotic key contracts) lives in the ALIGNED
-            // arm, and an UNREFINED shape fact is by construction a lossy lowering
-            // of that one arm — so a freshly seeded binding spells from the arm
-            // lane while both describe the same thing.
-            //
-            // **S4 flips it once flow refinement exists** (the S3 note at this site
-            // said it would have to): a fact carrying a witnessed field, or one
-            // minted by arm subtraction, states something the declared arm does
-            // not, and spelling the arm would report the declaration back at a
-            // caller who just narrowed it. [`shape_is_flow_refined`] is the test.
-            if matches!(fact, Fact::Shape { .. })
-                && !shape_is_flow_refined(fact, known)
-                && let Some(arms) = store.contract_arms(name)
-                && let Some(text) = render_contract_arms(cx, arms)
-            {
-                return DumpRendering {
-                    text,
-                    asserted: arms.iter().any(|a| a.stratum == Stratum::Asserted),
-                };
-            }
-            // Flow-refined (or arm-less): the fact-lane spelling, same as the
-            // fallthrough below — except a `Shape` still keeps a fallback to
-            // the declared arms for any field the S4 narrowing didn't touch
-            // (issue #424). `to_fact`'s float/int floor leaves such a field's
-            // value-lane slot `None` from the seed; without this, the ONE
-            // switch above (full arm text vs. full fact text) would make that
-            // field read `mixed` the moment a sibling key got narrowed.
-            if let Fact::Shape { shape, nullable } = fact {
-                let fallback = store.contract_arms(name).unwrap_or(&[]);
-                return DumpRendering {
-                    text: render_shape_fact_flow(shape, *nullable, fallback),
-                    asserted: known.stratum == Stratum::Asserted,
-                };
-            }
-            return DumpRendering {
-                text: render_dump_fact(fact),
-                asserted: known.stratum == Stratum::Asserted,
-            };
+    let arg = DumpArg { w, value, env, store, span_start, fold_resources };
+    for rung in DUMP_RUNGS {
+        if let Some(rendering) = rung(&arg, folder) {
+            return rendering;
         }
-        // 1b. A declared lane the guards on this path have NARROWED (issue #429),
-        //     above every object rung for rung 2b's reason: a guard the walk just
-        //     executed is strictly stronger than the declaration it narrowed, and
-        //     printing `Suit` inside `if ($s === Suit::Hearts)` would report the
-        //     declaration back at a reader who had already refined it. An
-        //     un-narrowed lane declines here and the declaration wins, exactly as
-        //     before.
-        if let Some(text) = narrowed_lane_dump(cx, store, name) {
-            return DumpRendering { text, asserted: false };
-        }
-        // 2. An object holder whose class the heap proved EXACT — the allocation's
-        //    own class, rendered source-cased and namespace-qualified (matching
-        //    PHPStan).
-        if let Some(obj) = store.obj_of(name)
-            && obj.class_exact
-        {
-            return DumpRendering { text: cx.class_display_fqn(&obj.class), asserted: false };
-        }
-        // 2b. The N4 `Member{yes:[…]}` carrier (ADR-0052 §1): a var an `instanceof`
-        //     guard bound to a class. A single-yes-member set renders that class; a
-        //     multi-member set falls through. Bound at `Verified` (a live-branch
-        //     `instanceof`) => never `(asserted)`.
+    }
+    DumpRendering::unknown()
+}
+
+/// A variable: its own lanes, in trust order, ending in honest unknown rather than
+/// falling to the expression rungs below.
+fn dump_var(arg: &DumpArg, _: &mut dyn Folder) -> Option<DumpRendering> {
+    let ArgValue::Var(name) = arg.value else { return None };
+    let (cx, store) = (arg.w.cx, arg.store);
+    // 1. A proven value fact (the four-layer value domain), carrying its stratum.
+    if let Some(known) = arg.env.get(name)
+        && let Some(fact) = &known.fact
+    {
+        // A-G1a, applied to spelling: declared fidelity the fact domain cannot
+        // express (class-typed slots, exotic key contracts) lives in the ALIGNED
+        // arm, and an UNREFINED shape fact is by construction a lossy lowering
+        // of that one arm — so a freshly seeded binding spells from the arm
+        // lane while both describe the same thing.
         //
-        //     Above the lower-bound heap class, not below it: since a declared
-        //     parameter is a heap object (issue #388) the two co-occur, and a guard
-        //     the walk just executed is strictly stronger than the declaration it
-        //     narrowed — rendering `Box` inside `if ($b instanceof Sub)` would report
-        //     the declaration back at a reader who had already refuted it.
-        if let Some(m) = store.member_of(name)
-            && let [only] = m.yes.as_slice()
+        // **S4 flips it once flow refinement exists** (the S3 note at this site
+        // said it would have to): a fact carrying a witnessed field, or one
+        // minted by arm subtraction, states something the declared arm does
+        // not, and spelling the arm would report the declaration back at a
+        // caller who just narrowed it. [`shape_is_flow_refined`] is the test.
+        if matches!(fact, Fact::Shape { .. })
+            && !shape_is_flow_refined(fact, known)
+            && let Some(arms) = store.contract_arms(name)
+            && let Some(rendering) = DumpRendering::of_arms(cx, arms)
         {
-            return DumpRendering { text: cx.class_display_fqn(only), asserted: false };
+            return Some(rendering);
         }
-        // 2c. An object holder whose class is only a lower bound — a `$this` seed, a
-        //     declared parameter, a returned non-exact object. Still the object's
-        //     own fact and still above the declared arms, which for such a variable
-        //     say the same thing one rung less directly.
-        if let Some(obj) = store.obj_of(name) {
-            return DumpRendering { text: cx.class_display_fqn(&obj.class), asserted: false };
+        // Flow-refined (or arm-less): the fact-lane spelling, same as the
+        // fallthrough below — except a `Shape` still keeps a fallback to
+        // the declared arms for any field the S4 narrowing didn't touch
+        // (issue #424). `to_fact`'s float/int floor leaves such a field's
+        // value-lane slot `None` from the seed; without this, the ONE
+        // switch above (full arm text vs. full fact text) would make that
+        // field read `mixed` the moment a sibling key got narrowed.
+        if let Fact::Shape { shape, nullable } = fact {
+            let fallback = store.contract_arms(name).unwrap_or(&[]);
+            return Some(DumpRendering {
+                text: render_shape_fact_flow(shape, *nullable, fallback),
+                asserted: known.stratum == Stratum::Asserted,
+            });
         }
-        // 3. The narrowed declared-arm list (contract carrier).
-        if let Some(arms) = store.contract_arms(name)
-            && let Some(text) = render_contract_arms(cx, arms)
-        {
-            return DumpRendering {
-                text,
-                asserted: arms.iter().any(|a| a.stratum == Stratum::Asserted),
-            };
-        }
-        // 4. Honest unknown.
-        return DumpRendering { text: DUMP_UNKNOWN.to_owned(), asserted: false };
+        return Some(DumpRendering::of_fact(fact, known.stratum));
     }
-    // A constant-key read against an abstract shape (ADR-0062 §4, S3): the declared
-    // field's value slot. Every no-fact outcome (optional field, unknown slot,
-    // declared absence) falls through to honest unknown.
-    if let ArgValue::OffsetRead { base, key } = value
-        && let Some((read, stratum)) = shape_read_at(base, key, env, poisoned, cx.php_minor)
-        && let Some(fact) = read.into_fact()
+    // 1b. A declared lane the guards on this path have NARROWED (issue #429),
+    //     above every object rung for rung 2b's reason: a guard the walk just
+    //     executed is strictly stronger than the declaration it narrowed, and
+    //     printing `Suit` inside `if ($s === Suit::Hearts)` would report the
+    //     declaration back at a reader who had already refined it. An
+    //     un-narrowed lane declines here and the declaration wins, exactly as
+    //     before.
+    if let Some(text) = narrowed_lane_dump(cx, store, name) {
+        return Some(DumpRendering { text, asserted: false });
+    }
+    // 2. An object holder whose class the heap proved EXACT — the allocation's
+    //    own class, rendered source-cased and namespace-qualified (matching
+    //    PHPStan).
+    if let Some(obj) = store.obj_of(name)
+        && obj.class_exact
     {
-        return DumpRendering {
-            text: render_dump_fact(&fact),
-            asserted: stratum == Stratum::Asserted,
-        };
+        return Some(DumpRendering { text: cx.class_display_fqn(&obj.class), asserted: false });
     }
-
-    // A ternary `$c ? A : B` (ADR-0031, issue #625): the guard's verdict picks the
-    // taken arm's fact, an undecided guard joins both. Placed above the fold for
-    // the same reason the `??` below it is — a ternary is never a literal the
-    // folder can reach, so without this rung a fully-decided `true ? 1 : 2`
-    // dumped `unknown` while `$t = true ? 1 : 2;` bound `1`. That asymmetry is
-    // the defect issue #625 names: `eval_ternary_fact` existed and worked, and
-    // was wired into the assignment seam alone.
+    // 2b. The N4 `Member{yes:[…]}` carrier (ADR-0052 §1): a var an `instanceof`
+    //     guard bound to a class. A single-yes-member set renders that class; a
+    //     multi-member set falls through. Bound at `Verified` (a live-branch
+    //     `instanceof`) => never `(asserted)`.
     //
-    // The stratum is the assignment seam's, from the same `eval_ternary_fact_strat`,
-    // so the two seams cannot disagree about `(asserted)` any more than they can
-    // about the fact itself.
-    //
-    // # This rung marks the untaken arm dead, and that is deliberate
-    //
-    // `eval_ternary_fact` records the untaken arm of a decided guard as proven
-    // unevaluated (ADR-0052 §6). The alternative considered was a non-marking
-    // variant for this seam, on the theory that the dump surface is a second
-    // reader and might double-mark. It is not needed and it would be wrong:
-    //
-    // - `emit_dumps` gates on `descent.is_none()`, so this runs exactly once per
-    //   dump site, in the plain per-scope walk — there is no second pass to
-    //   double-mark from.
-    // - The deadness is true of the source, not of the seam that noticed it. PHP
-    //   evaluates one arm of a ternary wherever it is written, so a finding
-    //   inside `dumpType($x === 2 ? f("bad") : 0)` with `$x` proven `1` is the
-    //   same false positive the assignment seam already suppresses. Declining to
-    //   mark here would reintroduce, for deadness, exactly the by-seam
-    //   disagreement this rung exists to remove.
-    // - The record is idempotent by construction: `w.dead` is read through
-    //   `in_dead`'s `any()` predicate, so a span pushed twice decides identically
-    //   to one pushed once. A duplicate would cost a `Span`, never a verdict.
-    if let ArgValue::Ternary { cond, then_val, then_span, else_val, else_span } = value
-        && let Some((fact, stratum)) = eval_ternary_fact_strat(
-            w,
-            folder,
-            cond,
-            then_val,
-            else_val,
-            (*then_span, *else_span),
-            env,
-            store,
-        )
+    //     Above the lower-bound heap class, not below it: since a declared
+    //     parameter is a heap object (issue #388) the two co-occur, and a guard
+    //     the walk just executed is strictly stronger than the declaration it
+    //     narrowed — rendering `Box` inside `if ($b instanceof Sub)` would report
+    //     the declaration back at a reader who had already refuted it.
+    if let Some(m) = store.member_of(name)
+        && let [only] = m.yes.as_slice()
     {
-        return DumpRendering {
-            text: render_dump_fact(&fact),
-            asserted: stratum == Stratum::Asserted,
-        };
+        return Some(DumpRendering { text: cx.class_display_fqn(only), asserted: false });
     }
+    // 2c. An object holder whose class is only a lower bound — a `$this` seed, a
+    //     declared parameter, a returned non-exact object. Still the object's
+    //     own fact and still above the declared arms, which for such a variable
+    //     say the same thing one rung less directly.
+    if let Some(obj) = store.obj_of(name) {
+        return Some(DumpRendering { text: cx.class_display_fqn(&obj.class), asserted: false });
+    }
+    // 3. The narrowed declared-arm list (contract carrier).
+    if let Some(arms) = store.contract_arms(name)
+        && let Some(rendering) = DumpRendering::of_arms(cx, arms)
+    {
+        return Some(rendering);
+    }
+    // 4. Honest unknown.
+    Some(DumpRendering::unknown())
+}
 
-    // A `??` chain (ADR-0052 §6 + ADR-0062 A-G11, S5): the spine's join under the
-    // left-to-right `¬isset` premise ladder, where a KeyCover discharges. Placed
-    // above the fold since a `??` is never a literal the folder can reach.
-    if let ArgValue::Coalesce(a, b, rhs_span) = value
-        && let Some((fact, stratum)) =
-            eval_coalesce_fact(w, folder, a, b, *rhs_span, env, Some(store))
-    {
-        return DumpRendering {
-            text: render_dump_fact(&fact),
-            asserted: stratum == Stratum::Asserted,
-        };
-    }
+/// A constant-key read against an abstract shape (ADR-0062 §4, S3): the declared
+/// field's value slot. Every no-fact outcome (optional field, unknown slot,
+/// declared absence) falls through.
+fn dump_offset_read(arg: &DumpArg, _: &mut dyn Folder) -> Option<DumpRendering> {
+    let ArgValue::OffsetRead { base, key } = arg.value else { return None };
+    let (cx, poisoned) = (arg.w.cx, arg.w.scope.poisoned);
+    let (read, stratum) = shape_read_at(base, key, arg.env, poisoned, cx.php_minor)?;
+    Some(DumpRendering::of_fact(&read.into_fact()?, stratum))
+}
 
-    // A value-position operator — a comparison, `<=>`, a connective, `!`, a cast,
-    // a concatenation or `isset(…)`, through `total_op_fact` — same placement
-    // reasoning as `??`. Total, so lower rungs never see one: the decided value
-    // where the operands decide it, the operator's floor (`bool`, `int<-1, 1>`,
-    // the cast target's base, `string`) where they do not, never `unknown`.
-    if let Some((fact, stratum)) = total_op_fact(w, folder, value, env, Some(store), poisoned) {
-        return DumpRendering {
-            text: render_dump_fact(&fact),
-            asserted: stratum == Stratum::Asserted,
-        };
-    }
+/// A ternary `$c ? A : B` (ADR-0031, issue #625): the guard's verdict picks the
+/// taken arm's fact, an undecided guard joins both. Above the fold for the reason
+/// the `??` rung is: a ternary is never a literal the folder can reach, so without
+/// this rung a fully-decided `true ? 1 : 2` dumped `unknown` while
+/// `$t = true ? 1 : 2;` bound `1`. That asymmetry is the defect issue #625 names:
+/// `eval_ternary_fact` existed and worked, and was wired into the assignment seam
+/// alone. The stratum is the assignment seam's, from the same
+/// `eval_ternary_fact_strat`, so the two seams cannot disagree about `(asserted)`
+/// any more than about the fact itself.
+///
+/// # This rung marks the untaken arm dead, and that is deliberate
+///
+/// `eval_ternary_fact` records the untaken arm of a decided guard as proven
+/// unevaluated (ADR-0052 §6). The alternative considered was a non-marking variant
+/// for this seam, on the theory that the dump surface is a second reader and might
+/// double-mark. It is not needed and it would be wrong:
+///
+/// - `emit_dumps` gates on `descent.is_none()`, so this runs exactly once per dump
+///   site, in the plain per-scope walk — there is no second pass to double-mark
+///   from.
+/// - The deadness is true of the source, not of the seam that noticed it. PHP
+///   evaluates one arm of a ternary wherever it is written, so a finding inside
+///   `dumpType($x === 2 ? f("bad") : 0)` with `$x` proven `1` is the same false
+///   positive the assignment seam already suppresses. Declining to mark here would
+///   reintroduce, for deadness, exactly the by-seam disagreement this rung exists
+///   to remove.
+/// - The record is idempotent by construction: `w.dead` is read through
+///   `in_dead`'s `any()` predicate, so a span pushed twice decides identically to
+///   one pushed once. A duplicate would cost a `Span`, never a verdict.
+fn dump_ternary(arg: &DumpArg, folder: &mut dyn Folder) -> Option<DumpRendering> {
+    let ArgValue::Ternary { cond, then_val, then_span, else_val, else_span } = arg.value else {
+        return None;
+    };
+    let (fact, stratum) = eval_ternary_fact_strat(
+        arg.w,
+        folder,
+        cond,
+        then_val,
+        else_val,
+        (*then_span, *else_span),
+        arg.env,
+        arg.store,
+    )?;
+    Some(DumpRendering::of_fact(&fact, stratum))
+}
 
-    // A depth-1 property fetch `$var->prop` (ADR-0052 §7, Gap B): the allocation-keyed
-    // heap property fact (alias-correct, ADR-0036). Escaped-then-swept props carry no
-    // fact and fall through to the declared floor below; a readonly prop survives.
-    // Deeper chains (`$a->b->c`) lower to `Other`, never here.
-    if let ArgValue::PropFetch { var, prop } = value
-        && !poisoned
-        && let Some(fact) = store.prop_fact(var, prop)
-    {
-        return DumpRendering {
-            text: render_dump_fact(fact),
-            asserted: store.prop_stratum(var, prop) == Stratum::Asserted,
-        };
+/// A `??` chain (ADR-0052 §6 + ADR-0062 A-G11, S5): the spine's join under the
+/// left-to-right `¬isset` premise ladder, where a KeyCover discharges. Above the
+/// fold since a `??` is never a literal the folder can reach.
+fn dump_coalesce(arg: &DumpArg, folder: &mut dyn Folder) -> Option<DumpRendering> {
+    let ArgValue::Coalesce(a, b, rhs_span) = arg.value else { return None };
+    let (fact, stratum) =
+        eval_coalesce_fact(arg.w, folder, a, b, *rhs_span, arg.env, Some(arg.store))?;
+    Some(DumpRendering::of_fact(&fact, stratum))
+}
+
+/// A value-position operator — a comparison, `<=>`, a connective, `!`, a cast, a
+/// concatenation or `isset(…)`, through `total_op_fact` — placed as the `??` rung
+/// is. Total, so lower rungs never see one: the decided value where the operands
+/// decide it, the operator's floor (`bool`, `int<-1, 1>`, the cast target's base,
+/// `string`) where they do not, never `unknown`.
+fn dump_total_op(arg: &DumpArg, folder: &mut dyn Folder) -> Option<DumpRendering> {
+    let poisoned = arg.w.scope.poisoned;
+    let (fact, stratum) =
+        total_op_fact(arg.w, folder, arg.value, arg.env, Some(arg.store), poisoned)?;
+    Some(DumpRendering::of_fact(&fact, stratum))
+}
+
+/// A depth-1 property fetch `$var->prop` (ADR-0052 §7, Gap B): the allocation-keyed
+/// heap property fact (alias-correct, ADR-0036). Escaped-then-swept props carry no
+/// fact and fall through to the declared floor below; a readonly prop survives.
+/// Deeper chains (`$a->b->c`) lower to `Other`, never here.
+fn dump_prop_fact(arg: &DumpArg, _: &mut dyn Folder) -> Option<DumpRendering> {
+    let ArgValue::PropFetch { var, prop } = arg.value else { return None };
+    if arg.w.scope.poisoned {
+        return None;
     }
-    // The same fetch with NO in-trace fact (ADR-0049 A20, issue #620): the
-    // property's DECLARED type, read off the receiver's declared class through the
-    // declared-receiver lane. Strictly below the rung above — a write the trace saw
-    // states what this slot holds *now*, the declaration only what it may ever
-    // hold — which is also why a written-then-swept or unspellable-rvalue write
-    // lands here rather than on `unknown`: it recorded nothing to beat the floor.
-    if let ArgValue::PropFetch { var, prop } = value
-        && !poisoned
-        && let Some(arms) = declared_property_arms(cx, store, var, prop)
-        && let Some(text) = render_contract_arms(cx, &arms)
-    {
-        return DumpRendering {
-            text,
-            asserted: arms.iter().any(|a| a.stratum == Stratum::Asserted),
-        };
+    let fact = arg.store.prop_fact(var, prop)?;
+    Some(DumpRendering::of_fact(fact, arg.store.prop_stratum(var, prop)))
+}
+
+/// The same fetch with NO in-trace fact (ADR-0049 A20, issue #620): the property's
+/// DECLARED type, read off the receiver's declared class through the
+/// declared-receiver lane. Strictly below [`dump_prop_fact`] — a write the trace saw
+/// states what this slot holds *now*, the declaration only what it may ever hold —
+/// which is also why a written-then-swept or unspellable-rvalue write lands here
+/// rather than on `unknown`: it recorded nothing to beat the floor.
+fn dump_prop_declared(arg: &DumpArg, _: &mut dyn Folder) -> Option<DumpRendering> {
+    let ArgValue::PropFetch { var, prop } = arg.value else { return None };
+    if arg.w.scope.poisoned {
+        return None;
     }
-    // A bare global constant (ADR-0094, issue #598), above the literal rung for
-    // the same reason the operator family sits there: the literal seam can only
-    // carry a single value, and most of what ADR-0094 §3 rules is not one —
-    // `PHP_EOL` defaults to the union `\"\\n\"|\"\\r\\n\"` and `PHP_VERSION_ID` to
-    // the range the declared target spans. A single-valued constant answers the
-    // same either way; the resolver is one function.
-    if let ArgValue::GlobalConst(r) = value
-        && let Some((fact, stratum)) = global_const_fact(cx, r)
-    {
-        return DumpRendering {
-            text: render_dump_fact(&fact),
-            asserted: stratum == Stratum::Asserted,
-        };
+    let arms = declared_property_arms(arg.w.cx, arg.store, var, prop)?;
+    DumpRendering::of_arms(arg.w.cx, &arms)
+}
+
+/// A bare global constant (ADR-0094, issue #598), above the literal rung for the
+/// same reason the operator family sits there: the literal seam can only carry a
+/// single value, and most of what ADR-0094 §3 rules is not one — `PHP_EOL`
+/// defaults to the union `\"\\n\"|\"\\r\\n\"` and `PHP_VERSION_ID` to the range
+/// the declared target spans. A single-valued constant answers the same either
+/// way; the resolver is one function.
+fn dump_global_const(arg: &DumpArg, _: &mut dyn Folder) -> Option<DumpRendering> {
+    let ArgValue::GlobalConst(r) = arg.value else { return None };
+    let (fact, stratum) = global_const_fact(arg.w.cx, r)?;
+    Some(DumpRendering::of_fact(&fact, stratum))
+}
+
+/// A resolved literal/foldable value fact, above every call rung below (a
+/// fully-literal call folds to a Singleton, ADR-0056 §4). Stratum comes from the
+/// resolution itself so a fold over an Asserted project-call summary stays
+/// Asserted (issue #127).
+fn dump_literal(arg: &DumpArg, folder: &mut dyn Folder) -> Option<DumpRendering> {
+    let (cx, poisoned) = (arg.w.cx, arg.w.scope.poisoned);
+    let (lit, stratum) = cx.resolve_literal_strat(arg.value, arg.env, poisoned, folder)?;
+    Some(DumpRendering::of_fact(&singleton_fact(&lit, cx.php_minor)?, stratum))
+}
+
+/// An array literal [`dump_literal`] could not prove whole (issue #327): the shape
+/// its observed keys denote, with an unknown slot per unresolved element.
+fn dump_array_literal(arg: &DumpArg, folder: &mut dyn Folder) -> Option<DumpRendering> {
+    let ArgValue::Array(items) = arg.value else { return None };
+    let (cx, poisoned) = (arg.w.cx, arg.w.scope.poisoned);
+    let (fact, stratum) =
+        array_literal_fact(cx, folder, items, arg.env, poisoned, Some(arg.store))?;
+    Some(DumpRendering::of_fact(&fact, stratum))
+}
+
+/// The `::class` magic constant (issue #236): FQN literal when written, the
+/// `class-string` refinement when relative. Verified — PHP's own claim.
+fn dump_class_const(arg: &DumpArg, _: &mut dyn Folder) -> Option<DumpRendering> {
+    let ArgValue::ClassConst(sc, name) = arg.value else { return None };
+    let fact = class_const_class_fact(arg.w.cx, arg.w.scope, sc, name)?;
+    Some(DumpRendering::of_fact(&fact, Stratum::Verified))
+}
+
+/// The member-wise union fold (issue #74): a bounded union-of-constants argument
+/// is enumerated, each combination folded through the same seam a literal call
+/// takes, and the answers composed. Sits above every type rung below — this is a
+/// value the real engine answered, member by member.
+fn dump_union_fold(arg: &DumpArg, folder: &mut dyn Folder) -> Option<DumpRendering> {
+    let ArgValue::Call(name, args) = arg.value else { return None };
+    let poisoned = arg.w.scope.poisoned;
+    let (fact, stratum, _prov) = arg.w.cx.try_union_fold(name, args, arg.env, poisoned, folder)?;
+    Some(DumpRendering::of_fact(&fact, stratum))
+}
+
+/// A project-function call in argument position (issue #60): the T0 return-fact
+/// summary, where the assignment ladder puts it (fold, then summary, then builtin
+/// envelope, then arms). `summary_binds` keeps the two forms identical. Findings
+/// go to a scratch since the dump surface never emits for the callee, and
+/// `descent: None` is sound because `emit_dumps` runs only in the plain per-scope
+/// pass.
+fn dump_call_summary(arg: &DumpArg, folder: &mut dyn Folder) -> Option<DumpRendering> {
+    let ArgValue::Call(name, args) = arg.value else { return None };
+    if args.is_empty() {
+        return None;
     }
-    // A non-variable argument: a resolved literal/foldable value fact wins first (a
-    // fully-literal call folds to a Singleton, ADR-0056 §4). Stratum comes from the
-    // resolution itself so a fold over an Asserted project-call summary stays
-    // Asserted (issue #127).
-    if let Some((lit, strat)) = cx.resolve_literal_strat(value, env, poisoned, folder)
-        && let Some(fact) = singleton_fact(&lit, cx.php_minor)
-    {
-        return DumpRendering {
-            text: render_dump_fact(&fact),
-            asserted: strat == Stratum::Asserted,
-        };
-    }
-    // An array literal the rung above could not prove whole (issue #327): the
-    // shape its observed keys denote, with an unknown slot per unresolved element.
-    if let ArgValue::Array(items) = value
-        && let Some((fact, stratum)) =
-            array_literal_fact(cx, folder, items, env, poisoned, Some(store))
-    {
-        return DumpRendering {
-            text: render_dump_fact(&fact),
-            asserted: stratum == Stratum::Asserted,
-        };
-    }
-    // The `::class` magic constant (issue #236): FQN literal when written, the
-    // `class-string` refinement when relative. Verified — PHP's own claim.
-    if let ArgValue::ClassConst(sc, name) = value
-        && let Some(fact) = class_const_class_fact(cx, w.scope, sc, name)
-    {
-        return DumpRendering { text: render_dump_fact(&fact), asserted: false };
-    }
-    // The member-wise union fold (issue #74): a bounded union-of-constants argument
-    // is enumerated, each combination folded through the same seam a literal call
-    // takes, and the answers composed. Sits above every type rung below — this is a
-    // value the real engine answered, member by member.
-    if let ArgValue::Call(name, cargs) = value
-        && let Some((fact, stratum, _prov)) = cx.try_union_fold(name, cargs, env, poisoned, folder)
-    {
-        return DumpRendering {
-            text: render_dump_fact(&fact),
-            asserted: stratum == Stratum::Asserted,
-        };
-    }
-    // A project-function call in argument position (issue #60): the T0 return-fact
-    // summary, where the assignment ladder puts it (fold > summary > builtin
-    // envelope > arms). `summary_binds` keeps the two forms identical. Findings go
-    // to a scratch since the dump surface never emits for the callee, and
-    // `descent: None` is sound because `emit_dumps` runs only in the plain
-    // per-scope pass.
-    if let ArgValue::Call(name, cargs) = value
-        && !cargs.is_empty()
-    {
-        let mut scratch: Vec<Diagnostic> = Vec::new();
-        if let Some(ReturnSummary { value: Some(sv), .. }) = project_call_summary(
-            cx, folder, name, cargs, env, store, poisoned, span_start, None, &mut scratch,
-        ) && summary_binds(&sv.fact)
-        {
-            return DumpRendering {
-                text: render_dump_fact(&sv.fact),
-                asserted: sv.stratum == Stratum::Asserted,
-            };
+    let (cx, poisoned) = (arg.w.cx, arg.w.scope.poisoned);
+    let mut scratch: Vec<Diagnostic> = Vec::new();
+    let summary = project_call_summary(
+        cx, folder, name, args, arg.env, arg.store, poisoned, arg.span_start, None, &mut scratch,
+    )?;
+    let sv = summary.value?;
+    summary_binds(&sv.fact).then(|| DumpRendering::of_fact(&sv.fact, sv.stratum))
+}
+
+/// A method / static call in argument position (issue #386): the same rung, one
+/// resolver over, and the same `summary_binds` gate — so `dumpType($b->get())` and
+/// `$v = $b->get(); dumpType($v)` cannot disagree. `w` carries the frame, so
+/// `$this->m()` and `self::m()` resolve here where the frame-less seams decline.
+/// The **value** component only: an object result has no rendering in value
+/// position (ADR-0057 B5), which is why `dumpType($b->makeFoo())` stays unknown.
+fn dump_method_summary(arg: &DumpArg, folder: &mut dyn Folder) -> Option<DumpRendering> {
+    let ArgValue::MethodCall { callee, args, named } = arg.value else { return None };
+    let w = arg.w;
+    let mut scratch: Vec<Diagnostic> = Vec::new();
+    let summary = project_method_summary(
+        w.cx,
+        folder,
+        callee,
+        args,
+        named,
+        arg.env,
+        arg.store,
+        w.this_exact,
+        w.enclosing_class,
+        w.scope.poisoned,
+        arg.span_start,
+        None,
+        &mut scratch,
+    )?;
+    let sv = summary.value?;
+    summary_binds(&sv.fact).then(|| DumpRendering::of_fact(&sv.fact, sv.stratum))
+}
+
+/// A builtin call the fold could not reach: the builtin-call ladder
+/// ([`builtin_call_rung`]) the assignment seam climbs, so `dumpType(gettype($h))`
+/// and `$t = gettype($h); dumpType($t)` answer the same string. The §2.7 folds only
+/// where `fold_resources` allows them; the resource arms not at all, since nothing
+/// binds here.
+fn dump_builtin_call(arg: &DumpArg, folder: &mut dyn Folder) -> Option<DumpRendering> {
+    let ArgValue::Call(name, args) = arg.value else { return None };
+    let (cx, poisoned) = (arg.w.cx, arg.w.scope.poisoned);
+    let rungs = OptionalRungs { resource_folds: arg.fold_resources, resource_arms: false };
+    match builtin_call_rung(cx, folder, name, args, arg.env, Some(arg.store), poisoned, rungs)? {
+        BuiltinRung::ResourceFold(fact, stratum) | BuiltinRung::Shape(fact, stratum) => {
+            Some(DumpRendering::of_fact(&fact, stratum))
         }
-    }
-    // A method / static call in argument position (issue #386): the same rung, one
-    // resolver over, and the same `summary_binds` gate — so `dumpType($b->get())`
-    // and `$v = $b->get(); dumpType($v)` cannot disagree. `w` carries the frame, so
-    // `$this->m()` and `self::m()` resolve here where the frame-less seams decline.
-    // The **value** component only: an object result has no rendering in value
-    // position (ADR-0057 B5), which is why `dumpType($b->makeFoo())` stays unknown.
-    if let ArgValue::MethodCall { callee, args, named } = value {
-        let mut scratch: Vec<Diagnostic> = Vec::new();
-        if let Some(ReturnSummary { value: Some(sv), .. }) = project_method_summary(
-            cx,
-            folder,
-            callee,
-            args,
-            named,
-            env,
-            store,
-            w.this_exact,
-            w.enclosing_class,
-            poisoned,
-            span_start,
-            None,
-            &mut scratch,
-        ) && summary_binds(&sv.fact)
-        {
-            return DumpRendering {
-                text: render_dump_fact(&sv.fact),
-                asserted: sv.stratum == Stratum::Asserted,
-            };
+        // The reflected envelope / admitted refinement (ADR-0056 R1): always
+        // Verified, read off the engine's own arginfo.
+        BuiltinRung::Envelope(fact) => Some(DumpRendering::of_fact(&fact, Stratum::Verified)),
+        // The declared-return floor (ADR-0069): always `(asserted)` — the row is a
+        // catalog declaration, not a runtime answer. Rendered through the same arm
+        // speller [`dump_call_floor`] uses; a row with no spelling falls through.
+        BuiltinRung::Floor(arms) => {
+            let text = render_contract_arms(cx, &arms)?;
+            Some(DumpRendering { text, asserted: true })
         }
+        // Not asked.
+        BuiltinRung::ResourceArms(..) => None,
     }
-    // A builtin call the fold could not reach: the builtin-call ladder
-    // (`builtin_call_rung`) the assignment seam climbs, so `dumpType(gettype($h))`
-    // and `$t = gettype($h); dumpType($t)` answer the same string. The §2.7 folds
-    // only where `fold_resources` allows them; the resource arms not at all, since
-    // nothing binds here.
-    if let ArgValue::Call(name, args) = value
-        && let Some(rung) = builtin_call_rung(
-            cx,
-            folder,
-            name,
-            args,
-            env,
-            Some(store),
-            poisoned,
-            OptionalRungs { resource_folds: fold_resources, resource_arms: false },
-        )
-    {
-        match rung {
-            BuiltinRung::ResourceFold(fact, stratum) | BuiltinRung::Shape(fact, stratum) => {
-                return DumpRendering {
-                    text: render_dump_fact(&fact),
-                    asserted: stratum == Stratum::Asserted,
-                };
-            }
-            // The reflected envelope / admitted refinement (ADR-0056 R1): always
-            // Verified, read off the engine's own arginfo.
-            BuiltinRung::Envelope(fact) => {
-                return DumpRendering { text: render_dump_fact(&fact), asserted: false };
-            }
-            // The declared-return floor (ADR-0069): always `(asserted)` — the row
-            // is a catalog declaration, not a runtime answer. Rendered through the
-            // same arm speller the project-call floor below uses; a row with no
-            // spelling falls through to it.
-            BuiltinRung::Floor(arms) => {
-                if let Some(text) = render_contract_arms(cx, &arms) {
-                    return DumpRendering { text, asserted: true };
-                }
-            }
-            // Not asked.
-            BuiltinRung::ResourceArms(..) => {}
-        }
-    }
-    // The declared-return floor of an unresolved project call (issue #60): the
-    // callee's `: string` is a fact the caller should see even with no summary
-    // crossed. Exactly the arm list the assignment form seeds into the contract
-    // store; no declared return type still falls to honest unknown.
-    if let ArgValue::Call(name, cargs) = value
-        && let Some(arms) = call_return_arms_by_name(cx, folder, name, cargs, env, store, poisoned)
-        && let Some(text) = render_contract_arms(cx, &arms)
-    {
-        return DumpRendering {
-            text,
-            asserted: arms.iter().any(|a| a.stratum == Stratum::Asserted),
-        };
-    }
-    // The same floor for an unsummarized method/static call (issue #386): the
-    // declared `: string` of the resolved target, which the assignment form seeds
-    // into the contract store.
-    if let ArgValue::MethodCall { callee, args, .. } = value
-        && let Some(arms) = method_return_arms_by_callee(
-            cx,
-            folder,
-            callee,
-            args,
-            env,
-            store,
-            w.this_exact,
-            w.enclosing_class,
-            poisoned,
-        )
-        && let Some(text) = render_contract_arms(cx, &arms)
-    {
-        return DumpRendering {
-            text,
-            asserted: arms.iter().any(|a| a.stratum == Stratum::Asserted),
-        };
-    }
-    DumpRendering { text: DUMP_UNKNOWN.to_owned(), asserted: false }
+}
+
+/// The declared-return floor of an unresolved project call (issue #60): the
+/// callee's `: string` is a fact the caller should see even with no summary
+/// crossed. Exactly the arm list the assignment form seeds into the contract
+/// store; no declared return type still falls to honest unknown.
+fn dump_call_floor(arg: &DumpArg, folder: &mut dyn Folder) -> Option<DumpRendering> {
+    let ArgValue::Call(name, args) = arg.value else { return None };
+    let (cx, poisoned) = (arg.w.cx, arg.w.scope.poisoned);
+    let arms = call_return_arms_by_name(cx, folder, name, args, arg.env, arg.store, poisoned)?;
+    DumpRendering::of_arms(cx, &arms)
+}
+
+/// The same floor for an unsummarized method/static call (issue #386): the
+/// declared `: string` of the resolved target, which the assignment form seeds
+/// into the contract store.
+fn dump_method_floor(arg: &DumpArg, folder: &mut dyn Folder) -> Option<DumpRendering> {
+    let ArgValue::MethodCall { callee, args, .. } = arg.value else { return None };
+    let w = arg.w;
+    let arms = method_return_arms_by_callee(
+        w.cx,
+        folder,
+        callee,
+        args,
+        arg.env,
+        arg.store,
+        w.this_exact,
+        w.enclosing_class,
+        w.scope.poisoned,
+    )?;
+    DumpRendering::of_arms(w.cx, &arms)
 }
 
 /// The declared-side view of a dump argument (ADR-0053 §2, `debug.phpdoc-type`): the
