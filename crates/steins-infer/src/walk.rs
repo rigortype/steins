@@ -1,6 +1,10 @@
 //! The linear-trace walk: [`analyze_scope`] over one scope with a given initial
-//! env, [`WalkCx`], the statement loop [`walk_trace`], dead-path marking and the
-//! by-value survivor / value-stratum helpers.
+//! env, [`WalkCx`], the statement loop [`walk_trace`] and dead-path marking.
+//!
+//! `walk_trace` runs one fixed phase pipeline per statement. The phases that are
+//! not here have a module each: the call phase in `stmt_calls`, the read-position
+//! and return-type checks in `stmt_checks`, the structured loops in `loops`; the
+//! entry state is `entry_state`'s and the by-value survivors are `by_value`'s.
 
 use std::collections::{HashMap, HashSet};
 

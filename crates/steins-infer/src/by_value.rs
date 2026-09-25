@@ -1,3 +1,8 @@
+//! The by-value reading of a call's arguments (ADR-0070): which of the names a
+//! statement hands to a call keep their facts through it ([`by_value_survivors`],
+//! [`arg_is_by_value`]), and the trust stratum a resolved value carries
+//! ([`value_stratum`]).
+
 use std::collections::{HashMap, HashSet};
 
 use steins_syntax::{ArgValue, Callee, InvalidatedVar, NameRef, NamedArg, Receiver};
@@ -70,6 +75,8 @@ use crate::walk::mined_arm_admitted;
 /// [`Param::by_ref`]: steins_syntax::Param::by_ref
 /// [`dump_family`]: crate::dump::dump_family
 /// [`collect_assert_types`]: crate::assert_harness::collect_assert_types
+/// [`Stmt::invalidated`]: steins_syntax::Stmt::invalidated
+/// [`emit_asserts`]: crate::dump::emit_asserts
 pub(crate) fn by_value_survivors<'s>(
     cx: &Cx<'_>,
     poisoned: bool,
@@ -166,6 +173,8 @@ fn is_dump_read_site(cx: &Cx<'_>, r: &NameRef) -> bool {
 /// assertion is. With no sink (every normal check) this is `false` for every
 /// site and `assertType` stays an ordinary call — the check surface is
 /// byte-identical. See the exception paragraph on [`by_value_survivors`].
+///
+/// [`emit_asserts`]: crate::dump::emit_asserts
 fn is_assert_read_site(cx: &Cx<'_>, r: &NameRef) -> bool {
     ASSERT_SINK.with(|s| s.borrow().is_some()) && resolved_fn_fqn(cx, r) == ASSERT_TYPE_FQN
 }
@@ -191,6 +200,8 @@ fn is_assert_read_site(cx: &Cx<'_>, r: &NameRef) -> bool {
 ///
 /// A name none of the lanes mention answers `false` too, purely as a cost gate:
 /// invalidating an unbound name is already a no-op.
+///
+/// [`Fact`]: steins_domain::Fact
 fn is_value_semantic(var: &str, env: &HashMap<String, Known>, store: &Store) -> bool {
     if store.refs.contains_key(var) {
         return true;

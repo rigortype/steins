@@ -178,7 +178,7 @@ pub(crate) fn walk_if(
 /// a branch taken under `then` polarity knows because that condition held.
 ///
 /// Extracted from [`walk_if`]'s two branch blocks, which is where the ordering
-/// constraints below were established; a `while` header's body entry ([`walk_while_body`])
+/// constraints below were established; a `while` header's body entry (`walk_while_body`)
 /// takes the same true-side application, for the same reason an `if`'s then-branch
 /// does — the condition was evaluated true immediately before the code that follows.
 ///
@@ -186,8 +186,6 @@ pub(crate) fn walk_if(
 /// because it is the only one that can mint a fact over an unfacted binding, which
 /// the scalar refinements must then see — `is_string($v) && $v !== ''` narrows to
 /// `non-empty-string` only in this order.
-///
-/// [`walk_while_body`]: crate::loops::walk_while_body
 pub(crate) fn apply_cond_side(
     w: &WalkCx,
     folder: &mut dyn Folder,

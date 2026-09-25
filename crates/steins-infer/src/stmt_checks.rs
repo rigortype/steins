@@ -1,3 +1,6 @@
+//! The statement walk's checks that judge a statement without changing the env:
+//! step 1z at the read positions, and step 1b on a `return`'s value.
+
 use std::collections::HashMap;
 
 use steins_domain::Certainty;

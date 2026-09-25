@@ -880,7 +880,7 @@ pub(crate) struct ResourceEffects {
 ///
 /// [`checkable_calls`]: crate::descent::checkable_calls
 /// [`Stmt::invalidated`]: steins_syntax::Stmt::invalidated
-/// [`by_value_survivors`]: crate::walk::by_value_survivors
+/// [`by_value_survivors`]: crate::by_value::by_value_survivors
 /// [`type_predicate`]: crate::predicates::type_predicate
 pub(crate) fn resource_call_effects(
     cx: &Cx,

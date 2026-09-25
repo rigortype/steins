@@ -574,7 +574,7 @@ fn a_call_with_no_known_signature_still_costs_the_key_its_fact() {
 
 
 // Issue #559 — #536's sibling, one builtin over: the DR2 family in STATEMENT
-// position, where walk.rs asks `by_value_arg` rather than the guard-position
+// position, where by_value.rs asks `by_value_arg` rather than the guard-position
 // exemption asserts.rs enforces. An uncertified name read as "may write
 // through any argument" and cost the subject its fact.
 
