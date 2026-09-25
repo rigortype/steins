@@ -9,7 +9,6 @@ use steins_domain::{ArmKnown, Base, Certainty, Fact, IntRange, Refinement, Shape
 use steins_phpdoc::{TagKind, scan_docblock};
 use steins_syntax::{
     ArgValue, CallExpr, Callee, Comment, NameRef, RefKind, SourceTree, Span, Stmt, StmtKind,
-    ValueOp,
 };
 
 use crate::fold::Folder;
@@ -23,10 +22,7 @@ use crate::assign::eval_coalesce_fact;
 use crate::builtin_returns::{
     builtin_call_return_fact, builtin_return_floor, shape_builtin_return_fact,
 };
-use crate::cond::{
-    eval_binary_fact, eval_cast_fact, eval_concat_fact, eval_isset_fact, eval_logical_fact,
-    eval_not_fact, eval_spaceship_fact, eval_ternary_fact,
-};
+use crate::cond::{eval_ternary_fact_strat, total_op_fact};
 use crate::cx::Cx;
 use crate::declared_property::declared_property_arms;
 use crate::descent::{project_call_summary, project_method_summary, summary_binds};
@@ -38,7 +34,7 @@ use crate::offsets::shape_read_at;
 use crate::project::{Diagnostic, Fix, FixEdit, Res};
 use crate::resource_folds::resource_fold_return_fact;
 use crate::return_arms::{call_return_arms_by_name, method_return_arms_by_callee};
-use crate::walk::{WalkCx, value_stratum};
+use crate::walk::WalkCx;
 
 // ---------------------------------------------------------------------------
 // The dump surface (ADR-0053): requested introspection — an "answered question".
@@ -747,10 +743,9 @@ fn best_dump_type(
     // the defect issue #625 names: `eval_ternary_fact` existed and worked, and
     // was wired into the assignment seam alone.
     //
-    // The stratum is the assignment seam's, computed the same way (`min` over the
-    // arms — either could be the taken one under a `Maybe` verdict), so the two
-    // seams cannot disagree about `(asserted)` any more than they can about the
-    // fact itself.
+    // The stratum is the assignment seam's, from the same `eval_ternary_fact_strat`,
+    // so the two seams cannot disagree about `(asserted)` any more than they can
+    // about the fact itself.
     //
     // # This rung marks the untaken arm dead, and that is deliberate
     //
@@ -772,11 +767,17 @@ fn best_dump_type(
     //   `in_dead`'s `any()` predicate, so a span pushed twice decides identically
     //   to one pushed once. A duplicate would cost a `Span`, never a verdict.
     if let ArgValue::Ternary { cond, then_val, then_span, else_val, else_span } = value
-        && let Some(fact) =
-            eval_ternary_fact(w, folder, cond, then_val, else_val, (*then_span, *else_span), env, store)
+        && let Some((fact, stratum)) = eval_ternary_fact_strat(
+            w,
+            folder,
+            cond,
+            then_val,
+            else_val,
+            (*then_span, *else_span),
+            env,
+            store,
+        )
     {
-        let stratum = value_stratum(cx, then_val, env, Some(store))
-            .min(value_stratum(cx, else_val, env, Some(store)));
         return DumpRendering {
             text: render_dump_fact(&fact),
             asserted: stratum == Stratum::Asserted,
@@ -796,81 +797,12 @@ fn best_dump_type(
         };
     }
 
-    // A value-position comparison (issue #260): the operator's own fact, same
-    // placement reasoning as `??`. Total, so lower rungs never see one —
-    // `true`/`false` when `eval_cmp` decides, `bool` when it doesn't. A
-    // `ValueOp::BitOr` (issue #615) has no floor and is not matched.
-    if let ArgValue::Binary { op: ValueOp::Cmp(op), lhs, rhs } = value {
-        let (fact, stratum) =
-            eval_binary_fact(cx, folder, *op, lhs, rhs, env, Some(store), poisoned);
-        return DumpRendering {
-            text: render_dump_fact(&fact),
-            asserted: stratum == Stratum::Asserted,
-        };
-    }
-
-    // A value-position `<=>` (issue #625): total one layer up from the
-    // comparison — `-1`/`0`/`1` where `eval_cmp` decides both poles, the
-    // `int<-1, 1>` floor where it does not.
-    if let ArgValue::Binary { op: ValueOp::Spaceship, lhs, rhs } = value {
-        let (fact, stratum) =
-            eval_spaceship_fact(cx, folder, lhs, rhs, env, Some(store), poisoned);
-        return DumpRendering {
-            text: render_dump_fact(&fact),
-            asserted: stratum == Stratum::Asserted,
-        };
-    }
-
-    // A value-position logical connective and its negation (issue #625): total
-    // for the strongest reason in this group — PHP has no operator overloading
-    // for `&& || and or xor !`, so the answer is a `bool` whatever the operands
-    // are.
-    if let ArgValue::Logical { op, lhs, rhs, rhs_span } = value {
-        let (fact, stratum) =
-            eval_logical_fact(w, folder, *op, lhs, rhs, *rhs_span, env, Some(store), poisoned);
-        return DumpRendering {
-            text: render_dump_fact(&fact),
-            asserted: stratum == Stratum::Asserted,
-        };
-    }
-    if let ArgValue::Not(inner) = value {
-        let (fact, stratum) = eval_not_fact(w, folder, inner, env, Some(store), poisoned);
-        return DumpRendering {
-            text: render_dump_fact(&fact),
-            asserted: stratum == Stratum::Asserted,
-        };
-    }
-
-    // A value-position cast (issue #626): the `settype` grid of issue #595 read
-    // through the other syntax, and total for the same reason the group above is
-    // — a cast that produces a value produces one of its target's base, so the
-    // floor is that base and never `unknown`.
-    if let ArgValue::Cast { target, operand } = value {
-        let (fact, stratum) =
-            eval_cast_fact(w, folder, *target, operand, env, Some(store), poisoned);
-        return DumpRendering {
-            text: render_dump_fact(&fact),
-            asserted: stratum == Stratum::Asserted,
-        };
-    }
-
-    // A value-position concatenation (issue #627): the predicate table and the
-    // `string` floor, above the literal fold the lower rungs already did. Total
-    // for the same reason the cast above is — a `.` that produces a value
-    // produces a `string`, so the floor is `string` and never `unknown`.
-    if let ArgValue::Concat(lhs, rhs) = value {
-        let (fact, stratum) = eval_concat_fact(w, folder, lhs, rhs, env, Some(store), poisoned);
-        return DumpRendering {
-            text: render_dump_fact(&fact),
-            asserted: stratum == Stratum::Asserted,
-        };
-    }
-
-    // A value-position `isset(…)` (issue #579), same placement reasoning as the
-    // comparison above and total for the same reason — `true`/`false` where the
-    // subject's shape or binding decides, `bool` where it does not.
-    if let ArgValue::Isset(ops) = value {
-        let (fact, stratum) = eval_isset_fact(cx, ops, env, poisoned);
+    // A value-position operator — a comparison, `<=>`, a connective, `!`, a cast,
+    // a concatenation or `isset(…)`, through `total_op_fact` — same placement
+    // reasoning as `??`. Total, so lower rungs never see one: the decided value
+    // where the operands decide it, the operator's floor (`bool`, `int<-1, 1>`,
+    // the cast target's base, `string`) where they do not, never `unknown`.
+    if let Some((fact, stratum)) = total_op_fact(w, folder, value, env, Some(store), poisoned) {
         return DumpRendering {
             text: render_dump_fact(&fact),
             asserted: stratum == Stratum::Asserted,

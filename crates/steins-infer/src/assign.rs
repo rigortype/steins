@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 
 use steins_domain::{CoverFlavor, Fact, ShapeFact, Val, Key as VKey};
-use steins_syntax::{ArgValue, CallExpr, Span, ValueOp};
+use steins_syntax::{ArgValue, CallExpr, Span};
 
 use crate::fold::Folder;
 use crate::annotate::{FactKind, LineFact};
@@ -14,10 +14,7 @@ use crate::builtin_returns::{
     builtin_return_floor, escape_mentioned_resources, floor_value_fact, shape_builtin_return_fact,
     socket_pair_places,
 };
-use crate::cond::{
-    coalesce_lhs_proven_present, eval_binary_fact, eval_cast_fact, eval_concat_fact,
-    eval_isset_fact, eval_logical_fact, eval_not_fact, eval_spaceship_fact, eval_ternary_fact,
-};
+use crate::cond::{coalesce_lhs_proven_present, eval_ternary_fact_strat, total_op_fact};
 use crate::descent::summary_binds;
 use crate::env::{
     ContractArm, HeapSummary, Known, ReturnSummary, Store, Stratum, array_literal_fact,
@@ -70,7 +67,7 @@ pub(crate) fn apply_assign(
     // and resolves to the chosen arm, or (undecided) a `OneOf` of both when
     // literal, else unknown.
     if let ArgValue::Ternary { cond, then_val, then_span, else_val, else_span } = value {
-        match eval_ternary_fact(
+        match eval_ternary_fact_strat(
             w,
             folder,
             cond,
@@ -80,16 +77,13 @@ pub(crate) fn apply_assign(
             env,
             store,
         ) {
-            Some(fact) => {
+            Some((fact, strat)) => {
                 if let (Fact::Singleton(lit), Some(facts)) = (&fact, facts.as_deref_mut()) {
                     facts.push(LineFact {
                         line,
                         kind: FactKind::Value { var: var.to_owned(), rendered: render_val(lit) },
                     });
                 }
-                // Derivation clause: result stratum is `min` over the arms (either
-                // could be the taken one under a `Maybe` verdict).
-                let strat = value_stratum(cx, then_val, env, Some(&*store)).min(value_stratum(cx, else_val, env, Some(&*store)));
                 env.insert(var.to_owned(), Known::value_strat(fact, line, None, strat));
                 store.unbind(var);
             }
@@ -101,126 +95,14 @@ pub(crate) fn apply_assign(
         return;
     }
 
-    // A comparison rvalue `$b = $x > 3;` (issue #260): the operator's fact, by the
-    // same evaluator the dump surface reads, so the two can never disagree. Total
-    // for a comparison — the binding is `bool` at worst, never dropped. A
-    // `ValueOp::BitOr` (issue #615) is deliberately not matched: it has no such
-    // floor, so it falls through and binds nothing, exactly as it did when a `|`
-    // lowered to `ArgValue::Other`.
-    if let ArgValue::Binary { op: ValueOp::Cmp(op), lhs, rhs } = value {
-        let (fact, strat) =
-            eval_binary_fact(cx, folder, *op, lhs, rhs, env, Some(&*store), w.scope.poisoned);
-        if let (Fact::Singleton(lit), Some(facts)) = (&fact, facts.as_deref_mut()) {
-            facts.push(LineFact {
-                line,
-                kind: FactKind::Value { var: var.to_owned(), rendered: render_val(lit) },
-            });
-        }
-        env.insert(var.to_owned(), Known::value_strat(fact, line, None, strat));
-        store.unbind(var);
-        return;
-    }
-
-    // A `<=>` rvalue `$n = $a <=> $b;` (issue #625): the operator's fact, by the
-    // same evaluator the dump surface reads. Total one layer up from the
-    // comparison — `int<-1, 1>` at worst, never dropped.
-    if let ArgValue::Binary { op: ValueOp::Spaceship, lhs, rhs } = value {
-        let (fact, strat) =
-            eval_spaceship_fact(cx, folder, lhs, rhs, env, Some(&*store), w.scope.poisoned);
-        if let (Fact::Singleton(lit), Some(facts)) = (&fact, facts.as_deref_mut()) {
-            facts.push(LineFact {
-                line,
-                kind: FactKind::Value { var: var.to_owned(), rendered: render_val(lit) },
-            });
-        }
-        env.insert(var.to_owned(), Known::value_strat(fact, line, None, strat));
-        store.unbind(var);
-        return;
-    }
-
-    // A logical rvalue `$b = $x && $y;` and its negation `$b = !$x;` (issue
-    // #625): the operator's fact, by the same evaluator the dump surface reads.
-    // Total — PHP has no operator overloading for these — so the binding is
-    // `bool` at worst and never dropped. A decided `&&`/`||` also records its
-    // unevaluated right operand dead here (ADR-0052 §6).
-    if let ArgValue::Logical { op, lhs, rhs, rhs_span } = value {
-        let (fact, strat) = eval_logical_fact(
-            w,
-            folder,
-            *op,
-            lhs,
-            rhs,
-            *rhs_span,
-            env,
-            Some(&*store),
-            w.scope.poisoned,
-        );
-        if let (Fact::Singleton(lit), Some(facts)) = (&fact, facts.as_deref_mut()) {
-            facts.push(LineFact {
-                line,
-                kind: FactKind::Value { var: var.to_owned(), rendered: render_val(lit) },
-            });
-        }
-        env.insert(var.to_owned(), Known::value_strat(fact, line, None, strat));
-        store.unbind(var);
-        return;
-    }
-    if let ArgValue::Not(inner) = value {
-        let (fact, strat) =
-            eval_not_fact(w, folder, inner, env, Some(&*store), w.scope.poisoned);
-        if let (Fact::Singleton(lit), Some(facts)) = (&fact, facts.as_deref_mut()) {
-            facts.push(LineFact {
-                line,
-                kind: FactKind::Value { var: var.to_owned(), rendered: render_val(lit) },
-            });
-        }
-        env.insert(var.to_owned(), Known::value_strat(fact, line, None, strat));
-        store.unbind(var);
-        return;
-    }
-
-    // A cast rvalue `$n = (int) $x;` (issue #626): the grid's fact, by the same
-    // evaluator the dump surface reads — the assignment and the dump of the same
-    // expression can never disagree. Total, so the binding is the target's base
-    // at worst and never dropped.
-    if let ArgValue::Cast { target, operand } = value {
-        let (fact, strat) =
-            eval_cast_fact(w, folder, *target, operand, env, Some(&*store), w.scope.poisoned);
-        if let (Fact::Singleton(lit), Some(facts)) = (&fact, facts.as_deref_mut()) {
-            facts.push(LineFact {
-                line,
-                kind: FactKind::Value { var: var.to_owned(), rendered: render_val(lit) },
-            });
-        }
-        env.insert(var.to_owned(), Known::value_strat(fact, line, None, strat));
-        store.unbind(var);
-        return;
-    }
-
-    // A concatenation rvalue `$s = $a . $b;` (issue #627): the operator's fact,
-    // by the same evaluator the dump surface reads — the assignment and the dump
-    // of the same expression can never disagree. Total, so the binding is
-    // `string` at worst and never dropped.
-    if let ArgValue::Concat(lhs, rhs) = value {
-        let (fact, strat) =
-            eval_concat_fact(w, folder, lhs, rhs, env, Some(&*store), w.scope.poisoned);
-        if let (Fact::Singleton(lit), Some(facts)) = (&fact, facts.as_deref_mut()) {
-            facts.push(LineFact {
-                line,
-                kind: FactKind::Value { var: var.to_owned(), rendered: render_val(lit) },
-            });
-        }
-        env.insert(var.to_owned(), Known::value_strat(fact, line, None, strat));
-        store.unbind(var);
-        return;
-    }
-
-    // An `isset(…)` rvalue `$b = isset($a['k']);` (issue #579): the construct's
-    // fact, by the same evaluator the dump surface reads — the assignment and the
-    // dump of the same expression can never disagree. Total, so the binding is
-    // `bool` at worst and never dropped.
-    if let ArgValue::Isset(ops) = value {
-        let (fact, strat) = eval_isset_fact(cx, ops, env, w.scope.poisoned);
+    // An operator rvalue `$b = $x > 3;`, `$s = $a . $b;`, `$b = isset($a['k']);`
+    // and the rest of `total_op_fact`'s seven: the operator's fact, by the same
+    // dispatch the dump surface and a returning exit read, so the three can never
+    // disagree. Total, so the binding is the operator's floor at worst and never
+    // dropped; a `ValueOp::BitOr` (issue #615) falls through and binds nothing.
+    if let Some((fact, strat)) =
+        total_op_fact(w, folder, value, env, Some(&*store), w.scope.poisoned)
+    {
         if let (Fact::Singleton(lit), Some(facts)) = (&fact, facts.as_deref_mut()) {
             facts.push(LineFact {
                 line,
