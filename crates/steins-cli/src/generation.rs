@@ -119,9 +119,7 @@ pub(crate) fn try_generation_check(
         partition: &partition,
         plugins: &plugins,
         effects,
-        warning_handler_abort: postures.warning_handler_abort,
-        final_keyword: postures.final_keyword,
-        os_pin: postures.os_pin,
+        postures: *postures,
         php: !no_php,
         // The verifier is environment-driven here (`STEINS_GENERATIONS_PARANOID`),
         // which `generation_check` reads for itself; the CLI never forces it.

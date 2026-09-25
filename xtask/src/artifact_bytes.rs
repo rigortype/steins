@@ -45,7 +45,7 @@ use std::path::{Path, PathBuf};
 
 use steins_db::{EffectsPolicy, PluginFacts, composer};
 use steins_gen::{SectionName, Store};
-use steins_infer::{FinalKeyword, GenerationParams, generation_check};
+use steins_infer::{GenerationParams, RuntimePostures, generation_check};
 use steins_syntax::SourceTree;
 
 use crate::corpus::collect_php_files;
@@ -160,9 +160,7 @@ fn measure_in_store(dir: &Path, store: &Path, php: bool) -> Result<Measurement, 
         partition: &partition,
         plugins: &plugins,
         effects: &effects,
-        warning_handler_abort: true,
-        final_keyword: FinalKeyword::Enforced,
-        os_pin: None,
+        postures: RuntimePostures::default(),
         php,
         paranoid: false,
     };

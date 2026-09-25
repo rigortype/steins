@@ -38,7 +38,7 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 use steins_db::{EffectsPolicy, PluginFacts, Project, SourceFile, SteinsDatabase, composer, parse};
 use steins_infer::{
-    Diagnostic, FinalKeyword, GenerationMode, GenerationParams, PhaseTimings, SidecarFolder,
+    Diagnostic, GenerationMode, GenerationParams, PhaseTimings, RuntimePostures, SidecarFolder,
     check_project, generation_check,
 };
 use steins_syntax::SourceTree;
@@ -598,9 +598,7 @@ fn measure_warm_in_store(
         plugins: &plugins,
         effects: &effects,
         // `check_project`'s own defaults — what the cold measurement ran under.
-        warning_handler_abort: true,
-        final_keyword: FinalKeyword::Enforced,
-        os_pin: None,
+        postures: RuntimePostures::default(),
         php: matches!(posture, Posture::Php),
         paranoid,
     };
@@ -1336,9 +1334,7 @@ fn run_generation(
         partition: &partition,
         plugins: &plugins,
         effects: &effects,
-        warning_handler_abort: true,
-        final_keyword: FinalKeyword::Enforced,
-        os_pin: None,
+        postures: RuntimePostures::default(),
         php: matches!(posture, Posture::Php),
         paranoid,
     };
