@@ -1318,10 +1318,6 @@ fn print_tripwire(family: &str, regressions: &[PhpdocRegression], local_reports:
 }
 
 #[cfg(test)]
-#[path = "gate_bridge.rs"]
-mod bridge;
-
-#[cfg(test)]
 mod tests {
     use steins_infer::is_vendor_path;
 
