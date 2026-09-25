@@ -1,8 +1,9 @@
-//! Out-parameter seeding: what a by-ref argument holds after the call, with the
-//! `preg_match` / `preg_match_all` `$matches` shapes read off the pattern (issue
-//! #156), the `settype` cast write at statement position (issue #595), the array
-//! out-state rows of [`crate::array_out_state`] (issue #635), the preg flag
-//! constants, and the `preg.invalid-pattern` entry points.
+//! Out-parameter seeding: what a by-ref argument holds after the call — the
+//! `settype` cast write at statement position (issue #595), the array out-state
+//! rows of [`crate::array_out_state`] (issue #635), and the `preg_match` /
+//! `preg_match_all` `$matches` shapes, which [`preg`] reads off the pattern
+//! (issue #156) beside the preg flag constants and the `preg.invalid-pattern`
+//! entry points.
 
 mod preg;
 

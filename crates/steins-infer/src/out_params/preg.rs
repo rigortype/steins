@@ -1,3 +1,8 @@
+//! The preg out-parameters (issues #156 and #168): the `$matches` shape a `preg_match`
+//! or `preg_match_all` call writes, read off its proven pattern and flags — and the
+//! `preg.invalid-pattern` check (ADR-0078, issue #189) at every entry point that takes
+//! a pattern.
+
 use std::collections::HashMap;
 
 use steins_domain::{
