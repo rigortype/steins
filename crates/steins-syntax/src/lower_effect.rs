@@ -8,13 +8,13 @@ use std::collections::HashSet;
 
 use mago_span::HasSpan;
 use mago_syntax::cst::{
-    Argument, Expression, FunctionCall, Literal, Node, PartialApplication, Statement,
-    UnaryPrefixOperator, Variable,
+    Access, Argument, ArrayElement, Expression, FunctionCall, Literal, Node, PartialApplication,
+    Statement, UnaryPrefixOperator, Variable,
 };
 
 use crate::ast::{
     CallExpr, CallTarget, CallbackRef, CatchClause, ConstArgs, EffectOrigin, NameRef, RefKind,
-    RefTarget, SUPERGLOBALS, ThrowKind, ThrowOrigin,
+    RefTarget, SUPERGLOBALS, StateConstruct, ThrowKind, ThrowOrigin,
 };
 use crate::lower_decl::lower_catch_clause;
 use crate::lower_expr::{
@@ -646,10 +646,107 @@ pub(crate) fn scan_effect_origins(node: &Node<'_, '_>, cx: &EffectScanCx, out: &
         | Node::Interface(_)
         | Node::Trait(_)
         | Node::Enum(_) => return,
-        _ => {}
+        _ => {
+            if scan_state_construct(node, cx, out) {
+                return;
+            }
+        }
     }
     for child in children(node) {
         scan_effect_origins(&child, cx, out);
+    }
+}
+
+/// Record the [`StateConstruct`] `node` is, if it is one (ADR-0055 amendment of
+/// 2026-09-26: each marks the body non-exhaustive until its label is inferred).
+/// Returns `true` when this already walked the node's children, which happens for
+/// one shape: a static property's name is a variable token, and `Foo::$_GET` names
+/// a property rather than the superglobal, so only the class expression — and a
+/// dynamic name's expression — is walked on.
+fn scan_state_construct(node: &Node<'_, '_>, cx: &EffectScanCx, out: &mut Vec<EffectOrigin>) -> bool {
+    let state = |construct, span: mago_span::Span| EffectOrigin::State { construct, span: to_span(span) };
+    match node {
+        Node::Global(g) => out.push(state(StateConstruct::Global, g.span())),
+        Node::Static(s) => out.push(state(StateConstruct::StaticVar, s.span())),
+        Node::DirectVariable(dv) if is_superglobal(dv.name) => {
+            out.push(state(StateConstruct::Superglobal, dv.span()));
+        }
+        Node::StaticPropertyAccess(spa) => {
+            out.push(state(StateConstruct::StaticProperty, spa.span()));
+            scan_effect_origins(&Node::Expression(spa.class), cx, out);
+            if !matches!(spa.property, Variable::Direct(_)) {
+                scan_effect_origins(&Node::Variable(&spa.property), cx, out);
+            }
+            return true;
+        }
+        _ => {
+            if let Some(span) = property_write_span(node) {
+                out.push(state(StateConstruct::PropertyWrite, span));
+            }
+        }
+    }
+    false
+}
+
+/// Whether a direct variable's spelled name (`$` included) is one of the
+/// [`SUPERGLOBALS`]. PHP spells them case-sensitively, and a variable variable
+/// cannot reach one inside a function-like, so the direct spelling is all there is.
+fn is_superglobal(name: &[u8]) -> bool {
+    name.strip_prefix(b"$").is_some_and(|n| SUPERGLOBALS.iter().any(|s| s.as_bytes() == n))
+}
+
+/// Where `node` writes an instance property, if it does
+/// ([`StateConstruct::PropertyWrite`]): the written lvalue's span. A `&` binding
+/// counts, since a later write through the alias lands in the property; that
+/// includes a by-reference `foreach` over a property, whose elements the loop
+/// variable aliases.
+fn property_write_span(node: &Node<'_, '_>) -> Option<mago_span::Span> {
+    let written = |e: &Expression<'_>| writes_property(e).then(|| e.span());
+    match node {
+        Node::Assignment(a) => written(a.lhs),
+        Node::UnaryPrefix(u) => match u.operator {
+            UnaryPrefixOperator::PreIncrement(_)
+            | UnaryPrefixOperator::PreDecrement(_)
+            | UnaryPrefixOperator::Reference(_) => written(u.operand),
+            _ => None,
+        },
+        // `$x++` / `$x--`, the only postfix operators, write their operand.
+        Node::UnaryPostfix(u) => written(u.operand),
+        Node::Unset(u) => u.values.iter().find_map(|v| written(v)),
+        Node::Foreach(fe) => {
+            let target = &fe.target;
+            let aliased = if target.value().is_reference() { written(fe.expression) } else { None };
+            aliased.or_else(|| target.key().and_then(written)).or_else(|| written(target.value()))
+        }
+        _ => None,
+    }
+}
+
+/// Whether an lvalue's write lands in an instance property. Offsets peel down to
+/// the base written through (`$o->p[] = …` and `$o->p['k'] = …` write `$o->p`),
+/// a property access there is the write (`$a[0]->p = …` included), and a
+/// destructuring pattern asks each of its targets. An offset's *index* is a read.
+fn writes_property(lvalue: &Expression<'_>) -> bool {
+    let mut cur = lvalue.unparenthesized();
+    loop {
+        cur = match cur {
+            Expression::ArrayAccess(aa) => aa.array.unparenthesized(),
+            Expression::ArrayAppend(ap) => ap.array.unparenthesized(),
+            Expression::Access(Access::Property(_) | Access::NullSafeProperty(_)) => return true,
+            Expression::Array(a) => return a.elements.iter().any(element_writes_property),
+            Expression::LegacyArray(a) => return a.elements.iter().any(element_writes_property),
+            Expression::List(l) => return l.elements.iter().any(element_writes_property),
+            _ => return false,
+        };
+    }
+}
+
+/// [`writes_property`] for one destructuring target; a key is a read.
+fn element_writes_property(element: &ArrayElement<'_>) -> bool {
+    match element {
+        ArrayElement::KeyValue(kv) => writes_property(kv.value),
+        ArrayElement::Value(v) => writes_property(v.value),
+        ArrayElement::Variadic(_) | ArrayElement::Missing(_) => false,
     }
 }
 

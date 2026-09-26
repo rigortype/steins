@@ -179,14 +179,15 @@ fn both_lanes_show_up_when_neither_subsumes_the_other() {
 
 // 4. The class-level tag (ADR-0082 §5/§7)
 
-/// A constructor and a void-returning method both count as "pure" here.
+/// A constructor and a void-returning method both count as "pure" here. The
+/// constructor promotes its property rather than assigning it: an assignment is
+/// a property write, which refuses the tag for now (the next test).
 #[test]
 fn all_pure_class_gets_the_class_tag_and_no_method_tags() {
     let lib = concat!(
         "<?php\n",
         "class C {\n",
-        "    private int $n;\n",
-        "    public function __construct(int $n) { $this->n = $n; }\n",
+        "    public function __construct(private int $n) {}\n",
         "    public function get(): int { return $this->n; }\n",
         "    public function nothing(): void {}\n",
         "}\n",
@@ -205,13 +206,60 @@ fn all_pure_class_gets_the_class_tag_and_no_method_tags() {
             " * @phpstan-all-methods-pure\n",
             " */\n",
             "class C {\n",
-            "    private int $n;\n",
-            "    public function __construct(int $n) { $this->n = $n; }\n",
+            "    public function __construct(private int $n) {}\n",
             "    public function get(): int { return $this->n; }\n",
             "    public function nothing(): void {}\n",
             "}\n",
         )
     );
+}
+
+/// ADR-0055 amendment (2026-09-26): a state construct marks its body `…?` until
+/// its label is inferred, and the constructor is not carved out yet — so the
+/// initializing constructor PHPStan would accept still withholds the class tag.
+/// The conservative side: nothing is written, where the tag was once written.
+#[test]
+fn an_initializing_constructor_refuses_the_class_tag_for_now() {
+    let lib = concat!(
+        "<?php\n",
+        "class C {\n",
+        "    private int $n;\n",
+        "    public function __construct(int $n) { $this->n = $n; }\n",
+        "    public function get(): int { return $this->n; }\n",
+        "}\n",
+    );
+    let report = plan(&[("lib.php", lib)]);
+    assert_oracle_complete(&report);
+    assert_eq!(only_reason(&report), REASON_EFFECTS_NOT_EXHAUSTIVE);
+    assert!(report.refusals[0].detail.contains("C::__construct()"), "{:#?}", report.refusals);
+    assert!(report.plan.is_empty(), "nothing is written");
+}
+
+/// The class a stock PHPStan rejects `@phpstan-all-methods-pure` on
+/// (`impure.staticPropertyAccess`, `impure.propertyAssign`, `impure.superglobal`)
+/// used to get the tag, since its summaries read `{}`. A state construct is not
+/// proven pure, so the class-wide claim is refused and nothing is written.
+#[test]
+fn state_constructs_refuse_the_class_tag() {
+    for body in [
+        "self::$hits++;",
+        "$this->x = 1;",
+        "$this->items[] = 1;",
+        "unset($this->x);",
+        "return $_GET['x'];",
+        "return self::$hits;",
+        "global $g;",
+        "static $n = 0;",
+    ] {
+        let lib = format!(
+            "<?php\nfinal class Svc {{\n    public static int $hits = 0;\n    public $x = 0;\n    public $items = [];\n    public function get(): int {{ return $this->x; }}\n    public function bump() {{ {body} }}\n}}\n"
+        );
+        let report = plan(&[("lib.php", &lib)]);
+        assert_oracle_complete(&report);
+        assert_eq!(only_reason(&report), REASON_EFFECTS_NOT_EXHAUSTIVE, "{body}");
+        assert!(report.refusals[0].detail.contains("Svc::bump()"), "{body}: {:#?}", report.refusals);
+        assert!(report.plan.is_empty(), "{body}: nothing is written");
+    }
 }
 
 #[test]

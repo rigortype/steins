@@ -690,8 +690,8 @@ mod tests {
     /// `ctx` leg), value-IR corners the codec exceptions exist for (a
     /// non-finite float literal, a non-UTF-8 string literal), effect-origin
     /// keywords (`echo`, `exit`), trace-IR control flow (`if`/`foreach`/
-    /// closures), magic-member tags, alias edges, constants, and property
-    /// writes.
+    /// closures), magic-member tags, alias edges, constants, property
+    /// writes, and state constructs (`static`, a superglobal).
     fn fixture() -> Vec<(&'static str, &'static str)> {
         vec![
             (
@@ -709,6 +709,10 @@ mod tests {
             (
                 "vendor/lib/b/src/origins.php",
                 "<?php\nnamespace Lib\\A;\nclass Origins {\n  public function each(array $a, $obj, $dyn): void {\n    $this->each($a, $obj, $dyn);\n    $obj->$dyn();\n    \\array_map('strlen', $a);\n    $f = static function (): int { return 1; };\n    $f();\n    $g = function (): iterable { return []; };\n    $g();\n  }\n}\n",
+            ),
+            (
+                "vendor/lib/b/src/state.php",
+                "<?php\nnamespace Lib\\A;\nfunction tally(): int {\n  static $n = 0;\n  return ++$n + \\count($_GET);\n}\n",
             ),
             ("vendor/autoload.php", "<?php\nfunction stray_helper() {}\n"),
         ]
@@ -730,6 +734,7 @@ mod tests {
             O::Opaque { .. } => "Opaque",
             O::HigherOrder { .. } => "HigherOrder",
             O::Callback { .. } => "Callback",
+            O::State { .. } => "State",
         }
     }
 
@@ -844,11 +849,11 @@ mod tests {
         assert!(app.functions()[0].docblock.is_some(), "a docblocked function");
         // The payload codec carries an enum by variant index, and
         // `EffectOrigin`'s inverse is the one hand-written twin in the graph
-        // (`steins-syntax::persist`), so its seven variants have to survive
+        // (`steins-syntax::persist`), so its eight variants have to survive
         // the disk boundary *by position*. They only can if they are here.
         let kinds = fixture_origin_kinds(&parsed);
         for variant in
-            ["Call", "Output", "Exit", "MethodCall", "Opaque", "HigherOrder", "Callback"]
+            ["Call", "Output", "Exit", "MethodCall", "Opaque", "HigherOrder", "Callback", "State"]
         {
             assert!(kinds.contains_key(variant), "the fixture must carry an {variant} origin");
         }
