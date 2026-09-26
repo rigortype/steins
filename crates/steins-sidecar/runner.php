@@ -71,6 +71,18 @@ ini_set('memory_limit', '256M');
 const STEINS_FOLD_ARRAY_MAX_ENTRIES = 256;
 const STEINS_FOLD_ARRAY_MAX_DEPTH = 8;
 
+// The byte half of the same budget (issue #783), mirrored from the Rust
+// `FOLD_ALLOCATION_MAX`: a string result, or the strings and keys of an array
+// result together, widen past this many bytes before anything is encoded.
+//
+// A result can fit the call and not the reply. `sprintf('%100000000d', 1)`
+// returns 100 MB inside `memory_limit`, and the child then died in
+// `json_encode`, which needs the string again and its escaped copy on top. The
+// Rust side prices the widths it can read before dispatch; this catches every
+// product it cannot (`str_replace`, `implode`, …) at the one place they all
+// pass, and refuses nothing the analysis would have kept.
+const STEINS_FOLD_STRING_MAX_BYTES = 1048576;
+
 $in = fopen('php://stdin', 'r');
 $out = fopen('php://stdout', 'w');
 
@@ -780,6 +792,11 @@ function steins_encode_value($v)
         return ['kind' => 'value', 'value' => $v, 'type' => 'float'];
     }
     if (is_string($v)) {
+        // Measured before the first `json_encode`, which is the allocation the
+        // byte budget exists to avoid.
+        if (strlen($v) > STEINS_FOLD_STRING_MAX_BYTES) {
+            return ['kind' => 'widen', 'reason' => 'string result over byte budget'];
+        }
         // Only valid UTF-8 survives JSON; binary strings widen.
         if (json_encode($v) === false) {
             return ['kind' => 'widen', 'reason' => 'non-utf8 string'];
@@ -799,7 +816,8 @@ function steins_encode_value($v)
         // charged and every leaf validated BEFORE the envelope is built, so an
         // oversized or unencodable answer never becomes a megabyte of JSON.
         $budget = STEINS_FOLD_ARRAY_MAX_ENTRIES;
-        $reason = steins_charge_array_result($v, STEINS_FOLD_ARRAY_MAX_DEPTH, $budget);
+        $bytes = STEINS_FOLD_STRING_MAX_BYTES;
+        $reason = steins_charge_array_result($v, STEINS_FOLD_ARRAY_MAX_DEPTH, $budget, $bytes);
         if ($reason !== null) {
             return ['kind' => 'widen', 'reason' => $reason];
         }
@@ -821,14 +839,17 @@ function steins_encode_value($v)
  * unbounded stack.
  *
  * `$budget` is by-reference because entries are counted **recursively**: a
- * nested array's entries spend the same allowance its parent's do.
+ * nested array's entries spend the same allowance its parent's do. `$bytes`
+ * is the same idea for the string keys and leaves (issue #783): 256 entries of
+ * a megabyte each is one allocation the call made and 256 the encoder would.
  *
  * @param array<mixed> $v
  * @param int $depth
  * @param int $budget
+ * @param int $bytes
  * @return string|null the widen reason, or null when the result may be encoded
  */
-function steins_charge_array_result(array $v, $depth, &$budget)
+function steins_charge_array_result(array $v, $depth, &$budget, &$bytes)
 {
     if ($depth === 0) {
         return 'array result over depth budget';
@@ -840,11 +861,23 @@ function steins_charge_array_result(array $v, $depth, &$budget)
         $budget--;
         // A binary string KEY would fail the response encode just as a binary
         // string value would, so it is validated on the same footing.
-        if (is_string($key) && json_encode($key) === false) {
-            return 'non-utf8 string';
+        if (is_string($key)) {
+            $bytes -= strlen($key);
+            if ($bytes < 0) {
+                return 'array result over byte budget';
+            }
+            if (json_encode($key) === false) {
+                return 'non-utf8 string';
+            }
+        }
+        if (is_string($item)) {
+            $bytes -= strlen($item);
+            if ($bytes < 0) {
+                return 'array result over byte budget';
+            }
         }
         if (is_array($item)) {
-            $nested = steins_charge_array_result($item, $depth - 1, $budget);
+            $nested = steins_charge_array_result($item, $depth - 1, $budget, $bytes);
             if ($nested !== null) {
                 return $nested;
             }

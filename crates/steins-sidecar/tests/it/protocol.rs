@@ -809,6 +809,44 @@ fn a_memory_exhausting_fold_widens_and_the_next_request_still_answers() {
     assert!(!sc.is_poisoned(), "the respawned child is healthy");
 }
 
+/// **A result that fits the call but not the reply widens, and the child
+/// lives** (issue #783).
+///
+/// `sprintf('%100000000d', 1)` returns 100 MB well inside `memory_limit`; the
+/// child then died encoding it, since `json_encode` needs the string again and
+/// its escaped copy on top. The runner now measures a string result, and the
+/// strings and keys of an array result together, before encoding either. The
+/// Rust side prices this width before dispatch too, so here the transport is
+/// asked directly: this is the backstop for products no argument prices.
+#[test]
+fn a_result_over_the_byte_budget_widens_before_it_is_encoded() {
+    let Some(mut sc) = spawn_or_skip("a_result_over_the_byte_budget_widens_before_it_is_encoded")
+    else {
+        return;
+    };
+    let kilobytes = "x".repeat(8 * 1024);
+    for (label, name, args) in [
+        ("a 100 MB format result", "sprintf", vec![s("%100000000d"), int(1)]),
+        ("a 2 MB string result", "str_repeat", vec![s("x"), int(2 * 1024 * 1024)]),
+        ("256 entries of 8 KB", "array_fill", vec![int(0), int(256), s(&kilobytes)]),
+    ] {
+        let r = sc.fold(name, &args, true);
+        assert!(
+            matches!(&r, FoldResult::Widen { reason } if reason.contains("byte budget")),
+            "{label} was not refused by the byte budget, got {r:?}"
+        );
+        assert!(!sc.is_poisoned(), "{label} killed the child");
+    }
+    // Exactly the budget still answers: the line is the Rust side's, not lower.
+    let r = sc.fold("str_repeat", &[s("x"), int(1024 * 1024)], true);
+    assert!(matches!(r, FoldResult::Value(FoldValue::Str(ref v)) if v.len() == 1024 * 1024));
+    assert_eq!(
+        sc.fold("strtoupper", &[s("still alive")], true),
+        FoldResult::Value(FoldValue::Str("STILL ALIVE".to_owned()))
+    );
+    assert_eq!(sc.respawns(), 0, "nothing was replaced");
+}
+
 /// The storm brake: recovery bounded at three respawns per `Sidecar` — past
 /// the cap, the instance is permanently poisoned, widening immediately.
 #[test]
