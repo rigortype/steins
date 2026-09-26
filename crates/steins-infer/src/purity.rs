@@ -2576,10 +2576,25 @@ pub(crate) fn interop_tag(
     let Some((env, labels)) = docblock_envelope_tag(docblock, accept) else {
         return InteropTag::Absent;
     };
-    if labels.iter().any(|l| !registry.is_known(l)) {
+    if labels.iter().any(|l| !is_interop_label(registry, l)) {
         return InteropTag::Unbounded;
     }
     InteropTag::Bound(env, labels)
+}
+
+/// Whether `label` is in the **interop vocabulary** (ADR-0082 §4): known to the
+/// run's `registry`, and outside `failure.*`, which names value provenance
+/// (ADR-0042) rather than an effect. A `failure.*` label is therefore unknown to
+/// an interop tag exactly as a typo is, while `#[\Steins\Effect]` keeps taking it.
+/// The one membership test the bound reading, its vocabulary diagnostic, and the
+/// transform's emission guard share (issue #805).
+pub(crate) fn is_interop_label(registry: &steins_catalog::LabelRegistry, label: &str) -> bool {
+    registry.is_known(label) && !is_provenance_label(label)
+}
+
+/// Whether `label` lies under the `failure.*` provenance family (ADR-0042).
+fn is_provenance_label(label: &str) -> bool {
+    steins_catalog::subsumes("failure", label)
 }
 
 /// The tag families a declaration's **own** docblock may carry (the method-level
@@ -2637,28 +2652,40 @@ fn report_interop_vocabulary(
     let tag = EnvelopeSpelling::Interop(env).tag_name();
     let pos = cx.tree().position(anchor.start);
     for label in &labels {
-        if registry.is_known(label) {
+        if is_interop_label(registry, label) {
             continue;
         }
-        let Some(intent) = registry.label_intent(label, &labels) else {
-            continue;
-        };
         // Every variant states the consequence, because it is the part a reader
         // cannot see: their tag is still there, and it is checking nothing.
         let head = format!(
             "unknown effect label '{label}' in {tag} on {subject} — the whole tag reads as \
              unspecified and bounds nothing"
         );
-        let message = match intent {
-            steins_catalog::LabelIntent::Near(near) => format!("{head}; did you mean '{near}'?"),
-            steins_catalog::LabelIntent::Retired(r) => {
-                format!("{head}; {}", retirement_clause(r))
-            }
-            // Intent is evident, but nothing in the vocabulary is a candidate to
-            // suggest — naming a far-off label here would be a worse guess than
-            // saying nothing.
-            steins_catalog::LabelIntent::KnownSibling | steins_catalog::LabelIntent::DotPath => {
-                head
+        // Known to the registry yet outside the interop vocabulary is `failure.*`
+        // (issue #805). A registry spelling is its own evidence of intent, and the
+        // nearest-label suggestion would only name it back.
+        let message = if registry.is_known(label) {
+            format!("{head}; failure.* names value provenance, not an effect")
+        } else {
+            let Some(intent) = registry.label_intent(label, &labels) else {
+                continue;
+            };
+            match intent {
+                // Never suggest a label the interop vocabulary refuses in turn.
+                steins_catalog::LabelIntent::Near(near) if !is_interop_label(registry, near) => {
+                    head
+                }
+                steins_catalog::LabelIntent::Near(near) => {
+                    format!("{head}; did you mean '{near}'?")
+                }
+                steins_catalog::LabelIntent::Retired(r) => {
+                    format!("{head}; {}", retirement_clause(r))
+                }
+                // Intent is evident, but nothing in the vocabulary is a candidate to
+                // suggest — naming a far-off label here would be a worse guess than
+                // saying nothing.
+                steins_catalog::LabelIntent::KnownSibling
+                | steins_catalog::LabelIntent::DotPath => head,
             }
         };
         out.push(Diagnostic {

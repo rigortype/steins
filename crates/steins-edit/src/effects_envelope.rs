@@ -87,8 +87,9 @@ pub const REASON_ATTRIBUTE_ENVELOPE: &str = "attribute-envelope";
 /// label collapses it to ⊤ (2026-08-12 ruling), so it may be a human's note,
 /// not a stale bound; nothing is written over it.
 pub const REASON_EXISTING_TAG_UNREADABLE: &str = "existing-tag-unreadable";
-/// The computed bound names a label the registry does not know, so the tag
-/// would read back as prose (⊤) rather than the bound it meant.
+/// The computed bound names a label outside the interop vocabulary — one the
+/// registry does not know, or a `failure.*` label — so the tag would read back as
+/// prose (⊤) rather than the bound it meant.
 pub const REASON_BOUND_LABEL_UNKNOWN: &str = "bound-label-unknown";
 /// The class uses a trait: the class tag covers the trait's methods too, and
 /// their bodies are never analyzed (ADR-0049 lowers a trait by name only), so
@@ -344,15 +345,18 @@ fn decide_decl(
         return;
     }
     // Unknown labels here mean a checked attribute's declared lane
-    // (`effect.unknown-label` already reports it there) or an unloaded plugin.
+    // (`effect.unknown-label` already reports it there), a `failure.*` label the
+    // attribute takes but the interop tag does not (issue #805), or an unloaded
+    // plugin.
     let unknown = unknown_labels(em.plugins, &bound);
     if !unknown.is_empty() {
         em.refuse(
             site,
             REASON_BOUND_LABEL_UNKNOWN,
             format!(
-                "the proven bound names {}, which this run's label registry does not know; the \
-                 tag would read back as prose rather than as a bound",
+                "the proven bound names {}, which the interop vocabulary does not take (this \
+                 run's label registry does not know it, or it is failure.*); the tag would read \
+                 back as prose rather than as a bound",
                 render_labels(&unknown)
             ),
         );

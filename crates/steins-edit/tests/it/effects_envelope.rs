@@ -705,3 +705,35 @@ fn an_unknown_label_in_the_bound_is_never_written() {
     assert_eq!(only_reason(&report), REASON_BOUND_LABEL_UNKNOWN);
     assert!(report.plan.is_empty());
 }
+
+// 10. `failure.*` is registered but outside the interop vocabulary (issue #805):
+// the transform reads and writes it exactly as the checker reads it.
+
+/// Read side: an existing `failure.*` tag is ⊤, not a stale bound to replace.
+#[test]
+fn an_existing_failure_label_tag_is_unreadable_not_a_stale_bound() {
+    let lib = "<?php\n/**\n * @phpstan-impure failure.input\n */\nfunction f(): int { return time(); }\n";
+    let report = plan(&[("lib.php", lib)]);
+    assert_oracle_complete(&report);
+    assert_eq!(only_reason(&report), REASON_EXISTING_TAG_UNREADABLE);
+    assert_eq!(report.plan.apply_file("lib.php", lib), lib, "the file must be byte-identical");
+}
+
+/// Write side: an attribute's `failure.*` label rides the declared lane, and a
+/// tag spelling it would read back as ⊤.
+#[test]
+fn a_failure_label_in_the_bound_is_never_written() {
+    let lib = concat!(
+        "<?php\n",
+        "interface Repo {\n",
+        "    #[\\Steins\\Effect('failure.input')]\n",
+        "    public function load(): string;\n",
+        "}\n",
+        "function f(Repo $r): string { return $r->load(); }\n",
+    );
+    let report = plan(&[("lib.php", lib)]);
+    assert_oracle_complete(&report);
+    assert_eq!(report.oracle.enumerated, 1, "{:#?}", report.refusals);
+    assert_eq!(only_reason(&report), REASON_BOUND_LABEL_UNKNOWN);
+    assert!(report.plan.is_empty());
+}
