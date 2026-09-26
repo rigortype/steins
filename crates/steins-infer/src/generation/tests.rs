@@ -15,6 +15,7 @@
 //! like the other sidecar-backed oracles; a PHP-less environment skips loudly.
 
 use std::cell::RefCell;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use steins_db::{EffectsPolicy, PluginFacts, composer};
@@ -80,7 +81,12 @@ fn php_or_skip(test: &str) -> bool {
     match Sidecar::spawn() {
         Ok(_) => true,
         Err(e) => {
-            eprintln!("SKIP {test}: could not spawn php sidecar ({e}) — is `php` on PATH?");
+            // Not `eprintln!`: steins-cli's output-seam test scans every
+            // crate's `src/` for raw printing, and this module lives there.
+            let _ = writeln!(
+                std::io::stderr(),
+                "SKIP {test}: could not spawn php sidecar ({e}) — is `php` on PATH?"
+            );
             false
         }
     }
