@@ -423,7 +423,9 @@ pub(crate) fn floor_value_fact(arms: &[ContractArm]) -> Option<Fact> {
 pub(crate) enum BuiltinRung {
     /// A §2.7 fold over a proven handle (ADR-0097), at its stratum.
     ResourceFold(Fact, Stratum),
-    /// The argument-dependent rung (ADR-0061 §1), at the argument's stratum.
+    /// The argument-dependent rungs, at the arguments' stratum: a folded array
+    /// that is no literal ([`Cx::unwitnessed_fold_fact`]), and ADR-0061 §1's
+    /// shape rung.
     Shape(Fact, Stratum),
     /// The engine's reflected return envelope (ADR-0056 R1): `Verified`, read off
     /// the running engine's own arginfo (§2).
@@ -452,8 +454,10 @@ pub(crate) struct OptionalRungs {
 ///
 /// 1. the §2.7 **resource folds** ([`resource_fold_return_fact`], ADR-0097),
 ///    above the shape rung because the two cannot both answer;
-/// 2. the **argument-dependent** rung ([`shape_builtin_return_fact`], ADR-0061
-///    §1), carrying the argument's stratum;
+/// 2. the **argument-dependent** rungs, carrying the arguments' stratum: first
+///    a folded array whose next append index its keys do not state, so the
+///    fold made no literal of it ([`Cx::unwitnessed_fold_fact`]), then ADR-0061
+///    §1's shape rung ([`shape_builtin_return_fact`]);
 /// 3. the engine's **reflected envelope** ([`builtin_call_return_fact`]);
 /// 4. the **resource-return arms** ([`builtin_resource_arms`], ADR-0056 §8),
 ///    below the envelope because they fire only where it structurally cannot
@@ -489,8 +493,9 @@ pub(crate) fn builtin_call_rung(
     {
         return Some(BuiltinRung::ResourceFold(fact, stratum));
     }
-    if let Some((fact, stratum)) =
-        shape_builtin_return_fact(cx, folder, name, args, env, store, poisoned)
+    if let Some((fact, stratum)) = cx
+        .unwitnessed_fold_fact(name, args, env, poisoned, folder)
+        .or_else(|| shape_builtin_return_fact(cx, folder, name, args, env, store, poisoned))
     {
         return Some(BuiltinRung::Shape(fact, stratum));
     }
@@ -678,9 +683,13 @@ pub(crate) fn shape_builtin_return_fact(
                 .or_else(|| array_literal_fact(cx, folder, items, env, poisoned, store))?;
             (&seeded.0, seeded.1)
         }
-        [call @ ArgValue::Call(..), ..] => {
-            let (lit, strat) = cx.resolve_literal_strat(call, env, poisoned, folder)?;
-            seeded = (singleton_fact(&lit)?, strat);
+        [call @ ArgValue::Call(inner, inner_args), ..] => {
+            seeded = match cx.resolve_literal_strat(call, env, poisoned, folder) {
+                Some((lit, strat)) => (singleton_fact(&lit)?, strat),
+                // A folded array the fold made no literal of is the same shape
+                // here as bound to a variable first.
+                None => cx.unwitnessed_fold_fact(inner, inner_args, env, poisoned, folder)?,
+            };
             (&seeded.0, seeded.1)
         }
         _ => return None,

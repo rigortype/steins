@@ -350,6 +350,34 @@ fn the_probed_clean_names_fold_to_the_engines_own_arrays() {
     }
 }
 
+/// `array_unique` with a flag other than `SORT_STRING` keeps its input's next
+/// append index, so the fold binds a shape with no order witness rather than a
+/// literal. PHP puts the 9 at key 2 (`php -r`, 8.1.32 to 8.5.10), where the
+/// literal said 1; the default flag builds afresh and stays exact.
+/// `fold_append_index.rs` has the other rows.
+#[test]
+fn array_unique_with_a_non_default_flag_names_no_append_key() {
+    let Some(mut folder) = live("array_unique_with_a_non_default_flag_names_no_append_key") else {
+        return;
+    };
+    const SRC: &str = "<?php\nfunction f(): void {\n\
+         $a = array_unique(['a', 'a'], SORT_REGULAR);\n\
+         \\PHPStan\\dumpType($a);\n\
+         $a[] = 9;\n\
+         \\PHPStan\\dumpType($a);\n\
+         $b = array_unique(['a', 'a'], SORT_REGULAR);\n\
+         array_push($b, 9);\n\
+         \\PHPStan\\dumpType($b);\n\
+         $c = array_unique(['a', 'a']);\n\
+         $c[] = 9;\n\
+         \\PHPStan\\dumpType($c);\n\
+         }\n";
+    assert_eq!(
+        dumps(SRC, &mut folder),
+        vec!["list{'a'}", "non-empty-array{9|'a', ...<int, 9>}", "non-empty-array", "list{'a', 9}"]
+    );
+}
+
 /// `array_fill(0, 1000000, 'x')` is the legitimate call with an illegitimate
 /// reply: nothing about it is wrong except the size of the answer. The runner
 /// charges the 256-entry budget before encoding, so the call is *made* and the
