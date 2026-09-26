@@ -179,15 +179,14 @@ fn both_lanes_show_up_when_neither_subsumes_the_other() {
 
 // 4. The class-level tag (ADR-0082 §5/§7)
 
-/// A constructor and a void-returning method both count as "pure" here. The
-/// constructor promotes its property rather than assigning it: an assignment is
-/// a property write, which refuses the tag for now (the next test).
+/// A constructor and a void-returning method both count as "pure" here.
 #[test]
 fn all_pure_class_gets_the_class_tag_and_no_method_tags() {
     let lib = concat!(
         "<?php\n",
         "class C {\n",
-        "    public function __construct(private int $n) {}\n",
+        "    private int $n;\n",
+        "    public function __construct(int $n) { $this->n = $n; }\n",
         "    public function get(): int { return $this->n; }\n",
         "    public function nothing(): void {}\n",
         "}\n",
@@ -206,7 +205,8 @@ fn all_pure_class_gets_the_class_tag_and_no_method_tags() {
             " * @phpstan-all-methods-pure\n",
             " */\n",
             "class C {\n",
-            "    public function __construct(private int $n) {}\n",
+            "    private int $n;\n",
+            "    public function __construct(int $n) { $this->n = $n; }\n",
             "    public function get(): int { return $this->n; }\n",
             "    public function nothing(): void {}\n",
             "}\n",
@@ -214,25 +214,29 @@ fn all_pure_class_gets_the_class_tag_and_no_method_tags() {
     );
 }
 
-/// ADR-0055 amendment (2026-09-26): a state construct marks its body `…?` until
-/// its label is inferred, and the constructor is not carved out yet — so the
-/// initializing constructor PHPStan would accept still withholds the class tag.
-/// The conservative side: nothing is written, where the tag was once written.
+/// ADR-0055's constructor-creation exemption (#313) covers exactly the `$this`
+/// writes PHPStan's constructor exclusion covers; every other state construct in
+/// a constructor still withholds the class tag, since PHPStan would reject it.
 #[test]
-fn an_initializing_constructor_refuses_the_class_tag_for_now() {
-    let lib = concat!(
-        "<?php\n",
-        "class C {\n",
-        "    private int $n;\n",
-        "    public function __construct(int $n) { $this->n = $n; }\n",
-        "    public function get(): int { return $this->n; }\n",
-        "}\n",
-    );
-    let report = plan(&[("lib.php", lib)]);
-    assert_oracle_complete(&report);
-    assert_eq!(only_reason(&report), REASON_EFFECTS_NOT_EXHAUSTIVE);
-    assert!(report.refusals[0].detail.contains("C::__construct()"), "{:#?}", report.refusals);
-    assert!(report.plan.is_empty(), "nothing is written");
+fn a_constructors_other_state_refuses_the_class_tag() {
+    for body in [
+        "$self = $this; $self->n = $n;",
+        "$o = new \\stdClass(); $o->n = $n;",
+        "unset($this->n);",
+        "$r = &$this->n;",
+        "self::$count++;",
+        "$this->n = $_GET['n'];",
+        "$f = function () use ($n) { $this->n = $n; }; $f();",
+    ] {
+        let lib = format!(
+            "<?php\nclass C {{\n    public static int $count = 0;\n    public int $n = 0;\n    public function __construct(int $n) {{ {body} }}\n    public function get(): int {{ return $this->n; }}\n}}\n"
+        );
+        let report = plan(&[("lib.php", &lib)]);
+        assert_oracle_complete(&report);
+        assert_eq!(only_reason(&report), REASON_EFFECTS_NOT_EXHAUSTIVE, "{body}");
+        assert!(report.refusals[0].detail.contains("C::__construct()"), "{body}: {:#?}", report.refusals);
+        assert!(report.plan.is_empty(), "{body}: nothing is written");
+    }
 }
 
 /// The class a stock PHPStan rejects `@phpstan-all-methods-pure` on

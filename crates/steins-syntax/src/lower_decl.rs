@@ -1100,7 +1100,8 @@ fn lower_method(m: &Method<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex, rc
             collect_body_callables(block.statements.iter()),
             body_aliased(block.statements.iter()),
             receiver_writes(block.statements.iter()),
-        );
+        )
+        .in_constructor(m.name.value.eq_ignore_ascii_case(b"__construct"));
         for s in block.statements.iter() {
             scan_effect_origins(&Node::Statement(s), &cx, &mut effect_origins);
             scan_throw_origins(&Node::Statement(s), &[], &[], &cx.locals, &mut throw_origins);

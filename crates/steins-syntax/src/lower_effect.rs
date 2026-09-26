@@ -195,6 +195,11 @@ pub(crate) struct EffectScanCx {
     pub(crate) frame_aliased: bool,
     /// What this frame writes, for the ADR-0067 declared-receiver gate.
     pub(crate) writes: ReceiverWrites,
+    /// Whether the frame is a `__construct` body, whose writes to `$this`'s own
+    /// properties are exempt from [`StateConstruct::PropertyWrite`]
+    /// ([`property_write_span`]). Only a method sets it: a closure or arrow
+    /// function defined in a constructor is a frame of its own.
+    constructor: bool,
 }
 
 impl EffectScanCx {
@@ -212,7 +217,13 @@ impl EffectScanCx {
             .filter(|p| p.is_reference())
             .map(|p| strip_dollar(bytes_to_string(p.variable.name)))
             .collect();
-        Self { locals, byref_params, frame_aliased, writes }
+        Self { locals, byref_params, frame_aliased, writes, constructor: false }
+    }
+
+    /// Mark the frame as a `__construct` body ([`Self::constructor`]).
+    pub(crate) const fn in_constructor(mut self, constructor: bool) -> Self {
+        self.constructor = constructor;
+        self
     }
 }
 
@@ -680,7 +691,7 @@ fn scan_state_construct(node: &Node<'_, '_>, cx: &EffectScanCx, out: &mut Vec<Ef
             return true;
         }
         _ => {
-            if let Some(span) = property_write_span(node) {
+            if let Some(span) = property_write_span(node, cx.constructor) {
                 out.push(state(StateConstruct::PropertyWrite, span));
             }
         }
@@ -700,23 +711,47 @@ fn is_superglobal(name: &[u8]) -> bool {
 /// counts, since a later write through the alias lands in the property; that
 /// includes a by-reference `foreach` over a property, whose elements the loop
 /// variable aliases.
-fn property_write_span(node: &Node<'_, '_>) -> Option<mago_span::Span> {
-    let written = |e: &Expression<'_>| writes_property(e).then(|| e.span());
+///
+/// `constructor` is ADR-0055's constructor-creation exemption (point 13, #313),
+/// applied to **exhaustiveness only**: inside a `__construct` body, a write whose
+/// base is literally `$this` is initialization rather than state the call
+/// changes, so it records nothing. It mirrors the exclusion PHPStan's
+/// `ClassMethodHandler` makes for a property assignment in the declaring class's
+/// constructor, and so covers exactly the writes PHPStan reports there as a
+/// property assignment — an assignment of any operator, `++`/`--`, a write or
+/// `unset` through an offset, a destructuring or `foreach` target, and a
+/// `foreach` by reference over the property, which PHPStan reports nothing for.
+/// Two `$this` writes stay recorded, because PHPStan reports each under another
+/// identifier its constructor exclusion does not reach: `unset($this->p)`
+/// (`propertyUnset`) and a `&` binding of `$this->p` (`propertyAssignByRef`).
+/// So is `$self = $this; $self->p = …` (the base is not literally `$this`), a
+/// write to another object's property, and a `$this` write in a closure or arrow
+/// function defined in the constructor, which can run after construction.
+fn property_write_span(node: &Node<'_, '_>, constructor: bool) -> Option<mago_span::Span> {
+    let written = |e: &Expression<'_>, exempt: bool| writes_property(e, exempt).then(|| e.span());
     match node {
-        Node::Assignment(a) => written(a.lhs),
+        Node::Assignment(a) => written(a.lhs, constructor),
         Node::UnaryPrefix(u) => match u.operator {
-            UnaryPrefixOperator::PreIncrement(_)
-            | UnaryPrefixOperator::PreDecrement(_)
-            | UnaryPrefixOperator::Reference(_) => written(u.operand),
+            UnaryPrefixOperator::PreIncrement(_) | UnaryPrefixOperator::PreDecrement(_) => {
+                written(u.operand, constructor)
+            }
+            UnaryPrefixOperator::Reference(_) => written(u.operand, false),
             _ => None,
         },
         // `$x++` / `$x--`, the only postfix operators, write their operand.
-        Node::UnaryPostfix(u) => written(u.operand),
-        Node::Unset(u) => u.values.iter().find_map(|v| written(v)),
+        Node::UnaryPostfix(u) => written(u.operand, constructor),
+        // Unsetting a whole property is never exempt; unsetting through an offset is.
+        Node::Unset(u) => u.values.iter().find_map(|v| {
+            let whole = matches!(v.unparenthesized(), Expression::Access(Access::Property(_)));
+            written(v, constructor && !whole)
+        }),
         Node::Foreach(fe) => {
             let target = &fe.target;
-            let aliased = if target.value().is_reference() { written(fe.expression) } else { None };
-            aliased.or_else(|| target.key().and_then(written)).or_else(|| written(target.value()))
+            let aliased =
+                if target.value().is_reference() { written(fe.expression, constructor) } else { None };
+            aliased
+                .or_else(|| target.key().and_then(|k| written(k, constructor)))
+                .or_else(|| written(target.value(), constructor))
         }
         _ => None,
     }
@@ -726,26 +761,30 @@ fn property_write_span(node: &Node<'_, '_>) -> Option<mago_span::Span> {
 /// the base written through (`$o->p[] = …` and `$o->p['k'] = …` write `$o->p`),
 /// a property access there is the write (`$a[0]->p = …` included), and a
 /// destructuring pattern asks each of its targets. An offset's *index* is a read.
-fn writes_property(lvalue: &Expression<'_>) -> bool {
+/// `exempt_this` exempts a property whose object is literally `$this` — the
+/// constructor exemption of [`property_write_span`], decided per target.
+fn writes_property(lvalue: &Expression<'_>, exempt_this: bool) -> bool {
+    let each = |element: &ArrayElement<'_>| element_writes_property(element, exempt_this);
     let mut cur = lvalue.unparenthesized();
     loop {
         cur = match cur {
             Expression::ArrayAccess(aa) => aa.array.unparenthesized(),
             Expression::ArrayAppend(ap) => ap.array.unparenthesized(),
-            Expression::Access(Access::Property(_) | Access::NullSafeProperty(_)) => return true,
-            Expression::Array(a) => return a.elements.iter().any(element_writes_property),
-            Expression::LegacyArray(a) => return a.elements.iter().any(element_writes_property),
-            Expression::List(l) => return l.elements.iter().any(element_writes_property),
+            Expression::Access(Access::Property(pa)) => return !(exempt_this && is_this_expr(pa.object)),
+            Expression::Access(Access::NullSafeProperty(_)) => return true,
+            Expression::Array(a) => return a.elements.iter().any(each),
+            Expression::LegacyArray(a) => return a.elements.iter().any(each),
+            Expression::List(l) => return l.elements.iter().any(each),
             _ => return false,
         };
     }
 }
 
 /// [`writes_property`] for one destructuring target; a key is a read.
-fn element_writes_property(element: &ArrayElement<'_>) -> bool {
+fn element_writes_property(element: &ArrayElement<'_>, exempt_this: bool) -> bool {
     match element {
-        ArrayElement::KeyValue(kv) => writes_property(kv.value),
-        ArrayElement::Value(v) => writes_property(v.value),
+        ArrayElement::KeyValue(kv) => writes_property(kv.value, exempt_this),
+        ArrayElement::Value(v) => writes_property(v.value, exempt_this),
         ArrayElement::Variadic(_) | ArrayElement::Missing(_) => false,
     }
 }

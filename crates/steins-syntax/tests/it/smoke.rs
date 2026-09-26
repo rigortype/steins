@@ -570,6 +570,66 @@ fn scans_structural_state_constructs() {
     assert_eq!(states("$x = $o->p; $a[$o->p] = 1; foreach ($o->p as $v) {}"), vec![]);
 }
 
+/// ADR-0055's constructor-creation exemption (#313), for exhaustiveness only: a
+/// `__construct` body's write whose base is literally `$this` records nothing,
+/// where PHPStan's constructor exclusion reaches it; every other write stays.
+#[test]
+fn a_constructor_initializing_this_records_no_property_write() {
+    use steins_syntax::StateConstruct as S;
+
+    /// The property writes of method `name`, whose body is `body`, as source text.
+    fn writes(name: &str, body: &str) -> Vec<String> {
+        let src = format!(
+            "<?php class C {{ public $p; public $q = []; public static $s; public function {name}($o, $a) {{ {body} }} }}"
+        );
+        let tree = SourceTree::parse(&src);
+        let m = tree.classes()[0].methods[0].clone();
+        m.effect_origins
+            .iter()
+            .filter_map(|o| match o {
+                EffectOrigin::State { construct: S::PropertyWrite, span } => {
+                    Some(src[span.start as usize..span.end as usize].to_owned())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    for init in [
+        "$this->p = $o;",
+        "$this->p .= 'x';",
+        "$this->p ??= 1;",
+        "$this->p++;",
+        "--$this->p;",
+        "$this->q[] = 1;",
+        "$this->q['k'] = 1;",
+        "unset($this->q['k']);",
+        "[$this->p, $x] = $a;",
+        "foreach ($a as $this->p) {}",
+        "foreach ($this->q as &$v) { $v = 0; }",
+    ] {
+        assert_eq!(writes("__construct", init), Vec::<String>::new(), "{init}");
+        assert_eq!(writes("__CONSTRUCT", init), Vec::<String>::new(), "{init}, any case");
+        assert_eq!(writes("init", init).len(), 1, "{init} outside a constructor");
+    }
+    for (write, lvalue) in [
+        ("$self = $this; $self->p = 1;", "$self->p"),
+        ("$o->p = 1;", "$o->p"),
+        ("$this->p->q = 1;", "$this->p->q"),
+        ("unset($this->p);", "$this->p"),
+        ("$r = &$this->p;", "$this->p"),
+        ("[$this->p, $o->p] = $a;", "[$this->p, $o->p]"),
+    ] {
+        assert_eq!(writes("__construct", write), [lvalue], "{write}");
+    }
+    let src = "<?php class C { public $p; public function __construct() { $f = function () { $this->p = 1; }; $f(); } }";
+    let tree = SourceTree::parse(src);
+    let closure_writes = tree.scopes().iter().any(|s| {
+        s.effect_origins.iter().any(|o| matches!(o, EffectOrigin::State { construct: S::PropertyWrite, .. }))
+    });
+    assert!(closure_writes, "a closure defined in a constructor can run after construction");
+}
+
 /// A state construct inside a closure or arrow function belongs to that scope,
 /// exactly as an `echo` does.
 #[test]

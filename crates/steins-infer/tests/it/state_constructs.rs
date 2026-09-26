@@ -143,14 +143,32 @@ fn instance_property_reads_stay_exhaustive() {
     assert!(s.labels.is_empty() && s.exhaustive, "{s:?}");
 }
 
-/// The conservative side of the ADR-0055 constructor carve-out (#313): an
-/// initializing constructor is a property write like any other, for now.
+/// ADR-0055's constructor-creation exemption (#313), for exhaustiveness only: a
+/// constructor initializing `$this`'s own properties stays exhaustive `{}`.
 #[test]
-fn a_constructors_own_property_initialization_is_not_exhaustive_yet() {
-    let src = "<?php\nclass Money {\n    private int $n;\n    public function __construct(int $n) { $this->n = $n; }\n}\n";
-    assert!(!summary(src, "Money::__construct").exhaustive);
-    let promoted = "<?php\nclass Money {\n    public function __construct(private int $n) {}\n}\n";
-    assert!(summary(promoted, "Money::__construct").exhaustive, "promotion is no body write");
+fn a_constructors_own_property_initialization_stays_exhaustive() {
+    let src = "<?php\nclass Money {\n    private int $n;\n    private array $tags = [];\n    public function __construct(int $n, string $t) { $this->n = $n; $this->tags[] = $t; }\n}\n";
+    let s = summary(src, "Money::__construct");
+    assert!(s.labels.is_empty() && s.exhaustive, "{s:?}");
+}
+
+/// Everything the exemption does not reach stays `…?`, in a constructor too.
+#[test]
+fn a_constructors_other_state_is_still_not_exhaustive() {
+    for body in [
+        "$self = $this; $self->x = 1;",
+        "$o->x = 1;",
+        "unset($this->x);",
+        "$r = &$this->x;",
+        "self::$hits = 1;",
+        "$this->x = $_GET['x'];",
+        "$f = function () { $this->x = 1; }; $f();",
+    ] {
+        let src = format!(
+            "<?php\nclass Svc {{\n    public static $hits = 0;\n    public $x = 0;\n    public function __construct($o) {{ {body} }}\n}}\n"
+        );
+        assert!(!summary(&src, "Svc::__construct").exhaustive, "`{body}` must mark the constructor `…?`");
+    }
 }
 
 // ---- What it does not do ---------------------------------------------------
