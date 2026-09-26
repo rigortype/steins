@@ -109,20 +109,38 @@ jobs:
         include:
           - os: ubuntu-latest
             label: linux x86_64 glibc
+            php: "8.4"
           - os: ubuntu-24.04-arm
             label: linux arm64 glibc
+            php: "8.4"
           - os: macos-latest
             label: macos arm64
-          # The Intel macOS row. `macos-13` is retired; the Intel image is now
+            php: "8.4"
+          # The Intel macOS row, and the only place CI executes the
+          # x86_64-apple-darwin binary: the release job cross-compiles it and
+          # cannot run it. `macos-13` is retired; the Intel image is now
           # spelled `-intel`, and macos-latest is arm64.
+          #
+          # This row takes the image's own PHP instead of asking for a version.
+          # setup-php installs PHP on macOS from Homebrew bottles, and neither
+          # homebrew-core nor setup-php's tap publishes Intel macOS PHP bottles
+          # any more, so a version the image lacks, or a newer patch of the one
+          # it has, is a source build that runs for half an hour and then fails
+          # (#798). What this row tests is the binary, not the PHP under it;
+          # the shim's PHP range is the unit job's concern.
           - os: macos-15-intel
             label: macos x86_64
+            php: pre-installed
     steps:
       - uses: actions/checkout@v5
 
       - uses: shivammathur/setup-php@v2
+        # A bottle install takes about a minute. Anything longer is a source
+        # build, which is how the Intel row failed in #798; stop it here
+        # rather than half an hour later.
+        timeout-minutes: 10
         with:
-          php-version: "8.4"
+          php-version: ${{ matrix.php }}
           coverage: none
 
       - name: Find a tag whose binaries exist
