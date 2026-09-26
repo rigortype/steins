@@ -28,14 +28,18 @@
 //! * a comparator that writes to the array under `usort`/`uasort` has its
 //!   writes **discarded**, so the result rests on the input alone and a
 //!   callback-invoking sort needs no callback analysis to state its out-state.
-//! * the next append index counts **negative** keys since PHP 8.3:
-//!   `array_push([-3 => 1], 9)` measures `[-3 => 1, -2 => 9]`, not `[..., 0 =>
-//!   9]` ([`next_append_key`]).
+//! * the next append index counts **negative** keys, but whether it does on
+//!   PHP 8.1/8.2 depends on where the array came from, which no key sequence
+//!   records. `array_push([-3 => 1], 9)` measures `[-3 => 1, -2 => 9]` on 8.1.32
+//!   and 8.5.10 alike; `$a = []; $a[-3] = 1; array_push($a, 9);` measures `0`
+//!   for the pushed key before 8.3 (php-src GH-11154). So below 8.3 a negative
+//!   landing index declines ([`next_append_key`]).
 
 use steins_domain::{
     Certainty, Fact, IntRange, Key, Presence, ShapeFact, Tail, Val, keys_are_a_list,
 };
 
+use crate::fold_args::NEXT_INT_BOUNDARY;
 use crate::shape_projection::{shape_fact, shape_value_union};
 use crate::transfers::list_transfer_fact;
 
@@ -300,22 +304,6 @@ fn general_removal(shape: &ShapeFact) -> Option<Fact> {
     )))
 }
 
-/// **The integer key PHP would hand the next appended value**, or `None` for a
-/// shape whose integer keys are not all known.
-///
-/// Measured at PHP 8.5.9, and the negative row is the one a reading of the
-/// manual gets wrong (PHP 8.3 changed it):
-///
-/// ```text
-/// array_push(['a'=>1], 9)   => ['a'=>1, 0=>9]    no integer key at all: 0
-/// array_push([5=>1], 9)     => [5=>1, 6=>9]      max + 1
-/// array_push([-3=>1], 9)    => [-3=>1, -2=>9]    max + 1, negatives included
-/// array_push([], 9)         => [0=>9]
-/// ```
-///
-/// Index bookkeeping, not folded arithmetic on an operand (ADR-0028 §3): the
-/// keys are the shape's own, and `max + 1` at `i64::MAX` declines rather than
-/// wrapping.
 /// The key sequence an **append** may read its next index off, which is
 /// strictly less than [`determined_order`] will answer (issue #636).
 ///
@@ -342,21 +330,47 @@ fn append_order(shape: &ShapeFact) -> Option<Vec<Key>> {
     shape.witnessed_order().map(<[Key]>::to_vec)
 }
 
-fn next_append_key(keys: &[Key]) -> Option<i64> {
+/// **The integer key PHP would hand the next appended value**, or `None` when
+/// the analysis minor does not decide it.
+///
+/// Measured with `php -r` on 8.1.32 and 8.5.10:
+///
+/// ```text
+/// array_push(['a'=>1], 9)   => ['a'=>1, 0=>9]    no integer key at all: 0
+/// array_push([5=>1], 9)     => [5=>1, 6=>9]      max + 1
+/// array_push([-3=>1], 9)    => [-3=>1, -2=>9]    max + 1, negatives included
+/// array_push([], 9)         => [0=>9]
+/// ```
+///
+/// **A negative landing index is only provable from PHP 8.3** (ADR-0049 A22).
+/// Before it, an array that began as PHP's shared empty array (`[]`, `array()`)
+/// kept a next index of `0` through a negative write, so `$a = []; $a[-3] = 1;
+/// $a[] = 9;` lands `9` on `0` on 8.1.32 and 8.2.33, and on `-2` from 8.3.33
+/// (php-src GH-11154, commit `e2f477c`). A literal-built `[-3 => 1]` lands on
+/// `-2` on every one of those. The witnessed sequence is `[-3]` either way, so
+/// below 8.3, or when the minor is unknown or the target range straddles 8.3,
+/// the index declines whenever `max + 1` is negative. From `0` up both arrays
+/// agree, and so does every minor.
+///
+/// Index bookkeeping, not folded arithmetic on an operand (ADR-0028 §3): the
+/// keys are the shape's own, and `max + 1` at `i64::MAX` declines rather than
+/// wrapping.
+fn next_append_key(keys: &[Key], php_minor: Option<(u16, u16)>) -> Option<i64> {
     let max = keys.iter().filter_map(|k| match k {
         Key::Int(n) => Some(*n),
         Key::Str(_) => None,
     });
-    match max.max() {
-        None => Some(0),
-        Some(n) => n.checked_add(1),
-    }
+    let next = match max.max() {
+        None => 0,
+        Some(n) => n.checked_add(1)?,
+    };
+    (next >= 0 || php_minor.is_some_and(|m| m >= NEXT_INT_BOUNDARY)).then_some(next)
 }
 
 /// **What `array_push($a, ...$values)` wrote into `$a`.**
 ///
 /// The ordered leg appends one witnessed key per value, each at the index
-/// [`next_append_key`] states, so `['foo' => 17, 'a', 'bar' => 18]` pushed with
+/// [`next_append_key`] states for `php_minor`, so `['foo' => 17, 'a', 'bar' => 18]` pushed with
 /// `19, 'baz', false` becomes `array{foo: 17, 0: 'a', bar: 18, 1: 19, 2: 'baz',
 /// 3: false}` — the append algebra `apply_offset_write` already performs for
 /// `$a[] = v`, read off the same order witness.
@@ -371,6 +385,7 @@ fn next_append_key(keys: &[Key]) -> Option<i64> {
 pub(crate) fn array_push_written_fact(
     shape: &ShapeFact,
     values: &[Option<Fact>],
+    php_minor: Option<(u16, u16)>,
 ) -> Option<Fact> {
     if values.is_empty() {
         return Some(shape_fact(shape.clone()));
@@ -381,7 +396,7 @@ pub(crate) fn array_push_written_fact(
             .map(|k| shape.field(k).map(|(k, p, s)| (k.clone(), *p, s.clone())))
             .collect::<Option<Vec<_>>>()?;
         let mut new_order = order.clone();
-        let mut next = next_append_key(&order)?;
+        let mut next = next_append_key(&order, php_minor)?;
         for value in values {
             let key = Key::Int(next);
             next = next.checked_add(1)?;
@@ -605,6 +620,7 @@ impl ArrayOutRule {
         self,
         shape: Option<&ShapeFact>,
         values: &[Option<Fact>],
+        php_minor: Option<(u16, u16)>,
     ) -> Fact {
         let precise = shape.and_then(|s| match self.kind {
             RuleKind::Sort(kind) => sort_written_fact(kind, s),
@@ -615,7 +631,7 @@ impl ArrayOutRule {
             RuleKind::PointerMove => Some(shape_fact(s.clone())),
             RuleKind::Shift => array_shift_written_fact(s),
             RuleKind::Pop => array_pop_written_fact(s),
-            RuleKind::Push => array_push_written_fact(s, values),
+            RuleKind::Push => array_push_written_fact(s, values, php_minor),
             RuleKind::Unshift => array_unshift_written_fact(s, values),
         });
         precise.unwrap_or_else(|| self.floor(values))
@@ -756,7 +772,7 @@ mod tests {
     fn a_pointer_move_hands_back_the_callers_own_claim() {
         let shape = lit(&[(Key::Int(0), i(1)), (Key::Int(1), i(2))]);
         let rule = array_out_rule("reset").expect("a rule");
-        let Fact::Shape { shape: out, .. } = rule.written_fact(Some(&shape), &[]) else {
+        let Fact::Shape { shape: out, .. } = rule.written_fact(Some(&shape), &[], None) else {
             panic!("a pointer move states a shape");
         };
         assert_eq!(*out, shape, "`reset`/`end` change nothing the type can see");
@@ -825,7 +841,8 @@ mod tests {
             Vec::new(),
         );
         for rule in ["array_shift", "array_pop"] {
-            let out = array_out_rule(rule).expect("a rule").written_fact(Some(&non_empty), &[]);
+            let out =
+                array_out_rule(rule).expect("a rule").written_fact(Some(&non_empty), &[], None);
             let Fact::Shape { shape, .. } = out else { panic!("{rule} states a shape") };
             assert!(!shape.non_empty, "{rule} may have taken the only entry");
             assert_eq!(shape.tail, non_empty.tail, "{rule} does not touch the tail");
@@ -850,20 +867,37 @@ mod tests {
         assert_eq!(determined_order(&declared), None);
         assert!(array_shift_written_fact(&declared).is_none());
         assert!(array_pop_written_fact(&declared).is_none());
-        let floored = array_out_rule("array_shift").expect("a rule").written_fact(Some(&declared), &[]);
+        let floored =
+            array_out_rule("array_shift").expect("a rule").written_fact(Some(&declared), &[], None);
         assert_eq!(floored, shape_fact(ShapeFact::plain_array()));
     }
 
     #[test]
     fn the_next_append_key_is_the_maximum_integer_key_plus_one() {
-        // Probed at PHP 8.5.9 — the negative row changed in PHP 8.3 and a
-        // reading of the older manual would have said `0`.
-        assert_eq!(next_append_key(&[]), Some(0));
-        assert_eq!(next_append_key(&[Key::Str("a".into())]), Some(0), "no integer key at all");
-        assert_eq!(next_append_key(&[Key::Int(5)]), Some(6));
-        assert_eq!(next_append_key(&[Key::Int(-3)]), Some(-2), "negatives included");
-        assert_eq!(next_append_key(&[Key::Int(0), Key::Int(7), Key::Int(2)]), Some(8));
-        assert_eq!(next_append_key(&[Key::Int(i64::MAX)]), None, "no wrap, a decline");
+        // Probed on 8.1.32 and 8.5.10. From `0` up every minor agrees, so an
+        // unknown one answers too.
+        for minor in [None, Some((8, 1)), Some((8, 5))] {
+            assert_eq!(next_append_key(&[], minor), Some(0));
+            let string_only = next_append_key(&[Key::Str("a".into())], minor);
+            assert_eq!(string_only, Some(0), "no integer key at all");
+            assert_eq!(next_append_key(&[Key::Int(5)], minor), Some(6));
+            assert_eq!(next_append_key(&[Key::Int(0), Key::Int(7), Key::Int(2)], minor), Some(8));
+            // `$a = []; $a[-3] = 1; $a[-1] = 2; $a[] = 9;` lands on `0` everywhere.
+            assert_eq!(next_append_key(&[Key::Int(-3), Key::Int(-1)], minor), Some(0));
+            assert_eq!(next_append_key(&[Key::Int(i64::MAX)], minor), None, "no wrap, a decline");
+        }
+    }
+
+    #[test]
+    fn a_negative_next_append_key_needs_php_8_3() {
+        // `$a = [-3 => 1]; $a[] = 9;` lands on `-2` on 8.1.32 through 8.5.10, but
+        // `$a = []; $a[-3] = 1; $a[] = 9;` lands on `0` on 8.1.32 and 8.2.33
+        // (php-src GH-11154). Both arrays witness the sequence `[-3]`.
+        assert_eq!(next_append_key(&[Key::Int(-3)], Some((8, 3))), Some(-2));
+        assert_eq!(next_append_key(&[Key::Int(-3)], Some((8, 5))), Some(-2));
+        assert_eq!(next_append_key(&[Key::Int(-3)], Some((8, 2))), None);
+        assert_eq!(next_append_key(&[Key::Int(-3)], Some((8, 1))), None);
+        assert_eq!(next_append_key(&[Key::Int(-3)], None), None, "an unknown minor may be 8.2");
     }
 
     #[test]
@@ -882,7 +916,7 @@ mod tests {
             Some(Fact::Singleton(Val::Bool(false))),
         ];
         let Fact::Shape { shape: out, .. } =
-            array_push_written_fact(&shape, &values).expect("a shape")
+            array_push_written_fact(&shape, &values, None).expect("a shape")
         else {
             panic!("a push states a shape");
         };
@@ -936,7 +970,7 @@ mod tests {
         for name in ["array_push", "array_unshift"] {
             let rule = array_out_rule(name).expect("a rule");
             assert!(rule.consumes_values(), "{name} writes its remaining arguments");
-            let Fact::Shape { shape: out, .. } = rule.written_fact(Some(&shape), &[]) else {
+            let Fact::Shape { shape: out, .. } = rule.written_fact(Some(&shape), &[], None) else {
                 panic!("{name} states a shape");
             };
             assert_eq!(*out, shape, "{name} with no values is the identity");
@@ -957,7 +991,7 @@ mod tests {
             Vec::new(),
         );
         let Fact::Shape { shape: out, .. } =
-            array_push_written_fact(&ints, &[Some(Fact::Singleton(Val::Str("x".into())))])
+            array_push_written_fact(&ints, &[Some(Fact::Singleton(Val::Str("x".into())))], None)
                 .expect("a shape")
         else {
             panic!("a push states a shape");
@@ -1021,8 +1055,8 @@ mod tests {
             ("array_push", false),
             ("array_unshift", false),
         ] {
-            let Fact::Shape { shape, .. } = array_out_rule(name).expect("a rule").written_fact(None, &[])
-            else {
+            let rule = array_out_rule(name).expect("a rule");
+            let Fact::Shape { shape, .. } = rule.written_fact(None, &[], None) else {
                 panic!("{name} states a shape");
             };
             assert_eq!(shape.is_list == Certainty::Yes, want_list, "{name}");
