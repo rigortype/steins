@@ -285,6 +285,117 @@ fn the_attribute_spelling_of_a_retired_label_now_says_what_to_write() {
     assert_eq!(f[0].id, UNKNOWN_LABEL_ID, "still the mechanics id it always was");
 }
 
+// `failure.*` (issue #805): registered, but outside the interop vocabulary.
+// ADR-0082 §4 takes the registry minus `failure.*`, which names value provenance
+// (ADR-0042), so an interop tag naming one reads as ⊤ like any unknown label.
+
+#[test]
+fn a_failure_label_in_an_impure_tag_reads_as_unspecified_and_reports() {
+    let src = concat!(
+        "<?php\n",
+        "/** @phpstan-impure failure.input */\n",
+        "function stamp(): int { return time(); }\n",
+    );
+    // Before the fix this read as the bound `{failure.input}` and `time()` exceeded it.
+    assert!(of_id(src, EFFECT_ID).is_empty(), "the tag bounds nothing, so nothing exceeds it");
+    let d = one_vocabulary(src);
+    assert_eq!(
+        d.message,
+        "unknown effect label 'failure.input' in @phpstan-impure on stamp() — the whole tag \
+         reads as unspecified and bounds nothing; failure.* names value provenance, not an effect"
+    );
+    assert!(!surfaced("default", &d), "same floor as every other vocabulary finding");
+    assert!(surfaced("contracts", &d));
+}
+
+#[test]
+fn a_failure_label_in_a_class_level_tag_reads_as_unspecified_and_reports() {
+    let src = concat!(
+        "<?php\n",
+        "/** @phpstan-all-methods-impure failure.input */\n",
+        "class Stamper {\n",
+        "    public function stamp(): int { return time(); }\n",
+        "}\n",
+    );
+    assert!(of_id(src, EFFECT_ID).is_empty(), "the class tag bounds nothing either");
+    assert_eq!(
+        one_vocabulary(src).message,
+        "unknown effect label 'failure.input' in @phpstan-all-methods-impure on class Stamper — \
+         the whole tag reads as unspecified and bounds nothing; failure.* names value \
+         provenance, not an effect"
+    );
+}
+
+#[test]
+fn a_failure_label_beside_a_real_one_still_makes_the_whole_tag_inert() {
+    // ⊤ composition: `nondet.time` alone would be exceeded by the file write.
+    let src = concat!(
+        "<?php\n",
+        "/** @phpstan-impure nondet.time, failure.environment */\n",
+        "function save(): int { file_put_contents('/x', 'y'); return time(); }\n",
+    );
+    assert!(of_id(src, EFFECT_ID).is_empty(), "no narrowing to the recognized subset");
+    let d = one_vocabulary(src);
+    assert!(d.message.starts_with("unknown effect label 'failure.environment' "), "{}", d.message);
+}
+
+#[test]
+fn a_registered_effect_label_still_bounds_where_failure_does_not() {
+    // The control for the witnesses above: same body, same tags, a non-failure label.
+    let own = concat!(
+        "<?php\n",
+        "/** @phpstan-impure nondet.random */\n",
+        "function stamp(): int { return time(); }\n",
+    );
+    let f = of_id(own, EFFECT_ID);
+    assert_eq!(f.len(), 1, "{f:#?}");
+    assert_eq!(
+        f[0].message,
+        "time() has effect nondet.time, but stamp() is declared @phpstan-impure nondet.random — \
+         nondet.time exceeds the envelope"
+    );
+    assert!(of_id(own, INTEROP_UNKNOWN_LABEL_ID).is_empty());
+    let class = concat!(
+        "<?php\n",
+        "/** @phpstan-all-methods-impure nondet.random */\n",
+        "class Stamper {\n",
+        "    public function stamp(): int { return time(); }\n",
+        "}\n",
+    );
+    assert_eq!(of_id(class, EFFECT_ID).len(), 1, "the class-level control bounds too");
+    assert!(of_id(class, INTEROP_UNKNOWN_LABEL_ID).is_empty());
+}
+
+#[test]
+fn a_near_miss_of_a_failure_label_suggests_nothing() {
+    // The registry's nearest entry is `failure.input`, which the tag would refuse in
+    // turn — so the finding keeps the dot-path reading and names no replacement.
+    let d = one_vocabulary(concat!(
+        "<?php\n",
+        "/** @phpstan-impure failure.inptu */\n",
+        "function stamp(): int { return time(); }\n",
+    ));
+    assert_eq!(
+        d.message,
+        "unknown effect label 'failure.inptu' in @phpstan-impure on stamp() — the whole tag \
+         reads as unspecified and bounds nothing"
+    );
+}
+
+#[test]
+fn the_attribute_spelling_still_takes_a_failure_label() {
+    // Issue #805 narrows the interop stratum only: the checked attribute keeps the
+    // registry as its vocabulary, `failure.*` included, and stays a bound.
+    let src = concat!(
+        "<?php\n",
+        "#[\\Steins\\Effect('failure.input')]\n",
+        "function stamp(): int { return time(); }\n",
+    );
+    assert!(of_id(src, UNKNOWN_LABEL_ID).is_empty(), "a registered label, not a typo");
+    assert!(of_id(src, INTEROP_UNKNOWN_LABEL_ID).is_empty(), "one stratum, one id");
+    assert_eq!(of_id(src, EFFECT_ID).len(), 1, "still the bound `{{failure.input}}`");
+}
+
 // Suppression: a contract-layer id a migration can absorb.
 
 #[test]

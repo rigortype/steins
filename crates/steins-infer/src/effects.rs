@@ -34,7 +34,7 @@ use std::collections::HashMap;
 use steins_db::{Db, PluginFacts, Project, SourceFile, parse, project_index};
 use steins_phpdoc::EnvelopeTag;
 
-use crate::purity::{EffectSet, InteropTag, compute_effects, interop_tag};
+use crate::purity::{EffectSet, InteropTag, compute_effects, interop_tag, is_interop_label};
 use crate::project::{FileUnit, Index, LazyTree};
 use crate::Sym;
 
@@ -182,7 +182,8 @@ pub fn existing_envelope(
     }
 }
 
-/// The members of `labels` the run's registry does not know, in the order given.
+/// The members of `labels` outside the interop vocabulary — unknown to the run's
+/// registry, or under `failure.*` (ADR-0082 §4) — in the order given.
 ///
 /// The emission counterpart of [`existing_envelope`]: a writer asks this before
 /// spelling a bound, since a tag with an unknown label reads back as prose (⊤)
@@ -190,7 +191,7 @@ pub fn existing_envelope(
 #[must_use]
 pub fn unknown_labels(plugins: &PluginFacts, labels: &[String]) -> Vec<String> {
     let registry = plugins.registry();
-    labels.iter().filter(|l| !registry.is_known(l)).cloned().collect()
+    labels.iter().filter(|l| !is_interop_label(registry, l)).cloned().collect()
 }
 
 #[cfg(test)]
