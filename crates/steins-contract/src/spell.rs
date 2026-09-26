@@ -406,23 +406,28 @@ pub fn spell_shape(
             *required && matches!(key, Key::Int(n) if *n == i as i64)
         });
 
-    let mut next_auto: i64 = 0;
+    // The key a keyless field would take. `None` past a `PHP_INT_MAX` key:
+    // PHP has no next key there (`$a[] = …` fails), so nothing after it may
+    // print keyless — neither saturate nor wrap.
+    let mut next_auto: Option<i64> = Some(0);
     let mut parts: Vec<String> = Vec::with_capacity(fields.len() + 1);
     for (key, required, value) in fields {
         let keyless = if sealed {
             positional
         } else {
-            *required && matches!(key, Key::Int(i) if *i == next_auto)
+            *required && matches!(key, Key::Int(i) if next_auto == Some(*i))
         };
         if keyless {
             parts.push(value.clone());
-            next_auto += 1;
         } else {
-            if let Key::Int(i) = key {
-                next_auto = next_auto.max(i + 1);
-            }
             let mark = if *required { "" } else { "?" };
             parts.push(format!("{}{mark}: {value}", spell_key(key)));
+        }
+        // Keyless or not, an int key at or past the auto key moves it past itself.
+        if let Key::Int(i) = key
+            && next_auto.is_some_and(|n| *i >= n)
+        {
+            next_auto = i.checked_add(1);
         }
     }
     match tail {
@@ -958,6 +963,22 @@ mod array_vocabulary_tests {
     }
 
     #[test]
+    fn a_field_after_a_php_int_max_key_never_prints_keyless() {
+        // PHP has no auto key past `PHP_INT_MAX`. `9223372036854775807` itself
+        // is the auto key after `…806`, so it prints bare; the `i64::MIN` key
+        // after it would print bare too if the auto key wrapped.
+        let fields = [
+            (Key::Int(i64::MAX - 1), true, "1".to_owned()),
+            (Key::Int(i64::MAX), true, "2".to_owned()),
+            (Key::Int(i64::MIN), true, "3".to_owned()),
+        ];
+        assert_eq!(
+            spell_shape(false, false, &fields, &ShapeTail::Untyped),
+            "array{9223372036854775806: 1, 2, -9223372036854775808: 3, ...}"
+        );
+    }
+
+    #[test]
     fn quoted_keys_spell_bare_when_identifier_shaped_else_quoted() {
         assert_eq!(spell_ty("array{'a': int}"), "array{a: int}");
         assert_eq!(spell_ty("array{'a b': int}"), "array{'a b': int}");
@@ -1017,6 +1038,21 @@ mod array_vocabulary_tests {
                 (Key::Int(0), Val::Str("b".into())),
             ])),
             "array{1: 'a', 0: 'b'}"
+        );
+    }
+
+    #[test]
+    fn a_php_int_max_key_value_spells_its_key() {
+        // phpstan-src `bug-15248.php` / `bug-15244.php`: these panicked in debug.
+        let max = |v| (Key::Int(i64::MAX), Val::Int(v));
+        assert_eq!(spell_val(&av(vec![max(1)])), "array{9223372036854775807: 1}");
+        assert_eq!(
+            spell_val(&av(vec![(Key::Int(i64::MAX - 1), Val::Int(1)), max(2)])),
+            "array{9223372036854775806: 1, 9223372036854775807: 2}"
+        );
+        assert_eq!(
+            spell_val(&av(vec![max(1), (Key::Int(0), Val::Int(2))])),
+            "array{9223372036854775807: 1, 0: 2}"
         );
     }
 }
