@@ -46,6 +46,7 @@ pub mod escapes;
 mod existence;
 mod fold;
 mod fold_args;
+mod fold_budget;
 #[cfg(not(target_arch = "wasm32"))]
 mod fold_persist;
 #[cfg(not(target_arch = "wasm32"))]
