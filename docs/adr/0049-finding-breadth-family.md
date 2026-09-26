@@ -523,6 +523,13 @@ worded — never recall.
 
 ## Amendment (2026-07-26): the next-int rule is a project property
 
+*A12's rule statement and its pre-8.3 column are superseded by the A22
+amendment (2026-09-26): no supported minor floors a literal's next key
+at `0`, and the 8.3 boundary is real only for an append onto an array
+that began as `[]`. A12's machinery — the minor as a parameter, the
+straddling range that declines — stands and now serves the append
+index.*
+
 Source: found while landing issue #39 (array literals as fold
 arguments, commit `7c38323`) and **not** caused by it — the fold path
 sends raw entries to the sidecar and lets the runtime assign keys, so
@@ -857,7 +864,9 @@ vocabulary already carries:
 - A literal whose auto-key positions **depend on the PHP minor** (the 8.3
   next-auto-index change for negative keys) is not one the source names
   unambiguously; `normalize_array` is asked with an unknown minor so that
-  it declines those and answers for the rest.
+  it declines those and answers for the rest. *Superseded by A22
+  (2026-09-26): no supported minor places a literal's keys differently,
+  so `f(...[-5 => 1, 2])` flattens to `1, 2` like any other literal.*
 
 A plain positional argument after any unpacking stays unanalyzable: PHP
 rejects that source at compile time, so there is no call there to answer
@@ -1085,3 +1094,137 @@ way the absence family does.
   absence family and the argument-premise surface, which is a wider
   question than "what does this read answer" and wants its own
   measurement.
+
+## Amendment (2026-09-26): the negative-key edge is an append rule, not a literal rule
+
+Status: PENDING ratification (post-hoc-ratification mode, ADR-0077
+precedent). Source: a `php -r` witness on PHP 8.2.33, taken 2026-09-26,
+contradicted A12's pre-8.3 column. This amendment records what php-src
+and witnesses on every supported minor show. It supersedes A12's rule
+statement, its two-rule machinery and its unknown-minor leg for array
+literals. A12's principles stand — the version is a parameter, a target
+range that straddles the boundary declines, a guessed key is a wrong key
+— and they now govern the append index, which is where PHP draws the
+8.3 line.
+
+### A22. A literal has one next-int rule; the 8.3 boundary belongs to the append index
+
+**What A12 got wrong.** A12 said that before PHP 8.3 the next auto-index
+after a negative key floored at `0`, so `[-5 => 'a', 'b']` put `'b'` at
+`0` on 8.1 and 8.2. That column was never witnessed — A12's own evidence
+bar calls it "the documented floor rule" — and it is false on every
+minor ADR-0011 supports. The primary sources show two separate changes:
+
+- **PHP 8.0, the negative-index RFC.** "Arrays Starting With a Negative
+  Index" (`wiki.php.net/rfc/negative_array_index`) passed for 8.0, 17–2;
+  its 7.3 deprecation notice failed, 8–14. php-src commit `6732028`
+  ("Implement the negative_array_index RFC") is in `php-8.0.0` and not
+  in `php-7.4.0`. It starts `nNextFreeElement` at `ZEND_LONG_MIN`
+  instead of `0`, and 8.0's UPGRADING lists it as a backward-incompatible
+  change: "Any array that has a number n as its first numeric key will
+  use n+1 for its next implicit key, even if n is negative."
+- **PHP 8.3, GH-11154.** 8.3's UPGRADING says something narrower:
+  "Assigning a negative index n to an empty array will now make sure
+  that the next index is n+1 instead of 0." Commit `e2f477c` changes one
+  field. The shared immutable `zend_empty_array` still carried
+  `nNextFreeElement = 0`, and `zend_array_dup` copies that field when it
+  separates an empty array, so an array that **began as `[]`** kept a
+  next index of `0` through a negative write.
+
+Witnessed with `php -r` on each minor (nixpkgs builds; 8.5.10 local):
+
+| | 7.4.33 | 8.0.28 | 8.1.32 | 8.2.33 | 8.3.33 | 8.4.25 | 8.5.10 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `[-5 => 1, 2]` | `-5, 0` | `-5, -4` | `-5, -4` | `-5, -4` | `-5, -4` | `-5, -4` | `-5, -4` |
+| `$a = [-5 => 1]; $a[] = 2;` | `-5, 0` | `-5, -4` | `-5, -4` | `-5, -4` | `-5, -4` | `-5, -4` | `-5, -4` |
+| `$u[-5] = 1; $u[] = 2;` (`$u` unset) | `-5, 0` | `-5, -4` | `-5, -4` | `-5, -4` | `-5, -4` | `-5, -4` | `-5, -4` |
+| `$b = []; $b[-5] = 1; $b[] = 2;` | `-5, 0` | `-5, 0` | `-5, 0` | `-5, 0` | `-5, -4` | `-5, -4` | `-5, -4` |
+| `array_keys(array_fill(-5, 3, 'x'))` | `-5, 0, 1` | `-5, -4, -3` | `-5, -4, -3` | `-5, -4, -3` | `-5, -4, -3` | `-5, -4, -3` | `-5, -4, -3` |
+
+The first row holds as well for `array(-5 => 1, 2)`, a literal with a
+variable element, and a class constant. Every hand-written row in
+`array_lowering.rs` (#46's counterexamples, `-1`/`-2`, the running max,
+the duplicate negative key) prints the same keys on 8.1.32, 8.2.33 and
+8.5.10. So a literal has **one** rule across the supported range: one
+past the largest integer key seen, negative or not. A12's split never
+existed there; its pre-8.3 column is PHP 7.4.
+
+**The literal side collapses.** `NextIntRule`,
+`next_int_is_version_dependent` and `normalize_array_with` are gone.
+`normalize_array(items)` takes no minor and declines only on a key the
+source does not spell (issue #336) or an omitted key past `PHP_INT_MAX`
+(#812). `duplicate_array_keys` loses its parallel chains. What follows
+from that:
+
+- A12 resolved `[-5 => 'a', 'b']` with `'b'` at `0` on a reported 8.1 or
+  8.2 minor. That was the manufactured wrong key A12's third leg existed
+  to prevent, reached through its first leg. It is gone.
+- A negative-key literal is a proven premise under an unknown minor and
+  under a straddling target: `[-5 => 'a', 'b'] === [-5 => 'a', -4 =>
+  'b']` decides `true`, and `array.duplicate-key` fires on `[-5 => 'a',
+  'b', -4 => 'c']` on every minor. Before, it was silent without a minor
+  and silent on 8.1/8.2 — a missed finding, since PHP drops `'b'` there
+  too.
+- The literal spread `f(...[-5 => 1, 2])` flattens (A17, A18);
+  `render_array` no longer needs its exemption; and
+  `steins_edit::common::arg_to_val` resolves such a literal instead of
+  refusing, so A12's recorded edit-layer refinement is moot.
+- The `php_minor` parameter threaded through `val_of`,
+  `singleton_fact`, the `===`/`==` evaluators, condition refinement and
+  the offset readers fed nothing but `normalize_array`, and leaves with
+  it.
+
+**The append side keeps the boundary.** `$a[] = v` and `array_push`
+(ADR-0062 Amendment K, ADR-0077 §4) read the landing index off a
+witnessed key sequence as `max + 1`. That sequence cannot tell
+`[-3 => 1]` from `$a = []; $a[-3] = 1;`: both witness `[-3]`, and the
+first lands the next append on `-2` on every supported minor while the
+second lands it on `0` on 8.1.32 and 8.2.33 and on `-2` from 8.3.33.
+Before this amendment the append answered `-2` for both under any minor,
+an unknown one included, which is a wrong key for the second on 8.1 and
+8.2. The index now reads the effective minor: `max + 1` when it is
+non-negative, since the floor and `max + 1` agree there, or when the
+minor is 8.3 or later; otherwise the append declines to Amendment J's
+weak row, a write at an unnamed integer key. Measured on the walk:
+`$a = []; $a[-3] = 1; $a[] = 9;` dumps `array{-3: 1, -2: 9}` on 8.3 and
+8.5 and `non-empty-array{-3: 1|9, ...<int, 9>}` on 8.1, 8.2 or no minor.
+
+That is A12's machinery on the seam that needs it. `Cx::php_minor` and
+`effective_php_view` are unchanged: a target that straddles 8.3 answers
+`None`, and a negative landing index then declines. #28's integration
+stands, and A12's argument that the unknown leg "is the shape #28 will
+need" survives with a different consumer. The cost is precision on a
+literal-built array whose integer keys are all negative: below 8.3, or
+with no minor, its next append index is no longer named. Recovering it
+would need the shape to record whether the array began as the shared
+empty array, and nothing needs that yet.
+
+**The fold wire had the same defect.** ADR-0028 §3 rebuilds an array
+argument in the runner with `$arr[] =` and `$arr[k] =` so that absent
+keys get the engine's own next-int. The runner started from `$arr = []`,
+which is exactly the GH-11154 path: on 8.1.32 and 8.2.33 the sidecar
+folded `count([-5 => 'a', 'b', -4 => 'c'])` to `3`, where the literal
+counts `2`. The runner now starts from `null` and lets the first write
+autovivify a fresh array, which starts at `ZEND_LONG_MIN` — the third
+row above, and `$n = null; $n[-5] = 1; $n[] = 2;` gives `-5, -4` on
+8.0.28 through 8.2.33 as well — so the rebuilt argument is the literal
+the source wrote on every minor. CI's matrix runs PHP 8.4 and 8.5, which is why no gate saw
+this. `a_negative_key_argument_rebuilds_like_its_literal` fails on
+8.1.32 and 8.2.33 before the fix and passes after, and the whole sidecar
+suite is green on both when run serially.
+
+**Evidence bar, restated.** A12 let one column of a two-column table
+rest on documentation rather than a witness, and that column was wrong.
+A column keyed on a PHP version is witnessed on that version or it is
+not asserted. The literal tests now assert one column, witnessed on
+8.1.32, 8.2.33 and 8.5.10; the append tests assert both sides of the
+8.3 boundary, each witnessed on a minor from that side.
+
+### What the amendment does not change
+
+- `PhpView`, `effective_php_view` and the straddle computation, and
+  A11's catalog-skew demotion.
+- Amendment K's high-water-mark fence: `unset` still drops the order
+  witness.
+- ADR-0028 §3's principle that PHP owns array semantics on the wire; the
+  fix is what makes the runner honour it on 8.1 and 8.2.
