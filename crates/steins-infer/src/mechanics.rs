@@ -65,7 +65,7 @@ pub(crate) fn emit_parse_failure(
 /// overwrites.
 pub(crate) fn check_array_duplicate_keys(cx: &Cx, out: &mut Vec<Diagnostic>) {
     for site in cx.tree().array_literal_sites() {
-        for dup in duplicate_array_keys(site, cx.php_minor) {
+        for dup in duplicate_array_keys(site) {
             let winner_pos = cx.tree().position(dup.winner_span.start);
             let shadowed_pos = cx.tree().position(dup.shadowed_span.start);
             out.push(Diagnostic {

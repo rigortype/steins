@@ -593,7 +593,7 @@ fn maybe_arg_premise(
             )?)
         }
         ArgValue::OffsetRead { base, key } => {
-            let (read, stratum) = shape_read_at(base, key, env, poisoned, cx.php_minor)?;
+            let (read, stratum) = shape_read_at(base, key, env, poisoned)?;
             let f = read.into_fact()?;
             f.finite_members().is_none().then_some((f, stratum, None))
         }

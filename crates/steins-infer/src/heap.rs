@@ -147,7 +147,7 @@ pub(crate) fn new_heap_object(
             obj.readonly.insert(p.name.clone());
         }
         if let Some(default) = &p.default
-            && let Some(fact) = singleton_fact(default, cx.php_minor)
+            && let Some(fact) = singleton_fact(default)
             // A typed slot stores the boundary-converted default (issue #48):
             // `public float $d = 3;` holds `3.0`, not `3`.
             && let Some(fact) = match p.ty.as_ref() {
@@ -204,7 +204,7 @@ pub(crate) fn new_heap_object(
                 Some(a) => match cx
                     .resolve_literal_strat(a, env, poisoned, folder)
                     .and_then(|(lit, strat)| {
-                        singleton_fact(&lit, cx.php_minor).map(|f| (f, strat))
+                        singleton_fact(&lit).map(|f| (f, strat))
                     })
                     // The promoted slot stores the boundary-converted argument
                     // (issue #48): a mode-dependent conversion falls back to the
@@ -941,7 +941,7 @@ pub(crate) fn apply_prop_assign(
         Some((lit, strat)) => (Some(lit.clone()), *strat),
         None => (None, value_stratum(cx, value, env, Some(&*store))),
     };
-    let prop_fact_val: Option<Fact> = proven_lit.as_ref().and_then(|l| singleton_fact(l, cx.php_minor)).or_else(|| {
+    let prop_fact_val: Option<Fact> = proven_lit.as_ref().and_then(singleton_fact).or_else(|| {
         match value {
             ArgValue::PropFetch { var: rv, prop: rp } => store.prop_fact(rv, rp).cloned(),
             _ => arg_abstract_fact(value, env, false).cloned(),

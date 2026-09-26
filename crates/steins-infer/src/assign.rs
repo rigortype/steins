@@ -248,7 +248,7 @@ pub(crate) fn apply_assign(
         ArgValue::OffsetRead { base, key } => {
             // Resolve against the PRE-assignment env: PHP evaluates the rvalue
             // first, so a self-read `$a = $a['k']` still reads the old `$a`.
-            let read = shape_read_at(base, key, env, w.scope.poisoned, cx.php_minor)
+            let read = shape_read_at(base, key, env, w.scope.poisoned)
                 .and_then(|(read, strat)| Some((read.into_fact()?, strat)));
             match read {
                 Some((fact, strat)) => lhs.bind_quiet(env, store, fact, strat),
@@ -279,7 +279,7 @@ pub(crate) fn apply_assign(
                 None,
                 Some(&mut *out),
             )
-            .and_then(|(lit, strat)| singleton_fact(&lit, cx.php_minor).map(|f| (lit, f, strat)))
+            .and_then(|(lit, strat)| singleton_fact(&lit).map(|f| (lit, f, strat)))
         {
             Some((lit, fact, strat)) => {
                 lhs.note(FactKind::Value { var: var.to_owned(), rendered: lit.render() });

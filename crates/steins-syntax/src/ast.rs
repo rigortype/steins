@@ -1167,97 +1167,32 @@ impl NormKey {
     }
 }
 
-/// The PHP minor that changed the next-auto-index edge case for negative keys.
-const NEXT_INT_RULE_CHANGED_IN: (u16, u16) = (8, 3);
-
-/// PHP's next-auto-index rule for an omitted array key (`[$a, $b]`); the two
-/// variants differ **only** when every integer key seen so far is negative.
-/// PHP 8.3 changed the edge case: before it, next-auto-index floored at `0`
-/// (`[-5 => 'a', 'b']` put `'b'` at `0`); from 8.3, one past the largest
-/// integer key seen (`'b'` lands at `-4`). Verified PHP 8.5.8: `php -r
-/// 'var_export([-5=>"a","b"]);'` → `-5, -4`. Steins' floor is 8.1 (ADR-0011):
-/// 8.1/8.2 take [`NextIntRule::FloorAtZero`], 8.3+ take [`NextIntRule::MaxPlusOne`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum NextIntRule {
-    /// PHP < 8.3 (Steins' floor 8.1 through 8.2): the next auto-index never goes below `0`.
-    FloorAtZero,
-    /// PHP >= 8.3: one past the largest integer key seen, negative or not.
-    MaxPlusOne,
-}
-
-impl NextIntRule {
-    /// The rule a project on PHP `(major, minor)` follows.
-    #[must_use]
-    pub fn for_minor(minor: (u16, u16)) -> Self {
-        if minor >= NEXT_INT_RULE_CHANGED_IN { Self::MaxPlusOne } else { Self::FloorAtZero }
-    }
-}
-
-/// Whether `items` normalizes *differently* under the two [`NextIntRule`]s —
-/// an omitted key falls where every integer key seen so far is negative, so
-/// pre-8.3 floor and 8.3+ max+1 disagree. Exactly the ambiguity
-/// [`normalize_array`] declines when the PHP minor is unknown; purely syntactic.
-#[must_use]
-pub fn next_int_is_version_dependent(items: &[(ArrayKey, ArgValue)]) -> bool {
-    let mut max_seen: Option<i64> = None;
-    for (k, _) in items {
-        match k {
-            ArrayKey::Auto => {
-                // `None` → position 0 under both rules. Past a `PHP_INT_MAX` key
-                // neither rule has a next key (PHP throws under both), so they
-                // agree. Otherwise the rules split exactly when one past the
-                // running max is still negative.
-                let Some(next) = max_seen.map_or(Some(0), |m: i64| m.checked_add(1)) else {
-                    continue;
-                };
-                if next < 0 {
-                    return true;
-                }
-                max_seen = Some(max_seen.map_or(next, |m| m.max(next)));
-            }
-            ArrayKey::Int(i) => max_seen = Some(max_seen.map_or(*i, |m| m.max(*i))),
-            ArrayKey::Str(_) => {}
-            // An unknown key may be an integer, so it may move the running max
-            // — which makes every following `Auto` position unresolvable under
-            // *either* rule, not merely different between them. Answering
-            // `true` routes the literal to `normalize_array`'s decline, which
-            // is where an unresolvable key set belongs (issue #336).
-            ArrayKey::Expr(_) => return true,
-        }
-    }
-    false
-}
-
 /// Next PHP auto-index for an omitted array key, given the running max integer
-/// key seen (`None` → `0`) and the [`NextIntRule`] in force. `None` past a
+/// key seen (`None` → `0`): one past the largest integer key, negative or not
+/// (ADR-0049 A22). Every minor from ADR-0011's 8.1 floor up builds a literal this
+/// way — the negative-index RFC landed in PHP 8.0 (php-src `6732028`), and
+/// `var_export([-5 => 'a', 'b'])` prints `-5, -4` on 8.0.28, 8.1.32, 8.2.33,
+/// 8.3.33, 8.4.25 and 8.5.10; only 7.4.33 prints `-5, 0`. `None` past a
 /// `PHP_INT_MAX` key: PHP has no next key there and throws "Cannot add element
-/// to the array as the next element is already occupied" under either rule
-/// (`php -r` on 8.5.10 and 8.2.33), so a clamped key would claim an overwrite
-/// PHP never performs. Shared by [`normalize_array_with`] and
-/// [`duplicate_array_keys`] (issue #187), which need the same arithmetic without
-/// the last-wins fold.
+/// to the array as the next element is already occupied" (`php -r` on 8.5.10
+/// and 8.2.33), so a clamped key would claim an overwrite PHP never performs.
+/// Shared by [`normalize_entries`] and [`duplicate_array_keys`] (issue #187),
+/// which need the same arithmetic without the last-wins fold.
 #[must_use]
-fn next_auto_index(max_seen: Option<i64>, rule: NextIntRule) -> Option<i64> {
-    let mut i = max_seen.map_or(Some(0), |m: i64| m.checked_add(1))?;
-    if matches!(rule, NextIntRule::FloorAtZero) {
-        i = i.max(0);
-    }
-    Some(i)
+fn next_auto_index(max_seen: Option<i64>) -> Option<i64> {
+    max_seen.map_or(Some(0), |m: i64| m.checked_add(1))
 }
 
-/// Resolve an array literal under an explicit [`NextIntRule`]: next-int
-/// assignment for `Auto` keys, **last-wins** for duplicates (PHP semantics,
-/// insertion-ordered). Prefer [`normalize_array`], which picks the rule from
-/// the PHP minor and declines to guess; use this only where the rule is known
-/// or the result isn't a proof-layer premise.
+/// Resolve array entries in order: next-int assignment for `Auto` keys,
+/// **last-wins** for duplicates (PHP semantics, insertion-ordered). Stops at the
+/// first key the source does not spell, since every entry after it has an
+/// unknown position; [`normalize_array`] declines such a literal outright, and
+/// only the cosmetic `render_array` reads the prefix.
 ///
 /// `None` when an omitted key follows a `PHP_INT_MAX` key: PHP throws there
 /// instead of appending, so the literal builds no array to resolve.
 #[must_use]
-pub fn normalize_array_with(
-    items: &[(ArrayKey, ArgValue)],
-    rule: NextIntRule,
-) -> Option<Vec<(NormKey, ArgValue)>> {
+fn normalize_entries(items: &[(ArrayKey, ArgValue)]) -> Option<Vec<(NormKey, ArgValue)>> {
     let mut out: Vec<(NormKey, ArgValue)> = Vec::with_capacity(items.len());
     // PHP's next auto-index: one past the largest integer key seen so far,
     // explicit or auto (verified: `[5=>'a',5=>'b','c']` → 5, 6). `None` → 0.
@@ -1265,13 +1200,10 @@ pub fn normalize_array_with(
     for (k, v) in items {
         let key = match k {
             ArrayKey::Auto => {
-                let i = next_auto_index(max_seen, rule)?;
+                let i = next_auto_index(max_seen)?;
                 max_seen = Some(max_seen.map_or(i, |m| m.max(i)));
                 NormKey::Int(i)
             }
-            // Unreachable through `normalize_array`, which declines a literal
-            // holding one (issue #336). Stopping here is the honest total
-            // answer — entries after an unknown key have unknown positions.
             ArrayKey::Expr(_) => return Some(out),
             ArrayKey::Int(i) => {
                 max_seen = Some(max_seen.map_or(*i, |m| m.max(*i)));
@@ -1290,29 +1222,18 @@ pub fn normalize_array_with(
 }
 
 /// Resolve an array literal's raw `(ArrayKey, value)` entries to their PHP
-/// runtime key→value map, picking the next-auto-index rule from the project's
-/// PHP minor (ADR-0049 A12; `Folder::php_minor()`'s `(major, minor)`, `None`
-/// if unanswered). Returns `None` for a key the source does not spell (issue
-/// #336), for an omitted key past a `PHP_INT_MAX` key (PHP throws, so there is
-/// no array), and when the minor is unknown *and* the literal straddles the 8.3
-/// rule change; version-independent literals still answer.
+/// runtime key→value map. The answer is the same on every supported PHP minor
+/// (ADR-0049 A22), so no version is asked for. Returns `None` for a key the
+/// source does not spell (issue #336) and for an omitted key past a
+/// `PHP_INT_MAX` key (PHP throws, so there is no array).
 #[must_use]
-pub fn normalize_array(
-    items: &[(ArrayKey, ArgValue)],
-    php_minor: Option<(u16, u16)>,
-) -> Option<Vec<(NormKey, ArgValue)>> {
-    // A key the source did not spell as a literal is unresolvable under EVERY
-    // rule (issue #336) — it may be an integer or collide with a written key,
-    // so no PHP version resolves it; checked before consulting the minor.
+pub fn normalize_array(items: &[(ArrayKey, ArgValue)]) -> Option<Vec<(NormKey, ArgValue)>> {
+    // A key the source did not spell as a literal is unresolvable (issue #336):
+    // it may be an integer or collide with a written key.
     if items.iter().any(|(k, _)| matches!(k, ArrayKey::Expr(_))) {
         return None;
     }
-    match php_minor {
-        Some(m) => normalize_array_with(items, NextIntRule::for_minor(m)),
-        None if next_int_is_version_dependent(items) => None,
-        // The rules agree on this literal, so either one resolves it.
-        None => normalize_array_with(items, NextIntRule::MaxPlusOne),
-    }
+    normalize_entries(items)
 }
 
 /// The positional arguments a **spread operand** contributes, or `None` when the
@@ -1345,12 +1266,6 @@ pub fn normalize_array(
 /// - Key normalization is PHP's own, so `...[true => 1]` and `...["1" => 1]`
 ///   both spread positionally — [`ArrayKey`] already folds them to `Int`.
 ///
-/// The PHP minor is deliberately not a parameter: [`normalize_array`] is asked
-/// with `None`, which answers only for literals every supported minor resolves
-/// alike and declines the negative-key edge the 8.3 next-auto-index rule change
-/// splits. A spread that lands on a different position under a different minor
-/// is not one whose arguments the source names.
-///
 /// Shaped for reuse at the **array-literal** seam (`[1, 2, ...[3, 4, 5], 6]`),
 /// which flattens the same operand into an enclosing literal's entries rather
 /// than into an argument list; that seam is a separate slice and is not wired up
@@ -1358,7 +1273,7 @@ pub fn normalize_array(
 #[must_use]
 pub fn flatten_spread_operand(operand: &ArgValue) -> Option<Vec<ArgValue>> {
     let ArgValue::Array(items) = operand else { return None };
-    let normalized = normalize_array(items, None)?;
+    let normalized = normalize_array(items)?;
     if normalized.iter().any(|(k, _)| matches!(k, NormKey::Str(_))) {
         return None;
     }
@@ -1412,18 +1327,11 @@ pub struct DuplicateArrayKey {
 /// key (variable, call, spread, destructuring hole) skips itself and every
 /// `Auto` element after it — silence, not a guess. So does an `Auto` element
 /// past a `PHP_INT_MAX` key: PHP throws there rather than overwrite, so it
-/// shadows nothing. `php_minor` selects the rule as [`normalize_array`] does;
-/// `None` runs both in parallel per `Auto` element until they disagree. Keys
-/// compare as **byte strings** (ADR-0080): four distinct invalid-UTF-8 bytes are
-/// four distinct keys, unlike pre-[`PhpStr`].
+/// shadows nothing. Keys compare as **byte strings** (ADR-0080): four distinct
+/// invalid-UTF-8 bytes are four distinct keys, unlike pre-[`PhpStr`].
 #[must_use]
-pub fn duplicate_array_keys(
-    site: &ArrayLiteralSite,
-    php_minor: Option<(u16, u16)>,
-) -> Vec<DuplicateArrayKey> {
-    let known_rule = php_minor.map(NextIntRule::for_minor);
-    let mut max_plus_one: Option<i64> = None;
-    let mut max_floor_zero: Option<i64> = None;
+pub fn duplicate_array_keys(site: &ArrayLiteralSite) -> Vec<DuplicateArrayKey> {
+    let mut max_seen: Option<i64> = None;
     let mut poisoned = false;
     let mut last_seen: HashMap<NormKey, Span> = HashMap::new();
     let mut out = Vec::new();
@@ -1437,31 +1345,18 @@ pub fn duplicate_array_keys(
                 None
             }
             Some(ArrayKey::Int(i)) => {
-                max_plus_one = Some(max_plus_one.map_or(*i, |m| m.max(*i)));
-                max_floor_zero = Some(max_floor_zero.map_or(*i, |m| m.max(*i)));
+                max_seen = Some(max_seen.map_or(*i, |m| m.max(*i)));
                 Some(NormKey::Int(*i))
             }
             Some(ArrayKey::Str(s)) => Some(NormKey::Str(s.clone())),
             Some(ArrayKey::Auto) if poisoned => None,
             Some(ArrayKey::Auto) => {
-                let a = next_auto_index(max_plus_one, NextIntRule::MaxPlusOne);
-                let b = next_auto_index(max_floor_zero, NextIntRule::FloorAtZero);
-                if let Some(a) = a {
-                    max_plus_one = Some(max_plus_one.map_or(a, |m| m.max(a)));
-                }
-                if let Some(b) = b {
-                    max_floor_zero = Some(max_floor_zero.map_or(b, |m| m.max(b)));
-                }
-                let key = match known_rule {
-                    Some(NextIntRule::MaxPlusOne) => a,
-                    Some(NextIntRule::FloorAtZero) => b,
-                    None if a == b => a,
-                    None => None,
-                };
-                // No key — the rules split on an unknown minor, or PHP throws
-                // past `PHP_INT_MAX` — leaves no later `Auto` a position either.
-                if key.is_none() {
-                    poisoned = true;
+                let key = next_auto_index(max_seen);
+                match key {
+                    Some(i) => max_seen = Some(max_seen.map_or(i, |m| m.max(i))),
+                    // PHP throws past `PHP_INT_MAX`, which leaves no later
+                    // `Auto` a position either.
+                    None => poisoned = true,
                 }
                 key.map(NormKey::Int)
             }
@@ -1673,10 +1568,7 @@ impl ArgValue {
 /// `['k' => 1]`, list-shaped arrays without keys, truncating with `…` after the
 /// first five entries.
 fn render_array(items: &[(ArrayKey, ArgValue)]) -> String {
-    // Rendering is cosmetic — never a proof-layer premise — so it takes the
-    // pinned rule unconditionally (ADR-0049 A12) rather than threading the
-    // project minor through `render()`'s config-free surface.
-    let Some(normalized) = normalize_array_with(items, NextIntRule::MaxPlusOne) else {
+    let Some(normalized) = normalize_entries(items) else {
         // An omitted key past `PHP_INT_MAX` makes PHP throw, so the literal
         // builds no array to normalize; it renders as written.
         return join_array_parts(items.iter().map(|(k, v)| match k {

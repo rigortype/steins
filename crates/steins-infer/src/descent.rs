@@ -957,7 +957,7 @@ pub(crate) fn descend(
     let mut bound_env: HashMap<String, Known> = bound
         .into_iter()
         .filter_map(|(name, value, strat)| {
-            singleton_fact(&value, cx.php_minor)
+            singleton_fact(&value)
                 .map(|fact| (name, Known::value_strat(fact, 0, Some(provenance.to_owned()), strat)))
         })
         .collect();

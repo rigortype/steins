@@ -32,6 +32,10 @@ fn require_target(raw: &str, floor: (u16, u16), ceiling: Option<(u16, u16)>) -> 
 /// `-5, 0` on 8.1.32 and 8.2.33, and `-5, -4` from 8.3.33.
 const APPEND: &str = "<?php\n$a = [];\n$a[-5] = \"a\";\n$a[] = \"b\";\n\\PHPStan\\dumpType($a);\n";
 
+/// The literal spelling of the same keys, which lands `"b"` on `-4` on every
+/// minor from 8.0 up (`php -r` on 8.1.32, 8.2.33, 8.5.10).
+const LITERAL: &str = "<?php\n$a = [-5 => \"a\", \"b\"];\n\\PHPStan\\dumpType($a);\n";
+
 /// [`APPEND`] when its index declines: Amendment J's write at an unnamed integer key,
 /// which may even have landed on `-5`.
 const DECLINED: &str = "dumped type: non-empty-array{-5: 'a'|'b', ...<int, 'b'>}";
@@ -43,6 +47,15 @@ fn dump_under(layout: ProjectLayout, src: &str) -> String {
     let project = Project::new(&db, vec![file], layout, steins_db::PluginFacts::none());
     let ds = check_project_with_runtime(&db, project, &mut NoFold, true);
     ds.into_iter().find(|d| d.id == "debug.type").expect("one dump").message
+}
+
+fn every_layout() -> [(&'static str, ProjectLayout); 4] {
+    [
+        ("^8.1", layout_with(Some(require_target("^8.1", (8, 1), Some((8, u16::MAX)))))),
+        (">=8.1 <8.3", layout_with(Some(require_target(">=8.1 <8.3", (8, 1), Some((8, 2)))))),
+        ("^8.3", layout_with(Some(require_target("^8.3", (8, 3), Some((8, u16::MAX)))))),
+        ("none", layout_with(None)),
+    ]
 }
 
 #[test]
@@ -78,4 +91,13 @@ fn no_target_and_no_runtime_still_declines() {
     // An append that lands at 0 or above resolves under the same view.
     let src = "<?php\n$a = [1, 2];\n$a[] = 3;\n\\PHPStan\\dumpType($a);\n";
     assert_eq!(dump_under(layout_with(None), src), "dumped type: list{1, 2, 3}");
+}
+
+#[test]
+fn a_negative_key_literal_resolves_under_every_target() {
+    // The literal has one landing on every supported minor, so no target can split it.
+    for (target, layout) in every_layout() {
+        let dumped = dump_under(layout, LITERAL);
+        assert_eq!(dumped, "dumped type: array{-5: 'a', -4: 'b'}", "target {target}");
+    }
 }

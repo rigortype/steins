@@ -229,10 +229,10 @@ pub(crate) fn resource_call_effects(
                 // closes the entry the element names, by the same id transition a
                 // bare `$h` takes. An offset whose key is not literal names no
                 // place and falls to the escape leg below, as it does today.
-                value if crate::offsets::place_of_static(cx, value)
+                value if crate::offsets::place_of_static(value)
                     .is_some_and(|p| store.res_of(&p).is_some()) =>
                 {
-                    let place = crate::offsets::place_of_static(cx, value)
+                    let place = crate::offsets::place_of_static(value)
                         .expect("the guard just resolved one");
                     let res = store.res_of(&place).expect("the guard just found one");
                     let id = store.id_of(&place).expect("a bound resource has an id");

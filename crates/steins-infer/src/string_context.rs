@@ -197,7 +197,7 @@ fn string_context_fact(
         return Some((known.fact.clone()?, known.stratum));
     }
     let (lit, stratum) = w.cx.resolve_literal_strat(value, env, w.scope.poisoned, folder)?;
-    Some((singleton_fact(&lit, w.cx.php_minor)?, stratum))
+    Some((singleton_fact(&lit)?, stratum))
 }
 
 /// The **exact** class of a string-context operand that is an object, or `None`.

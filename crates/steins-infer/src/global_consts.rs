@@ -377,7 +377,7 @@ fn same_file_fact(cx: &Cx, fqn: &str) -> Option<Option<(Fact, Stratum)>> {
     if decls.next().is_some() || decl.conditional {
         return Some(None);
     }
-    let fact = decl.value.as_ref().and_then(|v| singleton_fact(v, cx.php_minor));
+    let fact = decl.value.as_ref().and_then(singleton_fact);
     Some(fact.map(|f| (f, Stratum::Verified)))
 }
 

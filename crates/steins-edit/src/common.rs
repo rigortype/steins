@@ -184,12 +184,8 @@ pub fn has_source_hint(source: &str, param: &Param) -> bool {
 
 /// Convert a lowered [`ArgValue`] to a concrete domain [`Val`], or `None` when
 /// it is not a self-evident literal (a `$var`, a call, a `new`, a closure, …).
-/// Arrays are literal iff every element is.
-///
-/// No PHP minor is reachable here (the sweeps carry no [`steins_infer::Folder`]),
-/// so `None` goes to [`normalize_array`]. ADR-0049 A12: the conservative leg —
-/// an array literal straddling the 8.3 next-int change refuses rather than
-/// guess a key; threading the minor through would tighten this later.
+/// Arrays are literal iff every element is. No PHP minor is needed: an array
+/// literal resolves its keys alike on every supported minor (ADR-0049 A22).
 #[must_use]
 pub fn arg_to_val(v: &ArgValue) -> Option<Val> {
     match v {
@@ -199,7 +195,7 @@ pub fn arg_to_val(v: &ArgValue) -> Option<Val> {
         ArgValue::Bool(b) => Some(Val::Bool(*b)),
         ArgValue::Null => Some(Val::Null),
         ArgValue::Array(items) => {
-            let normalized = normalize_array(items, None)?;
+            let normalized = normalize_array(items)?;
             let mut out = Vec::with_capacity(normalized.len());
             for (k, e) in normalized {
                 out.push((norm_key(&k), arg_to_val(&e)?));

@@ -285,7 +285,7 @@ pub(crate) fn transfer_arg_known(
     if let ArgValue::Array(items) = value
         && let Some((lit, strat)) = cx
             .resolve_literal_strat(value, env, false, folder)
-            .and_then(|(l, s)| Some((singleton_fact(&l, cx.php_minor)?, s)))
+            .and_then(|(l, s)| Some((singleton_fact(&l)?, s)))
             .or_else(|| array_literal_fact(cx, folder, items, env, false, store))
     {
         return Some((lit, strat.min(value_stratum(cx, value, env, store))));
@@ -305,7 +305,7 @@ pub(crate) fn transfer_arg_known(
         return global_const_fact(cx, r);
     }
     let lit = cx.resolve_literal(value, env, false, folder)?;
-    Some((singleton_fact(&lit, cx.php_minor)?, value_stratum(cx, value, env, store)))
+    Some((singleton_fact(&lit)?, value_stratum(cx, value, env, store)))
 }
 
 /// The declared contract lane as ONE fact, with the weakest stratum any arm of it
@@ -363,7 +363,7 @@ fn key_exists_verdict(
     let [key_arg, subject] = args else { return None };
     // The array-key cast is PHP's, not ours: `$a[5]` and `$a["5"]` are one key,
     // and `offset_key_of` is the same primitive the read and write sides use.
-    let key = crate::offsets::offset_key_of(&val_of(key_arg, cx.php_minor)?)?;
+    let key = crate::offsets::offset_key_of(&val_of(key_arg)?)?;
     let Fact::Shape { shape, nullable: false } =
         transfer_arg_fact(cx, folder, subject, env, store)?
     else {

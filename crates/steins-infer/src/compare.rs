@@ -31,7 +31,7 @@ pub(crate) fn php_truthy(v: &ArgValue) -> Option<bool> {
 
 /// Strict identity `===`: same runtime type AND equal value. Different concrete
 /// runtime types are a definite non-identity; a non-concrete operand is `None`.
-pub(crate) fn php_identical(a: &ArgValue, b: &ArgValue, php_minor: Option<(u16, u16)>) -> Option<bool> {
+pub(crate) fn php_identical(a: &ArgValue, b: &ArgValue) -> Option<bool> {
     use ArgValue::{Array, Bool, Float, Int, Null, Str};
     match (a, b) {
         (Int(x), Int(y)) => Some(x == y),
@@ -39,7 +39,7 @@ pub(crate) fn php_identical(a: &ArgValue, b: &ArgValue, php_minor: Option<(u16, 
         (Str(x), Str(y)) => Some(x == y),
         (Bool(x), Bool(y)) => Some(x == y),
         (Null, Null) => Some(true),
-        (Array(_), Array(_)) => php_array_identical(a, b, php_minor),
+        (Array(_), Array(_)) => php_array_identical(a, b),
         _ if is_concrete(a) && is_concrete(b) => Some(false),
         _ => None,
     }
@@ -47,13 +47,13 @@ pub(crate) fn php_identical(a: &ArgValue, b: &ArgValue, php_minor: Option<(u16, 
 
 /// Deep `===` of two array literals: same length, same key order, element-wise
 /// identical. A non-concrete element makes the result `None`.
-fn php_array_identical(a: &ArgValue, b: &ArgValue, php_minor: Option<(u16, u16)>) -> Option<bool> {
+fn php_array_identical(a: &ArgValue, b: &ArgValue) -> Option<bool> {
     let (ArgValue::Array(ai), ArgValue::Array(bi)) = (a, b) else { return None };
-    // Keys the project's PHP minor cannot pin down make the whole verdict
-    // undecidable (ADR-0049 A12) — `===` compares key order, so a guessed key
-    // would forge a `===` premise.
-    let na = normalize_array(ai, php_minor)?;
-    let nb = normalize_array(bi, php_minor)?;
+    // Keys `normalize_array` cannot pin down (a key the source does not spell)
+    // make the whole verdict undecidable — `===` compares key order, so a
+    // guessed key would forge a `===` premise.
+    let na = normalize_array(ai)?;
+    let nb = normalize_array(bi)?;
     if na.len() != nb.len() {
         return Some(false);
     }
@@ -61,7 +61,7 @@ fn php_array_identical(a: &ArgValue, b: &ArgValue, php_minor: Option<(u16, u16)>
         if ka != kb {
             return Some(false);
         }
-        match php_identical(va, vb, php_minor) {
+        match php_identical(va, vb) {
             Some(true) => {}
             Some(false) => return Some(false),
             None => return None,
@@ -100,7 +100,7 @@ fn is_concrete(v: &ArgValue) -> bool {
 /// byte-wise; an array is unequal to any non-null, non-bool scalar. Uncovered
 /// cells (a `float` vs non-numeric string; non-trivial arrays) return `None` →
 /// `Maybe`.
-pub(crate) fn php_loose_eq(a: &ArgValue, b: &ArgValue, php_minor: Option<(u16, u16)>) -> Option<bool> {
+pub(crate) fn php_loose_eq(a: &ArgValue, b: &ArgValue) -> Option<bool> {
     use ArgValue::{Array, Bool, Float, Int, Null, Str};
     // A `bool` on either side casts both operands to bool (subsumes null==bool).
     if matches!(a, Bool(_)) || matches!(b, Bool(_)) {
@@ -122,7 +122,7 @@ pub(crate) fn php_loose_eq(a: &ArgValue, b: &ArgValue, php_minor: Option<(u16, u
         (Float(f), Str(s)) | (Str(s), Float(f)) => php_float_str_eq(*f, s),
         (Str(x), Str(y)) => Some(php_str_eq(x, y)),
 
-        (Array(x), Array(y)) => php_array_loose_eq(x, y, php_minor),
+        (Array(x), Array(y)) => php_array_loose_eq(x, y),
         // An array is never loosely equal to a (non-null, non-bool) scalar.
         (Array(_), Int(_) | Float(_) | Str(_)) | (Int(_) | Float(_) | Str(_), Array(_)) => {
             Some(false)
@@ -177,12 +177,11 @@ fn php_str_eq(x: &PhpStr, y: &PhpStr) -> bool {
 fn php_array_loose_eq(
     x: &[(ArrayKey, ArgValue)],
     y: &[(ArrayKey, ArgValue)],
-    php_minor: Option<(u16, u16)>,
 ) -> Option<bool> {
     // As in `php_array_identical`: unproven keys make `==` undecidable, since the
-    // comparison is key-set-based (ADR-0049 A12).
-    let nx = normalize_array(x, php_minor)?;
-    let ny = normalize_array(y, php_minor)?;
+    // comparison is key-set-based.
+    let nx = normalize_array(x)?;
+    let ny = normalize_array(y)?;
     if nx.len() != ny.len() {
         return Some(false);
     }
@@ -190,7 +189,7 @@ fn php_array_loose_eq(
         let Some((_, vb)) = ny.iter().find(|(k2, _)| k2 == k) else {
             return Some(false);
         };
-        match php_loose_eq(va, vb, php_minor) {
+        match php_loose_eq(va, vb) {
             Some(true) => {}
             Some(false) => return Some(false),
             None => return None,
@@ -206,7 +205,7 @@ mod domain_tests {
     //! settled PHP comparison primitives.
     use steins_domain::Certainty;
     use crate::env::Known;
-    use steins_domain::{Base, Fact, Val};
+    use steins_domain::{Base, Fact, Key, Val};
     use steins_domain::PhpStr;
     use crate::compare::{php_identical, php_loose_eq, php_truthy};
     use crate::env::singleton_fact;
@@ -214,7 +213,7 @@ mod domain_tests {
 
     fn sing(v: ArgValue) -> Fact {
         // Scalars only here — no array literal, so the minor is immaterial.
-        singleton_fact(&v, None).expect("literal converts")
+        singleton_fact(&v).expect("literal converts")
     }
 
     #[test]
@@ -274,20 +273,20 @@ mod domain_tests {
         use ArgValue::{Bool, Int, Null, Str};
         let s = |x: &str| Str(x.into());
         // A representative slice of the recorded PHP 8.5.8 table.
-        assert_eq!(php_loose_eq(&Null, &Null, Some((8, 5))), Some(true));
-        assert_eq!(php_loose_eq(&Null, &Int(0), Some((8, 5))), Some(true));
-        assert_eq!(php_loose_eq(&Null, &s(""), Some((8, 5))), Some(true));
-        assert_eq!(php_loose_eq(&Null, &s("0"), Some((8, 5))), Some(false)); // the PHP 8 trap
-        assert_eq!(php_loose_eq(&Null, &Bool(false), Some((8, 5))), Some(true));
-        assert_eq!(php_loose_eq(&Bool(false), &s("0"), Some((8, 5))), Some(true));
-        assert_eq!(php_loose_eq(&Bool(false), &s("abc"), Some((8, 5))), Some(false));
-        assert_eq!(php_loose_eq(&Bool(true), &s("abc"), Some((8, 5))), Some(true));
-        assert_eq!(php_loose_eq(&Int(0), &s("abc"), Some((8, 5))), Some(false)); // PHP 8, not PHP 7
-        assert_eq!(php_loose_eq(&Int(0), &s("0"), Some((8, 5))), Some(true));
-        assert_eq!(php_loose_eq(&Int(0), &s(""), Some((8, 5))), Some(false));
-        assert_eq!(php_loose_eq(&s("0"), &s(""), Some((8, 5))), Some(false));
-        assert_eq!(php_loose_eq(&s("5"), &s("5"), Some((8, 5))), Some(true));
-        assert_eq!(php_loose_eq(&s("5"), &Int(5), Some((8, 5))), Some(true));
+        assert_eq!(php_loose_eq(&Null, &Null), Some(true));
+        assert_eq!(php_loose_eq(&Null, &Int(0)), Some(true));
+        assert_eq!(php_loose_eq(&Null, &s("")), Some(true));
+        assert_eq!(php_loose_eq(&Null, &s("0")), Some(false)); // the PHP 8 trap
+        assert_eq!(php_loose_eq(&Null, &Bool(false)), Some(true));
+        assert_eq!(php_loose_eq(&Bool(false), &s("0")), Some(true));
+        assert_eq!(php_loose_eq(&Bool(false), &s("abc")), Some(false));
+        assert_eq!(php_loose_eq(&Bool(true), &s("abc")), Some(true));
+        assert_eq!(php_loose_eq(&Int(0), &s("abc")), Some(false)); // PHP 8, not PHP 7
+        assert_eq!(php_loose_eq(&Int(0), &s("0")), Some(true));
+        assert_eq!(php_loose_eq(&Int(0), &s("")), Some(false));
+        assert_eq!(php_loose_eq(&s("0"), &s("")), Some(false));
+        assert_eq!(php_loose_eq(&s("5"), &s("5")), Some(true));
+        assert_eq!(php_loose_eq(&s("5"), &Int(5)), Some(true));
     }
 
     #[test]
@@ -305,62 +304,45 @@ mod domain_tests {
     #[test]
     fn identical_is_type_strict() {
         use ArgValue::{Float, Int};
-        assert_eq!(php_identical(&Int(5), &Int(5), Some((8, 5))), Some(true));
-        assert_eq!(php_identical(&Int(5), &Float(5.0), Some((8, 5))), Some(false)); // 5 === 5.0 is false
+        assert_eq!(php_identical(&Int(5), &Int(5)), Some(true));
+        assert_eq!(php_identical(&Int(5), &Float(5.0)), Some(false)); // 5 === 5.0 is false
     }
 
-    /// ADR-0049 A12: the next-auto-index rule for negative keys changed in PHP
-    /// 8.3, so an array `===` verdict is a function of the *project's* minor —
-    /// and is unproven when no minor was reported.
+    /// ADR-0049 A22: an omitted key after a negative one lands one past it on
+    /// every supported minor, so an array `===` verdict over such a literal is
+    /// decided with no minor at all.
     #[test]
-    fn negative_key_arrays_compare_per_the_project_minor() {
+    fn negative_key_arrays_compare_on_every_minor() {
         use steins_syntax::ArrayKey;
         let s = |x: &str| ArgValue::Str(x.into());
         let arr = |items: Vec<(ArrayKey, ArgValue)>| ArgValue::Array(items);
 
-        // `[-5 => 'a', 'b']` — the omitted key is where the two rules disagree.
+        // `[-5 => 'a', 'b']` against its two candidate landings, written out.
         let auto = arr(vec![(ArrayKey::Int(-5), s("a")), (ArrayKey::Auto, s("b"))]);
-        // `[-5 => 'a', -4 => 'b']` (the 8.3+ landing) and `[-5 => 'a', 0 => 'b']`
-        // (the pre-8.3 landing), both written with explicit keys.
         let at_minus_4 = arr(vec![(ArrayKey::Int(-5), s("a")), (ArrayKey::Int(-4), s("b"))]);
         let at_zero = arr(vec![(ArrayKey::Int(-5), s("a")), (ArrayKey::Int(0), s("b"))]);
 
-        // Witnessed on PHP 8.5.8:
-        //   php -r 'var_export([-5=>"a","b"] === [-5=>"a",-4=>"b"]);' → true
-        //   php -r 'var_export([-5=>"a","b"] === [-5=>"a",0=>"b"]);'  → false
-        assert_eq!(php_identical(&auto, &at_minus_4, Some((8, 5))), Some(true));
-        assert_eq!(php_identical(&auto, &at_zero, Some((8, 5))), Some(false));
-
-        // A project on 8.1/8.2 floors the auto index at 0 — the verdicts invert.
-        for minor in [(8, 1), (8, 2)] {
-            assert_eq!(php_identical(&auto, &at_minus_4, Some(minor)), Some(false), "{minor:?}");
-            assert_eq!(php_identical(&auto, &at_zero, Some(minor)), Some(true), "{minor:?}");
-        }
-
-        // No reported minor: unproven, not guessed. This is the leg that keeps a
-        // wrong key out of the proof layer.
-        assert_eq!(php_identical(&auto, &at_minus_4, None), None);
-        assert_eq!(php_identical(&auto, &at_zero, None), None);
-        assert_eq!(php_loose_eq(&auto, &at_minus_4, None), None);
-
-        // A version-independent literal still decides under an unknown minor —
-        // the widening stays narrow.
-        let list = arr(vec![(ArrayKey::Auto, s("a"))]);
-        let list_explicit = arr(vec![(ArrayKey::Int(0), s("a"))]);
-        assert_eq!(php_identical(&list, &list_explicit, None), Some(true));
+        // `[-5=>"a","b"] === [-5=>"a",-4=>"b"]` is true and `... === [-5=>"a",0=>"b"]`
+        // false through `php -r` on 8.1.32, 8.2.33 and 8.5.10 alike.
+        assert_eq!(php_identical(&auto, &at_minus_4), Some(true));
+        assert_eq!(php_identical(&auto, &at_zero), Some(false));
+        assert_eq!(php_loose_eq(&auto, &at_minus_4), Some(true));
+        assert_eq!(php_loose_eq(&auto, &at_zero), Some(false));
     }
 
-    /// The same premise on the fact side: an unresolvable key drops the
-    /// `Val::Array` singleton rather than recording a guessed one.
+    /// The same resolution on the fact side: the literal keeps its `Val::Array`
+    /// singleton, with the omitted key at `-4`.
     #[test]
-    fn unproven_negative_key_drops_the_singleton_fact() {
+    fn a_negative_key_literal_keeps_its_singleton_fact() {
         use steins_syntax::ArrayKey;
         let arr = ArgValue::Array(vec![
             (ArrayKey::Int(-5), ArgValue::Str("a".into())),
             (ArrayKey::Auto, ArgValue::Str("b".into())),
         ]);
-        assert!(singleton_fact(&arr, None).is_none());
-        assert!(singleton_fact(&arr, Some((8, 5))).is_some());
-        assert!(singleton_fact(&arr, Some((8, 1))).is_some());
+        let Some(Fact::Singleton(Val::Array(entries))) = singleton_fact(&arr) else {
+            panic!("a fully literal array is a singleton");
+        };
+        let keys: Vec<&Key> = entries.iter().map(|(k, _)| k).collect();
+        assert_eq!(keys, vec![&Key::Int(-5), &Key::Int(-4)]);
     }
 }
