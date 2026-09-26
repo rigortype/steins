@@ -13,7 +13,8 @@
 # let the shim under test fetch a real binary. Only the packaging origin is
 # local — the download, the checksum, and the exec are all real.
 #
-# Path-filtered, because none of this is affected by a Rust-only commit.
+# Path-filtered, because none of this is affected by a Rust-only commit; a
+# weekly run catches what changes outside the repository.
 name: composer
 
 # NB: the two path lists are duplicated on purpose. GitHub's workflow parser
@@ -36,6 +37,12 @@ on:
   # The channel depends on release assets that this workflow does not produce.
   # A manual run is how you check the channel still works after a release.
   workflow_dispatch:
+  # It also depends on runner images, setup-php, and Homebrew, none of which
+  # touch these paths when they change. Without a clock, an external break
+  # surfaces on whichever unrelated PR next edits .gitattributes, and gets
+  # blamed on it (#798). Scheduled runs use master.
+  schedule:
+    - cron: "23 5 * * 1" # Mondays, 05:23 UTC
 
 permissions:
   contents: read # `gh release list`, to find a tag that actually has binaries
