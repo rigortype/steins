@@ -10,7 +10,9 @@
 /// trace IR carries (ADR-0027), plus an **array literal** of them (issue #39).
 /// Not a JSON object: PHP array semantics JSON cannot express are left to the
 /// runtime (ADR-0004). `None` is an absent key (`[$a, $b]`), next-int assigned by
-/// `$arr[] =` (PHP 8.3 changed the negative-key edge); duplicates resolve last-wins.
+/// `$arr[] =` onto an array the runner autovivifies rather than starts at `[]`, so
+/// a negative key counts as it does in the literal (ADR-0049 A22); duplicates
+/// resolve last-wins.
 #[derive(Debug, Clone, PartialEq)]
 pub enum FoldArg {
     Int(i64),

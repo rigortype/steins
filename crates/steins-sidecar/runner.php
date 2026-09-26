@@ -714,10 +714,16 @@ function steins_decode_args(array $args)
  * decode too.
  *
  * **The key rules are PHP's, on purpose** (ADR-0004): an absent key is appended
- * with `$arr[] =`, so this engine's own next-int rule assigns it — including the
- * negative-key edge PHP 8.3 changed — and a repeated key is a plain assignment,
- * so duplicates resolve by this engine's own last-wins. Nothing here reimplements
- * array semantics; that is the entire reason folding runs on the project's PHP.
+ * with `$arr[] =`, so this engine's own next-int rule assigns it, and a repeated
+ * key is a plain assignment, so duplicates resolve by this engine's own
+ * last-wins. Nothing here reimplements array semantics; that is the entire reason
+ * folding runs on the project's PHP.
+ *
+ * `$arr` starts as `null`, not `[]`, so the first write autovivifies a fresh
+ * array the way a literal is built. Before PHP 8.3 the shared empty array `[]`
+ * kept a next key of `0` through a negative write (php-src GH-11154):
+ * `$a = []; $a[-5] = 'a'; $a[] = 'b';` puts `'b'` at `0` on 8.1 and 8.2, where
+ * the literal `[-5 => 'a', 'b']` puts it at `-4` (ADR-0049 A22).
  *
  * The return is wrapped in a one-element array so that a successfully decoded
  * `null` value is distinguishable from a decode failure (which returns null).
@@ -733,7 +739,7 @@ function steins_decode_arg($a)
     if (!is_array($a) || !array_key_exists('__steins_array', $a) || !is_array($a['__steins_array'])) {
         return null;
     }
-    $arr = [];
+    $arr = null;
     foreach ($a['__steins_array'] as $entry) {
         if (!is_array($entry) || !array_key_exists(0, $entry) || !array_key_exists(1, $entry)) {
             return null;
@@ -751,7 +757,7 @@ function steins_decode_arg($a)
             return null;
         }
     }
-    return [$arr];
+    return [$arr ?? []];
 }
 
 /**
