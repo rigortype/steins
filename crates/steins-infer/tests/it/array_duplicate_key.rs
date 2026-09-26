@@ -215,6 +215,45 @@ fn version_dependent_auto_index_is_silent_on_a_pre_8_3_minor() {
     assert!(d.is_empty(), "{d:#?}");
 }
 
+// The auto-index past `PHP_INT_MAX` (phpstan-src `bug-15248.php` / `bug-15244.php`)
+
+#[test]
+fn an_omitted_key_past_php_int_max_shadows_nothing() {
+    // php -r on 8.5.10 and 8.2.33: "Cannot add element to the array as the next
+    // element is already occupied". PHP throws instead of overwriting the
+    // `PHP_INT_MAX` entry, so no key is shadowed, under any minor.
+    for src in [
+        "<?php\n$a = [9223372036854775807 => 1, 2];\n",
+        "<?php\n$a = [9223372036854775807 => 1, 2, 3];\n",
+        "<?php\n$a = [9223372036854775806 => 1, 2, 3];\n",
+    ] {
+        assert!(dups(src).is_empty(), "{src}");
+        for minor in [(8, 1), (8, 5)] {
+            assert!(dups_with_minor(src, minor).is_empty(), "{src} on {minor:?}");
+        }
+    }
+}
+
+#[test]
+fn an_omitted_key_can_still_take_php_int_max_itself() {
+    // Result on PHP 8.5.10: [9223372036854775806 => 1, 9223372036854775807 => 3].
+    let src = "<?php\n$a = [\n    9223372036854775806 => 1,\n    2,\n    9223372036854775807 => 3,\n];\n";
+    let d = dups(src);
+    assert_eq!(d.len(), 1, "{d:#?}");
+    assert_eq!(d[0].line, 5);
+    assert!(d[0].message.contains("line 4"), "{}", d[0].message);
+}
+
+#[test]
+fn written_keys_after_the_throwing_element_are_still_compared() {
+    // PHP throws at `2` before the `'a'` entries are built, but the literal still
+    // spells `'a'` twice — the same textual reading as a proven-dead region.
+    let src = "<?php\n$a = [9223372036854775807 => 1, 2, 'a' => 1, 'a' => 2];\n";
+    let d = dups(src);
+    assert_eq!(d.len(), 1, "{d:#?}");
+    assert!(d[0].message.contains("'a'"), "{}", d[0].message);
+}
+
 // Multiple shadowing, nesting, and legacy array() syntax
 
 #[test]

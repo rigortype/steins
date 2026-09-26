@@ -26,6 +26,11 @@ fn norm_unknown(it: &[(ArrayKey, ArgValue)]) -> Vec<(NormKey, ArgValue)> {
     normalize_array(it, None).expect("version-independent literal resolves without a minor")
 }
 
+/// Normalize under a known rule a literal whose every omitted key has a next index.
+fn norm_with(it: &[(ArrayKey, ArgValue)], rule: NextIntRule) -> Vec<(NormKey, ArgValue)> {
+    normalize_array_with(it, rule).expect("no omitted key follows a PHP_INT_MAX key")
+}
+
 #[test]
 fn plain_list_uses_auto_keys() {
     let v = first_arg("<?php f(['a', 'b', 'c']);");
@@ -88,12 +93,12 @@ fn negative_key_next_int_splits_on_the_83_rule() {
     let it = items(&v);
     assert!(next_int_is_version_dependent(it));
 
-    let post = normalize_array_with(it, NextIntRule::MaxPlusOne);
+    let post = norm_with(it, NextIntRule::MaxPlusOne);
     assert_eq!(post[0].0, NormKey::Int(-5));
     assert_eq!(post[1].0, NormKey::Int(-4));
 
     // PHP < 8.3 floors the next auto-index at 0.
-    let pre = normalize_array_with(it, NextIntRule::FloorAtZero);
+    let pre = norm_with(it, NextIntRule::FloorAtZero);
     assert_eq!(pre[0].0, NormKey::Int(-5));
     assert_eq!(pre[1].0, NormKey::Int(0));
 }
@@ -141,7 +146,7 @@ fn next_int_tracks_the_running_max_not_the_last_key() {
 
     // php -r 'var_export([-5=>"a",-10=>"b","c"]);' → -5, -10, -4: max, not last.
     let v = first_arg("<?php f([-5 => 'a', -10 => 'b', 'c']);");
-    let post = normalize_array_with(items(&v), NextIntRule::MaxPlusOne);
+    let post = norm_with(items(&v), NextIntRule::MaxPlusOne);
     assert_eq!(post[2].0, NormKey::Int(-4));
 }
 
@@ -150,7 +155,7 @@ fn duplicate_negative_key_still_advances_the_index() {
     // php -r 'var_export([-5=>"a",-5=>"b","c"]);' on 8.5.8 → -5 => 'b', -4 => 'c'.
     // Last-wins folds the value; the key still counted toward the next index.
     let v = first_arg("<?php f([-5 => 'a', -5 => 'b', 'c']);");
-    let norm = normalize_array_with(items(&v), NextIntRule::MaxPlusOne);
+    let norm = norm_with(items(&v), NextIntRule::MaxPlusOne);
     assert_eq!(norm.len(), 2);
     assert_eq!(norm[0].0, NormKey::Int(-5));
     assert_eq!(norm[0].1, ArgValue::Str("b".into()));
@@ -162,7 +167,7 @@ fn auto_keys_climb_out_of_the_negatives() {
     // php -r 'var_export([-5=>"a","b",-1=>"z","c"]);' on 8.5.8
     //   → -5 => 'a', -4 => 'b', -1 => 'z', 0 => 'c'.
     let v = first_arg("<?php f([-5 => 'a', 'b', -1 => 'z', 'c']);");
-    let norm = normalize_array_with(items(&v), NextIntRule::MaxPlusOne);
+    let norm = norm_with(items(&v), NextIntRule::MaxPlusOne);
     let keys: Vec<_> = norm.iter().map(|(k, _)| k.clone()).collect();
     assert_eq!(
         keys,
@@ -196,10 +201,10 @@ fn adversarial_negative_key_shapes() {
         let v = first_arg(src);
         let it = items(&v);
         assert!(next_int_is_version_dependent(it), "{src}");
-        let post = normalize_array_with(it, NextIntRule::MaxPlusOne);
+        let post = norm_with(it, NextIntRule::MaxPlusOne);
         assert_eq!(post[2].0, NormKey::Int(-4), "{src}");
         // Pre-8.3 floors that same slot at 0.
-        assert_eq!(normalize_array_with(it, NextIntRule::FloorAtZero)[2].0, NormKey::Int(0), "{src}");
+        assert_eq!(norm_with(it, NextIntRule::FloorAtZero)[2].0, NormKey::Int(0), "{src}");
     }
 
     // Negative, then positive, then negative again, with autos throughout.
@@ -207,7 +212,7 @@ fn adversarial_negative_key_shapes() {
     let v = first_arg("<?php f([-5 => 'a', 'b', 10 => 'c', 'd', -1 => 'e', 'f']);");
     let it = items(&v);
     assert!(next_int_is_version_dependent(it));
-    let post = normalize_array_with(it, NextIntRule::MaxPlusOne);
+    let post = norm_with(it, NextIntRule::MaxPlusOne);
     let keys: Vec<_> = post.iter().map(|(k, _)| k.clone()).collect();
     assert_eq!(
         keys,
@@ -250,11 +255,59 @@ fn rendering_takes_the_pinned_rule_and_never_declines() {
     assert_eq!(v.render(), "[-5 => 'a', -4 => 'b']");
 
     assert_eq!(first_arg("<?php f(['a', 'b']);").render(), "['a', 'b']");
+
+    // PHP throws on this literal, so it has no normalized form: it renders as written.
+    let v = first_arg("<?php f([9223372036854775807 => 1, 'a' => 2, 3]);");
+    assert_eq!(v.render(), "[9223372036854775807 => 1, 'a' => 2, 3]");
+}
+
+/// PHP has no next key past `PHP_INT_MAX`: `[9223372036854775807 => 1, 2]`
+/// throws "Cannot add element to the array as the next element is already
+/// occupied" (`php -r` on 8.5.10 and 8.2.33, a variable item too), so the
+/// literal builds no array, and every rule declines rather than fold `2` onto a
+/// clamped key. phpstan-src's `bug-15248.php` drops the item instead
+/// (`array{9223372036854775807: 1}`), which PHP never produces either.
+#[test]
+fn an_omitted_key_past_php_int_max_declines_under_every_rule() {
+    for src in [
+        "<?php f([9223372036854775807 => 1, 2]);",
+        "<?php f([9223372036854775807 => 1, $x]);",
+        "<?php f([9223372036854775806 => 1, 2, 3]);",
+        "<?php f([-2 => 1, 9223372036854775807 => 2, 3]);",
+    ] {
+        let v = first_arg(src);
+        let it = items(&v);
+        // Both rules run out at the same element, so the minor cannot matter.
+        assert!(!next_int_is_version_dependent(it), "{src}");
+        assert_eq!(normalize_array_with(it, NextIntRule::MaxPlusOne), None, "{src}");
+        assert_eq!(normalize_array_with(it, NextIntRule::FloorAtZero), None, "{src}");
+        for minor in [None, Some((8, 1)), Some((8, 5))] {
+            assert_eq!(normalize_array(it, minor), None, "{src} on {minor:?}");
+        }
+    }
+}
+
+/// `PHP_INT_MAX` is still a key an omitted one can take, and a written key never
+/// needs a next one. Both `php -r`-witnessed on 8.5.10.
+#[test]
+fn php_int_max_resolves_as_the_last_free_key_and_as_a_written_key() {
+    // → [9223372036854775806 => 1, 9223372036854775807 => 2]
+    let v = first_arg("<?php f([9223372036854775806 => 1, 2]);");
+    let keys: Vec<_> = norm_unknown(items(&v)).into_iter().map(|(k, _)| k).collect();
+    assert_eq!(keys, vec![NormKey::Int(i64::MAX - 1), NormKey::Int(i64::MAX)]);
+
+    // → [9223372036854775807 => 3, 'a' => 2]
+    let v = first_arg("<?php f([9223372036854775807 => 1, 'a' => 2, 9223372036854775807 => 3]);");
+    let norm = norm_unknown(items(&v));
+    assert_eq!(norm.len(), 2);
+    assert_eq!(norm[0], (NormKey::Int(i64::MAX), ArgValue::Int(3)));
+    assert_eq!(norm[1].0, NormKey::Str("a".into()));
 }
 
 /// The load-bearing invariant behind A12's narrow widening: whenever
 /// `next_int_is_version_dependent` says "no", the two rules agree, so an unknown
-/// minor is sound. Exhaustive over key sequences ≤ length 4 (omitted/neg/zero/pos/string).
+/// minor is sound. Exhaustive over key sequences ≤ length 4 (omitted/neg/zero/pos/string,
+/// plus `PHP_INT_MAX - 1` and `PHP_INT_MAX`, after which neither rule has a next index).
 #[test]
 fn version_independence_implies_the_two_rules_agree() {
     let alphabet = [
@@ -264,10 +317,13 @@ fn version_independence_implies_the_two_rules_agree() {
         ArrayKey::Int(0),
         ArrayKey::Int(1),
         ArrayKey::Str("k".into()),
+        ArrayKey::Int(i64::MAX - 1),
+        ArrayKey::Int(i64::MAX),
     ];
     let val = ArgValue::Int(0);
     let mut checked = 0usize;
     let mut dependent = 0usize;
+    let mut no_next_key = 0usize;
 
     for len in 0..=4 {
         let total = alphabet.len().pow(len as u32);
@@ -286,15 +342,17 @@ fn version_independence_implies_the_two_rules_agree() {
                 assert_eq!(normalize_array(&seq, None), None, "{seq:?}");
             } else {
                 assert_eq!(pre, post, "declared version-independent but rules differ: {seq:?}");
-                assert_eq!(normalize_array(&seq, None).as_ref(), Some(&post), "{seq:?}");
+                assert_eq!(normalize_array(&seq, None), post, "{seq:?}");
+                no_next_key += usize::from(post.is_none());
             }
             checked += 1;
         }
     }
 
-    assert_eq!(checked, 1 + 6 + 36 + 216 + 1296);
+    assert_eq!(checked, 1 + 8 + 64 + 512 + 4096);
     // The predicate is not vacuously false — it fires on a real slice of them.
     assert!(dependent > 0, "no version-dependent sequence in the sweep");
+    assert!(no_next_key > 0, "no sequence in the sweep runs past PHP_INT_MAX");
 }
 
 #[test]
