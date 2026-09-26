@@ -90,7 +90,9 @@ computed member-by-member (ADR-0035's "widening is computed, not guessed"),
 not a threshold heuristic.
 
 **No abstract next-auto-index.** ADR-0049 A12 answers the next-int question
-for concrete arrays, version-aware. An abstract shape declines the
+for concrete arrays, version-aware (as amended by A22: a literal's keys are
+the same on every supported minor, and only a negative append index waits on
+PHP 8.3). An abstract shape declines the
 prediction: append to a shape widens the tail (sound); the fact never
 carries `nextAutoIndexes`.
 
