@@ -1,10 +1,10 @@
 //! What a generation run writes after it analyzes: nothing, when this run is
-//! the published generation and nothing degraded; otherwise a candidate — each
-//! unmoved package's artifact shared with the published generation, every
-//! other package's reassembled per file, this run's walk blocks in the one
-//! sidecar, the fold table — published over `CURRENT`. A failure here is a note
-//! and never the run's verdict: the findings are computed, and persistence is a
-//! cache.
+//! the published generation and nothing degraded, or when the fold surface lost
+//! an answer; otherwise a candidate — each unmoved package's artifact shared
+//! with the published generation, every other package's reassembled per file,
+//! this run's walk blocks in the one sidecar, the fold table — published over
+//! `CURRENT`. A failure here is a note and never the run's verdict: the findings
+//! are computed, and persistence is a cache.
 
 use std::sync::Arc;
 
@@ -48,15 +48,39 @@ pub(super) struct Publishable<'a> {
 /// Publish — or keep CURRENT when this run *is* the published generation
 /// and nothing degraded (a degradation republishes to repair the artifact).
 /// Returns the published (or confirmed-current) generation id, lowercase hex,
-/// or `None` when publication failed, which is a note; and how many artifacts
-/// the publish shared rather than wrote.
+/// or `None` when publication failed or was withheld, which is a note; and how
+/// many artifacts the publish shared rather than wrote.
+///
+/// **A run that lost a fold answer publishes nothing** (issue #784). Its walk
+/// blocks are findings computed without replies the run asked for and never
+/// received (ADR-0024: a lost reply is widened, never retried), yet their
+/// replay stamp carries only the engine's *identity*, which a child that died
+/// mid-run shares with one that answered everything. Published, they would
+/// replay on every later run under that stamp — the sound subset served as if
+/// the engine had answered, silently, after whatever killed the child is gone.
+/// Withholding the whole candidate rather than only its blocks is the simple
+/// half of the choice: the next run starts from whatever `CURRENT` already
+/// held, built by a run that lost nothing, and pays for the files it walks
+/// again — cost, never meaning. The gate is the loss count rather than
+/// [`FoldPosture::sidecar_backed_throughout`], which a warm run answering
+/// from the fold table alone, or a `--no-php` run, fails without having lost
+/// anything: their blocks are exactly what their stamp says.
+///
+/// [`FoldPosture::sidecar_backed_throughout`]: crate::FoldPosture::sidecar_backed_throughout
 pub(super) fn publish_or_reuse(
     store: &Store,
     current: Option<&Generation>,
     run: Publishable<'_>,
     fold_degraded: bool,
+    fold_losses: u32,
     notes: &mut Vec<String>,
 ) -> (Option<String>, usize) {
+    if fold_losses > 0 {
+        notes.push(format!(
+            "the PHP sidecar lost {fold_losses} answer(s) this run; nothing published, so no later run replays a finding computed without them"
+        ));
+        return (None, 0);
+    }
     let states = &run.loaded.states;
     let total_parsed: usize = states.iter().map(|s| s.parsed).sum();
     let any_degraded = states.iter().any(|s| s.degraded) || fold_degraded;
