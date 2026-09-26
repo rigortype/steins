@@ -206,6 +206,22 @@ fn determined_order(shape: &ShapeFact) -> Option<Vec<Key>> {
 /// `0, 1, …` in iteration order and can never collide with a surviving string
 /// key. It is index bookkeeping, not arithmetic on an operand (ADR-0028 §3).
 ///
+/// **The new sequence is a witness only while an integer key survives.** PHP
+/// sets the next append index to the number of integer keys it renumbered,
+/// which is the new sequence's `max + 1` — except when that number is `0`. A
+/// witness with no integer key says no index has been set yet, so a negative
+/// write moves it; PHP's index is `0`, and a negative write does not. Measured
+/// with `php -r` on 8.1.32, 8.2.33, 8.3.33, 8.4.25 and 8.5.10 alike:
+///
+/// ```text
+/// $a = [0=>'a', 5=>'x'];  array_shift($a); $a[] = 9;               => 0, 1
+/// $a = ['k'=>1];          array_shift($a); $a[-5] = 1; $a[] = 2;   => -5, 0
+/// $a = ['k'=>1];                           $a[-5] = 1; $a[] = 2;   => -5, -4
+/// ```
+///
+/// So a shift that leaves only string keys hands back the shape without a
+/// witness ([`append_order`]).
+///
 /// Otherwise the general leg ([`general_removal`]), which needs no order because
 /// it has no declared key to lose.
 pub(crate) fn array_shift_written_fact(shape: &ShapeFact) -> Option<Fact> {
@@ -228,6 +244,9 @@ pub(crate) fn array_shift_written_fact(shape: &ShapeFact) -> Option<Fact> {
             fields.push((renumbered.clone(), *presence, slot.clone()));
             new_order.push(renumbered);
         }
+        if next == 0 {
+            return Some(shape_fact(sealed_in(fields, &new_order)));
+        }
         return Some(sealed_with_order(fields, new_order));
     }
     general_removal(shape)
@@ -244,32 +263,76 @@ pub(crate) fn array_shift_written_fact(shape: &ShapeFact) -> Option<Fact> {
 /// array_pop(['a'=>1, 'b'=>2])      => ['a'=>1]
 /// ```
 ///
-/// (The *next* append index does move — `$a = ['x','y']; array_pop($a); $a[] =
-/// 'z';` measures `[0=>'x', 1=>'z']` — but that is a fact about a later write,
-/// not about the value this call left behind.)
+/// **The surviving sequence is a witness only where the next append index is
+/// still its `max + 1`** ([`pop_keeps_the_append_index`]). php-src's
+/// `array_pop` never recomputes the index from the survivors: it lowers it by
+/// one, and only when the popped key was the index minus one. Measured with
+/// `php -r` on 8.1.32, 8.2.33, 8.3.33, 8.4.25 and 8.5.10 alike:
+///
+/// ```text
+/// $a = ['x', 'y'];        array_pop($a); $a[] = 9;               => 0, 1
+/// $a = [5=>'a', 3=>'b'];  array_pop($a); $a[] = 9;               => 5, 6
+/// $a = [0=>'a', 5=>'x'];  array_pop($a); $a[] = 9;               => 0, 5
+/// $a = [5=>'x'];          array_pop($a); $a[] = 9;               => 5
+/// $a = [1];               array_pop($a); $a[-5] = 1; $a[] = 2;   => -5, 0
+/// ```
+///
+/// The first two keep the witness; the last three hand back the shape without
+/// one, so an append after them takes the weak row it takes after `unset`.
+///
+/// An order from [`determined_order`]'s **proven-list** leg is never a witness
+/// here, even though a shift may rebuild one from it. The shift resets PHP's
+/// index and the pop does not, so the pop inherits whatever index the list
+/// had, and a list type does not bound it: `list{int, int}` admits `$v = [1,
+/// 2, 3]; unset($v[2]);`, and `array_pop($v); $v[] = 9;` on that measures `0,
+/// 3`.
 pub(crate) fn array_pop_written_fact(shape: &ShapeFact) -> Option<Fact> {
     if let Some(order) = determined_order(shape)
-        && let Some((_last, rest)) = order.split_last()
+        && let Some((last, rest)) = order.split_last()
     {
         let fields = rest
             .iter()
             .map(|k| shape.field(k).map(|(k, p, s)| (k.clone(), *p, s.clone())))
             .collect::<Option<Vec<_>>>()?;
-        return Some(sealed_with_order(fields, rest.to_vec()));
+        if shape.witnessed_order().is_some() && pop_keeps_the_append_index(last, rest) {
+            return Some(sealed_with_order(fields, rest.to_vec()));
+        }
+        return Some(shape_fact(sealed_in(fields, rest)));
     }
     general_removal(shape)
 }
 
-/// The sealed shape a removal leaves, with its surviving order reattached.
+/// Whether PHP's next append index, after popping `last` off a witnessed
+/// sequence, is still the `max + 1` of what is left in `rest`.
+///
+/// The witness says it was `max + 1` before the pop, or that no index was set
+/// when there was no integer key. Popping a string key, or an integer below
+/// the maximum, moves neither the index nor the maximum. Popping the maximum
+/// `L` lowers the index to `L`, which is the survivors' `max + 1` only when
+/// `L - 1` survived. Otherwise their maximum is lower, or there is none and the
+/// witness would claim no index has been set when PHP's is `L`.
+fn pop_keeps_the_append_index(last: &Key, rest: &[Key]) -> bool {
+    let Key::Int(popped) = *last else { return true };
+    rest.iter().any(|k| match *k {
+        Key::Int(n) => n > popped || Some(n) == popped.checked_sub(1),
+        Key::Str(_) => false,
+    })
+}
+
+/// The sealed shape a rule leaves in `order`, with the order reattached as the
+/// witness — only for a rule whose next append index is the order's `max + 1`
+/// ([`append_order`]).
+fn sealed_with_order(fields: Vec<(Key, Presence, Option<Box<Fact>>)>, order: Vec<Key>) -> Fact {
+    shape_fact(sealed_in(fields, &order).with_order(order))
+}
+
+/// The sealed shape a rule leaves in a known `order`, **without** a witness.
 /// `is_list` is read off the surviving sequence rather than left to
 /// [`ShapeFact::normalize`]'s order-agnostic verdict: the sequence is known
 /// here, and `[0 => 'b', 1 => 'c']` in that order really is a list.
-fn sealed_with_order(fields: Vec<(Key, Presence, Option<Box<Fact>>)>, order: Vec<Key>) -> Fact {
+fn sealed_in(fields: Vec<(Key, Presence, Option<Box<Fact>>)>, order: &[Key]) -> ShapeFact {
     let is_list = Certainty::from_bool(keys_are_a_list(order.iter()));
-    shape_fact(
-        ShapeFact::normalize(fields, Tail::Sealed, is_list, !order.is_empty(), Vec::new())
-            .with_order(order),
-    )
+    ShapeFact::normalize(fields, Tail::Sealed, is_list, !order.is_empty(), Vec::new())
 }
 
 /// **A removal from an array with no declared key**: `non-empty-array<string>`
@@ -319,13 +382,25 @@ fn general_removal(shape: &ShapeFact) -> Option<Fact> {
 /// php -r '$a=[1,2,3]; unset($a[2]); $a[]=9; var_dump(array_keys($a));' => 0, 1, 3
 /// ```
 ///
-/// Only an order **witness** carries the missing premise, because
-/// `apply_offset_write` drops the witness on `unset` precisely so that it does:
-/// a witnessed sequence is the build order of an array nothing was removed
-/// from, so its maximum integer key is the maximum the array has ever held.
-/// Every other producer of a witness rebuilds by insertion and resets the
-/// counter with PHP (`array_pop`, `array_shift`, `array_splice`,
-/// `array_filter`, all measured at 8.5.9).
+/// Only an order **witness** carries the missing premise: PHP's next index is
+/// the witnessed sequence's `max + 1`, and with no integer key in the sequence
+/// no index has been set yet. Each producer either keeps that true or attaches
+/// no witness, measured with `php -r` on 8.1.32 through 8.5.10:
+///
+/// * a literal ([`ShapeFact::lift`]), and a write or append at the end, keep it
+///   by construction;
+/// * `unset` lowers no index, so `apply_offset_write` drops the witness;
+/// * `array_pop` lowers the index by one or not at all, so
+///   [`array_pop_written_fact`] keeps the witness only where that lands on the
+///   survivors' `max + 1`;
+/// * `array_shift` sets the index to the number of integer keys it renumbered,
+///   which is `0` rather than unset when there were none, so
+///   [`array_shift_written_fact`] keeps the witness only while one survives;
+/// * `array_unshift` rebuilds by insertion, and a call with a value always
+///   leaves an integer key;
+/// * a folded `array_filter` result is a fresh build: `array_filter([0 => 0, 5
+///   => 1])` then an append lands on `6`;
+/// * `array_splice` has no rule here, so it attaches no witness.
 fn append_order(shape: &ShapeFact) -> Option<Vec<Key>> {
     shape.witnessed_order().map(<[Key]>::to_vec)
 }
@@ -824,6 +899,64 @@ mod tests {
         };
         let keys: Vec<&Key> = out.fields.iter().map(|(k, _, _)| k).collect();
         assert_eq!(keys, vec![&Key::Int(5), &Key::Str("a".into())], "sorted, but key 5 kept");
+    }
+
+    #[test]
+    fn a_pop_keeps_the_witness_only_where_the_append_index_stays_max_plus_one() {
+        // `array_pop` lowers PHP's next append index by one, and only when the
+        // popped key was the index minus one (`php -r`, 8.1.32 to 8.5.10).
+        let witnessed_after_pop = |keys: &[Key]| {
+            let entries: Vec<(Key, Val)> = keys.iter().map(|k| (k.clone(), i(0))).collect();
+            let Fact::Shape { shape: out, .. } =
+                array_pop_written_fact(&lit(&entries)).expect("a shape")
+            else {
+                panic!("a pop states a shape");
+            };
+            out.witnessed_order().is_some()
+        };
+        let k = |s: &str| Key::Str(s.into());
+        assert!(witnessed_after_pop(&[Key::Int(0), Key::Int(1)]), "the index drops to 1");
+        assert!(witnessed_after_pop(&[Key::Int(5), Key::Int(3)]), "3 is below the index");
+        assert!(witnessed_after_pop(&[Key::Int(0), k("k")]), "a string key moves nothing");
+        assert!(witnessed_after_pop(&[k("k")]), "no index was ever set");
+        assert!(!witnessed_after_pop(&[Key::Int(0), Key::Int(5)]), "the index drops to 5, not 1");
+        assert!(!witnessed_after_pop(&[Key::Int(5)]), "the index drops to 5, not unset");
+        assert!(!witnessed_after_pop(&[Key::Int(1)]), "a negative write leaves the 0 alone");
+    }
+
+    #[test]
+    fn a_pop_off_a_list_nobody_watched_being_built_attaches_no_witness() {
+        // `list{int, int}` admits `[1, 2, 3]` unset at `2`, whose index is `3`.
+        let declared = ShapeFact::normalize(
+            vec![
+                (Key::Int(0), Presence::Required { witnessed: false }, None),
+                (Key::Int(1), Presence::Required { witnessed: false }, None),
+            ],
+            Tail::Sealed,
+            Certainty::Yes,
+            true,
+            Vec::new(),
+        );
+        assert_eq!(determined_order(&declared), Some(vec![Key::Int(0), Key::Int(1)]));
+        let Fact::Shape { shape: out, .. } = array_pop_written_fact(&declared).expect("a shape")
+        else {
+            panic!("a pop states a shape");
+        };
+        assert_eq!(out.order, None);
+        assert_eq!(out.is_list, Certainty::Yes, "the order is still known, so is list-ness");
+    }
+
+    #[test]
+    fn a_shift_that_leaves_only_string_keys_attaches_no_witness() {
+        // PHP sets the index to `0`, which a witness with no integer key cannot
+        // say: `['k' => 1]` shifted, written at `-5` and appended lands on `0`.
+        let shape = lit(&[(Key::Int(5), i(1)), (Key::Str("k".into()), i(2))]);
+        let Fact::Shape { shape: out, .. } = array_shift_written_fact(&shape).expect("a shape")
+        else {
+            panic!("a shift states a shape");
+        };
+        assert_eq!(out.fields.len(), 1);
+        assert_eq!(out.order, None);
     }
 
     #[test]

@@ -1096,13 +1096,12 @@ pub(crate) fn apply_offset_write(
     //   => 6              from a shape with no integer key left at all
     // ```
     //
-    // So the invariant this drop establishes is the stronger one the append
-    // needs: a witnessed order is the build order of a sequence **nothing has
-    // been removed from**, and its maximum integer key is therefore the
-    // maximum key the array has ever held. Every other producer of a witness
-    // rebuilds the array by insertion — `array_pop`, `array_shift`,
-    // `array_splice` and `array_filter` all reset the counter, measured at
-    // 8.5.9 — so `unset` is the single exception, and it is fenced here.
+    // So the invariant this drop keeps is the one the append needs: PHP's next
+    // index is the witnessed sequence's maximum integer key plus one. The
+    // removals in `array_out_state` hold it on their own terms, and neither
+    // simply resets the index: `array_pop` lowers it by one at most, and
+    // `array_shift` sets it to `0` when no integer key is left — see
+    // `append_order` for what each producer was measured to do.
     let witnessed_order: Option<Vec<VKey>> = match value {
         None => None,
         Some(_) => shape.order.as_ref().map(|order| {
