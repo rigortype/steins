@@ -39,14 +39,25 @@ fn runner_code() -> &'static str {
 /// anything slower is treated as misbehavior and widened.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// How many times one [`Sidecar`] will replace a dead child before giving up.
+/// How many times in a row one [`Sidecar`] will replace a dead child with no
+/// answer in between before giving up.
 ///
-/// The storm brake: killing three children means the input itself kills
-/// children, and each respawn costs a PHP startup. Past the cap the instance
-/// stays poisoned and every later request widens immediately.
+/// The storm brake: three replacements that each died before answering
+/// anything mean the engine itself is broken, and each respawn costs a PHP
+/// startup. Past the cap the instance stays poisoned and every later request
+/// widens immediately.
+///
+/// The count restarts at every answered request (issue #783). It was a
+/// lifetime budget, and a lifetime budget is not a storm brake: four `range()`
+/// literals in one analysed file each killed a child that had answered
+/// hundreds of requests, spent the budget inside that file, and left every
+/// file after it on the sound subset. A child that answers is not a storm. What
+/// stops one bomb from recurring is its caller's business — the fold seam
+/// stops asking a callee that killed a child — and the transport only has to
+/// stop respawning into an engine that cannot answer at all.
 ///
 /// Public so a run's coverage report can say which side of the brake it ended
-/// on (issue #245) — see [`Sidecar::respawns`]. A reporting input, never a gate.
+/// on (issue #245) — see [`Sidecar::strikes`]. A reporting input, never a gate.
 pub const RESPAWN_CAP: u32 = 3;
 
 /// One live child and the thread draining it — everything a respawn replaces.
@@ -150,8 +161,9 @@ impl Channel {
 /// Asymmetric discipline: the request whose reply never arrived **still
 /// fails** (widens) and is never retried on the fresh child — it is the
 /// likely bomb, and retrying would re-arm the fatal. The *next* request
-/// revives the instance (`Sidecar::revive`), up to `RESPAWN_CAP` times, so one
-/// poisoned fold costs one answer, not the whole run.
+/// revives the instance (`Sidecar::revive`), up to `RESPAWN_CAP` times in a
+/// row without an answer, so one poisoned fold costs one answer, not the whole
+/// run.
 ///
 /// Nothing is replayed: the runner is a pure per-request dispatcher with no
 /// cross-request state, so a fresh child answers identically — a respawn is
@@ -163,8 +175,13 @@ pub struct Sidecar {
     /// The child is dead and no request can be sent until it is replaced
     /// (ADR-0024). See [`Sidecar::is_poisoned`] for what this does *not* mean.
     poisoned: bool,
-    /// Respawns already attempted, against `RESPAWN_CAP`.
+    /// Respawns attempted over the instance's life. Reporting only.
     respawns: u32,
+    /// Respawns attempted since the last answered request — the number
+    /// `RESPAWN_CAP` bounds.
+    strikes: u32,
+    /// Children lost over the instance's life: one per [`Sidecar::poison`].
+    deaths: u32,
 }
 
 impl Sidecar {
@@ -186,22 +203,33 @@ impl Sidecar {
     pub fn spawn_with(bin: &str) -> std::io::Result<Self> {
         let chan = Channel::open(bin)?;
 
-        Ok(Self { chan, next_id: 1, timeout: DEFAULT_TIMEOUT, poisoned: false, respawns: 0 })
+        Ok(Self {
+            chan,
+            next_id: 1,
+            timeout: DEFAULT_TIMEOUT,
+            poisoned: false,
+            respawns: 0,
+            strikes: 0,
+            deaths: 0,
+        })
     }
 
     /// Make sure a live child is available, replacing a dead one if the cap
     /// allows. `true` means a request may be sent; `false` means every caller
     /// must widen. The *only* place `poisoned` is cleared; charges attempts,
     /// not successes — a respawn that fails to start `php` is what the cap
-    /// exists to bound.
+    /// exists to bound. Only an answered request ([`Self::request`]) clears
+    /// the strikes, so a replacement that dies before answering counts
+    /// against the next one.
     fn revive(&mut self) -> bool {
         if !self.poisoned {
             return true;
         }
-        if self.respawns >= RESPAWN_CAP {
+        if self.strikes >= RESPAWN_CAP {
             return false;
         }
         self.respawns += 1;
+        self.strikes += 1;
         self.chan.close();
         match Channel::open(&self.chan.bin) {
             Ok(chan) => {
@@ -247,6 +275,27 @@ impl Sidecar {
     #[must_use]
     pub fn respawns(&self) -> u32 {
         self.respawns
+    }
+
+    /// Respawns since the last answered request — the count [`RESPAWN_CAP`]
+    /// bounds, so `is_poisoned() && strikes() >= RESPAWN_CAP` is a transport
+    /// that has stopped replacing its child (issue #783). Reporting only, for
+    /// the same reason as [`Self::respawns`].
+    #[must_use]
+    pub fn strikes(&self) -> u32 {
+        self.strikes
+    }
+
+    /// Children this instance has lost — every request that ended with the
+    /// child dead, silent or desynced, counted where it happens.
+    ///
+    /// A caller watching [`Self::is_poisoned`] across one request cannot count
+    /// these (issue #783): a request that revives a dead child whose
+    /// replacement dies too reads poisoned both before and after, and the
+    /// second death is invisible to it. Reporting only.
+    #[must_use]
+    pub fn deaths(&self) -> u32 {
+        self.deaths
     }
 
     /// Query the child's PHP environment. Returns `None` on any failure (the
@@ -386,6 +435,9 @@ impl Sidecar {
                     self.poison();
                     return None;
                 }
+                // An answer: whatever killed the children before this one, the
+                // engine is not in a storm.
+                self.strikes = 0;
                 Some(value)
             }
             // A timeout, or a channel whose sender is gone. The latter is how an
@@ -405,6 +457,7 @@ impl Sidecar {
     /// the drop that follows. This request is already lost either way.
     fn poison(&mut self) {
         self.poisoned = true;
+        self.deaths += 1;
         let _ = self.chan.child.kill();
     }
 }
