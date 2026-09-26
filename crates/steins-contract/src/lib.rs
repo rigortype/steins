@@ -1390,22 +1390,28 @@ fn lower_int_range(args: &[steins_phpdoc::ast::GenericArg]) -> ContractTy {
 /// key `9`, as `[9 => …]` builds it).
 ///
 /// `None` when a key is not resolvable (const-fetch key, unparseable int
-/// literal), making the whole shape undecidable (`Opaque`/`Maybe`).
+/// literal, positional item past a `PHP_INT_MAX` key), making the whole shape
+/// undecidable (`Opaque`/`Maybe`).
 #[must_use]
 pub fn shape_keys(shape: &steins_phpdoc::ast::ArrayShape) -> Option<Vec<CKey>> {
     let mut keys = Vec::with_capacity(shape.items.len());
-    let mut next_auto: i64 = 0;
+    // `None` past a `PHP_INT_MAX` key: PHP has no next key there (`[PHP_INT_MAX
+    // => 1, 2]` throws), so a positional item after it names no key at all.
+    let mut next_auto: Option<i64> = Some(0);
     for item in &shape.items {
         let key = match &item.key {
-            None => CKey::Int(next_auto),
+            None => CKey::Int(next_auto?),
             Some(ShapeKey::Int(s)) => CKey::Int(s.replace('_', "").parse::<i64>().ok()?),
             Some(ShapeKey::Str(lit)) => norm_shape_key(&string_lit_value(lit)),
             Some(ShapeKey::Ident(name)) => norm_shape_key(name),
             Some(ShapeKey::ConstFetch { .. }) => return None,
         };
-        // Every int key — declared or PHP-folded — advances the auto-index.
-        if let CKey::Int(v) = key {
-            next_auto = next_auto.max(v.saturating_add(1));
+        // Every int key — declared or PHP-folded — at or past the auto-index
+        // moves it past itself.
+        if let CKey::Int(v) = key
+            && next_auto.is_some_and(|n| v >= n)
+        {
+            next_auto = v.checked_add(1);
         }
         keys.push(key);
     }
