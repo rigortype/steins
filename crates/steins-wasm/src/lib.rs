@@ -802,6 +802,10 @@ mod replay {
     /// moved the counts in OPPOSITE directions: `array_filter` folds here
     /// (portable 50 → 51), `preg_match` does not (refused 11 → 12, beside
     /// `preg_split` and for the same PCRE build option).
+    ///
+    /// Wave 3 moved 65 → 68 and only the refused side: `json_decode`,
+    /// `json_encode` and `preg_match_all` each diverged under the generated
+    /// probe, so `refused_folds` grew 12 → 15 and `fold_portable` stayed at 53.
     #[test]
     fn the_boot_object_describes_a_32_bit_engine() {
         let mut table = answered_table();
@@ -819,7 +823,8 @@ mod replay {
         assert_eq!(
             boot["fold_portable"], 53,
             "…and issue #382 measured the last two unverified rows into it, so the ALLOWLIST \
-             stands still at 65 while this engine's share moves 51 -> 53"
+             stood still at 65 while this engine's share moved 51 -> 53; wave 3 then grew only \
+             the refused side"
         );
         assert_eq!(
             boot["refused_folds"],
