@@ -215,18 +215,27 @@ assert(
   boot.refusals.every((r) => r.name && r.axis && r.witness.includes(" / ")),
   "each reason names the row, its axis, and both engines' answers",
 );
-// The rows that are not about the word size are the three PCRE matchers: issue
-// #382 put `preg_match` beside `preg_split`, and wave 3 added `preg_match_all`.
-// `steins-catalog`'s axis test owns the same list upstream.
+// The rows that are not about the word size are the PCRE matchers: issue #382
+// put `preg_match` beside `preg_split`, and wave 3 added `preg_match_all`.
+// `steins-catalog`'s axis test owns the list; this states the property instead
+// — the build-option rows are exactly the refused `preg_*` names, and every
+// other row is on the word — so a fourth matcher lands here without an edit,
+// while a `preg_*` row filed on the width axis, or a non-PCRE row on this one,
+// does not.
+const buildOption = boot.refusals.filter((r) => r.axis === "build_option").map((r) => r.name);
+const pcre = boot.refused_folds.filter((n) => n.startsWith("preg_"));
 assert(
-  boot.refusals.filter((r) => r.axis === "build_option").map((r) => r.name).join(",") ===
-    "preg_split,preg_match,preg_match_all",
-  `the PCRE matchers are the rows that are not about the word size (got ${JSON.stringify(boot.refusals.filter((r) => r.axis === "build_option"))})`,
+  buildOption.length > 0 && buildOption.join(",") === pcre.join(","),
+  `the PCRE matchers are the rows that are not about the word size (got ${JSON.stringify(buildOption)} vs ${JSON.stringify(pcre)})`,
+);
+assert(
+  boot.refusals.every((r) => r.axis === "build_option" || r.axis === "integer_width"),
+  `every other refused row is about the word size (got ${JSON.stringify(boot.refusals.map((r) => r.axis))})`,
 );
 // …and the panel the visitor reads is composed from that, checked here rather
-// than only in a browser. The boot object carrying eleven reasons and the panel
-// showing two is exactly the shape of defect this catches: assert on the
-// RENDERED text, per row.
+// than only in a browser. The boot object carrying every reason and the panel
+// showing two of them is exactly the shape of defect this catches: assert on
+// the RENDERED text, per row.
 const panel = renderBoundaryHtml(boot);
 for (const r of boot.refusals) {
   assert(
