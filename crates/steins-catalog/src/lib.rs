@@ -93,9 +93,11 @@ pub mod preg;
 // new table's name is then one added line, not a rewrapped block (issue #777).
 mod fold;
 pub use fold::{
+    FoldAllocation,
     PortabilityClass,
     Refusal,
     RefusalAxis,
+    fold_allocation,
     foldable,
     foldable_entry_count,
     portability_class,
