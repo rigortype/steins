@@ -237,10 +237,16 @@ prose, and the one way that arises — an unknown label in a *checked* attribute
 envelope riding the declared lane into a caller — is already reported as
 `effect.unknown-label` where it was written. A class-level claim is unaffected by
 an inert method tag: provenness governs it, and upstream's nearest-wins keeps that
-method's own story truthful. The seam is `steins_infer::effects::sweep_effects`,
-the effect fixpoint's per-declaration verdicts, mirroring
-`steins_infer::escapes::sweep_escapes`; the docblock mechanics — create, extend,
-round-trip verify — are the `@throws` sister's own code.
+method's own story truthful. The claim covers what PHPStan reads as the class's
+own methods, which includes a used trait's (reflection names the using class
+their declaring class); trait bodies are lowered name-only (ADR-0049), so a
+trait-using class refuses `uses-trait`. Inherited methods are outside it —
+PHPStan reads the class tag off a method's declaring class, so a child's tag
+leaves a parent's impure method `possiblyImpure` — and a parent needs no check.
+The seam is `steins_infer::effects::sweep_effects`, the effect fixpoint's
+per-declaration verdicts, mirroring `steins_infer::escapes::sweep_escapes`; the
+docblock mechanics — create, extend, round-trip verify — are the `@throws`
+sister's own code.
 
 **`loop-to-array-map`** — ADR-0010's flagship, landed under ADR-0076. The first
 transform whose precondition is an **effect** judgment: an append loop becomes

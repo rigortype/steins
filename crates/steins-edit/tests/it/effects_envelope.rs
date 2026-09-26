@@ -6,7 +6,7 @@ use steins_edit::TransformReport;
 use steins_edit::effects_envelope::{
     REASON_ALREADY_DECLARED, REASON_ATTRIBUTE_ENVELOPE, REASON_DECLARATION_MID_LINE,
     REASON_BOUND_LABEL_UNKNOWN, REASON_DOCBLOCK_NOT_ROUND_TRIPPABLE,
-    REASON_EFFECTS_NOT_EXHAUSTIVE, REASON_EXISTING_TAG_UNREADABLE,
+    REASON_EFFECTS_NOT_EXHAUSTIVE, REASON_EXISTING_TAG_UNREADABLE, REASON_USES_TRAIT,
 };
 use steins_edit::plan_effects_envelope;
 
@@ -279,6 +279,108 @@ fn an_interface_is_never_a_class_tag_candidate() {
     assert_oracle_complete(&report);
     assert_eq!(report.oracle.enumerated, 0, "{:#?}", report.refusals);
     assert!(report.plan.is_empty());
+}
+
+/// The tag covers a trait's methods as the class's own (PHPStan reports
+/// `impure.echo` in `loud()` under it), and trait bodies are never analyzed, so
+/// the claim is refused whatever the trait holds — impure, pure, or not in the
+/// project at all.
+#[test]
+fn a_trait_using_class_refuses_the_class_tag() {
+    for tr in [
+        "trait T {\n    public function shout(): void { echo 'hi'; $_SESSION['n'] = 1; }\n    public function loud(): int { echo 'hi'; return 1; }\n}\n",
+        "trait T {\n    public function one(): int { return 1; }\n}\n",
+        "",
+    ] {
+        let lib = format!(
+            "<?php\n{tr}final class UsesTrait {{\n    use T;\n    public function get(): int {{ return 1; }}\n}}\n"
+        );
+        let report = plan(&[("lib.php", &lib)]);
+        assert_oracle_complete(&report);
+        assert_eq!(report.oracle.enumerated, 1, "{tr}: {:#?}", report.refusals);
+        assert_eq!(only_reason(&report), REASON_USES_TRAIT, "{tr}");
+        let detail = &report.refusals[0].detail;
+        assert!(detail.contains("UsesTrait uses a trait"), "{tr}: {detail}");
+        assert!(report.plan.is_empty(), "{tr}: nothing is written");
+    }
+}
+
+/// Nothing proves a hand-written class tag over a trait, so it is not confirmed
+/// as `already-declared`; its bytes are left alone all the same.
+#[test]
+fn an_existing_class_tag_over_a_trait_is_not_confirmed() {
+    let lib = concat!(
+        "<?php\n",
+        "trait T {\n",
+        "    public function one(): int { return 1; }\n",
+        "}\n",
+        "/**\n",
+        " * @phpstan-all-methods-pure\n",
+        " */\n",
+        "final class C {\n",
+        "    use T;\n",
+        "    public function get(): int { return 1; }\n",
+        "}\n",
+    );
+    let report = plan(&[("lib.php", lib)]);
+    assert_oracle_complete(&report);
+    assert_eq!(only_reason(&report), REASON_USES_TRAIT);
+    assert_eq!(report.plan.apply_file("lib.php", lib), lib, "the file must be byte-identical");
+}
+
+/// Only the class-wide claim is refused: a declared method's own body is
+/// analyzed, so it still gets its bound.
+#[test]
+fn a_trait_using_class_still_gets_its_method_tags() {
+    let lib = concat!(
+        "<?php\n",
+        "trait T {\n",
+        "    public function one(): int { return 1; }\n",
+        "}\n",
+        "final class C {\n",
+        "    use T;\n",
+        "    public function save(): void { file_put_contents(\"/x\", \"y\"); }\n",
+        "}\n",
+    );
+    let report = plan(&[("lib.php", lib)]);
+    assert_oracle_complete(&report);
+    assert_eq!(report.oracle.transformed, 1, "{:#?}", report.refusals);
+    let out = report.plan.apply_file("lib.php", lib);
+    assert!(!out.contains("all-methods-pure"), "no class tag:\n{out}");
+    assert!(
+        out.contains("     * @phpstan-impure io.fs.write\n     */\n    public function save()"),
+        "the method keeps its own bound:\n{out}"
+    );
+}
+
+/// An inherited method is outside the child's tag: PHPStan reads the class tag
+/// off the method's declaring class, so `Base::loud()` stays `possiblyImpure`
+/// under `Child`'s tag. The child is judged on its own methods alone.
+#[test]
+fn an_impure_parent_does_not_disqualify_its_child() {
+    let lib = concat!(
+        "<?php\n",
+        "class Base {\n",
+        "    public function loud(): int { echo 'hi'; return 1; }\n",
+        "}\n",
+        "final class Child extends Base {\n",
+        "    public function get(): int { return 1; }\n",
+        "}\n",
+    );
+    let report = plan(&[("lib.php", lib)]);
+    assert_oracle_complete(&report);
+    assert_eq!(report.oracle.enumerated, 2, "{:#?}", report.refusals);
+    assert_eq!(report.oracle.transformed, 2, "{:#?}", report.refusals);
+
+    let out = report.plan.apply_file("lib.php", lib);
+    assert!(
+        out.contains("/**\n * @phpstan-all-methods-pure\n */\nfinal class Child extends Base {"),
+        "the child is tagged:\n{out}"
+    );
+    assert!(
+        out.contains("     * @phpstan-impure io.output.buffer\n     */\n    public function loud()"),
+        "the parent's method gets its own bound:\n{out}"
+    );
 }
 
 // 5. The checked spelling shadows this whole stratum (ADR-0082 §1)

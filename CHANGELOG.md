@@ -38,6 +38,10 @@ Entries accumulate under this heading as work lands; the `steins-release-prep`
 skill seals them into a version section at release time, reconstructing from
 `git log` if the discipline slipped.
 
+### Fixed
+
+- **`steins transform effects-envelope` no longer writes `@phpstan-all-methods-pure` over a class that uses a trait.** The tag covers the trait's methods as the class's own, and trait bodies are not analyzed, so the claim was never proven — a trait method that echoes drew PHPStan's `impure.echo` under the written tag. Such a class now refuses by name as `uses-trait` and nothing is written; its own impure methods still get their `@phpstan-impure` bound. Inherited methods need no such check: PHPStan reads the class tag off each method's declaring class, so a child's tag never covered its parent's methods.
+
 ## [0.1.8] - 2026-09-21
 
 This release is about `resource` — the one type PHP has no way to declare. A handle now has an identity and a state on the heap, so `$b = $h; fclose($b);` closes what `$h` holds and a closed handle handed back to a builtin that needs an open one is reported; an array element can hold a handle too, so the `proc_open()` idiom — `$pipes[0]` — is a resource from the moment the call returns rather than a value the analysis had lost; a value proven not to be a resource is reported at the hundred builtin positions php-src's stubs declare `@param resource`; `gettype()` and its three siblings answer from the handle instead of from a declaration; and `@param resource` stops accepting every object, with a mined exception for the classes PHP migrated its resources into. Around it: `int-mask`, `int-mask-of` and `non-empty-literal-string` stop accepting everything, `key-of<T>` over a function's own `@template` reads the array the call actually passed, and a native `resource $x` hint says why PHP reads it as a class name.
