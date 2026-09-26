@@ -171,6 +171,7 @@ mod union_fold;
 mod unknown_vocabulary;
 mod unset_maybe_undefined;
 mod unset_positions;
+mod unset_writes;
 mod untyped_surface;
 mod value_ir_method_calls;
 mod value_side_instanceof;
