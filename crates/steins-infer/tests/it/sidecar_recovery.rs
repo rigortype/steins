@@ -239,6 +239,66 @@ fn a_callback_carrier_never_reaches_the_runner() {
     );
 }
 
+/// **A death costs its callee, not the run** (issue #783).
+///
+/// The seam's budget prices the bombs it knows, and the transport has to
+/// survive the ones it does not. This asks the process engine directly, below
+/// every gate, with four callees that each kill the child: one past the
+/// three-respawn lifetime budget that used to abandon the fold surface. Each
+/// death quarantines its callee — the next call of that name is declined
+/// without dispatch, even a harmless one — and every other callee still
+/// answers from a live child at the end.
+///
+/// The posture counts every death where it happened. The old edge detector
+/// missed one whenever a request revived a dead child that then died again.
+#[test]
+fn a_callee_that_kills_the_child_is_quarantined_and_the_run_keeps_its_engine() {
+    use steins_infer::FoldEngine;
+    use steins_sidecar::{FoldArg, FoldResult, FoldValue};
+
+    let s = |v: &str| FoldArg::Str(v.to_owned());
+    let mut engine = steins_infer::ProcessEngine::enabled();
+    if !matches!(engine.fold("strtoupper", &[s("probe")], true), FoldResult::Value(_)) {
+        eprintln!(
+            "SKIP a_callee_that_kills_the_child_is_quarantined_and_the_run_keeps_its_engine: \
+             no folding engine — is `php` on PATH?"
+        );
+        return;
+    }
+    let bombs = [
+        ("str_repeat", vec![s("x"), FoldArg::Int(2_000_000_000)], vec![s("ab"), FoldArg::Int(3)]),
+        ("str_pad", vec![s("x"), FoldArg::Int(2_000_000_000)], vec![s("a"), FoldArg::Int(3)]),
+        ("range", vec![FoldArg::Int(0), FoldArg::Int(100_000_000)], vec![FoldArg::Int(1), FoldArg::Int(3)]),
+        ("sprintf", vec![s("%2000000000d"), FoldArg::Int(1)], vec![s("%d"), FoldArg::Int(1)]),
+    ];
+    for (i, (name, bomb, harmless)) in bombs.iter().enumerate() {
+        assert!(!engine.is_quarantined(name), "{name} is not quarantined before it kills");
+        let r = engine.fold(name, bomb, true);
+        assert!(matches!(r, FoldResult::Widen { .. }), "{name}'s bomb widened, got {r:?}");
+        assert!(engine.is_quarantined(name), "{name} killed a child and was not quarantined");
+        assert_eq!(
+            engine.fold(name, harmless, true),
+            FoldResult::widen("callee quarantined"),
+            "a quarantined {name} reached the engine again"
+        );
+        assert_eq!(
+            engine.fold("strtoupper", &[s("alive")], true),
+            FoldResult::Value(FoldValue::Str("ALIVE".to_owned())),
+            "bomb {i} ({name}) cost an unrelated callee its answer"
+        );
+    }
+    // The replay path's dispatch is quarantined the same way: the persisted
+    // table engine sends every miss through `call_raw`.
+    let params = steins_sidecar::fold_params("STR_REPEAT", &[s("ab"), FoldArg::Int(3)], true)
+        .expect("askable");
+    assert_eq!(engine.call_raw("fold", params), None, "the raw path ignored the quarantine");
+
+    let posture = engine.posture();
+    assert_eq!(posture.losses, 4, "one death per bomb: {posture:?}");
+    assert_eq!(posture.restarts, 4, "and one replacement for each: {posture:?}");
+    assert!(!posture.abandoned, "four deaths between answers are not a storm: {posture:?}");
+}
+
 // The whole-run `env` answers, across a restart (issue #245). No `php` needed:
 // the transport's recovery is modeled directly, the only way to hold the
 // decline window open on purpose.
@@ -319,7 +379,7 @@ fn a_whole_run_env_answer_is_retaken_after_the_transport_restarts() {
 /// on "the memo holds a decline" would pay the ADR-0024 timeout at every call
 /// site against a merely-hung sidecar (issue #110's failure mode); re-asking on
 /// "the engine has been replaced" costs one `env` per respawn instead, bounded
-/// by the respawn cap.
+/// by how often the child is replaced.
 #[test]
 fn a_decline_is_asked_once_per_transport_generation_not_once_per_call_site() {
     let mut folder = steins_infer::EngineFolder::with_engine(RestartableEngine::default());
