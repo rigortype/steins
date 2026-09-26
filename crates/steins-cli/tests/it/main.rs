@@ -1,5 +1,6 @@
 //! The crate's integration tests, compiled as one binary (xtask's `test_layout` guard).
 
+mod annotate_runtime;
 mod check_fix;
 mod cli;
 mod deep_nesting;
