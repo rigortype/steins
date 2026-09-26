@@ -106,6 +106,36 @@ fn throws_direct_profile_selects_the_origin_facet() {
     assert!(!r.stdout.contains("RuntimeException can escape"), "propagated throw hidden");
 }
 
+/// ADR-0046 amendment (owner ruling 2026-09-26): `eval` and an inclusion are
+/// proven effects, judged against a `@pure` envelope on the same surface as
+/// `echo` — the contract layer, so the default surface stays silent.
+#[test]
+fn eval_and_include_exceed_a_pure_envelope_under_contracts() {
+    let dir = workdir("dynamic-code");
+    write(
+        &dir,
+        "a.php",
+        "<?php\n/** @pure */\nfunction nondet(string $s): mixed { return eval($s); }\n\
+         /** @pure */\nfunction inc(string $f): mixed { return include $f; }\n",
+    );
+    let r = run_in(&dir, &["check", "--no-php", "a.php"]);
+    assert_eq!(r.code, 0, "the default surface has no contract layer, got:\n{}", r.stdout);
+    let r = run_in(&dir, &["check", "--no-php", "--profile", "contracts", "a.php"]);
+    assert_eq!(r.code, 1, "got:\n{}", r.stdout);
+    assert!(
+        r.stdout.contains(
+            "a.php:3:44: error[effect.envelope-exceeded]: eval has effect eval, but nondet() is declared @phpstan-pure"
+        ),
+        "got:\n{}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("include has effect io.fs.read, but inc() is declared @phpstan-pure"),
+        "got:\n{}",
+        r.stdout
+    );
+}
+
 // Config selection
 
 #[test]

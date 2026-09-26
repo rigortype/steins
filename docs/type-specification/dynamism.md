@@ -12,6 +12,17 @@ nondeterministic (ADR-0046). The distinction matters because it decides what
 Steins does about them — it does not model them probabilistically or heuristically;
 it identifies precisely which *claims* they invalidate and withholds those.
 
+## The effect lane
+
+The dam below is about names; the effect lane answers separately, per
+function-like (ADR-0046 amendment, owner ruling 2026-09-26). An `eval(...)` is
+a proven `eval` effect and an `include`/`require` a proven `io.fs.read`, each at
+its own span, and each also marks the containing body non-exhaustive, since the
+code it runs is unseen: `effects: {eval, …?}`. A pure envelope over either is
+exceeded. The vendor presumption and the in-universe path proof below do not
+reach this lane: they decide what an inclusion can mint, not whether it reads a
+file. See [effects.md](effects.md).
+
 ## What an absence proof needs
 
 Most findings claim "this value breaks here". The **finding-breadth family**

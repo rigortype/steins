@@ -319,6 +319,8 @@ fn scans_effect_origins_across_control_flow() {
             EffectOrigin::Opaque { .. } => panic!("no opaque call expected"),
             EffectOrigin::HigherOrder { .. } => panic!("no higher-order call expected"),
             EffectOrigin::Callback { .. } => panic!("no callback call expected"),
+            EffectOrigin::Eval { .. } => panic!("no eval expected"),
+            EffectOrigin::Include { .. } => panic!("no include expected"),
         }
     }
     assert_eq!(echo, 1, "echo inside the if is found");
@@ -334,6 +336,46 @@ fn scans_exit_and_die() {
     assert!(matches!(f.effect_origins.first(), Some(EffectOrigin::Exit { keyword: "exit", .. })));
     let g = tree.functions().iter().find(|x| x.name == "g").unwrap();
     assert!(matches!(g.effect_origins.first(), Some(EffectOrigin::Exit { keyword: "die", .. })));
+}
+
+/// ADR-0046 amendment: `eval` and the four inclusion constructs are effect
+/// origins of the function-like that contains them — not of an enclosing one —
+/// and the operand is still walked, so `eval(h())` also records the call.
+#[test]
+fn scans_eval_and_the_four_inclusions() {
+    let src = "<?php function f(string $c): void { eval(h($c)); }\n\
+               function g(string $p): void { include $p; include_once $p; require $p; require_once $p; }\n\
+               function k(string $c): void { $x = function () use ($c) { eval($c); }; }\n\
+               function h(string $c): string { return $c; }";
+    let tree = SourceTree::parse(src);
+    let func = |n: &str| tree.functions().iter().find(|x| x.name == n).unwrap();
+    let f = func("f");
+    assert!(matches!(f.effect_origins.first(), Some(EffectOrigin::Eval { .. })));
+    let calls_h = |o: &EffectOrigin| matches!(o, EffectOrigin::Call { name, .. } if name.simple() == "h");
+    assert!(
+        f.effect_origins.iter().any(calls_h),
+        "the operand's call is still an origin: {:?}",
+        f.effect_origins
+    );
+    let keywords: Vec<&str> = func("g")
+        .effect_origins
+        .iter()
+        .filter_map(|o| match o {
+            EffectOrigin::Include { keyword, .. } => Some(*keyword),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(keywords, ["include", "include_once", "require", "require_once"]);
+    let k = func("k");
+    assert!(
+        !k.effect_origins.iter().any(|o| matches!(o, EffectOrigin::Eval { .. })),
+        "a closure's eval is the closure's own: {:?}",
+        k.effect_origins
+    );
+    let closure = tree.scopes().iter().find(|s| {
+        s.effect_origins.iter().any(|o| matches!(o, EffectOrigin::Eval { .. }))
+    });
+    assert!(closure.is_some(), "the closure scope carries the eval");
 }
 
 /// Issue #318: the proven-constant leading args an effect origin carries. A
