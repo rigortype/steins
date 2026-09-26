@@ -64,7 +64,7 @@ None of that is written into the frontend. Every replay envelope carries a
 computed from the same helpers that gate admission — and the engine bar plus its
 *Precision boundary* panel are composed from it. A gate change moves the page in
 the same commit; a 64-bit engine answering instead would make the same code say
-"all 22" and name no refusals. That is issue #61's second half: the boundary is
+"all 68" and name no refusals. That is issue #61's second half: the boundary is
 legible, and it cannot go stale in the safe-but-illegible direction the way the
 sound-subset banner did once an engine was actually present.
 
