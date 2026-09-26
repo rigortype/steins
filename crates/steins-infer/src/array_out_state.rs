@@ -384,8 +384,10 @@ fn general_removal(shape: &ShapeFact) -> Option<Fact> {
 ///
 /// Only an order **witness** carries the missing premise: PHP's next index is
 /// the witnessed sequence's `max + 1`, and with no integer key in the sequence
-/// no index has been set yet. Each producer either keeps that true or attaches
-/// no witness, measured with `php -r` on 8.1.32 through 8.5.10:
+/// no index has been set yet. (Below 8.3 an array that began as `[]` breaks
+/// the second half, which [`next_append_key`] handles by declining a negative
+/// index.) Each producer either keeps that true or attaches no witness,
+/// measured with `php -r` on 8.1.32 through 8.5.10:
 ///
 /// * a literal ([`ShapeFact::lift`]), and a write or append at the end, keep it
 ///   by construction;
