@@ -325,8 +325,11 @@ assert(
 //     answers it on the transfer seam from the argument alone: `abs(-3)` is `3`
 //     on every engine. The rule fires only once the engine's reflected
 //     declaration countersigns it (ADR-0061 §2), so the plain run keeps the
-//     floor — and neither run ever asks the engine to fold `abs`, which is the
-//     refusal holding on the wire rather than only in the boot object.
+//     floor. The last check reads every batch of the session: section 5 is the
+//     run that first reflects `abs`, and a string argument passes the fold's
+//     width guard, so an admitted `abs` would have asked for its fold there.
+//     None is asked, which is the refusal holding on the wire rather than only
+//     in the boot object.
 const TRANSFER = '<?php\n\\PHPStan\\dumpType(abs(-3));\n';
 const transfer = await driveReplay({ analyze: analyzer(TRANSFER), answer, table });
 const transferDump = transfer.value.findings.find((f) => f.id === "debug.type");

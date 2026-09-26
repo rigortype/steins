@@ -218,13 +218,14 @@ jobs:
       # browser downloads, and no workflow ran it either: three of its assertions
       # went stale behind catalog and transfer changes that were each deliberate,
       # and nothing noticed. The pin lives in build.sh, so build.sh keys the
-      # cache; a hit skips the ~47 MB npm fetch, and a miss re-runs build.sh's
-      # license-text check against the fresh tarball. build.sh's own cargo build
-      # is a no-op after the step above.
+      # cache, and so do the tracked license texts: a hit skips the ~47 MB npm
+      # fetch, and a change to either re-runs build.sh's license-text check
+      # against the fresh tarball. build.sh's own cargo build is a no-op after
+      # the step above.
       - uses: actions/cache@v4
         with:
           path: apps/playground/vendor/php-wasm
-          key: php-wasm-${{ hashFiles('apps/playground/build.sh') }}
+          key: php-wasm-${{ hashFiles('apps/playground/build.sh', 'apps/playground/vendor-licenses/**') }}
 
       - name: Vendor the PHP engine
         run: ./apps/playground/build.sh
