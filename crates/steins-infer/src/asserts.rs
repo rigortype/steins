@@ -8,7 +8,9 @@ use std::collections::{HashMap, HashSet};
 use steins_contract::normalize;
 use steins_domain::{Base, Fact, Refinement, Val};
 use steins_phpdoc::AssertKind;
-use steins_syntax::{ArgValue, CallExpr, Callee, CondExpr, CondOperand, Param, Receiver, Scope};
+use steins_syntax::{
+    ArgValue, CallExpr, Callee, CondExpr, CondOperand, NamedArg, Param, Receiver, Scope,
+};
 
 use crate::by_value::by_value_survivors;
 use crate::contract::{AssertSpec, ProjectIsa};
@@ -811,6 +813,11 @@ fn collect_operand_opaque_reads(
 /// tested. A base mentioned by any OTHER call in the same condition is still
 /// forgotten — that mention is what might mutate it, collected by that call's
 /// own visit.
+///
+/// A call nested in the predicate's own argument list has no visit of its own,
+/// so the exemption charges it here (issue #704): `is_string(f($s))` forgets
+/// `$s`, which `f` may take by reference, and keeps the rest. An argument the
+/// walk cannot read ([`argument_reach`]) takes the general rule instead.
 fn collect_call_opaque_reads(
     cx: &Cx,
     call: &CallExpr,
@@ -818,10 +825,18 @@ fn collect_call_opaque_reads(
     store: &Store,
     out: &mut Vec<String>,
 ) {
+    if (type_predicate(cx, call).is_some() || pure_question_builtin(cx, call).is_some())
+        && let Some(reach) = argument_reach(call)
+    {
+        for r in reach {
+            if reads.contains(&r) && !out.contains(&r) {
+                out.push(r);
+            }
+        }
+        return;
+    }
     if array_guard_predicate(cx, call).is_some()
         || array_all_any_predicate(cx, call).is_some()
-        || type_predicate(cx, call).is_some()
-        || pure_question_builtin(cx, call).is_some()
         || in_array_literals(cx, call).is_some()
         // The mined generalization of the exemption above it (issue #637): a
         // builtin certified BY VALUE at every position this call supplies,
@@ -854,4 +869,71 @@ fn call_method_receiver_var(call: &CallExpr) -> Option<&str> {
         Callee::Method { receiver: Receiver::Var(v), .. } => Some(v),
         _ => None,
     }
+}
+
+/// The names a by-value predicate's argument list hands to a call **nested**
+/// in it (issue #704) — each may be taken by reference there — or `None` when
+/// an argument hides what it does: the unrepresentable `Other` (where an
+/// assignment or an increment lands), a closure, a ternary.
+///
+/// The predicate's own arguments are only read, so a bare `$s` there charges
+/// nothing; `$s` inside `f($s)`, `$o->m($s)` or `new C($s)` does. A method
+/// call's receiver variable is not charged: the call cannot rebind it. A key
+/// is only read even where its offset chain is handed on (`f($a[$k])` writes
+/// through `$a`, never `$k`).
+fn argument_reach(call: &CallExpr) -> Option<Vec<String>> {
+    let mut out = Vec::new();
+    call.args.iter().all(|a| reach_of(&a.value, false, &mut out)).then_some(out)
+}
+
+/// One argument value's contribution to [`argument_reach`]; `handed` is whether
+/// the value is itself an argument of a nested call. `false` means the value
+/// cannot be read.
+fn reach_of(v: &ArgValue, handed: bool, out: &mut Vec<String>) -> bool {
+    let mut charge = |name: &String| {
+        if handed && !out.contains(name) {
+            out.push(name.clone());
+        }
+    };
+    match v {
+        ArgValue::Var(name) | ArgValue::PropFetch { var: name, .. } => charge(name),
+        ArgValue::OffsetRead { base, key } => {
+            return reach_of(base, handed, out) && reach_of(key, false, out);
+        }
+        ArgValue::Concat(a, b)
+        | ArgValue::Coalesce(a, b, _)
+        | ArgValue::Binary { lhs: a, rhs: b, .. }
+        | ArgValue::Logical { lhs: a, rhs: b, .. } => {
+            return reach_of(a, false, out) && reach_of(b, false, out);
+        }
+        ArgValue::Not(a) | ArgValue::Cast { operand: a, .. } => return reach_of(a, false, out),
+        ArgValue::Array(items) => return items.iter().all(|(_, e)| reach_of(e, false, out)),
+        ArgValue::Call(_, args) => return args.iter().all(|a| reach_of(a, true, out)),
+        ArgValue::New(_, args, named) => return handed_args(args, named, out),
+        ArgValue::MethodCall { callee, args, named } => {
+            let receiver_reads = match callee {
+                Callee::Method { receiver: Receiver::New { args, named, .. }, .. } => {
+                    handed_args(args, named, out)
+                }
+                Callee::Method { .. } | Callee::Static { .. } => true,
+                _ => false,
+            };
+            return receiver_reads && handed_args(args, named, out);
+        }
+        ArgValue::Int(_)
+        | ArgValue::Float(_)
+        | ArgValue::Str(_)
+        | ArgValue::Bool(_)
+        | ArgValue::Null
+        | ArgValue::ClassConst(..)
+        | ArgValue::EnumCase(..)
+        | ArgValue::GlobalConst(_) => {}
+        _ => return false,
+    }
+    true
+}
+
+/// [`reach_of`] over one nested call's positional and named arguments.
+fn handed_args(args: &[ArgValue], named: &[NamedArg], out: &mut Vec<String>) -> bool {
+    args.iter().chain(named.iter().map(|n| &n.value)).all(|a| reach_of(a, true, out))
 }
