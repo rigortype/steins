@@ -37,6 +37,7 @@ mod concat;
 mod concat_value_position;
 mod conditional_purity;
 mod constant_undefined;
+mod constructor_by_ref_args;
 mod constructor_summary;
 mod count_guards;
 mod cross_file;

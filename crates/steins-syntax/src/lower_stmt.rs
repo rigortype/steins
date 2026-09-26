@@ -1554,6 +1554,8 @@ fn collect_call_vars_walk(node: &Node<'_, '_>, out: &mut Vec<String>) {
         Node::MethodCall(c) => Some(&c.argument_list),
         Node::NullSafeMethodCall(c) => Some(&c.argument_list),
         Node::StaticMethodCall(c) => Some(&c.argument_list),
+        // `new C($x)` — a constructor can take `&$x` like any call (issue #678).
+        Node::Instantiation(i) => i.argument_list.as_ref(),
         _ => None,
     };
     if let Some(list) = arguments {
@@ -1583,7 +1585,7 @@ pub(crate) fn call_invalidation(node: &Node<'_, '_>) -> Vec<InvalidatedVar> {
 }
 
 /// The one walk behind [`Stmt::invalidated`]: [`collect_call_vars`]'s shape —
-/// same four call nodes, same descent — but recording each occurrence's evidence
+/// same five call nodes, same descent — but recording each occurrence's evidence
 /// on the name's entry as it collects it, so the name set and its evidence are
 /// one answer by construction. A describable occurrence appends a
 /// `(callee, position)` site; an unprovable one marks the entry opaque,
@@ -1602,6 +1604,8 @@ pub(crate) fn call_invalidation(node: &Node<'_, '_>) -> Vec<InvalidatedVar> {
 ///
 /// * a method/nullsafe-method/static-method call — receiver mutability is a
 ///   separate question (ADR-0070 §4) and no `NameRef` names the target anyway;
+/// * a constructor call (`new C($a)`, issue #678) — the by-value gate resolves
+///   functions only, so no site describes a constructor parameter;
 /// * a dynamic function callee (`$f($a)`, `($o->cb)($a)`) — nothing to resolve;
 /// * an argument list carrying a **named** or **spread** argument, or a
 ///   first-class callable (`f(...)`) — positional mapping is defeated;
@@ -1635,6 +1639,7 @@ fn scan_invalidated(node: &Node<'_, '_>, out: &mut Vec<InvalidatedVar>, nested: 
         Node::MethodCall(c) => Some((&c.argument_list, None)),
         Node::NullSafeMethodCall(c) => Some((&c.argument_list, None)),
         Node::StaticMethodCall(c) => Some((&c.argument_list, None)),
+        Node::Instantiation(i) => i.argument_list.as_ref().map(|l| (l, None)),
         _ => None,
     };
     if let Some((list, callee)) = arguments {

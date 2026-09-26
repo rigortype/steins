@@ -149,6 +149,7 @@ fn an_unprovable_occurrence_marks_the_entry_opaque_with_no_sites() {
         ("<?php $s = 'a'; $o = new C(); $x = f($s) . $o->m($s);", "method call"),
         ("<?php $s = 'a'; $o = new C(); $x = f($s) . $o?->m($s);", "nullsafe method call"),
         ("<?php $s = 'a'; $x = f($s) . C::m($s);", "static method call"),
+        ("<?php $s = 'a'; $x = [f($s), new C($s)];", "constructor call (issue #678)"),
         ("<?php $s = 'a'; $fn = 'trim'; $x = f($s) . $fn($s);", "dynamic callee"),
         ("<?php $s = 'a'; $x = f($s) . g(x: $s);", "named argument"),
         ("<?php $s = 'a'; $r = []; $x = f($s) . g($s, ...$r);", "spread"),
