@@ -417,16 +417,16 @@ pub(crate) enum Refine {
 }
 
 /// The refinements that hold when `cond` is TRUE (the then-branch).
-pub(crate) fn then_refinements(cond: &CondExpr, php_minor: Option<(u16, u16)>) -> Vec<Refine> {
+pub(crate) fn then_refinements(cond: &CondExpr) -> Vec<Refine> {
     let mut out = Vec::new();
-    collect_refine(cond, true, &mut out, php_minor);
+    collect_refine(cond, true, &mut out);
     out
 }
 
 /// The refinements that hold when `cond` is FALSE (the else-branch).
-pub(crate) fn else_refinements(cond: &CondExpr, php_minor: Option<(u16, u16)>) -> Vec<Refine> {
+pub(crate) fn else_refinements(cond: &CondExpr) -> Vec<Refine> {
     let mut out = Vec::new();
-    collect_refine(cond, false, &mut out, php_minor);
+    collect_refine(cond, false, &mut out);
     out
 }
 
@@ -468,22 +468,21 @@ pub(crate) fn collect_guard_calls<'a>(cond: &'a CondExpr, then: bool, out: &mut 
 pub(crate) fn collect_truthy_calls<'a>(
     cond: &'a CondExpr,
     then: bool,
-    php_minor: Option<(u16, u16)>,
     out: &mut Vec<&'a CallExpr>,
 ) {
     match cond {
         CondExpr::Call { call, .. } if then => out.push(call),
         CondExpr::Cmp { op, lhs, rhs } => {
-            out.extend(cmp_truthy_witness(*op, lhs, rhs, then, php_minor));
+            out.extend(cmp_truthy_witness(*op, lhs, rhs, then));
         }
-        CondExpr::Not(c) => collect_truthy_calls(c, !then, php_minor, out),
+        CondExpr::Not(c) => collect_truthy_calls(c, !then, out),
         CondExpr::And(a, b) if then => {
-            collect_truthy_calls(a, true, php_minor, out);
-            collect_truthy_calls(b, true, php_minor, out);
+            collect_truthy_calls(a, true, out);
+            collect_truthy_calls(b, true, out);
         }
         CondExpr::Or(a, b) if !then => {
-            collect_truthy_calls(a, false, php_minor, out);
-            collect_truthy_calls(b, false, php_minor, out);
+            collect_truthy_calls(a, false, out);
+            collect_truthy_calls(b, false, out);
         }
         _ => {}
     }
@@ -504,7 +503,6 @@ fn cmp_truthy_witness<'a>(
     lhs: &'a CondOperand,
     rhs: &'a CondOperand,
     then: bool,
-    php_minor: Option<(u16, u16)>,
 ) -> Option<&'a CallExpr> {
     let (call, lit) = match (lhs, rhs) {
         (CondOperand::Other { call, .. }, CondOperand::Literal(v))
@@ -518,7 +516,7 @@ fn cmp_truthy_witness<'a>(
     falsy_literals()
         .iter()
         .all(|f| {
-            eval_cmp(op, std::slice::from_ref(f), std::slice::from_ref(lit), php_minor) == excluded
+            eval_cmp(op, std::slice::from_ref(f), std::slice::from_ref(lit)) == excluded
         })
         .then_some(call)
 }
@@ -581,10 +579,10 @@ pub(crate) fn operand_call(operand: &CondOperand) -> Option<&CallExpr> {
 /// Collect the refinements a condition implies on the given polarity (`then` =
 /// true-path, `!then` = false-path). Negation flips polarity; `&&` distributes on
 /// the true-path, `||` on the false-path (De Morgan).
-pub(crate) fn collect_refine(cond: &CondExpr, then: bool, out: &mut Vec<Refine>, php_minor: Option<(u16, u16)>) {
+pub(crate) fn collect_refine(cond: &CondExpr, then: bool, out: &mut Vec<Refine>) {
     match cond {
         CondExpr::Cmp { op, lhs, rhs } => {
-            collect_cmp_refine(*op, lhs, rhs, then, out, php_minor);
+            collect_cmp_refine(*op, lhs, rhs, then, out);
         }
         CondExpr::Truthy(op) => {
             // Only the true-path of a bare truthiness test refines (the false-path
@@ -593,14 +591,14 @@ pub(crate) fn collect_refine(cond: &CondExpr, then: bool, out: &mut Vec<Refine>,
                 out.push(Refine::Truthy(v.clone()));
             }
         }
-        CondExpr::Not(c) => collect_refine(c, !then, out, php_minor),
+        CondExpr::Not(c) => collect_refine(c, !then, out),
         CondExpr::And(a, b) if then => {
-            collect_refine(a, true, out, php_minor);
-            collect_refine(b, true, out, php_minor);
+            collect_refine(a, true, out);
+            collect_refine(b, true, out);
         }
         CondExpr::Or(a, b) if !then => {
-            collect_refine(a, false, out, php_minor);
-            collect_refine(b, false, out, php_minor);
+            collect_refine(a, false, out);
+            collect_refine(b, false, out);
         }
         _ => {}
     }
@@ -613,7 +611,6 @@ fn collect_cmp_refine(
     rhs: &CondOperand,
     then: bool,
     out: &mut Vec<Refine>,
-    php_minor: Option<(u16, u16)>,
 ) {
     // Identity/equality guards over a (var, literal) pair.
     if let Some((v, val)) = var_literal(lhs, rhs) {
@@ -624,7 +621,7 @@ fn collect_cmp_refine(
             _ => None,
         };
         if let Some(identical) = identical
-            && let Some(vv) = val_of(&val, php_minor)
+            && let Some(vv) = val_of(&val)
         {
             match (identical, &vv) {
                 (true, _) => out.push(Refine::Exact(v, vv)),
@@ -640,7 +637,7 @@ fn collect_cmp_refine(
         // is the idiom this exists for; it is a `NotNull` on the fall-through and
         // nothing anywhere else, which is why it is not a `Refine::Exclude`.
         if matches!((op, then), (CmpOp::Loose, false) | (CmpOp::NotLoose, true))
-            && matches!(val_of(&val, php_minor), Some(Val::Null))
+            && matches!(val_of(&val), Some(Val::Null))
         {
             out.push(Refine::NotNull(v));
             return;
@@ -879,7 +876,7 @@ pub(crate) fn apply_class_narrowing(w: &WalkCx, cond: &CondExpr, then: bool, sto
     // arrives only where it holds. `Refine::Exact` and `IntRange` are the value
     // lane's — see the refusals above.
     let mut refs = Vec::new();
-    collect_refine(cond, then, &mut refs, w.cx.php_minor);
+    collect_refine(cond, then, &mut refs);
     for r in &refs {
         match r {
             Refine::NotNull(var) => {

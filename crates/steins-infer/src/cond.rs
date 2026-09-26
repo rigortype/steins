@@ -181,7 +181,7 @@ pub(crate) fn eval_cond(
             let lv = cmp_operand_values(w, folder, lhs, env, poisoned);
             let rv = cmp_operand_values(w, folder, rhs, env, poisoned);
             match (lv, rv) {
-                (Some(lv), Some(rv)) => eval_cmp(*op, &lv, &rv, w.cx.php_minor),
+                (Some(lv), Some(rv)) => eval_cmp(*op, &lv, &rv),
                 _ => Certainty::Maybe,
             }
         }
@@ -208,7 +208,7 @@ pub(crate) fn eval_cond(
                 return Certainty::No;
             }
             let (benv, bstore) =
-                threaded_operand_env(w.cx, a, true, env, store, w.cx.php_minor, poisoned);
+                threaded_operand_env(w.cx, a, true, env, store, poisoned);
             va.and(eval_cond(w, folder, b, &benv, &bstore, poisoned))
         }
         CondExpr::Or(a, b) => {
@@ -219,7 +219,7 @@ pub(crate) fn eval_cond(
                 return Certainty::Yes;
             }
             let (benv, bstore) =
-                threaded_operand_env(w.cx, a, false, env, store, w.cx.php_minor, poisoned);
+                threaded_operand_env(w.cx, a, false, env, store, poisoned);
             va.or(eval_cond(w, folder, b, &benv, &bstore, poisoned))
         }
         // A foldable existence predicate in guard position folds to a Yes/No/Maybe
@@ -249,7 +249,6 @@ fn threaded_operand_env(
     then: bool,
     env: &HashMap<String, Known>,
     store: &Store,
-    php_minor: Option<(u16, u16)>,
     poisoned: bool,
 ) -> (HashMap<String, Known>, Store) {
     let mut benv = env.clone();
@@ -259,7 +258,7 @@ fn threaded_operand_env(
     // refinements so a minted fact is what they refine: `is_string($s) &&
     // strlen($s)` narrows `$s` in that order (ADR-0052 §6).
     apply_type_narrowing(cx, operand, then, &mut benv, &mut bstore);
-    collect_refine(operand, then, &mut refs, php_minor);
+    collect_refine(operand, then, &mut refs);
     apply_refinements(&refs, &mut benv, &mut bstore, Stratum::Verified);
     // The operand's own side effects land after its test narrowed (a by-ref call
     // may rebind a variable the test just constrained): forget them.
@@ -382,7 +381,7 @@ fn eval_binary_fact(
         .map_or_else(|| value_stratum(cx, lhs, env, store), |(_, s)| *s)
         .min(r.as_ref().map_or_else(|| value_stratum(cx, rhs, env, store), |(_, s)| *s));
     let verdict = match (l, r) {
-        (Some((l, _)), Some((r, _))) => eval_cmp(cop, &l, &r, cx.php_minor),
+        (Some((l, _)), Some((r, _))) => eval_cmp(cop, &l, &r),
         _ => Certainty::Maybe,
     };
     match verdict {
@@ -475,7 +474,7 @@ pub(crate) fn total_op_fact(
         ArgValue::Binary { op: ValueOp::Spaceship, lhs, rhs } => {
             eval_spaceship_fact(w.cx, folder, lhs, rhs, env, store, poisoned)
         }
-        ArgValue::Isset(ops) => eval_isset_fact(w.cx, ops, env, poisoned),
+        ArgValue::Isset(ops) => eval_isset_fact(ops, env, poisoned),
         ArgValue::Logical { op, lhs, rhs, rhs_span } => {
             eval_logical_fact(w, folder, *op, lhs, rhs, *rhs_span, env, store, poisoned)
         }
@@ -1021,8 +1020,8 @@ fn concat_tail_keeps_numeric(tail: &PhpStr) -> bool {
 /// [`eval_cmp`] asked twice and nothing else: it inherits the whole comparison
 /// decision procedure and adds no ordering of its own. It never subtracts the
 /// operands — that is arithmetic, and ADR-0028 §3's engine-int-width trap.
-pub(crate) fn spaceship_pole(l: &[ArgValue], r: &[ArgValue], php_minor: Option<(u16, u16)>) -> Option<i64> {
-    match (eval_cmp(CmpOp::Lt, l, r, php_minor), eval_cmp(CmpOp::Gt, l, r, php_minor)) {
+pub(crate) fn spaceship_pole(l: &[ArgValue], r: &[ArgValue]) -> Option<i64> {
+    match (eval_cmp(CmpOp::Lt, l, r), eval_cmp(CmpOp::Gt, l, r)) {
         (Certainty::Yes, Certainty::No) => Some(-1),
         (Certainty::No, Certainty::Yes) => Some(1),
         // Provably neither less nor greater is provably equal. `Maybe` on either
@@ -1076,7 +1075,7 @@ fn eval_spaceship_fact(
         .map_or_else(|| value_stratum(cx, lhs, env, store), |(_, s)| *s)
         .min(r.as_ref().map_or_else(|| value_stratum(cx, rhs, env, store), |(_, s)| *s));
     let decided = match (l, r) {
-        (Some((l, _)), Some((r, _))) => spaceship_pole(&l, &r, cx.php_minor),
+        (Some((l, _)), Some((r, _))) => spaceship_pole(&l, &r),
         _ => None,
     };
     match decided {
@@ -1131,7 +1130,6 @@ fn eval_spaceship_fact(
 /// takes the `min` over every operand rather than only the deciding one: less
 /// trust is always the safe side of this ledger.
 fn eval_isset_fact(
-    cx: &Cx<'_>,
     ops: &[IssetOperand],
     env: &HashMap<String, Known>,
     poisoned: bool,
@@ -1143,7 +1141,7 @@ fn eval_isset_fact(
     let mut verdict = Certainty::Yes;
     let mut derived = Stratum::Verified;
     for op in ops {
-        let (c, s) = isset_operand_verdict(cx, op, env, poisoned);
+        let (c, s) = isset_operand_verdict(op, env, poisoned);
         verdict = verdict.and(c);
         derived = derived.min(s);
     }
@@ -1185,7 +1183,6 @@ fn eval_isset_fact(
 /// reference table rather than as a `Fact` here — and that table does not on its
 /// own separate a proven allocation from a declared, possibly nullable, receiver.
 fn isset_operand_verdict(
-    cx: &Cx<'_>,
     op: &IssetOperand,
     env: &HashMap<String, Known>,
     poisoned: bool,
@@ -1207,11 +1204,11 @@ fn isset_operand_verdict(
             // the array, so an absent key is absent and a present one's value is
             // known. This is the leg that makes the table hold over a *witnessed*
             // literal and not only over a declared shape.
-            if let Some(decided) = proven_array_isset(cx, var, key, env, poisoned) {
+            if let Some(decided) = proven_array_isset(var, key, env, poisoned) {
                 return decided;
             }
             let base = ArgValue::Var(var.clone());
-            let Some((read, stratum)) = shape_read_at(&base, key, env, poisoned, cx.php_minor)
+            let Some((read, stratum)) = shape_read_at(&base, key, env, poisoned)
             else {
                 return UNDECIDED;
             };
@@ -1259,7 +1256,6 @@ fn isset_operand_verdict(
 /// The key travels through the offset family's own resolution and PHP's own key
 /// cast, so `$a[5]` and `$a["5"]` are one key here as everywhere else.
 fn proven_array_isset(
-    cx: &Cx<'_>,
     var: &str,
     key: &ArgValue,
     env: &HashMap<String, Known>,
@@ -1268,7 +1264,7 @@ fn proven_array_isset(
     if poisoned {
         return None;
     }
-    let Some(Fact::Singleton(key_val)) = offset_operand_fact(key, env, poisoned, cx.php_minor)
+    let Some(Fact::Singleton(key_val)) = offset_operand_fact(key, env, poisoned)
     else {
         return None;
     };
@@ -1339,18 +1335,18 @@ fn eval_ternary_fact(
     // The arms evaluate under the guard's respective refinements (ADR-0052 §6):
     // `$c ? A : B` — `A` sees `then_refinements($c)`, `B` sees `else_refinements`.
     // Only the arm envs thread; the verdict logic is unchanged.
-    let (tenv, _) = threaded_operand_env(w.cx, cond, true, env, store, w.cx.php_minor, poisoned);
-    let (eenv, _) = threaded_operand_env(w.cx, cond, false, env, store, w.cx.php_minor, poisoned);
+    let (tenv, _) = threaded_operand_env(w.cx, cond, true, env, store, poisoned);
+    let (eenv, _) = threaded_operand_env(w.cx, cond, false, env, store, poisoned);
     match verdict {
         Certainty::Yes => {
             w.cx
                 .resolve_literal(then_val, &tenv, poisoned, folder)
-                .and_then(|a| singleton_fact(&a, w.cx.php_minor))
+                .and_then(|a| singleton_fact(&a))
         }
         Certainty::No => {
             w.cx
                 .resolve_literal(else_val, &eenv, poisoned, folder)
-                .and_then(|a| singleton_fact(&a, w.cx.php_minor))
+                .and_then(|a| singleton_fact(&a))
         }
         Certainty::Maybe => {
             // Undecided guard: the value is one of the two arms, so the fact is
@@ -1365,7 +1361,7 @@ fn eval_ternary_fact(
             let arm = |value: &ArgValue, aenv: &HashMap<String, Known>, folder: &mut dyn Folder| {
                 w.cx
                     .resolve_literal(value, aenv, poisoned, folder)
-                    .and_then(|lit| singleton_fact(&lit, w.cx.php_minor))
+                    .and_then(|lit| singleton_fact(&lit))
                     .or_else(|| transfer_arg_fact(w.cx, folder, value, aenv, Some(store)))
             };
             let t = arm(then_val, &tenv, folder)?;
@@ -1474,15 +1470,15 @@ pub(crate) fn operand_values(
 
 /// Evaluate a comparison over two candidate value sets (ADR-0031 OneOf rule: all
 /// member pairs agree → that verdict; any disagreement or undecidable pair → Maybe).
-pub(crate) fn eval_cmp(op: CmpOp, lhs: &[ArgValue], rhs: &[ArgValue], php_minor: Option<(u16, u16)>) -> Certainty {
+pub(crate) fn eval_cmp(op: CmpOp, lhs: &[ArgValue], rhs: &[ArgValue]) -> Certainty {
     let mut acc: Option<bool> = None;
     for l in lhs {
         for r in rhs {
             let b = match op {
-                CmpOp::Identical => php_identical(l, r, php_minor),
-                CmpOp::NotIdentical => php_identical(l, r, php_minor).map(|x| !x),
-                CmpOp::Loose => php_loose_eq(l, r, php_minor),
-                CmpOp::NotLoose => php_loose_eq(l, r, php_minor).map(|x| !x),
+                CmpOp::Identical => php_identical(l, r),
+                CmpOp::NotIdentical => php_identical(l, r).map(|x| !x),
+                CmpOp::Loose => php_loose_eq(l, r),
+                CmpOp::NotLoose => php_loose_eq(l, r).map(|x| !x),
                 // Ordering: decide only for concrete numeric operands (PHP numeric
                 // ordering); any other pairing is undecidable here → `Maybe`. The
                 // refinement machinery consumes these guards regardless of verdict.

@@ -649,7 +649,7 @@ pub(crate) fn walk_trace(
             // at `Verified` stratum; `zend.assertions` is never consulted).
             StmtKind::Assert { cond } => {
                 apply_type_narrowing(w.cx, cond, true, env, store);
-                let refs = then_refinements(cond, w.cx.php_minor);
+                let refs = then_refinements(cond);
                 apply_refinements(&refs, env, store, Stratum::Verified);
                 // The declared-arm lane, in the same order `walk_if` applies it
                 // (issue #391): `apply_refinements` above reaches the VALUE lane

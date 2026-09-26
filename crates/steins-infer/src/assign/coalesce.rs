@@ -70,7 +70,7 @@ pub(crate) fn eval_coalesce_fact(
     env: &HashMap<String, Known>,
     store: Option<&Store>,
 ) -> Option<(Fact, Stratum)> {
-    let (poisoned, php_minor) = (w.scope.poisoned, w.cx.php_minor);
+    let poisoned = w.scope.poisoned;
     let mut arms: Vec<(&ArgValue, Option<Span>)> = Vec::new();
     flatten_coalesce_spans(a, Some(rhs_span), &mut arms);
     flatten_coalesce_spans(b, None, &mut arms);
@@ -83,7 +83,7 @@ pub(crate) fn eval_coalesce_fact(
     // contributes its stratum.
     let mut parts: Vec<(Option<Fact>, Stratum)> = Vec::with_capacity(arms.len());
     for (i, (arm, rest)) in arms.iter().enumerate() {
-        let projection = coalesce_projection(arm, env, poisoned, php_minor);
+        let projection = coalesce_projection(arm, env, poisoned);
         let (part, settled) = match &projection {
             Some((var, key)) => {
                 let (f, s, settled) = coalesce_arm_fact(var, key, env, &premises, i == last)?;
@@ -183,11 +183,10 @@ pub(crate) fn coalesce_projection(
     arm: &ArgValue,
     env: &HashMap<String, Known>,
     poisoned: bool,
-    php_minor: Option<(u16, u16)>,
 ) -> Option<(String, VKey)> {
     let ArgValue::OffsetRead { base, key } = arm else { return None };
     let ArgValue::Var(name) = base.as_ref() else { return None };
-    let Some(Fact::Singleton(key_val)) = offset_operand_fact(key, env, poisoned, php_minor) else {
+    let Some(Fact::Singleton(key_val)) = offset_operand_fact(key, env, poisoned) else {
         return None;
     };
     Some((name.clone(), offset_key_of(&key_val)?))
@@ -311,7 +310,7 @@ fn arg_value_fact(
         ArgValue::Var(name) if !w.scope.poisoned => env.get(name)?.fact.clone(),
         _ => {
             let lit = w.cx.resolve_literal(arg, env, w.scope.poisoned, folder)?;
-            singleton_fact(&lit, w.cx.php_minor)
+            singleton_fact(&lit)
         }
     }
 }

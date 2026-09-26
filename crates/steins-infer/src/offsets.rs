@@ -107,9 +107,9 @@ pub(crate) fn place_of(
             if strat != Stratum::Verified {
                 return None;
             }
-            Some(crate::env::elem_place(b, &crate::shapes::guard_key(&lit, cx.php_minor)?))
+            Some(crate::env::elem_place(b, &crate::shapes::guard_key(&lit)?))
         }
-        _ => place_of_static(cx, value),
+        _ => place_of_static(value),
     }
 }
 
@@ -124,12 +124,12 @@ pub(crate) fn place_of(
 /// a place is `Closed` only where a literal-key close put it there.
 ///
 /// [`resource_call_effects`]: crate::resource::resource_call_effects
-pub(crate) fn place_of_static(cx: &Cx, value: &ArgValue) -> Option<String> {
+pub(crate) fn place_of_static(value: &ArgValue) -> Option<String> {
     match value {
         ArgValue::Var(v) => Some(v.clone()),
         ArgValue::OffsetRead { base, key } => {
             let ArgValue::Var(b) = &**base else { return None };
-            Some(crate::env::elem_place(b, &crate::shapes::guard_key(key, cx.php_minor)?))
+            Some(crate::env::elem_place(b, &crate::shapes::guard_key(key)?))
         }
         _ => None,
     }
@@ -163,7 +163,6 @@ pub(crate) fn offset_operand_fact(
     arg: &ArgValue,
     env: &HashMap<String, Known>,
     poisoned: bool,
-    php_minor: Option<(u16, u16)>,
 ) -> Option<Fact> {
     match arg {
         ArgValue::Var(name) => {
@@ -173,7 +172,7 @@ pub(crate) fn offset_operand_fact(
             let k = env.get(name)?;
             (k.stratum == Stratum::Verified).then(|| k.fact.clone()).flatten()
         }
-        _ => singleton_fact(arg, php_minor),
+        _ => singleton_fact(arg),
     }
 }
 
@@ -220,7 +219,7 @@ pub(crate) fn check_offset_read(
     // Legs (b)/(e): base must be a proven `Verified` whole value (N2). An
     // object base (fact `None`, state lives in the heap) is silent — the
     // ArrayAccess/non-ArrayAccess object split is the deferred case.
-    let Some(base_fact) = offset_operand_fact(base, env, poisoned, cx.php_minor) else {
+    let Some(base_fact) = offset_operand_fact(base, env, poisoned) else {
         return;
     };
 
@@ -245,7 +244,7 @@ pub(crate) fn check_offset_read(
 
     // Case 2 — container base (`offset.missing`, warning-grade): key must be
     // a proven single value (leg (c)), canonicalized via the shared helper (A10).
-    let Some(Fact::Singleton(key_val)) = offset_operand_fact(key, env, poisoned, cx.php_minor)
+    let Some(Fact::Singleton(key_val)) = offset_operand_fact(key, env, poisoned)
     else {
         return;
     };
@@ -396,7 +395,6 @@ fn shape_site_at<'a>(
     key: &ArgValue,
     env: &'a HashMap<String, Known>,
     poisoned: bool,
-    php_minor: Option<(u16, u16)>,
 ) -> Option<(&'a ShapeFact, VKey, Stratum)> {
     if poisoned {
         return None;
@@ -406,7 +404,7 @@ fn shape_site_at<'a>(
     let Some(Fact::Shape { shape, nullable: false }) = &known.fact else { return None };
     // The key resolution is the offset family's, unchanged: a literal or a
     // `Verified` proven value, canonicalized by PHP's own key rule (A10).
-    let Some(Fact::Singleton(key_val)) = offset_operand_fact(key, env, poisoned, php_minor) else {
+    let Some(Fact::Singleton(key_val)) = offset_operand_fact(key, env, poisoned) else {
         return None;
     };
     let canon = offset_key_of(&key_val)?;
@@ -420,9 +418,8 @@ pub(crate) fn shape_read_at(
     key: &ArgValue,
     env: &HashMap<String, Known>,
     poisoned: bool,
-    php_minor: Option<(u16, u16)>,
 ) -> Option<(ShapeRead, Stratum)> {
-    let (shape, canon, stratum) = shape_site_at(base, key, env, poisoned, php_minor)?;
+    let (shape, canon, stratum) = shape_site_at(base, key, env, poisoned)?;
     // Derivation clause (ADR-0052 §5): the read consumes the base's fact, so the
     // result is no stronger than it — which is always `Asserted` for a shape.
     Some((shape_read(shape, &canon), stratum))
@@ -488,7 +485,7 @@ pub(crate) fn check_shape_read(
     span: Span,
     out: &mut Vec<Diagnostic>,
 ) {
-    let Some((shape, canon, _)) = shape_site_at(base, key, env, poisoned, cx.php_minor) else {
+    let Some((shape, canon, _)) = shape_site_at(base, key, env, poisoned) else {
         return;
     };
     judge_shape_read(cx, shape, &canon, &base.render(), span, out);
@@ -587,7 +584,7 @@ pub(crate) fn check_destructure_source(
             (Some(shape), _) => {
                 // The key resolution is the offset family's own (A10), unchanged.
                 let Some(Fact::Singleton(key_val)) =
-                    offset_operand_fact(key, env, poisoned, cx.php_minor)
+                    offset_operand_fact(key, env, poisoned)
                 else {
                     continue;
                 };
@@ -620,7 +617,7 @@ pub(crate) fn check_coalesce_final_arm(
 
     let mut premises: Vec<(String, VKey)> = Vec::new();
     for (i, arm) in arms.iter().enumerate() {
-        let projection = coalesce_projection(arm, env, poisoned, cx.php_minor);
+        let projection = coalesce_projection(arm, env, poisoned);
         if i == last {
             let Some((var, canon)) = projection else { return };
             judge_coalesce_final(cx, &var, &canon, env, &premises, span, out);

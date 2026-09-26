@@ -17,12 +17,11 @@ pub(crate) const NEXT_INT_BOUNDARY: (u16, u16) = (8, 3);
 /// the project's **declared target** into the two per-run answers the checker
 /// consumes.
 ///
-/// - The **effective minor** feeds `normalize_array` (ADR-0049 A12): with a
+/// - The **effective minor** feeds the append index (ADR-0049 A22): with a
 ///   declared target, the range must agree on the next-int boundary — one side
-///   entirely answers with its floor, a straddling range answers `None` (A12's
-///   existing unknown leg: a boundary-sensitive literal declines, every other
-///   literal still resolves). With no target, the runtime minor answers as
-///   before #28.
+///   entirely answers with its floor, a straddling range answers `None` (a
+///   negative landing index declines, every other append still resolves). With
+///   no target, the runtime minor answers as before #28.
 /// - The **catalog skew** flag feeds ADR-0052 A11's arm-deletion demotion: the
 ///   catalog is verified only at [`steins_catalog::PINNED_PHP`], so a target
 ///   range is skewed unless it is exactly the pin; no target falls back to the
@@ -49,7 +48,7 @@ fn version_id_hi(m: (u16, u16)) -> u32 {
 /// consumes, all derived from the one target-or-runtime seam.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct PhpView {
-    /// The effective minor for version-keyed value rules (ADR-0049 A12) — see
+    /// The effective minor for version-keyed value rules (ADR-0049 A22) — see
     /// [`effective_php_view`].
     pub(crate) effective_minor: Option<(u16, u16)>,
     /// The ADR-0052 A11 catalog-skew flag.

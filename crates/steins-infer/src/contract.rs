@@ -1211,10 +1211,9 @@ impl<'a> Cx<'a> {
                 lit => self.resolve_cval(&lit, env, store, poisoned, folder),
             },
             ArgValue::Array(items) => {
-                // ADR-0049 A12: the walk knows the project's own PHP minor, so a
-                // negative-key literal resolves exactly; only an unreported minor
-                // over such a literal declines.
-                let normalized = normalize_array(items, self.php_minor)?;
+                // A negative-key literal resolves alike on every supported minor
+                // (ADR-0049 A22); only a key the source does not spell declines.
+                let normalized = normalize_array(items)?;
                 let mut out = Vec::with_capacity(normalized.len());
                 for (k, v) in normalized {
                     out.push((k, self.resolve_cval(&v, env, store, poisoned, folder)?));
@@ -1763,7 +1762,7 @@ fn cval_as_val(v: &CVal) -> Option<Val> {
     match v {
         // The array minor-version question is already settled: a `CVal`'s keys are
         // normalized (`NormKey`), so no next-int guess is needed here.
-        CVal::Scalar(s) => val_of(s, None),
+        CVal::Scalar(s) => val_of(s),
         CVal::Array(entries) => entries
             .iter()
             .map(|(k, cv)| cval_as_val(cv).map(|val| (domain_key(k), val)))
@@ -1971,7 +1970,7 @@ fn const_operand_shape(cx: &Cx, cfile: usize, coff: u32, ty: &PType) -> Option<C
     let PKind::Const(ConstExpr::Fetch { class, name }) = &ty.kind else { return None };
     let fqn = cx.resolve_pclass(cfile, coff, class);
     let ArgValue::Array(items) = cx.resolve_const_literal(&fqn, name)? else { return None };
-    let normalized = normalize_array(&items, cx.php_minor)?;
+    let normalized = normalize_array(&items)?;
     let mut fields = Vec::with_capacity(normalized.len());
     for (k, v) in normalized {
         fields.push((k, literal_contract(&v)?));

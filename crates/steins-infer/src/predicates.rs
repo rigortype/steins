@@ -701,7 +701,6 @@ fn ctype_proof(callee: &str) -> Option<StrPreds> {
 pub(crate) fn in_array_literals(
     cx: &Cx,
     call: &CallExpr,
-    php_minor: Option<(u16, u16)>,
 ) -> Option<(String, Vec<Val>)> {
     let callee = global_function_callee(cx, call)?;
     if !call.positional_only || !callee.eq_ignore_ascii_case("in_array") {
@@ -714,7 +713,7 @@ pub(crate) fn in_array_literals(
     }
     let ArgValue::Var(var) = &call.args[0].value else { return None };
     let ArgValue::Array(_) = &call.args[1].value else { return None };
-    let Some(Val::Array(entries)) = val_of(&call.args[1].value, php_minor) else { return None };
+    let Some(Val::Array(entries)) = val_of(&call.args[1].value) else { return None };
     // A nested array member has no scalar identity the value domain can carry.
     if entries.iter().any(|(_, v)| matches!(v, Val::Array(_))) {
         return None;
@@ -740,7 +739,7 @@ pub(crate) fn in_array_literals(
 /// neither reflexive across types nor transitive, so no sound identity can be
 /// minted from it. A needle that is not a literal is declined too — proving a
 /// variable needle absent says nothing about a value the analyzer cannot name.
-fn in_array_haystack(cx: &Cx, call: &CallExpr, php_minor: Option<(u16, u16)>) -> Option<(String, Val)> {
+fn in_array_haystack(cx: &Cx, call: &CallExpr) -> Option<(String, Val)> {
     let callee = global_function_callee(cx, call)?;
     if !call.positional_only || !callee.eq_ignore_ascii_case("in_array") || call.args.len() != 3 {
         return None;
@@ -748,7 +747,7 @@ fn in_array_haystack(cx: &Cx, call: &CallExpr, php_minor: Option<(u16, u16)>) ->
     if !matches!(call.args[2].value, ArgValue::Bool(true)) {
         return None;
     }
-    let needle = val_of(&call.args[0].value, php_minor)?;
+    let needle = val_of(&call.args[0].value)?;
     if matches!(needle, Val::Array(_)) {
         return None;
     }
@@ -772,7 +771,7 @@ fn collect_type_guards(cx: &Cx, cond: &CondExpr, then: bool, out: &mut Vec<TypeG
             }
             // The haystack's element subtraction, on the branch where the
             // membership test FAILS (issue #565).
-            if !then && let Some((var, needle)) = in_array_haystack(cx, call, cx.php_minor) {
+            if !then && let Some((var, needle)) = in_array_haystack(cx, call) {
                 out.push(TypeGuard::HaystackExcludes { var, needle });
             }
             if let Some(pred) = type_predicate(cx, call) {
@@ -781,7 +780,7 @@ fn collect_type_guards(cx: &Cx, cond: &CondExpr, then: bool, out: &mut Vec<TypeG
                 }
                 return;
             }
-            if let Some((var, lits)) = in_array_literals(cx, call, cx.php_minor) {
+            if let Some((var, lits)) = in_array_literals(cx, call) {
                 out.push(TypeGuard::InArray { var, lits, positive: then });
             }
         }

@@ -786,8 +786,8 @@ fn dump_var(arg: &DumpArg, _: &mut dyn Folder) -> Option<DumpRendering> {
 /// declared absence) falls through.
 fn dump_offset_read(arg: &DumpArg, _: &mut dyn Folder) -> Option<DumpRendering> {
     let ArgValue::OffsetRead { base, key } = arg.value else { return None };
-    let (cx, poisoned) = (arg.w.cx, arg.w.scope.poisoned);
-    let (read, stratum) = shape_read_at(base, key, arg.env, poisoned, cx.php_minor)?;
+    let poisoned = arg.w.scope.poisoned;
+    let (read, stratum) = shape_read_at(base, key, arg.env, poisoned)?;
     Some(DumpRendering::of_fact(&read.into_fact()?, stratum))
 }
 
@@ -906,7 +906,7 @@ fn dump_global_const(arg: &DumpArg, _: &mut dyn Folder) -> Option<DumpRendering>
 fn dump_literal(arg: &DumpArg, folder: &mut dyn Folder) -> Option<DumpRendering> {
     let (cx, poisoned) = (arg.w.cx, arg.w.scope.poisoned);
     let (lit, stratum) = cx.resolve_literal_strat(arg.value, arg.env, poisoned, folder)?;
-    Some(DumpRendering::of_fact(&singleton_fact(&lit, cx.php_minor)?, stratum))
+    Some(DumpRendering::of_fact(&singleton_fact(&lit)?, stratum))
 }
 
 /// An array literal [`dump_literal`] could not prove whole (issue #327): the shape

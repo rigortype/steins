@@ -196,9 +196,9 @@ pub(crate) fn apply_cond_side(
 ) {
     apply_type_narrowing(w.cx, cond, then, env, store);
     let refs = if then {
-        then_refinements(cond, w.cx.php_minor)
+        then_refinements(cond)
     } else {
-        else_refinements(cond, w.cx.php_minor)
+        else_refinements(cond)
     };
     apply_refinements(&refs, env, store, Stratum::Verified);
     apply_class_narrowing(w, cond, then, store);
@@ -437,7 +437,7 @@ pub(crate) fn walk_match(
             continue;
         }
         let cond_k =
-            eval_arm_cond(op, subj_vals.as_deref(), &arm.conditions, env, poisoned, w.cx.php_minor);
+            eval_arm_cond(op, subj_vals.as_deref(), &arm.conditions, env, poisoned);
         let taken = match cond_k {
             Certainty::No => Certainty::No,
             Certainty::Yes if earlier_all_no => {
@@ -470,18 +470,17 @@ pub(crate) fn walk_match(
         }
         let mut benv = env.clone();
         let mut bclasses = store.clone();
-        refine_match_arm(subject, &arm.conditions, loose, &mut benv, w.cx.php_minor);
+        refine_match_arm(subject, &arm.conditions, loose, &mut benv);
         refine_match_arm_enum_case(w, subject, &arm.conditions, loose, &mut bclasses);
         // Tag-based discrimination (ADR-0062 A-G4): a `match`/`switch` on a
         // constant-key projection subtracts the base's array arms by the field's
         // `admits` verdict, minting the collapsed shape into the arm's env. The
         // `default` arm refines nothing (a residue A-G4 does not model in v1).
         if let CondOperand::Offset { var, key } = subject
-            && let Some(k) = guard_key(key, w.cx.php_minor)
+            && let Some(k) = guard_key(key)
             && let Some(tags) = arm_tag_literals(&arm.conditions)
         {
             apply_shape_guard(
-                w.cx,
                 &ShapeGuard::Tag { var: var.clone(), key: k, tags, loose },
                 &mut benv,
                 &mut bclasses,
@@ -579,13 +578,12 @@ fn eval_arm_cond(
     conditions: &[CondOperand],
     env: &HashMap<String, Known>,
     poisoned: bool,
-    php_minor: Option<(u16, u16)>,
 ) -> Certainty {
     let Some(subj) = subj_vals else { return Certainty::Maybe };
     let mut acc = Certainty::No;
     for c in conditions {
         let cert = match operand_values(c, env, poisoned) {
-            Some(cv) => eval_cmp(op, subj, &cv, php_minor),
+            Some(cv) => eval_cmp(op, subj, &cv),
             None => Certainty::Maybe,
         };
         acc = acc.or(cert);
@@ -619,7 +617,6 @@ fn refine_match_arm(
     conditions: &[CondOperand],
     loose: bool,
     env: &mut HashMap<String, Known>,
-    php_minor: Option<(u16, u16)>,
 ) {
     if loose {
         return;
@@ -628,7 +625,7 @@ fn refine_match_arm(
     let mut vals = Vec::with_capacity(conditions.len());
     for c in conditions {
         match c {
-            CondOperand::Literal(v) => match val_of(v, php_minor) {
+            CondOperand::Literal(v) => match val_of(v) {
                 Some(val) => vals.push(val),
                 None => return,
             },
@@ -758,7 +755,7 @@ fn subtract_no_match_path(
     let mut every_condition_landed = true;
     for cond in arms.iter().flat_map(|a| a.conditions.iter()) {
         let landed = match cond {
-            CondOperand::Literal(lit) => match val_of(lit, w.cx.php_minor) {
+            CondOperand::Literal(lit) => match val_of(lit) {
                 Some(val) => {
                     let (refine, sub) = if matches!(val, Val::Null) {
                         (Refine::NotNull(name.clone()), normalize::Subtrahend::Null)

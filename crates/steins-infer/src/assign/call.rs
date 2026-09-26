@@ -56,7 +56,7 @@ pub(super) fn bind_unfolded(
             ) =>
         {
             lhs.bind_quiet(env, store, fact, strat);
-            bind_handle_elements(cx, var, items, store);
+            bind_handle_elements(var, items, store);
         }
         // The `::class` magic constant (issue #236): `$c = Foo::class`
         // binds its FQN literal, `$c = static::class` the refinement.
@@ -294,12 +294,11 @@ fn seed_returned_shape(
 ///
 /// [`normalize_array`]: steins_syntax::normalize_array
 fn bind_handle_elements(
-    cx: &crate::cx::Cx,
     var: &str,
     items: &[(steins_syntax::ArrayKey, ArgValue)],
     store: &mut Store,
 ) {
-    let Some(normalized) = steins_syntax::normalize_array(items, cx.php_minor) else { return };
+    let Some(normalized) = steins_syntax::normalize_array(items) else { return };
     for (key, value) in normalized {
         let ArgValue::Var(source) = value else { continue };
         let Some(id) = store.id_of(&source).filter(|id| store.resources.contains_key(id)) else {

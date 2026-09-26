@@ -80,7 +80,7 @@ pub(crate) fn seed_out_params(
     store: &mut Store,
 ) {
     let mut calls = Vec::new();
-    collect_truthy_calls(cond, then, w.cx.php_minor, &mut calls);
+    collect_truthy_calls(cond, then, &mut calls);
     for call in calls {
         let seeds = out_param_seed(w, folder, call, env, store, SeedPosition::Guard);
         let line = guard_call_line(w, call);

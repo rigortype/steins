@@ -173,12 +173,16 @@ fn a_string_keyed_literal_declines_because_it_is_a_named_argument() {
 }
 
 #[test]
-fn a_literal_whose_positions_depend_on_the_php_minor_declines() {
-    // `[-5 => 'a', 'b']` puts `'b'` at 0 before PHP 8.3 and at -4 from 8.3 —
-    // and last-wins can then fold differently. A spread whose flattened list is
-    // not the same under every supported minor is not one the source names.
-    assert_eq!(lowered("f(...[-5 => 1, 2])"), ArgValue::Other);
-    // A non-literal key is unresolvable under EVERY rule (issue #336).
+fn a_negative_key_literal_flattens_like_any_other() {
+    // `f(...[-5 => 1, 2])` passes `[1, 2]` and `f(...[-5 => 1, 2, -4 => 3])` passes
+    // `[1, 3]` through `php -r` on 8.1.32, 8.2.33 and 8.5.10: the omitted key lands
+    // on -4 on every supported minor (ADR-0049 A22), so last-wins folds alike too.
+    assert_eq!(stmt_args("f(...[-5 => 1, 2])"), vec![ArgValue::Int(1), ArgValue::Int(2)]);
+    assert_eq!(
+        stmt_args("f(...[-5 => 1, 2, -4 => 3])"),
+        vec![ArgValue::Int(1), ArgValue::Int(3)]
+    );
+    // A non-literal key is unresolvable (issue #336).
     assert_eq!(lowered("f(...[$k => 1])"), ArgValue::Other);
 }
 
@@ -234,6 +238,7 @@ fn has_spread_is_down_exactly_when_the_argument_count_is_proven() {
         ("f(...[])", 0),
         ("f(1, ...[])", 1),
         ("f(...[2 => 1, 0 => 2])", 2),
+        ("f(...[-5 => 1, 2])", 2),
     ] {
         let call = call_stmt(src);
         assert!(!call.has_spread, "`{src}` proves its count");
@@ -248,7 +253,6 @@ fn has_spread_is_down_exactly_when_the_argument_count_is_proven() {
         "f(...[1], ...$rest)",
         "f(...$rest, ...[1])",
         "f(...['a' => 1])",
-        "f(...[-5 => 1, 2])",
     ] {
         let call = call_stmt(src);
         assert!(call.has_spread, "`{src}` cannot prove its count");
