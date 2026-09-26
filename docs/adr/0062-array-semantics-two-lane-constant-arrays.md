@@ -1208,6 +1208,20 @@ fence upgrades the witness's meaning from "this was the build order" to "this
 was the build order and nothing has been removed since" — which is exactly the
 premise `max + 1` needs.
 
+*Corrected 2026-09-27: `array_pop` and `array_shift` do not reset the counter
+the way this paragraph says, measured with `php -r` on 8.1.32, 8.2.33, 8.3.33,
+8.4.25 and 8.5.10 alike. `array_pop` lowers it by one, and only when the popped
+key was the counter minus one, so `$a = [0 => 'a', 5 => 'x']; array_pop($a);
+$a[] = 9;` lands on `5`, not `1`. `array_shift` sets it to the number of
+integer keys it renumbered, which is `0` rather than unset when there were
+none, so `$a = ['k' => 1]; array_shift($a); $a[-5] = 1; $a[] = 2;` lands on
+`0`, not `-4`. The witness now means only that PHP's counter is the sequence's
+`max + 1`, and each of those two rules keeps it only where that holds. A pop
+also no longer turns a proven list into a witness, the K3 mistake again: the
+list says nothing about the counter, and the pop does not reset it.
+`array_splice` has no rule and attaches no witness, and a folded `array_filter`
+result is a fresh build, which does hold it.*
+
 ### K3. Two live claims this corrected
 
 Both were reachable before this slice, through `array_push`:

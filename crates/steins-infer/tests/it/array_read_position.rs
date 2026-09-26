@@ -400,3 +400,127 @@ fn a_moved_declaration_declines_even_with_the_right_arity() {
     folder.types.insert("current".to_owned(), "int|false".to_owned());
     assert_eq!(dump_with("array{a: int}", "current($v)", &mut folder), "dumped type: unknown");
 }
+
+
+// The next append index after a pop or a shift
+
+/// `$a` dumped after `body`, inside a function that declares nothing.
+fn dump_after(body: &str) -> String {
+    let src = format!("<?php\nfunction f(): void {{ {body} \\PHPStan\\dumpType($a); }}\n");
+    one_type_with(&src, &mut Mock::sidecar())
+}
+
+#[test]
+fn a_pop_that_lowers_the_append_index_below_the_survivors_max_plus_one_names_no_index() {
+    // php-src's `array_pop` lowers the next append index by one, and only when
+    // the popped key was that index minus one; it never recomputes the index
+    // from the survivors. Measured with `php -r` on 8.1.32, 8.2.33, 8.3.33,
+    // 8.4.25 and 8.5.10, every minor alike:
+    //
+    //   $a = [0 => 'a', 5 => 'x']; array_pop($a); $a[] = 9;   => 0, 5
+    //   $a = [5 => 'x']; array_pop($a); $a[] = 9;              => 5
+    //   $a = [1]; array_pop($a); $a[-5] = 1; $a[] = 2;         => -5, 0
+    //
+    // Each used to dump the survivors' `max + 1` (`list{'a', 9}`, `list{9}`,
+    // `array{-5: 1, -4: 2}`). The append takes the weak row it takes after
+    // `unset`, which admits what PHP built.
+    for (body, want) in [
+        (
+            "$a = [0 => 'a', 5 => 'x']; array_pop($a); $a[] = 9;",
+            "dumped type: non-empty-array{9|'a', ...<int, 9>}",
+        ),
+        ("$a = [5 => 'x']; array_pop($a); $a[] = 9;", "dumped type: non-empty-array<int, 9>"),
+        (
+            "$a = [1]; array_pop($a); $a[-5] = 1; $a[] = 2;",
+            "dumped type: non-empty-array{-5: 1|2, ...}",
+        ),
+    ] {
+        assert_eq!(dump_after(body), want, "{body}");
+    }
+}
+
+#[test]
+fn a_pop_that_leaves_the_append_index_at_the_survivors_max_plus_one_stays_exact() {
+    // Popping a string key, or an integer below the maximum, moves no index;
+    // popping the maximum lands the index on the survivors' `max + 1` when the
+    // key below it survived. The same five minors:
+    //
+    //   $a = ['x', 'y']; array_pop($a); $a[] = 'z';                      => 0, 1
+    //   $a = ['a', 'b', 'c']; array_pop($a); array_pop($a); $a[] = 9;    => 0, 1
+    //   $a = [5 => 'a', 3 => 'b']; array_pop($a); $a[] = 9;              => 5, 6
+    //   $a = [0 => 'a', 5 => 'x', 'k' => 's']; array_pop($a); $a[] = 9;  => 0, 5, 6
+    //   $a = ['a', 'k' => 1]; array_pop($a); $a[] = 9;                   => 0, 1
+    for (body, want) in [
+        ("$a = ['x', 'y']; array_pop($a); $a[] = 'z';", "dumped type: list{'x', 'z'}"),
+        (
+            "$a = ['a', 'b', 'c']; array_pop($a); array_pop($a); $a[] = 9;",
+            "dumped type: list{'a', 9}",
+        ),
+        ("$a = [5 => 'a', 3 => 'b']; array_pop($a); $a[] = 9;", "dumped type: array{5: 'a', 6: 9}"),
+        (
+            "$a = [0 => 'a', 5 => 'x', 'k' => 's']; array_pop($a); $a[] = 9;",
+            "dumped type: array{0: 'a', 5: 'x', 6: 9}",
+        ),
+        ("$a = ['a', 'k' => 1]; array_pop($a); $a[] = 9;", "dumped type: list{'a', 9}"),
+    ] {
+        assert_eq!(dump_after(body), want, "{body}");
+    }
+}
+
+#[test]
+fn a_pop_off_a_declared_list_names_no_append_index() {
+    // A declared list carries no witness, and `list{int, int}` admits
+    // `$a = [1, 2, 3]; unset($a[2]);`, whose `array_pop($a); $a[] = 9;`
+    // measures `0, 3` on the same five minors. This used to dump `list{int, 9}`.
+    let dumped = |body: &str| {
+        let src = format!(
+            "<?php\n/** @param list{{int, int}} $a */\n\
+             function f(array $a): void {{ {body} \\PHPStan\\dumpType($a); }}\n"
+        );
+        one_type_with(&src, &mut Mock::sidecar())
+    };
+    assert_eq!(
+        dumped("array_pop($a); $a[] = 9;"),
+        "dumped type: non-empty-array{int, ...<int, 9>} (asserted)"
+    );
+    // A shift sets the index to the number of integer keys it renumbered, so
+    // the same list does name one: shifting that array and appending measures
+    // `0, 1`.
+    assert_eq!(dumped("array_shift($a); $a[] = 9;"), "dumped type: list{int, 9} (asserted)");
+}
+
+#[test]
+fn a_shift_that_leaves_no_integer_key_names_no_append_index() {
+    // `array_shift` sets the next append index to the number of integer keys
+    // it renumbered, which is `0` when there were none, and a negative write
+    // does not move a `0`. The same five minors:
+    //
+    //   $a = ['k' => 1]; array_shift($a); $a[-5] = 1; $a[] = 2;             => -5, 0
+    //   $a = ['a']; array_shift($a); $a[-5] = 1; $a[] = 2;                  => -5, 0
+    //   $a = [5 => 'x', 'k' => 1]; array_shift($a); $a[-5] = 1; $a[] = 2;   => 'k', -5, 0
+    //
+    // Each used to dump `-4` as the appended key, the index of an array that
+    // never held an integer key.
+    for (body, want) in [
+        (
+            "$a = ['k' => 1]; array_shift($a); $a[-5] = 1; $a[] = 2;",
+            "dumped type: non-empty-array{-5: 1|2, ...}",
+        ),
+        (
+            "$a = ['a']; array_shift($a); $a[-5] = 1; $a[] = 2;",
+            "dumped type: non-empty-array{-5: 1|2, ...}",
+        ),
+        (
+            "$a = [5 => 'x', 'k' => 1]; array_shift($a); $a[-5] = 1; $a[] = 2;",
+            "dumped type: non-empty-array{-5: 1|2, k: 1, ...}",
+        ),
+    ] {
+        assert_eq!(dump_after(body), want, "{body}");
+    }
+    // A shift that renumbers an integer key names the index exactly:
+    // `$a = [0 => 'a', 5 => 'x']; array_shift($a); $a[] = 9;` measures `0, 1`.
+    assert_eq!(
+        dump_after("$a = [0 => 'a', 5 => 'x']; array_shift($a); $a[] = 9;"),
+        "dumped type: list{'x', 9}"
+    );
+}
