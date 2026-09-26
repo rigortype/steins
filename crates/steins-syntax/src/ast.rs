@@ -2397,7 +2397,8 @@ pub struct Stmt {
     /// Variables this statement passes as an argument to any call, one entry per name,
     /// carrying the evidence ADR-0070's by-value gate consults. The checker marks each name
     /// unknown after the statement (sound floor: a by-ref param could mutate it), unless
-    /// every occurrence is a provable by-value site.
+    /// every occurrence is a provable by-value site. A name an embedded assignment or
+    /// increment writes (`$x = ($s = 1)`, `f($s++)`) is here too, opaque (issue #694).
     pub invalidated: Vec<InvalidatedVar>,
     /// Every place this statement puts a value into PHP's string context (ADR-0078, issue
     /// #193) — `echo`/`print` operands, interpolated-string expressions, `(string)` casts,
@@ -2507,7 +2508,8 @@ pub struct InvalidatedVar {
     /// The local variable's name, without the leading `$`.
     pub name: String,
     /// `true` if at least one occurrence is unprovable (method/static/dynamic callee, named
-    /// or spread args, closure-body occurrence, echo-embedded write) — no site is protected.
+    /// or spread args, closure-body occurrence, embedded assignment or increment) — no site
+    /// is protected.
     pub opaque: bool,
     /// The provable occurrences: callee reference + 0-based argument position (same
     /// [`NameRef`] a [`CallExpr`] carries, for project-wide resolution).

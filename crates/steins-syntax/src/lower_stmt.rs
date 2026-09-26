@@ -61,7 +61,7 @@ pub(crate) fn lower_stmt(s: &Statement<'_>, out: &mut Vec<Stmt>) {
             // Point the diagnostic at the returned value, else the `return` word.
             let span = r.value.map_or_else(|| to_span(r.span()), |e| to_span(e.span()));
             if let Some(e) = r.value {
-                invalidated = call_invalidation(&Node::Expression(e));
+                invalidated = expr_invalidation(e);
                 // `return f($s);` — carry the call so propagation/descent reach it.
                 call = named_call(e);
             }
@@ -79,15 +79,8 @@ pub(crate) fn lower_stmt(s: &Statement<'_>, out: &mut Vec<Stmt>) {
             for v in e.values.iter() {
                 scan_invalidated(&Node::Expression(v), &mut invalidated, false);
                 // Echo invalidates variables written by embedded assignments
-                // (`echo $x = 5;`) or mutable calls (ADR-0031) — and a name this
-                // echo WRITES is not a by-value-argument question at all: the
-                // write is the reason it is invalidated, no signature can excuse
-                // it, so its entry is opaque.
-                let mut writes = Vec::new();
-                collect_assign_writes(&Node::Expression(v), &mut writes);
-                for name in writes {
-                    note_occurrence(&mut invalidated, name, None);
-                }
+                // (`echo $x = 5;`) or mutable calls (ADR-0031).
+                note_embedded_writes(&Node::Expression(v), &mut invalidated);
                 if let Some(c) = named_call(v) {
                     calls.push(c);
                 }
@@ -1374,13 +1367,32 @@ fn offset_write_invalidation(
     a: &mago_syntax::cst::Assignment<'_>,
 ) -> Vec<InvalidatedVar> {
     let mut invalidated = call_invalidation(&Node::Expression(whole));
-    let mut writes = Vec::new();
-    collect_assign_writes(&Node::Expression(a.lhs), &mut writes);
-    collect_assign_writes(&Node::Expression(a.rhs), &mut writes);
-    for name in writes {
-        note_occurrence(&mut invalidated, name, None);
-    }
+    note_embedded_writes(&Node::Expression(a.lhs), &mut invalidated);
+    note_embedded_writes(&Node::Expression(a.rhs), &mut invalidated);
     invalidated
+}
+
+/// What an expression-statement operand can rebind (issue #694): the by-ref call
+/// arguments [`call_invalidation`] names, plus every embedded assignment or
+/// increment as an opaque entry — `$x = ($s = 'bar')`, `$x = $s++`,
+/// `strlen($s = 'zz')`. The walk applies no nested assignment expression, so a
+/// name missing here keeps its pre-statement value past the statement.
+fn expr_invalidation(e: &Expression<'_>) -> Vec<InvalidatedVar> {
+    let mut invalidated = call_invalidation(&Node::Expression(e));
+    note_embedded_writes(&Node::Expression(e), &mut invalidated);
+    invalidated
+}
+
+/// Record every name an embedded assignment or increment in `node` writes, each
+/// as an opaque entry. A name the statement WRITES is not a by-value-argument
+/// question at all: the write is the reason it is invalidated, no signature can
+/// excuse it, so no site may vouch for it.
+fn note_embedded_writes(node: &Node<'_, '_>, out: &mut Vec<InvalidatedVar>) {
+    let mut writes = Vec::new();
+    collect_assign_writes(node, &mut writes);
+    for name in writes {
+        note_occurrence(out, name, None);
+    }
 }
 
 /// Lower an expression-statement to a trace entry.
@@ -1392,7 +1404,7 @@ pub(crate) fn lower_expr_stmt(expr: &Expression<'_>) -> Stmt {
                 // Only a plain `=` yields a value; compound ops (`+=`, `.=`, …)
                 // make the variable unknown.
                 let value = if a.operator.is_assign() { lower_arg_value(a.rhs) } else { ArgValue::Other };
-                let invalidated = call_invalidation(&Node::Expression(a.rhs));
+                let invalidated = expr_invalidation(a.rhs);
                 // `$x = f($s);` — carry the RHS call for propagation/descent.
                 let call = if a.operator.is_assign() { named_call(a.rhs) } else { None };
                 let span = to_span(a.lhs.span());
@@ -1404,7 +1416,7 @@ pub(crate) fn lower_expr_stmt(expr: &Expression<'_>) -> Stmt {
                 // compound op (`+=`, `.=`, …) makes the property value unknown.
                 let value = if a.operator.is_assign() { lower_arg_value(a.rhs) } else { ArgValue::Other };
                 let value_call = if a.operator.is_assign() { named_call(a.rhs) } else { None };
-                let invalidated = call_invalidation(&Node::Expression(a.rhs));
+                let invalidated = expr_invalidation(a.rhs);
                 let span = to_span(a.lhs.span());
                 let kind = StmtKind::PropAssign { target_var, prop, value, value_call, span };
                 Stmt::lowered(kind, invalidated)
@@ -1433,7 +1445,7 @@ pub(crate) fn lower_expr_stmt(expr: &Expression<'_>) -> Stmt {
                 // `[$a, $b] = <source>;` / `list($a, $b) = <source>;` (issue #288).
                 // Barrier semantics for the targets, plus the source's own reads —
                 // see `StmtKind::Destructure`.
-                let invalidated = call_invalidation(&Node::Expression(a.rhs));
+                let invalidated = expr_invalidation(a.rhs);
                 let source = lower_arg_value(a.rhs);
                 let call = named_call(a.rhs);
                 let span = to_span(a.lhs.span());
@@ -1450,11 +1462,15 @@ pub(crate) fn lower_expr_stmt(expr: &Expression<'_>) -> Stmt {
             // `assert(<expr>)` — a statement-position assert whose argument lowers to
             // a condition (ADR-0052 §5). `assert` is a pure by-value builtin (it never
             // mutates its argument by reference), so the narrowed variables carry no
-            // invalidation; a non-lowerable argument falls back to a plain `Call`.
+            // call invalidation — only what the argument itself writes
+            // (`assert(($s = f()) !== null)`, issue #694); a non-lowerable argument
+            // falls back to a plain `Call`.
             if let Some(cond) = assert_stmt_cond(fc) {
-                Stmt::lowered(StmtKind::Assert { cond }, Vec::new())
+                let mut invalidated = Vec::new();
+                note_embedded_writes(&Node::Expression(expr), &mut invalidated);
+                Stmt::lowered(StmtKind::Assert { cond }, invalidated)
             } else {
-                let invalidated = call_invalidation(&Node::Expression(expr));
+                let invalidated = expr_invalidation(expr);
                 Stmt::lowered(StmtKind::Call(lower_call(fc)), invalidated)
             }
         }
@@ -1464,11 +1480,11 @@ pub(crate) fn lower_expr_stmt(expr: &Expression<'_>) -> Stmt {
         Expression::Call(Call::Method(_) | Call::NullSafeMethod(_) | Call::StaticMethod(_))
         | Expression::Instantiation(_) => match named_call(expr) {
             Some(call) => {
-                let invalidated = call_invalidation(&Node::Expression(expr));
+                let invalidated = expr_invalidation(expr);
                 Stmt::lowered(StmtKind::Call(call), invalidated)
             }
             None => {
-                let invalidated = call_invalidation(&Node::Expression(expr));
+                let invalidated = expr_invalidation(expr);
                 Stmt::lowered(StmtKind::Barrier, invalidated)
             }
         },
@@ -1486,7 +1502,7 @@ pub(crate) fn lower_expr_stmt(expr: &Expression<'_>) -> Stmt {
         // expression hands to a call are still invalidated (by-ref conservatism),
         // though the terminator makes anything after it unreachable.
         Expression::Throw(t) => {
-            let invalidated = call_invalidation(&Node::Expression(t.exception));
+            let invalidated = expr_invalidation(t.exception);
             Stmt::lowered(StmtKind::Throw { span: to_span(expr.span()) }, invalidated)
         }
         // `exit;` / `die;` — a trace terminator (ADR-0019 never-returns).

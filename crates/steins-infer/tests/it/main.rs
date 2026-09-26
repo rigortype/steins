@@ -51,6 +51,7 @@ mod destructure_source_read;
 mod docblock_hygiene;
 mod dump_surface;
 mod effects;
+mod embedded_writes;
 mod enforced_top_return;
 mod enum_case_domain;
 mod exhaustiveness;
