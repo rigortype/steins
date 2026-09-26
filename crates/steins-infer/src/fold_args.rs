@@ -387,12 +387,12 @@ mod php_view_tests {
         PhpTarget { floor, ceiling, source: PhpTargetSource::Require, raw: String::new() }
     }
 
-    /// Issue #28: the one seam both A11 and A12 follow (and, since #29, the
+    /// Issue #28: the one seam both A11 and A22 follow (and, since #29, the
     /// PHP_VERSION_ID guard interval).
     #[test]
     fn a_declared_target_overrides_the_runtime() {
-        // A range straddling the A12 boundary declines the effective minor
-        // (boundary-sensitive literals must decline) and skews the catalog; the
+        // A range straddling the A22 boundary declines the effective minor
+        // (a negative append index must decline) and skews the catalog; the
         // version-id interval spans the declared range [8.1.00, 8.99.99].
         let caret81 = target((8, 1), Some((8, u16::MAX)));
         let v = effective_php_view(Some((8, 5)), Some(&caret81));

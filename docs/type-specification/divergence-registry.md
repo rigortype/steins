@@ -80,8 +80,9 @@ real-FP class (phpstan/phpstan#14940). Steins splits by provenance
 they take the sound widening, never declaration order.
 
 **8. No abstract `nextAutoIndexes`.** The next-auto-index prediction exists
-only for concrete arrays and is PHP-minor-aware (ADR-0049 A12). An abstract
-shape declines the prediction: append widens the tail (ADR-0062 §3).
+only for concrete arrays and is PHP-minor-aware where PHP is: an append whose
+landing index would be negative answers only from PHP 8.3 (ADR-0049 A22). An
+abstract shape declines the prediction: append widens the tail (ADR-0062 §3).
 
 **9. No union-degradation threshold.** PHPStan collapses >256-member
 constant-array unions (`ARRAY_COUNT_LIMIT`) as a heuristic. Steins' finite

@@ -69,7 +69,7 @@ impl PhpTargetSource {
 ///
 /// A ceiling of `Some((8, u16::MAX))` spells "any minor of major 8" (`^8.1`);
 /// `None` spells an open upper bound (`>=8.1`). Patch levels are dropped: every
-/// version-sensitive decision keys on the minor (ADR-0049 A12, ADR-0052 A11,
+/// version-sensitive decision keys on the minor (ADR-0049 A22, ADR-0052 A11,
 /// ADR-0056 §2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PhpTarget {
@@ -97,8 +97,9 @@ impl PhpTarget {
     }
 
     /// Whether the range spans versions on both sides of `boundary`. Generalizes
-    /// ADR-0049 A12's per-literal unknown leg to a range: a boundary-sensitive
-    /// question has no single answer for a straddling target and must decline.
+    /// ADR-0049's unknown-minor leg (A12, moved to the append index by A22) to a
+    /// range: a boundary-sensitive question has no single answer for a
+    /// straddling target and must decline.
     #[must_use]
     pub fn straddles(&self, boundary: (u16, u16)) -> bool {
         self.floor < boundary && self.ceiling.is_none_or(|c| c >= boundary)

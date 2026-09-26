@@ -186,8 +186,8 @@ fn read_universe<'u>(
     // version-sensitive decisions key on; the sidecar's runtime minor is the
     // fallback when the project declares nothing. One computation per run,
     // shared by every file's context — ADR-0052 A11 (catalog skew) and
-    // ADR-0049 A12 (the next-int rule, through `normalize_array`) both follow
-    // this one seam.
+    // ADR-0049 A22 (the append index's next-int boundary) both follow this one
+    // seam.
     let runtime_minor = folder.php_minor();
     let view = effective_php_view(runtime_minor, layout.php_target());
     let (php_minor, catalog_skew) = (view.effective_minor, view.catalog_skew);
