@@ -66,6 +66,12 @@
 //! its package's reparse until any identity input moves — ADR-0092 §8's
 //! recovery story ("throw the cache away") is the unclever repair.
 //!
+//! The one degradation that withholds publication is a **lost fold answer**
+//! (issue #784): a run whose sidecar died or went silent computed some walk
+//! blocks without replies it asked for, and nothing in a block's stamp says
+//! so. Such a run publishes nothing and leaves `CURRENT` as it was; see
+//! `publish_or_reuse`.
+//!
 //! **What the generation identity covers** ([`GenerationInputs`], filled in
 //! [`generation_check`]): the analyzer's own version (`CARGO_PKG_VERSION` —
 //! one workspace version, and it subsumes the generated catalog tables baked
@@ -128,6 +134,8 @@
 mod identity;
 mod load;
 mod publish;
+#[cfg(test)]
+mod tests;
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -270,7 +278,8 @@ pub enum GenerationMode {
 pub struct GenerationReport {
     pub mode: GenerationMode,
     /// The published (or confirmed-current) generation id, lowercase hex;
-    /// `None` when publication failed (see [`Self::notes`]).
+    /// `None` when publication failed, or was withheld because the fold
+    /// surface lost an answer (see [`Self::notes`]).
     pub generation: Option<String>,
     pub packages: Vec<PackageReport>,
     pub fold: FoldReport,
@@ -511,8 +520,11 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
         },
     };
     let t_persist = Instant::now();
+    // Read after the walk, whose workers ask through this same child, so a
+    // death anywhere in the run is counted here.
+    let losses = fold.folder.posture().losses;
     let (generation, shared_artifacts) =
-        publish_or_reuse(&store, current.as_ref(), publishable, fold.degraded, &mut notes);
+        publish_or_reuse(&store, current.as_ref(), publishable, fold.degraded, losses, &mut notes);
     let persist_ms = ms(t_persist.elapsed());
 
     Ok(report(captured, loaded, analysis, RunRecord {
@@ -577,6 +589,10 @@ fn fold_engine(
     // makes the engine posture, and therefore the replay stamp, available
     // before the first file is walked rather than after the last.
     crate::Folder::php_minor(&mut folder);
+    // Where a test kills the child (issue #784): the boot surface, and so the
+    // replay stamp, is already recorded, and no file has been walked yet.
+    #[cfg(test)]
+    tests::after_boot(&mut folder);
     FoldSetup { folder, loaded_rows: fold_loaded_rows, degraded: fold_degraded }
 }
 
