@@ -857,6 +857,10 @@ pub(crate) fn classify_effect_origins(
                 ));
                 row.exhaustive = false;
             }
+            // A state construct's label (`global.*`, `mutate.*`) is not inferred
+            // yet (ADR-0055), and `{}` over one would read as proven-pure, so it
+            // marks the body `…?` until it is (ADR-0055 amendment, 2026-09-26).
+            EffectOrigin::State { .. } => row.exhaustive = false,
         }
     }
 }
@@ -1260,7 +1264,8 @@ const fn effect_origin_span(o: &EffectOrigin) -> steins_syntax::Span {
         | EffectOrigin::HigherOrder { span, .. }
         | EffectOrigin::Callback { span, .. }
         | EffectOrigin::Eval { span }
-        | EffectOrigin::Include { span, .. } => *span,
+        | EffectOrigin::Include { span, .. }
+        | EffectOrigin::State { span, .. } => *span,
     }
 }
 
@@ -1892,7 +1897,7 @@ fn report_unit(
             | EffectOrigin::Exit { .. }
             | EffectOrigin::Eval { .. }
             | EffectOrigin::Include { .. } => {}
-            EffectOrigin::Opaque { .. } => {}
+            EffectOrigin::Opaque { .. } | EffectOrigin::State { .. } => {}
         }
     }
 }
