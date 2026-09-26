@@ -398,13 +398,62 @@ pub(crate) const PORTABLE: &[&str] = &[
 /// the class stays so the next admission has somewhere honest to sit.
 pub(crate) const UNVERIFIED: &[&str] = &[];
 
+/// How a foldable name's result grows with its arguments when no single
+/// parameter carries the size (issue #783) — the rows the fold seam's
+/// allocation budget prices before it sends a call to the engine.
+///
+/// The seam charges a parameter *named* `length`, `times` or `count` on its own,
+/// from the mined names. That covers `str_repeat` and `array_fill` and cannot
+/// see these two shapes: `range(0, 100000000)` has no size parameter at all, and
+/// `sprintf('%100000000d', 1)` keeps its size inside a string. Both asked the
+/// runner for more than its `memory_limit`, and memory exhaustion is a PHP fatal
+/// that kills the child rather than a `Throwable` the runner can widen.
+///
+/// The rows are data here rather than a special case on the name in the seam,
+/// because this crate already owns what each foldable name's positions mean
+/// (issue #258). Positions are argument indices, and
+/// `every_allocation_row_names_its_mined_parameters` holds them to the mined
+/// names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FoldAllocation {
+    /// `range($start, $end, $step)`: `floor(|end − start| / |step|) + 1`
+    /// entries, read through PHP's own coercion of each endpoint.
+    Span {
+        /// The first endpoint.
+        start: usize,
+        /// The second endpoint.
+        end: usize,
+        /// The optional step; absent is `1`.
+        step: usize,
+    },
+    /// A printf-family format string: each conversion pads its value to the
+    /// spec's width, and the values follow the format positionally.
+    Format {
+        /// The format string.
+        format: usize,
+        /// The first value; `%1$s` names this one.
+        values: usize,
+    },
+}
+
+/// The [`FoldAllocation`] row for `name` (case-insensitive), or `None` when the
+/// name's size is carried by a named parameter or by nothing.
+#[must_use]
+pub fn fold_allocation(name: &str) -> Option<FoldAllocation> {
+    match name.to_ascii_lowercase().as_str() {
+        "range" => Some(FoldAllocation::Span { start: 0, end: 1, step: 2 }),
+        "sprintf" => Some(FoldAllocation::Format { format: 0, values: 1 }),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::{effect_labels, param_facts};
     use super::{
-        PORTABLE, PortabilityClass, REFUSED, RefusalAxis, UNVERIFIED, foldable,
-        foldable_entry_count, portability_class, portable, portable_names, refusal, refused_names,
-        unverified_names,
+        FoldAllocation, PORTABLE, PortabilityClass, REFUSED, RefusalAxis, UNVERIFIED,
+        fold_allocation, foldable, foldable_entry_count, portability_class, portable,
+        portable_names, refusal, refused_names, unverified_names,
     };
 
     /// Classes are pairwise DISJOINT, no name listed twice, size is 63
@@ -807,5 +856,44 @@ mod tests {
             assert!(!foldable(name), "{name} must not be foldable");
             assert!(!portable(name), "{name} must not be certified portable");
         }
+    }
+
+    /// **An allocation row points at the parameters it prices** (issue #783).
+    ///
+    /// A row is positions, and a position the arginfo gives another meaning
+    /// would price the wrong argument without failing anything: the seam would
+    /// read `range`'s `$step` from wherever the row said it was. So each row is
+    /// held to the mined names, and to the allowlist, since a row for a name
+    /// that never folds is budget nobody spends.
+    ///
+    /// The last half is the tripwire for the next printf-family admission.
+    /// `vsprintf` and `printf` are not foldable today; a foldable name that
+    /// takes a `$format` without a row would walk `'%2000000000d'` past the
+    /// budget exactly as `sprintf` did.
+    #[test]
+    fn every_allocation_row_names_its_mined_parameters() {
+        for name in PORTABLE.iter().chain(REFUSED).chain(UNVERIFIED) {
+            let names = param_facts(name).map_or(&[][..], |f| f.param_names);
+            match fold_allocation(name) {
+                Some(FoldAllocation::Span { start, end, step }) => {
+                    assert_eq!(names.get(start), Some(&"start"), "{name}");
+                    assert_eq!(names.get(end), Some(&"end"), "{name}");
+                    assert_eq!(names.get(step), Some(&"step"), "{name}");
+                }
+                Some(FoldAllocation::Format { format, values }) => {
+                    assert_eq!(names.get(format), Some(&"format"), "{name}");
+                    assert_eq!(names.get(values), Some(&"values"), "{name}");
+                }
+                None => assert!(
+                    !names.contains(&"format"),
+                    "{name} folds with a `$format` and no allocation row prices its widths"
+                ),
+            }
+        }
+        for name in ["range", "sprintf", "RANGE", "SPrintf"] {
+            assert!(fold_allocation(name).is_some(), "{name} is priced");
+            assert!(foldable(name), "{name} is priced because it folds");
+        }
+        assert_eq!(fold_allocation("str_repeat"), None, "its size is a named parameter");
     }
 }
