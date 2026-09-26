@@ -1722,8 +1722,8 @@ fn note_occurrence(out: &mut Vec<InvalidatedVar>, name: String, site: Option<(Na
 /// Collect the names of variables a subtree may **write** — over-approximated,
 /// which is always sound (it only makes the walk forget more). Covers every
 /// assignment lvalue, compound assignment, increment/decrement, `foreach`
-/// value/key binding, `catch` parameter, and `list()`/array destructuring
-/// target. Does **not** descend into nested function-like bodies (separate
+/// value/key binding, `catch` parameter, `list()`/array destructuring target,
+/// and `unset` target. Does **not** descend into nested function-like bodies (separate
 /// scopes); their internal writes are not the enclosing construct's concern.
 pub(crate) fn collect_assign_writes(node: &Node<'_, '_>, out: &mut Vec<String>) {
     match node {
@@ -1746,6 +1746,15 @@ pub(crate) fn collect_assign_writes(node: &Node<'_, '_>, out: &mut Vec<String>) 
         }
         // `$x++` / `$x--` (the only postfix operators) write their operand.
         Node::UnaryPostfix(u) => collect_direct_vars(&Node::Expression(u.operand), out),
+        // `unset($x)` removes the binding and `unset($a['k'])` rewrites the array
+        // (issue #685): each target is collected as an assignment lvalue is, keys
+        // included.
+        Node::Unset(u) => {
+            for target in u.values.iter() {
+                collect_direct_vars(&Node::Expression(target), out);
+            }
+            return;
+        }
         // `foreach ($it as &$v)` writes THROUGH its subject: every element the
         // body assigns to `$v` lands in `$it`, and the alias outlives the loop. The
         // subject is a write of the construct (issue #677) — the one thing that

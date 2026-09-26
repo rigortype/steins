@@ -2221,8 +2221,9 @@ pub enum StmtKind {
     /// (ADR-0027 ratchet: forgets only touched/branched variables, not all known values).
     ///
     /// * `writes` — over-approximated names the subtree may assign (any lvalue, compound/
-    ///   inc-dec, `foreach`/`catch`/`list()` bindings) plus everything handed to any call
-    ///   (by-ref conservatism); nested function/closure bodies don't count.
+    ///   inc-dec, `foreach`/`catch`/`list()` bindings, `unset` targets) plus everything
+    ///   handed to any call (by-ref conservatism); nested function/closure bodies don't
+    ///   count.
     /// * `reads` — every other mentioned variable not in `writes`; a construct that reads
     ///   and branches may early-return, so the fall-through path excludes the known value
     ///   (`if ($x == null) { return; }` filters `null` from the tail). Same scope exclusion.
