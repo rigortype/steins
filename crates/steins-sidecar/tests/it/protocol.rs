@@ -266,6 +266,8 @@ fn reflect_class_never_autoloads() {
 /// **Fault injection**: sidecar dies mid-run during class queries, degrading to
 /// `None` (never empty-members) — one answer per death, decline past the cap.
 /// Killed via *timeout*, not memory: no allocation cost (four 256 MB bombs already run).
+/// The cap counts replacements in a row with no answer between (issue #783), so
+/// spending it takes three more deaths back to back.
 #[test]
 fn a_dead_sidecar_declines_a_class_query_and_the_next_one_answers() {
     let Some(mut sc) = spawn_or_skip("a_dead_sidecar_declines_a_class_query") else { return };
@@ -284,7 +286,9 @@ fn a_dead_sidecar_declines_a_class_query_and_the_next_one_answers() {
     }
 
     sc.set_timeout(quick);
-    assert!(matches!(sc.fold("usleep", &[int(1_000_000)], true), FoldResult::Widen { .. }));
+    for _ in 0..4 {
+        assert!(matches!(sc.fold("usleep", &[int(1_000_000)], true), FoldResult::Widen { .. }));
+    }
     sc.set_timeout(generous);
     assert!(sc.is_poisoned(), "the respawn budget is spent");
     assert_eq!(
@@ -847,25 +851,55 @@ fn a_result_over_the_byte_budget_widens_before_it_is_encoded() {
     assert_eq!(sc.respawns(), 0, "nothing was replaced");
 }
 
-/// The storm brake: recovery bounded at three respawns per `Sidecar` — past
-/// the cap, the instance is permanently poisoned, widening immediately.
+/// **A child that answers is not a storm** (issue #783): deaths separated by
+/// answers never spend the respawn cap.
+///
+/// The cap was a lifetime budget, so any four deaths in a run abandoned the
+/// fold surface for the rest of it — four `range()` literals in one analysed
+/// file did exactly that. Four bombs here, one past the old budget, each
+/// followed by an answer: every replacement is made, and the counters say what
+/// happened, one death and one respawn per bomb.
 #[test]
-fn the_respawn_cap_bounds_recovery_and_then_poisons_permanently() {
-    let Some(mut sc) = spawn_or_skip("the_respawn_cap_bounds_recovery") else { return };
+fn deaths_between_answers_never_spend_the_respawn_cap() {
+    let Some(mut sc) = spawn_or_skip("deaths_between_answers_never_spend_the_respawn_cap") else {
+        return;
+    };
     let bomb = [s("x"), int(2_000_000_000)];
-
-    for i in 0..3 {
+    for i in 0..4 {
         assert!(matches!(sc.fold("str_repeat", &bomb, true), FoldResult::Widen { .. }), "bomb {i} widens");
         assert_eq!(
             sc.fold("strtoupper", &[s("alive")], true),
             FoldResult::Value(FoldValue::Str("ALIVE".to_owned())),
             "respawn {i} answered"
         );
+        assert_eq!(sc.strikes(), 0, "an answer clears the strikes");
     }
+    assert_eq!(sc.deaths(), 4, "one death per bomb");
+    assert_eq!(sc.respawns(), 4, "and one replacement for each");
+}
 
-    // The fourth bomb kills the third replacement, and there is no fourth.
-    assert!(matches!(sc.fold("str_repeat", &bomb, true), FoldResult::Widen { .. }), "the last bomb widens");
+/// The storm brake: three replacements in a row that die before answering —
+/// past the cap, the instance is permanently poisoned, widening immediately.
+///
+/// Killed by timeout rather than by memory, since every death here is charged
+/// in a row and a timeout costs no allocation.
+#[test]
+fn the_respawn_cap_bounds_recovery_and_then_poisons_permanently() {
+    let Some(mut sc) = spawn_or_skip("the_respawn_cap_bounds_recovery") else { return };
+    let quick = Duration::from_millis(20);
+    let slow = [int(1_000_000)]; // `usleep` for 1s, past the 20ms deadline
+
+    // The first kills the original child; each later one revives the instance
+    // and kills the replacement before it answers anything.
+    sc.set_timeout(quick);
+    for i in 0..4 {
+        assert!(matches!(sc.fold("usleep", &slow, true), FoldResult::Widen { .. }), "death {i} widens");
+    }
     assert!(sc.is_poisoned());
+    assert_eq!(sc.strikes(), 3, "three replacements in a row, none answered");
+    assert_eq!(sc.deaths(), 4, "the original child and its three replacements");
+    assert_eq!(sc.respawns(), 3);
+    sc.set_timeout(Duration::from_secs(2));
     let start = std::time::Instant::now();
     for _ in 0..5 {
         let r = sc.fold("strtoupper", &[s("alive")], true);
@@ -875,6 +909,7 @@ fn the_respawn_cap_bounds_recovery_and_then_poisons_permanently() {
     // loose on purpose — asserts "no hang", not a performance figure.
     assert!(start.elapsed() < Duration::from_secs(1), "a capped sidecar widens without waiting");
     assert!(sc.is_poisoned(), "the poison is permanent now");
+    assert_eq!(sc.deaths(), 4, "a request that reaches no child costs no child");
 }
 
 /// The runner evaluates every fold in **strict mode**, because it declares
