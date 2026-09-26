@@ -51,6 +51,7 @@ section](#where-the-record-and-the-code-disagree) says why it is there.
 | [19](#schema-19) | #598 (ADR-0094) | misdecode, under-answer | `GlobalConstDecl` grows the declared value and the `conditional` flag. |
 | [20](#schema-20) | #603 (ADR-0057 note) | misdecode, under-answer | `FunctionDecl` and `MethodDecl` grow `ret_top`; `RetHintKind` grows `Top`. |
 | [21](#schema-21) | #320 (ADR-0096), #352 | misdecode, meaning | `Stmt` grows `value_position` (#320); `CallTarget` grows `Bool` (#352). |
+| [22](#schema-22) | #807 (ADR-0055 amendment) | meaning | `EffectOrigin` grows `State`: a structural state construct marks its body non-exhaustive. |
 
 ## Where the record and the code disagree
 
@@ -270,4 +271,18 @@ was lowered with `second: None` because the parser lexes `true` as a literal and
 the old enum could not carry one, so replaying a schema-20 artifact would answer
 `io.output.buffer` for every return-mode dumper this binary now proves writes
 nothing. ADR-0092 §2 forbids a miss that changes meaning, so the bump buys the
+refusal to read the old file, not a decode fix.
+
+### Schema 22
+
+`22` is the structural state constructs in the effect lane (ADR-0055
+amendment of 2026-09-26, PR #807), and it is a **meaning** bump of schema 18's
+kind. `EffectOrigin` grows `State`, appended after `Callback`, so no existing
+index moves and every schema-21 payload still decodes exactly as it was
+written. What changed is what the absence of an origin *means*: a schema-21
+body holding a `global` or `static` declaration, a superglobal, a static
+property or an instance property write was lowered with no origin for it, so
+replaying one would answer `{}` — exhaustive and effect-free — for a body this
+binary marks `…?`, and `effects-envelope` would write a purity tag from the
+replay. ADR-0092 §2 forbids a miss that changes meaning, so the bump buys the
 refusal to read the old file, not a decode fix.
