@@ -12,6 +12,7 @@
 //! |---|---|
 //! | exhaustive summary, bound has a label beyond `mutate.local` | `@phpstan-impure <labels>` |
 //! | every method of a class provenly, exhaustively pure | `@phpstan-all-methods-pure` on the class, and **no** method tags |
+//! | the class uses a trait | no class tag (`uses-trait`) |
 //! | non-exhaustive summary | nothing (`effects-not-exhaustive`) |
 //! | pure function / method | nothing — no per-declaration `@phpstan-pure` is ever written |
 //! | declaration carries `#[\Steins\Effect]` / `#[\Steins\Pure]` | nothing (`attribute-envelope`) |
@@ -20,6 +21,16 @@
 //!
 //! A bare tag (⊤) is never written: absence of information already means ⊤
 //! (ADR-0082 §3).
+//!
+//! ## What the class tag covers
+//!
+//! The methods PHPStan reads as the class's own: those its body declares, and
+//! those a trait inserts (reflection names the using class their declaring
+//! class). Trait bodies are lowered name-only (ADR-0049), so a trait-using
+//! class refuses `uses-trait`. An **inherited** method is not covered: PHPStan
+//! reads the class tag off the method's declaring class, so under a child's
+//! tag a parent's impure method stays `possiblyImpure` (checked against
+//! phpstan-src 2026-09-26) and needs no check here.
 //!
 //! ## Unknown labels are prose, not a stale bound (2026-08-12 ruling)
 //!
@@ -79,6 +90,10 @@ pub const REASON_EXISTING_TAG_UNREADABLE: &str = "existing-tag-unreadable";
 /// The computed bound names a label the registry does not know, so the tag
 /// would read back as prose (⊤) rather than the bound it meant.
 pub const REASON_BOUND_LABEL_UNKNOWN: &str = "bound-label-unknown";
+/// The class uses a trait: the class tag covers the trait's methods too, and
+/// their bodies are never analyzed (ADR-0049 lowers a trait by name only), so
+/// the class-wide claim is not proven.
+pub const REASON_USES_TRAIT: &str = "uses-trait";
 /// No lossless insertion point, or the written tag did not survive the
 /// re-parse round-trip. Shared with the `@throws` sister (same reason name).
 pub const REASON_DOCBLOCK_NOT_ROUND_TRIPPABLE: &str =
@@ -391,6 +406,19 @@ fn decide_class(em: &mut Emission, class: &ClassDecl, tree: &SourceTree, sweep: 
         );
         return;
     }
+    // Ahead of the per-method checks: nothing done to a declared method lifts it.
+    if class.uses_traits {
+        em.refuse(
+            site,
+            REASON_USES_TRAIT,
+            format!(
+                "{} uses a trait, and the class-wide tag covers the trait's methods as the \
+                 class's own; trait bodies are not analyzed, so the purity claim is not proven",
+                class.name
+            ),
+        );
+        return;
+    }
     if let Some(m) = class.methods.iter().find(|m| !method_effects(class, m, sweep).exhaustive) {
         em.refuse(
             site,
@@ -453,7 +481,8 @@ fn decide_class(em: &mut Emission, class: &ClassDecl, tree: &SourceTree, sweep: 
 /// is not read here: a non-exhaustive method refuses with a named reason
 /// (ADR-0034), not a silent non-candidate. Excluded outright, since no
 /// proven-pure reading exists: an **interface** or **trait** (no bodies), a
-/// class with an **abstract** method, and a class declaring **no** method.
+/// class with an **abstract** method, and a class declaring **no** method. A
+/// trait-using class is not excluded: [`decide_class`] refuses it by name.
 fn class_is_provenly_pure(class: &ClassDecl, sweep: &EffectSweep) -> bool {
     if class.is_interface || class.is_trait || class.methods.is_empty() {
         return false;

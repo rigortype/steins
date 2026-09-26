@@ -743,11 +743,13 @@ could not close the effect set, so no label list is an upper bound),
 transform), `existing-tag-unreadable` (a tag is already written whose labels
 the registry cannot read, so it may be prose rather than a bound),
 `bound-label-unknown` (the computed bound names a label the registry does not
-know, so the tag would read back as prose), plus the two shared
-docblock-mechanics names above. A pure declaration is not a candidate at all —
-no per-declaration `@phpstan-pure` is ever written — with one exception: a pure
-declaration carrying an unreadable tag is reported, because "your docblock was
-left alone" is an answer worth having.
+know, so the tag would read back as prose), `uses-trait` (the class uses a
+trait: `@phpstan-all-methods-pure` covers the trait's methods too, and trait
+bodies are not analyzed, so the class-wide claim is not proven), plus the two
+shared docblock-mechanics names above. A pure declaration is not a candidate
+at all — no per-declaration `@phpstan-pure` is ever written — with one
+exception: a pure declaration carrying an unreadable tag is reported, because
+"your docblock was left alone" is an answer worth having.
 
 `loop-to-array-map` is the first transform whose precondition is an
 *effect* judgment rather than a type one. It rewrites
