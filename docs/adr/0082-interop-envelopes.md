@@ -218,10 +218,10 @@ rejects. Until the ADR-0055 labels are inferred, each of those constructs
 marks its body non-exhaustive, so such a class refuses as
 `effects-not-exhaustive` and nothing is written.
 
-That includes a constructor initializing its own properties by assignment.
-The #303 deferral under Consequences still holds on the read side — a
-pure-declared initializing constructor is not a finding — but emission is
-more conservative than it for now: such a class gets no tag. A promoted
-constructor writes nothing in its body and is unaffected. Whether emission
-carves the constructor out before ADR-0055 E2 is the open question that
-amendment records.
+A constructor initializing its own properties is not one of those
+constructs: the same amendment applies ADR-0055's creation exemption to the
+bit, reaching exactly the `$this` writes PHPStan's own constructor exclusion
+reaches, so the #303 deferral under Consequences now holds on the writing
+side too and such a class is tagged as before. A constructor that unsets a
+`$this` property, binds one by reference, or writes through an alias of
+`$this` is still `…?`, since PHPStan would reject the tag over it.
