@@ -217,11 +217,13 @@ assert(
 );
 // The rows that are not about the word size are the PCRE matchers: issue #382
 // put `preg_match` beside `preg_split`, and wave 3 added `preg_match_all`.
-// `steins-catalog`'s axis test owns the list; this states the property instead
-// — the build-option rows are exactly the refused `preg_*` names, and every
-// other row is on the word — so a fourth matcher lands here without an edit,
-// while a `preg_*` row filed on the width axis, or a non-PCRE row on this one,
-// does not.
+// The names are pinned once, in the `refused_folds` literal above; this checks
+// only which axis each row is on: the build-option rows are exactly the refused
+// `preg_*` names, so a `preg_*` row filed on the width axis, or a non-PCRE row
+// on this one, fails. The second check is a deliberate tripwire: a row moved to
+// a new `RefusalAxis` still renders (the panel falls back to its neutral
+// sentence, below), and this is what makes someone decide whether that axis
+// earns a sentence of its own.
 const buildOption = boot.refusals.filter((r) => r.axis === "build_option").map((r) => r.name);
 const pcre = boot.refused_folds.filter((n) => n.startsWith("preg_"));
 assert(
@@ -230,7 +232,7 @@ assert(
 );
 assert(
   boot.refusals.every((r) => r.axis === "build_option" || r.axis === "integer_width"),
-  `every other refused row is about the word size (got ${JSON.stringify(boot.refusals.map((r) => r.axis))})`,
+  `every refused row is on one of the two axes the panel frames (got ${JSON.stringify(boot.refusals.map((r) => r.axis))})`,
 );
 // …and the panel the visitor reads is composed from that, checked here rather
 // than only in a browser. The boot object carrying every reason and the panel
