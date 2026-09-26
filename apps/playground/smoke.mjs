@@ -219,7 +219,7 @@ assert(boot.unverified_folds === undefined, "…and nothing is unverified there 
 // since issue #382 measured its last two rows (`array_merge`, `explode`) and
 // both left for portable — the allowlist did not grow, a debt was paid.
 // `steins-catalog`'s partition test owns these numbers; this asserts they
-// travel. On the full lane every one of the 65 folds, so what a narrow engine
+// travel. On the full lane every one of them folds, so what a narrow engine
 // would decline is invisible here.
 assert(boot.fold_total === 68 && boot.fold_portable === 53, "the catalog's own counts travel");
 assert(steins.check(flagship).boot === undefined, "the sound-subset envelope carries no boot key");
