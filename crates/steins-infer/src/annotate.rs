@@ -105,6 +105,7 @@ pub fn annotate_facts(
         &index,
         0,
         folder,
+        RuntimePostures::default(),
         &ProjectLayout::fallback(),
         &PluginFacts::none(),
         &EffectsPolicy::none(),
@@ -122,6 +123,7 @@ pub fn annotate_file(db: &dyn Db, file: SourceFile, folder: &mut dyn Folder) -> 
         &index,
         0,
         folder,
+        RuntimePostures::default(),
         &ProjectLayout::fallback(),
         &PluginFacts::none(),
         &EffectsPolicy::none(),
@@ -130,13 +132,30 @@ pub fn annotate_file(db: &dyn Db, file: SourceFile, folder: &mut dyn Folder) -> 
 
 /// Project-aware annotate (ADR-0020, `--project`): compute the margin facts for
 /// `target` while resolving names, classes, and effects against the whole
-/// `project`. Returns facts for the target file only.
+/// `project`. Returns facts for the target file only. Runs under the default
+/// [`RuntimePostures`]; [`annotate_project_under`] takes the ones a project
+/// declares.
 #[must_use]
 pub fn annotate_project(
     db: &dyn Db,
     project: Project,
     target: SourceFile,
     folder: &mut dyn Folder,
+) -> Vec<LineFact> {
+    annotate_project_under(db, project, target, folder, RuntimePostures::default())
+}
+
+/// [`annotate_project`] under the `[runtime]` postures a project declares
+/// (ADR-0037 §2), the twin of [`check_project_under`](crate::check_project_under):
+/// the margin's value facts and its findings both read them, so a declared
+/// posture moves the margin as it moves `check` (issue #787).
+#[must_use]
+pub fn annotate_project_under(
+    db: &dyn Db,
+    project: Project,
+    target: SourceFile,
+    folder: &mut dyn Folder,
+    postures: RuntimePostures,
 ) -> Vec<LineFact> {
     let handles: Vec<SourceFile> = project.files(db).to_vec();
     // One `LazyTree` per file, borrowing the database's own parse: the salsa
@@ -160,6 +179,7 @@ pub fn annotate_project(
         &index,
         target_idx,
         folder,
+        postures,
         project.layout(db),
         project.plugins(db),
         project.effects(db),
@@ -215,6 +235,7 @@ fn annotate_units(
     index: &Index,
     target: usize,
     folder: &mut dyn Folder,
+    postures: RuntimePostures,
     layout: &ProjectLayout,
     plugins: &PluginFacts,
     policy: &EffectsPolicy,
@@ -244,8 +265,10 @@ fn annotate_units(
         }
     }
 
-    // 2. Value / exact-class facts from the propagation walk of the target file.
-    let cx = Cx::new(units, index, target);
+    // 2. Value / exact-class facts from the propagation walk of the target file,
+    // under the postures step 3 checks with: an `os` pin narrows `PHP_EOL` here
+    // exactly as it does in the findings.
+    let cx = Cx { postures, ..Cx::new(units, index, target) };
     let mut sink: Vec<Diagnostic> = Vec::new();
     for scope in cx.tree().scopes() {
         analyze_scope(
@@ -267,9 +290,7 @@ fn annotate_units(
 
     // 3. Findings on the target file (project-wide check, filtered by path).
     let target_path = units[target].path;
-    for d in
-        check_units(units, index, folder, RuntimePostures::default(), layout, plugins, policy)
-    {
+    for d in check_units(units, index, folder, postures, layout, plugins, policy) {
         if d.path == target_path {
             facts.push(LineFact { line: d.line, kind: FactKind::Finding { id: d.id } });
         }
