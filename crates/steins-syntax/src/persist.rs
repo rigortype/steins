@@ -20,7 +20,7 @@
 use serde::Deserialize;
 
 use crate::ast::{
-    CallbackRef, ConstArgs, EffectOrigin, EffectRecv, NameRef, RefTarget, Span,
+    CallbackRef, ConstArgs, EffectOrigin, EffectRecv, NameRef, RefTarget, Span, StateConstruct,
 };
 
 /// `&'static str` keyword serialization ([`EffectOrigin::Output`] /
@@ -97,6 +97,7 @@ enum EffectOriginWire {
     Callback { cbref: CallbackRef, span: Span },
     Eval { span: Span },
     Include { keyword: String, span: Span },
+    State { construct: StateConstruct, span: Span },
 }
 
 impl<'de> serde::Deserialize<'de> for EffectOrigin {
@@ -140,6 +141,7 @@ impl<'de> serde::Deserialize<'de> for EffectOrigin {
                 keyword: keyword::intern(&kw).ok_or_else(|| unknown(&kw))?,
                 span,
             },
+            EffectOriginWire::State { construct, span } => EffectOrigin::State { construct, span },
         })
     }
 }
