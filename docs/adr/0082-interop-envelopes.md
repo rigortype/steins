@@ -206,3 +206,22 @@ through an unreadable site or a computed bound with the same defect
 and `bound-label-unknown`.
 
 **Status: accepted 2026-08-12, owner-ratified.**
+
+## Note (2026-09-26): the exhaustiveness §7 writes from
+
+§7 writes a tag only from exhaustive inference, which is only as honest as
+the exhaustiveness bit. Before ADR-0055's 2026-09-26 amendment, a body whose
+only state access was a superglobal, a `global` or `static` declaration, a
+static property or a property write read `{}` and exhaustive, and the
+transform wrote `@phpstan-all-methods-pure` over classes stock PHPStan
+rejects. Until the ADR-0055 labels are inferred, each of those constructs
+marks its body non-exhaustive, so such a class refuses as
+`effects-not-exhaustive` and nothing is written.
+
+That includes a constructor initializing its own properties by assignment.
+The #303 deferral under Consequences still holds on the read side — a
+pure-declared initializing constructor is not a finding — but emission is
+more conservative than it for now: such a class gets no tag. A promoted
+constructor writes nothing in its body and is unaffected. Whether emission
+carves the constructor out before ADR-0055 E2 is the open question that
+amendment records.
