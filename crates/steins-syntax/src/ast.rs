@@ -304,7 +304,9 @@ pub enum StateConstruct {
     /// A write to an instance property: assignment, compound assignment,
     /// `++`/`--`, `unset`, a `foreach` target, a write through an offset
     /// (`$o->p[] = …`), or a `&` binding that lets a later write reach it
-    /// (`$r = &$o->p`, `foreach ($o->p as &$v)`).
+    /// (`$r = &$o->p`, `foreach ($o->p as &$v)`). A `__construct` body's
+    /// writes to `$this`'s own properties are exempt — ADR-0055's
+    /// constructor-creation exemption (#313), for exhaustiveness only.
     PropertyWrite,
 }
 
