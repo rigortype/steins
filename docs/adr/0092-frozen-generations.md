@@ -362,3 +362,33 @@ only duplicate rows; and a row's validity is scoped by the engine
 identity alone, never by source location, so packages add no
 invalidation axis. Growth control is mark-and-sweep by construction — a
 published table holds exactly the rows its run consumed or newly asked.
+
+## Amendment (2026-09-27): a run that lost a fold answer publishes nothing
+
+§2 publishes a candidate "on success", and the implementation read success
+as "no artifact degraded" — which left out the one input that is neither an
+artifact nor an identity field: whether the fold surface answered. A child
+that dies mid-run (ADR-0024: the lost reply widens and is never retried)
+leaves every file walked after it with the sound subset's findings, while
+the replay stamp still carries the engine identity the child reported before
+it died. Published, those walk blocks replayed on every later run under that
+stamp, silently, and kept doing so after whatever killed the child was gone
+(issue #784).
+
+So a run whose fold posture records a loss publishes **nothing** and leaves
+`CURRENT` where it was. The next run starts from a generation built by a run
+that lost nothing, or cold, and walks again what it cannot replay. That is
+§2's standing invariant applied to the fold seam: the loss costs a rebuild,
+never a finding. Two narrower shapes were weighed and not taken. Publishing
+the package and fold-table artifacts while refusing the run's walk blocks
+keeps the parse cache, but a same-identity rerun then keeps a `CURRENT` with
+nothing to replay until the sources move, and needs its own exception to the
+reuse rule to repair that. Refusing only the blocks walked after the first
+loss needs a loss position per walk worker. A lossy run is already
+exceptional and already announced on stderr, so neither economy is worth its
+rule.
+
+The gate is the loss count, not "sidecar-backed throughout": a warm run that
+answers every question from the recorded table never engages a child, and a
+`--no-php` run never asks one, and both publish blocks that are exactly what
+their stamp says.
