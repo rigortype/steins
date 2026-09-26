@@ -283,6 +283,11 @@ values answers the unchanged count.
 3. **The next append index counts negative keys.** `array_push([-3 => 1], 9)`
    measures `[-3 => 1, -2 => 9]` at PHP 8.5.9 — `max + 1`, not `0`, since the
    PHP 8.3 change. `max + 1` at `i64::MAX` declines rather than wrapping.
+   *Corrected by ADR-0049 A22 (2026-09-26): this row measures the same on
+   8.1.32, since a literal-built array has counted negative keys from PHP
+   8.0. The 8.3 change is `$a = []; $a[-3] = 1; array_push($a, 9);`, which
+   lands on `0` on 8.1 and 8.2, so below 8.3 a negative landing index
+   declines to the floor.*
 
 ### The rules do not decline; they floor
 

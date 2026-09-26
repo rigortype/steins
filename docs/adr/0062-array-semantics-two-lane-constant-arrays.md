@@ -490,7 +490,9 @@ An array literal in rvalue position seeds by two rungs, most precise first:
 `normalize_array` declining (A12: a literal straddling the 8.3 next-int
 change on an unpinned minor) declines the **whole** literal at both rungs. A
 guessed key set is wrong rather than wide, which is not a trade this domain
-makes.
+makes. *ADR-0049 A22 (2026-09-26) removed that decline: a literal's keys are
+the same on every supported minor, so `normalize_array` now declines only on
+a key the source does not spell or an omitted key past `PHP_INT_MAX`.*
 
 **Stratum** is ADR-0061 §3's derivation clause: `min` over the element facts
 that contributed one. An unknown slot contributes nothing — it makes no
@@ -1155,7 +1157,12 @@ value lands is decided in one place, and the two spellings cannot drift.
 
 The landing index is `max(integer keys) + 1`, `0` when the array has no integer
 key, and it counts negative keys since PHP 8.3 — the table Amendment §4 of
-ADR-0077 already measured. This is index bookkeeping over the shape's own key
+ADR-0077 already measured. *Corrected by ADR-0049 A22 (2026-09-26): a
+literal-built array has counted negative keys since PHP 8.0; what 8.3
+changed is an array that began as `[]`, which floored the index at `0` on 8.1
+and 8.2. The two witness the same key sequence, so below 8.3, or with no
+minor, a negative landing index now declines to Amendment J's weak row.* This
+is index bookkeeping over the shape's own key
 sequence, not folded arithmetic on an operand: ADR-0028 §3's ban stands, and
 `$a[$i + 1] = v` still takes Amendment J's weak row.
 

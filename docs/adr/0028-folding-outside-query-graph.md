@@ -44,7 +44,12 @@ allowlist did not change; the gate under it did.
    `null` for an absent key — and the runner rebuilds it with `$arr[] =`
    / `$arr[k] =`. Absent keys therefore get **this engine's** next-int
    (including the negative-key edge PHP 8.3 changed) and duplicates
-   **this engine's** last-wins. A JSON object could express neither. The
+   **this engine's** last-wins. A JSON object could express neither.
+   *Corrected by ADR-0049 A22 (2026-09-26): what 8.3 changed is the next
+   key of an array that began as `[]`, and the runner started from `[]`,
+   so on 8.1 and 8.2 it rebuilt `[-5 => 'a', 'b']` with `'b'` at `0`
+   where the literal puts it at `-4`. The runner now autovivifies from
+   `null`, which builds the array the way the literal does.* The
    general principle restated: a fold is the value the project's own PHP
    produces (ADR-0004), so no array rule is reimplemented in Rust to be
    wrong about later.
