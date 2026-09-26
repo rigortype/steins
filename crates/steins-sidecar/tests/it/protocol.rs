@@ -607,6 +607,43 @@ fn php_assigns_absent_keys_and_resolves_duplicates() {
     );
 }
 
+/// An absent key after a negative one lands one past it in a literal on every
+/// supported minor: `[-5 => 'a', 'b', -4 => 'c']` is `[-5 => 'a', -4 => 'c']`
+/// through `php -r` on 8.1.32, 8.2.33 and 8.5.10. Appending to `[]` is not the
+/// same operation before PHP 8.3 — the shared empty array floored the next key
+/// at `0` (php-src GH-11154), which would rebuild three entries — so the runner
+/// must not start from `[]` (ADR-0049 A22).
+#[test]
+fn a_negative_key_argument_rebuilds_like_its_literal() {
+    let Some(mut sc) = spawn_or_skip("a_negative_key_argument_rebuilds_like_its_literal") else {
+        return;
+    };
+    let shadowed = FoldArg::Array(vec![
+        (Some(FoldKey::Int(-5)), s("a")),
+        (None, s("b")),
+        (Some(FoldKey::Int(-4)), s("c")),
+    ]);
+    assert_eq!(sc.fold("count", &[shadowed], true), FoldResult::Value(FoldValue::Int(2)));
+    let keyed = FoldArg::Array(vec![(Some(FoldKey::Int(-5)), s("a")), (None, s("b"))]);
+    assert_eq!(
+        sc.fold("array_keys", &[keyed], true),
+        FoldResult::Value(FoldValue::Array(vec![
+            (FoldKey::Int(0), FoldValue::Int(-5)),
+            (FoldKey::Int(1), FoldValue::Int(-4)),
+        ]))
+    );
+    // A string key first, and no key at all, rebuild as they always did.
+    let string_first = FoldArg::Array(vec![(Some(FoldKey::Str("k".into())), s("a")), (None, s("b"))]);
+    assert_eq!(
+        sc.fold("array_keys", &[string_first], true),
+        FoldResult::Value(FoldValue::Array(vec![
+            (FoldKey::Int(0), FoldValue::Str("k".to_owned())),
+            (FoldKey::Int(1), FoldValue::Int(0)),
+        ]))
+    );
+    assert_eq!(sc.fold("count", &[list(vec![])], true), FoldResult::Value(FoldValue::Int(0)));
+}
+
 /// Rebuilding an array literal can THROW PHP's own key-rule error:
 /// `[PHP_INT_MAX => 'a', 'b']` → "Cannot add element...". Before issue #64 S1.5
 /// this escaped as an uncaught FATAL, killing the runner mid-NDJSON — must widen.
