@@ -66,6 +66,7 @@
 use std::collections::HashMap;
 use std::io::BufRead;
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::{Value, json};
 use steins_edit::{CompletenessOracle, EditPlan, unified_diff};
@@ -253,12 +254,27 @@ struct Session {
     plans: HashMap<String, StoredPlan>,
 }
 
+/// The last nonce a [`Session`] took in this process. Nonces only move up.
+static LAST_NONCE: AtomicU64 = AtomicU64::new(0);
+
 impl Session {
     fn new() -> Self {
-        let nonce = std::time::SystemTime::now()
+        // The clock alone does not separate two sessions: macOS reads it in
+        // whole microseconds, so two sessions created in the same tick shared a
+        // stamp, and a handle from one passed the other's foreign-process check
+        // (issue #712). Taking one past the last nonce when the clock has not
+        // moved on makes every session's stamp distinct by construction. The
+        // clock still separates this process from an earlier one that had the
+        // same pid.
+        let clock = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
+            .map(|d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
             .unwrap_or_default();
+        let next = |last: u64| clock.max(last.saturating_add(1));
+        let last = LAST_NONCE
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |last| Some(next(last)))
+            .unwrap_or_else(|last| last);
+        let nonce = next(last);
         Self { stamp: format!("{}-{nonce}", std::process::id()), next: 1, plans: HashMap::new() }
     }
 
@@ -867,12 +883,13 @@ mod tests {
     }
 
     /// Two sessions in the same process still can't share a handle — the nonce
-    /// separates them even under pid reuse.
+    /// separates them even under pid reuse, and even inside one clock tick
+    /// (issue #712): back-to-back sessions all differ.
     #[test]
     fn sessions_do_not_share_handles() {
-        let a = Session::new();
-        let b = Session::new();
-        assert_ne!(a.stamp, b.stamp);
+        let stamps: std::collections::HashSet<String> =
+            (0..1000).map(|_| Session::new().stamp).collect();
+        assert_eq!(stamps.len(), 1000, "every session has its own stamp");
     }
 
     #[test]
