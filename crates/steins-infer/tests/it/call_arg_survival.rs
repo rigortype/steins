@@ -370,17 +370,18 @@ fn a_project_declaration_shadowing_a_mined_name_certifies_nothing() {
 /// chain — so the assignment channel is what owns it, and the pin is that a
 /// certified callee and an unknown one answer identically.
 ///
-/// They answer identically at the WRONG value: a nested assignment expression
-/// is not applied by the walk, so `$s` reads back as its pre-statement value
-/// under either callee. That gap predates this issue and is orthogonal to it
-/// (`$q = ($s = 'zz');` with no call at all does the same); what matters here
-/// is that certification does not launder it — a by-value promise about the
-/// PARAMETER never becomes a promise about the caller's statement.
+/// The walk applies no nested assignment expression, so the statement names the
+/// write as an opaque entry and `$s` is forgotten under either callee (issue
+/// #694 — before it, all three read back the pre-statement `'abc'`). What
+/// matters here is that certification does not launder the write — a by-value
+/// promise about the PARAMETER never becomes a promise about the caller's
+/// statement.
 #[test]
 fn an_embedded_assignment_reads_the_same_under_a_certified_callee() {
     let certified = dump_after("$s = 'abc'; strstr($s = 'zz', 'z');");
     let unknown = dump_after("$s = 'abc'; my_helper($s = 'zz');");
     let no_call = dump_after("$s = 'abc'; $q = ($s = 'zz');");
+    assert_eq!(certified, "dumped type: unknown", "the write is forgotten, not kept");
     assert_eq!(certified, unknown, "certification did not move this shape");
     assert_eq!(certified, no_call, "…and the shape does not need a call at all");
     // The offset spelling of the by-value rule itself is unaffected (issue

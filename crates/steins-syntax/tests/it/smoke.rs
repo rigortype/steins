@@ -158,6 +158,11 @@ fn an_unprovable_occurrence_marks_the_entry_opaque_with_no_sites() {
         ),
         ("<?php $s = 'a'; $c = fn() => g($s);", "arrow-body occurrence"),
         ("<?php $s = 'a'; echo trim($s), $s = 'x';", "echo-embedded write"),
+        // Issue #694: every expression-statement arm names its embedded writes.
+        ("<?php $s = 'a'; $x = trim($s) . ($s = 'x');", "assignment-embedded write"),
+        ("<?php $s = 'a'; $x = trim($s) . $s++;", "assignment-embedded increment"),
+        ("<?php $s = 'a'; f(trim($s), $s = 'x');", "call-argument write"),
+        ("<?php $s = 'a'; $o = new C(); $o->p = trim($s) . ($s = 'x');", "property-assignment write"),
     ] {
         let tree = SourceTree::parse(src);
         let top = tree.scopes().iter().find(|s| s.function_name.is_none()).unwrap();
