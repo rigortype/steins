@@ -402,6 +402,10 @@ fn general_removal(shape: &ShapeFact) -> Option<Fact> {
 ///   leaves an integer key;
 /// * a folded `array_filter` result is a fresh build: `array_filter([0 => 0, 5
 ///   => 1])` then an append lands on `6`;
+/// * a folded `array_unique` with a flag other than `SORT_STRING` keeps its
+///   input's index, so the fold makes a literal of it only when the input's
+///   largest integer key survived, and binds a shape with no witness otherwise
+///   ([`Cx::unwitnessed_fold_fact`](crate::cx::Cx::unwitnessed_fold_fact));
 /// * `array_splice` has no rule here, so it attaches no witness.
 fn append_order(shape: &ShapeFact) -> Option<Vec<Key>> {
     shape.witnessed_order().map(<[Key]>::to_vec)

@@ -58,6 +58,7 @@ mod existence_guard;
 mod false_arm_strip;
 mod float_boundary_coercion;
 mod fold_allowlist_growth;
+mod fold_append_index;
 mod fold_project_call;
 mod fold_table_persistence;
 mod folding;

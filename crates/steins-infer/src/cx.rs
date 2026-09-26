@@ -7,7 +7,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use steins_domain::{Certainty, Fact, PhpStr, Val};
+use steins_domain::{Certainty, Fact, Key, PhpStr, ShapeFact, Val};
 use steins_phpdoc::Type as PType;
 use steins_phpdoc::ast::TypeKind as PKind;
 use steins_syntax::{
@@ -104,6 +104,10 @@ pub(crate) struct Cx<'a> {
     /// undeclared target, which the floor admits.
     pub(crate) php_target: Option<&'a steins_db::PhpTarget>,
 }
+
+/// The one allowlisted name whose folded array can keep its input's next append
+/// index instead of stating its own ([`Cx::fold_states_its_append_index`]).
+const INDEX_CARRYING_FOLD: &str = "array_unique";
 
 impl<'a> Cx<'a> {
     pub(crate) fn new(units: &'a [FileUnit<'a>], index: &'a Index, cur: usize) -> Self {
@@ -1147,6 +1151,10 @@ impl<'a> Cx<'a> {
     }
 
     /// [`Self::try_fold`] with optional live [`Descent`] and findings sink (issue #127).
+    ///
+    /// A folded array whose next append index its keys do not state is no
+    /// literal ([`Self::fold_states_its_append_index`]); the builtin-call ladder
+    /// takes it as a shape instead ([`Self::unwitnessed_fold_fact`]).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn try_fold_under(
         &self,
@@ -1155,9 +1163,118 @@ impl<'a> Cx<'a> {
         env: &HashMap<String, Known>,
         poisoned: bool,
         folder: &mut dyn Folder,
+        descent: Option<&mut Descent<'_>>,
+        out: Option<&mut Vec<Diagnostic>>,
+    ) -> Option<(ArgValue, String, Stratum)> {
+        let (resolved, folded, arg_strat) =
+            self.fold_resolved_under(name, args, env, poisoned, folder, descent, out)?;
+        if !self.fold_states_its_append_index(name, &resolved, &folded) {
+            return None;
+        }
+        Some((folded, format!("folded from {}", render_call(name, &resolved)), arg_strat))
+    }
+
+    /// **A folded array whose next append index its keys do not state**, as the
+    /// shape it is with no order witness: the builtin-call ladder's answer for
+    /// the calls [`Self::try_fold_under`] refuses to make a literal. `None` when
+    /// the call does not fold, or folds to a literal, which the rungs above
+    /// already bound.
+    ///
+    /// Every key, value, the count and list-ness survive, since the engine
+    /// answered them. Only the witness goes, and with it the order-dependent
+    /// projections and the exact landing key of a later `$a[] = v`, which
+    /// takes the row it takes after `unset`.
+    pub(crate) fn unwitnessed_fold_fact(
+        &self,
+        name: &str,
+        args: &[ArgValue],
+        env: &HashMap<String, Known>,
+        poisoned: bool,
+        folder: &mut dyn Folder,
+    ) -> Option<(Fact, Stratum)> {
+        // No other name's fold refuses a literal, so no other call pays for
+        // resolving its arguments a second time.
+        if poisoned || !name.eq_ignore_ascii_case(INDEX_CARRYING_FOLD) {
+            return None;
+        }
+        let (resolved, folded, arg_strat) =
+            self.fold_resolved_under(name, args, env, poisoned, folder, None, None)?;
+        if self.fold_states_its_append_index(name, &resolved, &folded) {
+            return None;
+        }
+        let Some(Val::Array(entries)) = val_of(&folded) else { return None };
+        let shape = ShapeFact { order: None, ..ShapeFact::lift(&entries) };
+        Some((Fact::Shape { shape: Box::new(shape), nullable: false }, arg_strat))
+    }
+
+    /// Whether PHP's next append index for `folded` is the one its keys state:
+    /// their largest integer key plus one, or none set when there is no integer
+    /// key. A literal becomes a `Singleton`, and every consumer lifts a
+    /// `Singleton` array with an order witness ([`ShapeFact::lift`]) that makes
+    /// exactly this claim.
+    ///
+    /// Every array-returning name on the allowlist keeps the claim, because it
+    /// builds its result fresh or hands back a literal argument whole, except
+    /// `array_unique` with a flag other than `SORT_STRING` (`2`). php-src
+    /// duplicates the input there and deletes the repeats, so the input's index
+    /// carries over. Measured with `php -r` on 8.1.32, 8.2.33, 8.3.33, 8.4.25
+    /// and 8.5.10 alike, appending `9` to each result:
+    ///
+    /// ```text
+    /// array_unique(['a', 'a'], SORT_REGULAR)               => 0, 2
+    /// array_unique(['a', 'a'])                             => 0, 1
+    /// array_unique(['a', 'a', 'b'], SORT_REGULAR)          => 0, 2, 3
+    /// array_unique(['k' => 'a', 0 => 'a'], SORT_REGULAR)   => 'k', 1
+    /// ```
+    ///
+    /// The input is a literal too, so its index is the one its own keys state.
+    /// The result's claim therefore still holds when the input's largest integer
+    /// key survived, as in the third row, and when php-src hands back the input
+    /// itself, which it does for one entry or none. A flag spelled any other way
+    /// than the integer `2` counts as another flag, which only costs the witness.
+    fn fold_states_its_append_index(
+        &self,
+        name: &str,
+        resolved: &[ArgValue],
+        folded: &ArgValue,
+    ) -> bool {
+        if !name.eq_ignore_ascii_case(INDEX_CARRYING_FOLD) {
+            return true;
+        }
+        let input = match resolved {
+            [_] | [_, ArgValue::Int(2)] => return true,
+            [input, _] => input,
+            _ => return false,
+        };
+        let max_int_key = |arg: &ArgValue| match val_of(arg)? {
+            Val::Array(entries) => Some(
+                entries
+                    .iter()
+                    .filter_map(|(k, _)| match k {
+                        Key::Int(n) => Some(*n),
+                        Key::Str(_) => None,
+                    })
+                    .max(),
+            ),
+            _ => None,
+        };
+        matches!((max_int_key(input), max_int_key(folded)), (Some(a), Some(b)) if a == b)
+    }
+
+    /// The fold [`Self::try_fold_under`] makes, before it decides whether the
+    /// result is a literal: the resolved arguments, the engine's answer and the
+    /// arguments' stratum.
+    #[allow(clippy::too_many_arguments)]
+    fn fold_resolved_under(
+        &self,
+        name: &str,
+        args: &[ArgValue],
+        env: &HashMap<String, Known>,
+        poisoned: bool,
+        folder: &mut dyn Folder,
         mut descent: Option<&mut Descent<'_>>,
         mut out: Option<&mut Vec<Diagnostic>>,
-    ) -> Option<(ArgValue, String, Stratum)> {
+    ) -> Option<(Vec<ArgValue>, ArgValue, Stratum)> {
         // Any project user function sharing this simple name shadows the builtin
         // (or makes it ambiguous) — do not fold. Conservative, never an FP.
         if self.index.has_simple_function(name) {
@@ -1228,7 +1345,7 @@ impl<'a> Cx<'a> {
         // including when the walk has descended into another file's body, which
         // is PHP's rule exactly.
         let folded = folder.fold(name, &resolved, self.tree().has_strict_types())?;
-        Some((folded, format!("folded from {}", render_call(name, &resolved)), arg_strat))
+        Some((resolved, folded, arg_strat))
     }
 
     /// Fold an allowlisted builtin over a **bounded union of constant arguments**,

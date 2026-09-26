@@ -1236,6 +1236,18 @@ Both were reachable before this slice, through `array_push`:
   `array_unshift($x, 99)` is `array_is_list` true). `array_push` and `$a[] = v`
   do not. The parameter is the caller's now, and the two answer differently.
 
+*Corrected 2026-09-27: a fold is a witness producer too, because the fold seam
+hands its answer on as a literal and a literal lifts with a witness. Every
+array-returning name on the fold allowlist builds its result fresh, which keeps
+the counter at `max + 1`, except `array_unique` with a flag other than
+`SORT_STRING`. php-src duplicates the input there and deletes the repeats, so
+the input's counter carries over: `$a = array_unique(['a', 'a'], SORT_REGULAR);
+$a[] = 9;` lands on `2`, not `1`, measured with `php -r` on 8.1.32, 8.2.33,
+8.3.33, 8.4.25 and 8.5.10 alike. The seam makes a literal of such a result only
+when the input's largest integer key survived. Otherwise the builtin-call
+ladder binds the folded shape with no witness, so the result keeps its type and
+an append takes the row it takes after `unset`.*
+
 ### K4. What still declines
 
 - `$o->p[] = v` — ADR-0063 §2.3's aliasing family, not this lane.
