@@ -387,8 +387,10 @@ pub trait FoldEngine {
     /// caller memoizes a decline as a *whole-run* answer, a bumped generation says
     /// the engine that gave it no longer exists, so the answer may be asked once
     /// more of the one that replaced it — [`EngineFolder`]'s `refresh_env_memos`
-    /// is the only consumer. Bounded by the transport's own respawn cap, which is
-    /// what keeps "ask again" from becoming "ask at every call site".
+    /// is the only consumer. Bounded by how often the child is replaced, which is
+    /// what keeps "ask again" from becoming "ask at every call site": the
+    /// respawn cap bounds replacements in a row, and the process engine stops
+    /// asking a callee that killed a child (issue #783).
     ///
     /// The default `0` is right for every transport that cannot be replaced
     /// mid-run ([`TableEngine`], and any wasm engine): its declines are as
@@ -591,10 +593,10 @@ impl<E: FoldEngine> EngineFolder<E> {
     /// The generation counter bounds the re-asking: re-asking on "the memo holds a
     /// decline" would pay the ADR-0024 timeout at every call site against a merely
     /// hung sidecar; re-asking on "the engine that declined was replaced" costs at
-    /// most one `env` per respawn, bounded by the respawn cap. All four are
-    /// dropped together rather than only the declines, since they come from one
-    /// reply and a conditional would have to distinguish a decline from a real
-    /// verdict (a loaded monkey-patch extension is a legitimate
+    /// most one `env` per respawn, bounded as [`FoldEngine::restarts`] says. All
+    /// four are dropped together rather than only the declines, since they come
+    /// from one reply and a conditional would have to distinguish a decline from
+    /// a real verdict (a loaded monkey-patch extension is a legitimate
     /// `absence_available == Some(false)`).
     ///
     /// The per-name memos are deliberately NOT dropped: a declined `reflect` costs

@@ -4,6 +4,8 @@
 //!
 //! [`ProcessEngine`]: crate::ProcessEngine
 
+use std::collections::HashSet;
+
 use steins_sidecar::{
     ClassReflection, ConstantDefined, EnvInfo, FoldArg, FoldResult, PregCompile, Reflection,
 };
@@ -45,16 +47,23 @@ pub struct ProcessEngine {
     /// run, with no permanent suppression from an earlier success (review
     /// finding on PR #134).
     unresponsive_notified: bool,
-    /// Requests that ended with the child dead or silent (issue #245) — the
-    /// [`FoldPosture::losses`] counter. Counted on the EDGE into poison rather
-    /// than per poisoned call: past the respawn cap `is_poisoned` stays true for
-    /// every remaining request of the run, and counting those would report tens of
-    /// thousands of "losses" for one dead child.
-    losses: u32,
-    /// The edge detector for `losses`: the last `Sidecar::is_poisoned` this engine
-    /// observed. A `false → true` step is a loss; a `true → false` step is a
-    /// successful respawn, which is [`Sidecar::respawns`]'s business to count.
-    poisoned_seen: bool,
+    /// Callees whose fold killed a child, lowercased (issue #783). Each is
+    /// declined without dispatch for the rest of the run.
+    ///
+    /// A death costs its callee, not the run. The transport's respawn cap is a
+    /// storm brake and stops only an engine that dies before answering anything;
+    /// what stops one bomb shape from recurring is not asking it again. Before
+    /// this, four `range()` literals in one analysed file spent a lifetime
+    /// budget of three respawns and every file after it ran as the sound subset.
+    /// The fold seam now prices those four before dispatch, and a shape nothing
+    /// prices costs one child and that callee's later folds.
+    ///
+    /// Keyed by callee rather than by call, because the bombs that got past the
+    /// budget came in families: the next call of a name that exhausted
+    /// `memory_limit` with one literal is the likeliest to do it with another.
+    /// A timeout counts too — a callee slow enough to time out once would cost
+    /// the timeout again at every call site.
+    quarantined: HashSet<String>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -69,8 +78,7 @@ impl ProcessEngine {
             spawn_failed: false,
             notified: true, // suppress our own notice; only spawn-failure re-arms it.
             unresponsive_notified: true, // suppress; only enabled() re-arms it (mirrors `notified`).
-            losses: 0,
-            poisoned_seen: false,
+            quarantined: HashSet::new(),
         }
     }
 
@@ -122,14 +130,6 @@ impl ProcessEngine {
         let sc = self.ensure()?;
         let result = op(sc);
         let poisoned = sc.is_poisoned();
-        // The loss ledger (issue #245), read off the same post-call state the
-        // notice latch is: an edge into poison is one answer this run will never
-        // have. The notice says it happened; this counts how often, so the run's
-        // own report can qualify the numbers it prints.
-        if poisoned && !self.poisoned_seen {
-            self.losses += 1;
-        }
-        self.poisoned_seen = poisoned;
         if poisoned {
             self.note_unresponsive();
         }
@@ -158,8 +158,32 @@ impl ProcessEngine {
     /// Send `method`/`params` verbatim to the child and return the raw `result`.
     /// The native answering half of an ADR-0066 replay request; `None` when no
     /// sidecar can be had or the request failed.
+    ///
+    /// A `fold` here is quarantined exactly as [`FoldEngine::fold`] is: the
+    /// persisted-table engine (ADR-0092) answers every miss through this method,
+    /// so it is the path a `steins check` run's folds actually take. A declined
+    /// callee answers `None`, which that engine does not record.
     pub fn call_raw(&mut self, method: &str, params: serde_json::Value) -> Option<serde_json::Value> {
-        self.call(|sc| sc.call_raw(method, params)).flatten()
+        if method != "fold" {
+            return self.call(|sc| sc.call_raw(method, params)).flatten();
+        }
+        let callee = params.get("function").and_then(serde_json::Value::as_str)?.to_owned();
+        self.fold_guarded(&callee, |sc| sc.call_raw(method, params)).flatten()
+    }
+
+    /// Run a fold of `callee` unless it is quarantined, and quarantine it when
+    /// the request cost a child (issue #783). `None` when it is quarantined or
+    /// no sidecar can be had.
+    fn fold_guarded<T>(&mut self, callee: &str, op: impl FnOnce(&mut Sidecar) -> T) -> Option<T> {
+        if self.is_quarantined(callee) {
+            return None;
+        }
+        let deaths = self.sidecar.as_ref().map_or(0, Sidecar::deaths);
+        let result = self.call(op);
+        if self.sidecar.as_ref().is_some_and(|sc| sc.deaths() > deaths) {
+            self.quarantined.insert(callee.to_ascii_lowercase());
+        }
+        result
     }
 
     /// What this engine delivered over the whole run (issue #245).
@@ -170,6 +194,12 @@ impl ProcessEngine {
     /// `abandoned` reads the respawn budget rather than the poison flag alone —
     /// poisoned-with-budget-left is a child about to be replaced, poisoned-with-
     /// none-left is the end of the fold surface for this run.
+    ///
+    /// `losses` is the transport's own death count. It was an edge detector on
+    /// `is_poisoned` between calls, which missed a death whenever one request
+    /// revived a dead child and the replacement died too: the flag read `true`
+    /// on both sides, so an abandoned run reported one death fewer than the
+    /// children it lost (issue #783).
     #[must_use]
     pub fn posture(&self) -> FoldPosture {
         let Some(sc) = &self.sidecar else {
@@ -177,10 +207,17 @@ impl ProcessEngine {
         };
         FoldPosture {
             engaged: true,
-            losses: self.losses,
+            losses: sc.deaths(),
             restarts: sc.respawns(),
-            abandoned: sc.is_poisoned() && sc.respawns() >= steins_sidecar::RESPAWN_CAP,
+            abandoned: sc.is_poisoned() && sc.strikes() >= steins_sidecar::RESPAWN_CAP,
         }
+    }
+
+    /// Whether a fold of `name` killed a child earlier in this run, so that
+    /// [`FoldEngine::fold`] declines it without dispatch (issue #783).
+    #[must_use]
+    pub fn is_quarantined(&self, name: &str) -> bool {
+        self.quarantined.contains(&name.to_ascii_lowercase())
     }
 }
 
@@ -199,7 +236,10 @@ impl FoldEngine for ProcessEngine {
     }
 
     fn fold(&mut self, name: &str, args: &[FoldArg], strict: bool) -> FoldResult {
-        self.call(|sc| sc.fold(name, args, strict))
+        if self.is_quarantined(name) {
+            return FoldResult::widen("callee quarantined");
+        }
+        self.fold_guarded(name, |sc| sc.fold(name, args, strict))
             .unwrap_or_else(|| FoldResult::widen("no sidecar"))
     }
 
