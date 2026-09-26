@@ -14,8 +14,9 @@ their commands; `.github/workflows/composer.yml` defines the Composer channel.
   does not run in CI. Run it alongside CI when the change affects inference
   compatibility.
 - **Composer:** `composer.yml` is path-filtered, so a CLI change that breaks
-  the Composer channel stays green until the next `composer/**` PR. After
-  changing command dispatch or exit codes, dispatch that workflow explicitly.
+  the Composer channel stays green until the next `composer/**` PR or the
+  weekly scheduled run. After changing command dispatch or exit codes, dispatch
+  that workflow explicitly.
 
 ## Gates that fail on something the diff hides
 
