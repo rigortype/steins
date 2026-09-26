@@ -148,6 +148,7 @@ mod short_circuit;
 mod short_circuit_dead_operands;
 mod sidecar_recovery;
 mod stage2_facts;
+mod state_constructs;
 mod str_pred_transfer;
 mod stratum;
 mod string_context;

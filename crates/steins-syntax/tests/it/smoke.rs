@@ -319,6 +319,7 @@ fn scans_effect_origins_across_control_flow() {
             EffectOrigin::Opaque { .. } => panic!("no opaque call expected"),
             EffectOrigin::HigherOrder { .. } => panic!("no higher-order call expected"),
             EffectOrigin::Callback { .. } => panic!("no callback call expected"),
+            EffectOrigin::State { .. } => panic!("no state construct expected"),
         }
     }
     assert_eq!(echo, 1, "echo inside the if is found");
@@ -508,6 +509,137 @@ fn nested_closure_bodies_are_not_scanned() {
         !f.effect_origins.iter().any(|o| matches!(o, EffectOrigin::Output { .. })),
         "closure-nested echo is not the outer function's effect"
     );
+}
+
+/// ADR-0055 amendment (2026-09-26): the structural state constructs are effect
+/// origins, one per construct, recorded at the construct itself.
+#[test]
+fn scans_structural_state_constructs() {
+    use steins_syntax::StateConstruct as S;
+
+    /// The state constructs of `f`'s body, each with the source text of its span.
+    fn states(body: &str) -> Vec<(S, String)> {
+        let src = format!("<?php function f($o, $a, $c): void {{ {body} }}");
+        let tree = SourceTree::parse(&src);
+        let f = tree.functions().iter().find(|f| f.name == "f").expect("f").clone();
+        f.effect_origins
+            .iter()
+            .filter_map(|o| match o {
+                EffectOrigin::State { construct, span } => {
+                    Some((*construct, src[span.start as usize..span.end as usize].to_owned()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+    let one = |c: S, text: &str| vec![(c, text.to_owned())];
+
+    assert_eq!(states("global $g;"), one(S::Global, "global $g;"));
+    assert_eq!(states("static $n = 0;"), one(S::StaticVar, "static $n = 0;"));
+    for sg in steins_syntax::SUPERGLOBALS {
+        let access = format!("${sg}");
+        assert_eq!(states(&format!("{access}['k'] = 1;")), one(S::Superglobal, &access), "{sg}");
+    }
+    assert_eq!(states("return;"), vec![], "no construct, no origin");
+    // Case matters to PHP, and a variable variable cannot reach a superglobal in a function.
+    assert_eq!(states("$_get = 1; $n = '_GET'; $$n;"), vec![]);
+    for access in ["self::$p", "static::$p", "Foo::$p", "$c::$p"] {
+        assert_eq!(states(&format!("$x = {access};")), one(S::StaticProperty, access), "{access}");
+    }
+    // `Foo::$_GET` names a property; the superglobal is not read.
+    assert_eq!(states("$x = Foo::$_GET;"), one(S::StaticProperty, "Foo::$_GET"));
+    for (write, lvalue) in [
+        ("$o->p = 1;", "$o->p"),
+        ("$o->p .= 'x';", "$o->p"),
+        ("$o->p ??= 1;", "$o->p"),
+        ("$o->p++;", "$o->p"),
+        ("--$o->p;", "$o->p"),
+        ("unset($o->p['k']);", "$o->p['k']"),
+        ("$o->p[] = 1;", "$o->p[]"),
+        ("$o->p['k'] = 1;", "$o->p['k']"),
+        ("$a[0]->p = 1;", "$a[0]->p"),
+        ("$o->p->q = 1;", "$o->p->q"),
+        ("[$o->p, $x] = $a;", "[$o->p, $x]"),
+        ("$r = &$o->p;", "$o->p"),
+        ("foreach ($a as $o->p) {}", "$o->p"),
+        ("foreach ($o->p as &$v) {}", "$o->p"),
+    ] {
+        assert_eq!(states(write), one(S::PropertyWrite, lvalue), "{write}");
+    }
+    // A property read, and a property in an offset's index, write nothing.
+    assert_eq!(states("$x = $o->p; $a[$o->p] = 1; foreach ($o->p as $v) {}"), vec![]);
+}
+
+/// ADR-0055's constructor-creation exemption (#313), for exhaustiveness only: a
+/// `__construct` body's write whose base is literally `$this` records nothing,
+/// where PHPStan's constructor exclusion reaches it; every other write stays.
+#[test]
+fn a_constructor_initializing_this_records_no_property_write() {
+    use steins_syntax::StateConstruct as S;
+
+    /// The property writes of method `name`, whose body is `body`, as source text.
+    fn writes(name: &str, body: &str) -> Vec<String> {
+        let src = format!(
+            "<?php class C {{ public $p; public $q = []; public static $s; public function {name}($o, $a) {{ {body} }} }}"
+        );
+        let tree = SourceTree::parse(&src);
+        let m = tree.classes()[0].methods[0].clone();
+        m.effect_origins
+            .iter()
+            .filter_map(|o| match o {
+                EffectOrigin::State { construct: S::PropertyWrite, span } => {
+                    Some(src[span.start as usize..span.end as usize].to_owned())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    for init in [
+        "$this->p = $o;",
+        "$this->p .= 'x';",
+        "$this->p ??= 1;",
+        "$this->p++;",
+        "--$this->p;",
+        "$this->q[] = 1;",
+        "$this->q['k'] = 1;",
+        "unset($this->q['k']);",
+        "[$this->p, $x] = $a;",
+        "foreach ($a as $this->p) {}",
+        "foreach ($this->q as &$v) { $v = 0; }",
+    ] {
+        assert_eq!(writes("__construct", init), Vec::<String>::new(), "{init}");
+        assert_eq!(writes("__CONSTRUCT", init), Vec::<String>::new(), "{init}, any case");
+        assert_eq!(writes("init", init).len(), 1, "{init} outside a constructor");
+    }
+    for (write, lvalue) in [
+        ("$self = $this; $self->p = 1;", "$self->p"),
+        ("$o->p = 1;", "$o->p"),
+        ("$this->p->q = 1;", "$this->p->q"),
+        ("unset($this->p);", "$this->p"),
+        ("$r = &$this->p;", "$this->p"),
+        ("[$this->p, $o->p] = $a;", "[$this->p, $o->p]"),
+    ] {
+        assert_eq!(writes("__construct", write), [lvalue], "{write}");
+    }
+    let src = "<?php class C { public $p; public function __construct() { $f = function () { $this->p = 1; }; $f(); } }";
+    let tree = SourceTree::parse(src);
+    let closure_writes = tree.scopes().iter().any(|s| {
+        s.effect_origins.iter().any(|o| matches!(o, EffectOrigin::State { construct: S::PropertyWrite, .. }))
+    });
+    assert!(closure_writes, "a closure defined in a constructor can run after construction");
+}
+
+/// A state construct inside a closure or arrow function belongs to that scope,
+/// exactly as an `echo` does.
+#[test]
+fn a_nested_scope_owns_its_state_constructs() {
+    let src = "<?php function f($o): void { $g = function () { global $x; }; $h = fn () => $_GET; }";
+    let tree = SourceTree::parse(src);
+    let state = |o: &EffectOrigin| matches!(o, EffectOrigin::State { .. });
+    assert!(!tree.functions()[0].effect_origins.iter().any(state), "f owns none of them");
+    let owners = tree.scopes().iter().filter(|s| s.effect_origins.iter().any(state)).count();
+    assert_eq!(owners, 2, "the closure and the arrow function each carry their own");
 }
 
 #[test]

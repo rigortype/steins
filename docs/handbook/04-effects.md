@@ -246,6 +246,15 @@ on its own — an over-approximation of the unknown is not a proof
 of anything. It is honesty in the margin: Steins is telling you
 where its view ends.
 
+State the effect system does not label yet ends the view the same
+way. A `global` or `static` declaration, a superglobal such as
+`$_GET`, a static property, or a write to an object's property
+marks the body `…?` until the `global.*` and `mutate.*` labels
+are inferred, so `function f() { return $_GET['q']; }` reads
+`effects: {…?}` rather than the `{}` of a pure function. A
+constructor setting its own `$this->…` properties is creating the
+object, not changing it, and stays `{}`.
+
 ## The four findings
 
 Effects produce four findings, and they live on different

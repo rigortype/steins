@@ -224,6 +224,7 @@ Recognized origins in a body:
 | a higher-order builtin with a resolvable callback | the callback's effects, per the [invocation shape](closures.md) |
 | a `$fn()` call resolved to a known callback | the callback's effects |
 | a method call on a receiver whose declared type is a project **interface** | the interface method's envelope labels, in the **declared** lane (ADR-0067) |
+| a `global` or `static` declaration, a superglobal access, a static property access, or an instance property write (a constructor initializing `$this` excepted) | **no** effect yet, but exhaustiveness is tainted — interim, until the ADR-0055 labels are inferred (ADR-0055 amendment of 2026-09-26) |
 | anything else dynamic | **no** effect, but exhaustiveness is tainted |
 
 The `$this->`/`self::` edges are drawn under a **final/private guard**: a

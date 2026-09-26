@@ -505,7 +505,12 @@ of the same envelope concept, one trust stratum below the attribute.
   tag and never writes per-method `@phpstan-pure`, and it refuses rather than
   touch a site it cannot read faithfully: an existing tag carrying an unknown
   label is left byte-untouched, and a computed bound is never written if it
-  would itself contain one.
+  would itself contain one. Until the ADR-0055 labels are inferred, a body
+  holding a `global` or `static` declaration, a superglobal, a static
+  property or a property write is non-exhaustive, so its class gets no tag.
+  A constructor initializing its own `$this` properties is exempt, matching
+  the read side above and PHPStan's own constructor exclusion (ADR-0055
+  amendment of 2026-09-26).
 
 ## Open questions for upstream
 

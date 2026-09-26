@@ -214,6 +214,58 @@ fn all_pure_class_gets_the_class_tag_and_no_method_tags() {
     );
 }
 
+/// ADR-0055's constructor-creation exemption (#313) covers exactly the `$this`
+/// writes PHPStan's constructor exclusion covers; every other state construct in
+/// a constructor still withholds the class tag, since PHPStan would reject it.
+#[test]
+fn a_constructors_other_state_refuses_the_class_tag() {
+    for body in [
+        "$self = $this; $self->n = $n;",
+        "$o = new \\stdClass(); $o->n = $n;",
+        "unset($this->n);",
+        "$r = &$this->n;",
+        "self::$count++;",
+        "$this->n = $_GET['n'];",
+        "$f = function () use ($n) { $this->n = $n; }; $f();",
+    ] {
+        let lib = format!(
+            "<?php\nclass C {{\n    public static int $count = 0;\n    public int $n = 0;\n    public function __construct(int $n) {{ {body} }}\n    public function get(): int {{ return $this->n; }}\n}}\n"
+        );
+        let report = plan(&[("lib.php", &lib)]);
+        assert_oracle_complete(&report);
+        assert_eq!(only_reason(&report), REASON_EFFECTS_NOT_EXHAUSTIVE, "{body}");
+        assert!(report.refusals[0].detail.contains("C::__construct()"), "{body}: {:#?}", report.refusals);
+        assert!(report.plan.is_empty(), "{body}: nothing is written");
+    }
+}
+
+/// The class a stock PHPStan rejects `@phpstan-all-methods-pure` on
+/// (`impure.staticPropertyAccess`, `impure.propertyAssign`, `impure.superglobal`)
+/// used to get the tag, since its summaries read `{}`. A state construct is not
+/// proven pure, so the class-wide claim is refused and nothing is written.
+#[test]
+fn state_constructs_refuse_the_class_tag() {
+    for body in [
+        "self::$hits++;",
+        "$this->x = 1;",
+        "$this->items[] = 1;",
+        "unset($this->x);",
+        "return $_GET['x'];",
+        "return self::$hits;",
+        "global $g;",
+        "static $n = 0;",
+    ] {
+        let lib = format!(
+            "<?php\nfinal class Svc {{\n    public static int $hits = 0;\n    public $x = 0;\n    public $items = [];\n    public function get(): int {{ return $this->x; }}\n    public function bump() {{ {body} }}\n}}\n"
+        );
+        let report = plan(&[("lib.php", &lib)]);
+        assert_oracle_complete(&report);
+        assert_eq!(only_reason(&report), REASON_EFFECTS_NOT_EXHAUSTIVE, "{body}");
+        assert!(report.refusals[0].detail.contains("Svc::bump()"), "{body}: {:#?}", report.refusals);
+        assert!(report.plan.is_empty(), "{body}: nothing is written");
+    }
+}
+
 #[test]
 fn class_docblock_is_extended_when_present() {
     let lib = concat!(

@@ -286,6 +286,30 @@ pub const SUPERGLOBALS: &[&str] = &[
     "GLOBALS", "_SERVER", "_GET", "_POST", "_FILES", "_COOKIE", "_SESSION", "_REQUEST", "_ENV",
 ];
 
+/// Which structural state construct an [`EffectOrigin::State`] is (ADR-0055
+/// and its 2026-07-24 amendment). Each is a place a body reads or writes
+/// state that outlives the call, and none has its label inferred yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
+pub enum StateConstruct {
+    /// A `global $x;` import: the local is the interpreter-global cell.
+    Global,
+    /// A `static $x` declaration: the local outlives the call.
+    StaticVar,
+    /// A read or write of one of the [`SUPERGLOBALS`].
+    Superglobal,
+    /// A read or write of a static property: `self::$p`, `static::$p`,
+    /// `Foo::$p`, `$class::$p`.
+    StaticProperty,
+    /// A write to an instance property: assignment, compound assignment,
+    /// `++`/`--`, `unset`, a `foreach` target, a write through an offset
+    /// (`$o->p[] = …`), or a `&` binding that lets a later write reach it
+    /// (`$r = &$o->p`, `foreach ($o->p as &$v)`). A `__construct` body's
+    /// writes to `$this`'s own properties are exempt — ADR-0055's
+    /// constructor-creation exemption (#313), for exhaustiveness only.
+    PropertyWrite,
+}
+
 // `Deserialize` is hand-written (`crate::persist`), not derived: serde's
 // derive implicitly borrows a `&str` field from the input, which a
 // `&'static str` keyword can never satisfy, and `serde(with)` does not lift
@@ -339,6 +363,13 @@ pub enum EffectOrigin {
     /// A direct `$fn()` call resolved (body-local single-assignment) to a known
     /// callback (ADR-0033); its effects join the caller's. Unresolvable stays [`Self::Opaque`].
     Callback { cbref: CallbackRef, span: Span },
+    /// A structural state construct at `span` ([`StateConstruct`]): the
+    /// ADR-0055 origins whose labels (`global.*`, `mutate.*`) are not inferred
+    /// yet. Until they are, one marks the body **non-exhaustive** exactly as
+    /// [`Self::Opaque`] does (ADR-0055 amendment, 2026-09-26), so `{}` is never
+    /// read as proven-pure over it. Appended after the existing variants so no
+    /// persisted variant index moves.
+    State { construct: StateConstruct, span: Span },
 }
 
 /// One call argument in the form a **structural** scan can prove constant

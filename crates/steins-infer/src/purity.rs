@@ -831,6 +831,10 @@ pub(crate) fn classify_effect_origins(
                 add_callback_effects(cx, cbref, *span, policy, row);
             }
             EffectOrigin::Opaque { .. } => row.exhaustive = false,
+            // A state construct's label (`global.*`, `mutate.*`) is not inferred
+            // yet (ADR-0055), and `{}` over one would read as proven-pure, so it
+            // marks the body `…?` until it is (ADR-0055 amendment, 2026-09-26).
+            EffectOrigin::State { .. } => row.exhaustive = false,
         }
     }
 }
@@ -1232,7 +1236,8 @@ const fn effect_origin_span(o: &EffectOrigin) -> steins_syntax::Span {
         | EffectOrigin::MethodCall { span, .. }
         | EffectOrigin::Opaque { span }
         | EffectOrigin::HigherOrder { span, .. }
-        | EffectOrigin::Callback { span, .. } => *span,
+        | EffectOrigin::Callback { span, .. }
+        | EffectOrigin::State { span, .. } => *span,
     }
 }
 
@@ -1854,7 +1859,7 @@ fn report_unit(
                 report_callback(out, cx, cbref, effects, span.start, display, bound);
             }
             EffectOrigin::Output { .. } | EffectOrigin::Exit { .. } => {}
-            EffectOrigin::Opaque { .. } => {}
+            EffectOrigin::Opaque { .. } | EffectOrigin::State { .. } => {}
         }
     }
 }

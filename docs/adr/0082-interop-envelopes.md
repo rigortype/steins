@@ -206,3 +206,22 @@ through an unreadable site or a computed bound with the same defect
 and `bound-label-unknown`.
 
 **Status: accepted 2026-08-12, owner-ratified.**
+
+## Note (2026-09-26): the exhaustiveness §7 writes from
+
+§7 writes a tag only from exhaustive inference, which is only as honest as
+the exhaustiveness bit. Before ADR-0055's 2026-09-26 amendment, a body whose
+only state access was a superglobal, a `global` or `static` declaration, a
+static property or a property write read `{}` and exhaustive, and the
+transform wrote `@phpstan-all-methods-pure` over classes stock PHPStan
+rejects. Until the ADR-0055 labels are inferred, each of those constructs
+marks its body non-exhaustive, so such a class refuses as
+`effects-not-exhaustive` and nothing is written.
+
+A constructor initializing its own properties is not one of those
+constructs: the same amendment applies ADR-0055's creation exemption to the
+bit, reaching exactly the `$this` writes PHPStan's own constructor exclusion
+reaches, so the #303 deferral under Consequences now holds on the writing
+side too and such a class is tagged as before. A constructor that unsets a
+`$this` property, binds one by reference, or writes through an alias of
+`$this` is still `…?`, since PHPStan would reject the tag over it.

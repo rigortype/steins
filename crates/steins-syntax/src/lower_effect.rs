@@ -8,13 +8,13 @@ use std::collections::HashSet;
 
 use mago_span::HasSpan;
 use mago_syntax::cst::{
-    Argument, Expression, FunctionCall, Literal, Node, PartialApplication, Statement,
-    UnaryPrefixOperator, Variable,
+    Access, Argument, ArrayElement, Expression, FunctionCall, Literal, Node, PartialApplication,
+    Statement, UnaryPrefixOperator, Variable,
 };
 
 use crate::ast::{
     CallExpr, CallTarget, CallbackRef, CatchClause, ConstArgs, EffectOrigin, NameRef, RefKind,
-    RefTarget, SUPERGLOBALS, ThrowKind, ThrowOrigin,
+    RefTarget, SUPERGLOBALS, StateConstruct, ThrowKind, ThrowOrigin,
 };
 use crate::lower_decl::lower_catch_clause;
 use crate::lower_expr::{
@@ -195,6 +195,11 @@ pub(crate) struct EffectScanCx {
     pub(crate) frame_aliased: bool,
     /// What this frame writes, for the ADR-0067 declared-receiver gate.
     pub(crate) writes: ReceiverWrites,
+    /// Whether the frame is a `__construct` body, whose writes to `$this`'s own
+    /// properties are exempt from [`StateConstruct::PropertyWrite`]
+    /// ([`property_write_span`]). Only a method sets it: a closure or arrow
+    /// function defined in a constructor is a frame of its own.
+    constructor: bool,
 }
 
 impl EffectScanCx {
@@ -212,7 +217,13 @@ impl EffectScanCx {
             .filter(|p| p.is_reference())
             .map(|p| strip_dollar(bytes_to_string(p.variable.name)))
             .collect();
-        Self { locals, byref_params, frame_aliased, writes }
+        Self { locals, byref_params, frame_aliased, writes, constructor: false }
+    }
+
+    /// Mark the frame as a `__construct` body ([`Self::constructor`]).
+    pub(crate) const fn in_constructor(mut self, constructor: bool) -> Self {
+        self.constructor = constructor;
+        self
     }
 }
 
@@ -646,10 +657,135 @@ pub(crate) fn scan_effect_origins(node: &Node<'_, '_>, cx: &EffectScanCx, out: &
         | Node::Interface(_)
         | Node::Trait(_)
         | Node::Enum(_) => return,
-        _ => {}
+        _ => {
+            if scan_state_construct(node, cx, out) {
+                return;
+            }
+        }
     }
     for child in children(node) {
         scan_effect_origins(&child, cx, out);
+    }
+}
+
+/// Record the [`StateConstruct`] `node` is, if it is one (ADR-0055 amendment of
+/// 2026-09-26: each marks the body non-exhaustive until its label is inferred).
+/// Returns `true` when this already walked the node's children, which happens for
+/// one shape: a static property's name is a variable token, and `Foo::$_GET` names
+/// a property rather than the superglobal, so only the class expression — and a
+/// dynamic name's expression — is walked on.
+fn scan_state_construct(node: &Node<'_, '_>, cx: &EffectScanCx, out: &mut Vec<EffectOrigin>) -> bool {
+    let state = |construct, span: mago_span::Span| EffectOrigin::State { construct, span: to_span(span) };
+    match node {
+        Node::Global(g) => out.push(state(StateConstruct::Global, g.span())),
+        Node::Static(s) => out.push(state(StateConstruct::StaticVar, s.span())),
+        Node::DirectVariable(dv) if is_superglobal(dv.name) => {
+            out.push(state(StateConstruct::Superglobal, dv.span()));
+        }
+        Node::StaticPropertyAccess(spa) => {
+            out.push(state(StateConstruct::StaticProperty, spa.span()));
+            scan_effect_origins(&Node::Expression(spa.class), cx, out);
+            if !matches!(spa.property, Variable::Direct(_)) {
+                scan_effect_origins(&Node::Variable(&spa.property), cx, out);
+            }
+            return true;
+        }
+        _ => {
+            if let Some(span) = property_write_span(node, cx.constructor) {
+                out.push(state(StateConstruct::PropertyWrite, span));
+            }
+        }
+    }
+    false
+}
+
+/// Whether a direct variable's spelled name (`$` included) is one of the
+/// [`SUPERGLOBALS`]. PHP spells them case-sensitively, and a variable variable
+/// cannot reach one inside a function-like, so the direct spelling is all there is.
+fn is_superglobal(name: &[u8]) -> bool {
+    name.strip_prefix(b"$").is_some_and(|n| SUPERGLOBALS.iter().any(|s| s.as_bytes() == n))
+}
+
+/// Where `node` writes an instance property, if it does
+/// ([`StateConstruct::PropertyWrite`]): the written lvalue's span. A `&` binding
+/// counts, since a later write through the alias lands in the property; that
+/// includes a by-reference `foreach` over a property, whose elements the loop
+/// variable aliases.
+///
+/// `constructor` is ADR-0055's constructor-creation exemption (point 13, #313),
+/// applied to **exhaustiveness only**: inside a `__construct` body, a write whose
+/// base is literally `$this` is initialization rather than state the call
+/// changes, so it records nothing. It mirrors the exclusion PHPStan's
+/// `ClassMethodHandler` makes for a property assignment in the declaring class's
+/// constructor, and so covers exactly the writes PHPStan reports there as a
+/// property assignment — an assignment of any operator, `++`/`--`, a write or
+/// `unset` through an offset, a destructuring or `foreach` target, and a
+/// `foreach` by reference over the property, which PHPStan reports nothing for.
+/// Two `$this` writes stay recorded, because PHPStan reports each under another
+/// identifier its constructor exclusion does not reach: `unset($this->p)`
+/// (`propertyUnset`) and a `&` binding of `$this->p` (`propertyAssignByRef`).
+/// So is `$self = $this; $self->p = …` (the base is not literally `$this`), a
+/// write to another object's property, and a `$this` write in a closure or arrow
+/// function defined in the constructor, which can run after construction.
+fn property_write_span(node: &Node<'_, '_>, constructor: bool) -> Option<mago_span::Span> {
+    let written = |e: &Expression<'_>, exempt: bool| writes_property(e, exempt).then(|| e.span());
+    match node {
+        Node::Assignment(a) => written(a.lhs, constructor),
+        Node::UnaryPrefix(u) => match u.operator {
+            UnaryPrefixOperator::PreIncrement(_) | UnaryPrefixOperator::PreDecrement(_) => {
+                written(u.operand, constructor)
+            }
+            UnaryPrefixOperator::Reference(_) => written(u.operand, false),
+            _ => None,
+        },
+        // `$x++` / `$x--`, the only postfix operators, write their operand.
+        Node::UnaryPostfix(u) => written(u.operand, constructor),
+        // Unsetting a whole property is never exempt; unsetting through an offset is.
+        Node::Unset(u) => u.values.iter().find_map(|v| {
+            let whole = matches!(v.unparenthesized(), Expression::Access(Access::Property(_)));
+            written(v, constructor && !whole)
+        }),
+        Node::Foreach(fe) => {
+            let target = &fe.target;
+            let aliased =
+                if target.value().is_reference() { written(fe.expression, constructor) } else { None };
+            aliased
+                .or_else(|| target.key().and_then(|k| written(k, constructor)))
+                .or_else(|| written(target.value(), constructor))
+        }
+        _ => None,
+    }
+}
+
+/// Whether an lvalue's write lands in an instance property. Offsets peel down to
+/// the base written through (`$o->p[] = …` and `$o->p['k'] = …` write `$o->p`),
+/// a property access there is the write (`$a[0]->p = …` included), and a
+/// destructuring pattern asks each of its targets. An offset's *index* is a read.
+/// `exempt_this` exempts a property whose object is literally `$this` — the
+/// constructor exemption of [`property_write_span`], decided per target.
+fn writes_property(lvalue: &Expression<'_>, exempt_this: bool) -> bool {
+    let each = |element: &ArrayElement<'_>| element_writes_property(element, exempt_this);
+    let mut cur = lvalue.unparenthesized();
+    loop {
+        cur = match cur {
+            Expression::ArrayAccess(aa) => aa.array.unparenthesized(),
+            Expression::ArrayAppend(ap) => ap.array.unparenthesized(),
+            Expression::Access(Access::Property(pa)) => return !(exempt_this && is_this_expr(pa.object)),
+            Expression::Access(Access::NullSafeProperty(_)) => return true,
+            Expression::Array(a) => return a.elements.iter().any(each),
+            Expression::LegacyArray(a) => return a.elements.iter().any(each),
+            Expression::List(l) => return l.elements.iter().any(each),
+            _ => return false,
+        };
+    }
+}
+
+/// [`writes_property`] for one destructuring target; a key is a read.
+fn element_writes_property(element: &ArrayElement<'_>, exempt_this: bool) -> bool {
+    match element {
+        ArrayElement::KeyValue(kv) => writes_property(kv.value, exempt_this),
+        ArrayElement::Value(v) => writes_property(v.value, exempt_this),
+        ArrayElement::Variadic(_) | ArrayElement::Missing(_) => false,
     }
 }
 

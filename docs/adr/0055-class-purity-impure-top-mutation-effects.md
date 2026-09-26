@@ -533,3 +533,107 @@ A4. **Slice placement.** No new slice: A2's catalog rows fold into
     now also counts superglobal-origin prevalence — on a 2007-era
     codebase the `global.read` margin is expected to be the loudest
     single instrument of the effect-splitting inventory.
+
+## Amendment (2026-09-26): until the labels land, a state construct marks its body non-exhaustive
+
+**Status: owner ruling (2026-09-26), interim.** It holds until the E2
+inference (#302, #313) lands. The constructor exemption below was decided the
+same day, on its measured cost.
+
+None of this ADR's inference has landed: Part I's labels have no source, and
+the 2026-07-24 amendment's superglobal origins (A1) are not implemented
+either. Until this amendment the effect-origin scan had no arm for a
+superglobal, a `global` or `static` declaration, a static property, or a
+property write, so a body holding only such constructs was summarized
+`effects: {}` and exhaustive — the summary a proven-pure body earns.
+
+Point 6 and the 2026-07-24 amendment call that gap safe: "soundness never at
+risk, silence being the safe side". It is safe for findings, which read the
+proven lane only. It is **not** safe for the `effects-envelope` transform
+(ADR-0082 §7), which writes `@phpstan-all-methods-pure` from exactly those
+`{}`-exhaustive summaries. Reproduced on master: `final class Svc` with
+`public function bump(): void { self::$hits++; $this->x = 1; }` got the tag
+("1 seeded, Post-check OK"), and stock PHPStan rejects it
+(`impure.staticPropertyAccess`, `impure.propertyAssign`; a `$_GET` reader
+earns `impure.superglobal`). The loop→`array_map` precondition (ADR-0076 §2)
+reads the same summary. Silence in the proven lane is safe; silence read as
+exhaustiveness is a claim of purity.
+
+**The interim rule.** Each of these is an effect origin
+(`EffectOrigin::State`) that marks its body **non-exhaustive** — the `…?` an
+unresolvable call earns — and does nothing else:
+
+- a `global $x;` import;
+- a `static $x` declaration;
+- a read or write of `$_GET`, `$_POST`, `$_COOKIE`, `$_SERVER`, `$_ENV`,
+  `$_FILES`, `$_REQUEST`, `$_SESSION` or `$GLOBALS`;
+- a read or write of a static property: `self::$p`, `static::$p`,
+  `Foo::$p`, `$class::$p`;
+- a write to an instance property: assignment, compound assignment,
+  `++`/`--`, `unset`, a write through an offset (`$o->p[] = …`), a
+  destructuring or `foreach` target, and a `&` binding
+  (`$r = &$o->p`, `foreach ($o->p as &$v)`) — except a constructor
+  initializing `$this`, below.
+
+No label is introduced, so nothing in Parts I–V moves: point 4 still decides
+that a static property write is `mutate.static` and not `global.*`, and A1
+still decides `global.read` and `global.write`. No finding fires either,
+since non-exhaustiveness never produces one (ADR-0005), so
+`effect.envelope-exceeded` over these bodies still waits for the labels. What
+changes is every reader of the bit: `annotate` prints `effects: {…?}`,
+`effects-envelope` refuses the class tag as `effects-not-exhaustive`,
+`loop-to-array-map` refuses a loop holding one as `body-call-unresolved`, and
+`effect-diff` reports `coverage-narrowed`. An instance property read stays
+exhaustive, as it stays unlabeled here. A construct belongs to the
+function-like that lexically contains it, as `echo` does.
+
+Two places need saying: one where the interim rule is wider than this ADR's
+design, and one where it takes a piece of that design early.
+
+- **Static property reads.** Point 4 labels a static property *write*; a
+  read has no label in this ADR. The interim rule marks reads too, because
+  the transform writes PHPStan's tags and PHPStan rejects a static property
+  read in a pure method (`impure.staticPropertyAccess`). When E2 lands, a
+  read needs its own decision — a label, or a standing `…?` — rather than
+  silently becoming `{}` again.
+- **Constructors: point 13's creation exemption applies to exhaustiveness
+  now, ahead of #313.** Inside a method named `__construct` (any case), a
+  write whose base is literally `$this` is initialization, not state the
+  call changes, and marks nothing. This is the exemption point 13 gives
+  `mutate.self`, applied to the bit alone: no label moves, and #313 still
+  owns the labeled form. Its reach is PHPStan's own constructor exclusion
+  (`ClassMethodHandler`, a property assignment in the declaring class's
+  constructor whose object is `$this`), so a tag written over such a class
+  is one PHPStan accepts, as ADR-0082's #303 deferral already does on the
+  read side. That covers an assignment of any operator, `++`/`--`, a write
+  or `unset` through an offset (`$this->items[] = …`), a destructuring or
+  `foreach` target, and a by-reference `foreach` over the property.
+  Outside it, and still `…?` in a constructor: `unset($this->p)` and a `&`
+  binding of `$this->p`, which PHPStan reports as `propertyUnset` and
+  `propertyAssignByRef` beyond that exclusion; a write through an alias
+  (`$self = $this; $self->p = …`), which PHPStan would exempt by type but a
+  structural scan cannot tell from any other variable; another object's
+  property; a static property; and a `$this` write inside a closure or
+  arrow function defined in the constructor, a frame of its own that can
+  run after construction completes.
+
+  The decision was taken on this measurement: dry runs of `effects-envelope`
+  over the ten public corpus packages write 737 class tags on master, 332
+  with no exemption and 678 with it. The 346 it restores are initializing
+  constructors. The other 59 withheld tags each hold a setter, a static
+  property access, or a factory that sets a fresh object's properties
+  (`$e = new static(…); $e->p = …;`, `$c = clone $this; $c->p = …;`),
+  directly or through a callee, and PHPStan rejects all three. Every tag
+  written with the exemption is one master also wrote.
+
+Out of reach of a structural scan, and left to the labels: a property handed
+to a by-reference parameter of a user function or an uncatalogued builtin
+(the catalogued out-parameter rows already color it `mutate`, ADR-0063
+§2.3), and a by-reference return of a property. `$argv` and `$argc` are not
+superglobals: inside a function-like they are locals, reachable only through
+`global`, `$_SERVER` or `$GLOBALS`, all recorded.
+
+When E2 lands, each `StateConstruct` gets its label in the effects pass in
+place of `exhaustive = false`, and these scan sites are its origin sites. The
+origins are persisted in frozen generations (ADR-0092), so the variant came
+with a schema bump (PR #807).
