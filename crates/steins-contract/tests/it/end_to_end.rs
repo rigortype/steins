@@ -480,6 +480,21 @@ fn integer_like_string_shape_keys_normalize() {
     );
 }
 
+/// A positional shape item past a `PHP_INT_MAX` key has no key to take (PHP has
+/// no next key there), so the shape does not decide, rather than hand the item
+/// `PHP_INT_MAX` a second time and judge that entry against `int` and `string` both.
+#[test]
+fn a_positional_shape_item_past_php_int_max_leaves_the_shape_undecided() {
+    let shape = ty("array{9223372036854775807: int, string}");
+    assert_eq!(shape, steins_contract::ContractTy::Opaque);
+    assert_eq!(admits_val(&shape, &arr(vec![(Key::Int(i64::MAX), Val::Int(1))])), Maybe);
+
+    // One key short of the edge, the positional item takes `PHP_INT_MAX` itself.
+    let shape = ty("array{9223372036854775806: int, string}");
+    let val = arr(vec![(Key::Int(i64::MAX - 1), Val::Int(1)), (Key::Int(i64::MAX), s("x"))]);
+    assert_eq!(admits_val(&shape, &val), Yes);
+}
+
 #[test]
 fn abstract_facts_judged_soundly() {
     let numeric =

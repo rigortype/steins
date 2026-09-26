@@ -266,7 +266,7 @@ fn normkey_cval(k: &NormKey) -> CVal {
 /// rejected it.
 pub(crate) fn accepts_shape(cx: &Cx, cfile: usize, coff: u32, shape: &steins_phpdoc::ast::ArrayShape, v: &CVal) -> Tri {
     let CVal::Array(entries) = v else { return Tri::No };
-    // An unresolvable shape key (const-fetch) → no verdict.
+    // An unresolvable shape key (const-fetch, positional past `PHP_INT_MAX`) → no verdict.
     let Some(keys) = steins_contract::shape_keys(shape) else { return Tri::Maybe };
     let spec = steins_contract::ShapeSpec {
         list: matches!(shape.kind, ArrayShapeKind::List | ArrayShapeKind::NonEmptyList),
