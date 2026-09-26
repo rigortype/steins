@@ -322,6 +322,46 @@ fn the_guard_position_exemption_refuses_what_it_cannot_read() {
     assert_eq!(one_type(method), "dumped type: unknown");
 }
 
+/// Issue #704: the by-name exemptions — the type predicates and the
+/// pure-question builtins — owe the same refusal. Each is certified for what
+/// IT does with its argument, and here the argument is a call to a function
+/// that takes `$s` by reference and empties it. PHP enters every branch below
+/// with `$s === ''`; the analysis used to enter it with `'abc'`.
+#[test]
+fn a_by_name_exemption_charges_the_call_nested_in_its_argument() {
+    let wrap = |guard: &str| {
+        one_type(&format!(
+            "<?php\nfunction f(string &$s): string {{ $s = ''; return 'x'; }}\n\
+             function g(): void {{ $s = 'abc';\n\
+             if ({guard}) {{ \\PHPStan\\dumpType($s); }} }}\n"
+        ))
+    };
+    for guard in ["is_string(f($s))", "class_exists(f($s))", "strlen(f($s))", "strlen(f($s)) > 0"] {
+        assert_eq!(wrap(guard), "dumped type: unknown", "{guard}");
+    }
+    // An assignment in the argument is the same defect without a call: the
+    // branch sees `'q'`, and the exemption had kept `'abc'`.
+    assert_eq!(wrap("is_string($s = 'q')"), "dumped type: unknown");
+    // The predicate's own argument is still only read.
+    assert_eq!(wrap("is_string($s)"), "dumped type: 'abc'");
+}
+
+/// What the charge reaches is what the nested call is handed, and nothing else
+/// (issue #704): a method's receiver cannot be rebound by the call, and a name
+/// the nested call is never handed cannot be written by it.
+#[test]
+fn a_by_name_exemption_keeps_what_the_nested_call_is_not_handed() {
+    let src = "<?php\nfinal class K {\n\
+               private int $n = 3;\n\
+               public function name(): string { return 'a'; }\n\
+               public function all(): array { return []; }\n\
+               public function t(): void { $this->n = 5; $y = 'q';\n\
+               if (is_string($this->name())) { \\PHPStan\\dumpType($this->n); }\n\
+               if (in_array($y, $this->all(), true)) { \\PHPStan\\dumpType($y); }\n\
+               } }\n";
+    assert_eq!(types(src), vec!["dumped type: int".to_owned(), "dumped type: 'q'".to_owned()]);
+}
+
 /// The other direction, and the reason the arm reads `by_ref` rather than
 /// assuming: a reference parameter must still condemn the binding. A rowed
 /// name answers positionally (its row is the complete list); an **unrowed**
