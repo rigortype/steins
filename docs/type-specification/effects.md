@@ -131,6 +131,34 @@ the code it runs is unseen, the body is also `…?`: `effects: {eval, …?}`. Th
 same goes for the four inclusion constructs, which read a file whatever the
 file holds: `effects: {io.fs.read, …?}`.
 
+The two make up the **escape-hatch family**, and its membership rule is where
+the code runs: **outside the analyzed universe**, as native code (`ffi`) or as
+code passed as data (`eval`). Code that runs unseen but *inside* the universe —
+an unresolved dynamic call, the magic methods `unserialize` can reach, an
+included file's code — gets `…?` and no label. With `create_function()`,
+string `assert()` and `preg_replace()`'s `/e` modifier removed from PHP, the
+family is closed at two. What it gives a consumer is a property rather than a
+prefix: **an escape-hatch label is ⊤** to anything asking what a call could
+touch. A statement carrying one is never a dead statement, and crossing one
+invalidates everything remembered.
+
+That is why `eval` is a root and not `nondet.eval` (ADR-0046 amendment):
+
+- `eval` is deterministic given its input; its problem is unanalyzability,
+  which is ADR-0046's own thesis, not nondeterminism.
+- Prefix subsumption would let a `nondet` envelope admit an `eval` whose payload
+  can `exit` or write files. `io.eval` fails the same way under `io`.
+- Consumers that treat labels as read-shaped (`nondet.*`, `global.read`,
+  `io.fs.read`) — the no-effect statement rule, label-scoped forgetting of
+  remembered values — would read a bare `eval($code);` as a dead statement and
+  keep their memory across it. The same reasoning is why an inclusion's
+  read-shaped `io.fs.read` never travels without its `…?`.
+
+A shared `escape.*` parent was considered while it still cost no compatibility,
+and declined: the membership is closed at two, and the ⊤ property is what
+consumers need, stated as such rather than spelled as a prefix. The sibling
+analyzer Rigor adopts the same `eval` label in rigortype/rigor#1431.
+
 **Ecosystem and private labels** (`io.redis`, `email.send`) are not builtin, and
 before issue #68 they were *correctly* unknown, because nothing could open the
 registry. A Composer package of `type: steins-plugin` now can, through the
