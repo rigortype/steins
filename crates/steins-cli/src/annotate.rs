@@ -5,20 +5,20 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use steins_db::{Project, SourceFile, SteinsDatabase};
+use steins_db::{EffectsPolicy, PluginFacts, Project, ProjectLayout, SourceFile, SteinsDatabase};
 use steins_infer::{
-    EffectSummary, LineFact, SOUND_SUBSET_NOTICE, SidecarFolder, annotate_file, annotate_project,
-    effect_summaries_file, effect_summaries_project,
+    EffectSummary, LineFact, SOUND_SUBSET_NOTICE, SidecarFolder, annotate_project_under,
+    effect_summaries_project,
 };
 
 use crate::Format;
-use crate::config::{allow_list_from_disk, effects_policy_from_disk};
+use crate::config::{allow_list, effects_from_config, read_steins_config, runtime_from_config};
 use crate::project::{collect_sources, load_plugins, resolve_layout};
 
 /// `steins annotate [--no-php] [--format text|json] <file.php>` — reprint one
 /// file with a right-margin column of proven facts (ADR-0020), or (JSON) the
-/// same effect summaries (issue #65). Never modifies the file; exit 2 on usage error.
-#[expect(clippy::too_many_lines, reason = "predates the #778 ratchet; split when next reworked")]
+/// same effect summaries (issue #65). Never modifies the file; exit 2 on usage or
+/// config error.
 pub(crate) fn run_annotate(args: &[String]) -> ExitCode {
     let mut no_php = false;
     let mut format = Format::Text;
@@ -88,11 +88,62 @@ pub(crate) fn run_annotate(args: &[String]) -> ExitCode {
     if no_php {
         errln!("{SOUND_SUBSET_NOTICE}");
     }
+    // `./steins.toml` parsed once, as `check` parses it (ADR-0050 §7): a malformed
+    // file, an unknown `[runtime]` key included, is exit 2. The `[runtime]`
+    // postures go to the margin whole, as `check` runs them (issue #787).
+    let config = match read_steins_config() {
+        Ok(config) => config.unwrap_or_default(),
+        Err(e) => {
+            errln!("steins: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let (postures, runtime_warnings) = runtime_from_config(config.runtime);
+    let plugin_allow = allow_list(config.plugins);
+    let effects_policy = effects_from_config(config.effects, false);
     let db = SteinsDatabase::default();
     let mut folder = if no_php { SidecarFolder::new(true) } else { SidecarFolder::enabled() };
+    let (project, target_file) = load_annotate_project(
+        &db,
+        path,
+        &text,
+        project_dir,
+        &mut folder,
+        plugin_allow.as_deref(),
+        effects_policy,
+    );
+    // After the boundary notices, where `check` prints them.
+    for w in &runtime_warnings {
+        errln!("steins: {w}");
+    }
 
-    // Project context (ADR-0015): `--project` dir, else the file's dir. A bare
-    // relative filename has an empty (unopenable) parent — else falls back silently.
+    // `--format json` reads the same [`EffectSummary`]s as the text margin
+    // (issue #65); the effect fixpoint reads no posture, in `check` as here.
+    match format {
+        Format::Text => {
+            let facts = annotate_project_under(&db, project, target_file, &mut folder, postures);
+            out!("{}", render_annotation(&text, &facts));
+        }
+        Format::Json => print_annotate_json(&effect_summaries_project(&db, project, target_file)),
+    }
+    ExitCode::SUCCESS
+}
+
+/// The project `path` is annotated in (ADR-0015): every source under the
+/// `--project` dir, else under the file's own dir, with `text` standing in for
+/// the target. Falls back to a one-file project (no manifest, no plugin, no
+/// policy) when the target isn't under that root.
+fn load_annotate_project(
+    db: &SteinsDatabase,
+    path: &Path,
+    text: &str,
+    project_dir: Option<String>,
+    folder: &mut SidecarFolder,
+    plugin_allow: Option<&[String]>,
+    effects_policy: EffectsPolicy,
+) -> (Project, SourceFile) {
+    // A bare relative filename has an empty (unopenable) parent — else falls
+    // back silently.
     let root = project_dir.map(PathBuf::from).unwrap_or_else(|| {
         path.parent()
             .filter(|p| !p.as_os_str().is_empty())
@@ -106,62 +157,36 @@ pub(crate) fn run_annotate(args: &[String]) -> ExitCode {
     let mut target: Option<SourceFile> = None;
     for fp in &project_files {
         let content = if fp.canonicalize().map(|c| c == canon_target).unwrap_or(false) {
-            text.clone()
+            text.to_owned()
         } else {
             match std::fs::read(fp) {
                 Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
                 Err(_) => continue,
             }
         };
-        let input = SourceFile::new(&db, fp.to_string_lossy().into_owned(), content);
+        let input = SourceFile::new(db, fp.to_string_lossy().into_owned(), content);
         if fp.canonicalize().map(|c| c == canon_target).unwrap_or(false) {
             target = Some(input);
         }
         inputs.push(input);
     }
 
-    // Fall back to a one-file project if the target isn't under root. `--format
-    // json` reads the same [`EffectSummary`]s as the text margin (issue #65).
-    match format {
-        Format::Text => {
-            let facts = match target {
-                Some(target_file) => {
-                    let layout = resolve_layout(&[root.to_string_lossy().into_owned()]);
-                    folder.set_php_target(layout.php_target().cloned());
-                    let plugins = load_plugins(&layout, allow_list_from_disk().as_deref());
-                    let project = Project::builder(inputs, layout, plugins)
-                        .effects(effects_policy_from_disk())
-                        .new(&db);
-                    annotate_project(&db, project, target_file, &mut folder)
-                }
-                None => {
-                    let input =
-                        SourceFile::new(&db, path.to_string_lossy().into_owned(), text.clone());
-                    annotate_file(&db, input, &mut folder)
-                }
-            };
-            out!("{}", render_annotation(&text, &facts));
+    match target {
+        Some(target_file) => {
+            let layout = resolve_layout(&[root.to_string_lossy().into_owned()]);
+            folder.set_php_target(layout.php_target().cloned());
+            let plugins = load_plugins(&layout, plugin_allow);
+            let project =
+                Project::builder(inputs, layout, plugins).effects(effects_policy).new(db);
+            (project, target_file)
         }
-        Format::Json => {
-            let summaries = match target {
-                Some(target_file) => {
-                    let layout = resolve_layout(&[root.to_string_lossy().into_owned()]);
-                    let plugins = load_plugins(&layout, allow_list_from_disk().as_deref());
-                    let project = Project::builder(inputs, layout, plugins)
-                        .effects(effects_policy_from_disk())
-                        .new(&db);
-                    effect_summaries_project(&db, project, target_file)
-                }
-                None => {
-                    let input =
-                        SourceFile::new(&db, path.to_string_lossy().into_owned(), text.clone());
-                    effect_summaries_file(&db, input)
-                }
-            };
-            print_annotate_json(&summaries);
+        None => {
+            let input = SourceFile::new(db, path.to_string_lossy().into_owned(), text.to_owned());
+            let project =
+                Project::new(db, vec![input], ProjectLayout::fallback(), PluginFacts::none());
+            (project, input)
         }
     }
-    ExitCode::SUCCESS
 }
 
 /// `annotate --format json`'s document (issue #65): sorted proven labels,

@@ -234,7 +234,7 @@ pub(crate) fn vendor_dirs_from_disk() -> Vec<String> {
     read_steins_config().ok().flatten().and_then(|c| c.paths).map(|p| p.vendor_dirs).unwrap_or_default()
 }
 
-/// Read and parse `./steins.toml` once for `check`/`doctor` (ADR-0050 §7 /
+/// Read and parse `./steins.toml` once for `check`/`doctor`/`annotate` (ADR-0050 §7 /
 /// ADR-0052 §5 N2). `Ok(None)`: no file. `Err`: doesn't parse, INCLUDING an
 /// unknown `[runtime]` key — a hard error (exit 2), never warn-and-proceed.
 /// Transform's `--config` keeps its own lenient loaders (ADR-0046 §2).
