@@ -68,10 +68,11 @@ pub(crate) struct Cx<'a> {
     pub(crate) postures: RuntimePostures,
     /// The **effective analysis minor** for version-keyed value rules (issue
     /// #28): the target floor when the project declares a target whose range
-    /// agrees on the ADR-0049 A12 next-int boundary, `None` when the declared
-    /// range straddles it (a boundary-sensitive literal must then decline —
-    /// A12's unknown leg, generalized to a range), and the sidecar's runtime
-    /// minor when the project declares nothing (the pre-#28 behavior).
+    /// agrees on the ADR-0049 A22 next-int boundary, `None` when the declared
+    /// range straddles it (a negative append index must then decline — the
+    /// unknown leg, generalized to a range), and the sidecar's runtime minor
+    /// when the project declares nothing (the pre-#28 behavior). Read only by
+    /// the append index; an array literal resolves the same on every minor.
     /// Computed once per run by [`effective_php_view`].
     ///
     /// [`effective_php_view`]: crate::fold_args::effective_php_view
@@ -987,7 +988,7 @@ impl<'a> Cx<'a> {
                 )?;
                 // Same derivation as `.` above: result stratum is the operands' min.
                 let strat = value_stratum(self, lhs, env, None).min(value_stratum(self, rhs, env, None));
-                match eval_cmp(*cop, &l, &r, self.php_minor) {
+                match eval_cmp(*cop, &l, &r) {
                     Certainty::Yes => Some((ArgValue::Bool(true), strat)),
                     Certainty::No => Some((ArgValue::Bool(false), strat)),
                     Certainty::Maybe => None,
@@ -1015,7 +1016,7 @@ impl<'a> Cx<'a> {
                     rhs, env, poisoned, folder, descent.as_deref_mut(), out.as_deref_mut(),
                 )?;
                 let strat = value_stratum(self, lhs, env, None).min(value_stratum(self, rhs, env, None));
-                spaceship_pole(&l, &r, self.php_minor).map(|n| (ArgValue::Int(n), strat))
+                spaceship_pole(&l, &r).map(|n| (ArgValue::Int(n), strat))
             }
             // A cast in value position (issue #626): the SAME grid the fact seam
             // runs, over the operand's own resolved literal — a cast of a proven
@@ -1033,7 +1034,7 @@ impl<'a> Cx<'a> {
                 let (lit, strat) = self.resolve_literal_under(
                     operand, env, poisoned, folder, descent.as_deref_mut(), out.as_deref_mut(),
                 )?;
-                let fact = singleton_fact(&lit, self.php_minor)?;
+                let fact = singleton_fact(&lit)?;
                 match php_cast_fact(&fact, *target)? {
                     Fact::Singleton(v) => Some((arg_of_val(&v), strat)),
                     _ => None,
@@ -1326,7 +1327,7 @@ impl<'a> Cx<'a> {
                 lanes.iter().zip(&odometer).map(|(lane, i)| lane[*i].clone()).collect();
             match self
                 .try_fold(name, &combo, env, poisoned, folder)
-                .and_then(|(folded, _, _)| val_of(&folded, self.php_minor))
+                .and_then(|(folded, _, _)| val_of(&folded))
             {
                 Some(v) => vals.push(v),
                 None => declined = true,

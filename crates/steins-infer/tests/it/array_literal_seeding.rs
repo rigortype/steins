@@ -5,8 +5,8 @@
 //! fact for the **whole** array — keys, count, sealing, every proven sibling.
 //!
 //! What survives is everything that was never about values: `normalize_array`
-//! resolves auto indices, last-wins duplicates, and the version-dependent
-//! next-int rule without inspecting one, so the key sequence is computable
+//! resolves auto indices, last-wins duplicates, and the next-int rule without
+//! inspecting one, so the key sequence is computable
 //! regardless — a literal, by being a literal, seals its own key universe.
 //!
 //! Two disciplines are pinned here beside the answers:
@@ -191,16 +191,16 @@ fn a_fully_literal_array_is_still_a_proven_value() {
 }
 
 #[test]
-fn an_unresolvable_key_set_declines_the_whole_literal() {
-    // ADR-0049 A12: with no pinned minor, a literal straddling the 8.3 next-int
-    // change has unproven KEYS — a guessed key set is wrong, not wide; silent.
+fn a_negative_key_literal_resolves_with_no_minor() {
+    // ADR-0049 A22: the omitted keys land on -4 and -3 on every supported minor
+    // (`php -r` on 8.1.32, 8.2.33 and 8.5.10), so no pinned minor is needed.
     assert_eq!(
         dump("$a = [-5 => 'a', 'b', 'c']; \\PHPStan\\dumpType($a);"),
-        "dumped type: unknown"
+        "dumped type: array{-5: 'a', -4: 'b', -3: 'c'}"
     );
     assert_eq!(
         dump("$a = [-5 => 'a', $s, 'c']; \\PHPStan\\dumpType($a);"),
-        "dumped type: unknown"
+        "dumped type: array{-5: 'a', -4: string, -3: 'c'}"
     );
 }
 

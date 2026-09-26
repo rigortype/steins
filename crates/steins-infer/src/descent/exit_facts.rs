@@ -47,7 +47,7 @@ pub(crate) fn return_value_fact(
     // field's value slot. Every no-fact outcome (optional field, unknown slot,
     // declared absence) is a factless exit.
     if let ArgValue::OffsetRead { base, key } = value
-        && let Some((read, strat)) = shape_read_at(base, key, env, poisoned, w.cx.php_minor)
+        && let Some((read, strat)) = shape_read_at(base, key, env, poisoned)
         && let Some(fact) = read.into_fact()
     {
         return Some((fact, strat));
@@ -103,7 +103,7 @@ pub(crate) fn return_value_fact(
     // syntactic tree. Scratch sink: findings for nested fold args are owned by the
     // return-check / assignment paths that resolve with a real `out`.
     if let Some((lit, strat)) = w.cx.resolve_literal_strat(value, env, poisoned, folder)
-        && let Some(fact) = singleton_fact(&lit, w.cx.php_minor)
+        && let Some(fact) = singleton_fact(&lit)
     {
         return Some((fact, strat));
     }

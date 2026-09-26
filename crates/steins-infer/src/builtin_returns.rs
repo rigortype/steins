@@ -673,14 +673,14 @@ pub(crate) fn shape_builtin_return_fact(
         [ArgValue::Array(items), ..] => {
             seeded = cx
                 .resolve_literal(&args[0], env, poisoned, folder)
-                .and_then(|lit| singleton_fact(&lit, cx.php_minor))
+                .and_then(|lit| singleton_fact(&lit))
                 .map(|f| (f, value_stratum(cx, &args[0], env, store)))
                 .or_else(|| array_literal_fact(cx, folder, items, env, poisoned, store))?;
             (&seeded.0, seeded.1)
         }
         [call @ ArgValue::Call(..), ..] => {
             let (lit, strat) = cx.resolve_literal_strat(call, env, poisoned, folder)?;
-            seeded = (singleton_fact(&lit, cx.php_minor)?, strat);
+            seeded = (singleton_fact(&lit)?, strat);
             (&seeded.0, seeded.1)
         }
         _ => return None,

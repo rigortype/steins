@@ -100,8 +100,8 @@ impl ShapeGuard {
 /// A guard's literal key, canonicalized by PHP's own key rule — the SAME
 /// [`offset_key_of`] the read side uses, so a guard and a read can never
 /// disagree about which key they mean.
-pub(crate) fn guard_key(arg: &ArgValue, php_minor: Option<(u16, u16)>) -> Option<VKey> {
-    offset_key_of(&val_of(arg, php_minor)?)
+pub(crate) fn guard_key(arg: &ArgValue) -> Option<VKey> {
+    offset_key_of(&val_of(arg)?)
 }
 
 /// The recognized array-predicate a guard call names, or `None` for a call that
@@ -291,10 +291,9 @@ pub(crate) fn collect_shape_guards(
     env: &HashMap<String, Known>,
     out: &mut Vec<ShapeGuard>,
 ) {
-    let php_minor = cx.php_minor;
     match cond {
         CondExpr::Isset { var, key } => {
-            if let Some(k) = guard_key(key, php_minor) {
+            if let Some(k) = guard_key(key) {
                 out.push(ShapeGuard::Present {
                     var: var.clone(),
                     key: k,
@@ -344,7 +343,7 @@ pub(crate) fn collect_shape_guards(
             // the two guards can never disagree about what a key's presence
             // narrows to.
             if !positive && !loose && matches!(lit, ArgValue::Null) {
-                if let Some(k) = guard_key(offset.1, php_minor) {
+                if let Some(k) = guard_key(offset.1) {
                     out.push(ShapeGuard::Present {
                         var: offset.0.clone(),
                         key: k,
@@ -357,7 +356,7 @@ pub(crate) fn collect_shape_guards(
             if !positive {
                 return;
             }
-            if let Some(k) = guard_key(offset.1, php_minor) {
+            if let Some(k) = guard_key(offset.1) {
                 out.push(ShapeGuard::Tag {
                     var: offset.0.clone(),
                     key: k,
@@ -374,7 +373,7 @@ pub(crate) fn collect_shape_guards(
                             return;
                         }
                         let ArgValue::Var(var) = &call.args[1].value else { return };
-                        if let Some(k) = guard_key(&call.args[0].value, php_minor) {
+                        if let Some(k) = guard_key(&call.args[0].value) {
                             out.push(ShapeGuard::Present {
                                 var: var.clone(),
                                 key: k,
@@ -447,7 +446,7 @@ fn presence_disjuncts(cx: &Cx, cond: &CondExpr, out: &mut Vec<PresenceDisjunct>)
         CondExpr::Or(a, b) => {
             presence_disjuncts(cx, a, out) && presence_disjuncts(cx, b, out)
         }
-        CondExpr::Isset { var, key } => match guard_key(key, cx.php_minor) {
+        CondExpr::Isset { var, key } => match guard_key(key) {
             Some(k) => {
                 out.push((var.clone(), k, PresenceFlavor::Isset));
                 true
@@ -460,7 +459,7 @@ fn presence_disjuncts(cx: &Cx, cond: &CondExpr, out: &mut Vec<PresenceDisjunct>)
                 return false;
             }
             let ArgValue::Var(var) = &call.args[1].value else { return false };
-            match guard_key(&call.args[0].value, cx.php_minor) {
+            match guard_key(&call.args[0].value) {
                 Some(k) => {
                     out.push((var.clone(), k, PresenceFlavor::KeyExists));
                     true
@@ -525,20 +524,19 @@ pub(crate) fn apply_shape_narrowing(
     let mut guards = Vec::new();
     collect_shape_guards(cx, cond, then, env, &mut guards);
     for g in &guards {
-        apply_shape_guard(cx, g, env, store, witnessed);
+        apply_shape_guard(g, env, store, witnessed);
     }
 }
 
 /// One guard, both lanes: subtract the arm lane, mint a fact if the subtraction
 /// collapsed the union to one array arm, then refine the fact.
 pub(crate) fn apply_shape_guard(
-    cx: &Cx,
     g: &ShapeGuard,
     env: &mut HashMap<String, Known>,
     store: &mut Store,
     witnessed: bool,
 ) {
-    subtract_shape_arms(cx, g, store);
+    subtract_shape_arms(g, store);
     mint_collapsed_shape(g.var(), env, store);
     refine_shape_fact(g, env, witnessed);
 }
@@ -551,14 +549,14 @@ pub(crate) fn apply_shape_guard(
 /// An emptied lane drops to no-fact, never a death signal (ADR-0052 §2). Marks
 /// [`Store::narrowed`] on the way out (issue #428) — every path past the
 /// `kept.len() == arms.len()` no-op return below has already proven a kill.
-fn subtract_shape_arms(cx: &Cx, g: &ShapeGuard, store: &mut Store) {
+fn subtract_shape_arms(g: &ShapeGuard, store: &mut Store) {
     let Some(arms) = store.contract.get(g.var()) else { return };
     // A single-arm lane has no discrimination to do.
     if arms.len() < 2 {
         return;
     }
     let kept: Vec<ContractArm> =
-        arms.iter().filter(|a| shape_arm_survives(g, &a.ty, cx.php_minor)).cloned().collect();
+        arms.iter().filter(|a| shape_arm_survives(g, &a.ty)).cloned().collect();
     if kept.len() == arms.len() {
         return;
     }
@@ -579,7 +577,7 @@ fn subtract_shape_arms(cx: &Cx, g: &ShapeGuard, store: &mut Store) {
 
 /// Does `ty` survive `g`? The FP-safe answer is always `true`: an arm dies only
 /// on a definite verdict, exactly as ADR-0052 §2's arm deletion does.
-fn shape_arm_survives(g: &ShapeGuard, ty: &ContractTy, php_minor: Option<(u16, u16)>) -> bool {
+fn shape_arm_survives(g: &ShapeGuard, ty: &ContractTy) -> bool {
     use steins_domain::Presence;
     let shape = steins_contract::to_shape_fact(ty);
     match g {
@@ -618,7 +616,7 @@ fn shape_arm_survives(g: &ShapeGuard, ty: &ContractTy, php_minor: Option<(u16, u
             if matches!(presence, Presence::Absent) {
                 return false;
             }
-            tags.iter().any(|t| tag_possible(slot, t, *loose, php_minor))
+            tags.iter().any(|t| tag_possible(slot, t, *loose))
         }
         // Truthiness, list-ness, and A8's non-emptiness are whole-array
         // properties, and every arm can be non-empty/a list for *some* value it
@@ -666,16 +664,16 @@ fn arm_can_hold_key(shape: &ShapeFact, k: &VKey) -> bool {
 /// finite slot is compared through [`eval_cmp`] rather than by `admits`, and an
 /// abstract slot under a loose comparison keeps the arm (undecidable from the
 /// fact alone).
-fn tag_possible(slot: &Fact, tag: &ArgValue, loose: bool, php_minor: Option<(u16, u16)>) -> bool {
+fn tag_possible(slot: &Fact, tag: &ArgValue, loose: bool) -> bool {
     match slot.finite_members() {
         Some(members) => {
             let op = if loose { CmpOp::Loose } else { CmpOp::Identical };
             let args: Vec<ArgValue> = members.iter().map(arg_of_val).collect();
-            eval_cmp(op, &args, std::slice::from_ref(tag), php_minor) != Certainty::No
+            eval_cmp(op, &args, std::slice::from_ref(tag)) != Certainty::No
         }
         // An abstract slot decides only under `===`, where membership *is* the
         // question `admits` answers.
-        None => loose || val_of(tag, php_minor).is_none_or(|v| slot.admits(&v)),
+        None => loose || val_of(tag).is_none_or(|v| slot.admits(&v)),
     }
 }
 
@@ -999,7 +997,6 @@ pub(crate) fn apply_offset_write(
     store: &mut Store,
 ) {
     use steins_domain::{KeyClass, Tail};
-    let php_minor = w.cx.php_minor;
     // Capture before the barrier clears everything.
     let before = env.get(base).cloned();
     let arms = store.contract.get(base).cloned();
@@ -1015,7 +1012,7 @@ pub(crate) fn apply_offset_write(
         Some(v) if w.scope.poisoned => (
             w.cx
                 .resolve_literal(v, env, true, folder)
-                .and_then(|lit| singleton_fact(&lit, php_minor)),
+                .and_then(|lit| singleton_fact(&lit)),
             Stratum::Verified,
         ),
         Some(v) => match transfer_arg_known(w.cx, folder, v, env, Some(&*store)) {
@@ -1051,7 +1048,7 @@ pub(crate) fn apply_offset_write(
         }
         _ => return,
     };
-    let first = match keys.first().and_then(|k| guard_key(k, php_minor)) {
+    let first = match keys.first().and_then(guard_key) {
         Some(k) => k,
         // **The write at a key nobody can name** (issue #636): `$x[$i] = v`.
         // Lowering now hands the walk a non-literal key instead of a plain
@@ -1214,7 +1211,8 @@ pub(crate) fn apply_offset_write(
 /// [`array_push_written_fact`]'s rule verbatim rather than a second one — one
 /// place decides where an appended value lands, and the two spellings cannot
 /// drift. When that rule declines (no witnessed order and a shape whose fields
-/// it cannot fold into a tail), the floor is
+/// it cannot fold into a tail, or a negative landing index the analysis minor
+/// does not decide, ADR-0049 A22), the floor is
 /// [`ShapeFact::write_at_unknown_key`] at `KeyClass::Int`: an append IS a write
 /// at some integer key, so the weakest row of Amendment J covers it.
 ///
@@ -1238,14 +1236,13 @@ pub(crate) fn apply_offset_append(
     env: &mut HashMap<String, Known>,
     store: &mut Store,
 ) {
-    let php_minor = w.cx.php_minor;
     // Captured before the barrier clears everything, exactly as the write does.
     let before = env.get(base).cloned();
     let arms = store.contract.get(base).cloned();
     let (slot, slot_stratum) = if w.scope.poisoned {
         (
             w.cx.resolve_literal(value, env, true, folder)
-                .and_then(|lit| singleton_fact(&lit, php_minor)),
+                .and_then(|lit| singleton_fact(&lit)),
             Stratum::Verified,
         )
     } else {
@@ -1267,7 +1264,7 @@ pub(crate) fn apply_offset_append(
         }
         _ => return,
     };
-    let next = match array_push_written_fact(shape, std::slice::from_ref(&slot)) {
+    let next = match array_push_written_fact(shape, std::slice::from_ref(&slot), w.cx.php_minor) {
         Some(fact) => fact,
         None => {
             let floored = shape.write_at_unknown_key(steins_domain::KeyClass::Int, slot.as_ref());

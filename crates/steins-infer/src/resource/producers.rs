@@ -303,7 +303,7 @@ fn proc_open_places(
     let Some(ArgValue::Array(items)) = cx.resolve_literal(spec, env, poisoned, folder) else {
         return None;
     };
-    let normalized = steins_syntax::normalize_array(&items, cx.php_minor)?;
+    let normalized = steins_syntax::normalize_array(&items)?;
     let mut places = Vec::new();
     for (key, descriptor) in normalized {
         // Leg 2: a string key is the `ValueError` above; an integer key can be a
@@ -317,7 +317,7 @@ fn proc_open_places(
         // a non-`pipe`, which is why it refuses the whole spec rather than
         // contributing nothing.
         let ArgValue::Array(cells) = descriptor else { return None };
-        let cells = steins_syntax::normalize_array(&cells, cx.php_minor)?;
+        let cells = steins_syntax::normalize_array(&cells)?;
         let word = match cells.iter().find(|(k, _)| *k == steins_syntax::NormKey::Int(0)) {
             Some((_, ArgValue::Str(s))) => s.clone(),
             // No cell `0` at all is a `ValueError` out of the engine
@@ -479,7 +479,7 @@ pub(crate) fn seed_produced_places(
     store: &mut Store,
 ) {
     let mut calls = Vec::new();
-    collect_truthy_calls(cond, then, w.cx.php_minor, &mut calls);
+    collect_truthy_calls(cond, then, &mut calls);
     let seeds: Vec<_> =
         calls.into_iter().filter_map(|call| produced_places(w, folder, call, env)).collect();
     apply_produced_places(w, seeds, store);

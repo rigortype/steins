@@ -311,7 +311,7 @@ fn an_empty_explode_separator_throws_and_falls_to_the_floor() {
 /// string casts without retyping what it keeps — so all three are `PORTABLE`,
 /// and `replay_fold.rs` pins that they fold on a 32-bit table too. Each also
 /// exercises a rule Rust declines to re-derive (ADR-0004): `array_fill`'s
-/// negative `$start_index` key sequence (PHP 8.3 changed it), `str_split`'s
+/// negative `$start_index` key sequence (PHP 8.0 changed it), `str_split`'s
 /// empty-string return (8.2 changed it), `array_unique`'s `SORT_STRING`
 /// comparison of unlike scalars.
 #[test]
@@ -330,7 +330,8 @@ fn the_probed_clean_names_fold_to_the_engines_own_arrays() {
         dumps(SRC, &mut folder),
         vec![
             "list{'x', 'x', 'x'}",
-            // 8.3+ counts up from the negative start; before it the third key was 1.
+            // 8.0+ counts up from the negative start (`php -r` on 8.0.28 through
+            // 8.5.10); 7.4.33 gives -5, 0, 1.
             "array{-5: 'x', -4: 'x', -3: 'x'}",
             "list{'ab', 'cd', 'ef'}",
             // 8.2+ returns the empty array; before it, `['']`.

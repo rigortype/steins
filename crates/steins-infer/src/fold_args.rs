@@ -6,21 +6,22 @@ use steins_domain::PhpStr;
 use steins_sidecar::{FoldArg, FoldKey, FoldValue};
 use steins_syntax::{ArgValue, ArrayKey, php_canonical_int_string};
 
-/// The ADR-0049 A12 boundary: the minor where PHP changed the next-auto-index
-/// rule for array literals with negative keys. The one version boundary any
+/// The ADR-0049 A22 boundary: the minor from which PHP's next append index
+/// counts a negative key on *every* array. Before it, an array that began as the
+/// shared empty array floored its next index at `0` (php-src GH-11154); an
+/// array literal never did on any supported minor. The one version boundary any
 /// value rule keys on today.
-const NEXT_INT_BOUNDARY: (u16, u16) = (8, 3);
+pub(crate) const NEXT_INT_BOUNDARY: (u16, u16) = (8, 3);
 
 /// The analysis PHP view (issue #28): fold the sidecar's **runtime** minor and
 /// the project's **declared target** into the two per-run answers the checker
 /// consumes.
 ///
-/// - The **effective minor** feeds `normalize_array` (ADR-0049 A12): with a
+/// - The **effective minor** feeds the append index (ADR-0049 A22): with a
 ///   declared target, the range must agree on the next-int boundary — one side
-///   entirely answers with its floor, a straddling range answers `None` (A12's
-///   existing unknown leg: a boundary-sensitive literal declines, every other
-///   literal still resolves). With no target, the runtime minor answers as
-///   before #28.
+///   entirely answers with its floor, a straddling range answers `None` (a
+///   negative landing index declines, every other append still resolves). With
+///   no target, the runtime minor answers as before #28.
 /// - The **catalog skew** flag feeds ADR-0052 A11's arm-deletion demotion: the
 ///   catalog is verified only at [`steins_catalog::PINNED_PHP`], so a target
 ///   range is skewed unless it is exactly the pin; no target falls back to the
@@ -47,7 +48,7 @@ fn version_id_hi(m: (u16, u16)) -> u32 {
 /// consumes, all derived from the one target-or-runtime seam.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct PhpView {
-    /// The effective minor for version-keyed value rules (ADR-0049 A12) — see
+    /// The effective minor for version-keyed value rules (ADR-0049 A22) — see
     /// [`effective_php_view`].
     pub(crate) effective_minor: Option<(u16, u16)>,
     /// The ADR-0052 A11 catalog-skew flag.

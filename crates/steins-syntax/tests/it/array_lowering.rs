@@ -2,10 +2,7 @@
 //! key normalization, next-int auto keys, nested arrays, spread/unrepresentable → `Other`.
 
 use steins_domain::PhpStr;
-use steins_syntax::{
-    ArgValue, ArrayKey, NextIntRule, NormKey, SourceTree, next_int_is_version_dependent,
-    normalize_array, normalize_array_with,
-};
+use steins_syntax::{ArgValue, ArrayKey, NormKey, SourceTree, normalize_array};
 
 /// The `ArgValue` of the first positional argument of the first function call.
 fn first_arg(src: &str) -> ArgValue {
@@ -20,15 +17,13 @@ fn items(v: &ArgValue) -> &[(ArrayKey, ArgValue)] {
     }
 }
 
-/// Normalize with an unknown minor: asserts the literal is version-independent (rules agree).
-fn norm_unknown(it: &[(ArrayKey, ArgValue)]) -> Vec<(NormKey, ArgValue)> {
-    assert!(!next_int_is_version_dependent(it), "fixture is version-dependent");
-    normalize_array(it, None).expect("version-independent literal resolves without a minor")
+/// Normalize a literal whose every key is spelled and every omitted key has a next index.
+fn norm(it: &[(ArrayKey, ArgValue)]) -> Vec<(NormKey, ArgValue)> {
+    normalize_array(it).expect("the literal resolves")
 }
 
-/// Normalize under a known rule a literal whose every omitted key has a next index.
-fn norm_with(it: &[(ArrayKey, ArgValue)], rule: NextIntRule) -> Vec<(NormKey, ArgValue)> {
-    normalize_array_with(it, rule).expect("no omitted key follows a PHP_INT_MAX key")
+fn keys(it: &[(ArrayKey, ArgValue)]) -> Vec<NormKey> {
+    norm(it).into_iter().map(|(k, _)| k).collect()
 }
 
 #[test]
@@ -38,7 +33,7 @@ fn plain_list_uses_auto_keys() {
     assert_eq!(it.len(), 3);
     assert!(it.iter().all(|(k, _)| matches!(k, ArrayKey::Auto)));
     assert_eq!(it[0].1, ArgValue::Str("a".into()));
-    let norm = norm_unknown(it);
+    let norm = norm(it);
     assert_eq!(norm[0].0, NormKey::Int(0));
     assert_eq!(norm[2].0, NormKey::Int(2));
 }
@@ -76,86 +71,46 @@ fn bool_float_null_keys_normalize_php_faithfully() {
 fn next_int_follows_largest_explicit_int_key() {
     // [5 => 'a', 'b'] → 'b' gets key 6 (one past the largest int key seen).
     let v = first_arg("<?php f([5 => 'a', 'b']);");
-    let norm = norm_unknown(items(&v));
+    let norm = norm(items(&v));
     assert_eq!(norm[0].0, NormKey::Int(5));
     assert_eq!(norm[1].0, NormKey::Int(6));
 }
 
-// Negative keys: the PHP 8.3 next-auto-index change (ADR-0049 A12). Every
-// expectation below is a `php -r 'var_export(...)'` witness on PHP 8.5.8,
-// never recall; pre-8.3 column is what PHP < 8.3 documents (floor at 0;
-// Steins's floor is 8.1, ADR-0011).
+// Negative keys (ADR-0049 A22). An omitted key takes one past the largest
+// integer key seen, negative or not, on every supported minor: the
+// negative-index RFC landed in PHP 8.0, and every row below prints the same keys
+// through `php -r` on 8.1.32, 8.2.33 and 8.5.10. There is no pre-8.3 column to
+// assert — A12's floor at `0` is PHP 7.4 (7.4.33 prints `-5, 0` for the first row).
 
 #[test]
-fn negative_key_next_int_splits_on_the_83_rule() {
-    // php -r 'var_export([-5=>"a","b"]);' on 8.5.8 → -5, -4.
+fn an_omitted_key_after_a_negative_key_counts_it() {
+    // `[-5 => 'a', 'b']` → -5, -4 on 8.0.28 through 8.5.10.
     let v = first_arg("<?php f([-5 => 'a', 'b']);");
-    let it = items(&v);
-    assert!(next_int_is_version_dependent(it));
+    assert_eq!(keys(items(&v)), vec![NormKey::Int(-5), NormKey::Int(-4)]);
 
-    let post = norm_with(it, NextIntRule::MaxPlusOne);
-    assert_eq!(post[0].0, NormKey::Int(-5));
-    assert_eq!(post[1].0, NormKey::Int(-4));
-
-    // PHP < 8.3 floors the next auto-index at 0.
-    let pre = norm_with(it, NextIntRule::FloorAtZero);
-    assert_eq!(pre[0].0, NormKey::Int(-5));
-    assert_eq!(pre[1].0, NormKey::Int(0));
-}
-
-#[test]
-fn reported_minor_picks_the_rule_and_unknown_declines() {
-    let v = first_arg("<?php f([-5 => 'a', 'b']);");
-    let it = items(&v);
-
-    // A known minor resolves exactly — on either side of the 8.3 boundary.
-    for (minor, want) in [((8, 1), 0), ((8, 2), 0), ((8, 3), -4), ((8, 5), -4)] {
-        let norm = normalize_array(it, Some(minor)).expect("a known minor always resolves");
-        assert_eq!(norm[1].0, NormKey::Int(want), "PHP {minor:?}");
-    }
-
-    // Unknown minor + version-dependent literal → unproven; drop the fact, don't guess.
-    assert_eq!(normalize_array(it, None), None);
-}
-
-#[test]
-fn version_independent_literals_resolve_without_a_minor() {
-    // No negative key anywhere → the two rules agree, so an unknown minor still answers.
-    for src in ["<?php f(['a', 'b']);", "<?php f([5 => 'a', 'b']);", "<?php f(['k' => 1, 'b']);"] {
-        let v = first_arg(src);
-        let it = items(&v);
-        assert!(!next_int_is_version_dependent(it), "{src}");
-        assert!(normalize_array(it, None).is_some(), "{src}");
-    }
-
-    // A negative key with no later omitted key is version-independent too.
-    let v = first_arg("<?php f([-5 => 'a', 3 => 'b']);");
-    assert!(!next_int_is_version_dependent(items(&v)));
+    // The same keys through `array(...)`: the spelling builds the same literal.
+    let v = first_arg("<?php f(array(-5 => 'a', 'b'));");
+    assert_eq!(keys(items(&v)), vec![NormKey::Int(-5), NormKey::Int(-4)]);
 }
 
 #[test]
 fn next_int_tracks_the_running_max_not_the_last_key() {
-    // php -r 'var_export([3=>"a",-5=>"b","c"]);' on 8.5.8 → 3, -5, 4: the index
-    // is one past the largest key seen, and never moves backwards.
+    // `[3 => 'a', -5 => 'b', 'c']` → 3, -5, 4: the index is one past the largest
+    // key seen, and never moves backwards.
     let v = first_arg("<?php f([3 => 'a', -5 => 'b', 'c']);");
-    let it = items(&v);
-    // The running max is already 3 (≥ 0), so both rules agree here.
-    assert!(!next_int_is_version_dependent(it));
-    let norm = norm_unknown(it);
-    assert_eq!(norm[2].0, NormKey::Int(4));
+    assert_eq!(keys(items(&v))[2], NormKey::Int(4));
 
-    // php -r 'var_export([-5=>"a",-10=>"b","c"]);' → -5, -10, -4: max, not last.
+    // `[-5 => 'a', -10 => 'b', 'c']` → -5, -10, -4: max, not last.
     let v = first_arg("<?php f([-5 => 'a', -10 => 'b', 'c']);");
-    let post = norm_with(items(&v), NextIntRule::MaxPlusOne);
-    assert_eq!(post[2].0, NormKey::Int(-4));
+    assert_eq!(keys(items(&v))[2], NormKey::Int(-4));
 }
 
 #[test]
 fn duplicate_negative_key_still_advances_the_index() {
-    // php -r 'var_export([-5=>"a",-5=>"b","c"]);' on 8.5.8 → -5 => 'b', -4 => 'c'.
-    // Last-wins folds the value; the key still counted toward the next index.
+    // `[-5 => 'a', -5 => 'b', 'c']` → -5 => 'b', -4 => 'c'. Last-wins folds the
+    // value; the key still counted toward the next index.
     let v = first_arg("<?php f([-5 => 'a', -5 => 'b', 'c']);");
-    let norm = norm_with(items(&v), NextIntRule::MaxPlusOne);
+    let norm = norm(items(&v));
     assert_eq!(norm.len(), 2);
     assert_eq!(norm[0].0, NormKey::Int(-5));
     assert_eq!(norm[0].1, ArgValue::Str("b".into()));
@@ -164,58 +119,39 @@ fn duplicate_negative_key_still_advances_the_index() {
 
 #[test]
 fn auto_keys_climb_out_of_the_negatives() {
-    // php -r 'var_export([-5=>"a","b",-1=>"z","c"]);' on 8.5.8
-    //   → -5 => 'a', -4 => 'b', -1 => 'z', 0 => 'c'.
+    // `[-5 => 'a', 'b', -1 => 'z', 'c']` → -5 => 'a', -4 => 'b', -1 => 'z', 0 => 'c'.
     let v = first_arg("<?php f([-5 => 'a', 'b', -1 => 'z', 'c']);");
-    let norm = norm_with(items(&v), NextIntRule::MaxPlusOne);
-    let keys: Vec<_> = norm.iter().map(|(k, _)| k.clone()).collect();
     assert_eq!(
-        keys,
+        keys(items(&v)),
         vec![NormKey::Int(-5), NormKey::Int(-4), NormKey::Int(-1), NormKey::Int(0)]
     );
 }
 
-/// Adversarial counterexamples #46 names by hand, each a `php -r` witness on
-/// PHP 8.5.8: the running **max** (not last key, not its sign) drives the next index.
+/// Adversarial counterexamples #46 names by hand: the running **max** (not the
+/// last key, not its sign) drives the next index.
 #[test]
 fn adversarial_negative_key_shapes() {
-    // Mixed negative and positive explicit keys. `array_keys([-5=>a,3=>b,c])`
-    // → [-5, 3, 4]: the positive key lifts the max, so both rules agree.
+    // Mixed negative and positive explicit keys: `[-5 => a, 3 => b, c]` → -5, 3, 4.
     let v = first_arg("<?php f([-5 => 'a', 3 => 'b', 'c']);");
-    let it = items(&v);
-    assert!(!next_int_is_version_dependent(it));
-    assert_eq!(norm_unknown(it)[2].0, NormKey::Int(4));
+    assert_eq!(keys(items(&v))[2], NormKey::Int(4));
 
-    // A negative key *after* a larger auto key: `array_keys(['a',-5=>b,c])` →
-    // [0, -5, 1] — the auto key already pushed max to 0; negatives can't pull it back.
+    // A negative key *after* a larger auto key: `['a', -5 => b, c]` → 0, -5, 1 —
+    // the auto key already pushed the max to 0; negatives can't pull it back.
     let v = first_arg("<?php f(['a', -5 => 'b', 'c']);");
-    let it = items(&v);
-    assert!(!next_int_is_version_dependent(it));
-    let norm = norm_unknown(it);
-    let keys: Vec<_> = norm.iter().map(|(k, _)| k.clone()).collect();
-    assert_eq!(keys, vec![NormKey::Int(0), NormKey::Int(-5), NormKey::Int(1)]);
+    assert_eq!(keys(items(&v)), vec![NormKey::Int(0), NormKey::Int(-5), NormKey::Int(1)]);
 
     // String keys interleaved, before and around the negative key. A string key
-    // never touches the integer index: both witness [_, -5, -4].
+    // never touches the integer index: both give [_, -5, -4].
     for src in ["<?php f(['k' => 'a', -5 => 'b', 'c']);", "<?php f([-5 => 'a', 'k' => 'b', 'c']);"] {
         let v = first_arg(src);
-        let it = items(&v);
-        assert!(next_int_is_version_dependent(it), "{src}");
-        let post = norm_with(it, NextIntRule::MaxPlusOne);
-        assert_eq!(post[2].0, NormKey::Int(-4), "{src}");
-        // Pre-8.3 floors that same slot at 0.
-        assert_eq!(norm_with(it, NextIntRule::FloorAtZero)[2].0, NormKey::Int(0), "{src}");
+        assert_eq!(keys(items(&v))[2], NormKey::Int(-4), "{src}");
     }
 
-    // Negative, then positive, then negative again, with autos throughout.
-    // `array_keys([-5=>a,b,10=>c,d,-1=>e,f])` → [-5, -4, 10, 11, -1, 12].
+    // Negative, then positive, then negative again, with autos throughout:
+    // `[-5 => a, b, 10 => c, d, -1 => e, f]` → -5, -4, 10, 11, -1, 12.
     let v = first_arg("<?php f([-5 => 'a', 'b', 10 => 'c', 'd', -1 => 'e', 'f']);");
-    let it = items(&v);
-    assert!(next_int_is_version_dependent(it));
-    let post = norm_with(it, NextIntRule::MaxPlusOne);
-    let keys: Vec<_> = post.iter().map(|(k, _)| k.clone()).collect();
     assert_eq!(
-        keys,
+        keys(items(&v)),
         vec![
             NormKey::Int(-5),
             NormKey::Int(-4),
@@ -227,31 +163,21 @@ fn adversarial_negative_key_shapes() {
     );
 }
 
-/// `-1` is the exact edge of the 8.3 change: one past it is `0`, which the
-/// pre-8.3 floor also yields, so a `-1` key is *not* version-dependent.
-/// Witnessed: `array_keys([-1=>"a","b","c"])` → `[-1, 0, 1]` on PHP 8.5.8.
+/// One past `-1` is `0` and one past `-2` is `-1`: no special case sits at zero.
+/// `[-1 => a, b, c]` → -1, 0, 1 and `[-2 => a, b]` → -2, -1.
 #[test]
-fn minus_one_is_the_boundary_where_the_rules_reconverge() {
+fn the_index_crosses_zero_without_a_floor() {
     let v = first_arg("<?php f([-1 => 'a', 'b', 'c']);");
-    let it = items(&v);
-    assert!(!next_int_is_version_dependent(it));
-    let norm = norm_unknown(it);
-    let keys: Vec<_> = norm.iter().map(|(k, _)| k.clone()).collect();
-    assert_eq!(keys, vec![NormKey::Int(-1), NormKey::Int(0), NormKey::Int(1)]);
+    assert_eq!(keys(items(&v)), vec![NormKey::Int(-1), NormKey::Int(0), NormKey::Int(1)]);
 
-    // `-2` is the first key that does split them.
     let v = first_arg("<?php f([-2 => 'a', 'b']);");
-    assert!(next_int_is_version_dependent(items(&v)));
+    assert_eq!(keys(items(&v)), vec![NormKey::Int(-2), NormKey::Int(-1)]);
 }
 
-/// `render_array` is the one consumer A12 exempts: not a proof-layer premise,
-/// so it takes the pinned rule unconditionally instead of threading the minor
-/// (issue #46 criterion 3) — a future change to thread it shows as a test diff.
+/// `render_array` resolves keys exactly as the proof layer does.
 #[test]
-fn rendering_takes_the_pinned_rule_and_never_declines() {
+fn rendering_places_negative_keys_like_normalization() {
     let v = first_arg("<?php f([-5 => 'a', 'b']);");
-    // Pinned rule (8.3+) puts 'b' at -4; version-dependent, yet rendering produces a message.
-    assert!(next_int_is_version_dependent(items(&v)));
     assert_eq!(v.render(), "[-5 => 'a', -4 => 'b']");
 
     assert_eq!(first_arg("<?php f(['a', 'b']);").render(), "['a', 'b']");
@@ -264,11 +190,11 @@ fn rendering_takes_the_pinned_rule_and_never_declines() {
 /// PHP has no next key past `PHP_INT_MAX`: `[9223372036854775807 => 1, 2]`
 /// throws "Cannot add element to the array as the next element is already
 /// occupied" (`php -r` on 8.5.10 and 8.2.33, a variable item too), so the
-/// literal builds no array, and every rule declines rather than fold `2` onto a
-/// clamped key. phpstan-src's `bug-15248.php` drops the item instead
+/// literal builds no array, and normalization declines rather than fold `2` onto
+/// a clamped key. phpstan-src's `bug-15248.php` drops the item instead
 /// (`array{9223372036854775807: 1}`), which PHP never produces either.
 #[test]
-fn an_omitted_key_past_php_int_max_declines_under_every_rule() {
+fn an_omitted_key_past_php_int_max_declines() {
     for src in [
         "<?php f([9223372036854775807 => 1, 2]);",
         "<?php f([9223372036854775807 => 1, $x]);",
@@ -276,14 +202,7 @@ fn an_omitted_key_past_php_int_max_declines_under_every_rule() {
         "<?php f([-2 => 1, 9223372036854775807 => 2, 3]);",
     ] {
         let v = first_arg(src);
-        let it = items(&v);
-        // Both rules run out at the same element, so the minor cannot matter.
-        assert!(!next_int_is_version_dependent(it), "{src}");
-        assert_eq!(normalize_array_with(it, NextIntRule::MaxPlusOne), None, "{src}");
-        assert_eq!(normalize_array_with(it, NextIntRule::FloorAtZero), None, "{src}");
-        for minor in [None, Some((8, 1)), Some((8, 5))] {
-            assert_eq!(normalize_array(it, minor), None, "{src} on {minor:?}");
-        }
+        assert_eq!(normalize_array(items(&v)), None, "{src}");
     }
 }
 
@@ -293,82 +212,21 @@ fn an_omitted_key_past_php_int_max_declines_under_every_rule() {
 fn php_int_max_resolves_as_the_last_free_key_and_as_a_written_key() {
     // → [9223372036854775806 => 1, 9223372036854775807 => 2]
     let v = first_arg("<?php f([9223372036854775806 => 1, 2]);");
-    let keys: Vec<_> = norm_unknown(items(&v)).into_iter().map(|(k, _)| k).collect();
-    assert_eq!(keys, vec![NormKey::Int(i64::MAX - 1), NormKey::Int(i64::MAX)]);
+    assert_eq!(keys(items(&v)), vec![NormKey::Int(i64::MAX - 1), NormKey::Int(i64::MAX)]);
 
     // → [9223372036854775807 => 3, 'a' => 2]
     let v = first_arg("<?php f([9223372036854775807 => 1, 'a' => 2, 9223372036854775807 => 3]);");
-    let norm = norm_unknown(items(&v));
+    let norm = norm(items(&v));
     assert_eq!(norm.len(), 2);
     assert_eq!(norm[0], (NormKey::Int(i64::MAX), ArgValue::Int(3)));
     assert_eq!(norm[1].0, NormKey::Str("a".into()));
-}
-
-/// The load-bearing invariant behind A12's narrow widening: whenever
-/// `next_int_is_version_dependent` says "no", the two rules agree, so an unknown
-/// minor is sound. Exhaustive over key sequences ≤ length 4 (omitted/neg/zero/pos/string,
-/// plus `PHP_INT_MAX - 1` and `PHP_INT_MAX`, after which neither rule has a next index).
-#[test]
-fn version_independence_implies_the_two_rules_agree() {
-    let alphabet = [
-        ArrayKey::Auto,
-        ArrayKey::Int(-2),
-        ArrayKey::Int(-1),
-        ArrayKey::Int(0),
-        ArrayKey::Int(1),
-        ArrayKey::Str("k".into()),
-        ArrayKey::Int(i64::MAX - 1),
-        ArrayKey::Int(i64::MAX),
-    ];
-    let val = ArgValue::Int(0);
-    let mut checked = 0usize;
-    let mut dependent = 0usize;
-    let mut no_next_key = 0usize;
-
-    for len in 0..=4 {
-        let total = alphabet.len().pow(len as u32);
-        for n in 0..total {
-            let mut seq = Vec::with_capacity(len);
-            let mut rest = n;
-            for _ in 0..len {
-                seq.push((alphabet[rest % alphabet.len()].clone(), val.clone()));
-                rest /= alphabet.len();
-            }
-            let pre = normalize_array_with(&seq, NextIntRule::FloorAtZero);
-            let post = normalize_array_with(&seq, NextIntRule::MaxPlusOne);
-            if next_int_is_version_dependent(&seq) {
-                dependent += 1;
-                // Declared dependent → an unknown minor must decline.
-                assert_eq!(normalize_array(&seq, None), None, "{seq:?}");
-            } else {
-                assert_eq!(pre, post, "declared version-independent but rules differ: {seq:?}");
-                assert_eq!(normalize_array(&seq, None), post, "{seq:?}");
-                no_next_key += usize::from(post.is_none());
-            }
-            checked += 1;
-        }
-    }
-
-    assert_eq!(checked, 1 + 8 + 64 + 512 + 4096);
-    // The predicate is not vacuously false — it fires on a real slice of them.
-    assert!(dependent > 0, "no version-dependent sequence in the sweep");
-    assert!(no_next_key > 0, "no sequence in the sweep runs past PHP_INT_MAX");
-}
-
-#[test]
-fn rule_selection_brackets_the_83_boundary() {
-    assert_eq!(NextIntRule::for_minor((8, 1)), NextIntRule::FloorAtZero);
-    assert_eq!(NextIntRule::for_minor((8, 2)), NextIntRule::FloorAtZero);
-    assert_eq!(NextIntRule::for_minor((8, 3)), NextIntRule::MaxPlusOne);
-    assert_eq!(NextIntRule::for_minor((8, 5)), NextIntRule::MaxPlusOne);
-    assert_eq!(NextIntRule::for_minor((9, 0)), NextIntRule::MaxPlusOne);
 }
 
 #[test]
 fn duplicate_keys_resolve_last_wins() {
     // [0 => 'a', 0 => 'b'] → one entry, value 'b', at the first position.
     let v = first_arg("<?php f([0 => 'a', 0 => 'b']);");
-    let norm = norm_unknown(items(&v));
+    let norm = norm(items(&v));
     assert_eq!(norm.len(), 1);
     assert_eq!(norm[0].0, NormKey::Int(0));
     assert_eq!(norm[0].1, ArgValue::Str("b".into()));
@@ -423,7 +281,7 @@ fn a_non_literal_key_is_carried_rather_than_collapsing() {
     assert_eq!(it[0].0, ArrayKey::Expr(Box::new(ArgValue::Var("k".into()))));
     assert_eq!(it[0].1, ArgValue::Int(1));
     // Not a normalizable key set: an unknown key may be an integer, moving the auto-index.
-    assert_eq!(normalize_array(it, Some((8, 5))), None);
+    assert_eq!(normalize_array(it), None);
 }
 
 #[test]

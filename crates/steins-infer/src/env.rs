@@ -36,7 +36,7 @@ use steins_domain::{Base, Key as VKey, PhpStr, Refinement, ShapeFact, StrPreds, 
 /// insertion order (reusing [`normalize_array`], matching [`VKey`]). Any
 /// non-literal element (or a non-literal `ArgValue`) yields `None` — the fact is
 /// dropped (the safe side).
-pub(crate) fn val_of(arg: &ArgValue, php_minor: Option<(u16, u16)>) -> Option<Val> {
+pub(crate) fn val_of(arg: &ArgValue) -> Option<Val> {
     match arg {
         ArgValue::Int(i) => Some(Val::Int(*i)),
         ArgValue::Float(f) => Some(Val::Float(*f)),
@@ -44,17 +44,17 @@ pub(crate) fn val_of(arg: &ArgValue, php_minor: Option<(u16, u16)>) -> Option<Va
         ArgValue::Bool(b) => Some(Val::Bool(*b)),
         ArgValue::Null => Some(Val::Null),
         ArgValue::Array(items) => {
-            // An unknown minor over a literal straddling the 8.3 next-int change
-            // yields `None` here (ADR-0049 A12) — the keys are unproven, so the
+            // A key the source does not spell, or an omitted key past
+            // `PHP_INT_MAX`, yields `None` here — the keys are unproven, so the
             // singleton fact is dropped rather than built on a guessed key.
-            let normalized = normalize_array(items, php_minor)?;
+            let normalized = normalize_array(items)?;
             let mut out = Vec::with_capacity(normalized.len());
             for (k, v) in normalized {
                 let key = match k {
                     NormKey::Int(i) => VKey::Int(i),
                     NormKey::Str(s) => VKey::Str(s),
                 };
-                out.push((key, val_of(&v, php_minor)?));
+                out.push((key, val_of(&v)?));
             }
             Some(Val::Array(out))
         }
@@ -136,8 +136,8 @@ pub(crate) fn render_val(v: &Val) -> String {
 
 /// A domain `Singleton` fact from a literal/array [`ArgValue`], or `None` when
 /// the value is not representable (a non-literal) — the fact is then dropped.
-pub(crate) fn singleton_fact(arg: &ArgValue, php_minor: Option<(u16, u16)>) -> Option<Fact> {
-    val_of(arg, php_minor).map(Fact::Singleton)
+pub(crate) fn singleton_fact(arg: &ArgValue) -> Option<Fact> {
+    val_of(arg).map(Fact::Singleton)
 }
 
 /// The deepest nesting [`array_literal_fact`] descends into before it stops
@@ -167,9 +167,10 @@ const SHAPE_SEED_MAX_DEPTH: u8 = FOLD_ARRAY_MAX_DEPTH;
 /// result is always a [`Fact::Shape`].
 ///
 /// Refuses: a poisoned scope (today's silence, unchanged), and an unresolvable
-/// key set — [`normalize_array`] declining means the literal straddles the 8.3
-/// next-int change on an unpinned minor (ADR-0049 A12); a guessed key would be
-/// *wrong*, not wider, so the whole literal declines as `val_of` already does.
+/// key set — [`normalize_array`] declining means an omitted key follows a
+/// `PHP_INT_MAX` key, where PHP throws; a guessed key would be *wrong*, not
+/// wider, so the whole literal declines as `val_of` already does. (A key the
+/// source does not spell takes `open_keyed_literal_fact` before this point.)
 ///
 /// Stratum: `min` over element facts that contributed one (ADR-0061 §3); an
 /// unknown slot contributes nothing.
@@ -207,7 +208,7 @@ fn array_literal_fact_within(
     if items.iter().any(|(k, _)| matches!(k, ArrayKey::Expr(_))) {
         return open_keyed_literal_fact(cx, folder, items, env, poisoned, store, depth);
     }
-    let normalized = normalize_array(items, cx.php_minor)?;
+    let normalized = normalize_array(items)?;
     let mut entries: Vec<(VKey, Option<Fact>)> = Vec::with_capacity(normalized.len());
     let mut stratum = Stratum::Verified;
     for (key, value) in &normalized {

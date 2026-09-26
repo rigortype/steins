@@ -371,7 +371,7 @@ fn apply_helper_guard(
     collect_shape_guards(cx, cond, then, env, &mut guards);
     for g in &guards {
         // ADR-0058: tag-declared, so the presence stratum is the declared one.
-        apply_shape_guard(cx, g, env, store, false);
+        apply_shape_guard(g, env, store, false);
         let var = g.var();
         let handed_over = call
             .args
@@ -822,7 +822,7 @@ fn collect_call_opaque_reads(
         || array_all_any_predicate(cx, call).is_some()
         || type_predicate(cx, call).is_some()
         || pure_question_builtin(cx, call).is_some()
-        || in_array_literals(cx, call, cx.php_minor).is_some()
+        || in_array_literals(cx, call).is_some()
         // The mined generalization of the exemption above it (issue #637): a
         // builtin certified BY VALUE at every position this call supplies,
         // called with arguments that cannot themselves write, cannot have
