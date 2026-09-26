@@ -102,7 +102,7 @@ pub(crate) fn parse_php_minor(v: &str) -> Option<(u16, u16)> {
 /// bound **widens** — a miss, never a false positive (ADR-0002). The depth
 /// bound also keeps the recursive encoders here and in the runner off an
 /// unbounded stack.
-const FOLD_ARRAY_MAX_ENTRIES: usize = 256;
+pub(crate) const FOLD_ARRAY_MAX_ENTRIES: usize = 256;
 pub(crate) const FOLD_ARRAY_MAX_DEPTH: u8 = 8;
 
 /// The member-wise union fold's bounds (issue #74): at most this many members in
