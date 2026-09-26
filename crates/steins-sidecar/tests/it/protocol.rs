@@ -405,15 +405,20 @@ fn a_runtime_limit_is_not_a_compile_refusal() {
 }
 
 /// Subject is `''` — the catastrophic pattern answers instantly, no backtracking.
+///
+/// The verdict is the proof, not the host clock (issue #726): a probe that ran
+/// away would hit a PCRE limit, which the runner widens (see
+/// `a_runtime_limit_is_not_a_compile_refusal`), or the transport timeout,
+/// which poisons — both `None`. Only a match that finished inside PCRE's own
+/// limits comes back `Compiles`. The widened timeout is a hang guard, so a
+/// starved host is not read as a runaway.
 #[test]
 fn a_catastrophic_pattern_compiles_without_running_away() {
     let Some(mut sc) = spawn_or_skip("a_catastrophic_pattern_compiles_without_running_away") else {
         return;
     };
-    let start = std::time::Instant::now();
-    assert_eq!(sc.preg_compile("/(a+)+$/"), Some(PregCompile::Compiles));
-    // Loose on purpose ("no runaway", not perf) — else the 2s transport timeout bounds it.
-    assert!(start.elapsed() < Duration::from_secs(1), "the empty-subject probe returns at once");
+    sc.set_timeout(Duration::from_secs(60));
+    assert_eq!(sc.preg_compile("/(a+)+$/"), Some(PregCompile::Compiles), "no PCRE limit hit");
 }
 
 /// `error_get_last` is cleared per request, so no stale diagnostic leaks.
