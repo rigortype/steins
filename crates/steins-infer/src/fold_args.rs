@@ -6,10 +6,12 @@ use steins_domain::PhpStr;
 use steins_sidecar::{FoldArg, FoldKey, FoldValue};
 use steins_syntax::{ArgValue, ArrayKey, php_canonical_int_string};
 
-/// The ADR-0049 A12 boundary: the minor where PHP changed the next-auto-index
-/// rule for array literals with negative keys. The one version boundary any
+/// The ADR-0049 A22 boundary: the minor from which PHP's next append index
+/// counts a negative key on *every* array. Before it, an array that began as the
+/// shared empty array floored its next index at `0` (php-src GH-11154); an
+/// array literal never did on any supported minor. The one version boundary any
 /// value rule keys on today.
-const NEXT_INT_BOUNDARY: (u16, u16) = (8, 3);
+pub(crate) const NEXT_INT_BOUNDARY: (u16, u16) = (8, 3);
 
 /// The analysis PHP view (issue #28): fold the sidecar's **runtime** minor and
 /// the project's **declared target** into the two per-run answers the checker

@@ -1214,7 +1214,8 @@ pub(crate) fn apply_offset_write(
 /// [`array_push_written_fact`]'s rule verbatim rather than a second one — one
 /// place decides where an appended value lands, and the two spellings cannot
 /// drift. When that rule declines (no witnessed order and a shape whose fields
-/// it cannot fold into a tail), the floor is
+/// it cannot fold into a tail, or a negative landing index the analysis minor
+/// does not decide, ADR-0049 A22), the floor is
 /// [`ShapeFact::write_at_unknown_key`] at `KeyClass::Int`: an append IS a write
 /// at some integer key, so the weakest row of Amendment J covers it.
 ///
@@ -1267,7 +1268,7 @@ pub(crate) fn apply_offset_append(
         }
         _ => return,
     };
-    let next = match array_push_written_fact(shape, std::slice::from_ref(&slot)) {
+    let next = match array_push_written_fact(shape, std::slice::from_ref(&slot), php_minor) {
         Some(fact) => fact,
         None => {
             let floored = shape.write_at_unknown_key(steins_domain::KeyClass::Int, slot.as_ref());

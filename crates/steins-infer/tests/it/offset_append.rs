@@ -10,7 +10,8 @@
 //! measurement at PHP 8.5.9, quoted at its assertion:
 //!
 //! * the next index is `max(integer keys) + 1`, `0` when there is none, and it
-//!   counts negative keys since PHP 8.3;
+//!   counts negative keys — on every array only from PHP 8.3, so below it a
+//!   negative landing index declines (ADR-0049 A22);
 //! * it is a **high-water mark**, so `unset` does not lower it — which is why
 //!   the order witness is dropped by an `unset` and why an append onto a shape
 //!   that lost its witness answers the weak row instead of a key;
@@ -26,10 +27,12 @@ use steins_domain::{Base, Fact, IntRange, Refinement};
 use steins_infer::{DEBUG_TYPE_ID, Diagnostic, Folder, check_with};
 use steins_syntax::{ArgValue, SourceTree};
 
-/// The same mock sidecar the rest of the shape suites use.
+/// The same mock sidecar the rest of the shape suites use, reporting no PHP
+/// minor unless [`Mock::on`] names one.
 #[derive(Default)]
 struct Mock {
     facts: HashMap<String, Fact>,
+    minor: Option<(u16, u16)>,
 }
 
 impl Mock {
@@ -39,7 +42,11 @@ impl Mock {
             "count".to_owned(),
             Fact::refined(Base::Int, Refinement::Int(IntRange::NON_NEGATIVE), false),
         );
-        Mock { facts }
+        Mock { facts, minor: None }
+    }
+
+    fn on(minor: Option<(u16, u16)>) -> Mock {
+        Mock { minor, ..Mock::sidecar() }
     }
 }
 
@@ -53,11 +60,18 @@ impl Folder for Mock {
     fn builtin_return_fact(&mut self, name: &str) -> Option<Fact> {
         self.facts.get(&name.to_ascii_lowercase()).cloned()
     }
+    fn php_minor(&mut self) -> Option<(u16, u16)> {
+        self.minor
+    }
 }
 
 fn one_type(src: &str) -> String {
+    one_type_with(src, &mut Mock::sidecar())
+}
+
+fn one_type_with(src: &str, folder: &mut Mock) -> String {
     let tree = SourceTree::parse(src);
-    let ds: Vec<Diagnostic> = check_with(&tree, &[], "t.php", &mut Mock::sidecar())
+    let ds: Vec<Diagnostic> = check_with(&tree, &[], "t.php", folder)
         .into_iter()
         .filter(|d| !d.id.starts_with("untyped."))
         .collect();
@@ -70,6 +84,11 @@ fn one_type(src: &str) -> String {
 
 fn dump_body(body: &str) -> String {
     one_type(&format!("<?php\nfunction f(int $i, string $s): void {{ {body} }}\n"))
+}
+
+fn dump_body_on(minor: Option<(u16, u16)>, body: &str) -> String {
+    let src = format!("<?php\nfunction f(int $i, string $s): void {{ {body} }}\n");
+    one_type_with(&src, &mut Mock::on(minor))
 }
 
 fn dump_decl(decl: &str, body: &str) -> String {
@@ -115,14 +134,40 @@ fn an_append_is_one_past_the_maximum_integer_key_not_the_count() {
     );
 }
 
+/// Two arrays with the witnessed key sequence `[-3]`. `php -r` lands the append
+/// of the first on `-2` on 8.1.32 through 8.5.10; the second began as the shared
+/// empty array and lands on `0` on 8.1.32 and 8.2.33, `-2` from 8.3.33 (php-src
+/// GH-11154). The walk cannot tell them apart, so only the minor decides.
+const NEGATIVE_APPENDS: [&str; 2] = [
+    "$a = [-3 => 1]; $a[] = 9; \\PHPStan\\dumpType($a);",
+    "$a = []; $a[-3] = 1; $a[] = 9; \\PHPStan\\dumpType($a);",
+];
+
 #[test]
-fn an_append_counts_negative_keys() {
-    // `php -r '$a=[-3=>1]; $a[]=9; var_dump(array_keys($a));'` => -3, -2.
-    // PHP 8.3 changed this; before it the append landed on 0.
-    assert_eq!(
-        dump_body("$a = [-3 => 1]; $a[] = 9; \\PHPStan\\dumpType($a);"),
-        "dumped type: array{-3: 1, -2: 9}"
-    );
+fn an_append_counts_negative_keys_from_php_8_3() {
+    for body in NEGATIVE_APPENDS {
+        for minor in [(8, 3), (8, 5)] {
+            assert_eq!(
+                dump_body_on(Some(minor), body),
+                "dumped type: array{-3: 1, -2: 9}",
+                "{body} on {minor:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_negative_append_index_declines_below_php_8_3() {
+    // The weak row of Amendment J: a write at some integer key, maybe even -3.
+    for body in NEGATIVE_APPENDS {
+        for minor in [None, Some((8, 1)), Some((8, 2))] {
+            assert_eq!(
+                dump_body_on(minor, body),
+                "dumped type: non-empty-array{-3: 1|9, ...<int, 9>}",
+                "{body} on {minor:?}"
+            );
+        }
+    }
 }
 
 #[test]

@@ -335,7 +335,7 @@ fn array_out_state_fact(
             }
         }
     }
-    Some((rule.written_fact(shape.as_ref(), &values), stratum))
+    Some((rule.written_fact(shape.as_ref(), &values, w.cx.php_minor), stratum))
 }
 
 /// **What `settype($var, $type)` wrote into `$var`** (issue #595), for a call
