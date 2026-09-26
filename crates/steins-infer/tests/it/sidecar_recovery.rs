@@ -113,6 +113,68 @@ fn a_refused_bomb_leaves_the_run_posture_intact() {
     );
 }
 
+/// The shapes issue #783 measured killing the child, none of which carries its
+/// size in a parameter named for it, then the controls. The file is strict on
+/// purpose: `range('a', 100000000)` still reaches the allocation there, since
+/// `range` declares `string|int|float` and PHP 8.3 coerces a non-numeric string
+/// that faces a number to `0` with only a warning.
+const PRICED_BOMBS_THEN_FOLDABLE: &str = "<?php\n\
+     declare(strict_types=1);\n\
+     \\PHPStan\\dumpType(range(0, 2000000000));\n\
+     \\PHPStan\\dumpType(range(0, 100000000));\n\
+     \\PHPStan\\dumpType(range(0, -100000000));\n\
+     \\PHPStan\\dumpType(range(0, 2000000000, 3));\n\
+     \\PHPStan\\dumpType(range(0, 100000000, 0.5));\n\
+     \\PHPStan\\dumpType(range('0', '100000000'));\n\
+     \\PHPStan\\dumpType(range('a', 100000000));\n\
+     \\PHPStan\\dumpType(sprintf('%2000000000d', 1));\n\
+     \\PHPStan\\dumpType(sprintf('%100000000d', 1));\n\
+     \\PHPStan\\dumpType(range(1, 10));\n\
+     \\PHPStan\\dumpType(range('a', 'e'));\n\
+     \\PHPStan\\dumpType(sprintf('%05d', 42));\n\
+     \\PHPStan\\dumpType(strtoupper('ab'));\n";
+
+/// **A `range` or a format that would spend the engine's memory is priced and
+/// refused before dispatch** (issue #783).
+///
+/// Four `range()` literals in one phpstan-src fixture each killed the child,
+/// which spent the run's whole respawn budget inside one file and left every
+/// later file on the sound subset. The named-parameter budget could not see
+/// them: `range`'s size is arithmetic over three arguments, and `sprintf`'s is
+/// inside its format string. As with the `str_repeat` bomb above, the claim is
+/// about the RUN as much as the dumps: nothing lost, nothing restarted, and the
+/// controls after the bombs still fold.
+#[test]
+fn a_priced_range_or_format_never_reaches_the_runner() {
+    let mut folder = SidecarFolder::enabled();
+    if folder.fold("strtoupper", &[ArgValue::Str("probe".into())], true).is_none() {
+        eprintln!(
+            "SKIP a_priced_range_or_format_never_reaches_the_runner: \
+             no folding engine — is `php` on PATH?"
+        );
+        return;
+    }
+    let d = dumps(PRICED_BOMBS_THEN_FOLDABLE, &mut folder);
+    assert_eq!(d.len(), 13, "one dump per line, got {d:?}");
+    for (i, got) in d.iter().take(9).enumerate() {
+        assert!(
+            !got.starts_with('\'') && !got.starts_with("array{") && !got.starts_with("list{"),
+            "bomb {i} folded to a value: {got}"
+        );
+    }
+    // The controls still fold, which is what makes the price a budget and not a
+    // ban on the two names.
+    assert!(d[9].starts_with("list{1, 2, 3"), "range(1, 10) did not fold: {}", d[9]);
+    assert_eq!(d[10], "list{'a', 'b', 'c', 'd', 'e'}");
+    assert_eq!(d[11], "'00042'");
+    assert_eq!(d[12], "'AB'");
+
+    let after = folder.posture();
+    assert_eq!(after.losses, 0, "a reply was lost, so a bomb was dispatched: {after:?}");
+    assert_eq!(after.restarts, 0, "the child was replaced: {after:?}");
+    assert!(after.sidecar_backed_throughout(), "got {after:?}");
+}
+
 /// A snippet whose every fold names a SECOND callee, and then asks an ordinary
 /// question.
 ///
