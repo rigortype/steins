@@ -742,8 +742,9 @@ could not close the effect set, so no label list is an upper bound),
 `already-declared` (the same bound is written — the second run of the
 transform), `existing-tag-unreadable` (a tag is already written whose labels
 the registry cannot read, so it may be prose rather than a bound),
-`bound-label-unknown` (the computed bound names a label the registry does not
-know, so the tag would read back as prose), `uses-trait` (the class uses a
+`bound-label-unknown` (the computed bound names a label outside the interop
+vocabulary — one the registry does not know, or a `failure.*` label — so the
+tag would read back as prose), `uses-trait` (the class uses a
 trait: `@phpstan-all-methods-pure` covers the trait's methods too, and trait
 bodies are not analyzed, so the class-wide claim is not proven), plus the two
 shared docblock-mechanics names above. A pure declaration is not a candidate
