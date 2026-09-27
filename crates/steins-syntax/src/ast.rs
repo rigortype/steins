@@ -2472,11 +2472,16 @@ pub struct Runs {
     /// `Ns\f(…)`), in source order. Empty whenever [`Self::other`] is set,
     /// since the answer is decided without them.
     pub functions: Vec<RunCall>,
-    /// Whether the evaluation runs anything a function name cannot describe: a
-    /// method, static or constructor call, a call through a variable or an
-    /// expression, a pipe (`|>` calls its right-hand side), or
-    /// `include`/`require`/`eval`. A magic method an operator runs (`__clone`
-    /// under `clone`, `__toString` under a conversion) is not a call here.
+    /// The class of every `new` that names one (`new Foo(…)`, `new \Ns\Foo`),
+    /// in source order — the walk asks whether it is an engine class, whose
+    /// constructor runs no userland. Empty whenever [`Self::other`] is set.
+    pub constructs: Vec<NameRef>,
+    /// Whether the evaluation runs anything a name cannot describe: a method or
+    /// static call, a `new` of `self`/`static`/`parent`, a variable or an
+    /// anonymous class, a call through a variable or an expression, a pipe
+    /// (`|>` calls its right-hand side), or `include`/`require`/`eval`. A magic
+    /// method an operator runs (`__clone` under `clone`, `__toString` under a
+    /// conversion) is not a call here.
     pub other: bool,
 }
 
