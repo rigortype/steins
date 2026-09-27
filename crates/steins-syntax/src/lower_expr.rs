@@ -222,7 +222,11 @@ fn lower_guard_arg(expr: &Expression<'_>) -> Option<CondExpr> {
         // the honest set, as the guard-position lowering computes it.
         other @ (Expression::Call(_) | Expression::Instantiation(_)) => {
             let call = named_call(other)?;
-            Some(CondExpr::Call { call: Box::new(call), reads: cond_reads(other) })
+            Some(CondExpr::Call {
+                call: Box::new(call),
+                reads: cond_reads(other),
+                writes: cond_writes(other),
+            })
         }
         _ => None,
     }
@@ -1052,7 +1056,7 @@ pub(crate) fn lower_cond(expr: &Expression<'_>) -> CondExpr {
     // ADR-0079's dam exists for, and the file's other findings are dropped with
     // it rather than drawn from a tree the walk did not finish.
     if stack_guard::exhausted() {
-        return CondExpr::Opaque { reads: Vec::new() };
+        return CondExpr::Opaque { reads: Vec::new(), writes: Vec::new() };
     }
     match expr.unparenthesized() {
         Expression::Binary(b) => lower_binary_cond(b),
@@ -1085,7 +1089,7 @@ pub(crate) fn lower_cond(expr: &Expression<'_>) -> CondExpr {
                     key: Box::new(key),
                 })))),
             ),
-            None => CondExpr::Opaque { reads: cond_reads(expr) },
+            None => CondExpr::Opaque { reads: cond_reads(expr), writes: cond_writes(expr) },
         },
         // `isset($x['k'])` (ADR-0062 S4) and bare `isset($x)` (issue #414). A
         // multi-argument isset is a conjunction by PHP semantics and lowers to the
@@ -1111,7 +1115,7 @@ pub(crate) fn lower_cond(expr: &Expression<'_>) -> CondExpr {
                     .into_iter()
                     .reduce(|a, b| CondExpr::And(Box::new(a), Box::new(b)))
                     .expect("non-empty"),
-                _ => CondExpr::Opaque { reads: cond_reads(expr) },
+                _ => CondExpr::Opaque { reads: cond_reads(expr), writes: cond_writes(expr) },
             }
         }
         other => match lower_cond_operand(other) {
@@ -1125,11 +1129,11 @@ pub(crate) fn lower_cond(expr: &Expression<'_>) -> CondExpr {
             // `CondOperand::Other::invalidates` set. Widening this one to match
             // would be a precision change (`if ($o->p)` would stop forgetting
             // `$o`) with its own measurement, and it is not what issue #158 is.
-            CondOperand::Other { .. } => {
+            CondOperand::Other { writes, .. } => {
                 let reads = cond_reads(other);
                 match named_call(other) {
-                    Some(call) => CondExpr::Call { call: Box::new(call), reads },
-                    None => CondExpr::Opaque { reads },
+                    Some(call) => CondExpr::Call { call: Box::new(call), reads, writes },
+                    None => CondExpr::Opaque { reads, writes },
                 }
             }
             operand => CondExpr::Truthy(operand),
@@ -1277,7 +1281,10 @@ fn lower_binary_cond(b: &Binary<'_>) -> CondExpr {
             let mut reads = Vec::new();
             collect_read_vars(&Node::Expression(b.lhs), &[], &mut reads);
             collect_read_vars(&Node::Expression(b.rhs), &[], &mut reads);
-            CondExpr::Opaque { reads }
+            let mut writes = Vec::new();
+            collect_assign_writes(&Node::Expression(b.lhs), &mut writes);
+            collect_assign_writes(&Node::Expression(b.rhs), &mut writes);
+            CondExpr::Opaque { reads, writes }
         }
     }
 }
@@ -1406,6 +1413,10 @@ fn lower_cond_operand_other(other: &Expression<'_>) -> CondOperand {
             OperandWriters::Calls => call_invalidation(&node),
             _ => Vec::new(),
         },
+        writes: match writers {
+            OperandWriters::Any => cond_writes(other),
+            _ => Vec::new(),
+        },
     }
 }
 
@@ -1475,6 +1486,16 @@ fn cond_reads(expr: &Expression<'_>) -> Vec<String> {
     let mut reads = Vec::new();
     collect_read_vars(&Node::Expression(expr), &[], &mut reads);
     reads
+}
+
+/// The variables an assignment or an increment in a condition subtree rebinds
+/// (issue #654): the `writes` of [`CondOperand::Other`], [`CondExpr::Call`] and
+/// [`CondExpr::Opaque`]. [`collect_assign_writes`] is the statement lowering's own
+/// write collector, so a condition and a statement agree on what a write is.
+fn cond_writes(expr: &Expression<'_>) -> Vec<String> {
+    let mut writes = Vec::new();
+    collect_assign_writes(&Node::Expression(expr), &mut writes);
+    writes
 }
 
 /// Lower a recognized control-flow construct to [`StmtKind::Opaque`]: compute

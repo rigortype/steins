@@ -368,7 +368,7 @@ fn collect_cond_vars(cond: &CondExpr, out: &mut Vec<String>) {
         // #571): subject selection sees the same mention set the `Opaque`
         // lowering recorded, while the invalidation path no longer sees one.
         CondExpr::Call { reads, .. }
-        | CondExpr::Opaque { reads }
+        | CondExpr::Opaque { reads, .. }
         | CondExpr::InstanceofDyn { reads, .. } => out.extend(reads.iter().cloned()),
         CondExpr::Isset { var, .. } | CondExpr::IssetVar { var } => out.push(var.clone()),
     }

@@ -1918,6 +1918,13 @@ pub enum CondOperand {
         /// a fact the callee provably can't reach survives the comparison. Empty for a
         /// non-call writer (`OperandWriters::Any`), so `f($y)+($y=1)` keeps the blanket drop.
         sites: Vec<InvalidatedVar>,
+        /// Variables an assignment or an increment inside this operand **rebinds** —
+        /// the targets as written, a subset of `invalidates` (issue #654). `($x = f())
+        /// !== null` writes `$x`; `f($x) !== null` writes nothing here, whatever `f`
+        /// declares. A later conjunct's write is what makes an earlier conjunct's
+        /// refinement stale, and `invalidates` alone cannot say which of its names a
+        /// write reached and which were only read.
+        writes: Vec<String>,
     },
 }
 
@@ -1944,7 +1951,9 @@ pub enum CondExpr {
     /// inference can consume `@phpstan-assert-if-true`/`-if-false` (ADR-0052 §5, `Asserted`
     /// stratum) and fold existence predicates (`method_exists`/etc, ADR-0049 §4/N3) to a real
     /// verdict; other guard calls evaluate `Maybe`, and `reads` invalidates their variables.
-    Call { call: Box<CallExpr>, reads: Vec<String> },
+    /// `writes` is the subset an assignment or an increment in the arguments rebinds
+    /// (`f($x = g())` writes `$x`) — [`CondOperand::Other`]'s field of the same name.
+    Call { call: Box<CallExpr>, reads: Vec<String>, writes: Vec<String> },
     /// `isset($var[<literal>])` — a key-presence guard, depth exactly one (ADR-0062 S4).
     /// True branch promotes presence and strips `null` (PHP's own `isset` semantics); only
     /// this exact form lowers here — bare `isset($x)` is [`Self::IssetVar`] (issue #414)
@@ -1984,8 +1993,10 @@ pub enum CondExpr {
     /// (ADR-0087 §4's `|unset` read inside its own guard) has a place to put it.
     IssetVar { var: String },
     /// A condition the lowering cannot model. `reads` lists every bare variable it mentions,
-    /// so the excluded path still invalidates them (ADR-0027 read-set rule).
-    Opaque { reads: Vec<String> },
+    /// so the excluded path still invalidates them (ADR-0027 read-set rule). `writes` is
+    /// the subset an assignment or an increment in it rebinds (`($x = f())` writes `$x`,
+    /// `$o->p` writes nothing) — [`CondOperand::Other`]'s field of the same name.
+    Opaque { reads: Vec<String>, writes: Vec<String> },
 }
 
 /// One arm of a structured [`StmtKind::Match`] (ADR-0031 Part B). `conditions` are the

@@ -51,7 +51,7 @@ use crate::names::{PackageName, SectionName};
 /// a cold run would not give. The history — one row per bump, with its issue,
 /// its kind and the reasoning it landed with — is
 /// `docs/internal-spec/generation-schema.md`.
-pub const SCHEMA_VERSION: u32 = 21;
+pub const SCHEMA_VERSION: u32 = 22;
 
 const MAGIC: [u8; 8] = *b"steinsgn";
 const HEADER_LEN: u64 = 16;

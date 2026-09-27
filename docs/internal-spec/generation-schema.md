@@ -51,6 +51,7 @@ section](#where-the-record-and-the-code-disagree) says why it is there.
 | [19](#schema-19) | #598 (ADR-0094) | misdecode, under-answer | `GlobalConstDecl` grows the declared value and the `conditional` flag. |
 | [20](#schema-20) | #603 (ADR-0057 note) | misdecode, under-answer | `FunctionDecl` and `MethodDecl` grow `ret_top`; `RetHintKind` grows `Top`. |
 | [21](#schema-21) | #320 (ADR-0096), #352 | misdecode, meaning | `Stmt` grows `value_position` (#320); `CallTarget` grows `Bool` (#352). |
+| [22](#schema-22) | #654 | misdecode | `CondOperand::Other`, `CondExpr::Call` and `CondExpr::Opaque` grow `writes`. |
 
 ## Where the record and the code disagree
 
@@ -271,3 +272,14 @@ the old enum could not carry one, so replaying a schema-20 artifact would answer
 `io.output.buffer` for every return-mode dumper this binary now proves writes
 nothing. ADR-0092 §2 forbids a miss that changes meaning, so the bump buys the
 refusal to read the old file, not a decode fix.
+
+### Schema 22
+
+`22` is the conjunct write set (issue #654). `CondOperand::Other`,
+`CondExpr::Call` and `CondExpr::Opaque` each grow a `writes` field — the
+variables an assignment or an increment in the condition rebinds — so the
+branch walk can tell which of an earlier conjunct's refinements a later
+conjunct made stale. It is the **misdecode** kind of schema 16: a struct
+variant's payload gains a field and the wire codec reads a variant's fields
+positionally, so a schema-21 payload would decode the bytes after `sites` or
+`reads` as the new `writes`.
