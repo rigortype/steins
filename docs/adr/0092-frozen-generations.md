@@ -428,3 +428,50 @@ use the lockfile the fingerprint hashed, or dependency code no hashed file
 describes: `cargo install` without `--locked` (from `--git` or `--path`)
 resolves afresh, and a `[patch]` onto a local checkout of a dependency
 changes its code without moving any hashed file.
+
+## Amendment (2026-09-27): what the schema number covers
+
+§2 has artifacts carry a schema version whose mismatch is a miss, and leaves
+their layout "free to change with the schema version". The rule for when the
+number moves, the doc comment on `SCHEMA_VERSION`, read that as every payload:
+a bump whenever a binary would read a stored payload otherwise than it was
+written. That put every change to the trace IR or its lowering behind a bump,
+nineteen of them from schema 4 to 22, and when two such changes were open at
+once the second to merge had to renumber.
+
+Since issue #563 and the amendment above, §2's other identity field already
+does that work. The analyzer version is a content hash of `crates/*/src`, the
+files they embed, `Cargo.lock` and the manifests, and the load refuses a
+package whose `sources` record names another analyzer version before it
+decodes a trace or facts payload. A publish copies a stored payload only for a
+file whose load succeeded, so a moved analyzer refuses the whole generation.
+Issue #828 proved that before the rule moved: no reader decodes those payloads
+ahead of the gate, and a binary with an unbumped trace-IR change rebuilt every
+package warm as `parsed (analyzer moved)`, with output byte-identical to its
+cold run. There the bump bought nothing but a discarded fold table.
+
+So the schema number covers what is read before the analyzer gate, or read
+across analyzer versions. That is steins-gen's framing (the container header
+and directory, the manifest, `CURRENT`, how artifacts and the sidecar are
+named), the `sources` record that is the gate's own input, and the layouts of
+the `symbols` shard, the `summaries` sidecar and the payload directories. Each
+of those is decoded before the gate or before the replay licence, and staying
+under the number keeps every such decoder meeting an old file as a miss, never
+a misdecode. It is also the fold table's identity, row format, `request_key`
+spelling and `parse_*_result` readers. The fold table is the one read across
+versions whose content reaches findings: §4 scopes its rows by the engine
+identity and the runner, never by the analyzer, so only the schema number, or
+a new axis of the table's own identity as `strict_keyed` was, refuses a row
+this binary would ask or read differently. The trace, facts and contracts
+payloads take no bump.
+
+§2's invariant does not move: an artifact of another schema is still a miss,
+and so is an artifact of another analyzer. What moves is which of the two
+refuses a given change. The narrowed rule is exactly as sound as the analyzer
+fingerprint, whose limits the amendment above names, and a bump never covered
+those either, since a bump made in the tree edits `crates/*/src` and moves the
+fingerprint too. A test in `steins-infer` (`src/generation/gate_order.rs`)
+pins the gate order, because output equality cannot see a decode that runs
+before the gate and is then thrown away. The record of every bump, and of
+which the narrowed rule would still require, is
+`docs/internal-spec/generation-schema.md`.
