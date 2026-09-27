@@ -105,12 +105,16 @@ fn construct_reading_other_var_preserves_unrelated_fact() {
     // Read-set must not over-forget: a construct reading/writing only OTHER vars
     // leaves tracked `$w` known, so the TypeError still FIRES. Here `if` reads
     // `$cond` and calls `use_it($cond)`; neither `reads` nor `writes` mentions `$w`.
+    // Inside a function body: at top level the call could rebind `$w` through
+    // `global`, and the frame is forgotten (issue #762).
     let src = "<?php
 function width(int $w): int { return $w; }
 function use_it($c): void {}
-$w = \"abc\";
-if ($cond) { use_it($cond); }
-width($w);
+function t($cond): void {
+    $w = \"abc\";
+    if ($cond) { use_it($cond); }
+    width($w);
+}
 ";
     let f = findings(src);
     assert_eq!(f.len(), 1, "unrelated construct preserves $w → still flagged: {f:#?}");

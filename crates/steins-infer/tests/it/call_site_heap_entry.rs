@@ -462,12 +462,15 @@ fn the_receiver_shares_its_copy_with_an_argument_naming_it() {
     // ADR-0086 §3's aliasing clause: `$b->m($b)` names one object twice, so `$this`
     // and the parameter must be ONE callee allocation. Two copies would convict
     // correct code — the write through `$this` IS visible through `$o`.
+    //
+    // The statements sit in a function body: at top level the second `new` could
+    // rebind `$b` through `global`, and the frame is forgotten (issue #762).
     let src = "<?php\ndeclare(strict_types=1);\n\
         function needString(string $s): void {}\n\
         class Box {\n\
         \x20 public function __construct(public mixed $value) {}\n\
         \x20 public function m(Box $o): void { $this->value = 's'; needString($o->value); }\n\
-        }\n$b = new Box(1);\n$b->m($b);\n";
+        }\nfunction t(): void {\n$b = new Box(1);\n$b->m($b);\n}\n";
     assert_eq!(count(src), 0, "$this and the parameter are one object");
 
     // The mirror — write through the parameter, read through `$this` — is the same
@@ -477,7 +480,7 @@ fn the_receiver_shares_its_copy_with_an_argument_naming_it() {
         class Box {\n\
         \x20 public function __construct(public mixed $value) {}\n\
         \x20 public function m(Box $o): void { $o->value = 's'; needString($this->value); }\n\
-        }\n$b = new Box(1);\n$b->m($b);\n";
+        }\nfunction t(): void {\n$b = new Box(1);\n$b->m($b);\n}\n";
     assert_eq!(count(mirror), 0, "the alias runs both ways");
 
     // And the aliasing is real rather than incidental: with two DIFFERENT objects the
@@ -487,7 +490,7 @@ fn the_receiver_shares_its_copy_with_an_argument_naming_it() {
         class Box {\n\
         \x20 public function __construct(public mixed $value) {}\n\
         \x20 public function m(Box $o): void { $this->value = 's'; needString($o->value); }\n\
-        }\n$b = new Box(1);\n$c = new Box(1);\n$b->m($c);\n";
+        }\nfunction t(): void {\n$b = new Box(1);\n$c = new Box(1);\n$b->m($c);\n}\n";
     let f = findings(distinct);
     assert_eq!(f.len(), 1, "$c kept its own 1: {f:#?}");
     assert_eq!(f[0].id, ID);
@@ -589,17 +592,25 @@ fn the_this_key_distinguishes_two_receivers() {
     // key naming only the class would let `$b1->m()`'s walk answer for `$b2->m()` —
     // replaying the first summary and suppressing the second's emission. Each
     // receiver's own state is in the key, so the first fires and the second does not.
-    let src = format!("{BOXM}$b1 = new Box(1);\n$b1->m();\n$b2 = new Box('s');\n$b2->m();\n");
+    // In a function body: at top level each call could rebind the other receiver
+    // through `global`, and the frame is forgotten (issue #762).
+    let src = format!(
+        "{BOXM}function t(): void {{\n$b1 = new Box(1);\n$b1->m();\n$b2 = new Box('s');\n$b2->m();\n}}\n"
+    );
     let f = findings(&src);
     assert_eq!(f.len(), 1, "exactly the int receiver fires: {f:#?}");
     assert_eq!(f[0].id, ID);
 
     // Reversed, so the answer follows the receiver rather than the call order.
-    let rev = format!("{BOXM}$b1 = new Box('s');\n$b1->m();\n$b2 = new Box(1);\n$b2->m();\n");
+    let rev = format!(
+        "{BOXM}function t(): void {{\n$b1 = new Box('s');\n$b1->m();\n$b2 = new Box(1);\n$b2->m();\n}}\n"
+    );
     assert_eq!(count(&rev), 1);
 
     // The same receiver state twice on one line is one finding: same key, same site.
-    let twice = format!("{BOXM}$b1 = new Box(1); $b2 = new Box(1); $b1->m(); $b2->m();\n");
+    let twice = format!(
+        "{BOXM}function t(): void {{\n$b1 = new Box(1); $b2 = new Box(1); $b1->m(); $b2->m();\n}}\n"
+    );
     assert_eq!(count(&twice), 1, "one key, one emission");
 }
 

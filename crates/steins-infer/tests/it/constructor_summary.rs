@@ -423,12 +423,14 @@ fn the_key_names_the_seeded_this_so_defaults_do_not_replay() {
     // Two classes sharing one inherited constructor body, with different literal
     // defaults on the slot the body leaves alone. The `this:` component carries the
     // seeded object's canonical rendering (C8), so neither answers for the other.
+    // In a function body: at top level the second `new` could rebind `$a` through
+    // `global`, and the frame is forgotten (issue #762).
     let src = "<?php\ndeclare(strict_types=1);\n\
         class KBase { public $kept; public $w; public function __construct(int $v) { $this->w = $v; } }\n\
         class K1 extends KBase { public $kept = 1; }\n\
         class K2 extends KBase { public $kept = 2; }\n\
-        $a = new K1(0);\n$b = new K2(0);\n\
-        \\PHPStan\\dumpType($a->kept);\n\\PHPStan\\dumpType($b->kept);\n";
+        function t(): void {\n$a = new K1(0);\n$b = new K2(0);\n\
+        \\PHPStan\\dumpType($a->kept);\n\\PHPStan\\dumpType($b->kept);\n}\n";
     assert_eq!(dumps(src), vec!["dumped type: 1", "dumped type: 2"]);
 }
 
@@ -440,12 +442,12 @@ fn the_key_names_the_seeded_this_so_defaults_do_not_replay() {
 fn exactness_and_readonly_bookkeeping_cross_unchanged() {
     // A readonly slot written by the constructor's own body is recorded written, so a
     // caller-side second write is the proven `readonly.reassigned` it always was, and
-    // the slot is sweep-immune.
+    // the slot is sweep-immune. In a function body, for the reason above.
     let src = "<?php\ndeclare(strict_types=1);\n\
         function unknownFn(): void {}\n\
         class Ro { public readonly string $name;\n\
         \x20 public function __construct() { $this->name = 'abc'; } }\n\
-        $r = new Ro();\nunknownFn();\n\\PHPStan\\dumpType($r->name);\n";
+        function t(): void {\n$r = new Ro();\nunknownFn();\n\\PHPStan\\dumpType($r->name);\n}\n";
     assert_eq!(dumped(src), "dumped type: 'abc'");
 }
 

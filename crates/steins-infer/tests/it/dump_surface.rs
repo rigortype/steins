@@ -452,23 +452,26 @@ fn dump_of_prop_after_escape_falls_to_the_declaration() {
     // passing `$h` itself would drop `$h`'s binding too. What the dump renders is
     // the property's DECLARED type (issue #620), which the sweep cannot invalidate:
     // whatever the unknown callee stored, PHP type-checked it against `?int`.
-    let src = "<?php class H { public ?int $p = null; } \
-        $h = new H(); $h->p = 7; $a = $h; sink($h); unknownFn(); \\PHPStan\\dumpType($a->p);";
+    //
+    // In a function body: at top level the calls could rebind `$a` through
+    // `global`, and the frame is forgotten (issue #762).
+    let src = "<?php class H { public ?int $p = null; } function t(): void { \
+        $h = new H(); $h->p = 7; $a = $h; sink($h); unknownFn(); \\PHPStan\\dumpType($a->p); }";
     assert_eq!(one_type(src), "dumped type: int|null");
 
     // The same escape over an UNDECLARED property, where there is no floor to fall
     // to — the honest unknown, unchanged.
-    let untyped = "<?php class H { public $p = null; } \
-        $h = new H(); $h->p = 7; $a = $h; sink($h); unknownFn(); \\PHPStan\\dumpType($a->p);";
+    let untyped = "<?php class H { public $p = null; } function t(): void { \
+        $h = new H(); $h->p = 7; $a = $h; sink($h); unknownFn(); \\PHPStan\\dumpType($a->p); }";
     assert_eq!(one_type(untyped), "dumped type: unknown");
 }
 
 #[test]
 fn dump_of_readonly_prop_survives_escape() {
     // A readonly prop is sweep-immune, so its fact still reaches the dump after the
-    // same escape shape.
+    // same escape shape, in a function body for the same reason as above.
     let src = "<?php class H { public function __construct(public readonly int $p) {} } \
-        $h = new H(5); $a = $h; sink($h); unknownFn(); \\PHPStan\\dumpType($a->p);";
+        function t(): void { $h = new H(5); $a = $h; sink($h); unknownFn(); \\PHPStan\\dumpType($a->p); }";
     assert_eq!(one_type(src), "dumped type: 5");
 }
 

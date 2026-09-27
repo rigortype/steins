@@ -86,6 +86,9 @@ fn absence(src: &str) -> Vec<Diagnostic> {
 }
 
 /// The owner's flagship shape: a factory whose promoted prop is the bound argument.
+/// A fixture that reads an object after a second call keeps its statements in a
+/// function body: at top level any project call could rebind the object's name
+/// through `global`, and the frame is forgotten there (issue #762).
 const P: &str = "<?php\ndeclare(strict_types=1);\n\
     function needInt(int $x): void {}\n\
     function needString(string $s): void {}\n\
@@ -153,10 +156,10 @@ fn a_factorys_object_is_the_inline_new_byte_for_byte() {
     // the factory's `return new Foo(...)` snapshot came out of the SAME
     // `new_heap_object` the assignment form runs.
     let inline = format!(
-        "{P}$x = new Foo(123);\nneedString($x->n);\n\\PHPStan\\dumpType($x->n);\n\\PHPStan\\dumpType($x);\n"
+        "{P}function t(): void {{\n$x = new Foo(123);\nneedString($x->n);\n\\PHPStan\\dumpType($x->n);\n\\PHPStan\\dumpType($x);\n}}\n"
     );
     let factory = format!(
-        "{P}$x = createFoo(123);\nneedString($x->n);\n\\PHPStan\\dumpType($x->n);\n\\PHPStan\\dumpType($x);\n"
+        "{P}function t(): void {{\n$x = createFoo(123);\nneedString($x->n);\n\\PHPStan\\dumpType($x->n);\n\\PHPStan\\dumpType($x);\n}}\n"
     );
     // Everything a reader sees, compared verbatim. The one field left out is the
     // dump's removal-fix payload, which is a byte range into the fixture's own text:
@@ -205,7 +208,7 @@ fn leg2_the_escape_bit_crosses_and_the_callers_sweep_honours_it() {
         "escaped is not swept — it is swept by the NEXT unknown call",
     );
     assert_eq!(
-        dumped(&format!("{P}{LEAKY}$f = leak(5);\nunknownFn();\n\\PHPStan\\dumpType($f->n);\n")),
+        dumped(&format!("{P}{LEAKY}function t(): void {{\n$f = leak(5);\nunknownFn();\n\\PHPStan\\dumpType($f->n);\n}}\n")),
         "dumped type: unknown",
     );
 
@@ -213,7 +216,7 @@ fn leg2_the_escape_bit_crosses_and_the_callers_sweep_honours_it() {
     // the allocation's only exit, so the caller holds the sole reference and the same
     // unknown call cannot reach it (§1 — the precision payoff of ADR-0036, kept).
     assert_eq!(
-        dumped(&format!("{P}$f = createFoo(5);\nunknownFn();\n\\PHPStan\\dumpType($f->n);\n")),
+        dumped(&format!("{P}function t(): void {{\n$f = createFoo(5);\nunknownFn();\n\\PHPStan\\dumpType($f->n);\n}}\n")),
         "dumped type: 5",
     );
 
@@ -295,7 +298,9 @@ fn leg5_readonly_bookkeeping_transfers() {
         function makeR(int $n): R { $r = new R($n, $n); \
         $c = function() use ($r) { return $r; }; return $r; }\n";
     assert_eq!(
-        dumps(&format!("{RO}$r = makeR(7);\nunknownFn();\n\\PHPStan\\dumpType($r->ro);\n\\PHPStan\\dumpType($r->m);\n")),
+        dumps(&format!(
+            "{RO}function t(): void {{\n$r = makeR(7);\nunknownFn();\n\\PHPStan\\dumpType($r->ro);\n\\PHPStan\\dumpType($r->m);\n}}\n"
+        )),
         vec!["dumped type: 7", "dumped type: unknown"],
     );
 
@@ -380,7 +385,7 @@ fn leg7_the_summary_replays_and_recursion_degrades() {
     // identically — the second is a memo hit, and a memo hit REPLAYS.
     assert_eq!(
         dumps(&format!(
-            "{P}$a = createFoo(1);\n$b = createFoo(1);\n\\PHPStan\\dumpType($a->n);\n\\PHPStan\\dumpType($b->n);\n"
+            "{P}function t(): void {{\n$a = createFoo(1);\n$b = createFoo(1);\n\\PHPStan\\dumpType($a->n);\n\\PHPStan\\dumpType($b->n);\n}}\n"
         )),
         vec!["dumped type: 1", "dumped type: 1"],
     );
@@ -388,7 +393,7 @@ fn leg7_the_summary_replays_and_recursion_degrades() {
     // allocation id is in it.
     assert_eq!(
         dumps(&format!(
-            "{P}$a = createFoo(1);\n$b = createFoo(2);\n\\PHPStan\\dumpType($a->n);\n\\PHPStan\\dumpType($b->n);\n"
+            "{P}function t(): void {{\n$a = createFoo(1);\n$b = createFoo(2);\n\\PHPStan\\dumpType($a->n);\n\\PHPStan\\dumpType($b->n);\n}}\n"
         )),
         vec!["dumped type: 1", "dumped type: 2"],
     );

@@ -44,6 +44,7 @@ use crate::out_params::{
 };
 use crate::predicates::apply_type_narrowing;
 use crate::project::{Diagnostic, FnResolution};
+use crate::rebind;
 use crate::refine::{
     apply_class_narrowing, apply_inline_var_casts, apply_refinements, collect_guard_calls_any,
     then_refinements,
@@ -573,6 +574,19 @@ pub(crate) fn walk_trace(
         // classify the exit (A2 drop/cross, A3 floor, T1 allocation).
         record_return_exit(w, folder, stmt, env, store, &stmt_calls);
 
+        // 1d. The top-level rebind rule (issue #762): in the frame whose locals are
+        // the globals, a statement that runs a userland body forgets every name the
+        // frame holds — value lane, heap objects and heap resources alike — since
+        // that body can rebind any of them without the statement naming it. After
+        // the checks above, which judge the arguments as they were passed; before
+        // step 2, so the statement's own binding (`$x = bump();`) lands after it.
+        // An `if` forgets inside `walk_if` instead, once its condition is judged.
+        let rebinds = rebind::top_level_rebind_risk(cx, folder, &stmt.runs);
+        if rebinds && !matches!(stmt.kind, StmtKind::If { .. }) {
+            env.clear();
+            store.clear();
+        }
+
         // 2. Apply the statement's own effect on the environment + compute its flow.
         let flow = match &stmt.kind {
             StmtKind::Barrier => {
@@ -773,7 +787,7 @@ pub(crate) fn walk_trace(
                     .flatten();
                 walk_if(
                     w, folder, cond, then_trace, elseifs, else_trace.as_deref(), chain.as_ref(),
-                    env, store, descent, facts, out,
+                    rebinds, env, store, descent, facts, out,
                 )
             }
             StmtKind::Match { subject, arms, default, loose } => walk_match(

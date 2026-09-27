@@ -286,11 +286,13 @@ fn an_alias_is_looked_up_by_its_spelling_not_its_case() {
     // `App\row` — and only the same-spelled `@param Row` is the alias. Keyed by
     // a case fold, `row` was the alias too, and with the alias now winning the
     // collision `m(new Row())` was convicted against `int`, a `No` the oracle
-    // never gives. Both directions, because the fold hid both.
+    // never gives. Both directions, because the fold hid both. In function bodies,
+    // since at top level a call could rebind `$p` through `global` and the frame is
+    // forgotten (issue #762).
     let src = "<?php\nnamespace App;\nclass Row {}\n/** @phpstan-type Row int */\nclass Probe {\n\
         /** @param row $v */\n\
         public function m($v): void { \\PHPStan\\dumpPhpDocType($v); }\n}\n\
-        $p = new Probe();\n$p->m(new Row());\n";
+        function t(): void {\n$p = new Probe();\n$p->m(new Row());\n}\n";
     assert_eq!(one_dump(src), "dumped phpdoc type: App\\Row (asserted)");
     assert_eq!(param_count(src), 0, "`row` is the class, which `new Row()` inhabits");
     // The other way round: a lower-case alias does not capture the class-cased
@@ -300,7 +302,7 @@ fn an_alias_is_looked_up_by_its_spelling_not_its_case() {
         public function m($v): void { \\PHPStan\\dumpPhpDocType($v); }\n\
         /** @param row $v */\n\
         public function n($v): void { \\PHPStan\\dumpPhpDocType($v); }\n}\n\
-        $p = new Probe();\n$p->m(new Row());\n$p->n(new Row());\n";
+        function t(): void {\n$p = new Probe();\n$p->m(new Row());\n$p->n(new Row());\n}\n";
     assert_eq!(
         dumps(mirror),
         ["dumped phpdoc type: App\\Row (asserted)", "dumped phpdoc type: int (asserted)"]
@@ -553,13 +555,16 @@ fn a_range_bound_is_not_a_class_name_to_qualify() {
     // bound. Spelled that way the range floored to `Opaque`, and a local body —
     // `expand_alias` qualifies those too — dumped `no declared contract` and
     // admitted `-1` against `int<1, max>`.
+    //
+    // The calls sit in a function body: at top level the first could rebind `$p`
+    // through `global`, and the frame is forgotten (issue #762).
     let src = "<?php\nnamespace App;\n/**\n * @phpstan-type Pos int<1, max>\n\
          * @phpstan-type Neg int<min, -1>\n */\nclass Probe {\n\
         /** @param Pos $v */\n\
         public function m($v): void { \\PHPStan\\dumpPhpDocType($v); }\n\
         /** @param Neg $v */\n\
         public function n($v): void { \\PHPStan\\dumpPhpDocType($v); }\n}\n\
-        $p = new Probe();\n$p->m(-1);\n$p->n(1);\n";
+        function t(): void {\n$p = new Probe();\n$p->m(-1);\n$p->n(1);\n}\n";
     assert_eq!(
         dumps(src),
         ["dumped phpdoc type: int<1, max> (asserted)", "dumped phpdoc type: int<min, -1> (asserted)"]
@@ -574,7 +579,9 @@ fn an_imported_bodys_const_fetch_names_the_owners_class() {
     // `Vendor` resolves its `Geo` where the operand is read
     // (`const_operand_shape`), so left relative it found the importer's
     // `App\Geo::MAP = ['b' => 2]` and convicted `'a'`, the key the owner's map
-    // has. PHPStan dumps `'a'` and accepts.
+    // has. PHPStan dumps `'a'` and accepts. The calls sit in a function body: at
+    // top level the first could rebind `$p` through `global`, and the frame is
+    // forgotten (issue #762).
     let src = "<?php\nnamespace Vendor;\n\
         /**\n * @phpstan-type Ko key-of<Geo::MAP>\n * @phpstan-type Vo value-of<Geo::MAP>\n */\n\
         class Geo { const MAP = ['a' => 1]; }\n";
@@ -585,8 +592,8 @@ fn an_imported_bodys_const_fetch_names_the_owners_class() {
         public function ko($v): void {}\n\
         /** @param Vo $v */\n\
         public function vo($v): void {}\n}\n\
-        $p = new Probe();\n";
-    let with = |calls: &str| format!("{src}{user}{calls}");
+        function t(): void {\n$p = new Probe();\n";
+    let with = |calls: &str| format!("{src}{user}{calls}}}\n");
     assert_eq!(param_count(&with("$p->ko('a');\n$p->vo(1);\n")), 0, "the owner's key and value");
     // Not a floor: the owner's map is what judges, so the importer's own key is
     // the one rejected.

@@ -497,6 +497,8 @@ fn carry_survives_a_variable_binding() {
 /// `takesIntBox` never touches its parameter.
 #[test]
 fn passing_the_object_as_an_argument_keeps_the_carry() {
+    // In a function body: at top level the intervening call could rebind the
+    // object's name through `global`, and the frame is forgotten (issue #762).
     let src = "<?php\n\
         /** @template T */\n\
         final class MutableBox {\n\
@@ -507,9 +509,11 @@ fn passing_the_object_as_an_argument_keeps_the_carry() {
         function takesIntBox(MutableBox $box): void {}\n\
         /** @param MutableBox<string> $box */\n\
         function takesStringBox(MutableBox $box): void {}\n\
+        function t(): void {\n\
         $box = new MutableBox(1);\n\
         takesIntBox($box);\n\
-        takesStringBox($box);";
+        takesStringBox($box);\n\
+        }";
     assert_eq!(param_count(src), 1, "the carry survives an intervening call that only reads it");
 }
 
@@ -552,6 +556,8 @@ fn receiver_method_call_sweeps_the_stale_value_carry() {
 /// A receiver call sweeps only its own receiver — an unrelated object's carry is untouched.
 #[test]
 fn the_sweep_is_receiver_local() {
+    // In a function body: at top level the intervening call could rebind the
+    // object's name through `global`, and the frame is forgotten (issue #762).
     let src = "<?php\n\
         /** @template T */\n\
         final class MutableBox {\n\
@@ -561,10 +567,12 @@ fn the_sweep_is_receiver_local() {
         }\n\
         /** @param MutableBox<string> $box */\n\
         function takesStringBox(MutableBox $box): void {}\n\
+        function t(): void {\n\
         $a = new MutableBox(1);\n\
         $b = new MutableBox(2);\n\
         $a->touch();\n\
-        takesStringBox($b);";
+        takesStringBox($b);\n\
+        }";
     assert_eq!(param_count(src), 1, "sweeping $a leaves $b's carry intact");
 }
 
@@ -572,6 +580,8 @@ fn the_sweep_is_receiver_local() {
 /// a receiver call, like a `readonly` prop survives a sweep.
 #[test]
 fn inheritance_edge_carry_survives_a_receiver_call() {
+    // In a function body: at top level the intervening call could rebind the
+    // object's name through `global`, and the frame is forgotten (issue #762).
     let src = "<?php\n\
         /** @template T */\n\
         class Box {\n\
@@ -585,9 +595,11 @@ fn inheritance_edge_carry_survives_a_receiver_call() {
         }\n\
         /** @param Box<string> $box */\n\
         function takesStringBox(Box $box): void {}\n\
+        function t(): void {\n\
         $box = new IntBox(1);\n\
         $box->touch();\n\
-        takesStringBox($box);";
+        takesStringBox($box);\n\
+        }";
     assert_eq!(param_count(src), 1, "a declared edge is not a mutable fact — it survives the sweep");
 }
 
@@ -740,21 +752,27 @@ fn an_unprovable_callee_sweeps() {
 /// The mention test is **token-exact** (`$boxes` ≠ `$box`); a comment mention still sweeps.
 #[test]
 fn the_mention_test_respects_token_boundaries() {
+    // In a function body: at top level the intervening call could rebind the
+    // object's name through `global`, and the frame is forgotten (issue #762).
     let src = "<?php\n\
         /** @template T */\n\
         final class Box { /** @param T $value */ public function __construct(public mixed $value) {} }\n\
         function nearName(Box $box, array $boxes): void { $n = count($boxes); }\n\
         /** @param Box<string> $b */\n\
         function takesStringBox(Box $b): void {}\n\
+        function t(): void {\n\
         $box = new Box(1);\n\
         nearName($box, []);\n\
-        takesStringBox($box);";
+        takesStringBox($box);\n\
+        }";
     assert_eq!(param_count(src), 1, "$boxes is not $box — the carry survives");
 }
 
 /// A **declared** edge carry is no more swept by an argument pass than a receiver call.
 #[test]
 fn inheritance_edge_carry_survives_an_argument_pass() {
+    // In a function body: at top level the intervening call could rebind the
+    // object's name through `global`, and the frame is forgotten (issue #762).
     let src = "<?php\n\
         /** @template T */\n\
         class Box {\n\
@@ -769,9 +787,11 @@ fn inheritance_edge_carry_survives_an_argument_pass() {
         function mutate(Box $b): void { $b->touch(); }\n\
         /** @param Box<string> $box */\n\
         function takesStringBox(Box $box): void {}\n\
+        function t(): void {\n\
         $box = new IntBox(1);\n\
         mutate($box);\n\
-        takesStringBox($box);";
+        takesStringBox($box);\n\
+        }";
     assert_eq!(param_count(src), 1, "a declared edge survives an argument pass");
 }
 
@@ -1528,8 +1548,12 @@ fn a_swept_value_carry_declines_and_a_declared_one_does_not() {
         dumped(&format!("{f}$b = new Box(1); $b->mutate(); \\PHPStan\\dumpType(unwrapT($b));")),
         "dumped type: unknown",
     );
+    // In a function body: at top level `$b->mutate()` could rebind `$b` through
+    // `global`, and the frame is forgotten (issue #762).
     assert_eq!(
-        dumped(&format!("{f}$b = new IntBox(1); $b->mutate(); \\PHPStan\\dumpType(unwrapT($b));")),
+        dumped(&format!(
+            "{f}function t(): void {{ $b = new IntBox(1); $b->mutate(); \\PHPStan\\dumpType(unwrapT($b)); }}"
+        )),
         "dumped type: int (asserted)",
     );
 }

@@ -54,6 +54,9 @@ fn dumps(src: &str) -> Vec<String> {
         .collect()
 }
 
+/// The fixtures that read an object after a call keep their statements in a
+/// function body: at top level any project call could rebind the object's name
+/// through `global`, and the frame is forgotten there (issue #762).
 const HEAD: &str = "<?php\ndeclare(strict_types=1);\n\
     function needInt(int $x): void {}\n\
     function needString(string $s): void {}\n";
@@ -157,11 +160,11 @@ fn a_fluent_setter_reads_its_own_write() {
     // caller-side sweep with the walk's own truth.
     let cls = "final class F { public $x = 0;\n\
         \x20 public function setX(int $v): self { $this->x = $v; return $this; } }\n";
-    let src = format!("{HEAD}{cls}$o = new F();\n$o->setX(1);\n\\PHPStan\\dumpType($o->x);\n");
+    let src = format!("{HEAD}{cls}function t(): void {{\n$o = new F();\n$o->setX(1);\n\\PHPStan\\dumpType($o->x);\n}}\n");
     assert_eq!(dumped(&src), "dumped type: 1");
 
     // And as a premise.
-    let sink = format!("{HEAD}{cls}$o = new F();\n$o->setX(1);\nneedString($o->x);\n");
+    let sink = format!("{HEAD}{cls}function t(): void {{\n$o = new F();\n$o->setX(1);\nneedString($o->x);\n}}\n");
     let f = findings(&sink);
     assert_eq!(f.len(), 1, "{f:#?}");
     assert_eq!(f[0].id, ID);
@@ -175,7 +178,7 @@ fn a_setter_that_writes_nothing_leaves_the_receivers_slot_alone() {
     let src = format!(
         "{HEAD}final class N {{ public $x = 0;\n\
         \x20 public function touch(): void {{}} }}\n\
-        $o = new N();\n$o->x = 4;\n$o->touch();\n\\PHPStan\\dumpType($o->x);\n"
+        function t(): void {{\n$o = new N();\n$o->x = 4;\n$o->touch();\n\\PHPStan\\dumpType($o->x);\n}}\n"
     );
     assert_eq!(dumped(&src), "dumped type: 4");
 }
@@ -215,7 +218,7 @@ fn a_leak_inside_the_callee_comes_back_pre_escaped_and_swept() {
         class L {{ public $value = 0;\n\
         \x20 public function __construct() {{ $this->init(); }}\n\
         \x20 private function init(): void {{ $this->value = 2; register($this); }} }}\n\
-        $l = new L();\n\\PHPStan\\dumpType($l->value);\n"
+        function t(): void {{\n$l = new L();\n\\PHPStan\\dumpType($l->value);\n}}\n"
     );
     assert_eq!(dumped(&src), "dumped type: unknown");
 
@@ -228,7 +231,7 @@ fn a_leak_inside_the_callee_comes_back_pre_escaped_and_swept() {
         class L2 {{ public $value = 0;\n\
         \x20 public function __construct() {{ $this->init(); }}\n\
         \x20 private function init(): void {{ register($this); }} }}\n\
-        $l = new L2();\n$l->value = 3;\nunknownFn();\n\\PHPStan\\dumpType($l->value);\n"
+        function t(): void {{\n$l = new L2();\n$l->value = 3;\nunknownFn();\n\\PHPStan\\dumpType($l->value);\n}}\n"
     );
     assert_eq!(dumped(&escaped), "dumped type: unknown");
 
@@ -239,7 +242,7 @@ fn a_leak_inside_the_callee_comes_back_pre_escaped_and_swept() {
         "{HEAD}class L3 {{ public $value = 0;\n\
         \x20 public function __construct() {{ $this->init(); }}\n\
         \x20 private function init(): void {{}} }}\n\
-        $l = new L3();\n$l->value = 3;\nunknownFn();\n\\PHPStan\\dumpType($l->value);\n"
+        function t(): void {{\n$l = new L3();\n$l->value = 3;\nunknownFn();\n\\PHPStan\\dumpType($l->value);\n}}\n"
     );
     assert_eq!(dumped(&local), "dumped type: 3");
 }
@@ -457,7 +460,7 @@ fn a_diagnostic_inside_the_callee_is_emitted_once_per_entry_state() {
     let cls = "class K { public $value = 0;\n\
         \x20 public function __construct(int $v) { $this->init($v); }\n\
         \x20 private function init(int $v): void { needString($v); $this->value = $v; } }\n";
-    let twice = format!("{HEAD}{cls}$a = new K(1); $b = new K(1);\n");
+    let twice = format!("{HEAD}{cls}function t(): void {{\n$a = new K(1); $b = new K(1);\n}}\n");
     assert_eq!(
         findings(&twice).into_iter().filter(|d| d.id == ID).count(),
         1,
@@ -466,8 +469,8 @@ fn a_diagnostic_inside_the_callee_is_emitted_once_per_entry_state() {
 
     // Two entry states are two keys and are each judged — and each answer is its own.
     let two = format!(
-        "{HEAD}{cls}$a = new K(1);\n$b = new K(2);\n\
-        \\PHPStan\\dumpType($a->value);\n\\PHPStan\\dumpType($b->value);\n"
+        "{HEAD}{cls}function t(): void {{\n$a = new K(1);\n$b = new K(2);\n\
+        \\PHPStan\\dumpType($a->value);\n\\PHPStan\\dumpType($b->value);\n}}\n"
     );
     assert_eq!(dumps(&two), vec!["dumped type: 1", "dumped type: 2"]);
     assert_eq!(findings(&two).into_iter().filter(|d| d.id == ID).count(), 2);
@@ -483,8 +486,8 @@ fn the_memo_key_distinguishes_two_this_states() {
         "{HEAD}class Ms {{ public $pre = 0; public $out = 0;\n\
         \x20 public function __construct(int $p) {{ $this->pre = $p; $this->copy(); }}\n\
         \x20 private function copy(): void {{ $this->out = $this->pre; }} }}\n\
-        $a = new Ms(1);\n$b = new Ms(2);\n\
-        \\PHPStan\\dumpType($a->out);\n\\PHPStan\\dumpType($b->out);\n"
+        function t(): void {{\n$a = new Ms(1);\n$b = new Ms(2);\n\
+        \\PHPStan\\dumpType($a->out);\n\\PHPStan\\dumpType($b->out);\n}}\n"
     );
     assert_eq!(dumps(&src), vec!["dumped type: 1", "dumped type: 2"]);
 }
