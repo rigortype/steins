@@ -2,26 +2,20 @@
 //! (issue #28), the array / union fold budgets, and the `ArgValue` ↔ `FoldValue`
 //! conversions with their shape tracking.
 
-use steins_domain::PhpStr;
+use steins_domain::{NEXT_INT_BOUNDARY, PhpStr};
 use steins_sidecar::{FoldArg, FoldKey, FoldValue};
 use steins_syntax::{ArgValue, ArrayKey, php_canonical_int_string};
-
-/// The ADR-0049 A22 boundary: the minor from which PHP's next append index
-/// counts a negative key on *every* array. Before it, an array that began as the
-/// shared empty array floored its next index at `0` (php-src GH-11154); an
-/// array literal never did on any supported minor. The one version boundary any
-/// value rule keys on today.
-pub(crate) const NEXT_INT_BOUNDARY: (u16, u16) = (8, 3);
 
 /// The analysis PHP view (issue #28): fold the sidecar's **runtime** minor and
 /// the project's **declared target** into the two per-run answers the checker
 /// consumes.
 ///
-/// - The **effective minor** feeds the append index (ADR-0049 A22): with a
-///   declared target, the range must agree on the next-int boundary — one side
-///   entirely answers with its floor, a straddling range answers `None` (a
-///   negative landing index declines, every other append still resolves). With
-///   no target, the runtime minor answers as before #28.
+/// - The **effective minor** feeds the append index
+///   ([`steins_domain::append_index`], ADR-0049 A22): with a declared target,
+///   the range must agree on the next-int boundary ([`NEXT_INT_BOUNDARY`]) —
+///   one side entirely answers with its floor, a straddling range answers
+///   `None` (a negative landing index declines, every other append still
+///   resolves). With no target, the runtime minor answers as before #28.
 /// - The **catalog skew** flag feeds ADR-0052 A11's arm-deletion demotion: the
 ///   catalog is verified only at [`steins_catalog::PINNED_PHP`], so a target
 ///   range is skewed unless it is exactly the pin; no target falls back to the
