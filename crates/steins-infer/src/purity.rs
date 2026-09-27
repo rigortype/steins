@@ -590,10 +590,10 @@ fn propagate_effects(
 /// cannot name two labels for one construct.
 const fn construct_label(origin: &EffectOrigin) -> Option<(&'static str, &'static str)> {
     match origin {
-        EffectOrigin::Output { keyword, .. } => Some(("io.output.buffer", *keyword)),
-        EffectOrigin::Exit { keyword, .. } => Some(("exit", *keyword)),
+        EffectOrigin::Output { keyword, .. } => Some(("io.output.buffer", keyword.spelling())),
+        EffectOrigin::Exit { keyword, .. } => Some(("exit", keyword.spelling())),
         EffectOrigin::Eval { .. } => Some(("eval", "eval")),
-        EffectOrigin::Include { keyword, .. } => Some(("io.fs.read", *keyword)),
+        EffectOrigin::Include { keyword, .. } => Some(("io.fs.read", keyword.spelling())),
         EffectOrigin::Call { .. }
         | EffectOrigin::MethodCall { .. }
         | EffectOrigin::Opaque { .. }

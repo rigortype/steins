@@ -867,10 +867,9 @@ mod tests {
         let rendered = format!("{app:?}");
         assert!(rendered.contains("inf"), "the non-finite float literal survived lowering");
         assert!(app.functions()[0].docblock.is_some(), "a docblocked function");
-        // The payload codec carries an enum by variant index, and
-        // `EffectOrigin`'s inverse is the one hand-written twin in the graph
-        // (`steins-syntax::persist`), so its variants have to survive the
-        // disk boundary *by position*. They only can if they are here.
+        // The payload codec carries an enum by variant index, so every
+        // `EffectOrigin` variant has to survive the disk boundary *by
+        // position*. It only can if the fixture carries it.
         let origins = fixture_origins(&parsed);
         for kind in EffectOriginKind::ALL {
             let carried = origins.iter().any(|o| o.kind() == kind);
