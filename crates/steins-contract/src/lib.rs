@@ -19,8 +19,8 @@ pub mod spell;
 pub use admit::{ShapeSpec, admits_fact, admits_val, shape_verdict};
 
 use steins_domain::{
-    Base, Certainty, Fact, IntRange, KeyClass, Key as DKey, PhpStr, Presence as DPresence,
-    Refinement, ShapeFact, StrPreds, Tail as DTail, Val,
+    Base, Certainty, Fact, IntRange, KeyClass, Key as DKey, NextInt, PhpStr,
+    Presence as DPresence, Refinement, ShapeFact, StrPreds, Tail as DTail, Val,
 };
 use steins_phpdoc::ast::{ArrayShapeKind, ConstExpr, ShapeKey, StringLit, Type, TypeKind};
 
@@ -1385,9 +1385,10 @@ fn lower_int_range(args: &[steins_phpdoc::ast::GenericArg]) -> ContractTy {
 }
 
 /// The normalized runtime keys a shape's items denote, in item order:
-/// positional items take the running auto-index, and PHP folds an
-/// integer-like string/bareword key to an int key (`array{'9': T}` declares
-/// key `9`, as `[9 => …]` builds it).
+/// positional items take the running auto-index, floored at `0`
+/// ([`NextInt::floored_at_zero`]), and PHP folds an integer-like
+/// string/bareword key to an int key (`array{'9': T}` declares key `9`, as
+/// `[9 => …]` builds it).
 ///
 /// `None` when a key is not resolvable (const-fetch key, unparseable int
 /// literal, positional item past a `PHP_INT_MAX` key), making the whole shape
@@ -1395,23 +1396,20 @@ fn lower_int_range(args: &[steins_phpdoc::ast::GenericArg]) -> ContractTy {
 #[must_use]
 pub fn shape_keys(shape: &steins_phpdoc::ast::ArrayShape) -> Option<Vec<CKey>> {
     let mut keys = Vec::with_capacity(shape.items.len());
-    // `None` past a `PHP_INT_MAX` key: PHP has no next key there (`[PHP_INT_MAX
-    // => 1, 2]` throws), so a positional item after it names no key at all.
-    let mut next_auto: Option<i64> = Some(0);
+    // No next key past a `PHP_INT_MAX` key (`[PHP_INT_MAX => 1, 2]` throws), so
+    // a positional item after it names no key at all.
+    let mut next_int = NextInt::floored_at_zero();
     for item in &shape.items {
         let key = match &item.key {
-            None => CKey::Int(next_auto?),
+            None => CKey::Int(next_int.next()?),
             Some(ShapeKey::Int(s)) => CKey::Int(s.replace('_', "").parse::<i64>().ok()?),
             Some(ShapeKey::Str(lit)) => norm_shape_key(&string_lit_value(lit)),
             Some(ShapeKey::Ident(name)) => norm_shape_key(name),
             Some(ShapeKey::ConstFetch { .. }) => return None,
         };
-        // Every int key — declared or PHP-folded — at or past the auto-index
-        // moves it past itself.
-        if let CKey::Int(v) = key
-            && next_auto.is_some_and(|n| v >= n)
-        {
-            next_auto = v.checked_add(1);
+        // Every int key, declared or PHP-folded, moves the auto-index.
+        if let CKey::Int(v) = key {
+            next_int.observe(v);
         }
         keys.push(key);
     }
