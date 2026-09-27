@@ -495,15 +495,15 @@ fn a_positional_shape_item_past_php_int_max_leaves_the_shape_undecided() {
     assert_eq!(admits_val(&shape, &val), Yes);
 }
 
-/// A positional shape item after a negative key takes `0`: the phpdoc grammar's
-/// auto-index is floored there, as PHPStan's constant-array builder reads it,
-/// while the literal `[-5 => 1, 'x']` puts `'x'` at `-4`.
+/// A positional shape item after a negative key takes the key the literal gives
+/// it (ADR-0049 A22, #832): `[-5 => 1, 'x']` puts `'x'` at `-4`, and so does
+/// `array{-5: int, string}`. PHPStan's constant-array builder floors it at `0`.
 #[test]
-fn a_positional_shape_item_after_a_negative_key_takes_zero() {
+fn a_positional_shape_item_after_a_negative_key_takes_the_literals_next_key() {
     let shape = ty("array{-5: int, string}");
     let at = |k| arr(vec![(Key::Int(-5), Val::Int(1)), (Key::Int(k), s("x"))]);
-    assert_eq!(admits_val(&shape, &at(0)), Yes);
-    assert_eq!(admits_val(&shape, &at(-4)), No);
+    assert_eq!(admits_val(&shape, &at(-4)), Yes);
+    assert_eq!(admits_val(&shape, &at(0)), No);
 }
 
 #[test]

@@ -381,7 +381,9 @@ pub enum ShapeTail {
 /// A **sealed** shape's head comes from `is_list` (issue #163); fields print
 /// positional only when ALL keys are `0..n-1`, in order, required — one gap
 /// and every field prints its key. An **unsealed** shape keeps the
-/// per-field auto-index rule instead ([`NextInt::floored_at_zero`]).
+/// per-field auto-index rule instead: a field prints keyless where
+/// [`shape_keys`](crate::shape_keys) reads a positional item back at its key,
+/// the literal's next key ([`NextInt::new`]), negative keys included.
 #[must_use]
 pub fn spell_shape(
     is_list: bool,
@@ -409,7 +411,7 @@ pub fn spell_shape(
     // The key a keyless field would take, as `shape_keys` reads it back. No next
     // key past a `PHP_INT_MAX` key (`$a[] = …` fails), so nothing after it may
     // print keyless — neither saturate nor wrap.
-    let mut next_int = NextInt::floored_at_zero();
+    let mut next_int = NextInt::new();
     let mut parts: Vec<String> = Vec::with_capacity(fields.len() + 1);
     for (key, required, value) in fields {
         let keyless = if sealed {
@@ -977,15 +979,35 @@ mod array_vocabulary_tests {
     }
 
     #[test]
-    fn a_field_after_a_negative_key_prints_keyless_only_at_zero() {
-        // `shape_keys` reads a keyless field after `-5` at `0`, so only that key
-        // prints bare. `-4`, where the literal `[-5 => 1, 2]` puts `2`, keeps it.
+    fn a_field_after_a_negative_key_prints_keyless_at_the_literals_next_key() {
+        // `shape_keys` reads a keyless field after `-5` at `-4`, where the literal
+        // `[-5 => 1, 2]` puts `2`, so only that key prints bare. `0` keeps it.
         let at = |k| [(Key::Int(-5), true, "1".to_owned()), (Key::Int(k), true, "2".to_owned())];
-        assert_eq!(spell_shape(false, false, &at(0), &ShapeTail::Untyped), "array{-5: 1, 2, ...}");
+        assert_eq!(spell_shape(false, false, &at(-4), &ShapeTail::Untyped), "array{-5: 1, 2, ...}");
         assert_eq!(
-            spell_shape(false, false, &at(-4), &ShapeTail::Untyped),
-            "array{-5: 1, -4: 2, ...}"
+            spell_shape(false, false, &at(0), &ShapeTail::Untyped),
+            "array{-5: 1, 0: 2, ...}"
         );
+    }
+
+    #[test]
+    fn a_shape_with_positional_items_after_negative_keys_round_trips() {
+        // Lower (`shape_keys`), spell (`spell_shape`), lower again: the keys a
+        // keyless field is read back at are the keys it was spelled from.
+        let fact = |src: &str| crate::to_shape_fact(&lower_str(src).unwrap());
+        for (src, spelled) in [
+            ("array{-5: int, string, ...}", "array{-5: int, string, ...}"),
+            ("array{-5: int, -10: bool, string, ...}", "array{-10: bool, -5: int, string, ...}"),
+            ("array{-5: 1, 2, -1: 3, 4, ...}", "array{-5: 1, 2, -1: 3, 4, ...}"),
+            // Sorted by key, `0` follows `-5` and keeps its key; `1` follows `0`.
+            ("array{int, -5: string, bool, ...}", "array{-5: string, 0: int, bool, ...}"),
+            // Sealed: one key off `0..n-1` and every field prints its key.
+            ("array{-5: int, string}", "array{-5: int, -4: string}"),
+        ] {
+            assert_eq!(spell_ty(src), spelled, "{src}");
+            assert_eq!(spell_ty(spelled), spelled, "{spelled} is not a fixed point");
+            assert_eq!(fact(spelled), fact(src), "{spelled} reads back other keys");
+        }
     }
 
     #[test]
