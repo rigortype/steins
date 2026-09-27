@@ -570,7 +570,7 @@ fn collect_pure_guard_bases(cx: &Cx, cond: &CondExpr, out: &mut Vec<String>) {
                 out.push(var.clone());
             }
         }
-        CondExpr::Call { call, reads }
+        CondExpr::Call { call, reads, .. }
             if array_guard_predicate(cx, call).is_some()
                 || array_all_any_predicate(cx, call).is_some() =>
         {
@@ -709,14 +709,16 @@ fn collect_cond_opaque_reads(cx: &Cx, cond: &CondExpr, ce: &CondEnv, out: &mut V
     match cond {
         // An opaque condition may mutate any variable it reads by reference — the
         // whole read-set is forgotten (the conservative floor, unchanged).
-        CondExpr::Opaque { reads } => {
+        CondExpr::Opaque { reads, .. } => {
             for r in reads {
                 if !out.contains(r) {
                     out.push(r.clone());
                 }
             }
         }
-        CondExpr::Call { call, reads } => collect_call_opaque_reads(cx, call, reads, ce.store, out),
+        CondExpr::Call { call, reads, .. } => {
+            collect_call_opaque_reads(cx, call, reads, ce.store, out);
+        }
         // **Operand position** (issue #158). A call does not become harmless by
         // sitting inside a comparison: `preg_match($re, $s, $m) === 1` writes `$m`
         // exactly as the bare guard does. The rule: an operand's writes are judged
@@ -761,7 +763,7 @@ fn collect_operand_opaque_reads(
     ce: &CondEnv,
     out: &mut Vec<String>,
 ) {
-    let CondOperand::Other { call, invalidates, sites } = operand else { return };
+    let CondOperand::Other { call, invalidates, sites, .. } = operand else { return };
     let mut floor = Vec::new();
     match call {
         // The operand *is* a resolvable call: it gets every exemption a guard
