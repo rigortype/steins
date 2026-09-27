@@ -545,15 +545,53 @@ fn scheme_of(target: &str) -> Option<&str> {
 /// Rows cover `PDO`/`PDOStatement` with coarse label `io.db`. Runtime
 /// configuration controls whether emulated `prepare` contacts the server, so
 /// `prepare` takes the argument-insensitive upper bound.
+///
+/// `__construct` rows (issue #804) are what `new C(...)` and a subclass's
+/// `parent::__construct(...)` run. `new PDO(...)` connects (`io.db`), and
+/// `new DateTime(...)` reads the clock unless its argument names an absolute
+/// time, and the ambient timezone either way, so it takes `date`'s
+/// argument-blind `nondet.time` (ADR-0021). Every engine `Throwable`'s
+/// constructor only stores its arguments, and so does each constructor of the
+/// catalogued-pure containers here; `stdClass` has none. Any other engine
+/// class stays uncatalogued.
 #[must_use]
 pub fn method_effect_labels(class: &str, method: &str) -> Option<&'static [&'static str]> {
+    const EMPTY: &[&str] = &[];
     const IO_DB: &[&str] = &["io.db"];
+    const NONDET_TIME: &[&str] = &["nondet.time"];
 
     match (class.to_ascii_lowercase().as_str(), method.to_ascii_lowercase().as_str()) {
-        ("pdo", "query" | "exec" | "prepare") => Some(IO_DB),
+        ("pdo", "query" | "exec" | "prepare" | "__construct") => Some(IO_DB),
         ("pdostatement", "execute" | "fetch" | "fetchall") => Some(IO_DB),
+        ("datetime" | "datetimeimmutable", "__construct") => Some(NONDET_TIME),
+        (
+            "stdclass" | "arrayobject" | "arrayiterator" | "spldoublylinkedlist" | "splstack"
+            | "splqueue" | "splobjectstorage" | "splfixedarray" | "splpriorityqueue"
+            | "splminheap" | "splmaxheap" | "weakmap" | "dateinterval",
+            "__construct",
+        ) => Some(EMPTY),
+        (_, "__construct") if is_builtin_throwable(class) => Some(EMPTY),
         _ => None,
     }
+}
+
+/// Whether `class` is a global engine class whose ancestry in the mined
+/// hierarchy reaches `Throwable`.
+fn is_builtin_throwable(class: &str) -> bool {
+    let mut pending = vec![class];
+    let mut seen: Vec<String> = Vec::new();
+    while let Some(c) = pending.pop() {
+        if c.eq_ignore_ascii_case("throwable") {
+            return true;
+        }
+        let key = c.to_ascii_lowercase();
+        if seen.contains(&key) {
+            continue;
+        }
+        seen.push(key);
+        pending.extend(crate::builtin_class_supers(c).unwrap_or_default());
+    }
+    false
 }
 
 /// The position of an `array` parameter whose **values are callables**, or
@@ -1580,6 +1618,30 @@ mod tests {
     fn method_rows_match_both_keys_case_insensitively() {
         assert_eq!(method_effect_labels("pdo", "QUERY"), Some(&["io.db"][..]));
         assert_eq!(method_effect_labels("PdoStatement", "FetchAll"), Some(&["io.db"][..]));
+    }
+
+    #[test]
+    fn constructor_rows_cover_the_connection_the_clock_and_the_stores() {
+        assert_eq!(method_effect_labels("PDO", "__construct"), Some(&["io.db"][..]));
+        let time = Some(&["nondet.time"][..]);
+        assert_eq!(method_effect_labels("DateTimeImmutable", "__CONSTRUCT"), time);
+        assert_eq!(method_effect_labels("datetime", "__construct"), time);
+        assert_eq!(method_effect_labels("ArrayObject", "__construct"), Some(&[][..]));
+        assert_eq!(method_effect_labels("stdClass", "__construct"), Some(&[][..]));
+    }
+
+    #[test]
+    fn every_engine_throwable_constructs_purely_and_nothing_else_is_assumed() {
+        let engine = ["Exception", "InvalidArgumentException", "TypeError", "ErrorException"];
+        for class in engine {
+            assert_eq!(method_effect_labels(class, "__construct"), Some(&[][..]), "{class}");
+        }
+        // A user class, and an engine class with no row, stay uncatalogued.
+        assert_eq!(method_effect_labels("App\\Exception", "__construct"), None);
+        assert_eq!(method_effect_labels("DateTimeZone", "__construct"), None);
+        assert_eq!(method_effect_labels("SplFileObject", "__construct"), None);
+        // A constructor row says nothing about the class's other methods.
+        assert_eq!(method_effect_labels("Exception", "getMessage"), None);
     }
 
     #[test]
