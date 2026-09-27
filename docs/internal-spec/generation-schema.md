@@ -5,19 +5,31 @@
 Every artifact in a generation carries one schema number, and a reader that
 finds any other number misses and rebuilds. The rule for when that number moves
 is the doc comment on `SCHEMA_VERSION` in `crates/steins-gen/src/container.rs`:
-what a bump buys, and the four kinds of bump. This page is the record of every
-bump since schema 1, the store as it first landed (issue #485). The record used
-to be that doc comment, one paragraph per bump, until it outgrew the rule it
-sat under (issue #774).
+what a bump buys, which formats it covers, and the four kinds of bump. This
+page is the record of every bump since schema 1, the store as it first landed
+(issue #485), and of [the 2026-09-27 narrowing](#the-2026-09-27-narrowing) of
+what a bump covers. The record used to be that doc comment, one paragraph per
+bump, until it outgrew the rule it sat under (issue #774).
 
 ## Adding a bump
 
-Change the constant, add a row to the table and a note under [Notes](#notes),
-in the same PR. Anywhere else, cite a bump by its issue, not its number: when
-two bumps race, the one that merges second renumbers on rebase, and a number
-cited in another file renumbers with it. The conflict on the constant's own
-line is what forces the renumber, so it stays a conflict; do not union-merge
-it.
+Bump for a format that is read before the analyzer gate, or across analyzer
+versions: steins-gen's framing (the container header and directory, the
+manifest, `CURRENT`, how artifacts and the sidecar are named), the `sources`
+record, the layouts of the `symbols` shard, the `summaries` sidecar and the
+per-file payload directories, and the fold table (its identity, its row format,
+the `request_key` spelling and the `parse_*_result` readers). A change to the
+trace, facts or contracts payloads takes no bump, however it changes them: it
+moves the analyzer fingerprint, and `load_trees` refuses every stored payload
+on that before decoding it. The doc comment on `SCHEMA_VERSION` is the rule
+this summarizes.
+
+When a change does need one, change the constant, add a row to the table and a
+note under [Notes](#notes), in the same PR. Anywhere else, cite a bump by its
+issue, not its number: when two bumps race, the one that merges second
+renumbers on rebase, and a number cited in another file renumbers with it. The
+conflict on the constant's own line is what forces the renumber, so it stays a
+conflict; do not union-merge it.
 
 ## History
 
@@ -27,7 +39,10 @@ changed), **misdecode** (an old payload decodes as something never written),
 decides) and **meaning** (it decodes, and a replay answers something wrong).
 Where a bump is several, the column lists each, the one its note leads with
 first. A kind marked † is one the note does not state; [the next
-section](#where-the-record-and-the-code-disagree) says why it is there.
+section](#where-the-record-and-the-code-disagree) says why it is there. Every
+row landed under the rule as it stood before [the 2026-09-27
+narrowing](#the-2026-09-27-narrowing), which says which of them it still
+requires.
 
 | Schema | Issue | Kind | Summary |
 | --- | --- | --- | --- |
@@ -77,6 +92,46 @@ recorded here instead, and the kind column follows this section.
   each describes, a replay answering `unknown` or the arm floor where this
   binary binds or bounds, is a weaker answer rather than a wrong one, so the
   column calls it under-answer.
+
+## The 2026-09-27 narrowing
+
+Issue #828 changed what the number covers and did not move it, so it has a
+note and no row. Until then a bump was due whenever a binary would read a
+stored payload otherwise than it was written, which put every trace-IR change
+behind one. Since issue #563 the analyzer version is a content hash of
+`crates/*/src`, the files they embed, `Cargo.lock` and the manifests, and
+`load_trees` refuses a package whose `sources` record names another analyzer
+version before it decodes a trace or facts payload. A publish copies a stored
+payload only for a file whose load succeeded, so every artifact carries its
+publisher's analyzer, and a moved analyzer refuses the whole generation at
+once.
+
+The proof on the issue checked that before the rule moved. An audit placed
+every reader of a stored generation against the gate and found none that
+decodes trace or facts bytes ahead of it; the contracts payload has no
+production reader at all. A binary carrying an unbumped trace-IR change (a
+silent variant swap, and a lowering change as a positive control) reported
+every package of four public corpus trees and a five-package composite as
+`parsed (analyzer moved)`, and its warm output was byte-identical to its cold
+output. With the gate disabled the swap manufactured findings and the lowering
+change was masked entirely, so it is the gate, not the bump, that refuses
+them. Adding the bump changed no finding; it only threw the fold table away.
+`crates/steins-infer/src/generation/gate_order.rs` pins the order: a
+generation another build published decodes no trace or facts payload.
+
+Under the narrowed rule rows 4 to 22 would not have bumped: each changed the
+trace IR, its lowering, or what the trace payload records, and nothing read
+before the gate. Rows 2 (#504) and 3 (#519) still would: the codec swap
+reached the `symbols` shard and the `summaries` rows, which are decoded before
+the gate and before the replay licence, and the walk blocks' move into the
+sidecar changed where a section's bytes live. Every row stays, with its kind,
+as the record of what each bump was for.
+
+The narrowed rule is exactly as sound as the analyzer fingerprint. Its known
+holes, a `cargo install` without `--locked` and a `[patch]` onto a local
+checkout of a dependency, are ADR-0092's to name, and a bump never covered
+them either: for a change inside the tree the constant sits in `crates/*/src`,
+so a bump always moved the fingerprint too.
 
 ## Notes
 
