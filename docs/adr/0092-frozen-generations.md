@@ -418,3 +418,11 @@ on it, so the analyzer stamps what it compiled in. A table recorded before
 the field existed reads as a whole-table miss. Neither half suffices alone:
 the fingerprint refuses the walk blocks, and the runner axis refuses the
 rows those blocks would be recomputed from.
+
+The same fingerprint now also hashes `Cargo.lock`, the root manifest and
+every crate's manifest. The analyzer is also what its dependencies make it:
+a Mago bump moves the parser's rev in those two files, changes the syntax
+lowering, and touches no source, and a manifest can switch a feature or a
+profile setting the same way. The one build this cannot pin is
+`cargo install --git` without `--locked`, which resolves afresh rather than
+reading the lockfile the fingerprint hashed.
