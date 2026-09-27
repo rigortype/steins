@@ -134,6 +134,21 @@ fn an_append_is_one_past_the_maximum_integer_key_not_the_count() {
     );
 }
 
+#[test]
+fn an_append_may_land_on_php_int_max() {
+    // `php -r '$e=[PHP_INT_MAX-1=>1]; $e[]=2; var_export($e);'` on 8.5.10 =>
+    // 9223372036854775806 => 1, 9223372036854775807 => 2. Only the next append
+    // throws, and it has no key to name.
+    assert_eq!(
+        dump_body("$a = [9223372036854775806 => 1]; $a[] = 2; \\PHPStan\\dumpType($a);"),
+        "dumped type: array{9223372036854775806: 1, 9223372036854775807: 2}"
+    );
+    assert_eq!(
+        dump_body("$a = [9223372036854775807 => 1]; $a[] = 2; \\PHPStan\\dumpType($a);"),
+        "dumped type: non-empty-array{9223372036854775807: 1|2, ...<int, 2>}"
+    );
+}
+
 /// Two arrays with the witnessed key sequence `[-3]`. `php -r` lands the append
 /// of the first on `-2` on 8.1.32 through 8.5.10; the second began as the shared
 /// empty array and lands on `0` on 8.1.32 and 8.2.33, `-2` from 8.3.33 (php-src

@@ -438,11 +438,12 @@ pub(crate) fn array_push_written_fact(
             .iter()
             .map(|k| shape.field(k).map(|(k, p, s)| (k.clone(), *p, s.clone())))
             .collect::<Option<Vec<_>>>()?;
-        let mut new_order = order.clone();
-        let mut next = append_index(&order, php_minor)?;
+        let mut new_order = order;
         for value in values {
-            let key = Key::Int(next);
-            next = next.checked_add(1)?;
+            // Each value reads the next index off the keys so far, as PHP does,
+            // so only a value that finds none declines: `[PHP_INT_MAX - 1 => 1]`
+            // takes one more value at `PHP_INT_MAX` and throws on a second.
+            let key = Key::Int(append_index(&new_order, php_minor)?);
             fields.push((
                 key.clone(),
                 Presence::Required { witnessed: true },
@@ -1010,6 +1011,54 @@ mod tests {
             out.field(&Key::Int(3)).and_then(|(_, _, s)| s.clone()).map(|s| *s),
             Some(Fact::Singleton(Val::Bool(false)))
         );
+    }
+
+    #[test]
+    fn a_push_may_land_its_last_value_on_php_int_max() {
+        // `php -r '$e = [PHP_INT_MAX - 2 => 1]; array_push($e, 2, 3);'` builds
+        // `[PHP_INT_MAX - 2 => 1, PHP_INT_MAX - 1 => 2, PHP_INT_MAX => 3]` on
+        // 8.5.10: only a further append would need a key past `PHP_INT_MAX`.
+        let shape = lit(&[(Key::Int(i64::MAX - 2), i(1))]);
+        let values = vec![Some(Fact::Singleton(i(2))), Some(Fact::Singleton(i(3)))];
+        let Fact::Shape { shape: out, .. } =
+            array_push_written_fact(&shape, &values, None).expect("a shape")
+        else {
+            panic!("a push states a shape");
+        };
+        assert_eq!(
+            out.witnessed_order(),
+            Some(&[Key::Int(i64::MAX - 2), Key::Int(i64::MAX - 1), Key::Int(i64::MAX)][..])
+        );
+        assert_eq!(
+            out.field(&Key::Int(i64::MAX)).and_then(|(_, _, s)| s.clone()).map(|s| *s),
+            Some(Fact::Singleton(i(3)))
+        );
+        // One value, the `$a[] = v` spelling: `$e = [PHP_INT_MAX - 1 => 1]; $e[] = 2;`
+        // puts `2` at `PHP_INT_MAX` on 8.5.10.
+        let one = lit(&[(Key::Int(i64::MAX - 1), i(1))]);
+        let Fact::Shape { shape: out, .. } =
+            array_push_written_fact(&one, &[Some(Fact::Singleton(i(2)))], None).expect("a shape")
+        else {
+            panic!("a push states a shape");
+        };
+        assert_eq!(out.witnessed_order(), Some(&[Key::Int(i64::MAX - 1), Key::Int(i64::MAX)][..]));
+    }
+
+    #[test]
+    fn a_push_with_a_value_past_php_int_max_declines() {
+        // `[PHP_INT_MAX - 1 => 1]` pushed with `2, 3` stores `2` at `PHP_INT_MAX`,
+        // then throws "Cannot add element to the array as the next element is
+        // already occupied" for `3` (8.5.10). So does any append to
+        // `[PHP_INT_MAX => 1]`. No key is named for a value PHP has none for.
+        let values = vec![Some(Fact::Singleton(i(2))), Some(Fact::Singleton(i(3)))];
+        let shape = lit(&[(Key::Int(i64::MAX - 1), i(1))]);
+        assert_eq!(array_push_written_fact(&shape, &values, None), None);
+        let full = lit(&[(Key::Int(i64::MAX), i(1))]);
+        assert_eq!(array_push_written_fact(&full, &values[..1], None), None);
+        // The floor still records the write.
+        let floored =
+            array_out_rule("array_push").expect("a rule").written_fact(Some(&shape), &values, None);
+        assert_eq!(floored, shape_fact(ShapeFact::plain_array().set_non_empty()));
     }
 
     #[test]
