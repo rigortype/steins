@@ -25,6 +25,7 @@ use crate::builtin_returns::{
     ResourceEffects, apply_resource_effects, escape_mentioned_resources, resource_call_effects,
 };
 use crate::by_value::by_value_survivors;
+use crate::conjunct_writes::{cond_rebinds, mask_stale_conjuncts};
 use crate::cx::Cx;
 use crate::descent::{
     apply_call_escape_and_sweep, checkable_calls, return_heap_object, return_value_fact,
@@ -648,6 +649,15 @@ pub(crate) fn walk_trace(
             // ruling: `assert($expr)` reads as `if (!$expr) throw`, unconditionally,
             // at `Verified` stratum; `zend.assertions` is never consulted).
             StmtKind::Assert { cond } => {
+                // With its stale conjuncts masked, as a branch applies it, over an
+                // env that has forgotten what the condition rebinds — the statement
+                // carries no invalidation set of its own (#654).
+                for v in cond_rebinds(w.cx, cond) {
+                    env.remove(&v);
+                    store.unbind(&v);
+                }
+                let masked = mask_stale_conjuncts(w.cx, cond);
+                let cond = masked.as_ref();
                 apply_type_narrowing(w.cx, cond, true, env, store);
                 let refs = then_refinements(cond);
                 apply_refinements(&refs, env, store, Stratum::Verified);

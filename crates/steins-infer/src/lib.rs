@@ -31,6 +31,7 @@ mod builtin_returns;
 mod coerce;
 mod compare;
 mod cond;
+mod conjunct_writes;
 mod contract;
 mod cx;
 pub mod dam;

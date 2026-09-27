@@ -253,6 +253,39 @@ pub(crate) fn arg_is_by_value(cx: &Cx<'_>, callee: &NameRef, position: u32) -> b
     }
 }
 
+/// Whether one argument position of a callee is **declared by reference**
+/// (issue #654) — a write the call makes into the caller's binding.
+///
+/// Not the negation of [`arg_is_by_value`]: both answer `false` for what they
+/// cannot see, an unresolved or ambiguous name and a method alike. A builtin
+/// is asked of both catalog witnesses, the hand-kept out-parameter rows and
+/// the mined arginfo table, because a by-reference name without a row
+/// (`settype`, `exec`) is certified by the second alone; a variadic reference
+/// parameter (`sscanf`'s `&...$vars`) covers every position from its own on.
+pub(crate) fn arg_is_by_ref(cx: &Cx<'_>, callee: &NameRef, position: u32) -> bool {
+    let position = position as usize;
+    let catalog_knows = |n: &str| {
+        steins_catalog::param_facts_mined(n) || steins_catalog::by_value_arg(n, 0).is_some()
+    };
+    match cx.resolve_function_with(callee, &catalog_knows) {
+        FnResolution::Builtin(name) => {
+            steins_catalog::by_value_arg(&name, position) == Some(false)
+                || steins_catalog::param_facts(&name).is_some_and(|f| {
+                    f.by_ref.contains(&position)
+                        || f.variadic.iter().any(|v| *v <= position && f.by_ref.contains(v))
+                })
+        }
+        FnResolution::User(fn_site) => {
+            let params = &cx.fn_decl(fn_site).params;
+            match params.get(position) {
+                Some(p) => p.by_ref,
+                None => params.last().is_some_and(|p| p.variadic && p.by_ref),
+            }
+        }
+        FnResolution::Unknown => false,
+    }
+}
+
 /// The trust stratum a resolved value carries (ADR-0052 §5 derivation clause): the
 /// minimum over every env/heap fact consumed while resolving `value`. A literal or
 /// fully-literal subtree is `Verified`; a bare `$var` takes its env stratum; a

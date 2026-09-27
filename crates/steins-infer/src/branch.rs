@@ -16,6 +16,7 @@ use crate::asserts::{
     guard_assert_kept_lanes,
 };
 use crate::cond::{eval_cmp, eval_cond, operand_values};
+use crate::conjunct_writes::mask_stale_conjuncts;
 use crate::contract::ProjectIsa;
 use crate::descent::escape_and_sweep_calls;
 use crate::env::{ContractArm, Descent, Known, Store, Stratum, join_envs, val_of};
@@ -186,6 +187,10 @@ pub(crate) fn walk_if(
 /// because it is the only one that can mint a fact over an unfacted binding, which
 /// the scalar refinements must then see — `is_string($v) && $v !== ''` narrows to
 /// `non-empty-string` only in this order.
+///
+/// What is applied is the condition with its stale conjuncts masked (issue
+/// #654): `$x === null && ($x = fetch()) !== null` enters its branch with the
+/// `$x` `fetch()` returned, which no refinement of the left conjunct describes.
 pub(crate) fn apply_cond_side(
     w: &WalkCx,
     folder: &mut dyn Folder,
@@ -194,6 +199,8 @@ pub(crate) fn apply_cond_side(
     env: &mut HashMap<String, Known>,
     store: &mut Store,
 ) {
+    let masked = mask_stale_conjuncts(w.cx, cond);
+    let cond = masked.as_ref();
     apply_type_narrowing(w.cx, cond, then, env, store);
     let refs = if then {
         then_refinements(cond)
