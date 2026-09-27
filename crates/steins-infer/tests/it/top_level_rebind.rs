@@ -160,6 +160,23 @@ fn a_constructor_that_globals_forgets_the_frame() {
 }
 
 #[test]
+fn a_project_subclass_of_an_engine_class_forgets_the_frame() {
+    let prelude = "final class E extends Exception {\n\
+                   public function __construct() { global $s; $s = 5; parent::__construct(); }\n}\n";
+    silent_after(prelude, "$e = new E();");
+}
+
+#[test]
+fn an_engine_class_constructor_keeps_the_frame() {
+    // The engine's own constructor runs no userland; its arguments are still read.
+    convicts_after("", "$d = new DateTimeImmutable('2020-01-01');");
+    convicts_after("", "$o = new stdClass();");
+    convicts_after("", "$e = new \\Exception('x');");
+    let bump2 = "function bump2(): string { global $s; $s = 5; return 'x'; }\n";
+    silent_after(bump2, "$e = new Exception(bump2());");
+}
+
+#[test]
 fn a_call_nested_in_a_builtin_argument_forgets_the_frame() {
     let prelude = "function bump2(): string { global $s; $s = 5; return 'x'; }\n";
     silent_after(prelude, "$n = strlen(bump2());");

@@ -19,7 +19,7 @@ use crate::ast::{
 };
 use crate::lower_expr::{
     append_base, assert_stmt_cond, const_key_offset, const_key_offset_path, destructure_reads,
-    lower_arg_value,
+    instantiation_class, lower_arg_value,
     lower_array_key, lower_call, lower_cond, lower_cond_operand, lower_construct_call,
     lower_method_call, lower_opaque, lower_static_call, opaque_sets, prop_fetch_of,
 };
@@ -191,6 +191,7 @@ fn stmt_runs(s: &Statement<'_>, kind: &StmtKind) -> Runs {
     }
     if runs.other {
         runs.functions = Vec::new();
+        runs.constructs = Vec::new();
     }
     runs
 }
@@ -205,10 +206,15 @@ fn scan_runs(node: &Node<'_, '_>, out: &mut Runs) {
             Expression::Identifier(id) => out.functions.push(run_call(id, &fc.argument_list)),
             _ => out.other = true,
         },
+        // A named class is recorded and its arguments scanned on; any other
+        // `new` decides the record, as an anonymous class's constructor does.
+        Node::Instantiation(inst) => match instantiation_class(inst) {
+            Some(class) => out.constructs.push(class),
+            None => out.other = true,
+        },
         Node::MethodCall(_)
         | Node::NullSafeMethodCall(_)
         | Node::StaticMethodCall(_)
-        | Node::Instantiation(_)
         | Node::Pipe(_)
         | Node::EvalConstruct(_)
         | Node::IncludeConstruct(_)

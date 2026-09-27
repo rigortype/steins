@@ -6,7 +6,7 @@
 //! walk applies on its answer.
 
 use steins_catalog::CarrierShape;
-use steins_syntax::{RunArg, RunCall, Runs};
+use steins_syntax::{NameRef, RunArg, RunCall, Runs};
 
 use crate::by_value::{is_assert_read_site, is_dump_read_site};
 use crate::cx::Cx;
@@ -35,9 +35,10 @@ use crate::fold::Folder;
 /// already. So this answers `false` in every other frame.
 ///
 /// In the top-level frame it answers `true` when the evaluation runs anything a
-/// function name cannot describe ([`Runs::other`]: a method, static or
-/// constructor call, a call through a value, a pipe, `include`/`require`/
-/// `eval`), or any named call [`call_may_run_userland`] cannot clear.
+/// name cannot describe ([`Runs::other`]: a method or static call, a `new` of
+/// no named class, a call through a value, a pipe, `include`/`require`/
+/// `eval`), a named call [`call_may_run_userland`] cannot clear, or a `new` of
+/// a class that is not an engine class ([`constructs_engine_class`]).
 /// Forgetting is strictly weaker than any fact it drops: it removes a proof and
 /// never adds one.
 ///
@@ -53,7 +54,27 @@ use crate::fold::Folder;
 /// [`Stmt::invalidated`]: steins_syntax::Stmt::invalidated
 pub(crate) fn top_level_rebind_risk(cx: &Cx, folder: &mut dyn Folder, runs: &Runs) -> bool {
     crate::walk::frame_is_top_level()
-        && (runs.other || runs.functions.iter().any(|call| call_may_run_userland(cx, folder, call)))
+        && (runs.other
+            || runs.functions.iter().any(|call| call_may_run_userland(cx, folder, call))
+            || runs.constructs.iter().any(|class| !constructs_engine_class(cx, folder, class)))
+}
+
+/// Whether `new` of the class `r` names builds an **engine class**, whose
+/// constructor is the engine's own: the name resolves (namespace and imports
+/// applied, no global fallback for a class) to no project class, and the mined
+/// class hierarchy or the live engine knows it. `new \DateTimeImmutable()`,
+/// `new \stdClass` and `new \Exception('…')` are let through; a project
+/// class, a project subclass of an engine class and an unknown name are not.
+///
+/// An engine constructor that reaches userland through an argument —
+/// `IteratorIterator` asking an `IteratorAggregate` for its iterator — is the
+/// calibration [`top_level_rebind_risk`] names, not a callee this reads.
+fn constructs_engine_class(cx: &Cx, folder: &mut dyn Folder, r: &NameRef) -> bool {
+    let fqn = cx.class_fqn(r);
+    let key = fqn.trim_start_matches('\\').to_ascii_lowercase();
+    cx.class_absent(&key)
+        && (steins_catalog::builtin_class_supers(&key).is_some()
+            || folder.boot_surface_class_like(&key) == Some(true))
 }
 
 /// Whether one statically named call may run a userland body.
