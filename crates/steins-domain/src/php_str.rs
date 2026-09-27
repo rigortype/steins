@@ -223,8 +223,9 @@ impl PartialEq<&str> for PhpStr {
 // (`steins_db::wire`, issue #504) cannot answer that question, because not
 // answering it is where its saving comes from, and under that codec a string
 // and a byte sequence are the same bytes anyway: one arm costs nothing over
-// two. A cache format (no external consumer): the artifact schema version
-// governs its evolution.
+// two. A cache format (no external consumer), and one that travels only in
+// payloads decoded past the analyzer gate: a change to it moves the analyzer
+// fingerprint, which refuses every stored copy, so it needs no schema bump.
 #[cfg(feature = "persist")]
 impl serde::Serialize for PhpStr {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {

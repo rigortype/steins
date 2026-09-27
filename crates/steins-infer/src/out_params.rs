@@ -124,7 +124,8 @@ pub(crate) fn seed_out_params(
 /// there can tell the global `array_shift` from a namespaced function of the
 /// same name, and [`global_function_callee`]'s whole job is to refuse that
 /// confusion. Reaching it needs a `NameRef` in `ArgValue::Call`, which is an IR
-/// change and a `SCHEMA_VERSION` bump — deliberately out of this slice.
+/// change (the analyzer fingerprint refuses the old traces, so no schema bump)
+/// — deliberately out of this slice.
 ///
 /// **Reading and binding are two halves on purpose.** The input a cast consumes
 /// is what the variable held *before* the call, and by the time the walk reaches

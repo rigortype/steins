@@ -43,10 +43,14 @@
 //! An enum travels by index, so **reordering a variant is a format change** —
 //! as is reordering a struct's fields, or changing a field's type. None of that
 //! is a hazard here and all of it would be under an interchange format: the
-//! artifacts are a cache with a schema version and no migration path (ADR-0092
-//! §2), so an artifact written by another schema is refused by
-//! [`steins_gen::SCHEMA_VERSION`] before a byte of payload is read, and the
-//! remedy for every disagreement is one rebuild.
+//! artifacts are a cache with no migration path (ADR-0092 §2), and a payload
+//! written by another format is refused before a byte of it is decoded. What
+//! refuses it depends on when it is read. The `symbols` shard and the
+//! `summaries` rows are decoded before the analyzer gate, so a change to their
+//! types is a [`steins_gen::SCHEMA_VERSION`] bump; the trace and facts
+//! payloads are decoded only past it, so a change to theirs moves the analyzer
+//! fingerprint and needs no bump. Either way the remedy for every disagreement
+//! is one rebuild.
 //!
 //! # Strictness
 //!
