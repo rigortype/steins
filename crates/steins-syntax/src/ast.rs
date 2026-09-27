@@ -310,13 +310,80 @@ pub enum StateConstruct {
     PropertyWrite,
 }
 
-// `Deserialize` is hand-written (`crate::persist`), not derived: serde's
-// derive implicitly borrows a `&str` field from the input, which a
-// `&'static str` keyword can never satisfy, and `serde(with)` does not lift
-// the implicit borrow. The derived `Serialize` and the hand-written inverse
-// share one wire shape, pinned by the round-trip tests in `steins-db`.
+/// Which output construct an [`EffectOrigin::Output`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
+pub enum OutputKeyword {
+    /// `echo`, and the short echo tag `<?=`.
+    Echo,
+    /// `print`.
+    Print,
+    /// Non-blank inline HTML between `?>` and `<?php`.
+    InlineHtml,
+}
+
+impl OutputKeyword {
+    /// The construct as findings and diagnostics spell it.
+    #[must_use]
+    pub const fn spelling(self) -> &'static str {
+        match self {
+            Self::Echo => "echo",
+            Self::Print => "print",
+            Self::InlineHtml => "inline HTML",
+        }
+    }
+}
+
+/// Which exit construct an [`EffectOrigin::Exit`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
+pub enum ExitKeyword {
+    /// `exit`.
+    Exit,
+    /// `die`.
+    Die,
+}
+
+impl ExitKeyword {
+    /// The construct as findings and diagnostics spell it.
+    #[must_use]
+    pub const fn spelling(self) -> &'static str {
+        match self {
+            Self::Exit => "exit",
+            Self::Die => "die",
+        }
+    }
+}
+
+/// Which file-inclusion construct an [`EffectOrigin::Include`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
+pub enum IncludeKeyword {
+    /// `include`.
+    Include,
+    /// `include_once`.
+    IncludeOnce,
+    /// `require`.
+    Require,
+    /// `require_once`.
+    RequireOnce,
+}
+
+impl IncludeKeyword {
+    /// The construct as findings and diagnostics spell it.
+    #[must_use]
+    pub const fn spelling(self) -> &'static str {
+        match self {
+            Self::Include => "include",
+            Self::IncludeOnce => "include_once",
+            Self::Require => "require",
+            Self::RequireOnce => "require_once",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "persist", derive(serde::Serialize))]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub enum EffectOrigin {
     /// A call to a statically-named function at `span`. `name` resolves
     /// project-wide (builtin/user function/ambiguous → taints exhaustiveness);
@@ -326,18 +393,11 @@ pub enum EffectOrigin {
     Call { name: NameRef, span: Span, arg_targets: Option<Vec<RefTarget>>, const_args: ConstArgs },
     /// An `echo`/`print`/short-echo, or non-blank inline HTML between `?>` and
     /// `<?php`, at `span` — `io.output.buffer` effect (ADR-0083, OB-capturable).
-    Output {
-        #[cfg_attr(feature = "persist", serde(serialize_with = "crate::persist::keyword::serialize"))]
-        keyword: &'static str,
-        span: Span,
-    },
+    Output { keyword: OutputKeyword, span: Span },
     /// An `exit` / `die` construct at `span` — the `exit` effect (ADR-0019 rule
-    /// 4: `Pure` forbids exit). `keyword` is the spelling for diagnostics.
-    Exit {
-        #[cfg_attr(feature = "persist", serde(serialize_with = "crate::persist::keyword::serialize"))]
-        keyword: &'static str,
-        span: Span,
-    },
+    /// 4: `Pure` forbids exit). `keyword` says which, and spells it for
+    /// diagnostics.
+    Exit { keyword: ExitKeyword, span: Span },
     /// A method/static call whose *receiver* resolves without a flow env
     /// (`$this->`, `self::`, `parent::`, `Foo::`, `new Foo()->`) — propagates
     /// `#[\Steins\Pure]` edges, and a *declared* receiver (ADR-0067) carries an
@@ -371,13 +431,9 @@ pub enum EffectOrigin {
     /// An `include`/`include_once`/`require`/`require_once` at `span` — a
     /// proven `io.fs.read` whatever the file holds (ADR-0046 amendment), and
     /// non-exhaustive for the same reason as [`Self::Eval`]: the included
-    /// file's top-level code runs in this frame, unseen. `keyword` is the
-    /// spelling for diagnostics.
-    Include {
-        #[cfg_attr(feature = "persist", serde(serialize_with = "crate::persist::keyword::serialize"))]
-        keyword: &'static str,
-        span: Span,
-    },
+    /// file's top-level code runs in this frame, unseen. `keyword` says
+    /// which, and spells it for diagnostics.
+    Include { keyword: IncludeKeyword, span: Span },
     /// A structural state construct at `span` ([`StateConstruct`]): the
     /// ADR-0055 origins whose labels (`global.*`, `mutate.*`) are not inferred
     /// yet. Until they are, one marks the body **non-exhaustive** exactly as

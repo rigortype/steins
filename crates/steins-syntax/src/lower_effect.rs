@@ -13,8 +13,9 @@ use mago_syntax::cst::{
 };
 
 use crate::ast::{
-    CallExpr, CallTarget, CallbackRef, CatchClause, ConstArgs, EffectOrigin, NameRef, RefKind,
-    RefTarget, SUPERGLOBALS, StateConstruct, ThrowKind, ThrowOrigin,
+    CallExpr, CallTarget, CallbackRef, CatchClause, ConstArgs, EffectOrigin, ExitKeyword,
+    IncludeKeyword, NameRef, OutputKeyword, RefKind, RefTarget, SUPERGLOBALS, StateConstruct,
+    ThrowKind, ThrowOrigin,
 };
 use crate::lower_decl::lower_catch_clause;
 use crate::lower_expr::{
@@ -592,12 +593,17 @@ pub(crate) fn scan_effect_origins(node: &Node<'_, '_>, cx: &EffectScanCx, out: &
             }
         }
         // Output-stream writes.
-        Node::Echo(e) => out.push(EffectOrigin::Output { keyword: "echo", span: to_span(e.span()) }),
+        Node::Echo(e) => {
+            let keyword = OutputKeyword::Echo;
+            out.push(EffectOrigin::Output { keyword, span: to_span(e.span()) });
+        }
         Node::EchoTag(e) => {
-            out.push(EffectOrigin::Output { keyword: "echo", span: to_span(e.span()) });
+            let keyword = OutputKeyword::Echo;
+            out.push(EffectOrigin::Output { keyword, span: to_span(e.span()) });
         }
         Node::PrintConstruct(p) => {
-            out.push(EffectOrigin::Output { keyword: "print", span: to_span(p.span()) });
+            let keyword = OutputKeyword::Print;
+            out.push(EffectOrigin::Output { keyword, span: to_span(p.span()) });
         }
         // Raw text between `?>` and the next `<?php` inside a body: the engine writes
         // it to the output channel exactly as `echo` does (ADR-0008 always said so;
@@ -606,31 +612,36 @@ pub(crate) fn scan_effect_origins(node: &Node<'_, '_>, cx: &EffectScanCx, out: &
         // and coloring it would tie the effect to template indentation.
         Node::Inline(i) => {
             if i.kind.is_text() && !i.value.iter().all(u8::is_ascii_whitespace) {
-                out.push(EffectOrigin::Output { keyword: "inline HTML", span: to_span(i.span()) });
+                let keyword = OutputKeyword::InlineHtml;
+                out.push(EffectOrigin::Output { keyword, span: to_span(i.span()) });
             }
         }
         // Non-local program exit.
         Node::ExitConstruct(x) => {
-            out.push(EffectOrigin::Exit { keyword: "exit", span: to_span(x.span()) });
+            out.push(EffectOrigin::Exit { keyword: ExitKeyword::Exit, span: to_span(x.span()) });
         }
         Node::DieConstruct(d) => {
-            out.push(EffectOrigin::Exit { keyword: "die", span: to_span(d.span()) });
+            out.push(EffectOrigin::Exit { keyword: ExitKeyword::Die, span: to_span(d.span()) });
         }
         // Dynamic code (ADR-0046 amendment): `eval` is its own label, a file
         // inclusion reads a file. Both run code this scan never sees. The
         // operand is still walked below — `eval(f())` calls `f`.
         Node::EvalConstruct(ec) => out.push(EffectOrigin::Eval { span: to_span(ec.span()) }),
         Node::IncludeConstruct(ic) => {
-            out.push(EffectOrigin::Include { keyword: "include", span: to_span(ic.span()) });
+            let keyword = IncludeKeyword::Include;
+            out.push(EffectOrigin::Include { keyword, span: to_span(ic.span()) });
         }
         Node::IncludeOnceConstruct(ic) => {
-            out.push(EffectOrigin::Include { keyword: "include_once", span: to_span(ic.span()) });
+            let keyword = IncludeKeyword::IncludeOnce;
+            out.push(EffectOrigin::Include { keyword, span: to_span(ic.span()) });
         }
         Node::RequireConstruct(rq) => {
-            out.push(EffectOrigin::Include { keyword: "require", span: to_span(rq.span()) });
+            let keyword = IncludeKeyword::Require;
+            out.push(EffectOrigin::Include { keyword, span: to_span(rq.span()) });
         }
         Node::RequireOnceConstruct(rq) => {
-            out.push(EffectOrigin::Include { keyword: "require_once", span: to_span(rq.span()) });
+            let keyword = IncludeKeyword::RequireOnce;
+            out.push(EffectOrigin::Include { keyword, span: to_span(rq.span()) });
         }
         // Instance / static method calls with a statically-resolvable receiver
         // become effect edges (`$this->`, `self::`, `parent::`, `Foo::`,

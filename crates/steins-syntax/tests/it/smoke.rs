@@ -316,7 +316,7 @@ fn scans_effect_origins_across_control_flow() {
     for o in &f.effect_origins {
         match o {
             EffectOrigin::Output { keyword, .. } => {
-                assert_eq!(*keyword, "echo");
+                assert_eq!(keyword.spelling(), "echo");
                 echo += 1;
             }
             EffectOrigin::Call { name, .. } => calls.push(name.simple().to_owned()),
@@ -332,10 +332,15 @@ fn scans_effect_origins_across_control_flow() {
 fn scans_exit_and_die() {
     let src = "<?php function f(): void { exit(); }\nfunction g(): void { die(1); }";
     let tree = SourceTree::parse(src);
-    let f = tree.functions().iter().find(|x| x.name == "f").unwrap();
-    assert!(matches!(f.effect_origins.first(), Some(EffectOrigin::Exit { keyword: "exit", .. })));
-    let g = tree.functions().iter().find(|x| x.name == "g").unwrap();
-    assert!(matches!(g.effect_origins.first(), Some(EffectOrigin::Exit { keyword: "die", .. })));
+    let exit_spelling = |name: &str| {
+        let func = tree.functions().iter().find(|x| x.name == name).unwrap();
+        match func.effect_origins.first() {
+            Some(EffectOrigin::Exit { keyword, .. }) => Some(keyword.spelling()),
+            _ => None,
+        }
+    };
+    assert_eq!(exit_spelling("f"), Some("exit"));
+    assert_eq!(exit_spelling("g"), Some("die"));
 }
 
 /// ADR-0046 amendment: `eval` and the four inclusion constructs are effect
@@ -361,7 +366,7 @@ fn scans_eval_and_the_four_inclusions() {
         .effect_origins
         .iter()
         .filter_map(|o| match o {
-            EffectOrigin::Include { keyword, .. } => Some(*keyword),
+            EffectOrigin::Include { keyword, .. } => Some(keyword.spelling()),
             _ => None,
         })
         .collect();
