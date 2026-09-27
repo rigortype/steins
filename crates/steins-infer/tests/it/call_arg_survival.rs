@@ -346,6 +346,33 @@ fn a_by_name_exemption_charges_the_call_nested_in_its_argument() {
     assert_eq!(wrap("is_string($s)"), "dumped type: 'abc'");
 }
 
+/// A ternary argument is read, not refused (issue #704's follow-up): its
+/// condition charges only what it may write or hand onward, so a needle spelled
+/// `rand() ? 5 : 6` leaves the haystack beside it alone, strict or loose. The
+/// control assigns the haystack in an arm, and that still forgets it.
+#[test]
+fn a_ternary_argument_charges_only_what_it_can_write() {
+    let wrap = |guard: &str| {
+        one_type(&format!(
+            "<?php\n/** @param array<int> $haystack */\n\
+             function g(array $haystack, bool $c): void {{\n\
+             if (! {guard}) {{ \\PHPStan\\dumpType($haystack); }} }}\n"
+        ))
+    };
+    let kept = wrap("in_array(rand() ? 5 : 6, $haystack, true)");
+    assert_eq!(kept, "dumped type: array<int> (asserted)");
+    assert_eq!(wrap("in_array(rand() ? 5 : 6, $haystack)"), kept);
+    assert_eq!(
+        wrap("in_array($c ? ($haystack = []) : 1, $haystack, true)"),
+        "dumped type: unknown"
+    );
+    // A by-reference call in the condition is charged with what it is handed.
+    let by_ref = "<?php\nfunction f(string &$s): bool { $s = ''; return true; }\n\
+                  function g(): void { $s = 'abc';\n\
+                  if (is_string(f($s) ? 'a' : 'b')) { \\PHPStan\\dumpType($s); } }\n";
+    assert_eq!(one_type(by_ref), "dumped type: unknown");
+}
+
 /// What the charge reaches is what the nested call is handed, and nothing else
 /// (issue #704): a method's receiver cannot be rebound by the call, and a name
 /// the nested call is never handed cannot be written by it.
