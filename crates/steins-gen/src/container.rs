@@ -22,35 +22,57 @@ use std::path::Path;
 
 use crate::names::{PackageName, SectionName};
 
-/// The artifact schema version. Covers everything this crate writes — the
-/// container layout, the manifest, `CURRENT` — and participates in the
-/// generation fingerprint, so bumping it obsoletes every stored generation at
-/// once. A mismatch is a miss; there is no migration path by design
-/// (ADR-0092 §2).
-///
-/// It also covers what the payload owners write *inside* a section, because a
-/// stored generation is only useful if every reader agrees with every writer.
+/// The artifact schema version. It participates in the generation
+/// fingerprint, so bumping it obsoletes every stored generation at once. A
+/// mismatch is a miss; there is no migration path by design (ADR-0092 §2).
 /// Bumping it is the whole migration — an artifact of the previous schema
 /// becomes an ordinary [`Miss`] and one rebuild.
 ///
-/// Bump it whenever this binary would read a stored payload otherwise than it
-/// was written. The history knows four kinds, and one bump is often several:
+/// Bump it when a format changes that is read **before the analyzer gate, or
+/// across analyzer versions**. The gate is `load_trees` in `steins-infer`,
+/// which refuses a package whose `sources` record names another analyzer
+/// version before any of that package's trace or facts payload is decoded.
+/// So a bump covers:
 ///
-/// - **layout**: the payload codec, or where a section's bytes live, changed;
+/// - this crate's framing: the container header and directory, the manifest,
+///   `CURRENT`, and how artifacts and the sidecar are named;
+/// - the `sources` record, the gate's own input;
+/// - the `symbols` shard layout, the `summaries` layout and the JSON of the
+///   per-file payload directories, each decoded before the gate or before its
+///   own licence check: a bump keeps every such decoder meeting an old file as
+///   a miss, not a misdecode;
+/// - the fold table: its identity, its row format, the `request_key` spelling
+///   and the `parse_*_result` readers. It is the one cross-version read whose
+///   content reaches findings, and neither the analyzer gate nor the runner
+///   hash covers it. A new axis in its identity, as `strict_keyed` was, is the
+///   other way to refuse old rows.
+///
+/// The trace, facts and contracts payloads need no bump. They are decoded, if
+/// at all, only past the gate, and a change to what writes or reads them moves
+/// the analyzer fingerprint, which refuses every stored one first; this rule
+/// is exactly as sound as that fingerprint.
+///
+/// The history knows four kinds, and one bump is often several:
+///
+/// - **layout**: a codec, or where a section's bytes live, changed — any
+///   format above;
 /// - **misdecode**: the wire codec carries an enum variant by index and a
 ///   struct's fields by position, so a variant inserted ahead of another, or a
-///   field added, makes an old payload decode as something never written;
-/// - **under-answer**: the old payload decodes, but spells the source more
-///   weakly than this binary lowers it, so a replay answers `unknown` or wider
-///   where this binary decides;
-/// - **meaning**: the old payload decodes, but records a verdict this binary no
-///   longer draws, so a replay answers something wrong.
+///   field added, makes old bytes decode as something never written — the
+///   wire-coded formats above, the `symbols` shard and the `summaries` rows;
+/// - **under-answer**: old bytes decode, but say less than this binary would,
+///   so a replay answers `unknown` or wider where this binary decides;
+/// - **meaning**: old bytes decode, but say something this binary no longer
+///   means, so a replay answers something wrong.
 ///
-/// None of them is optional: ADR-0092 §2 forbids a miss that changes meaning,
-/// and the bump is what makes an old artifact miss rather than serve an answer
-/// a cold run would not give. The history — one row per bump, with its issue,
-/// its kind and the reasoning it landed with — is
-/// `docs/internal-spec/generation-schema.md`.
+/// The last two now arise only in the fold table: the shard and the
+/// directories reach no finding across analyzer versions, and a `summaries`
+/// row replays only under a stamp that names the analyzer. Within what the
+/// number covers, no bump is optional: ADR-0092 §2 forbids a miss that changes
+/// meaning, and the bump is what makes an old artifact miss rather than serve
+/// an answer a cold run would not give. The history — one row per bump, with
+/// its issue, its kind and the reasoning it landed with, and the note that
+/// narrowed this rule (#828) — is `docs/internal-spec/generation-schema.md`.
 pub const SCHEMA_VERSION: u32 = 22;
 
 const MAGIC: [u8; 8] = *b"steinsgn";
