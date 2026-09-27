@@ -2090,3 +2090,48 @@ floor's stratum normalization, the cap's decline, the four seams and the
 interpolation lowering), `crates/steins-infer/tests/it/concat.rs` (the refusals,
 pinned in the literal lane and asserting the widened fact beside it), and the
 `SCHEMA_VERSION` round-trip in `crates/steins-db/src/persist.rs`.
+
+## Note (2026-09-27): §6's distribution stops at a later conjunct's write (issue #654) — PENDING ratification
+
+§6 says refinement collection "is already polarity-correct and needs no change".
+It is polarity-correct and not sequence-correct: `&&` distributes on the true
+side as if every conjunct tested the same env, and PHP evaluates them left to
+right. When a later conjunct rebinds a name an earlier one narrowed —
+`$x === null && ($x = fetch()) !== null` — the branch sees the written value,
+and the earlier refinement describes one that is gone. The walk forgot `$x`
+before the branch, as §6's obligation asks, and the refinement then re-minted it
+as `null`; `call.on-null` reported on a path PHP enters only with a `Node`.
+
+The rule: **a conjunct whose names a later conjunct may rebind contributes
+nothing to the branch.** `a && b` on its true side and `a || b` on its false
+side are the two where it bites; the mask is applied on every side, since the
+other two distribute nothing. It is applied once, to the condition every branch
+applies (`apply_cond_side`: both sides of an `if`, a loop body's entry, a
+break-free loop's exit) and to `assert()`'s fall-through, rather than in any one
+consumer — the loop entry never runs the `if`'s invalidation step, so a fix
+there would have missed it.
+What the collectors do with an unmasked condition is unchanged, the DR2 type
+vocabulary running first included.
+
+"May rebind" is two sources, both named rather than inferred from a read set:
+
+- **a syntactic write** — an assignment or an increment anywhere in the
+  conjunct, a nested call argument included. The lowering records these as a
+  `writes` field beside the read sets (`CondOperand::Other`, `CondExpr::Call`,
+  `CondExpr::Opaque`), because a read set cannot say which of its names a write
+  reached;
+- **a reference parameter** — a variable handed to a position a resolved
+  function declares `&`, from the project declaration or from either catalog
+  witness (the out-parameter rows, and the mined arginfo table for a name like
+  `settype` that has no row).
+
+A call the walk cannot resolve — a method, a dynamic call, an ambiguous name —
+rebinds nothing under this rule. That keeps the forget-and-re-derive answer the
+guard walk always gave (`$x instanceof Node && $this->check($x)` still enters
+with a `Node`), and it is a known residual, not a claim that such calls write
+nothing.
+
+The same set answers two neighbours. The declared-arm lane a guard call's
+`@phpstan-assert-*` tag lifts over the invalidation is not put back over a
+rebound name, and `assert()`, whose statement lowers with no invalidation set,
+forgets a rebound name before it narrows.

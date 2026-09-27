@@ -13,6 +13,7 @@ use steins_syntax::{
 };
 
 use crate::by_value::by_value_survivors;
+use crate::conjunct_writes::cond_rebinds;
 use crate::contract::{AssertSpec, ProjectIsa};
 use crate::cx::Cx;
 use crate::dispatch::resolve_call_target;
@@ -248,6 +249,9 @@ pub(crate) fn guard_assert_kept_lanes(
         return kept;
     }
     let invalidated = cond_invalidations(w.cx, cond, env, store, w.scope.poisoned);
+    // A name the condition rebinds anywhere holds the written value past it, and
+    // the lane describes the one before (issue #654): `isB($x) && ($x = $y)`.
+    let rebound = cond_rebinds(w.cx, cond);
     for call in guard_calls {
         if !call.positional_only {
             continue;
@@ -273,7 +277,7 @@ pub(crate) fn guard_assert_kept_lanes(
                 // Nothing is dropping this lane — no rescue needed.
                 continue;
             }
-            if occurs_elsewhere_in_calls(guard_calls, pos, v) {
+            if occurs_elsewhere_in_calls(guard_calls, pos, v) || rebound.contains(v) {
                 continue;
             }
             let Some(arms) = store.contract.get(v) else { continue };
