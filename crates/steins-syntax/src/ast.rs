@@ -387,6 +387,71 @@ pub enum EffectOrigin {
     State { construct: StateConstruct, span: Span },
 }
 
+/// [`EffectOriginKind`], and the methods that map an [`EffectOrigin`] onto it,
+/// generated from one list of the variant names, as `refused_rows!` generates
+/// the catalog's list and lookup from one table. A variant added to the enum
+/// and not to the list fails to compile, since `kind()`'s match is exhaustive,
+/// so [`EffectOriginKind::ALL`] cannot leave one out; the steins-db persistence
+/// tests pin the list's order to the order serde numbers the variants by.
+macro_rules! effect_origin_kinds {
+    ($($variant:ident),+ $(,)?) => {
+        impl EffectOrigin {
+            /// Which variant this origin is, fields dropped.
+            #[must_use]
+            pub const fn kind(&self) -> EffectOriginKind {
+                match self {
+                    $(Self::$variant { .. } => EffectOriginKind::$variant,)+
+                }
+            }
+
+            /// The source span of the construct this origin records, whatever
+            /// its shape.
+            #[must_use]
+            pub const fn span(&self) -> Span {
+                match self {
+                    $(Self::$variant { span, .. } => *span,)+
+                }
+            }
+        }
+
+        /// An [`EffectOrigin`]'s variant with its fields dropped
+        /// ([`EffectOrigin::kind`]): what a test names an origin by without
+        /// building one.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        pub enum EffectOriginKind {
+            $(#[doc = concat!("[`EffectOrigin::", stringify!($variant), "`].")] $variant,)+
+        }
+
+        impl EffectOriginKind {
+            /// Every kind, in [`EffectOrigin`]'s variant order, which is the
+            /// order the payload codec numbers its variants by.
+            pub const ALL: [Self; [$(stringify!($variant)),+].len()] = [$(Self::$variant),+];
+
+            /// The variant's name as [`EffectOrigin`] spells it (`"HigherOrder"`).
+            #[must_use]
+            pub const fn name(self) -> &'static str {
+                match self {
+                    $(Self::$variant => stringify!($variant),)+
+                }
+            }
+        }
+    };
+}
+
+// Every `EffectOrigin` variant, in declaration order.
+effect_origin_kinds!(
+    Call,
+    Output,
+    Exit,
+    MethodCall,
+    Opaque,
+    HigherOrder,
+    Callback,
+    Eval,
+    Include,
+    State,
+);
+
 /// One call argument in the form a **structural** scan can prove constant
 /// (issue #318). Anything requiring dataflow (variable, concatenation,
 /// interpolation, class constant, array element) is simply absent from
