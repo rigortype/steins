@@ -29,6 +29,11 @@ use crate::RuntimePostures;
 /// sources rather than the git revision, and what the choice costs. A released
 /// binary has fixed sources and keeps a stable identity across rebuilds.
 pub(super) fn analyzer_version() -> &'static str {
+    // Where a test publishes as another build (issue #828).
+    #[cfg(test)]
+    if let Some(foreign) = super::gate_order::foreign_analyzer() {
+        return foreign;
+    }
     concat!(env!("CARGO_PKG_VERSION"), "+", env!("STEINS_ANALYZER_FINGERPRINT"))
 }
 
