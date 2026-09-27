@@ -1228,3 +1228,42 @@ not asserted. The literal tests now assert one column, witnessed on
   witness.
 - ADR-0028 §3's principle that PHP owns array semantics on the wire; the
   fix is what makes the runner honour it on 8.1 and 8.2.
+
+## Amendment (2026-09-27): a phpdoc shape's positional item follows the literal (issue #832)
+
+Status: PENDING ratification (post-hoc-ratification mode, ADR-0077
+precedent). Source: owner decision on #832. #831 moved the phpdoc shape
+grammar onto A22's cursor and found that the grammar floored its
+auto-index at `0`, where A22's literal rule does not. Nothing had
+recorded that difference.
+
+### A23. A shape reads a positional item as the literal places it
+
+`array{-5: int, string}` declares the `string` at `-4`, the key
+`[-5 => 1, 'x']` gives `'x'` on every supported minor (A22). Before, the
+grammar started its auto-index at `0` and no negative key moved it, so
+the item sat at `0`. That is how PHPStan's `ConstantArrayTypeBuilder`
+reads a shape. The decision is that a shape denotes the literal it
+resembles: `shape_keys` and `spell_shape` walk `NextInt::new`,
+`NextInt::floored_at_zero` is gone, and the literal and the shape share
+one rule.
+
+- **Findings move both ways.** Under `@param array{-5: int, string}`,
+  `f([-5 => 1, 'x'])` is accepted and `f([-5 => 1, 0 => 'x'])` is
+  `phpdoc.param-mismatch`. The readings part only where a positional
+  item's largest preceding integer key is below `-1`.
+- **The spelling follows the reading back.** An unsealed field prints
+  keyless where `shape_keys` would read it back at its key, so
+  `array{-5: 1, -4: 2, ...}` prints as `array{-5: 1, 2, ...}`, and a `0`
+  key after `-5` keeps its key.
+- **No version enters.** A shape states a key layout, not how the array
+  was built, and A22's literal rule holds on every supported minor. The
+  8.3 boundary stays with the append index: an array begun as `[]` whose
+  append floored at `0` below 8.3 is never proven with that key, because
+  the append declines there and names no landing index.
+- **No next key past `PHP_INT_MAX`** is unchanged: a positional item
+  there names no key, and the shape lowers `Opaque`.
+
+The difference from PHPStan is registered as core entry 20 in
+`docs/type-specification/divergence-registry.md`, and
+`docs/type-specification/phpdoc-grammar.md` states the rule.

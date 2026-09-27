@@ -58,6 +58,36 @@ one, and the `template-type` resolution below, where a node nothing decides
 becomes one. Both lower `Opaque` — the same silence a template floor already
 gets.
 
+### Array shape keys
+
+A shape item's key is read as the same array literal would build it
+(`shape_keys`). An integer-like string or bareword key folds to an int key, so
+`array{'9': T}` declares key `9`, as `[9 => …]` does; a non-canonical spelling
+such as `'09'` stays a string.
+
+A **positional item takes the literal's next key**: one past the largest
+integer key before it, or `0` when there is none (ADR-0049 A22, A23).
+Negative keys count, so `array{-5: int, string}` declares the `string` at
+`-4`, where `[-5 => 1, 'x']` puts `'x'`, and `array{3: int, -5: bool, string}`
+declares it at `4`. The rule is the same on every supported PHP minor; a shape
+carries no version. Past a `PHP_INT_MAX` key there is **no next key** — PHP
+throws on `[9223372036854775807 => 1, 2]` — so a positional item there names no
+key and the whole shape lowers `Opaque`.
+
+Steins spells shapes under the same rule, so what it prints reads back to the
+same keys. An unsealed field prints keyless only where a positional item would
+take its key: `array{-5: int, -4: string, ...}` prints as
+`array{-5: int, string, ...}`, and a `0` key after `-5` keeps its key. A sealed
+shape prints keyless fields only when its keys are exactly `0..n-1`, in order
+and all required.
+
+PHPStan's `ConstantArrayTypeBuilder` starts its next index at `0` and no
+negative key moves it, so it reads `array{-5: int, string}` with the `string` at
+`0`. The two readings differ only for a shape with a positional item whose
+largest preceding integer key is below `-1`. That is an interop difference by
+decision (#832): a shape denotes the literal it resembles. See
+[divergence-registry.md](divergence-registry.md), core entry 20.
+
 ### `unset` — the possibly-undefined pseudo-type
 
 `unset` is **vocabulary**, not a class name (ADR-0087, issue #395). The parser
