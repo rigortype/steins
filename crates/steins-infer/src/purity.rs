@@ -562,7 +562,12 @@ fn propagate_effects(
         }
     }
 
+    // A duplicate FQN is listed once per declaration but owns one merged row; its
+    // first listing takes the set, and a later one must not overwrite it with the
+    // emptied remainder — that read a body calling `time()` as proven pure (#825).
+    let mut seen: HashSet<&Sym> = HashSet::with_capacity(syms.len());
     syms.iter()
+        .filter(|s| seen.insert(*s))
         .map(|s| {
             let f = findings.remove(s).unwrap_or_default();
             let dc = declared.remove(s).unwrap_or_default();
