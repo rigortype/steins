@@ -649,7 +649,7 @@ mod tests {
     use std::path::PathBuf;
 
     use steins_gen::{DecodeBudget, EnginePosture, GenerationInputs, Store};
-    use steins_syntax::{EffectOrigin, EffectOriginKind};
+    use steins_syntax::{ArgValue, EffectOrigin, EffectOriginKind, Stmt, StmtKind};
 
     use super::*;
     use crate::shard::{fallback_package_key, merge_shards};
@@ -690,14 +690,17 @@ mod tests {
     /// (contract inputs), namespaced declarations with `use` imports (the
     /// `ctx` leg), value-IR corners the codec exceptions exist for (a
     /// non-finite float literal, a non-UTF-8 string literal), effect-origin
-    /// keywords (`echo`, `exit`, `require_once`), trace-IR control flow (`if`/`foreach`/
-    /// closures), magic-member tags, alias edges, constants, property writes,
-    /// and state constructs (`static`, a superglobal).
+    /// keywords (`echo`, `exit`, `require_once`), the trace-IR constructs
+    /// [`TRACE_CONSTRUCTS`] names (casts, interpolation, offset writes, the
+    /// structured loops) beside `if` and closures, magic-member tags, alias
+    /// edges, constants, property writes, and state constructs (`static`, a
+    /// superglobal). A new trace-IR construct is one more line of PHP here, next
+    /// to its family, and one more row there.
     fn fixture() -> Vec<(&'static str, &'static str)> {
         vec![
             (
                 "src/app.php",
-                "<?php\nnamespace App;\nuse Lib\\A\\Widget;\n/** @param int $n @return string */\nfunction run(int $n): string {\n  $f = 1e999;\n  $g = 2.5;\n  $s = \"\\xC0\\xC1\";\n  $a = [1 => 'one', 'k' => $s];\n  if ($n === 1) { echo $s; } else { exit; }\n  foreach ($a as $k => $v) { $b[] = $v; }\n  $c = fn (int $x): int => $x + 1;\n  return dup((string) $n);\n}\nconst LIMIT = 3;\n$k->written = 1;\nclass_alias('lib\\\\a\\\\widget', 'app\\\\widget');\n",
+                "<?php\nnamespace App;\nuse Lib\\A\\Widget;\n/** @param int $n @return string */\nfunction run(int $n): string {\n  $f = 1e999;\n  $g = 2.5;\n  $s = \"\\xC0\\xC1\";\n  $i = (int) $g;\n  $t = \"x $s\";\n  $a = [1 => 'one', 'k' => $s];\n  $a[] = $t;\n  $a['k'] = $i;\n  unset($a['k']);\n  if ($n === 1) { echo $s; } else { exit; }\n  while ($n > 0) { $n--; }\n  for ($j = 0, $w = 'abc'; $j < $n; $j++) { $b[] = $w; }\n  foreach ($a as $k => $v) { $b[] = $v; }\n  foreach ($b as &$r) { $r = 1; }\n  foreach ($a[1] as [$p, $q]) { $b[] = $p; }\n  do { $n--; } while ($n > 0);\n  $c = fn (int $x): int => $x + 1;\n  return dup((string) $n);\n}\nconst LIMIT = 3;\n$k->written = 1;\nclass_alias('lib\\\\a\\\\widget', 'app\\\\widget');\n",
             ),
             (
                 "src/dynamic.php",
@@ -741,6 +744,78 @@ mod tests {
             }
         }
         origins
+    }
+
+    /// Whether a lowered statement is one [`TRACE_CONSTRUCTS`] row's construct.
+    type IsConstruct = fn(&StmtKind) -> bool;
+
+    /// The trace-IR constructs the fixture must carry for the whole-tree
+    /// equality in [`a_package_round_trips_through_its_artifact`] to test their
+    /// wire shape: each is a variant, or a variant's field, a trace-IR PR added.
+    /// Which PHP lowers to which shape is steins-syntax's to pin; this only
+    /// proves the fixture has one of each.
+    const TRACE_CONSTRUCTS: &[(&str, IsConstruct)] = &[
+        ("a value-position cast", |k| {
+            matches!(k, StmtKind::Assign { value: ArgValue::Cast { .. }, .. })
+        }),
+        ("an interpolated string's seeded concat chain", |k| {
+            matches!(k, StmtKind::Assign { value: ArgValue::Concat(head, _), .. }
+                if matches!(**head, ArgValue::Concat(..)))
+        }),
+        ("an auto-index append", |k| matches!(k, StmtKind::OffsetAppend { .. })),
+        ("a keyed offset write", |k| matches!(k, StmtKind::OffsetWrite { .. })),
+        ("an offset unset", |k| matches!(k, StmtKind::OffsetUnset { .. })),
+        ("a while with a body", |k| {
+            matches!(k, StmtKind::While { body, .. } if !body.is_empty())
+        }),
+        ("a for with init, body and a carried name", |k| {
+            matches!(k, StmtKind::For { init, body, carried, .. }
+                if !init.is_empty() && !body.is_empty() && !carried.is_empty())
+        }),
+        ("a foreach with a keyed header and a body", |k| {
+            matches!(k, StmtKind::Foreach {
+                subject: Some(_), key_var: Some(_), value_var: Some(_), by_ref: false, body, ..
+            } if !body.is_empty())
+        }),
+        ("a by-reference foreach", |k| matches!(k, StmtKind::Foreach { by_ref: true, .. })),
+        ("a foreach over an expression into a destructuring target", |k| {
+            matches!(k, StmtKind::Foreach { subject: None, value_var: None, .. })
+        }),
+        ("a do-while with a body", |k| {
+            matches!(k, StmtKind::DoWhile { body, .. } if !body.is_empty())
+        }),
+    ];
+
+    /// Every statement kind in the parsed fixture's scopes, nested bodies
+    /// included.
+    fn fixture_stmt_kinds<'a>(parsed: &'a [(&'static str, SourceTree)]) -> Vec<&'a StmtKind> {
+        fn walk<'a>(stmts: &'a [Stmt], out: &mut Vec<&'a StmtKind>) {
+            for s in stmts {
+                out.push(&s.kind);
+                match &s.kind {
+                    StmtKind::If { then_trace, elseifs, else_trace, .. } => {
+                        walk(then_trace, out);
+                        elseifs.iter().for_each(|(_, b)| walk(b, out));
+                        walk(else_trace.as_deref().unwrap_or_default(), out);
+                    }
+                    StmtKind::For { init, body, .. } => {
+                        walk(init, out);
+                        walk(body, out);
+                    }
+                    StmtKind::While { body, .. }
+                    | StmtKind::Foreach { body, .. }
+                    | StmtKind::DoWhile { body, .. } => walk(body, out),
+                    _ => {}
+                }
+            }
+        }
+        let mut kinds = Vec::new();
+        for (_, tree) in parsed {
+            for sc in tree.scopes() {
+                walk(&sc.stmts, &mut kinds);
+            }
+        }
+        kinds
     }
 
     /// The variant names serde decodes `T` by, in index order, which is what
@@ -874,6 +949,12 @@ mod tests {
         for kind in EffectOriginKind::ALL {
             let carried = origins.iter().any(|o| o.kind() == kind);
             assert!(carried, "the fixture must carry a {} origin", kind.name());
+        }
+        // The same holds for the trace IR's variants and fields: the equality
+        // below tests only the ones the fixture lowers to.
+        let kinds = fixture_stmt_kinds(&parsed);
+        for (construct, lowered) in TRACE_CONSTRUCTS {
+            assert!(kinds.iter().any(|k| lowered(k)), "the fixture must carry {construct}");
         }
         // Schema 20 (issue #603): `ret_top` sits between `ret` and `ret_span` on
         // both declarations and `RetHintKind::Top` precedes `Other`, so the
@@ -1025,292 +1106,6 @@ mod tests {
             assert!(read_contracts(&mut reader).is_err(), "{tag}: contracts");
             assert!(TraceIndex::open(&mut reader).is_err(), "{tag}: trace");
         }
-    }
-
-    /// **The `SCHEMA_VERSION` 10 → 11 payload** (issue #636): `$a[] = 1` lowers
-    /// to `StmtKind::OffsetAppend`, and the variant survives the trace codec
-    /// with its base and value intact.
-    ///
-    /// The variant sits *between* `OffsetWrite` and `OffsetUnset`, and the wire
-    /// codec carries an enum variant **by index**, so every neighbour's index
-    /// moved. That is exactly what the schema bump buys: a schema-10 artifact is
-    /// a [`Miss`] and rebuilds, rather than decoding an `OffsetAppend` as
-    /// something it never was.
-    #[test]
-    fn the_auto_index_append_round_trips_through_the_trace_payload() {
-        use steins_syntax::StmtKind;
-        let tree = SourceTree::parse(
-            "<?php\nfunction f(): void { $a = []; $a[] = 1; $a['k'] = 2; unset($a['k']); }\n",
-        );
-        let bytes = trace_payload(&tree);
-        let back: SourceTree =
-            crate::wire::from_slice(&bytes).expect("a lowered tree round-trips");
-        let kinds = |t: &SourceTree| -> Vec<String> {
-            t.scopes()
-                .iter()
-                .flat_map(|sc| sc.stmts.iter())
-                .map(|s| match &s.kind {
-                    StmtKind::OffsetAppend { base, value } => format!("append {base} {value:?}"),
-                    StmtKind::OffsetWrite { base, .. } => format!("write {base}"),
-                    StmtKind::OffsetUnset { base, .. } => format!("unset {base}"),
-                    other => format!("{other:?}"),
-                })
-                .collect()
-        };
-        let got = kinds(&back);
-        assert_eq!(got, kinds(&tree), "the decoded body is the encoded one");
-        assert!(
-            got.iter().any(|k| k.starts_with("append a ")),
-            "`$a[] = 1` lowered to something else: {got:?}"
-        );
-        assert!(got.contains(&"write a".to_owned()), "the key path is still its own variant");
-        assert!(got.contains(&"unset a".to_owned()), "and so is the unset");
-    }
-
-    /// **The `SCHEMA_VERSION` 11 → 12 payload** (issue #626): `(int) $x` lowers
-    /// to `ArgValue::Cast`, and the variant survives the trace codec with its
-    /// target and operand intact.
-    ///
-    /// The variant sits immediately before `ArgValue::Other`, and the wire codec
-    /// carries an enum variant **by index**, so `Other`'s index moved — which is
-    /// the sharp half of the bump: without it a schema-11 artifact's `Other`
-    /// would decode as a `Cast` whose target and operand were never written.
-    #[test]
-    fn the_value_position_cast_round_trips_through_the_trace_payload() {
-        use steins_syntax::{ArgValue, CastTarget, StmtKind};
-        let tree = SourceTree::parse(
-            "<?php\nfunction f($x): void { $a = (int) $x; $b = (string) 5; $c = (object) $x; }\n",
-        );
-        let bytes = trace_payload(&tree);
-        let back: SourceTree =
-            crate::wire::from_slice(&bytes).expect("a lowered tree round-trips");
-        let values = |t: &SourceTree| -> Vec<String> {
-            t.scopes()
-                .iter()
-                .flat_map(|sc| sc.stmts.iter())
-                .filter_map(|s| match &s.kind {
-                    StmtKind::Assign { var, value, .. } => Some(format!("{var}={value:?}")),
-                    _ => None,
-                })
-                .collect()
-        };
-        assert_eq!(values(&back), values(&tree), "the decoded body is the encoded one");
-        let assigned = |t: &SourceTree, want: &str| -> ArgValue {
-            t.scopes()
-                .iter()
-                .flat_map(|sc| sc.stmts.iter())
-                .find_map(|s| match &s.kind {
-                    StmtKind::Assign { var, value, .. } if var == want => Some(value.clone()),
-                    _ => None,
-                })
-                .expect("an assignment")
-        };
-        match assigned(&back, "a") {
-            ArgValue::Cast { target, operand } => {
-                assert_eq!(target, CastTarget::Int);
-                assert_eq!(*operand, ArgValue::Var("x".to_owned()));
-            }
-            other => panic!("`(int) $x` decoded as {other:?}"),
-        }
-        match assigned(&back, "b") {
-            ArgValue::Cast { target, operand } => {
-                assert_eq!(target, CastTarget::String);
-                assert_eq!(*operand, ArgValue::Int(5));
-            }
-            other => panic!("`(string) 5` decoded as {other:?}"),
-        }
-        // The neighbour whose index moved: `(object)` still decodes as `Other`.
-        assert_eq!(assigned(&back, "c"), ArgValue::Other, "`(object) $x` is still `Other`");
-    }
-
-    /// **The `SCHEMA_VERSION` 12 → 13 payload** (issue #649): a `while` lowers to
-    /// `StmtKind::While`, and the variant survives the trace codec with its
-    /// condition and its body's statements intact.
-    ///
-    /// The variant sits *before* `Opaque`, and the wire codec carries an enum
-    /// variant **by index**, so every later variant's index moved — the same
-    /// reason the append's and the cast's bumps existed. On top of that a
-    /// schema-12 trace spells every `while` as an `Opaque`, whose body is not
-    /// carried at all, so replaying one would answer silence for a body this
-    /// binary judges.
-    #[test]
-    fn the_structured_while_round_trips_through_the_trace_payload() {
-        use steins_syntax::StmtKind;
-        let tree = SourceTree::parse(
-            "<?php\nfunction f(int $n): void { while ($n > 0) { $s = 'abc'; $n--; } }\n",
-        );
-        let bytes = trace_payload(&tree);
-        let back: SourceTree =
-            crate::wire::from_slice(&bytes).expect("a lowered tree round-trips");
-        let kinds = |t: &SourceTree| -> Vec<String> {
-            t.scopes()
-                .iter()
-                .flat_map(|sc| sc.stmts.iter())
-                .map(|s| match &s.kind {
-                    StmtKind::While { cond, body, writes, .. } => {
-                        format!("while {cond:?} body={} writes={writes:?}", body.len())
-                    }
-                    other => format!("{other:?}"),
-                })
-                .collect()
-        };
-        let got = kinds(&back);
-        assert_eq!(got, kinds(&tree), "the decoded body is the encoded one");
-        assert!(
-            got.iter().any(|k| k.starts_with("while ") && k.contains("body=2")),
-            "the `while` lost its condition or its body: {got:?}"
-        );
-    }
-
-    /// **The `SCHEMA_VERSION` 13 → 14 payload** (issue #627): an interpolated
-    /// string lowers to the `ArgValue::Concat` chain it desugars to, and the
-    /// chain survives the trace codec.
-    ///
-    /// Unlike the two bumps above it — 11 → 12's misdecode and 12 → 13's shifted
-    /// variant index — this adds and re-orders nothing, so a schema-13 payload
-    /// still *decodes*; it simply spells `"a $v"` as `ArgValue::Other` and
-    /// answers `unknown` for a value this binary decides. The two shapes asserted
-    /// here are the ones that decide the lowering: the `''` seed that keeps
-    /// `"$v"` a string cast, and the heredoc that is deliberately NOT lowered.
-    #[test]
-    fn an_interpolated_string_round_trips_as_the_concat_chain() {
-        use steins_syntax::{ArgValue, StmtKind};
-        let tree = SourceTree::parse(
-            "<?php\nfunction f($v): void { $a = \"x $v\"; $b = \"$v\"; \
-             $c = <<<EOT\n  y $v\n  EOT; }\n",
-        );
-        let bytes = trace_payload(&tree);
-        let back: SourceTree =
-            crate::wire::from_slice(&bytes).expect("a lowered tree round-trips");
-        let assigned = |t: &SourceTree, want: &str| -> ArgValue {
-            t.scopes()
-                .iter()
-                .flat_map(|sc| sc.stmts.iter())
-                .find_map(|s| match &s.kind {
-                    StmtKind::Assign { var, value, .. } if var == want => Some(value.clone()),
-                    _ => None,
-                })
-                .expect("an assignment")
-        };
-        assert_eq!(assigned(&back, "a"), assigned(&tree, "a"), "the decoded chain is the encoded one");
-        // `"x $v"` is `Concat(Concat('', 'x '), $v)` — the seed, then the parts.
-        match assigned(&back, "a") {
-            ArgValue::Concat(head, tail) => {
-                assert_eq!(*tail, ArgValue::Var("v".to_owned()));
-                assert!(matches!(*head, ArgValue::Concat(..)), "the seed nests: {head:?}");
-            }
-            other => panic!("`\"x $v\"` decoded as {other:?}"),
-        }
-        // `"$v"` is NOT `$v` — it is a concatenation, which is what makes it a
-        // string cast. (The parser emits an empty literal part of its own here,
-        // so the head is a nested chain of empty strings rather than one `Str`;
-        // what matters is that the variable never stands alone.)
-        match assigned(&back, "b") {
-            ArgValue::Concat(head, tail) => {
-                assert_eq!(*tail, ArgValue::Var("v".to_owned()));
-                assert!(!matches!(*head, ArgValue::Var(_)), "the seed vanished: {head:?}");
-            }
-            other => panic!("`\"$v\"` decoded as {other:?}"),
-        }
-        // A heredoc still widens — its indentation stripping is not in the parts.
-        assert_eq!(assigned(&back, "c"), ArgValue::Other, "a heredoc is still `Other`");
-    }
-
-    /// **The `SCHEMA_VERSION` 14 → 15 payload** (issue #650): `for`, `foreach` and
-    /// `do`-`while` lower to variants of their own, and each survives the trace
-    /// codec with the body — and, for the `for`, the init trace and the carried set
-    /// — intact.
-    ///
-    /// The three sit after `While`, and the wire codec carries an enum variant **by
-    /// index**, so every later variant's index moved: a schema-14 payload would
-    /// decode an `Opaque`'s write set as one of these bodies. That is the sharp half
-    /// of the bump; the blunt half is that a schema-14 trace spells all three as
-    /// `Opaque`, whose body is not carried at all.
-    #[test]
-    fn the_other_three_loop_forms_round_trip_through_the_trace_payload() {
-        use steins_syntax::StmtKind;
-        let tree = SourceTree::parse(
-            "<?php\nfunction f(array $xs, int $n): void {\n\
-             for ($i = 0, $s = 'abc'; $i < $n; $i++) { $a = 1; $b = 2; }\n\
-             foreach ($xs as $k => $v) { $c = 3; }\n\
-             do { $d = 4; } while ($n > 0);\n}\n",
-        );
-        let bytes = trace_payload(&tree);
-        let back: SourceTree =
-            crate::wire::from_slice(&bytes).expect("a lowered tree round-trips");
-        let kinds = |t: &SourceTree| -> Vec<String> {
-            t.scopes()
-                .iter()
-                .flat_map(|sc| sc.stmts.iter())
-                .map(|s| match &s.kind {
-                    StmtKind::For { init, body, carried, .. } => {
-                        format!("for init={} body={} carried={carried:?}", init.len(), body.len())
-                    }
-                    StmtKind::Foreach { body, .. } => format!("foreach body={}", body.len()),
-                    StmtKind::DoWhile { body, .. } => format!("do-while body={}", body.len()),
-                    other => format!("{other:?}"),
-                })
-                .collect()
-        };
-        let got = kinds(&back);
-        assert_eq!(got, kinds(&tree), "the decoded bodies are the encoded ones");
-        assert!(
-            got.contains(&"for init=2 body=2 carried=[\"s\"]".to_owned()),
-            "the `for` lost a clause: {got:?}"
-        );
-        assert!(got.contains(&"foreach body=1".to_owned()), "the `foreach` lost its body: {got:?}");
-        assert!(got.contains(&"do-while body=1".to_owned()), "the `do`-`while` lost its body: {got:?}");
-    }
-
-    /// **The `SCHEMA_VERSION` 15 → 16 payload** (issue #652): `StmtKind::Foreach`
-    /// grows the header the binding is about — the subject, the two targets, and the
-    /// by-reference flag — and each survives the trace codec.
-    ///
-    /// The bump is the plainest **misdecode** kind: the variant gains fields, and the
-    /// wire codec reads a struct variant's fields positionally, so a schema-15 payload
-    /// would read the old `body` where the new `subject` is. On top of that a
-    /// schema-15 trace carries no header at all, so every `foreach` in it would bind
-    /// its targets untyped — replaying issue #650's silence for elements this binary
-    /// types.
-    #[test]
-    fn a_foreach_header_round_trips_through_the_trace_payload() {
-        use steins_syntax::StmtKind;
-        let tree = SourceTree::parse(
-            "<?php\nfunction f(array $xs, array $ys, array $zs): void {\n\
-             foreach ($xs as $k => $v) { $a = 1; }\n\
-             foreach ($ys as &$r) { $b = 2; }\n\
-             foreach (g() as [$p, $q]) { $c = 3; }\n}\n",
-        );
-        let bytes = trace_payload(&tree);
-        let back: SourceTree =
-            crate::wire::from_slice(&bytes).expect("a lowered tree round-trips");
-        let headers = |t: &SourceTree| -> Vec<String> {
-            t.scopes()
-                .iter()
-                .flat_map(|sc| sc.stmts.iter())
-                .filter_map(|s| match &s.kind {
-                    StmtKind::Foreach { subject, key_var, value_var, by_ref, .. } => {
-                        Some(format!("{subject:?} {key_var:?} {value_var:?} {by_ref}"))
-                    }
-                    _ => None,
-                })
-                .collect()
-        };
-        let got = headers(&back);
-        assert_eq!(got, headers(&tree), "the decoded headers are the encoded ones");
-        assert_eq!(
-            got,
-            vec![
-                "Some(\"xs\") Some(\"k\") Some(\"v\") false".to_owned(),
-                // The by-ref target's NAME survives; the flag is what refuses the
-                // binding, so a reader must see both.
-                "Some(\"ys\") None Some(\"r\") true".to_owned(),
-                // A non-variable subject and a destructuring target are both `None`
-                // — there is nothing for a walker to ask the env about.
-                "None None None false".to_owned(),
-            ],
-            "the header is carried verbatim: {got:?}"
-        );
     }
 
     /// Acceptance (c) for the nested trace directory: every way the framing
