@@ -392,3 +392,29 @@ The gate is the loss count, not "sidecar-backed throughout": a warm run that
 answers every question from the recorded table never engages a child, and a
 `--no-php` run never asks one, and both publish blocks that are exactly what
 their stamp says.
+
+## Amendment (2026-09-27): the runner is in both identities
+
+§2's identity covers "the analyzer's own version", which issue #563 made a
+content hash of `crates/*/src`, and §4 scopes fold rows by the engine
+identity the boot surface reports: PHP version, `PHP_INT_SIZE`, extension
+set, fold lane. Both left out the one input that is neither Rust source nor
+PHP's own: `runner.php`, the program every fold runs, which `steins-sidecar`
+compiles in with `include_str!`. A runner edit moved neither identity, and
+one can move an answer on an unchanged PHP (issue #813 rebuilt array
+arguments from `null` rather than `[]`, which changes a fold on 8.1 and 8.2).
+A warm run then replayed walk blocks the old runner had folded. With the
+analyzer fingerprint fixed alone, the fold table still served the old
+runner's rows under the unmoved engine identity and republished them, so the
+stale answer outlived every rebuild — and that half reached a release
+upgrade too, since the fold table never keys on the analyzer version.
+
+So the runner is in both. The analyzer fingerprint follows every `include!`,
+`include_str!` and `include_bytes!` target the sources name, and the build
+fails on one it cannot follow, or on a walk that finds nothing. The fold
+table's identity gains a `runner` field, a content hash of the embedded
+runner: `env` describes the PHP that answers and not the program answering
+on it, so the analyzer stamps what it compiled in. A table recorded before
+the field existed reads as a whole-table miss. Neither half suffices alone:
+the fingerprint refuses the walk blocks, and the runner axis refuses the
+rows those blocks would be recomputed from.
