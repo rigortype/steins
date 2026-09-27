@@ -47,12 +47,24 @@ pub(super) fn after_boot(folder: &mut RecordingFolder) {
 
 /// Kill the run's child until the transport gives up. One death is not enough:
 /// the next request respawns a child and is answered, so the run loses only the
-/// bomb's own reply. Past [`steins_sidecar::RESPAWN_CAP`] every later request
-/// widens, which is what a dead fold surface costs the walk.
+/// bomb's own reply. [`steins_sidecar::RESPAWN_CAP`] counts replacements in a
+/// row with no answer between them, and the process engine quarantines a callee
+/// that killed a child, so a repeated bomb would be declined without dispatch
+/// after its first death (issue #783). Each bomb is therefore a different
+/// callee, sent below the fold seam's budget, one after another: the original
+/// child and every replacement die before answering anything, and past the cap
+/// every later request widens, which is what a dead fold surface costs the walk.
 fn abandon_the_transport(folder: &mut RecordingFolder) {
-    let bomb = [FoldArg::Str("x".to_owned()), FoldArg::Int(2_000_000_000)];
-    for _ in 0..=steins_sidecar::RESPAWN_CAP {
-        let _ = folder.engine_mut().fold("str_repeat", &bomb, true);
+    let s = |v: &str| FoldArg::Str(v.to_owned());
+    let bombs = [
+        ("str_repeat", vec![s("x"), FoldArg::Int(2_000_000_000)]),
+        ("str_pad", vec![s("x"), FoldArg::Int(2_000_000_000)]),
+        ("range", vec![FoldArg::Int(0), FoldArg::Int(100_000_000)]),
+        ("sprintf", vec![s("%2000000000d"), FoldArg::Int(1)]),
+    ];
+    assert!(bombs.len() > steins_sidecar::RESPAWN_CAP as usize, "one death per strike and one more");
+    for (name, args) in &bombs {
+        let _ = folder.engine_mut().fold(name, args, true);
     }
     let posture = folder.posture();
     assert!(posture.abandoned && posture.losses > 0, "the transport outlived the fault: {posture:?}");
