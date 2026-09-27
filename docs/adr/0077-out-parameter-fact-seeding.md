@@ -351,3 +351,13 @@ Measured over the pinned nsrt corpus under `steins check --profile strict
 --no-cache`: 1,810 lines of output at the base commit and 1,810 byte-identical
 lines after every tranche. A seed can prove a finding as easily as it can
 silence one (§3.3), so the check is deliberate rather than assumed.
+
+## Amendment (2026-09-28, issue #828): a nested call's `NameRef` takes no schema bump
+
+The 2026-09-02 amendment postponed a call nested in another call's arguments
+because reaching it needs a `NameRef` in `ArgValue::Call`, which it counted as
+an IR change and a `SCHEMA_VERSION` bump. Since issue #828 (ADR-0092's
+amendment "what the schema number covers") a trace-IR change takes no bump:
+it moves the analyzer fingerprint, and the load refuses every stored trace
+payload on that before decoding it. The item stays postponed, and what it
+waits on is the IR change alone.
