@@ -880,7 +880,14 @@ fn call_method_receiver_var(call: &CallExpr) -> Option<&str> {
 /// The names a by-value predicate's argument list hands to a call **nested**
 /// in it (issue #704) — each may be taken by reference there — or `None` when
 /// an argument hides what it does: the unrepresentable `Other` (where an
-/// assignment or an increment lands), a closure, a ternary.
+/// assignment or an increment lands) or a closure. `None` costs the whole read
+/// set, because the lowered value keeps no names for such an argument, so no
+/// other argument's name can be told apart from one it mentions.
+///
+/// A ternary is readable: its condition is lowered, and charges every name it
+/// may write or hand onward ([`cond_reach`]), and each arm is an argument of its
+/// own. `rand() ? 5 : 6` charges nothing, so `in_array(rand() ? 5 : 6, $h)`
+/// keeps `$h`.
 ///
 /// The predicate's own arguments are only read, so a bare `$s` there charges
 /// nothing; `$s` inside `f($s)`, `$o->m($s)` or `new C($s)` does. A method
@@ -913,6 +920,12 @@ fn reach_of(v: &ArgValue, handed: bool, out: &mut Vec<String>) -> bool {
             return reach_of(a, false, out) && reach_of(b, false, out);
         }
         ArgValue::Not(a) | ArgValue::Cast { operand: a, .. } => return reach_of(a, false, out),
+        // Neither arm is handed on even when the ternary is: its result is a
+        // value, and a reference parameter handed one binds a temporary.
+        ArgValue::Ternary { cond, then_val, else_val, .. } => {
+            cond_reach(cond, out);
+            return reach_of(then_val, false, out) && reach_of(else_val, false, out);
+        }
         ArgValue::Array(items) => return items.iter().all(|(_, e)| reach_of(e, false, out)),
         ArgValue::Call(_, args) => return args.iter().all(|a| reach_of(a, true, out)),
         ArgValue::New(_, args, named) => return handed_args(args, named, out),
@@ -937,6 +950,42 @@ fn reach_of(v: &ArgValue, handed: bool, out: &mut Vec<String>) -> bool {
         _ => return false,
     }
     true
+}
+
+/// Every name a lowered condition in argument position may write or hand to a
+/// call, for [`reach_of`]'s ternary: a guard call's or an unmodelled test's whole
+/// read set, and an operand's invalidation set, which is empty unless it holds
+/// a writer. A bare variable, a literal or an `isset` charges nothing.
+fn cond_reach(cond: &CondExpr, out: &mut Vec<String>) {
+    let mut charge = |names: &[String]| {
+        for n in names {
+            if !out.contains(n) {
+                out.push(n.clone());
+            }
+        }
+    };
+    let operand = |op: &CondOperand| match op {
+        CondOperand::Other { invalidates, .. } => invalidates.clone(),
+        _ => Vec::new(),
+    };
+    match cond {
+        CondExpr::Cmp { lhs, rhs, .. } => {
+            charge(&operand(lhs));
+            charge(&operand(rhs));
+        }
+        CondExpr::Truthy(op) | CondExpr::Instanceof { operand: op, .. } => charge(&operand(op)),
+        CondExpr::InstanceofDyn { operand: op, class, .. } => {
+            charge(&operand(op));
+            charge(&operand(class));
+        }
+        CondExpr::Call { reads, .. } | CondExpr::Opaque { reads, .. } => charge(reads),
+        CondExpr::Not(c) => cond_reach(c, out),
+        CondExpr::And(a, b) | CondExpr::Or(a, b) => {
+            cond_reach(a, out);
+            cond_reach(b, out);
+        }
+        CondExpr::Isset { .. } | CondExpr::IssetVar { .. } => {}
+    }
 }
 
 /// [`reach_of`] over one nested call's positional and named arguments.
