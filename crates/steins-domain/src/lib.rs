@@ -14,6 +14,9 @@
 //! guessed), extensional membership (`admits`), and trinary queries via the unified
 //! [`Certainty`].
 //!
+//! PHP's next integer key, for an array literal and for an append, is [`NextInt`] and
+//! [`append_index`] (ADR-0049 A22).
+//!
 //! Invariants are enforced by constructors, checked by property tests, and proved for every
 //! value by the Lean 4 spec in `spike/lean-domain` (ADR-0059, differentially checked against
 //! `tests/it/lean_vectors.rs`):
@@ -29,6 +32,7 @@
 
 mod certainty;
 mod fact;
+mod next_int;
 mod php;
 mod php_str;
 mod preds;
@@ -38,6 +42,7 @@ mod value;
 
 pub use certainty::Certainty;
 pub use fact::{ArmKnown, CAP, Fact, Refinement, UnionArm};
+pub use next_int::{NEXT_INT_BOUNDARY, NextInt, append_index};
 pub use php::{
     php_is_falsy, php_is_numeric, php_str_is_decimal_int, php_str_is_lowercase,
     php_str_is_uppercase,
