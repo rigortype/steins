@@ -38,6 +38,10 @@ Entries accumulate under this heading as work lands; the `steins-release-prep`
 skill seals them into a version section at release time, reconstructing from
 `git log` if the discipline slipped.
 
+### Changed
+
+- **An unkeyed item in a phpdoc array shape now takes the key PHP gives the same array literal, also after negative keys, so findings move for such shapes (ADR-0049 A23).** `@param array{-5: int, string}` used to declare the `string` at key `0`; it is now at `-4`, where `[-5 => 1, 'x']` puts `'x'` on every supported PHP version. `f([-5 => 1, 'x'])` no longer reports `phpdoc.param-mismatch`, and `f([-5 => 1, 0 => 'x'])` now does — **breaking for a green `contracts` run** that passes such a value (contract layer, `--profile contracts`). A shape reads as before unless an unkeyed item comes after integer keys that are all `-2` or lower. The types Steins prints and writes follow the same rule, so an unsealed shape with negative keys can be spelled differently: `array{-5: 1, -4: 2, ...}` now prints as `array{-5: 1, 2, ...}`, and a `0` key after `-5` prints with its key. PHPStan still reads such an item at `0`; the difference is deliberate.
+
 ### Fixed
 
 - **Upgrading Steins no longer keeps the fold answers the previous version's PHP runner gave.** The cache in `.steins/` scoped its recorded fold answers by the PHP they ran on and not by the runner program Steins hands that PHP, so a Steins whose runner changed kept serving the old runner's answers, and the findings that follow from them, until `--no-cache` or a deleted `.steins/`. The negative-key fix for PHP 8.1 and 8.2 below is such a change: without this one, a project already cached on 8.1 or 8.2 would have kept folding `count([-5 => 'a', 'b', -4 => 'c'])` to `3`. A build from a git checkout had the same gap in the rest of the cache, which is keyed by a hash of Steins's sources that left out the runner and the versions of the libraries Steins is built with, the PHP parser among them.
