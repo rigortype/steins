@@ -178,7 +178,9 @@ reaches the enclosing function only through a call to that closure.
 `include $p;`: that judgment reads only statically-named function calls
 (ADR-0096 §5), and neither construct is one.
 
-The lowered effect origins are persisted in frozen generations (ADR-0092), so
-the two new origin variants come with a schema bump: an artifact written before
-them records a body holding `eval` as effect-free, and replaying it would answer
-the old `{}`.
+The lowered effect origins are persisted in frozen generations (ADR-0092), in
+the trace payload. An artifact written before the two new variants records a
+body holding `eval` as effect-free, and replaying it would answer the old `{}`.
+No schema bump is needed for that (issue #828, ADR-0092's amendment on what the
+schema number covers): the change moves the analyzer fingerprint, and a
+generation another build published is refused before its trace is decoded.
