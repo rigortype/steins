@@ -13,8 +13,8 @@ use mago_syntax::cst::{
 };
 
 use crate::ast::{
-    BodyEnd, HookKind, NsCtx, Param, RetHint, RetHintKind, SUPERGLOBALS, Scope, ScopeOwner, Stmt,
-    StmtKind, UndefinedRead, UnusedCapture,
+    BodyEnd, HookKind, NsCtx, Param, RetHint, RetHintKind, Runs, SUPERGLOBALS, Scope, ScopeOwner,
+    Stmt, StmtKind, UndefinedRead, UnusedCapture,
 };
 use crate::lower_decl::{DocIndex, lower_hint, lower_params};
 use crate::lower_effect::{
@@ -471,6 +471,8 @@ fn build_hook_expr_scope(
             end: BodyEnd::Terminates,
             has_terminator: true,
             value_position: false,
+            // A hook body is never the top-level frame (issue #762).
+            runs: Runs::default(),
         },
         HookKind::Set => Stmt {
             span: to_span(expr.span()),
@@ -1240,6 +1242,8 @@ fn build_closure_scope_from_arrow(
         end: BodyEnd::Terminates,
         has_terminator: true,
         value_position: false,
+        // An arrow body is never the top-level frame (issue #762).
+        runs: Runs::default(),
     };
     let mut opaque = Vec::new();
     scan_opaque(&Node::Expression(af.expression), &mut opaque, false);

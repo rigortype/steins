@@ -14,8 +14,8 @@ use mago_syntax::cst::{
 use crate::ast::{
     AppendStmt, ArgValue, ArrayKey, ArrayLiteralElement, ArrayLiteralSite, BinaryOperandOp, BodyEnd,
     CallExpr, Callee, CondExpr, CondOperand, ForeachBodyShape, ForeachSite, InvalidatedVar,
-    MatchArmT, NameRef, OpaqueConstruct, OpaqueSite, OperandSite, OperandSiteKind, PrevStmt, Span,
-    Stmt, StmtKind, StringContextKind, StringContextSite, UnaryOperandOp,
+    MatchArmT, NameRef, OpaqueConstruct, OpaqueSite, OperandSite, OperandSiteKind, PrevStmt, RunArg,
+    RunCall, Runs, Span, Stmt, StmtKind, StringContextKind, StringContextSite, UnaryOperandOp,
 };
 use crate::lower_expr::{
     append_base, assert_stmt_cond, const_key_offset, const_key_offset_path, destructure_reads,
@@ -134,6 +134,7 @@ pub(crate) fn lower_stmt(s: &Statement<'_>, out: &mut Vec<Stmt>) {
         // anything whose write set the lowering cannot bound.
         _ => Stmt::lowered(StmtKind::Barrier, Vec::new()),
     };
+    let runs = stmt_runs(s, &stmt.kind);
     out.push(Stmt {
         span: stmt_span,
         string_contexts: string_context_sites(s),
@@ -141,9 +142,147 @@ pub(crate) fn lower_stmt(s: &Statement<'_>, out: &mut Vec<Stmt>) {
         // off the CST statement, never off the lowered `kind`. See `stmt_end`.
         end: stmt_end(s),
         has_terminator: subtree_has_function_exit(&Node::Statement(s)),
+        runs,
         ..stmt
     });
 }
+
+// top-level rebind rule (issue #762)
+
+/// The [`Runs`] record of one statement: which subtree is its own evaluation is
+/// the type's rule, and the lowered `kind` says which rule applies. A structured
+/// `if` reads its conditions, and so does a `match (true)` guard chain, which is
+/// one; a structured `switch` or by-value `match` reads nothing, its subject and
+/// every arm condition being a variable or a literal. Everything else, the
+/// `Opaque` fallback of each of those included, reads its whole subtree.
+///
+/// The branches and arms are left out rather than over-counted, because the
+/// walk forgets **before** it walks them: counting an arm's call would forget
+/// the facts that decide which arms are live, and a dead arm the walk can no
+/// longer prove dead is checked as if it ran.
+fn stmt_runs(s: &Statement<'_>, kind: &StmtKind) -> Runs {
+    let mut runs = Runs::default();
+    let statement_match = match s {
+        Statement::Expression(es) => match es.expression.unparenthesized() {
+            Expression::Match(m) => Some(m),
+            _ => None,
+        },
+        _ => None,
+    };
+    match (s, kind, statement_match) {
+        (Statement::If(i), StmtKind::If { .. }, _) => {
+            scan_runs(&Node::Expression(i.condition), &mut runs);
+            for (c, _) in i.body.else_if_clauses() {
+                scan_runs(&Node::Expression(c), &mut runs);
+            }
+        }
+        (_, StmtKind::If { .. }, Some(m)) => {
+            for arm in m.arms.iter() {
+                if let mago_syntax::cst::MatchArm::Expression(a) = arm {
+                    for c in a.conditions.iter() {
+                        scan_runs(&Node::Expression(c), &mut runs);
+                    }
+                }
+            }
+        }
+        (Statement::Switch(_), StmtKind::Match { .. }, _)
+        | (_, StmtKind::Match { .. }, Some(_)) => {}
+        _ => scan_runs(&Node::Statement(s), &mut runs),
+    }
+    if runs.other {
+        runs.functions = Vec::new();
+    }
+    runs
+}
+
+/// Collect `node`'s calls into `out` (see [`Runs`]), stopping at the first one a
+/// function name cannot describe — the record's answer is decided there.
+fn scan_runs(node: &Node<'_, '_>, out: &mut Runs) {
+    match node {
+        // The callee spelled the way `lower_call` reads it: an identifier is a
+        // function name, and anything else is a call through a value.
+        Node::FunctionCall(fc) => match fc.function {
+            Expression::Identifier(id) => out.functions.push(run_call(id, &fc.argument_list)),
+            _ => out.other = true,
+        },
+        Node::MethodCall(_)
+        | Node::NullSafeMethodCall(_)
+        | Node::StaticMethodCall(_)
+        | Node::Instantiation(_)
+        | Node::Pipe(_)
+        | Node::EvalConstruct(_)
+        | Node::IncludeConstruct(_)
+        | Node::IncludeOnceConstruct(_)
+        | Node::RequireConstruct(_)
+        | Node::RequireOnceConstruct(_) => out.other = true,
+        Node::Function(_)
+        | Node::Closure(_)
+        | Node::ArrowFunction(_)
+        | Node::AnonymousClass(_)
+        | Node::Class(_)
+        | Node::Interface(_)
+        | Node::Trait(_)
+        | Node::Enum(_) => return,
+        _ => {}
+    }
+    if out.other {
+        return;
+    }
+    for child in children(node) {
+        scan_runs(&child, out);
+        if out.other {
+            return;
+        }
+    }
+}
+
+/// One statically named call's [`RunCall`]: the positional arguments up to the
+/// first named or spread one, each read only as far as [`RunArg`] asks.
+fn run_call(
+    id: &mago_syntax::cst::Identifier<'_>,
+    list: &mago_syntax::cst::ArgumentList<'_>,
+) -> RunCall {
+    let mut args = Vec::new();
+    let mut positional_only = true;
+    for arg in list.arguments.iter() {
+        match arg {
+            Argument::Positional(p) if p.ellipsis.is_none() && positional_only => {
+                args.push(run_arg(p.value));
+            }
+            _ => positional_only = false,
+        }
+    }
+    RunCall { callee: name_ref(id), args, positional_only }
+}
+
+/// A callback position's reading of one argument: `null`, a string literal
+/// spelled like a function name, or anything else.
+fn run_arg(e: &Expression<'_>) -> RunArg {
+    match e.unparenthesized() {
+        Expression::Literal(mago_syntax::cst::Literal::Null(_)) => RunArg::Null,
+        Expression::Literal(mago_syntax::cst::Literal::String(ls)) => {
+            match ls.value.map(bytes_to_string) {
+                Some(name) if spells_function_name(&name) => RunArg::Name(name),
+                _ => RunArg::Other,
+            }
+        }
+        _ => RunArg::Other,
+    }
+}
+
+/// Whether a string is spelled like a (possibly qualified) function name — so
+/// `'Foo::bar'`, `'a b'` and an interpolated string are not.
+fn spells_function_name(s: &str) -> bool {
+    let bare = s.strip_prefix('\\').unwrap_or(s);
+    !bare.is_empty()
+        && !bare.starts_with(|c: char| c.is_ascii_digit())
+        && bare.split('\\').all(|seg| {
+            !seg.is_empty()
+                && seg.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || !c.is_ascii())
+        })
+}
+
+// end top-level rebind rule (issue #762)
 
 // reachability foundation (ADR-0078, issue #199)
 
