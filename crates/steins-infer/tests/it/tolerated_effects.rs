@@ -289,13 +289,19 @@ fn a_second_attribution_label_carries_its_own_tolerance() {
 fn a_catalogued_builtin_class_method_is_attributable() {
     // Same production-site argument as above: a catalogued external class colors
     // the call, so the call is the boundary.
+    // The constructor connects (issue #804), a catalogued method of its own.
     const SRC: &str = "<?php\n#[\\Steins\\Pure]\nfunction f(PDO $db): int { (new PDO('sqlite::memory:'))->exec('x'); return 1; }\n";
-    assert_eq!(effects(SRC, EffectsPolicy::none()).len(), 1);
-    let policy = EffectsPolicy::new(
-        vec!["telemetry".to_owned()],
-        vec![("PDO::exec".to_owned(), vec!["telemetry".to_owned()])],
-    );
-    assert_eq!(effects(SRC, policy).len(), 0);
+    assert_eq!(effects(SRC, EffectsPolicy::none()).len(), 2);
+    let attribute = |methods: &[&str]| {
+        EffectsPolicy::new(
+            vec!["telemetry".to_owned()],
+            methods.iter().map(|m| ((*m).to_owned(), vec!["telemetry".to_owned()])),
+        )
+    };
+    let kept = effects(SRC, attribute(&["PDO::exec"]));
+    assert_eq!(kept.len(), 1, "{kept:#?}");
+    assert!(kept[0].message.starts_with("new PDO has effect io.db"), "{}", kept[0].message);
+    assert_eq!(effects(SRC, attribute(&["PDO::exec", "PDO::__construct"])).len(), 0);
 }
 
 // Attribution is inert on its own; tolerance is inert without a match.

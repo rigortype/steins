@@ -441,6 +441,17 @@ pub enum EffectOrigin {
     /// read as proven-pure over it. Appended after the existing variants so no
     /// persisted variant index moves.
     State { construct: StateConstruct, span: Span },
+    /// A `new` expression at `span` whose class the scan can name (issue
+    /// #804): an effect edge to that class's constructor, inherited ones
+    /// included, resolved by the effects pass like a method call's callee.
+    /// `class` is spelled as a static call's class is: an explicit name,
+    /// `self`, `static` (late-bound, so only a constructor no subclass can
+    /// replace resolves), or `parent`. A dynamic `new $cls()` is an
+    /// [`Self::Opaque`] instead, and so is an anonymous class that may declare
+    /// a constructor; one that cannot, but extends a class, records that
+    /// parent here. Appended after the existing variants so no persisted
+    /// variant index moves.
+    New { class: StaticClass, span: Span },
 }
 
 /// [`EffectOriginKind`], and the methods that map an [`EffectOrigin`] onto it,
@@ -506,6 +517,7 @@ effect_origin_kinds!(
     Eval,
     Include,
     State,
+    New,
 );
 
 /// One call argument in the form a **structural** scan can prove constant

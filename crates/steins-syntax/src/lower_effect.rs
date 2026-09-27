@@ -8,20 +8,20 @@ use std::collections::HashSet;
 
 use mago_span::HasSpan;
 use mago_syntax::cst::{
-    Access, Argument, ArrayElement, Expression, FunctionCall, Literal, Node, PartialApplication,
-    Statement, UnaryPrefixOperator, Variable,
+    Access, AnonymousClass, Argument, ArrayElement, ClassLikeMember, Expression, FunctionCall,
+    Literal, Node, PartialApplication, Statement, UnaryPrefixOperator, Variable,
 };
 
 use crate::ast::{
     CallExpr, CallTarget, CallbackRef, CatchClause, ConstArgs, EffectOrigin, ExitKeyword,
     IncludeKeyword, NameRef, OutputKeyword, RefKind, RefTarget, SUPERGLOBALS, StateConstruct,
-    ThrowKind, ThrowOrigin,
+    StaticClass, ThrowKind, ThrowOrigin,
 };
 use crate::lower_decl::lower_catch_clause;
 use crate::lower_expr::{
     effect_recv_of_class, effect_recv_of_object, effect_recv_of_object_declared,
     first_class_method_ref, first_class_static_ref, instantiation_class, lower_method_call,
-    lower_static_call, method_name_of, prop_fetch_of,
+    lower_static_call, method_name_of, prop_fetch_of, trace_static_class,
 };
 use crate::lower_scope::{arrow_def_offset, closure_def_offset};
 use crate::lower_stmt::{
@@ -675,11 +675,26 @@ pub(crate) fn scan_effect_origins(node: &Node<'_, '_>, cx: &EffectScanCx, out: &
                 out.push(EffectOrigin::Opaque { span: to_span(sc.span()) });
             }
         }
+        // `new C(...)` runs `C`'s constructor here (issue #804): an edge the
+        // effects pass resolves, or a taint when the class is computed. The
+        // arguments are walked below like any call's.
+        Node::Instantiation(inst) => {
+            let span = to_span(inst.span());
+            match trace_static_class(inst.class) {
+                Some(class) => out.push(EffectOrigin::New { class, span }),
+                None => out.push(EffectOrigin::Opaque { span }),
+            }
+        }
+        // An anonymous class's body is its own scope, but its constructor runs
+        // at this `new`, and its arguments are evaluated here.
+        Node::AnonymousClass(ac) => {
+            scan_anonymous_class_new(ac, cx, out);
+            return;
+        }
         // Nested scopes are scanned independently.
         Node::Function(_)
         | Node::Closure(_)
         | Node::ArrowFunction(_)
-        | Node::AnonymousClass(_)
         | Node::Class(_)
         | Node::Interface(_)
         | Node::Trait(_)
@@ -692,6 +707,32 @@ pub(crate) fn scan_effect_origins(node: &Node<'_, '_>, cx: &EffectScanCx, out: &
     }
     for child in children(node) {
         scan_effect_origins(&child, cx, out);
+    }
+}
+
+/// The effect origins of a `new class(...) {...}` expression (issue #804): its
+/// arguments, evaluated in this frame, and the constructor that runs here. The
+/// class body is never indexed, so a constructor it may bring — its own, or one
+/// a trait it uses supplies — is unseen, and taints like a dynamic `new`. With
+/// neither, the constructor is the parent's, if it extends one, and none at all
+/// otherwise.
+fn scan_anonymous_class_new(ac: &AnonymousClass<'_>, cx: &EffectScanCx, out: &mut Vec<EffectOrigin>) {
+    let span = to_span(ac.span());
+    let own_constructor = ac.members.iter().any(|m| match m {
+        ClassLikeMember::Method(m) => {
+            bytes_to_string(m.name.value).eq_ignore_ascii_case("__construct")
+        }
+        ClassLikeMember::TraitUse(_) => true,
+        _ => false,
+    });
+    let parent = ac.extends.as_ref().and_then(|e| e.types.iter().next());
+    if own_constructor {
+        out.push(EffectOrigin::Opaque { span });
+    } else if let Some(parent) = parent {
+        out.push(EffectOrigin::New { class: StaticClass::Named(name_ref(parent)), span });
+    }
+    if let Some(list) = &ac.argument_list {
+        scan_effect_origins(&Node::PartialArgumentList(list), cx, out);
     }
 }
 

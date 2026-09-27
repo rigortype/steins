@@ -152,8 +152,10 @@ fn by_ref_closure_capture_of_the_receiver_falls_back_to_taint() {
 #[test]
 fn by_value_closure_capture_of_the_receiver_keeps_the_bound() {
     // Positive control: `use ($r)` copies, so an inner write can't touch the caller's binding.
+    // `Wild` is declared, constructor-less: an undeclared class's `new` would leave
+    // the closure `…?` on its own (issue #804).
     let src = format!(
-        "<?php\n{REPO}function f(Repo $r): string {{\n\
+        "<?php\n{REPO}final class Wild {{}}\nfunction f(Repo $r): string {{\n\
              $g = function () use ($r) {{ $r = new Wild(); }};\n\
              $g();\n\
              return $r->find(1);\n\

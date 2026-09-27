@@ -10,11 +10,18 @@
 use steins_infer::{Diagnostic, EFFECT_ID, EffectSummary, check, effect_summary};
 use steins_syntax::SourceTree;
 
-/// Parse + check inline PHP, returning only the effect-envelope findings.
+/// Parse + check inline PHP, returning only the effect-envelope findings of the
+/// method rows. `new \PDO(...)` is `io.db` itself — the constructor connects
+/// (issue #804) — and that finding lands beside the method's whenever the
+/// receiver is written `(new \PDO(...))->m()`, so it is set aside here;
+/// `constructor_effects.rs` pins it.
 fn effects(src: &str) -> Vec<Diagnostic> {
     let tree = SourceTree::parse(src);
     let functions = tree.functions().to_vec();
-    check(&tree, &functions, "test.php").into_iter().filter(|d| d.id == EFFECT_ID).collect()
+    check(&tree, &functions, "test.php")
+        .into_iter()
+        .filter(|d| d.id == EFFECT_ID && !d.message.starts_with("new "))
+        .collect()
 }
 
 fn one(src: &str) -> Diagnostic {
@@ -118,12 +125,18 @@ fn class_and_method_names_fold_case() {
 #[test]
 fn io_db_propagates_through_a_helper_with_via_provenance() {
     let src = "<?php\n#[\\Steins\\Pure]\nfunction f(): void { rows(); }\nfunction rows(): void { (new \\PDO(\"sqlite::memory:\"))->query(\"SELECT 1\"); }\n";
-    let d = one(src);
+    // One finding per origin in `rows()`: the query, and the constructor's
+    // connection beside it (issue #804).
+    let f = effects(src);
+    let messages: Vec<&str> = f.iter().map(|d| d.message.as_str()).collect();
     assert_eq!(
-        d.message,
-        "rows() has effect io.db (via PDO::query at line 4), but f() is declared #[\\Steins\\Pure]"
+        messages,
+        [
+            "rows() has effect io.db (via PDO::query at line 4), but f() is declared #[\\Steins\\Pure]",
+            "rows() has effect io.db (via new PDO at line 4), but f() is declared #[\\Steins\\Pure]",
+        ]
     );
-    assert_eq!(d.line, 3, "reported at the outer rows() call site");
+    assert!(f.iter().all(|d| d.line == 3), "reported at the outer rows() call site");
 }
 
 // An unresolvable receiver is exactly as silent as it was
