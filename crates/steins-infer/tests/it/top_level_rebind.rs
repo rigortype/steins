@@ -303,6 +303,24 @@ fn a_heap_object_is_forgotten_by_the_same_rule() {
 // ---------------------------------------------------------------------------
 
 #[test]
+fn an_offset_write_that_may_run_offset_set_forgets_the_frame() {
+    // `offsetSet` is a userland body under `$a['k'] = 1`; probed at 8.5.10 this
+    // exits 0. (`$a = new AA()` forgets on its own, so `$s` is assigned after it.)
+    let src = "<?php\nfinal class AA implements ArrayAccess {\n\
+               public function offsetExists(mixed $o): bool { return true; }\n\
+               public function offsetGet(mixed $o): mixed { return 1; }\n\
+               public function offsetSet(mixed $o, mixed $v): void { $GLOBALS['s'] = 5; }\n\
+               public function offsetUnset(mixed $o): void {}\n}\n\
+               $a = new AA();\n$s = 'abc';\n$a['k'] = 1;\nintdiv($s, 1);\n";
+    assert_eq!(mismatch_lines(src), Vec::<u32>::new(), "{src}");
+}
+
+#[test]
+fn an_offset_write_on_a_proven_array_keeps_the_frame() {
+    convicts_after("$a = [];\n", "$a['k'] = 1;");
+}
+
+#[test]
 fn a_direct_write_through_dollar_globals_takes_the_total_clear() {
     // Known behaviour, not this rule: a superglobal base is never frame-private
     // (issue #641's target leg), so the barrier in front of it stays total.

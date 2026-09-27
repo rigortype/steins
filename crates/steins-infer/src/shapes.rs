@@ -960,7 +960,7 @@ fn write_is_frame_private(w: &WalkCx, base: &str) -> bool {
 ///
 /// [`closed_handle_verdict`]: crate::arg_check
 fn open_offset_barrier(w: &WalkCx, base: &str, env: &mut HashMap<String, Known>, store: &mut Store) {
-    if !write_is_frame_private(w, base) {
+    if !write_is_frame_private(w, base) || offset_write_may_run_userland(base, env) {
         env.clear();
         store.clear();
         return;
@@ -972,6 +972,28 @@ fn open_offset_barrier(w: &WalkCx, base: &str, env: &mut HashMap<String, Known>,
     store.narrowed.clear();
     store.contract.remove(base);
     store.drop_places_of(base);
+}
+
+/// Whether an offset write in the **top-level frame** may run a userland body
+/// (issue #762, issue #696's first point): `$base[…] = v`, `$base[] = v` and
+/// `unset($base[…])` on an `ArrayAccess` object run `offsetSet`/`offsetUnset`,
+/// and in the frame whose locals are the globals that body can rebind any of
+/// them through `global` or `$GLOBALS`, exactly as a called function can
+/// ([`top_level_rebind_risk`]). Probed at 8.5.10: `$s = 'abc'; $a = new AA();
+/// $a['k'] = 1; intdiv($s, 1);` with an `offsetSet` writing `$GLOBALS['s'] = 5`
+/// exits 0.
+///
+/// The narrow leg stays open where the base provably holds no object: a
+/// `Verified` value-lane fact, which describes a scalar or an array and never
+/// an object (a `null` base autovivifies to an array). Anything else — an
+/// object, a name the walk knows nothing about — takes the total clear, as the
+/// call rule does. Inside a function body the write reaches no binding of this
+/// frame but the target, so the leg stays as issue #641 left it.
+///
+/// [`top_level_rebind_risk`]: crate::rebind::top_level_rebind_risk
+fn offset_write_may_run_userland(base: &str, env: &HashMap<String, Known>) -> bool {
+    crate::walk::frame_is_top_level()
+        && !env.get(base).is_some_and(|k| k.fact.is_some() && k.stratum == Stratum::Verified)
 }
 
 /// `$var[k] = v` / `$var[k1][k2] = v` and `unset($var[k])`, with `k` either a
