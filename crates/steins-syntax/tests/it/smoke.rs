@@ -320,14 +320,7 @@ fn scans_effect_origins_across_control_flow() {
                 echo += 1;
             }
             EffectOrigin::Call { name, .. } => calls.push(name.simple().to_owned()),
-            EffectOrigin::Exit { .. } => panic!("no exit expected"),
-            EffectOrigin::MethodCall { .. } => panic!("no method call expected"),
-            EffectOrigin::Opaque { .. } => panic!("no opaque call expected"),
-            EffectOrigin::HigherOrder { .. } => panic!("no higher-order call expected"),
-            EffectOrigin::Callback { .. } => panic!("no callback call expected"),
-            EffectOrigin::Eval { .. } => panic!("no eval expected"),
-            EffectOrigin::Include { .. } => panic!("no include expected"),
-            EffectOrigin::State { .. } => panic!("no state construct expected"),
+            other => panic!("no {} origin expected: {other:?}", other.kind().name()),
         }
     }
     assert_eq!(echo, 1, "echo inside the if is found");
