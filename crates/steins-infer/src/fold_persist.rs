@@ -36,9 +36,9 @@
 //! are plural because a worker must not need a lock to record what it consumed.
 
 use std::collections::{BTreeMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
-use steins_gen::{ArtifactBuilder, ArtifactReader, Miss, PackageName, SectionName};
+use steins_gen::{ArtifactBuilder, ArtifactReader, Fingerprint, Miss, PackageName, SectionName};
 use steins_sidecar::{
     ClassReflection, ConstantDefined, EnvInfo, FoldArg, FoldResult, PregCompile, Reflection,
 };
@@ -88,11 +88,11 @@ fn rows_section() -> SectionName {
 // ---------------------------------------------------------------------------
 
 /// The engine identity a stored fold table is keyed under (ADR-0092 §4): the
-/// boot-surface fields that decide what the engine would answer, plus the
-/// strict posture axis of the row keys. On load the stored identity is
-/// compared with the live engine's own boot surface, taken then and there; any
-/// mismatch is a miss for the whole table — a different engine asks everything
-/// again, never reinterprets.
+/// boot-surface fields and the runner program that decide what the engine
+/// would answer, plus the strict posture axis of the row keys. On load the
+/// stored identity is compared with the live engine's own boot surface, taken
+/// then and there; any mismatch is a miss for the whole table — a different
+/// engine asks everything again, never reinterprets.
 ///
 /// Both sides of the comparison come through [`FoldTableIdentity::from_env`],
 /// so the normalization (extensions sorted and lowercased, the lane derived by
@@ -118,11 +118,25 @@ pub struct FoldTableIdentity {
     /// params — and compared like every other axis, so a table recorded under
     /// a seam that did not key strictness can never serve one that does.
     pub strict_keyed: bool,
+    /// A content hash of the runner the engine answered through
+    /// ([`steins_sidecar::RUNNER_SRC`]). `env` describes the PHP and not the
+    /// program running on it, and a runner edit can move an answer on an
+    /// unchanged PHP: rebuilding an array argument from `null` rather than
+    /// `[]` moved `count([-5 => 'a', 'b', -4 => 'c'])` on 8.1 and 8.2 (#813).
+    /// A table one runner recorded never serves another.
+    pub runner: String,
 }
 
+/// [`FoldTableIdentity::runner`] for the runner this binary embeds.
+static RUNNER: LazyLock<String> = LazyLock::new(|| {
+    Fingerprint::of_bytes("steins-sidecar/runner.php", steins_sidecar::RUNNER_SRC.as_bytes())
+        .to_hex()
+});
+
 impl FoldTableIdentity {
-    /// The identity of the engine `env` describes — the one constructor, used
-    /// for both the recording side and the loading side of the comparison.
+    /// The identity of the engine `env` describes, answering through the
+    /// runner this binary embeds — the one constructor, used for both the
+    /// recording side and the loading side of the comparison.
     #[must_use]
     pub fn from_env(env: &EnvInfo) -> Self {
         let mut extensions: Vec<String> =
@@ -134,6 +148,7 @@ impl FoldTableIdentity {
             extensions,
             fold_lane: fold_lane_at_width(env.int_size).as_str().to_owned(),
             strict_keyed: true,
+            runner: RUNNER.clone(),
         }
     }
 
@@ -144,15 +159,17 @@ impl FoldTableIdentity {
             "extensions": self.extensions,
             "fold_lane": self.fold_lane,
             "strict_keyed": self.strict_keyed,
+            "runner": self.runner,
         })
     }
 
     /// Strict inverse of [`Self::to_json`]: exactly these fields, exactly
     /// these types. `None` is the whole-table miss — an identity that cannot
-    /// be read cannot match anything.
+    /// be read cannot match anything, and that includes a table recorded
+    /// before the runner was an axis.
     fn from_json(value: &serde_json::Value) -> Option<Self> {
         let obj = value.as_object()?;
-        if obj.len() != 5 {
+        if obj.len() != 6 {
             return None;
         }
         let int_size = match obj.get("int_size")? {
@@ -170,6 +187,7 @@ impl FoldTableIdentity {
                 .collect::<Option<Vec<_>>>()?,
             fold_lane: obj.get("fold_lane")?.as_str()?.to_owned(),
             strict_keyed: obj.get("strict_keyed")?.as_bool()?,
+            runner: obj.get("runner")?.as_str()?.to_owned(),
         })
     }
 }
@@ -837,9 +855,13 @@ mod tests {
         extra["sapi"] = serde_json::json!("cli");
         let mut wrong_type = good.clone();
         wrong_type["int_size"] = serde_json::json!("8");
-        let mut mixed_list = good;
+        let mut mixed_list = good.clone();
         mixed_list["extensions"] = serde_json::json!(["core", 7]);
-        for bad in [serde_json::json!({}), serde_json::json!(42), extra, wrong_type, mixed_list] {
+        // What a table recorded before the runner axis carries.
+        let mut runnerless = good;
+        runnerless.as_object_mut().unwrap().remove("runner");
+        let shapes = [serde_json::json!({}), serde_json::json!(42), extra, wrong_type, mixed_list];
+        for bad in shapes.into_iter().chain([runnerless]) {
             assert_eq!(FoldTableIdentity::from_json(&bad), None, "{bad}");
         }
     }

@@ -19,9 +19,13 @@ use crate::wire::{
 };
 
 /// The runner source, baked into the binary. Passed to `php -r` as an argv
-/// element (see [`Channel::open`]) — never written to disk, so there is no
+/// element (see `Channel::open`) — never written to disk, so there is no
 /// per-instance or per-process temp file to leak or clean up.
-const RUNNER_SRC: &str = include_str!("../runner.php");
+///
+/// Public because it is half of what an answer depends on: `env` describes
+/// the PHP that answers, and this is the program answering on it, so a store
+/// of recorded answers has to key on both.
+pub const RUNNER_SRC: &str = include_str!("../runner.php");
 
 /// [`RUNNER_SRC`] with its leading `<?php` tag line removed, ready for `-r`
 /// (which forbids the open tag). Stripped by prefix rather than a hardcoded

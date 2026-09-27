@@ -204,12 +204,12 @@ fn the_live_engine_hears_only_what_the_table_never_recorded() {
     assert!(published.rows.contains_key(&fold_key("ucfirst", "xy")), "fresh row recorded");
 }
 
-/// Oracle (b): a doctored stored identity — a different PHP version, or a
-/// table whose rows were not keyed by the call site's strict mode — drops the
-/// WHOLE table. Findings stay byte-identical (everything is asked live, which
-/// is a cold run), the stored rows serve nothing (the fold row the table held
-/// comes back through the live engine), and the published table is rebuilt
-/// under the live identity.
+/// Oracle (b): a doctored stored identity — a different PHP version, a table
+/// whose rows were not keyed by the call site's strict mode, or one another
+/// runner recorded — drops the WHOLE table. Findings stay byte-identical
+/// (everything is asked live, which is a cold run), the stored rows serve
+/// nothing (the fold row the table held comes back through the live engine),
+/// and the published table is rebuilt under the live identity.
 #[test]
 fn a_doctored_identity_is_a_miss_for_the_whole_table() {
     if !spawn_or_skip("a_doctored_identity_is_a_miss_for_the_whole_table") {
@@ -221,9 +221,12 @@ fn a_doctored_identity_is_a_miss_for_the_whole_table() {
 
     let doctor_version = |a: &mut FoldTableArtifact| a.identity.php_version = "7.4.33".to_owned();
     let doctor_strict = |a: &mut FoldTableArtifact| a.identity.strict_keyed = false;
-    for (axis, doctor) in
-        [("php_version", &doctor_version as &dyn Fn(&mut FoldTableArtifact)), ("strict_keyed", &doctor_strict)]
-    {
+    let doctor_runner = |a: &mut FoldTableArtifact| a.identity.runner = "0".repeat(64);
+    for (axis, doctor) in [
+        ("php_version", &doctor_version as &dyn Fn(&mut FoldTableArtifact)),
+        ("strict_keyed", &doctor_strict),
+        ("runner", &doctor_runner),
+    ] {
         let mut doctored = artifact.clone();
         doctor(&mut doctored);
         let reloaded = persist_and_reload("identity", &doctored);
