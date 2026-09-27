@@ -326,6 +326,19 @@ because `int` remains for anyone who means the type. A native `resource $x` hint
 is unaffected — that is a class reference to PHP, and `class.undefined` still
 says so (entry 4). Reconsideration precondition: none.
 
+**20. A shape's positional item after negative keys takes the literal's next
+key.** PHPStan's `ConstantArrayTypeBuilder::createEmpty()` starts the next index
+at `0`, and an integer key moves it only from there up, so
+`array{-5: int, string}` declares the `string` at `0`. Steins reads a positional
+item as the same array literal places it (ADR-0049 A22, A23):
+`[-5 => 1, 'x']` puts `'x'` at `-4` on every supported minor, and so does the
+shape. The readings differ only where a positional item's largest preceding
+integer key is below `-1`, and Steins' spelling follows its own reading:
+`array{-5: 1, -4: 2, ...}` prints as `array{-5: 1, 2, ...}`. So under
+`@param array{-5: int, string}`, `f([-5 => 1, 'x'])` is accepted and
+`f([-5 => 1, 0 => 'x'])` is `phpdoc.param-mismatch`
+([phpdoc-grammar.md](phpdoc-grammar.md), "Array shape keys").
+
 ## Conformance-suite divergences (intentional silences)
 
 Steins runs `php-typing-conformance`. Standing at the last recorded run
