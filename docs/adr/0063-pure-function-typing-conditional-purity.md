@@ -224,3 +224,112 @@ that changes *meaning*, which ADR-0092 §2 forbids.
   lowering deliberately does not model (issue #288).
 - **The gate stays whole-frame**, per the earlier amendment, and per-variable
   exposure is not attempted.
+
+## Amendment (2026-09-28): the top-level scope is a frame whose locals are globals — PENDING ratification
+
+Issue #762, under the owner's ruling on it (option 2), and the first point of
+issue #696. The two legs above, and the value lane's statement invalidation
+before them, read every scope as frame-private: a callee reaches a caller's
+binding only through an argument, a receiver or a reference, so a statement
+that names nothing loses nothing. That holds inside a function body and not at
+file scope, where every local is a global and any userland body that runs can
+rebind one through `global $s` or `$GLOBALS['s']`. Probed at `PINNED_PHP`
+8.5.10, both of these exit 0 and Steins convicted the stale `"abc"` on the
+default surface:
+
+```
+function bump(): void { global $s; $s = 5; }
+$s = 'abc'; bump(); intdiv($s, 1);
+```
+
+```
+final class AA implements ArrayAccess { /* offsetSet: $GLOBALS['s'] = 5; */ }
+$a = new AA(); $s = 'abc'; $a['k'] = 1; intdiv($s, 1);
+```
+
+### The rule
+
+**In the top-level frame, a statement that runs a userland body forgets every
+name the frame holds.** The answer is one predicate
+(`rebind::top_level_rebind_risk`) and one clear, the one a `Barrier` applies,
+so the value lane, the heap objects and the heap resources drop together. It
+replaces ADR-0097 §2.4's top-level row, which forgot the resource *state* alone
+and kept the binding and the type lane that the same rebind invalidates.
+
+What runs a userland body is read off the CST (`Stmt::runs`), not the trace IR,
+which drops a call nested in an unmodelled expression, the body of a `try` and
+a method-call `echo` operand:
+
+- a method or static call, a call through a value, a pipe, and
+  `include`/`require`/`eval`;
+- a `new` of anything but an engine class: a project class, a project subclass
+  of an engine class, an unknown name, `self`/`static`/`parent`, a variable or
+  an anonymous class. `new \DateTimeImmutable()` and `new \Exception('…')` run
+  the engine's own constructor and are let through;
+- a named call that does not denote an engine builtin: a project function, a
+  namespaced twin, an unknown name. The builtin test reads the mined arginfo
+  table first and the live engine's reflection second, so `--no-php` does not
+  turn every `strlen()` into a forgetting;
+- an engine builtin handed a userland callee at a position of
+  `steins_catalog::callback_carriers`, the carrier rule the by-value lane and
+  the fold seam share: `array_map('bump', …)`, `usort($a, 'cmp')`,
+  `call_user_func('bump')`, a closure argument. `null`, a carrier-free
+  builtin's name (`'intval'`, `'strcmp'`) and an absent optional callback are
+  let through. The Deferred route (`ob_start`, `pcntl_signal`, `assert`) is
+  left out: a deferred callback runs later, not during the call that stores
+  it.
+
+The dump surface and the harness `assertType` are let through by the
+recognizers the by-value lane exempts them with.
+
+**When.** A simple statement forgets after its own checks, which judge the
+arguments as they were passed, and before its own binding, so `$x = f();`
+still binds `$x`. An `if` (and a `match (true)` guard chain, which is one)
+forgets once its condition is judged and before any branch is walked:
+forgetting before the condition would un-decide it, and a dead branch the walk
+can no longer prove dead is checked as if it ran. A loop counts its whole
+subtree, since the body's calls run before the header's next evaluation.
+
+**The offset-write leg.** In the top-level frame the narrow barrier of the
+2026-09-11 amendment additionally needs the base to hold a `Verified`
+value-lane fact, which describes a scalar or an array and never an object;
+anything else may be an `ArrayAccess` whose `offsetSet`/`offsetUnset` runs, and
+takes the total clear. That settles #696's first point for the offset-write
+leg: at top level a write is exposed unless its base is proven not to be an
+object.
+
+### What it does not see, by name
+
+- **Userland the engine runs behind a signature or an operator** read as data:
+  `__toString` under a conversion, `__clone` under `clone`, `offsetGet` under a
+  read, `__get`/`__set`, a generator or `Iterator` under `foreach`,
+  `JsonSerializable` under `json_encode`, an engine constructor reaching an
+  argument's userland (`IteratorIterator` over an `IteratorAggregate`), a
+  destructor, an autoloader, a registered error, output or shutdown handler, a
+  user stream wrapper. ADR-0070's top-level refusal and ADR-0097 §2.4's wrapper
+  note accept the same calibration.
+- **Ordering inside one statement.** The checks judge every argument against
+  the facts the statement was entered with, so in `need2(bump2(), $s)` the
+  `$s` PHP reads after `bump2()` is judged on its old value; likewise a
+  condition read after its own userland call.
+- **The routes that do not go through a call.** `include`/`require` of a file
+  that assigns, `extract()`, `$$name` and a `&` reference are on ADR-0001's
+  give-up list: the top-level scope is poisoned and holds no fact to convict
+  with, before the route as much as after it. `$GLOBALS['s'] = 5` written at
+  top level is a superglobal target, which the 2026-09-11 target leg already
+  sends to the total clear.
+
+### What it costs
+
+The rule gives up the true positives a script earns after its first project
+call: in script-shaped code every variable used after one is no longer checked
+against what it held before it. On phpstan-src's nsrt corpus (18,153 rows,
+mostly function-scoped) 99 rows in 10 files lost precision, 23 of them
+`match` → `differ` and 10 `subsumed` → `differ`; the other 66 were already
+`differ` or `unsupported` and now answer `unknown` or a wider type. Every moved
+row sits at file scope after a call the rule counts: an undefined helper
+(`doFoo()`), a project function, a closure handed to `array_map` or
+`array_filter`, a static call. Precision for a resolved callee
+is the follow-up the ruling names (option 1): forget only the names the callee's
+transitive globals-written set names, keeping this rule as the floor for every
+call such a summary cannot read.
