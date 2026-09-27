@@ -1385,8 +1385,9 @@ fn lower_int_range(args: &[steins_phpdoc::ast::GenericArg]) -> ContractTy {
 }
 
 /// The normalized runtime keys a shape's items denote, in item order:
-/// positional items take the running auto-index, floored at `0`
-/// ([`NextInt::floored_at_zero`]), and PHP folds an integer-like
+/// positional items take the key the same array literal would give them
+/// ([`NextInt::new`], ADR-0049 A22), so `array{-5: T, U}` declares `U` at
+/// `-4` as `[-5 => …, …]` builds it; and PHP folds an integer-like
 /// string/bareword key to an int key (`array{'9': T}` declares key `9`, as
 /// `[9 => …]` builds it).
 ///
@@ -1398,7 +1399,7 @@ pub fn shape_keys(shape: &steins_phpdoc::ast::ArrayShape) -> Option<Vec<CKey>> {
     let mut keys = Vec::with_capacity(shape.items.len());
     // No next key past a `PHP_INT_MAX` key (`[PHP_INT_MAX => 1, 2]` throws), so
     // a positional item after it names no key at all.
-    let mut next_int = NextInt::floored_at_zero();
+    let mut next_int = NextInt::new();
     for item in &shape.items {
         let key = match &item.key {
             None => CKey::Int(next_int.next()?),
