@@ -1181,8 +1181,7 @@ fn region_purity_in(
                     params: &[steins_syntax::Param],
                     eo: &[EffectOrigin],
                     to: &[ThrowOrigin]| {
-        let picked: Vec<EffectOrigin> =
-            eo.iter().filter(|o| inside(effect_origin_span(o))).cloned().collect();
+        let picked: Vec<EffectOrigin> = eo.iter().filter(|o| inside(o.span())).cloned().collect();
         classify_effect_origins(&cx, class_fqn, params, &picked, plugins, policy, &mut row);
         // The guards are dropped, not carried: this region's own body cannot
         // hold a `try` (a `try` is a statement, and the eligible body is one
@@ -1250,22 +1249,6 @@ fn region_purity_in(
         exhaustive,
         throws: classes,
         throws_exhaustive,
-    }
-}
-
-/// The source span of an [`EffectOrigin`], whatever its shape.
-const fn effect_origin_span(o: &EffectOrigin) -> steins_syntax::Span {
-    match o {
-        EffectOrigin::Call { span, .. }
-        | EffectOrigin::Output { span, .. }
-        | EffectOrigin::Exit { span, .. }
-        | EffectOrigin::MethodCall { span, .. }
-        | EffectOrigin::Opaque { span }
-        | EffectOrigin::HigherOrder { span, .. }
-        | EffectOrigin::Callback { span, .. }
-        | EffectOrigin::Eval { span }
-        | EffectOrigin::Include { span, .. }
-        | EffectOrigin::State { span, .. } => *span,
     }
 }
 
