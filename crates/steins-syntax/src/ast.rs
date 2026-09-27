@@ -2438,6 +2438,75 @@ pub struct Stmt {
     /// claim about the program. Every other reader is indifferent: an arm body's
     /// findings, dead-branch marking and terminality are unchanged.
     pub value_position: bool,
+    /// What this statement's own evaluation may hand control to (issue #762) —
+    /// see [`Runs`]. Read off the CST by `lower_stmt`'s central fill; the
+    /// entries that bypass it (a hoisted `match` arm, an arrow or hook body)
+    /// carry the empty record, and the statement that consumes a hoisted arm
+    /// carries its calls instead.
+    pub runs: Runs,
+}
+
+/// The calls a statement's own evaluation makes, as the **top-level rebind
+/// rule** needs them (issue #762): in the top-level frame every local is a
+/// global, so any userland body that runs can rebind one through `global $x`
+/// or `$GLOBALS['x']` while the statement mentions nothing, and the walk asks
+/// of each call whether it can be such a body.
+///
+/// Read off the CST rather than off [`StmtKind`], because the trace IR drops
+/// what it cannot model: a call nested in an [`ArgValue::Other`], the body of a
+/// `try`, an `echo $o->m()` operand. The syntax layer knows no signatures, so
+/// it records spellings and decides nothing.
+///
+/// Which subtree counts as "own evaluation": an `if` contributes its
+/// conditions only, since its branches are sub-traces whose statements carry
+/// their own records; a structured `switch` contributes nothing, since its
+/// subject and every case condition are a variable or a literal. Every other
+/// statement contributes its whole subtree — a loop's header and body alike,
+/// because the body's calls run before the header's next evaluation and before
+/// every later iteration. Nested function-likes and class-likes are their own
+/// scopes and are not descended.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
+pub struct Runs {
+    /// Every call of a **statically named function** (`f(…)`, `\f(…)`,
+    /// `Ns\f(…)`), in source order. Empty whenever [`Self::other`] is set,
+    /// since the answer is decided without them.
+    pub functions: Vec<RunCall>,
+    /// Whether the evaluation runs anything a function name cannot describe: a
+    /// method, static or constructor call, a call through a variable or an
+    /// expression, a pipe (`|>` calls its right-hand side), or
+    /// `include`/`require`/`eval`. A magic method an operator runs (`__clone`
+    /// under `clone`, `__toString` under a conversion) is not a call here.
+    pub other: bool,
+}
+
+/// One statically named function call in a [`Runs`] record: the reference and
+/// what the walk needs to tell whether a callback argument hands control to
+/// userland.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
+pub struct RunCall {
+    /// The function reference as written, for project-wide resolution.
+    pub callee: NameRef,
+    /// The positional arguments before the first named or spread one.
+    pub args: Vec<RunArg>,
+    /// `false` when the call has a named or spread argument, so a position in
+    /// [`Self::args`] no longer names every argument the callee receives.
+    pub positional_only: bool,
+}
+
+/// One positional argument of a [`RunCall`], only as finely as a callback
+/// position needs it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
+pub enum RunArg {
+    /// The literal `null` — no callee.
+    Null,
+    /// A string literal spelled like a function name (`'intval'`,
+    /// `'\App\f'`), which PHP resolves as a fully qualified name.
+    Name(String),
+    /// Anything else.
+    Other,
 }
 
 impl Stmt {
@@ -2455,6 +2524,7 @@ impl Stmt {
             string_contexts: Vec::new(),
             end: BodyEnd::FallsThrough,
             has_terminator: false,
+            runs: Runs::default(),
         }
     }
 }
