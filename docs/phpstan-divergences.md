@@ -172,7 +172,12 @@ named: the nsrt headline `match` count falls, with those rows landing on
 state a sequence and the oracle states a set. Key *layout* is still spelled
 the way PHPStan spells it (positional fields for contiguous required keys,
 every key printed otherwise, `non-empty-` dropped where a required key
-implies it, the empty shape `array{}`), and unsealed shapes are untouched.
+implies it, the empty shape `array{}`), and the head-keyword rule leaves
+unsealed shapes untouched. One layout difference is deliberate: a positional
+field takes the key the same array literal would give it, negative keys
+included (ADR-0049 A23), so `array{-5: 1, -4: 2, ...}` prints as
+`array{-5: 1, 2, ...}`, where PHPStan reads a positional field after only
+negative keys at `0`.
 Declined
 with reasons: an abstract `nextAutoIndexes` (concrete-only, version-aware),
 and `ARRAY_COUNT_LIMIT`-style union degradation (replaced by the computed
