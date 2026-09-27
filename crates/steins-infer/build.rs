@@ -26,6 +26,18 @@
 //! rebuild costs time, a spurious HIT costs correctness. It is also the rule
 //! that needs no maintenance as crates are added.
 //!
+//! **Why the files the sources embed, too.** A crate can compile a file that is
+//! not Rust into the binary: `steins-sidecar` embeds `runner.php`, the program
+//! every fold runs, with `include_str!`. A walk of `src/**/*.rs` alone did not
+//! see it, so a runner change (252b0e1e) left the fingerprint where it was, and
+//! a warm run replayed walk blocks the old runner had folded — the bug above,
+//! one file over. So the walk also follows every `include!`, `include_str!`
+//! and `include_bytes!` a source names, and an argument it cannot follow to a
+//! file fails the build: an embed the fingerprint cannot see is that bug
+//! waiting for its next edit. So does a walk that finds nothing or a file it
+//! cannot read, since either would stamp a value that does not describe the
+//! tree.
+//!
 //! **What it costs.** A released binary has fixed sources, so its identity is
 //! stable across rebuilds and its store keeps working. A working tree
 //! invalidates the store whenever any analyzer source changes — which is the
@@ -36,35 +48,52 @@
 
 use std::path::{Path, PathBuf};
 
+/// The macros that compile a file into the crate whose source names it.
+const EMBEDS: [&str; 3] = ["include!", "include_str!", "include_bytes!"];
+
 fn main() {
     let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("crates/ is the parent");
-    let mut files = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(crates) {
-        for e in entries.flatten() {
-            let src = e.path().join("src");
-            if src.is_dir() {
-                collect(&src, &mut files);
-            }
+    let root = canonical(crates.parent().expect("the workspace root is the parent of crates/"));
+    let mut sources = Vec::new();
+    for e in list(crates) {
+        let src = e.join("src");
+        if src.is_dir() {
+            collect(&src, &mut sources);
         }
     }
+    assert!(!sources.is_empty(), "no crates/*/src/**/*.rs under {}", crates.display());
+    let mut embeds = Vec::new();
+    for rs in &sources {
+        let text = std::fs::read_to_string(rs)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", rs.display()));
+        embedded(rs, &text, &mut embeds);
+    }
+    let mut embeds: Vec<PathBuf> = embeds.iter().map(|f| canonical(f)).collect();
+    embeds.sort();
+    embeds.dedup();
     // Sorted so the fingerprint is a property of the tree and not of the order
-    // the filesystem happened to report it in.
+    // the filesystem happened to report it in; deduplicated because an
+    // `include!` can name a file the walk already holds.
+    let mut files: Vec<PathBuf> = sources.iter().map(|f| canonical(f)).collect();
+    files.extend_from_slice(&embeds);
     files.sort();
+    files.dedup();
     let mut h = 0xcbf2_9ce4_8422_2325_u64;
     for f in &files {
-        fnv(&mut h, f.to_string_lossy().as_bytes());
-        if let Ok(bytes) = std::fs::read(f) {
-            fnv(&mut h, &bytes);
-        }
+        let bytes = std::fs::read(f).unwrap_or_else(|e| panic!("cannot read {}: {e}", f.display()));
+        field(&mut h, name(&root, f).as_bytes());
+        field(&mut h, &bytes);
         println!("cargo:rerun-if-changed={}", f.display());
     }
     println!("cargo:rustc-env=STEINS_ANALYZER_FINGERPRINT={h:016x}");
+    // What the walk followed past the sources, so a test can pin that the
+    // runner is in the fingerprint without re-deriving the walk.
+    let embeds: Vec<String> = embeds.iter().map(|f| name(&root, f)).collect();
+    println!("cargo:rustc-env=STEINS_ANALYZER_EMBEDS={}", embeds.join(";"));
 }
 
 fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
-    for e in entries.flatten() {
-        let p = e.path();
+    for p in list(dir) {
         if p.is_dir() {
             collect(&p, out);
         } else if p.extension().is_some_and(|x| x == "rs") {
@@ -73,9 +102,72 @@ fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// FNV-1a, folded in place so one hasher spans every file.
-fn fnv(h: &mut u64, bytes: &[u8]) {
-    for b in bytes {
+/// Every file `rs` compiles in through [`EMBEDS`], resolved against the
+/// directory of `rs`, as the macros resolve it. Line comments are dropped
+/// first, so prose that mentions a macro is not read as a use of it.
+///
+/// An argument that is not a string literal naming a file panics: a
+/// `concat!`, an `env!`, or a macro that wraps the call would compile a file
+/// this walk cannot see.
+fn embedded(rs: &Path, text: &str, out: &mut Vec<PathBuf>) {
+    let lines: Vec<&str> = text.lines().map(|l| l.split_once("//").map_or(l, |(c, _)| c)).collect();
+    let code = lines.join("\n");
+    let dir = rs.parent().expect("a source file has a directory");
+    for mac in EMBEDS {
+        for (at, _) in code.match_indices(mac) {
+            // `my_include!` is another macro.
+            if code[..at].ends_with(|c: char| c.is_alphanumeric() || c == '_') {
+                continue;
+            }
+            let Some(arg) = code[at + mac.len()..].trim_start().strip_prefix(['(', '[', '{'])
+            else {
+                continue;
+            };
+            let target = arg
+                .trim_start()
+                .strip_prefix('"')
+                .and_then(|lit| lit.split_once('"'))
+                .map(|(lit, _)| dir.join(lit))
+                .filter(|t| t.is_file());
+            let Some(target) = target else {
+                panic!(
+                    "{}: this `{mac}` names no file the analyzer fingerprint can follow; name \
+                     it with a string literal, or teach crates/steins-infer/build.rs to find it",
+                    rs.display()
+                );
+            };
+            out.push(target);
+        }
+    }
+}
+
+/// The entries of `dir`, or a failed build: a directory the walk cannot list
+/// would drop its files from the fingerprint without a word.
+fn list(dir: &Path) -> Vec<PathBuf> {
+    let entries =
+        std::fs::read_dir(dir).unwrap_or_else(|e| panic!("cannot list {}: {e}", dir.display()));
+    entries
+        .map(|e| e.unwrap_or_else(|e| panic!("cannot list {}: {e}", dir.display())).path())
+        .collect()
+}
+
+fn canonical(p: &Path) -> PathBuf {
+    std::fs::canonicalize(p).unwrap_or_else(|e| panic!("cannot resolve {}: {e}", p.display()))
+}
+
+/// The name a file is hashed under: relative to the workspace root and
+/// `/`-separated, so where the tree is checked out does not move the
+/// fingerprint. A file outside the tree keeps its full path.
+fn name(root: &Path, f: &Path) -> String {
+    let rel = f.strip_prefix(root).unwrap_or(f);
+    let parts: Vec<_> = rel.components().map(|c| c.as_os_str().to_string_lossy()).collect();
+    parts.join("/")
+}
+
+/// FNV-1a over one length-prefixed field, folded in place so one hasher spans
+/// every file. The prefix keeps a name and its contents from running together.
+fn field(h: &mut u64, bytes: &[u8]) {
+    for b in (bytes.len() as u64).to_le_bytes().iter().chain(bytes) {
         *h ^= u64::from(*b);
         *h = h.wrapping_mul(0x0000_0100_0000_01b3);
     }

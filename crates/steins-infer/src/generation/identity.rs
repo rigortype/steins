@@ -23,10 +23,11 @@ use crate::RuntimePostures;
 /// is not a tagged release (`cargo install --git`, a nightly, a local build) and
 /// every A/B a contributor runs in one working tree.
 ///
-/// `STEINS_ANALYZER_FINGERPRINT` is a content hash of `crates/*/src`, stamped by
-/// this crate's build script; see it for why the sources rather than the git
-/// revision, and what the choice costs. A released binary has fixed sources and
-/// keeps a stable identity across rebuilds.
+/// `STEINS_ANALYZER_FINGERPRINT` is a content hash of `crates/*/src` and of every
+/// file those sources embed, `runner.php` among them, stamped by this crate's
+/// build script; see it for why the sources rather than the git revision, and
+/// what the choice costs. A released binary has fixed sources and keeps a
+/// stable identity across rebuilds.
 pub(super) fn analyzer_version() -> &'static str {
     concat!(env!("CARGO_PKG_VERSION"), "+", env!("STEINS_ANALYZER_FINGERPRINT"))
 }
@@ -206,6 +207,15 @@ mod tests {
         // offset basis untouched, and a fingerprint that never moves is the bug
         // this replaces wearing a longer string.
         assert_ne!(fingerprint, "cbf29ce484222325", "the source walk found nothing to hash");
+    }
+
+    /// The fingerprint covers what the sources compile in, not only the sources.
+    /// `runner.php` is the program every fold runs; a change to it that left the
+    /// fingerprint where it was let a warm run replay what the old runner folded.
+    #[test]
+    fn the_analyzer_fingerprint_covers_the_embedded_runner() {
+        let embeds: Vec<&str> = env!("STEINS_ANALYZER_EMBEDS").split(';').collect();
+        assert!(embeds.contains(&"crates/steins-sidecar/runner.php"), "{embeds:?}");
     }
     use std::path::{Path, PathBuf};
 
