@@ -38,6 +38,15 @@
 //! cannot read, since either would stamp a value that does not describe the
 //! tree.
 //!
+//! **Why `Cargo.lock` and the manifests.** The analyzer is also what its
+//! dependencies make it. A Mago bump moves the parser's rev in the root
+//! `Cargo.toml` and in `Cargo.lock`, changes the syntax lowering, and touches
+//! nothing under `src`; a manifest can switch a feature or a profile setting
+//! the same way. So the lockfile, the root manifest and every crate's manifest
+//! are hashed too. The one build this cannot pin is `cargo install --git`
+//! without `--locked`, which resolves afresh rather than reading the lockfile
+//! it hashes.
+//!
 //! **What it costs.** A released binary has fixed sources, so its identity is
 //! stable across rebuilds and its store keeps working. A working tree
 //! invalidates the store whenever any analyzer source changes — which is the
@@ -55,10 +64,15 @@ fn main() {
     let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("crates/ is the parent");
     let root = canonical(crates.parent().expect("the workspace root is the parent of crates/"));
     let mut sources = Vec::new();
+    let mut builds = vec![root.join("Cargo.toml"), root.join("Cargo.lock")];
     for e in list(crates) {
         let src = e.join("src");
         if src.is_dir() {
             collect(&src, &mut sources);
+        }
+        let manifest = e.join("Cargo.toml");
+        if manifest.is_file() {
+            builds.push(manifest);
         }
     }
     assert!(!sources.is_empty(), "no crates/*/src/**/*.rs under {}", crates.display());
@@ -68,14 +82,15 @@ fn main() {
             .unwrap_or_else(|e| panic!("cannot read {}: {e}", rs.display()));
         embedded(rs, &text, &mut embeds);
     }
-    let mut embeds: Vec<PathBuf> = embeds.iter().map(|f| canonical(f)).collect();
-    embeds.sort();
-    embeds.dedup();
+    // Everything hashed that is not a `crates/*/src/**/*.rs` file.
+    let mut extra: Vec<PathBuf> = embeds.iter().chain(&builds).map(|f| canonical(f)).collect();
+    extra.sort();
+    extra.dedup();
     // Sorted so the fingerprint is a property of the tree and not of the order
     // the filesystem happened to report it in; deduplicated because an
     // `include!` can name a file the walk already holds.
     let mut files: Vec<PathBuf> = sources.iter().map(|f| canonical(f)).collect();
-    files.extend_from_slice(&embeds);
+    files.extend_from_slice(&extra);
     files.sort();
     files.dedup();
     let mut h = 0xcbf2_9ce4_8422_2325_u64;
@@ -86,10 +101,10 @@ fn main() {
         println!("cargo:rerun-if-changed={}", f.display());
     }
     println!("cargo:rustc-env=STEINS_ANALYZER_FINGERPRINT={h:016x}");
-    // What the walk followed past the sources, so a test can pin that the
-    // runner is in the fingerprint without re-deriving the walk.
-    let embeds: Vec<String> = embeds.iter().map(|f| name(&root, f)).collect();
-    println!("cargo:rustc-env=STEINS_ANALYZER_EMBEDS={}", embeds.join(";"));
+    // What the fingerprint covers past the sources, so a test can pin the
+    // runner and the lockfile in it without re-deriving the walk.
+    let extra: Vec<String> = extra.iter().map(|f| name(&root, f)).collect();
+    println!("cargo:rustc-env=STEINS_ANALYZER_EXTRA_INPUTS={}", extra.join(";"));
 }
 
 fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
