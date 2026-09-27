@@ -62,16 +62,21 @@ on:
     # `licenses` checks for drift AND embedded into the `steins-cli` binary via
     # `include_str!` (crates/steins-cli/src/main.rs), so it has to keep
     # triggering a real build. The `!` line re-includes it; order matters, and
-    # it must come after the blanket ignore. NB: duplicated verbatim on
+    # it must come after the blanket ignore. `changelog.d/**` is re-included
+    # too: a fragment is a gated entry (`cargo test -p xtask changelog`), and a
+    # PR that adds only a fragment must not leave a malformed one for the next
+    # code PR's CI to report. NB: duplicated verbatim on
     # `pull_request` below — GitHub's workflow parser does not honour YAML
     # anchors (see composer.yml), so an anchor here would silently widen scope.
     paths-ignore:
       - "**.md"
       - "!THIRD-PARTY-LICENSES.md"
+      - "!changelog.d/**"
   pull_request:
     paths-ignore:
       - "**.md"
       - "!THIRD-PARTY-LICENSES.md"
+      - "!changelog.d/**"
   # Manual escape hatch: GitHub webhook->Actions delivery dropped this branch's
   # events across three outage windows (2026-08-08); dispatch bypasses the webhook.
   workflow_dispatch:

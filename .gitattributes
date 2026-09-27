@@ -73,4 +73,12 @@
 # A test catches the duplicate instead (`xtask/src/changelog.rs`, issue #777,
 # the role rigor's changelog conformance spec plays there), and the
 # steins-release-prep skill's "split merge artefacts" step names it.
+#
+# Union only helps a local merge: GitHub ignores `.gitattributes` merge drivers
+# when it decides whether a PR can merge, so two PRs appending under
+# `[Unreleased]` still showed as conflicting and landed one at a time. Entries
+# therefore land as `changelog.d/<section>/<slug>.md` fragments (one new file
+# per change, rigortype/rigor's ADR-105 scheme), and only release prep writes
+# `[Unreleased]`. Union stays for the release branch and any local merge that
+# still meets this file.
 CHANGELOG.md merge=union

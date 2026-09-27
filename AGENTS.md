@@ -18,6 +18,8 @@ rules for one kind of task. Read it when the task matches its trigger.
 - **Performance** — before profiling, or before proposing an optimization:
   `docs/agents/profiling.md`. It carries the current baseline and what that
   baseline rules out.
+- **Changelog entry** for a user-visible change: `changelog.d/README.md`. An
+  entry is a new fragment file; never edit `CHANGELOG.md`'s `[Unreleased]`.
 - **Release** — a version bump, changelog seal, or version tag:
   `.claude/skills/steins-release-prep/SKILL.md`. It owns the push approval
   gates for releases.

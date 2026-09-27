@@ -14,13 +14,13 @@ is written here is what users read. Consequences:
 - **Write release notes, not commit messages.** The audience is someone deciding
   whether to upgrade, not someone reading the diff. Internal refactors, test
   additions, and doc churn do not belong here.
-- **Write your own `[Unreleased]` entry; don't defer it.** This section merges
-  by union (`.gitattributes`), so two branches appending here no longer
-  conflict on insertion order — git keeps both. The one thing union cannot
-  resolve silently-and-correctly is two branches opening the same **new**
-  `###` heading: that merges into a duplicate heading with no conflict raised.
-  Prefer an existing heading when one applies; the release-prep skill's
-  sealing step checks for a duplicate before a release ships it.
+- **Write your own entry, as a fragment, not here.** A change's entry lands
+  as `changelog.d/<section>/<slug>.md` (see `changelog.d/README.md`), in the
+  same grammar as the bullets below. GitHub ignores this file's union merge
+  when it decides whether a PR can merge, so two PRs appending under
+  `[Unreleased]` conflict on the anchor alone; a fragment is a new file and
+  never does. Only the `steins-release-prep` skill writes `[Unreleased]`: it
+  moves the fragments in at the cut and deletes them.
 
 What counts as notable for an analyzer, concretely: a change to which findings are
 reported or suppressed, to the surface of a profile, to the exit-code contract, to
@@ -34,9 +34,9 @@ findings by id (`call.undefined-function`), never by the sentence they print.
 
 ## [Unreleased]
 
-Entries accumulate under this heading as work lands; the `steins-release-prep`
-skill seals them into a version section at release time, reconstructing from
-`git log` if the discipline slipped.
+Entries accumulate in `changelog.d/` as work lands; the `steins-release-prep`
+skill moves them here and seals them into a version section at release time,
+reconstructing from `git log` if the discipline slipped.
 
 ### Changed
 
