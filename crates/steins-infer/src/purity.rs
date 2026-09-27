@@ -578,6 +578,42 @@ fn propagate_effects(
         .collect()
 }
 
+/// The label a **language-construct** origin proves on its own, whatever
+/// surrounds it, and the spelling its finding and its envelope diagnostic name
+/// the construct by: `echo` is `io.output.buffer`, `die` is `exit`. `None` for
+/// an origin whose effect is resolved through a callee (a call, a method call,
+/// a callback) or that proves no label (`Opaque`, and `State` until ADR-0055's
+/// labels land).
+///
+/// The one place a construct's label is spelled, so the finding
+/// [`classify_effect_origins`] records and the diagnostic [`report_unit`] emits
+/// cannot name two labels for one construct.
+const fn construct_label(origin: &EffectOrigin) -> Option<(&'static str, &'static str)> {
+    match origin {
+        EffectOrigin::Output { keyword, .. } => Some(("io.output.buffer", *keyword)),
+        EffectOrigin::Exit { keyword, .. } => Some(("exit", *keyword)),
+        EffectOrigin::Eval { .. } => Some(("eval", "eval")),
+        EffectOrigin::Include { keyword, .. } => Some(("io.fs.read", *keyword)),
+        EffectOrigin::Call { .. }
+        | EffectOrigin::MethodCall { .. }
+        | EffectOrigin::Opaque { .. }
+        | EffectOrigin::HigherOrder { .. }
+        | EffectOrigin::Callback { .. }
+        | EffectOrigin::State { .. } => None,
+    }
+}
+
+/// A language-construct origin's own finding ([`construct_label`]), at its line.
+fn construct_finding(cx: &Cx, origin: &EffectOrigin) -> Option<EffectFinding> {
+    let (label, spelling) = construct_label(origin)?;
+    Some(EffectFinding::direct(
+        label.to_owned(),
+        spelling.to_owned(),
+        cx.tree().position(origin.span().start).line,
+        cx.path().to_owned(),
+    ))
+}
+
 /// Classify one unit's (or one **region**'s — ADR-0076) effect origins into its
 /// [`EffectOwnRow`]. Split out of
 /// [`compute_effects`] so a *sub-span* of a body can be asked the same question
@@ -660,21 +696,8 @@ pub(crate) fn classify_effect_origins(
                     }
                 }
             }
-            EffectOrigin::Output { keyword, span } => {
-                row.findings.insert(EffectFinding::direct(
-                    "io.output.buffer".to_owned(),
-                    (*keyword).to_owned(),
-                    cx.tree().position(span.start).line,
-                    cx.path().to_owned(),
-                ));
-            }
-            EffectOrigin::Exit { keyword, span } => {
-                row.findings.insert(EffectFinding::direct(
-                    "exit".to_owned(),
-                    (*keyword).to_owned(),
-                    cx.tree().position(span.start).line,
-                    cx.path().to_owned(),
-                ));
+            EffectOrigin::Output { .. } | EffectOrigin::Exit { .. } => {
+                row.findings.extend(construct_finding(cx, origin));
             }
             EffectOrigin::MethodCall { receiver, method, span } => {
                 match resolve_effect_edge(cx, class_fqn, receiver, method) {
@@ -839,22 +862,8 @@ pub(crate) fn classify_effect_origins(
             // Dynamic code (ADR-0046 amendment): the construct itself is proven
             // — `eval`, or the file read an inclusion is — and the code it runs
             // is unseen, so the body is `…?` beside it.
-            EffectOrigin::Eval { span } => {
-                row.findings.insert(EffectFinding::direct(
-                    "eval".to_owned(),
-                    "eval".to_owned(),
-                    cx.tree().position(span.start).line,
-                    cx.path().to_owned(),
-                ));
-                row.exhaustive = false;
-            }
-            EffectOrigin::Include { keyword, span } => {
-                row.findings.insert(EffectFinding::direct(
-                    "io.fs.read".to_owned(),
-                    (*keyword).to_owned(),
-                    cx.tree().position(span.start).line,
-                    cx.path().to_owned(),
-                ));
+            EffectOrigin::Eval { .. } | EffectOrigin::Include { .. } => {
+                row.findings.extend(construct_finding(cx, origin));
                 row.exhaustive = false;
             }
             // A state construct's label (`global.*`, `mutate.*`) is not inferred
@@ -1766,21 +1775,6 @@ fn report_unit(
                     FnResolution::Unknown => {}
                 }
             }
-            EffectOrigin::Output { keyword, span } if bound.exceeds("io.output.buffer") => {
-                let prefix = format!("{keyword} has effect io.output.buffer");
-                out.push(exceeded_diag(cx, span.start, &prefix, display, bound, "io.output.buffer"));
-            }
-            EffectOrigin::Exit { keyword, span } if bound.exceeds("exit") => {
-                let prefix = format!("{keyword} has effect exit");
-                out.push(exceeded_diag(cx, span.start, &prefix, display, bound, "exit"));
-            }
-            EffectOrigin::Eval { span } if bound.exceeds("eval") => {
-                out.push(exceeded_diag(cx, span.start, "eval has effect eval", display, bound, "eval"));
-            }
-            EffectOrigin::Include { keyword, span } if bound.exceeds("io.fs.read") => {
-                let prefix = format!("{keyword} has effect io.fs.read");
-                out.push(exceeded_diag(cx, span.start, &prefix, display, bound, "io.fs.read"));
-            }
             EffectOrigin::MethodCall { receiver, method, span } => {
                 if let Some(callee) = resolve_effect_edge(cx, class_fqn, receiver, method) {
                     emit_transitive(out, cx, &callee, effects, span.start, display, bound);
@@ -1876,11 +1870,18 @@ fn report_unit(
             EffectOrigin::Callback { cbref, span } => {
                 report_callback(out, cx, cbref, effects, span.start, display, bound);
             }
-            EffectOrigin::Output { .. }
-            | EffectOrigin::Exit { .. }
-            | EffectOrigin::Eval { .. }
-            | EffectOrigin::Include { .. } => {}
-            EffectOrigin::Opaque { .. } | EffectOrigin::State { .. } => {}
+            // Every other origin is a language construct proving its own label
+            // (`construct_label`), or proves none (`Opaque`, `State`). A new
+            // construct reports here with no arm of its own; a new origin that
+            // resolves a callee needs an arm above, as `Call` has.
+            other => {
+                if let Some((label, spelling)) = construct_label(other)
+                    && bound.exceeds(label)
+                {
+                    let prefix = format!("{spelling} has effect {label}");
+                    out.push(exceeded_diag(cx, other.span().start, &prefix, display, bound, label));
+                }
+            }
         }
     }
 }
