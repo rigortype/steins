@@ -649,6 +649,7 @@ mod tests {
     use std::path::PathBuf;
 
     use steins_gen::{DecodeBudget, EnginePosture, GenerationInputs, Store};
+    use steins_syntax::{EffectOrigin, EffectOriginKind};
 
     use super::*;
     use crate::shard::{fallback_package_key, merge_shards};
@@ -722,50 +723,63 @@ mod tests {
         ]
     }
 
-    /// Which [`steins_syntax::EffectOrigin`] a value is. Exhaustive on
-    /// purpose: a new variant fails this match, which is the reminder that the
-    /// hand-written inverse in `steins-syntax::persist` needs the same variant
-    /// **in the same position** — the payload codec carries a variant by
-    /// index, so a twin that agrees on names and disagrees on order would
-    /// decode silently wrong.
-    fn origin_kind(origin: &steins_syntax::EffectOrigin) -> &'static str {
-        use steins_syntax::EffectOrigin as O;
-        match origin {
-            O::Call { .. } => "Call",
-            O::Output { .. } => "Output",
-            O::Exit { .. } => "Exit",
-            O::MethodCall { .. } => "MethodCall",
-            O::Opaque { .. } => "Opaque",
-            O::HigherOrder { .. } => "HigherOrder",
-            O::Callback { .. } => "Callback",
-            O::Eval { .. } => "Eval",
-            O::Include { .. } => "Include",
-            O::State { .. } => "State",
-        }
-    }
-
-    /// Every effect origin the parsed fixture carries, by variant.
-    fn fixture_origin_kinds(parsed: &[(&'static str, SourceTree)]) -> BTreeMap<&'static str, usize> {
-        let mut seen: BTreeMap<&'static str, usize> = BTreeMap::new();
+    /// Every effect origin the parsed fixture carries: functions', methods'
+    /// and closure scopes'.
+    fn fixture_origins<'a>(parsed: &'a [(&'static str, SourceTree)]) -> Vec<&'a EffectOrigin> {
+        let mut origins = Vec::new();
         for (_, tree) in parsed {
-            let mut note = |origins: &[steins_syntax::EffectOrigin]| {
-                for o in origins {
-                    *seen.entry(origin_kind(o)).or_default() += 1;
-                }
-            };
             for f in tree.functions() {
-                note(&f.effect_origins);
+                origins.extend(&f.effect_origins);
             }
             for c in tree.classes() {
                 for m in &c.methods {
-                    note(&m.effect_origins);
+                    origins.extend(&m.effect_origins);
                 }
             }
             for s in tree.scopes() {
-                note(&s.effect_origins);
+                origins.extend(&s.effect_origins);
             }
         }
-        seen
+        origins
+    }
+
+    /// The variant names serde decodes `T` by, in index order, which is what
+    /// a variant index on the payload codec's wire means. A derived
+    /// `Deserialize` hands the list to `deserialize_enum`; this deserializer
+    /// records it there and refuses everything else.
+    fn serde_variants<T: serde::de::DeserializeOwned>() -> &'static [&'static str] {
+        struct Variants(Option<&'static [&'static str]>);
+
+        impl<'de> serde::Deserializer<'de> for &mut Variants {
+            type Error = serde::de::value::Error;
+
+            fn deserialize_any<V: serde::de::Visitor<'de>>(
+                self,
+                _visitor: V,
+            ) -> Result<V::Value, Self::Error> {
+                Err(serde::de::Error::custom("not an enum"))
+            }
+
+            fn deserialize_enum<V: serde::de::Visitor<'de>>(
+                self,
+                _name: &'static str,
+                variants: &'static [&'static str],
+                _visitor: V,
+            ) -> Result<V::Value, Self::Error> {
+                self.0 = Some(variants);
+                Err(serde::de::Error::custom("the variant list is all this reads"))
+            }
+
+            serde::forward_to_deserialize_any! {
+                bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string bytes
+                byte_buf option unit unit_struct newtype_struct seq tuple tuple_struct map
+                struct identifier ignored_any
+            }
+        }
+
+        let mut variants = Variants(None);
+        assert!(T::deserialize(&mut variants).is_err(), "the recorder decodes nothing");
+        variants.0.expect("an enum's `Deserialize` names its variants")
     }
 
     /// Parse the fixture and group it exactly as the production constructors
@@ -855,14 +869,12 @@ mod tests {
         assert!(app.functions()[0].docblock.is_some(), "a docblocked function");
         // The payload codec carries an enum by variant index, and
         // `EffectOrigin`'s inverse is the one hand-written twin in the graph
-        // (`steins-syntax::persist`), so its ten variants have to survive
-        // the disk boundary *by position*. They only can if they are here.
-        let kinds = fixture_origin_kinds(&parsed);
-        for variant in [
-            "Call", "Output", "Exit", "MethodCall", "Opaque", "HigherOrder", "Callback", "Eval",
-            "Include", "State",
-        ] {
-            assert!(kinds.contains_key(variant), "the fixture must carry an {variant} origin");
+        // (`steins-syntax::persist`), so its variants have to survive the
+        // disk boundary *by position*. They only can if they are here.
+        let origins = fixture_origins(&parsed);
+        for kind in EffectOriginKind::ALL {
+            let carried = origins.iter().any(|o| o.kind() == kind);
+            assert!(carried, "the fixture must carry a {} origin", kind.name());
         }
         // Schema 20 (issue #603): `ret_top` sits between `ret` and `ret_span` on
         // both declarations and `RetHintKind::Top` precedes `Other`, so the
@@ -895,6 +907,38 @@ mod tests {
         assert!(all.iter().any(|c| matches!(c.owner, ContractOwner::Method { .. })));
         assert!(all.iter().any(|c| c.docblock.is_some() && !c.params.is_empty()));
         assert!(all.iter().any(|c| !c.ctx.class_imports.is_empty() || !c.ctx.namespace.is_empty()));
+    }
+
+    /// [`EffectOriginKind::ALL`] is what the tests here enumerate, in the order
+    /// the codec numbers the variants by. A variant missing from it does not
+    /// compile (`effect_origin_kinds!` in steins-syntax), but nothing there
+    /// fixes the order, so this pins the list, names and order, against the
+    /// variant list serde itself decodes an [`EffectOrigin`] by.
+    #[test]
+    fn the_effect_origin_kinds_are_every_variant_in_codec_order() {
+        let names: Vec<&str> = EffectOriginKind::ALL.iter().map(|k| k.name()).collect();
+        assert_eq!(names, serde_variants::<EffectOrigin>());
+    }
+
+    /// Every effect origin in the fixture round-trips through the payload
+    /// codec on its own, kind by kind, so a kind that stopped decoding fails
+    /// under its own name rather than somewhere inside a whole tree.
+    #[test]
+    fn every_effect_origin_kind_round_trips_through_the_codec() {
+        let parsed = parsed_fixture();
+        let origins = fixture_origins(&parsed);
+        for kind in EffectOriginKind::ALL {
+            let name = kind.name();
+            let of_kind: Vec<&EffectOrigin> =
+                origins.iter().copied().filter(|o| o.kind() == kind).collect();
+            assert!(!of_kind.is_empty(), "the fixture must carry a {name} origin");
+            for origin in of_kind {
+                let bytes = crate::wire::to_vec(origin).expect("an effect origin serializes");
+                let back: EffectOrigin =
+                    crate::wire::from_slice(&bytes).expect("an effect origin round-trips");
+                assert_eq!(&back, origin, "{name}");
+            }
+        }
     }
 
     /// The differential oracle across the disk boundary (issue #487
