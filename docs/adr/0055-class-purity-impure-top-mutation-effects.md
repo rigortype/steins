@@ -635,5 +635,6 @@ superglobals: inside a function-like they are locals, reachable only through
 
 When E2 lands, each `StateConstruct` gets its label in the effects pass in
 place of `exhaustive = false`, and these scan sites are its origin sites. The
-origins are persisted in frozen generations (ADR-0092), so the variant came
-with a schema bump (PR #807).
+origins are persisted in frozen generations (ADR-0092), in the trace payload,
+so the variant takes no schema bump (issue #828): it moves the analyzer
+fingerprint, which refuses a stored trace before it is decoded.
