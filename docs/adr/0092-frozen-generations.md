@@ -423,6 +423,8 @@ The same fingerprint now also hashes `Cargo.lock`, the root manifest and
 every crate's manifest. The analyzer is also what its dependencies make it:
 a Mago bump moves the parser's rev in those two files, changes the syntax
 lowering, and touches no source, and a manifest can switch a feature or a
-profile setting the same way. The one build this cannot pin is
-`cargo install --git` without `--locked`, which resolves afresh rather than
-reading the lockfile the fingerprint hashed.
+profile setting the same way. What this cannot pin is a build that does not
+use the lockfile the fingerprint hashed, or dependency code no hashed file
+describes: `cargo install` without `--locked` (from `--git` or `--path`)
+resolves afresh, and a `[patch]` onto a local checkout of a dependency
+changes its code without moving any hashed file.

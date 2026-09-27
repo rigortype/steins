@@ -43,9 +43,11 @@
 //! `Cargo.toml` and in `Cargo.lock`, changes the syntax lowering, and touches
 //! nothing under `src`; a manifest can switch a feature or a profile setting
 //! the same way. So the lockfile, the root manifest and every crate's manifest
-//! are hashed too. The one build this cannot pin is `cargo install --git`
-//! without `--locked`, which resolves afresh rather than reading the lockfile
-//! it hashes.
+//! are hashed too. What this cannot pin is a build that does not use the
+//! lockfile it hashes, or dependency code no hashed file describes: `cargo
+//! install` without `--locked` (from `--git` or `--path`) resolves afresh, and
+//! a `[patch]` onto a local checkout of a dependency changes its code without
+//! moving any file here.
 //!
 //! **What it costs.** A released binary has fixed sources, so its identity is
 //! stable across rebuilds and its store keeps working. A working tree
@@ -109,23 +111,32 @@ fn main() {
 
 fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
     for p in list(dir) {
+        // A dot-file is an editor's, not a module: no `mod` can name one, and
+        // Emacs keeps a dangling `.#name.rs` symlink beside every unsaved
+        // buffer, which would fail the read below.
+        if p.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.')) {
+            continue;
+        }
         if p.is_dir() {
             collect(&p, out);
-        } else if p.extension().is_some_and(|x| x == "rs") {
+        } else if p.is_file() && p.extension().is_some_and(|x| x == "rs") {
             out.push(p);
         }
     }
 }
 
 /// Every file `rs` compiles in through [`EMBEDS`], resolved against the
-/// directory of `rs`, as the macros resolve it. Line comments are dropped
-/// first, so prose that mentions a macro is not read as a use of it.
+/// directory of `rs`, as the macros resolve it. Whole-line comments are
+/// dropped first, so prose that mentions a macro is not read as a use of it.
+/// A trailing comment is kept: cutting each line at `//` would also cut at a
+/// `"http://…"` and silently lose an embed after it, where scanning a comment
+/// can only hash a file too many or fail the build.
 ///
 /// An argument that is not a string literal naming a file panics: a
 /// `concat!`, an `env!`, or a macro that wraps the call would compile a file
 /// this walk cannot see.
 fn embedded(rs: &Path, text: &str, out: &mut Vec<PathBuf>) {
-    let lines: Vec<&str> = text.lines().map(|l| l.split_once("//").map_or(l, |(c, _)| c)).collect();
+    let lines: Vec<&str> = text.lines().filter(|l| !l.trim_start().starts_with("//")).collect();
     let code = lines.join("\n");
     let dir = rs.parent().expect("a source file has a directory");
     for mac in EMBEDS {
