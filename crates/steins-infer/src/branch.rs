@@ -43,6 +43,15 @@ use crate::walk::{Flow, WalkCx, mark_dead, walk_trace};
 /// unchanged through every recursive `walk_if`/`walk_else` pair for the SAME
 /// chain, never recomputed. [`walk_else`]'s own terminal case is where it is
 /// finally consulted.
+///
+/// `rebinds` is the top-level rebind rule's answer for the construct's
+/// conditions (issue #762, [`top_level_rebind_risk`]): the frame is forgotten
+/// once the condition has been judged and its own effects applied, before any
+/// branch is walked. The verdict reads the entry facts, which is what the
+/// condition saw up to its first userland call. An `elseif` link recurses with
+/// `false`, the forgetting having happened here, ahead of every branch.
+///
+/// [`top_level_rebind_risk`]: crate::rebind::top_level_rebind_risk
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn walk_if(
     w: &WalkCx,
@@ -52,6 +61,7 @@ pub(crate) fn walk_if(
     elseifs: &[(CondExpr, Vec<Stmt>)],
     else_trace: Option<&[Stmt]>,
     chain: Option<&GuardChainCoverage>,
+    rebinds: bool,
     env: &mut HashMap<String, Known>,
     store: &mut Store,
     descent: &mut Option<Descent<'_>>,
@@ -117,7 +127,7 @@ pub(crate) fn walk_if(
     // forgetting never outlives the construct. The snapshot is taken BEFORE the
     // drop below, which is the only place the pre-branch lanes still exist.
     let branch_scoped = cond_branch_scoped_invalidations(w.cx, cond, &invalidated);
-    let restore: Vec<BranchScopedLanes> = branch_scoped
+    let mut restore: Vec<BranchScopedLanes> = branch_scoped
         .iter()
         .map(|v| (v.clone(), env.get(v).cloned(), store.contract.get(v).cloned()))
         .collect();
@@ -133,6 +143,14 @@ pub(crate) fn walk_if(
         store.contract.insert(var, arms);
     }
     apply_resource_effects(&guard_resources, store);
+    // The top-level rebind rule (issue #762): the condition's userland call may
+    // have rebound any name of the frame, the presence guard's key included, so
+    // nothing is handed back at a branch exit either.
+    if rebinds {
+        env.clear();
+        store.clear();
+        restore.clear();
+    }
 
     // 3. Walk the live branches on cloned envs, collecting those that fall through.
     let mut fell: Vec<(HashMap<String, Known>, Store)> = Vec::new();
@@ -302,7 +320,10 @@ fn walk_else(
 ) -> Flow {
     match elseifs.split_first() {
         Some(((cond, trace), rest)) => {
-            walk_if(w, folder, cond, trace, rest, else_trace, chain, env, store, descent, facts, out)
+            walk_if(
+                w, folder, cond, trace, rest, else_trace, chain, false, env, store, descent, facts,
+                out,
+            )
         }
         None => match else_trace {
             Some(stmts) => walk_trace(w, folder, stmts, env, store, descent, facts, true, out),

@@ -249,15 +249,19 @@ fn bare_general_return_falls_to_arm_floor() {
 
 #[test]
 fn memo_replay_is_deterministic() {
+    // In a function body: at top level the second call could rebind `$x` through
+    // `global`, and the frame is forgotten (issue #762).
     let src = "<?php\n\
         function f(int $trigger, int $n): int {\n\
             assert($n > 0);\n\
             return $n;\n\
         }\n\
+        function t(): void {\n\
         $x = f(1, rand());\n\
         $y = f(1, rand());\n\
         \\PHPStan\\dumpType($x);\n\
-        \\PHPStan\\dumpType($y);\n";
+        \\PHPStan\\dumpType($y);\n\
+        }\n";
     let ds: Vec<String> = findings(src)
         .into_iter()
         .filter(|d| d.id == DEBUG_TYPE_ID)

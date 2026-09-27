@@ -184,8 +184,10 @@ fn construct_writing_var_forgets_it() {
 #[test]
 fn irrelevant_construct_preserves_var() {
     // An `if` that never writes `$w` (only an unrelated `$y`) leaves `$w` known → flagged.
+    // In a function body, since at top level `log_it()` could rebind `$w` (issue #762).
     let src = format!(
-        "{COERCIVE_INT}function log_it(): void {{}}\n$w = \"abc\";\nif ($cond) {{ log_it(); $y = 1; }}\nwidth($w);"
+        "{COERCIVE_INT}function log_it(): void {{}}\n\
+         function t($cond): void {{ $w = \"abc\";\nif ($cond) {{ log_it(); $y = 1; }}\nwidth($w); }}"
     );
     let d = only(&src);
     assert!(d.message.contains("argument \"abc\""), "{}", d.message);
@@ -242,8 +244,11 @@ fn variable_written_via_call_in_construct_becomes_unknown() {
     assert_eq!(n(&unknown), 0, "$w passed to an unresolvable callee inside the if → forgotten");
     // A BY-VALUE parameter cannot reach the caller's binding, so the literal
     // survives the construct and `width("abc")` is a proven TypeError.
+    // In a function body, since at top level any project call could rebind `$w`
+    // through `global` (issue #762).
     let by_value = format!(
-        "{COERCIVE_INT}function sink($x): void {{}}\n$w = \"abc\";\nif ($cond) {{ sink($w); }}\nwidth($w);"
+        "{COERCIVE_INT}function sink($x): void {{}}\n\
+         function t($cond): void {{ $w = \"abc\";\nif ($cond) {{ sink($w); }}\nwidth($w); }}"
     );
     assert_eq!(n(&by_value), 1, "$w passed BY VALUE inside the if → survives");
 }
@@ -272,7 +277,10 @@ fn variable_passed_to_another_call_becomes_unknown() {
     let unknown = "<?php\nfunction width(int $w): int { return $w; }\n$w = \"abc\";\nsink($w);\nwidth($w);";
     assert_eq!(n(unknown), 0, "$w passed to an unresolvable callee → unknown afterwards");
     // ADR-0070: a by-value param receives a copy, so `$w` stays `"abc"` — proven TypeError.
-    let by_value = "<?php\nfunction width(int $w): int { return $w; }\nfunction sink($x) { return $x; }\n$w = \"abc\";\nsink($w);\nwidth($w);";
+    // In a function body, since at top level the call could rebind `$w` through
+    // `global` (issue #762).
+    let by_value = "<?php\nfunction width(int $w): int { return $w; }\nfunction sink($x) { return $x; }\n\
+                    function t(): void { $w = \"abc\";\nsink($w);\nwidth($w); }";
     assert_eq!(n(by_value), 1, "$w passed BY VALUE → the literal survives the call");
 }
 

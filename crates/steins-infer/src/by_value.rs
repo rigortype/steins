@@ -161,7 +161,7 @@ pub(crate) fn by_value_survivors<'s>(
 ///
 /// [`dump_family`]: crate::dump::dump_family
 /// [`recognizes_var_dump`]: crate::dump::recognizes_var_dump
-fn is_dump_read_site(cx: &Cx<'_>, r: &NameRef) -> bool {
+pub(crate) fn is_dump_read_site(cx: &Cx<'_>, r: &NameRef) -> bool {
     is_dump_family_fqn(&resolved_fn_fqn(cx, r)) || name_reaches_global_var_dump(cx, r)
 }
 
@@ -175,7 +175,7 @@ fn is_dump_read_site(cx: &Cx<'_>, r: &NameRef) -> bool {
 /// byte-identical. See the exception paragraph on [`by_value_survivors`].
 ///
 /// [`emit_asserts`]: crate::dump::emit_asserts
-fn is_assert_read_site(cx: &Cx<'_>, r: &NameRef) -> bool {
+pub(crate) fn is_assert_read_site(cx: &Cx<'_>, r: &NameRef) -> bool {
     ASSERT_SINK.with(|s| s.borrow().is_some()) && resolved_fn_fqn(cx, r) == ASSERT_TYPE_FQN
 }
 

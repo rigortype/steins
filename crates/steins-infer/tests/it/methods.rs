@@ -225,21 +225,24 @@ fn exact_class_fact_survives_method_call_while_literal_dies() {
     // name the shadow resolved AMBIGUOUS (issue #279) and the fixture measured the
     // shadowing rule instead of the by-value one. Renamed rather than pinned: the
     // shadow's own behavior has its own test.
-    let src = "<?php\nclass Foo { public function m(int $w): void {} public function other(): void {} }\nfunction observe($z): void {}\nfunction width(int $w): void {}\n$x = new Foo();\n$n = \"abc\";\n$x->other();\nobserve($n);\nwidth($n);\n$x->m(\"abc\");\n";
+    //
+    // In a function body: at top level each call could rebind `$x` or `$n` through
+    // `global`, and the frame is forgotten after it (issue #762).
+    let src = "<?php\nclass Foo { public function m(int $w): void {} public function other(): void {} }\nfunction observe($z): void {}\nfunction width(int $w): void {}\nfunction t(): void {\n$x = new Foo();\n$n = \"abc\";\n$x->other();\nobserve($n);\nwidth($n);\n$x->m(\"abc\");\n}\n";
     let f = findings(src);
     assert_eq!(f.len(), 2, "the class fact AND the by-value literal survive: {f:#?}");
     assert!(f[0].message.contains("to width()"), "{}", f[0].message);
-    assert_eq!(f[0].line, 9);
+    assert_eq!(f[0].line, 10);
     assert!(f[1].message.contains("to Foo::m()"), "{}", f[1].message);
-    assert_eq!(f[1].line, 10);
+    assert_eq!(f[1].line, 11);
 
     // …and the literal DOES die by reference — the half this pin's by-value reading must
     // never launder.
-    let by_ref = "<?php\nclass Foo { public function m(int $w): void {} public function other(): void {} }\nfunction observe(&$z): void {}\nfunction width(int $w): void {}\n$x = new Foo();\n$n = \"abc\";\n$x->other();\nobserve($n);\nwidth($n);\n$x->m(\"abc\");\n";
+    let by_ref = "<?php\nclass Foo { public function m(int $w): void {} public function other(): void {} }\nfunction observe(&$z): void {}\nfunction width(int $w): void {}\nfunction t(): void {\n$x = new Foo();\n$n = \"abc\";\n$x->other();\nobserve($n);\nwidth($n);\n$x->m(\"abc\");\n}\n";
     let f = findings(by_ref);
     assert_eq!(f.len(), 1, "a by-ref observe() still kills the literal fact: {f:#?}");
     assert!(f[0].message.contains("to Foo::m()"), "{}", f[0].message);
-    assert_eq!(f[0].line, 10);
+    assert_eq!(f[0].line, 11);
 }
 
 #[test]
@@ -256,7 +259,9 @@ fn by_value_pass_of_object_var_keeps_the_class_fact() {
     // `$x` by value and can't rebind it, so `$x->m("abc")` is a real error — what
     // `arg_is_by_value` now proves. Mutable *state* still dies via the ADR-0036 escape
     // earlier in the statement; identity does not.
-    let src = "<?php\nclass Foo { public function m(int $w): void {} }\nfunction log_it($o): void {}\n$x = new Foo();\nlog_it($x);\n$x->m(\"abc\");\n";
+    // In a function body: at top level `log_it()` could rebind `$x` through
+    // `global`, and the frame is forgotten after it (issue #762).
+    let src = "<?php\nclass Foo { public function m(int $w): void {} }\nfunction log_it($o): void {}\nfunction t(): void {\n$x = new Foo();\nlog_it($x);\n$x->m(\"abc\");\n}\n";
     assert_eq!(n(src), 1, "a by-value pass cannot rebind $x → the class fact survives");
     // The by-ref twin (`swap(&$x)`) is unaffected — it refuses at condition 2, so the fact dies.
 }

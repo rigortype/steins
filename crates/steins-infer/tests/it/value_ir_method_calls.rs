@@ -230,16 +230,18 @@ fn the_value_and_statement_positions_key_the_walk_alike() {
     // claim is that value position behaves as statement position does, not that the
     // second call is free. The method pair and the function pair must agree, which
     // is what says the `this:` key rendering added nothing that separates them.
+    // In function bodies: at top level the first call could rebind `$c` through
+    // `global`, and the frame is forgotten (issue #762).
     let method = "<?php\ndeclare(strict_types=1);\n\
         function needString(string $s): void {}\n\
         function f(mixed $v): void {}\n\
         final class C { public function m(int $n): mixed { needString($n); return $n; } }\n\
-        $c = new C();\n$x = $c->m(1);\nf($c->m(1));\n";
+        function t(): void {\n$c = new C();\n$x = $c->m(1);\nf($c->m(1));\n}\n";
     let function = "<?php\ndeclare(strict_types=1);\n\
         function needString(string $s): void {}\n\
         function f(mixed $v): void {}\n\
         function m(int $n): mixed { needString($n); return $n; }\n\
-        $x = m(1);\nf(m(1));\n";
+        function t(): void {\n$x = m(1);\nf(m(1));\n}\n";
     assert_eq!(findings(method).len(), findings(function).len(), "one shape, two spellings");
 
     // Within ONE statement the memo does bind the two: `f($c->m(1), $c->m(1))` walks
@@ -378,12 +380,14 @@ fn a_nested_method_calls_receiver_escapes_and_sweeps() {
 #[test]
 fn a_readonly_prop_survives_the_nested_sweep() {
     // The sweep's own boundary, unchanged at depth: `readonly` is a language
-    // guarantee, so the fact stands however the object was passed.
+    // guarantee, so the fact stands however the object was passed. In a function
+    // body: at top level `outer()` could rebind `$b` through `global`, and the
+    // frame is forgotten (issue #762).
     let src = "<?php\ndeclare(strict_types=1);\n\
         function needString(string $s): void {}\n\
         function outer(mixed $v): void {}\n\
         function mutate(Box $b): mixed { return 1; }\n\
         class Box { public function __construct(public readonly mixed $value) {} }\n\
-        $b = new Box(1);\nouter(mutate($b));\nneedString($b->value);\n";
+        function t(): void {\n$b = new Box(1);\nouter(mutate($b));\nneedString($b->value);\n}\n";
     assert_eq!(count(src), 1, "a readonly prop crosses the sweep");
 }

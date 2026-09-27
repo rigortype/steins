@@ -52,13 +52,15 @@ fn alias_write_visible_via_alias() {
 fn clone_isolates_both_directions() {
     // Corrupt only the clone: original stays clean (no finding for `$a->p`), clone
     // carries bad value (one for `$c->p`) — naive id-sharing would misfire on both.
+    // In a function body: at top level the first `needInt()` could rebind either
+    // name through `global`, and the frame is forgotten after it (issue #762).
     let src = format!(
-        "{PRELUDE}$a = new Box();\n$a->p = 5;\n$c = clone $a;\n$c->p = \"abc\";\nneedInt($a->p);\nneedInt($c->p);\n"
+        "{PRELUDE}function t(): void {{\n$a = new Box();\n$a->p = 5;\n$c = clone $a;\n$c->p = \"abc\";\nneedInt($a->p);\nneedInt($c->p);\n}}\n"
     );
     let f = findings(&src);
     assert_eq!(f.len(), 1, "{f:#?}");
     assert_eq!(f[0].id, ID);
-    assert_eq!(f[0].line, 9, "finding is on the $c->p read, not $a->p: {f:#?}");
+    assert_eq!(f[0].line, 10, "finding is on the $c->p read, not $a->p: {f:#?}");
 }
 
 #[test]
@@ -102,7 +104,11 @@ fn escape_sweep_on_pass_to_unknown() {
 #[test]
 fn non_escaped_survives_unknown_call() {
     // Payoff: a purely-local object keeps its facts across an unrelated unknown call.
-    let src = format!("{PRELUDE}$a = new Box();\n$a->p = \"abc\";\nunknownFn();\nneedInt($a->p);\n");
+    // Local to a function body: at top level `$a` is a global the call can rebind,
+    // and the frame is forgotten (issue #762).
+    let src = format!(
+        "{PRELUDE}function t(): void {{\n$a = new Box();\n$a->p = \"abc\";\nunknownFn();\nneedInt($a->p);\n}}\n"
+    );
     assert_eq!(count(&src), 1, "non-escaped object's props must survive");
 }
 
@@ -227,9 +233,11 @@ class NPrivSub extends NPrivBase {\n\
 
 #[test]
 fn readonly_persists_through_escape_and_unknown_call() {
+    // In a function body, since at top level the calls could rebind `$alias`
+    // through `global` (issue #762).
     let src = "<?php\nfunction needInt(int $x): int { return $x; }\n\
 class Ro { public function __construct(public readonly string $name) {} }\n\
-$r = new Ro(\"abc\");\n$alias = $r;\nsink($r);\nunknownFn();\nneedInt($alias->name);\n";
+function t(): void {\n$r = new Ro(\"abc\");\n$alias = $r;\nsink($r);\nunknownFn();\nneedInt($alias->name);\n}\n";
     // Readonly `$name` survives the escape+sweep, so the bad string flows into needInt().
     let f = findings(src);
     assert_eq!(f.len(), 1, "{f:#?}");

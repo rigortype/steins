@@ -80,6 +80,7 @@ pub mod profile;
 mod project;
 pub mod promote;
 mod purity;
+mod rebind;
 mod refine;
 mod resource;
 mod return_arms;
