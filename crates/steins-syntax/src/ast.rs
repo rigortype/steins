@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use steins_domain::PhpStr;
+use steins_domain::{NextInt, PhpStr};
 
 // ---------------------------------------------------------------------------
 // Public, Mago-free representation.
@@ -1167,22 +1167,6 @@ impl NormKey {
     }
 }
 
-/// Next PHP auto-index for an omitted array key, given the running max integer
-/// key seen (`None` → `0`): one past the largest integer key, negative or not
-/// (ADR-0049 A22). Every minor from ADR-0011's 8.1 floor up builds a literal this
-/// way — the negative-index RFC landed in PHP 8.0 (php-src `6732028`), and
-/// `var_export([-5 => 'a', 'b'])` prints `-5, -4` on 8.0.28, 8.1.32, 8.2.33,
-/// 8.3.33, 8.4.25 and 8.5.10; only 7.4.33 prints `-5, 0`. `None` past a
-/// `PHP_INT_MAX` key: PHP has no next key there and throws "Cannot add element
-/// to the array as the next element is already occupied" (`php -r` on 8.5.10
-/// and 8.2.33), so a clamped key would claim an overwrite PHP never performs.
-/// Shared by [`normalize_entries`] and [`duplicate_array_keys`] (issue #187),
-/// which need the same arithmetic without the last-wins fold.
-#[must_use]
-fn next_auto_index(max_seen: Option<i64>) -> Option<i64> {
-    max_seen.map_or(Some(0), |m: i64| m.checked_add(1))
-}
-
 /// Resolve array entries in order: next-int assignment for `Auto` keys,
 /// **last-wins** for duplicates (PHP semantics, insertion-ordered). Stops at the
 /// first key the source does not spell, since every entry after it has an
@@ -1194,19 +1178,19 @@ fn next_auto_index(max_seen: Option<i64>) -> Option<i64> {
 #[must_use]
 fn normalize_entries(items: &[(ArrayKey, ArgValue)]) -> Option<Vec<(NormKey, ArgValue)>> {
     let mut out: Vec<(NormKey, ArgValue)> = Vec::with_capacity(items.len());
-    // PHP's next auto-index: one past the largest integer key seen so far,
-    // explicit or auto (verified: `[5=>'a',5=>'b','c']` → 5, 6). `None` → 0.
-    let mut max_seen: Option<i64> = None;
+    // A literal's next key (ADR-0049 A22): one past the largest integer key seen
+    // so far, explicit or auto (verified: `[5=>'a',5=>'b','c']` → 5, 6).
+    let mut next_int = NextInt::new();
     for (k, v) in items {
         let key = match k {
             ArrayKey::Auto => {
-                let i = next_auto_index(max_seen)?;
-                max_seen = Some(max_seen.map_or(i, |m| m.max(i)));
+                let i = next_int.next()?;
+                next_int.observe(i);
                 NormKey::Int(i)
             }
             ArrayKey::Expr(_) => return Some(out),
             ArrayKey::Int(i) => {
-                max_seen = Some(max_seen.map_or(*i, |m| m.max(*i)));
+                next_int.observe(*i);
                 NormKey::Int(*i)
             }
             ArrayKey::Str(s) => NormKey::Str(s.clone()),
@@ -1331,7 +1315,7 @@ pub struct DuplicateArrayKey {
 /// invalid-UTF-8 bytes are four distinct keys, unlike pre-[`PhpStr`].
 #[must_use]
 pub fn duplicate_array_keys(site: &ArrayLiteralSite) -> Vec<DuplicateArrayKey> {
-    let mut max_seen: Option<i64> = None;
+    let mut next_int = NextInt::new();
     let mut poisoned = false;
     let mut last_seen: HashMap<NormKey, Span> = HashMap::new();
     let mut out = Vec::new();
@@ -1345,15 +1329,15 @@ pub fn duplicate_array_keys(site: &ArrayLiteralSite) -> Vec<DuplicateArrayKey> {
                 None
             }
             Some(ArrayKey::Int(i)) => {
-                max_seen = Some(max_seen.map_or(*i, |m| m.max(*i)));
+                next_int.observe(*i);
                 Some(NormKey::Int(*i))
             }
             Some(ArrayKey::Str(s)) => Some(NormKey::Str(s.clone())),
             Some(ArrayKey::Auto) if poisoned => None,
             Some(ArrayKey::Auto) => {
-                let key = next_auto_index(max_seen);
+                let key = next_int.next();
                 match key {
-                    Some(i) => max_seen = Some(max_seen.map_or(i, |m| m.max(i))),
+                    Some(i) => next_int.observe(i),
                     // PHP throws past `PHP_INT_MAX`, which leaves no later
                     // `Auto` a position either.
                     None => poisoned = true,
