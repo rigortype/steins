@@ -5,9 +5,9 @@
 //! the array has held, and no next key at all past `PHP_INT_MAX`. This module is
 //! the rule's one home:
 //!
-//! - [`NextInt`] walks a key sequence in order. An array literal starts it unset
-//!   ([`NextInt::new`]); the phpdoc shape grammar starts it at `0`
-//!   ([`NextInt::floored_at_zero`]).
+//! - [`NextInt`] walks a key sequence in order. An array literal and a phpdoc
+//!   shape's positional items both walk it from [`NextInt::new`], so
+//!   `array{-5: T, U}` declares `U` at `-4`, where `[-5 => 'a', 'b']` puts `'b'`.
 //! - [`append_index`] reads the next key off a witnessed key sequence, and is
 //!   where PHP's version enters: the 8.3 line ([`NEXT_INT_BOUNDARY`]) belongs to
 //!   the append, never to a literal.
@@ -62,22 +62,14 @@ impl NextInt {
     /// (ADR-0049 A22). The negative-index RFC landed in PHP 8.0 (php-src
     /// `6732028`), and `var_export([-5 => 'a', 'b'])` prints `-5, -4` on 8.0.28,
     /// 8.1.32, 8.2.33, 8.3.33, 8.4.25 and 8.5.10; only 7.4.33 prints `-5, 0`.
+    ///
+    /// A phpdoc shape's positional item takes the key the same literal would
+    /// give it, so the shape grammar and a shape's keyless spelling walk this
+    /// cursor too (#832). PHPStan's constant-array builder floors the index at
+    /// `0` instead, and reads the `U` of `array{-5: T, U}` at `0`.
     #[must_use]
     pub const fn new() -> Self {
         NextInt(Cursor::Unset)
-    }
-
-    /// A next key that starts at `0`, so a negative key never moves it: one past
-    /// the largest integer key seen, or `0` when that is larger.
-    ///
-    /// The phpdoc shape grammar reads a positional item this way, as PHPStan's
-    /// constant-array builder does: `array{-5: T, U}` declares `U` at `0`, where
-    /// the literal `[-5 => 'a', 'b']` puts `'b'` at `-4` ([`new`](Self::new)). A
-    /// shape spelled with keyless fields is read back under the same rule, so its
-    /// spelling walks this cursor too.
-    #[must_use]
-    pub const fn floored_at_zero() -> Self {
-        NextInt(Cursor::At(0))
     }
 
     /// Move past an integer key at the walk's position, written or omitted. A key
@@ -177,7 +169,6 @@ mod tests {
     fn an_array_with_no_integer_key_takes_zero() {
         assert_eq!(NextInt::new().next(), Some(0));
         assert_eq!(NextInt::default(), NextInt::new());
-        assert_eq!(NextInt::floored_at_zero().next(), Some(0));
         // A string key never reaches the cursor.
         assert_eq!(append_index(&[], None), Some(0));
         assert_eq!(append_index(&[Key::Str("a".into()), Key::Str("b".into())], None), Some(0));
@@ -233,27 +224,14 @@ mod tests {
         assert_eq!(literal_keys(&[Some(i64::MAX - 1), None]), Some(vec![i64::MAX - 1, i64::MAX]));
         assert_eq!(literal_keys(&[Some(i64::MAX - 1), None, None]), None);
         assert_eq!(literal_keys(&[None, Some(i64::MAX), Some(3)]), Some(vec![0, i64::MAX, 3]));
-        // Once gone, no smaller key brings it back, on either cursor.
+        // Once gone, no smaller key brings it back.
         assert_eq!(after(NextInt::new(), &[i64::MAX, 3, -3]), None);
-        assert_eq!(after(NextInt::floored_at_zero(), &[i64::MAX, 3, -3]), None);
-        assert_eq!(after(NextInt::floored_at_zero(), &[i64::MAX - 1]), Some(i64::MAX));
     }
 
+    /// Every sequence of up to four keys over the edges, against the closed form:
+    /// `max + 1` (`0` with no key), and `None` past `PHP_INT_MAX`.
     #[test]
-    fn the_floored_cursor_ignores_negative_keys() {
-        // `array{-5: T, U}` declares `U` at `0`; the literal puts it at `-4`.
-        assert_eq!(after(NextInt::floored_at_zero(), &[-5]), Some(0));
-        assert_eq!(after(NextInt::new(), &[-5]), Some(-4));
-        assert_eq!(after(NextInt::floored_at_zero(), &[-3, -1]), Some(0));
-        assert_eq!(after(NextInt::floored_at_zero(), &[-5, 3, -1]), Some(4));
-        assert_eq!(after(NextInt::floored_at_zero(), &[0]), Some(1));
-    }
-
-    /// Every sequence of up to four keys over the edges, against the closed forms:
-    /// the literal cursor is `max + 1` (`0` with no key), the floored one that or
-    /// `0`, whichever is larger, and both are `None` past `PHP_INT_MAX`.
-    #[test]
-    fn both_cursors_match_their_closed_form() {
+    fn the_cursor_matches_its_closed_form() {
         const EDGES: [i64; 7] = [i64::MIN, -2, -1, 0, 1, i64::MAX - 1, i64::MAX];
         let mut seqs: Vec<Vec<i64>> = vec![Vec::new()];
         let mut frontier: Vec<Vec<i64>> = vec![Vec::new()];
@@ -266,10 +244,8 @@ mod tests {
         }
         assert_eq!(seqs.len(), 1 + 7 + 49 + 343 + 2401);
         for seq in &seqs {
-            let literal = seq.iter().max().map_or(Some(0), |m| m.checked_add(1));
-            let floored = literal.map(|n| n.max(0));
-            assert_eq!(after(NextInt::new(), seq), literal, "literal after {seq:?}");
-            assert_eq!(after(NextInt::floored_at_zero(), seq), floored, "floored after {seq:?}");
+            let closed = seq.iter().max().map_or(Some(0), |m| m.checked_add(1));
+            assert_eq!(after(NextInt::new(), seq), closed, "after {seq:?}");
         }
     }
 
