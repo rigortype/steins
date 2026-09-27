@@ -142,7 +142,8 @@ disappear, and the release summary must repeat it.
   excludes the workspace's own crates, so a version bump alone can never make this
   file stale — but the generator's own output can drift from what is committed
   (it had, at `v0.1.1`), so run it anyway and let `git diff` answer.
-- **`CHANGELOG.md`** — seal `[Unreleased]` into the new version section (below).
+- **`CHANGELOG.md`** — consolidate the `changelog.d/` fragments, then seal
+  `[Unreleased]` into the new version section (below).
 
 ### Seal the `[Unreleased]` entries — the load-bearing step
 
@@ -151,6 +152,14 @@ The highest-value, most-skipped part of a release, and the one no test can check
 is what users actually read. It is also the review surface the release PR exists
 for.
 
+0. **Consolidate `changelog.d/` fragments before anything else.** Entries land
+   as `changelog.d/<section>/<slug>.md` fragments (`changelog.d/README.md`), not
+   as edits under `[Unreleased]`, because GitHub ignores the union merge when it
+   decides whether a PR can merge. Move every fragment's lines under the
+   matching `###` heading of `[Unreleased]`, creating headings in Keep a
+   Changelog order as needed, and `git rm` the fragment files. Afterwards
+   `changelog.d/` holds only its README, and the steps below run over the
+   consolidated `[Unreleased]`.
 1. **If `[Unreleased]` is empty or thin, reconstruct it first.** Entries are meant
    to accumulate as work lands; that discipline slips. Run
    `git log <last-tag>..HEAD --oneline` (for the first release, the whole
@@ -167,7 +176,8 @@ for.
    artefacts. `CHANGELOG.md` is `merge=union` (`.gitattributes`), which trades
    insertion-order conflicts for one artefact to look for here: a
    **duplicated `###` heading**, where two branches each opened the same
-   section under `[Unreleased]`. Merge the two, keeping Keep a Changelog's
+   section under `[Unreleased]` (entries written before the fragment scheme,
+   or a hand edit that bypassed it). Merge the two, keeping Keep a Changelog's
    order; `cargo test -p xtask changelog` fails while one is left. The same
    silent fold can happen if the release branch gets rebased onto `master`
    mid-prep; re-check for a duplicate heading after any such rebase.
