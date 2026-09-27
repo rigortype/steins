@@ -9,7 +9,7 @@
 //! then delegates to [`spell_arms`]. Byte-identical against `steins-edit`'s
 //! honesty tests and cross-crate parity test.
 
-use steins_domain::{Base, Certainty, IntRange, Key, PhpStr, StrPreds, Val, CAP};
+use steins_domain::{Base, Certainty, IntRange, Key, NextInt, PhpStr, StrPreds, Val, CAP};
 
 use crate::{
     is_array_key_ty, shape_is_list, CallableObl, CField, CKey, ContractTy, MixedCut, ResourceState,
@@ -381,7 +381,7 @@ pub enum ShapeTail {
 /// A **sealed** shape's head comes from `is_list` (issue #163); fields print
 /// positional only when ALL keys are `0..n-1`, in order, required — one gap
 /// and every field prints its key. An **unsealed** shape keeps the
-/// per-field auto-index rule instead.
+/// per-field auto-index rule instead ([`NextInt::floored_at_zero`]).
 #[must_use]
 pub fn spell_shape(
     is_list: bool,
@@ -406,16 +406,16 @@ pub fn spell_shape(
             *required && matches!(key, Key::Int(n) if *n == i as i64)
         });
 
-    // The key a keyless field would take. `None` past a `PHP_INT_MAX` key:
-    // PHP has no next key there (`$a[] = …` fails), so nothing after it may
+    // The key a keyless field would take, as `shape_keys` reads it back. No next
+    // key past a `PHP_INT_MAX` key (`$a[] = …` fails), so nothing after it may
     // print keyless — neither saturate nor wrap.
-    let mut next_auto: Option<i64> = Some(0);
+    let mut next_int = NextInt::floored_at_zero();
     let mut parts: Vec<String> = Vec::with_capacity(fields.len() + 1);
     for (key, required, value) in fields {
         let keyless = if sealed {
             positional
         } else {
-            *required && matches!(key, Key::Int(i) if next_auto == Some(*i))
+            *required && matches!(key, Key::Int(i) if next_int.next() == Some(*i))
         };
         if keyless {
             parts.push(value.clone());
@@ -423,11 +423,9 @@ pub fn spell_shape(
             let mark = if *required { "" } else { "?" };
             parts.push(format!("{}{mark}: {value}", spell_key(key)));
         }
-        // Keyless or not, an int key at or past the auto key moves it past itself.
-        if let Key::Int(i) = key
-            && next_auto.is_some_and(|n| *i >= n)
-        {
-            next_auto = i.checked_add(1);
+        // Keyless or not, an int key moves the auto key.
+        if let Key::Int(i) = key {
+            next_int.observe(*i);
         }
     }
     match tail {
@@ -975,6 +973,18 @@ mod array_vocabulary_tests {
         assert_eq!(
             spell_shape(false, false, &fields, &ShapeTail::Untyped),
             "array{9223372036854775806: 1, 2, -9223372036854775808: 3, ...}"
+        );
+    }
+
+    #[test]
+    fn a_field_after_a_negative_key_prints_keyless_only_at_zero() {
+        // `shape_keys` reads a keyless field after `-5` at `0`, so only that key
+        // prints bare. `-4`, where the literal `[-5 => 1, 2]` puts `2`, keeps it.
+        let at = |k| [(Key::Int(-5), true, "1".to_owned()), (Key::Int(k), true, "2".to_owned())];
+        assert_eq!(spell_shape(false, false, &at(0), &ShapeTail::Untyped), "array{-5: 1, 2, ...}");
+        assert_eq!(
+            spell_shape(false, false, &at(-4), &ShapeTail::Untyped),
+            "array{-5: 1, -4: 2, ...}"
         );
     }
 
