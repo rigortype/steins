@@ -15,7 +15,7 @@ use steins_db::{Db, EffectsPolicy, PluginFacts, Project, SourceFile, parse, proj
 use steins_syntax::Span;
 use steins_syntax::{
     ClassDecl, EffectEnvelope, EffectOrigin, EffectRecv, FunctionDecl, MethodDecl,
-    NameRef, ScopeOwner, SourceTree, ThrowOrigin, Visibility,
+    NameRef, ScopeOwner, SourceTree, StaticClass, ThrowOrigin, Visibility,
 };
 use steins_phpdoc::{EnvelopeTag, TagKind, scan_docblock};
 
@@ -582,8 +582,8 @@ fn propagate_effects(
 /// surrounds it, and the spelling its finding and its envelope diagnostic name
 /// the construct by: `echo` is `io.output.buffer`, `die` is `exit`. `None` for
 /// an origin whose effect is resolved through a callee (a call, a method call,
-/// a callback) or that proves no label (`Opaque`, and `State` until ADR-0055's
-/// labels land).
+/// a callback, a constructor) or that proves no label (`Opaque`, and `State`
+/// until ADR-0055's labels land).
 ///
 /// The one place a construct's label is spelled, so the finding
 /// [`classify_effect_origins`] records and the diagnostic [`report_unit`] emits
@@ -599,7 +599,8 @@ const fn construct_label(origin: &EffectOrigin) -> Option<(&'static str, &'stati
         | EffectOrigin::Opaque { .. }
         | EffectOrigin::HigherOrder { .. }
         | EffectOrigin::Callback { .. }
-        | EffectOrigin::State { .. } => None,
+        | EffectOrigin::State { .. }
+        | EffectOrigin::New { .. } => None,
     }
 }
 
@@ -716,9 +717,12 @@ pub(crate) fn classify_effect_origins(
                     //
                     // The two legs cannot both fire: `builtin_method_findings`
                     // answers only for `EffectRecv::ClassName` (a catalogued
-                    // external class), `resolve_declared_bound` only for the
-                    // declared receivers, which name no class here.
-                    None => match builtin_method_findings(cx, receiver, method, *span, policy) {
+                    // external class) and `parent::__construct`,
+                    // `resolve_declared_bound` only for the declared receivers,
+                    // which name no class here.
+                    None => match builtin_method_findings(
+                        cx, class_fqn, receiver, method, *span, policy,
+                    ) {
                         Some(fs) => {
                             for f in fs {
                                 row.findings.insert(f);
@@ -870,6 +874,10 @@ pub(crate) fn classify_effect_origins(
             // yet (ADR-0055), and `{}` over one would read as proven-pure, so it
             // marks the body `…?` until it is (ADR-0055 amendment, 2026-09-26).
             EffectOrigin::State { .. } => row.exhaustive = false,
+            // `new C(...)` runs `C`'s constructor (issue #804).
+            EffectOrigin::New { class, span } => {
+                classify_new(cx, class_fqn, class, *span, policy, row);
+            }
         }
     }
 }
@@ -1783,7 +1791,7 @@ fn report_unit(
                 // ones (ADR-0067 decision 5). An ADR-0067 receiver reaches neither
                 // arm and so reports nothing, which is the whole point.
                 } else if let Some(fs) =
-                    builtin_method_findings(cx, receiver, method, *span, bound.policy)
+                    builtin_method_findings(cx, class_fqn, receiver, method, *span, bound.policy)
                 {
                     // A builtin-class catalog row, reported like a builtin call's.
                     for f in fs {
@@ -1869,6 +1877,9 @@ fn report_unit(
             // A `$fn()` resolved to a body-local closure — report its effects.
             EffectOrigin::Callback { cbref, span } => {
                 report_callback(out, cx, cbref, effects, span.start, display, bound);
+            }
+            EffectOrigin::New { class, span } => {
+                report_new(out, cx, class_fqn, class, *span, effects, display, bound);
             }
             // Every other origin is a language construct proving its own label
             // (`construct_label`), or proves none (`Opaque`, `State`). A new
@@ -2274,6 +2285,174 @@ pub(crate) fn resolve_effect_edge(
     Some(Sym::Method(r.declaring_class.fqn.clone(), r.method.name.clone()))
 }
 
+/// What the constructor a `new` expression runs resolves to (issue #804).
+#[derive(Debug)]
+enum NewTarget {
+    /// A project constructor, declared on the class or inherited: an effect
+    /// edge, exactly as a method call's resolved callee is.
+    Edge(Sym),
+    /// No constructor anywhere on a chain the project holds end to end:
+    /// nothing runs, so nothing is contributed.
+    Absent,
+    /// The chain leaves the project at a global engine class the catalog has a
+    /// `__construct` row for: the class's FQN and that row's labels.
+    Catalog(String, &'static [&'static str]),
+    /// Anything else — a class no file declares and the catalog does not know,
+    /// a trait that may supply the constructor, an abstract one, `static` in a
+    /// class a subclass can extend with its own, `self` with no class in
+    /// scope — marks the body non-exhaustive.
+    Unknown,
+}
+
+/// Resolve the constructor `new class(...)` runs in a unit whose enclosing
+/// class is `enclosing` (issue #804).
+///
+/// `Foo`, `self` and `parent` name one class exactly. `static` is late-bound,
+/// so it resolves only in a final class, or to a final constructor, which no
+/// subclass can replace. In a trait, `self` and `parent` are the using class's,
+/// which the trait body cannot name, so they stay unknown there.
+fn resolve_new(cx: &Cx, enclosing: Option<&str>, class: &StaticClass) -> NewTarget {
+    let own = || enclosing.filter(|e| !cx.find_class(e).is_some_and(|(_, cd)| cd.is_trait));
+    let (start, exact) = match class {
+        StaticClass::Named(name) => (cx.class_fqn(name), true),
+        StaticClass::SelfKw => match own() {
+            Some(e) => (e.to_owned(), true),
+            None => return NewTarget::Unknown,
+        },
+        StaticClass::Parent => match own().and_then(|e| cx.parent_fqn(e)) {
+            Some(p) => (p, true),
+            None => return NewTarget::Unknown,
+        },
+        StaticClass::Static => match own() {
+            Some(e) => (e.to_owned(), cx.find_class(e).is_some_and(|(_, cd)| cd.is_final)),
+            None => return NewTarget::Unknown,
+        },
+    };
+    match resolve_in_chain(cx, &start, "__construct") {
+        Resolution::Found(r) if exact || r.method.is_final => {
+            NewTarget::Edge(Sym::Method(r.declaring_class.fqn.clone(), r.method.name.clone()))
+        }
+        Resolution::NotFoundChainComplete if exact => NewTarget::Absent,
+        Resolution::Unknown if exact => match catalog_constructor(cx, &start) {
+            Some((fqn, labels)) => NewTarget::Catalog(fqn, labels),
+            None => NewTarget::Unknown,
+        },
+        _ => NewTarget::Unknown,
+    }
+}
+
+/// The catalog's `__construct` row for the engine class `start`'s chain leaves
+/// the project at, when no project class on the way can hold the constructor:
+/// none declares one, and none uses a trait that could supply it. The exit
+/// class must be absent from the project and global, the gates
+/// [`builtin_method_findings`] holds a catalogued method to, for its reasons.
+fn catalog_constructor(cx: &Cx, start: &str) -> Option<(String, &'static [&'static str])> {
+    let mut cur = start.to_owned();
+    let mut seen: HashSet<String> = HashSet::new();
+    loop {
+        if !seen.insert(cur.to_ascii_lowercase()) {
+            return None;
+        }
+        let Some((file, cd)) = cx.find_class(&cur) else { break };
+        if cd.uses_traits || cd.methods.iter().any(|m| m.name.eq_ignore_ascii_case("__construct")) {
+            return None;
+        }
+        cur = cx.units[file].tree.resolve_class_fqn(cd.parent.as_ref()?);
+    }
+    if cur.contains('\\') || !cx.class_absent(&cur) {
+        return None;
+    }
+    steins_catalog::method_effect_labels(&cur, "__construct").map(|labels| (cur, labels))
+}
+
+/// The findings a catalogued engine constructor contributes at `span`
+/// ([`NewTarget::Catalog`]), named `origin` in a `via` provenance and
+/// attributed like the class's other catalogued methods.
+fn constructor_findings(
+    cx: &Cx,
+    fqn: &str,
+    labels: &[&str],
+    origin: &str,
+    span: Span,
+    policy: &EffectsPolicy,
+) -> Vec<EffectFinding> {
+    let line = cx.tree().position(span.start).line;
+    let attributed = policy.method_attribution(fqn, "__construct");
+    labels
+        .iter()
+        .map(|label| {
+            EffectFinding::direct((*label).to_owned(), origin.to_owned(), line, cx.path().to_owned())
+                .attributed_by(&attributed)
+        })
+        .collect()
+}
+
+/// How a `new` expression's class reads in a finding: `new Clock`, `new static`.
+fn new_origin(class: &StaticClass) -> String {
+    let spelled = match class {
+        StaticClass::Named(name) => name.simple(),
+        StaticClass::SelfKw => "self",
+        StaticClass::Static => "static",
+        StaticClass::Parent => "parent",
+    };
+    format!("new {spelled}")
+}
+
+/// Classify one `new` origin into `row` (issue #804): an edge to the
+/// constructor, the catalog's row for an engine one, nothing for a class with
+/// none, and the `…?` taint for one that cannot be resolved.
+fn classify_new(
+    cx: &Cx,
+    enclosing: Option<&str>,
+    class: &StaticClass,
+    span: Span,
+    policy: &EffectsPolicy,
+    row: &mut EffectOwnRow,
+) {
+    match resolve_new(cx, enclosing, class) {
+        NewTarget::Edge(callee) => {
+            row.edges.insert(callee);
+        }
+        NewTarget::Absent => {}
+        NewTarget::Catalog(fqn, labels) => {
+            let origin = new_origin(class);
+            row.findings.extend(constructor_findings(cx, &fqn, labels, &origin, span, policy));
+        }
+        NewTarget::Unknown => row.exhaustive = false,
+    }
+}
+
+/// Report the envelope violations one `new` origin proves, mirroring
+/// [`classify_new`]: a project constructor's through the edge, a catalogued
+/// engine constructor's at the `new` itself. The taint reports nothing.
+#[expect(clippy::too_many_arguments, reason = "mirrors report_unit's own parameter set")]
+fn report_new(
+    out: &mut Vec<Diagnostic>,
+    cx: &Cx,
+    enclosing: Option<&str>,
+    class: &StaticClass,
+    span: Span,
+    effects: &HashMap<Sym, EffectSet>,
+    display: &str,
+    bound: OperativeBound<'_>,
+) {
+    match resolve_new(cx, enclosing, class) {
+        NewTarget::Edge(callee) => {
+            emit_transitive(out, cx, &callee, effects, span.start, display, bound);
+        }
+        NewTarget::Catalog(fqn, labels) => {
+            let origin = new_origin(class);
+            for f in constructor_findings(cx, &fqn, labels, &origin, span, bound.policy) {
+                if bound.reports(&f) {
+                    let prefix = format!("{origin} has effect {}", f.label);
+                    out.push(exceeded_diag(cx, span.start, &prefix, display, bound, &f.label));
+                }
+            }
+        }
+        NewTarget::Absent | NewTarget::Unknown => {}
+    }
+}
+
 /// The **builtin-class catalog** answer for a method-call origin whose receiver
 /// draws no project edge (issue #67): the findings a
 /// [`steins_catalog::method_effect_labels`] row contributes, `Some(vec![])` for a
@@ -2296,13 +2475,26 @@ pub(crate) fn resolve_effect_edge(
 ///   so an unimported `PDO` inside `namespace App;` is `App\PDO`, some class of
 ///   the user's that Steins simply has not indexed, and coloring it `io.db` would
 ///   be the guess this analyzer does not make.
+///
+/// One `parent::` call reaches the catalog too: `parent::__construct(...)` in a
+/// class whose chain leaves the project at an engine class runs that class's
+/// constructor, the one `new` would (issue #804), under the same gates.
 fn builtin_method_findings(
     cx: &Cx,
+    enclosing: Option<&str>,
     receiver: &EffectRecv,
     method: &str,
     span: steins_syntax::Span,
     policy: &EffectsPolicy,
 ) -> Option<Vec<EffectFinding>> {
+    if matches!(receiver, EffectRecv::Parent) && method.eq_ignore_ascii_case("__construct") {
+        let NewTarget::Catalog(fqn, labels) = resolve_new(cx, enclosing, &StaticClass::Parent)
+        else {
+            return None;
+        };
+        let origin = "parent::__construct";
+        return Some(constructor_findings(cx, &fqn, labels, origin, span, policy));
+    }
     let EffectRecv::ClassName(name) = receiver else { return None };
     let fqn = cx.class_fqn(name);
     if fqn.contains('\\') || !cx.class_absent(&fqn) {

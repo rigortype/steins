@@ -383,6 +383,33 @@ fn scans_eval_and_the_four_inclusions() {
     assert!(closure.is_some(), "the closure scope carries the eval");
 }
 
+/// Issue #804: `new` records the class it constructs, spelled as a static call's
+/// class is, and a computed class is opaque. An anonymous class records its
+/// parent when it cannot hold a constructor of its own, is opaque when it can,
+/// and its arguments are the enclosing frame's calls.
+#[test]
+fn scans_new_by_the_class_it_names() {
+    let src = "<?php class P { public function f(string $c): void {\n\
+               new Foo(h()); new self; new static(); new parent; new $c(); new (h())();\n\
+               new class extends Foo {}; new class(h()) {}; new class { use T; };\n\
+               new class { public function __construct() {} };\n\
+               } }\nfunction h(): string { return ''; }";
+    let tree = SourceTree::parse(src);
+    let f = &tree.classes()[0].methods[0];
+    let shapes: Vec<String> = f
+        .effect_origins
+        .iter()
+        .filter_map(|o| match o {
+            EffectOrigin::New { class, .. } => Some(class.render()),
+            EffectOrigin::Opaque { .. } => Some("?".to_owned()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(shapes, ["Foo", "self", "static", "parent", "?", "?", "Foo", "?", "?"]);
+    let calls = f.effect_origins.iter().filter(|o| matches!(o, EffectOrigin::Call { .. })).count();
+    assert_eq!(calls, 3, "the arguments and the computed class are walked: {:?}", f.effect_origins);
+}
+
 /// Issue #318: the proven-constant leading args an effect origin carries. A
 /// literal arg is also a resolvable callback ref, so most calls arrive as
 /// `HigherOrder`, not `Call` — pinned on both arms here.
