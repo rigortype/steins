@@ -168,6 +168,9 @@ fn deferred_tree(open: &Arc<OpenArtifact>, path: &str, text: &Arc<String>) -> La
     let path = path.to_owned();
     let text = Arc::clone(text);
     LazyTree::deferred(move || {
+        // Where a test counts the tree decodes (issue #828).
+        #[cfg(test)]
+        super::gate_order::decoded(super::gate_order::Payload::Trace, &path);
         let mut reader = open.reader.lock().expect("the artifact lock is never poisoned");
         open.trace.read_tree(&mut reader, &path).unwrap_or_else(|_| SourceTree::parse(&text))
     })
@@ -723,6 +726,9 @@ fn load_trees(
             stale.push(slot);
             continue;
         }
+        // Where a test counts the facts decodes (issue #828).
+        #[cfg(test)]
+        super::gate_order::decoded(super::gate_order::Payload::Facts, path);
         match open
             .facts
             .as_ref()

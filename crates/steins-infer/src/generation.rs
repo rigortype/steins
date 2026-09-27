@@ -131,6 +131,8 @@
 //! [`Miss`]: steins_gen::Miss
 //! [`GenerationInputs`]: steins_gen::GenerationInputs
 
+#[cfg(test)]
+mod gate_order;
 mod identity;
 mod load;
 mod publish;
