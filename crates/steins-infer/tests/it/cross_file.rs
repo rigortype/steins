@@ -225,3 +225,55 @@ fn annotate_project_shows_cross_file_finding() {
         "cross-file finding fact on the render(\"abc\") line, got: {facts:#?}"
     );
 }
+
+// ---- 12. A duplicate FQN keeps its merged summary (issue #825) -------------
+
+/// Both declarations of `a` fold into one row; the collect after the fixpoint
+/// once let the second listing overwrite that row's set with an empty one, so
+/// a body calling `time()` read as proven pure and lost its throw.
+fn duplicate_summaries(files: &[(&str, &str)]) -> Vec<Vec<steins_infer::LineFact>> {
+    let db = SteinsDatabase::default();
+    let inputs: Vec<SourceFile> = files
+        .iter()
+        .map(|(p, t)| SourceFile::new(&db, (*p).to_owned(), (*t).to_owned()))
+        .collect();
+    let project = Project::new(&db, inputs.clone(), steins_db::ProjectLayout::fallback(), steins_db::PluginFacts::none());
+    for &file in &inputs {
+        for s in steins_infer::effect_summaries_project(&db, project, file) {
+            assert_eq!(s.labels, ["nondet.random", "nondet.time"], "{}: {s:#?}", file.path(&db));
+            assert!(s.exhaustive, "{}: {s:#?}", file.path(&db));
+        }
+    }
+    inputs.iter().map(|&file| annotate_project(&db, project, file, &mut NoFold)).collect()
+}
+
+fn throws_classes(facts: &[steins_infer::LineFact]) -> Vec<(u32, Vec<String>)> {
+    facts
+        .iter()
+        .filter_map(|f| match &f.kind {
+            FactKind::Throws { classes, exhaustive: true } => Some((f.line, classes.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+const IMPURE_A: &str = "<?php\nfunction a(): int\n{\n    if (rand()) { throw new \\RuntimeException(); }\n    return time();\n}\n";
+
+#[test]
+fn a_function_declared_in_two_files_keeps_its_effects_and_throws() {
+    let facts = duplicate_summaries(&[
+        ("f.php", IMPURE_A),
+        ("g.php", "<?php\n\nfunction a(): int\n{\n    return 1;\n}\n"),
+    ]);
+    let runtime = vec!["RuntimeException".to_owned()];
+    assert_eq!(throws_classes(&facts[0]), [(2, runtime.clone())], "{:#?}", facts[0]);
+    assert_eq!(throws_classes(&facts[1]), [(3, runtime)], "{:#?}", facts[1]);
+}
+
+#[test]
+fn a_function_declared_twice_in_one_file_keeps_its_effects_and_throws() {
+    let src = "<?php\nif (PHP_OS_FAMILY === 'Windows') {\n    function a(): int\n    {\n        if (rand()) { throw new \\RuntimeException(); }\n        return time();\n    }\n} else {\n    function a(): int { return 1; }\n}\n";
+    let facts = duplicate_summaries(&[("f.php", src)]);
+    let runtime = vec!["RuntimeException".to_owned()];
+    assert_eq!(throws_classes(&facts[0]), [(3, runtime.clone()), (9, runtime)], "{:#?}", facts[0]);
+}

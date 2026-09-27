@@ -428,7 +428,11 @@ fn propagate_throws(
         }
     }
 
+    // A duplicate FQN is listed once per declaration but owns one merged row;
+    // only its first listing may take the set (#825, the effect fixpoint's rule).
+    let mut seen: HashSet<&Sym> = HashSet::with_capacity(syms.len());
     syms.iter()
+        .filter(|s| seen.insert(*s))
         .map(|s| {
             let f = facts.remove(s).unwrap_or_default();
             let x = ex.get(s).copied().unwrap_or(true);
