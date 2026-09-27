@@ -200,7 +200,7 @@ order-witnessed 性が正直に失われる場所として明文化されてい�
 `array{-5: 1, -4: 2, ...}` は `array{-5: 1, 2, ...}` と綴る。PHPStan は
 負のキーしかない後の位置フィールドを `0` と読む。
 理由付きの
-不採用: 抽象 `nextAutoIndexes`(具体側のみ・バージョン対応 A12)、
+不採用: 抽象 `nextAutoIndexes`(具体側のみ・バージョン対応 A22)、
 `ARRAY_COUNT_LIMIT` 型の union 縮退(計算された OneOf 降下で置換;256 は
 単一 shape のフィールド幅上界としてのみ生存)。
 
