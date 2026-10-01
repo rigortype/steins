@@ -1504,6 +1504,18 @@ impl<'a> Cx<'a> {
     /// demoted to `Unknown` on a PHP-minor skew. A purely in-project verdict is
     /// never catalog-backed, so a project's own `A|B` union narrows unaffected.
     fn is_a_tracked(&self, sub_fqn: &str, super_fqn: &str) -> (IsA, bool) {
+        let walk = self.supertype_walk(sub_fqn, super_fqn);
+        (walk.verdict, walk.catalog)
+    }
+
+    /// One walk of `sub_fqn`'s supertype closure toward `super_fqn`: the parent
+    /// chain, every `implements` list on it, each interface's `extends`, an
+    /// enum's implicit roots, and the catalog's builtin hierarchy past the
+    /// project. [`Self::is_a`] reads the verdict; the throw lane
+    /// ([`crate::throws::throw_subtype`]) reads [`SupertypeWalk::chain_closed`]
+    /// as well, so the two never disagree about what the hierarchy holds
+    /// (issue #852).
+    pub(crate) fn supertype_walk(&self, sub_fqn: &str, super_fqn: &str) -> SupertypeWalk {
         let target = super_fqn.trim_start_matches('\\');
         // `Stringable` is implicitly implemented by any class with a `__toString`
         // method (PHP 8.0+), invisible to the explicit parent/`implements` closure.
@@ -1511,49 +1523,51 @@ impl<'a> Cx<'a> {
         // trait-using class (merged methods unmodeled — might declare
         // `__toString`) forces `Unknown` rather than an unsound `No`.
         let stringable_target = target.eq_ignore_ascii_case("Stringable");
-        let mut queue: Vec<String> = vec![sub_fqn.trim_start_matches('\\').to_owned()];
+        // Each queued name carries whether it is provably an interface: named in
+        // an `implements` list, or a supertype of an interface.
+        let mut queue: Vec<(String, bool)> =
+            vec![(sub_fqn.trim_start_matches('\\').to_owned(), false)];
         let mut seen: HashSet<String> = HashSet::new();
-        // Whether every ancestor edge inspected so far resolved — the closure
-        // condition for a sound `No`. A single unresolvable node taints it.
-        let mut complete = true;
+        let mut walk = SupertypeWalk { verdict: IsA::No, catalog: false, chain_closed: true };
         // Whether a visited class may implicitly gain `Stringable` via a trait.
         let mut maybe_stringable = false;
-        // Whether any traversed ancestor edge came from the builtin catalog (A11).
-        let mut catalog = false;
-        while let Some(cur) = queue.pop() {
+        while let Some((cur, interface)) = queue.pop() {
             if cur.eq_ignore_ascii_case(target) {
-                return (IsA::Yes, catalog);
+                walk.verdict = IsA::Yes;
+                return walk;
             }
             if !seen.insert(cur.to_ascii_lowercase()) {
                 continue;
             }
-            if stringable_target
-                && let Some((_, cd)) = self.find_class(&cur)
-            {
-                if cd.methods.iter().any(|m| m.name.eq_ignore_ascii_case("__toString")) {
-                    return (IsA::Yes, catalog);
-                }
-                if cd.uses_traits {
-                    maybe_stringable = true;
-                }
-            }
-            // An edge resolved through the catalog (not an in-project class) marks
-            // the whole verdict catalog-backed.
-            let in_project = self.find_class(&cur).is_some();
-            match self.ancestors_of(&cur) {
-                Some(supers) => {
-                    if !in_project {
-                        catalog = true;
+            if let Some((file, cd)) = self.find_class(&cur) {
+                if stringable_target {
+                    if cd.methods.iter().any(|m| m.name.eq_ignore_ascii_case("__toString")) {
+                        walk.verdict = IsA::Yes;
+                        return walk;
                     }
-                    queue.extend(supers);
+                    if cd.uses_traits {
+                        maybe_stringable = true;
+                    }
                 }
-                None => complete = false,
+                let edges = project_supers(self.units[file].tree, cd);
+                queue.extend(edges.into_iter().map(|(fqn, i)| (fqn, i || interface)));
+            } else if let Some(supers) = steins_catalog::builtin_class_supers(&cur) {
+                // An edge resolved through the catalog (not an in-project class)
+                // marks the whole verdict catalog-backed. The catalog records no
+                // kinds, so only an interface's own supertypes are known interfaces.
+                walk.catalog = true;
+                queue.extend(supers.into_iter().map(|s| (s.to_owned(), interface)));
+            } else {
+                // One unresolvable node leaves the closure open. An interface can
+                // only add interfaces above it, so the class chain stays closed.
+                walk.verdict = IsA::Unknown;
+                walk.chain_closed &= interface;
             }
         }
         if stringable_target && maybe_stringable {
-            return (IsA::Unknown, catalog);
+            walk.verdict = IsA::Unknown;
         }
-        (if complete { IsA::No } else { IsA::Unknown }, catalog)
+        walk
     }
 
     /// The **direct** supertypes (parent + `implements`, plus an enum's implicit
@@ -1562,26 +1576,50 @@ impl<'a> Cx<'a> {
     /// supertypes returns an empty vector (fully enumerated, a root).
     pub(crate) fn ancestors_of(&self, fqn: &str) -> Option<Vec<String>> {
         if let Some((file, cd)) = self.find_class(fqn) {
-            let tree = &self.units[file].tree;
-            let mut supers = Vec::new();
-            if let Some(pref) = &cd.parent {
-                supers.push(tree.resolve_class_fqn(pref));
-            }
-            for imp in &cd.implements {
-                supers.push(tree.resolve_class_fqn(imp));
-            }
-            if cd.is_enum {
-                supers.push("UnitEnum".to_owned());
-                if cd.enum_backing.is_some() {
-                    supers.push("BackedEnum".to_owned());
-                }
-            }
-            Some(supers)
+            let supers = project_supers(self.units[file].tree, cd);
+            Some(supers.into_iter().map(|(s, _)| s).collect())
         } else {
             steins_catalog::builtin_class_supers(fqn)
                 .map(|s| s.into_iter().map(str::to_owned).collect())
         }
     }
+}
+
+/// A project class-like's direct supertypes, resolved in its own file, each
+/// with whether it is provably an interface: everything but a class's `extends`
+/// parent is one (an `implements` entry, any supertype of an interface, an
+/// enum's implicit `UnitEnum`/`BackedEnum`).
+fn project_supers(
+    tree: &steins_syntax::SourceTree,
+    cd: &steins_syntax::ClassDecl,
+) -> Vec<(String, bool)> {
+    let mut supers = Vec::new();
+    if let Some(pref) = &cd.parent {
+        supers.push((tree.resolve_class_fqn(pref), cd.is_interface));
+    }
+    for imp in &cd.implements {
+        supers.push((tree.resolve_class_fqn(imp), true));
+    }
+    if cd.is_enum {
+        supers.push(("UnitEnum".to_owned(), true));
+        if cd.enum_backing.is_some() {
+            supers.push(("BackedEnum".to_owned(), true));
+        }
+    }
+    supers
+}
+
+/// What one supertype walk found ([`Cx::supertype_walk`], ADR-0043 §3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SupertypeWalk {
+    /// The trinary verdict: `No` only when every ancestor edge resolved.
+    pub(crate) verdict: IsA,
+    /// Whether any traversed ancestor edge came from the builtin catalog (A11).
+    pub(crate) catalog: bool,
+    /// Whether every name the walk could not resolve was provably an interface,
+    /// so the class chain itself is enumerated. An interface's supertypes are
+    /// interfaces, so such a name can never lead to a class.
+    pub(crate) chain_closed: bool,
 }
 
 /// The verdict of the trinary is-a oracle ([`Cx::is_a`], ADR-0043 §3).
@@ -2472,6 +2510,35 @@ enum Dir { case Up; }";
         let src = "<?php trait T {} class A {} class Foo extends A { use T; }";
         assert_eq!(is_a(src, "foo", "a"), IsA::Yes);
         assert_eq!(is_a(src, "foo", "unrelated"), IsA::No, "trait use keeps closure complete");
+    }
+
+    fn walk(src: &str, sub: &str, sup: &str) -> SupertypeWalk {
+        let tree = LazyTree::ready(SourceTree::parse(src));
+        let units = [FileUnit { path: "t.php", tree: &tree }];
+        let index = Index::from_units(&units);
+        Cx::new(&units, &index, 0).supertype_walk(sub, sup)
+    }
+
+    #[test]
+    fn an_unresolved_interface_leaves_the_class_chain_closed() {
+        // `is_a` keeps ADR-0043 §3's full-closure rule: an unknown interface makes
+        // every miss `Unknown`. The walk also reports that only an interface was
+        // left unresolved, which the throw lane reads (issue #852).
+        let src = "<?php
+interface Mine extends \\Vendor\\Base {}
+class Foo extends \\RuntimeException implements \\Vendor\\Marker, Mine {}";
+        let w = walk(src, "foo", "logicexception");
+        assert_eq!(w.verdict, IsA::Unknown);
+        assert!(w.chain_closed, "only interfaces were unresolved");
+        // An interface's own `extends` is an interface edge too.
+        assert!(walk(src, "mine", "logicexception").chain_closed);
+        // An unknown parent class, or an unknown subject, opens the chain itself.
+        let parent = "<?php class Foo extends \\Vendor\\Base implements \\Countable {}";
+        assert!(!walk(parent, "foo", "logicexception").chain_closed);
+        assert!(!walk(parent, "ghost", "logicexception").chain_closed);
+        // A catalog interface's supertypes stay interfaces: `Throwable` resolves.
+        let engine = "<?php class Foo extends \\Exception implements \\Vendor\\Marker {}";
+        assert_eq!(walk(engine, "foo", "stringable").verdict, IsA::Yes);
     }
 }
 
