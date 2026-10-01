@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use steins_db::{Project, ProjectLayout, SourceFile, SteinsDatabase};
-use steins_infer::effect_summaries_project;
+use steins_infer::effect_summaries_project_files;
 
 use crate::config::allow_list_from_disk;
 use crate::project::{collect_files, load_plugins, reject_missing_paths, resolve_layout};
@@ -154,14 +154,14 @@ fn capture_effect_entries(
     dir: &Path,
 ) -> Vec<effect_baseline::Entry> {
     let mut entries = Vec::new();
-    for &input in inputs {
-        let path = input.path(db).to_owned();
-        if layout.is_vendor(&path) {
-            continue;
-        }
-        let rel = baseline::relativize(dir, &path);
-        // One whole-project fixpoint per file (same cost `annotate` pays per call).
-        for s in effect_summaries_project(db, project, input) {
+    // The two whole-project fixpoints run once for every non-vendor file, not
+    // once per file (issue #861).
+    let targets: Vec<SourceFile> =
+        inputs.iter().copied().filter(|&input| !layout.is_vendor(input.path(db))).collect();
+    let summaries = effect_summaries_project_files(db, project, &targets);
+    for (&input, summaries) in targets.iter().zip(summaries) {
+        let rel = baseline::relativize(dir, input.path(db));
+        for s in summaries {
             entries.push(effect_baseline::Entry {
                 file: rel.clone(),
                 symbol: s.qualified,

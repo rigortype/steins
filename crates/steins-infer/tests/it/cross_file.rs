@@ -277,3 +277,33 @@ fn a_function_declared_twice_in_one_file_keeps_its_effects_and_throws() {
     let runtime = vec!["RuntimeException".to_owned()];
     assert_eq!(throws_classes(&facts[0]), [(3, runtime.clone()), (9, runtime)], "{:#?}", facts[0]);
 }
+
+// ---- 13. A batch of targets reads one fixpoint (issue #861) -----------------
+
+#[test]
+fn summaries_for_many_files_equal_the_per_file_summaries() {
+    let db = SteinsDatabase::default();
+    let files = [
+        ("lib.php", "<?php\nfunction stamp(): int { return time(); }\nfunction check(int $n): void { if ($n < 0) { throw new \\RuntimeException(); } }\n"),
+        ("use.php", "<?php\nfunction run(): int { check(1); return stamp(); }\nclass Job { public function go(): int { return run(); } }\n"),
+        ("pure.php", "<?php\nfunction twice(int $n): int { return $n * 2; }\n"),
+    ];
+    let inputs: Vec<SourceFile> = files
+        .iter()
+        .map(|(p, t)| SourceFile::new(&db, (*p).to_owned(), (*t).to_owned()))
+        .collect();
+    let project = Project::new(&db, inputs.clone(), steins_db::ProjectLayout::fallback(), steins_db::PluginFacts::none());
+    // A file the project does not hold has no summaries, as it never had.
+    let stranger = SourceFile::new(&db, "other.php".to_owned(), "<?php\nfunction z() {}\n".to_owned());
+    let mut targets = inputs.clone();
+    targets.push(stranger);
+
+    let batch = steins_infer::effect_summaries_project_files(&db, project, &targets);
+    assert_eq!(batch.len(), targets.len());
+    for (&file, got) in targets.iter().zip(&batch) {
+        assert_eq!(got, &steins_infer::effect_summaries_project(&db, project, file), "{}", file.path(&db));
+    }
+    // Cross-file facts reached the batch: `Job::go` sees `time()` through `run`.
+    assert!(batch[1].iter().any(|s| s.symbol == "Job::go" && s.labels == ["nondet.time"]), "{:#?}", batch[1]);
+    assert!(batch[3].is_empty());
+}
