@@ -1236,7 +1236,7 @@ fn lower_match_guard_chain(m: &mago_syntax::cst::Match<'_>) -> Option<Stmt> {
 /// chains are rare.
 ///
 /// Nested scopes are skipped, matching every sibling structural scan
-/// ([`scan_throw_origins`], [`scan_effect_origins`]); a `match` inside a live arm
+/// (the site scan, `scan_owner_sites`); a `match` inside a live arm
 /// is still reached, since only the outer construct's own arms are skipped by
 /// [`lower_match_stmt`] itself, not this walk.
 pub(crate) fn scan_guard_chain_no_default(node: &Node<'_, '_>, out: &mut Vec<Span>) {

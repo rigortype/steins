@@ -3,10 +3,9 @@
 //! callbacks they act on, and the `throw`/`try`/`catch` structure that decides
 //! which throws escape.
 //!
-//! The lanes' scans here are the legacy half of a pair: `lower_site` lowers the
-//! union of what they record once, and derives both origin lists from it. These
-//! scans stay as the oracle that derivation is held equal to (`site_oracle`) while
-//! the lanes still read the lists; they go when the lanes read sites.
+//! What remains here is the frame context a site scan reads (`EffectScanCx`) and the
+//! helpers it shares with `lower_site`, which lowers the sites themselves once for
+//! both lanes.
 
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -18,16 +17,13 @@ use mago_syntax::cst::{
 };
 
 use crate::ast::{
-    CallExpr, CallTarget, CallbackRef, CatchClause, ConstArgs, EffectOrigin, ExitKeyword,
-    IncludeKeyword, NameRef, OutputKeyword, RefKind, RefTarget, SUPERGLOBALS, StateConstruct,
-    StaticClass, ThrowKind, ThrowOrigin,
+    CallExpr, CallTarget, CallbackRef, ConstArgs, NameRef, RefKind, RefTarget, SUPERGLOBALS,
+    StaticClass,
 };
-use crate::lower_arg_shape::{Captures, FrameBindings, arg_shapes_of, method_call_shapes};
-use crate::lower_decl::lower_catch_clause;
+use crate::lower_arg_shape::{Captures, FrameBindings};
 use crate::lower_expr::{
-    effect_recv_of_class, effect_recv_of_object, effect_recv_of_object_declared,
-    first_class_method_ref, first_class_static_ref, instantiation_class, lower_method_call,
-    lower_static_call, method_name_of, prop_fetch_of, trace_static_class,
+    first_class_method_ref, first_class_static_ref, lower_method_call, lower_static_call,
+    prop_fetch_of,
 };
 use crate::lower_scope::{arrow_def_offset, closure_def_offset};
 use crate::lower_stmt::{
@@ -101,7 +97,7 @@ pub(crate) fn higher_order_of_call(fc: &FunctionCall<'_>) -> Option<HigherOrderC
 
 /// The per-position lvalue-root classification of a named call's arguments
 /// (ADR-0063 §2.3). `None` when a named or spread argument defeats positional
-/// mapping — see [`EffectOrigin::Call`]'s `arg_targets`.
+/// mapping — see [`crate::ast::EffectOrigin::Call`]'s `arg_targets`.
 pub(crate) fn arg_targets_of_call(fc: &FunctionCall<'_>, cx: &EffectScanCx) -> Option<Vec<RefTarget>> {
     let mut targets = Vec::new();
     for arg in fc.argument_list.arguments.iter() {
@@ -188,7 +184,7 @@ fn ref_target_of_arg(expr: &Expression<'_>, cx: &EffectScanCx) -> RefTarget {
     RefTarget::Local
 }
 
-/// The per-frame context [`scan_effect_origins`] consults: the ADR-0033
+/// The per-frame context the site scan consults: the ADR-0033
 /// callback-resolution map, plus the two facts by-ref out-parameter coloring
 /// needs about the enclosing frame (ADR-0063 §2.3).
 pub(crate) struct EffectScanCx {
@@ -203,11 +199,11 @@ pub(crate) struct EffectScanCx {
     /// What this frame writes, for the ADR-0067 declared-receiver gate.
     pub(crate) writes: ReceiverWrites,
     /// Whether the frame is a `__construct` body, whose writes to `$this`'s own
-    /// properties are exempt from [`StateConstruct::PropertyWrite`]
+    /// properties are exempt from [`crate::ast::StateConstruct::PropertyWrite`]
     /// ([`property_write_span`]). Only a method sets it: a closure or arrow
     /// function defined in a constructor is a frame of its own.
     pub(crate) constructor: bool,
-    /// What the frame's variables are shown to hold, for the [`ArgShape`] of a
+    /// What the frame's variables are shown to hold, for the [`crate::ast::ArgShape`] of a
     /// bare variable argument; opaque until [`Self::with_body`] builds it.
     pub(crate) bindings: FrameBindings,
 }
@@ -572,187 +568,6 @@ fn collect_callable_assigns(
     }
 }
 
-/// The origin of one function call ([`scan_effect_origins`]). A statically
-/// named call is either a builtin (catalog-classified) or a project function
-/// (a propagation edge), and the effects pass decides which; a `$fn()` resolved
-/// to a body-local closure joins its effects; any other dynamic call is opaque.
-fn scan_function_call(fc: &FunctionCall<'_>, cx: &EffectScanCx, out: &mut Vec<EffectOrigin>) {
-    if let Expression::Identifier(id) = fc.function {
-        // A named call passing a resolvable callback is a HigherOrder origin;
-        // otherwise a plain Call edge. `higher_order_of_call` and
-        // `arg_targets_of_call` reject the same named/spread argument lists,
-        // so on the `Some` arm the target vector is exactly `arg_count` long.
-        let arg_targets = arg_targets_of_call(fc, cx);
-        let const_args = const_args_of_call(fc);
-        let arg_shapes = arg_shapes_of(&fc.argument_list, &cx.bindings);
-        match higher_order_of_call(fc) {
-            Some((callee, callbacks, arg_count)) => {
-                out.push(EffectOrigin::HigherOrder {
-                    callee,
-                    callbacks,
-                    arg_count,
-                    // Both helpers reject the same argument lists, so these
-                    // are always `Some` on this arm.
-                    arg_targets: arg_targets.unwrap_or_default(),
-                    const_args,
-                    span: to_span(fc.span()),
-                    arg_shapes: arg_shapes.unwrap_or_default(),
-                });
-            }
-            None => out.push(EffectOrigin::Call {
-                name: name_ref(id),
-                span: to_span(id.span()),
-                arg_targets,
-                const_args,
-                arg_shapes,
-            }),
-        }
-    } else if let Some(cb) = direct_var_callee(fc).and_then(|v| cx.locals.get(&v).cloned()) {
-        // `$fn()` resolved to a body-local single-assignment closure.
-        out.push(EffectOrigin::Callback { cbref: cb, span: to_span(fc.span()) });
-    } else {
-        // A dynamic function call (`$f()`, `($cb)()`) — unprovable.
-        out.push(EffectOrigin::Opaque { span: to_span(fc.span()) });
-    }
-}
-
-/// Walk a function-body subtree, appending every [`EffectOrigin`] found. Does not
-/// descend into nested scopes (function/closure/arrow/class-like bodies), whose
-/// effects are their own concern. `locals` resolves a `$fn()` variable call to a
-/// body-local single-assignment closure (ADR-0033).
-pub(crate) fn scan_effect_origins(node: &Node<'_, '_>, cx: &EffectScanCx, out: &mut Vec<EffectOrigin>) {
-    match node {
-        Node::FunctionCall(fc) => scan_function_call(fc, cx, out),
-        // Output-stream writes.
-        Node::Echo(e) => {
-            let keyword = OutputKeyword::Echo;
-            out.push(EffectOrigin::Output { keyword, span: to_span(e.span()) });
-        }
-        Node::EchoTag(e) => {
-            let keyword = OutputKeyword::Echo;
-            out.push(EffectOrigin::Output { keyword, span: to_span(e.span()) });
-        }
-        Node::PrintConstruct(p) => {
-            let keyword = OutputKeyword::Print;
-            out.push(EffectOrigin::Output { keyword, span: to_span(p.span()) });
-        }
-        // Raw text between `?>` and the next `<?php` inside a body: the engine writes
-        // it to the output channel exactly as `echo` does (ADR-0008 always said so;
-        // ADR-0083 wired it). Whitespace-only inline text is skipped — layout
-        // punctuation between tag pairs isn't output anyone writes a function for,
-        // and coloring it would tie the effect to template indentation.
-        Node::Inline(i) => {
-            if i.kind.is_text() && !i.value.iter().all(u8::is_ascii_whitespace) {
-                let keyword = OutputKeyword::InlineHtml;
-                out.push(EffectOrigin::Output { keyword, span: to_span(i.span()) });
-            }
-        }
-        // Non-local program exit.
-        Node::ExitConstruct(x) => {
-            out.push(EffectOrigin::Exit { keyword: ExitKeyword::Exit, span: to_span(x.span()) });
-        }
-        Node::DieConstruct(d) => {
-            out.push(EffectOrigin::Exit { keyword: ExitKeyword::Die, span: to_span(d.span()) });
-        }
-        // Dynamic code (ADR-0046 amendment): `eval` is its own label, a file
-        // inclusion reads a file. Both run code this scan never sees. The
-        // operand is still walked below — `eval(f())` calls `f`.
-        Node::EvalConstruct(ec) => out.push(EffectOrigin::Eval { span: to_span(ec.span()) }),
-        Node::IncludeConstruct(ic) => {
-            let keyword = IncludeKeyword::Include;
-            out.push(EffectOrigin::Include { keyword, span: to_span(ic.span()) });
-        }
-        Node::IncludeOnceConstruct(ic) => {
-            let keyword = IncludeKeyword::IncludeOnce;
-            out.push(EffectOrigin::Include { keyword, span: to_span(ic.span()) });
-        }
-        Node::RequireConstruct(rq) => {
-            let keyword = IncludeKeyword::Require;
-            out.push(EffectOrigin::Include { keyword, span: to_span(rq.span()) });
-        }
-        Node::RequireOnceConstruct(rq) => {
-            let keyword = IncludeKeyword::RequireOnce;
-            out.push(EffectOrigin::Include { keyword, span: to_span(rq.span()) });
-        }
-        // Instance / static method calls with a statically-resolvable receiver
-        // become effect edges (`$this->`, `self::`, `parent::`, `Foo::`,
-        // `new Foo()->`). Dynamic receivers record nothing.
-        Node::MethodCall(mc) => {
-            if let (Some(recv), Some(method)) =
-                (effect_recv_of_object_declared(mc.object, cx), method_name_of(&mc.method))
-            {
-                let arg_shapes = method_call_shapes(mc.object, &mc.argument_list, &cx.bindings);
-                let span = to_span(mc.span());
-                out.push(EffectOrigin::MethodCall { receiver: recv, method, span, arg_shapes });
-            } else {
-                // `$var->m()` / `$o->$m()` — receiver or selector not resolvable.
-                out.push(EffectOrigin::Opaque { span: to_span(mc.span()) });
-            }
-        }
-        Node::NullSafeMethodCall(mc) => {
-            if let (Some(recv), Some(method)) =
-                (effect_recv_of_object_declared(mc.object, cx), method_name_of(&mc.method))
-            {
-                let span = to_span(mc.span());
-                let arg_shapes = None;
-                out.push(EffectOrigin::MethodCall { receiver: recv, method, span, arg_shapes });
-            } else {
-                out.push(EffectOrigin::Opaque { span: to_span(mc.span()) });
-            }
-        }
-        Node::StaticMethodCall(sc) => {
-            if let (Some(recv), Some(method)) =
-                (effect_recv_of_class(sc.class), method_name_of(&sc.method))
-            {
-                let arg_shapes = method_call_shapes(sc.class, &sc.argument_list, &cx.bindings);
-                let span = to_span(sc.span());
-                out.push(EffectOrigin::MethodCall { receiver: recv, method, span, arg_shapes });
-            } else {
-                // `$var::m()` / `static::m()` / `Foo::$m()` — unresolvable.
-                out.push(EffectOrigin::Opaque { span: to_span(sc.span()) });
-            }
-        }
-        // `new C(...)` runs `C`'s constructor here (issue #804): an edge the
-        // effects pass resolves, or a taint when the class is computed. The
-        // arguments are walked below like any call's.
-        Node::Instantiation(inst) => {
-            let span = to_span(inst.span());
-            match trace_static_class(inst.class) {
-                Some(class) => {
-                    let arg_shapes = match &inst.argument_list {
-                        Some(list) => arg_shapes_of(list, &cx.bindings),
-                        None => Some(Vec::new()),
-                    };
-                    out.push(EffectOrigin::New { class, span, arg_shapes });
-                }
-                None => out.push(EffectOrigin::Opaque { span }),
-            }
-        }
-        // An anonymous class's body is its own scope, but its constructor runs
-        // at this `new`, and its arguments are evaluated here.
-        Node::AnonymousClass(ac) => {
-            scan_anonymous_class_new(ac, cx, out);
-            return;
-        }
-        // Nested scopes are scanned independently.
-        Node::Function(_)
-        | Node::Closure(_)
-        | Node::ArrowFunction(_)
-        | Node::Class(_)
-        | Node::Interface(_)
-        | Node::Trait(_)
-        | Node::Enum(_) => return,
-        _ => {
-            if scan_state_construct(node, cx, out) {
-                return;
-            }
-        }
-    }
-    for child in children(node) {
-        scan_effect_origins(&child, cx, out);
-    }
-}
-
 /// The constructor a `new class(...) {...}` expression runs, as the effect and
 /// throw scans both read it (issues #804, #849).
 pub(crate) enum AnonymousConstructor {
@@ -785,54 +600,6 @@ pub(crate) fn anonymous_class_constructor(ac: &AnonymousClass<'_>) -> AnonymousC
     }
 }
 
-/// The effect origins of a `new class(...) {...}` expression (issue #804): its
-/// arguments, evaluated in this frame, and the constructor that runs here
-/// ([`AnonymousConstructor`]).
-fn scan_anonymous_class_new(ac: &AnonymousClass<'_>, cx: &EffectScanCx, out: &mut Vec<EffectOrigin>) {
-    let span = to_span(ac.span());
-    match anonymous_class_constructor(ac) {
-        AnonymousConstructor::Unseen => out.push(EffectOrigin::Opaque { span }),
-        AnonymousConstructor::Inherited(class) => {
-            out.push(EffectOrigin::New { class, span, arg_shapes: None });
-        }
-        AnonymousConstructor::None => {}
-    }
-    if let Some(list) = &ac.argument_list {
-        scan_effect_origins(&Node::PartialArgumentList(list), cx, out);
-    }
-}
-
-/// Record the [`StateConstruct`] `node` is, if it is one (ADR-0055 amendment of
-/// 2026-09-26: each marks the body non-exhaustive until its label is inferred).
-/// Returns `true` when this already walked the node's children, which happens for
-/// one shape: a static property's name is a variable token, and `Foo::$_GET` names
-/// a property rather than the superglobal, so only the class expression — and a
-/// dynamic name's expression — is walked on.
-fn scan_state_construct(node: &Node<'_, '_>, cx: &EffectScanCx, out: &mut Vec<EffectOrigin>) -> bool {
-    let state = |construct, span: mago_span::Span| EffectOrigin::State { construct, span: to_span(span) };
-    match node {
-        Node::Global(g) => out.push(state(StateConstruct::Global, g.span())),
-        Node::Static(s) => out.push(state(StateConstruct::StaticVar, s.span())),
-        Node::DirectVariable(dv) if is_superglobal(dv.name) => {
-            out.push(state(StateConstruct::Superglobal, dv.span()));
-        }
-        Node::StaticPropertyAccess(spa) => {
-            out.push(state(StateConstruct::StaticProperty, spa.span()));
-            scan_effect_origins(&Node::Expression(spa.class), cx, out);
-            if !matches!(spa.property, Variable::Direct(_)) {
-                scan_effect_origins(&Node::Variable(&spa.property), cx, out);
-            }
-            return true;
-        }
-        _ => {
-            if let Some(span) = property_write_span(node, cx.constructor) {
-                out.push(state(StateConstruct::PropertyWrite, span));
-            }
-        }
-    }
-    false
-}
-
 /// Whether a direct variable's spelled name (`$` included) is one of the
 /// [`SUPERGLOBALS`]. PHP spells them case-sensitively, and a variable variable
 /// cannot reach one inside a function-like, so the direct spelling is all there is.
@@ -841,7 +608,7 @@ pub(crate) fn is_superglobal(name: &[u8]) -> bool {
 }
 
 /// Where `node` writes an instance property, if it does
-/// ([`StateConstruct::PropertyWrite`]): the written lvalue's span. A `&` binding
+/// ([`crate::ast::StateConstruct::PropertyWrite`]): the written lvalue's span. A `&` binding
 /// counts, since a later write through the alias lands in the property; that
 /// includes a by-reference `foreach` over a property, whose elements the loop
 /// variable aliases.
@@ -925,7 +692,7 @@ fn element_writes_property(element: &ArrayElement<'_>, exempt_this: bool) -> boo
 
 /// Walk a body subtree, appending every instance/static method call as a
 /// [`CallExpr`] (ADR-0043 §6 comprehensive method-call surface). Mirrors
-/// [`scan_effect_origins`]'s traversal discipline: descends control flow and
+/// the site scan's traversal discipline: descends control flow and
 /// sub-expressions (`foo($this->m($x))` is captured) but not nested
 /// function/closure/class-like bodies, their own scopes. Dynamic receivers/
 /// selectors are still recorded ([`Callee::Dynamic`]) so the sweep can taint them.
@@ -975,236 +742,5 @@ pub(crate) fn scan_method_calls(node: &Node<'_, '_>, out: &mut Vec<CallExpr>) {
     }
     for child in children(node) {
         scan_method_calls(&child, out);
-    }
-}
-
-/// The structural throw-origin walk (ADR-0040 damming). Produces every
-/// throw-relevant construct in a body — explicit throws, function/method call
-/// edges — tagged with the ordered enclosing `try`/`catch` guards that may dam it.
-/// Independent of the trace IR: try/catch nesting is handled by threading a guard
-/// stack (`guards`, outer→inner) and a catch-variable scope (`catch_scope`, for
-/// rethrow precision) through the descent.
-///
-/// * A `try` block is walked with this try's guard pushed; its `catch` and
-///   `finally` blocks are walked WITHOUT it (a catch body is outside its own
-///   clause but inside outer trys; `finally` absorbs nothing).
-/// * `throw new X` records the class; `throw $e` of an enclosing catch parameter
-///   re-emits that catch's absorbed set (rethrow); any other throw taints.
-/// * Every `new`, a thrown one included, is an edge to the constructor it runs
-///   (issue #849), or a taint when the class is computed or an anonymous class
-///   may bring its own.
-#[expect(clippy::too_many_lines, reason = "predates the #778 ratchet; split when next reworked")]
-pub(crate) fn scan_throw_origins(
-    node: &Node<'_, '_>,
-    guards: &[Vec<CatchClause>],
-    catch_scope: &[(String, Vec<NameRef>, bool)],
-    locals: &HashMap<String, CallbackRef>,
-    out: &mut Vec<ThrowOrigin>,
-) {
-    // Innermost-first snapshot of the active guards for an origin at this point.
-    let snapshot = || -> Vec<Vec<CatchClause>> {
-        let mut g = guards.to_vec();
-        g.reverse();
-        g
-    };
-
-    match node {
-        // A `try` composes the damming: its own guard wraps the try block only.
-        Node::Try(t) => {
-            let clauses: Vec<CatchClause> =
-                t.catch_clauses.iter().map(lower_catch_clause).collect();
-            // Try block: this try's guard is active (innermost).
-            let mut inner_guards = guards.to_vec();
-            inner_guards.push(clauses.clone());
-            for s in t.block.statements.iter() {
-                scan_throw_origins(&Node::Statement(s), &inner_guards, catch_scope, locals, out);
-            }
-            // Catch blocks: outer guards only; the clause's `$e` enters scope for
-            // rethrow precision inside its own body.
-            for c in t.catch_clauses.iter() {
-                let clause = lower_catch_clause(c);
-                let mut inner_scope = catch_scope.to_vec();
-                if let Some(var) = &clause.var {
-                    // Rethrow precision is only sound while `$e` still holds the caught
-                    // exception. If the clause body writes the variable — by assignment
-                    // or by handing it to any call (a by-ref signature could rebind it)
-                    // — a later `throw $e` may throw something else, so the variable
-                    // must NOT enter the rethrow scope (its throws degrade to Taint).
-                    // Counterexample this fixed: `catch (RuntimeException $e) { $e =
-                    // new JsonException(); throw $e; }` under `@throws JsonException`
-                    // falsely reported RuntimeException.
-                    let mut written = Vec::new();
-                    for s in c.block.statements.iter() {
-                        collect_assign_writes(&Node::Statement(s), &mut written);
-                        collect_call_vars(&Node::Statement(s), &mut written);
-                    }
-                    if !written.contains(var) {
-                        inner_scope.push((var.clone(), clause.classes.clone(), clause.has_unresolvable));
-                    }
-                }
-                for s in c.block.statements.iter() {
-                    scan_throw_origins(&Node::Statement(s), guards, &inner_scope, locals, out);
-                }
-            }
-            // Finally: outer guards only; this try's catches never absorb it.
-            if let Some(fin) = &t.finally_clause {
-                for s in fin.block.statements.iter() {
-                    scan_throw_origins(&Node::Statement(s), guards, catch_scope, locals, out);
-                }
-            }
-            return; // children handled manually with the right guard/scope
-        }
-        // `throw <expr>` — classify the thrown expression.
-        Node::Throw(t) => {
-            let kind = match t.exception.unparenthesized() {
-                Expression::Instantiation(inst) => match instantiation_class(inst) {
-                    Some(class) => ThrowKind::New(class),
-                    None => ThrowKind::Taint, // `throw new $c()` — dynamic class
-                },
-                Expression::Variable(Variable::Direct(dv)) => {
-                    let name = strip_dollar(bytes_to_string(dv.name));
-                    match catch_scope.iter().rev().find(|(v, _, _)| *v == name) {
-                        Some((_, caught, unresolvable)) => ThrowKind::Rethrow {
-                            caught: caught.clone(),
-                            has_unresolvable: *unresolvable,
-                        },
-                        None => ThrowKind::Taint, // throwing a non-catch variable
-                    }
-                }
-                _ => ThrowKind::Taint,
-            };
-            out.push(ThrowOrigin { kind, span: to_span(t.span()), guards: snapshot() });
-            // Descend into the exception expression too (a call inside it — e.g.
-            // `throw wrap(inner())` — is its own propagation edge).
-        }
-        // Statically-named function call → propagation edge. A named call passing
-        // resolvable callbacks becomes a HigherOrder edge (ADR-0033); a `$fn()`
-        // resolved to a body-local closure becomes a Callback edge.
-        Node::FunctionCall(fc) => {
-            if let Expression::Identifier(id) = fc.function {
-                match higher_order_of_call(fc) {
-                    Some((callee, callbacks, arg_count)) => out.push(ThrowOrigin {
-                        kind: ThrowKind::HigherOrder { callee, callbacks, arg_count },
-                        span: to_span(fc.span()),
-                        guards: snapshot(),
-                    }),
-                    None => out.push(ThrowOrigin {
-                        kind: ThrowKind::Call(name_ref(id)),
-                        span: to_span(id.span()),
-                        guards: snapshot(),
-                    }),
-                }
-            } else if let Some(cb) = direct_var_callee(fc).and_then(|v| locals.get(&v).cloned()) {
-                out.push(ThrowOrigin {
-                    kind: ThrowKind::Callback { cbref: cb },
-                    span: to_span(fc.span()),
-                    guards: snapshot(),
-                });
-            } else {
-                out.push(ThrowOrigin { kind: ThrowKind::Taint, span: to_span(fc.span()), guards: snapshot() });
-            }
-        }
-        // Method / static calls with a resolvable receiver → edge; else taint.
-        Node::MethodCall(mc) => {
-            match (effect_recv_of_object(mc.object), method_name_of(&mc.method)) {
-                (Some(recv), Some(method)) => out.push(ThrowOrigin {
-                    kind: ThrowKind::MethodCall { receiver: recv, method },
-                    span: to_span(mc.span()),
-                    guards: snapshot(),
-                }),
-                _ => out.push(ThrowOrigin { kind: ThrowKind::Taint, span: to_span(mc.span()), guards: snapshot() }),
-            }
-        }
-        Node::NullSafeMethodCall(mc) => {
-            match (effect_recv_of_object(mc.object), method_name_of(&mc.method)) {
-                (Some(recv), Some(method)) => out.push(ThrowOrigin {
-                    kind: ThrowKind::MethodCall { receiver: recv, method },
-                    span: to_span(mc.span()),
-                    guards: snapshot(),
-                }),
-                _ => out.push(ThrowOrigin { kind: ThrowKind::Taint, span: to_span(mc.span()), guards: snapshot() }),
-            }
-        }
-        Node::StaticMethodCall(sc) => {
-            match (effect_recv_of_class(sc.class), method_name_of(&sc.method)) {
-                (Some(recv), Some(method)) => out.push(ThrowOrigin {
-                    kind: ThrowKind::MethodCall { receiver: recv, method },
-                    span: to_span(sc.span()),
-                    guards: snapshot(),
-                }),
-                _ => out.push(ThrowOrigin { kind: ThrowKind::Taint, span: to_span(sc.span()), guards: snapshot() }),
-            }
-        }
-        // `new C(...)` runs `C`'s constructor here (issue #849): an edge the
-        // throw pass resolves as the effects pass resolves `EffectOrigin::New`,
-        // or a taint when the class is computed. A `throw new X(...)` reaches
-        // this too, so `X`'s constructor's throws join `X` itself. The
-        // arguments are walked below like any call's.
-        Node::Instantiation(inst) => {
-            let kind = trace_static_class(inst.class)
-                .map_or(ThrowKind::Taint, |class| ThrowKind::Construct { class });
-            out.push(ThrowOrigin { kind, span: to_span(inst.span()), guards: snapshot() });
-        }
-        // An anonymous class's body is its own scope, but its constructor runs
-        // at this `new`, and its arguments are evaluated here.
-        Node::AnonymousClass(ac) => {
-            scan_anonymous_class_throws(ac, guards, catch_scope, locals, out);
-            return;
-        }
-        // A `match` with no `default` arm can raise `\UnhandledMatchError` at
-        // runtime (ADR-0031 Part B) — recorded here as a structural possible-throw;
-        // the trace walk separately proves when it is a *certain* terminator.
-        // `UnhandledMatchError` is an `Error` (unchecked), so it never enters
-        // `throw.undeclared`; it surfaces only in the annotate throws margin.
-        Node::Match(m) => {
-            if !m.arms.iter().any(mago_syntax::cst::MatchArm::is_default) {
-                out.push(ThrowOrigin {
-                    kind: ThrowKind::New(NameRef {
-                        raw: "UnhandledMatchError".to_owned(),
-                        kind: RefKind::FullyQualified,
-                        offset: to_span(m.span()).start,
-                    }),
-                    span: to_span(m.span()),
-                    guards: snapshot(),
-                });
-            }
-            // Fall through to descend into the arms for their own throws.
-        }
-        // Nested scopes are their own concern — do not descend.
-        Node::Function(_)
-        | Node::Closure(_)
-        | Node::ArrowFunction(_)
-        | Node::Class(_)
-        | Node::Interface(_)
-        | Node::Trait(_)
-        | Node::Enum(_) => return,
-        _ => {}
-    }
-    for child in children(node) {
-        scan_throw_origins(&child, guards, catch_scope, locals, out);
-    }
-}
-
-/// The throw origins of a `new class(...) {...}` expression (issue #849), the
-/// twin of [`scan_anonymous_class_new`]: the constructor that runs here, under
-/// this frame's guards, and the arguments, evaluated in this frame.
-fn scan_anonymous_class_throws(
-    ac: &AnonymousClass<'_>,
-    guards: &[Vec<CatchClause>],
-    catch_scope: &[(String, Vec<NameRef>, bool)],
-    locals: &HashMap<String, CallbackRef>,
-    out: &mut Vec<ThrowOrigin>,
-) {
-    let kind = match anonymous_class_constructor(ac) {
-        AnonymousConstructor::Unseen => Some(ThrowKind::Taint),
-        AnonymousConstructor::Inherited(class) => Some(ThrowKind::Construct { class }),
-        AnonymousConstructor::None => None,
-    };
-    if let Some(kind) = kind {
-        let guards = guards.iter().rev().cloned().collect();
-        out.push(ThrowOrigin { kind, span: to_span(ac.span()), guards });
-    }
-    if let Some(list) = &ac.argument_list {
-        scan_throw_origins(&Node::PartialArgumentList(list), guards, catch_scope, locals, out);
     }
 }

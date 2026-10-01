@@ -111,7 +111,7 @@ pub(crate) struct EffectSet {
 }
 
 /// One unit's **own** contribution to the effect fixpoint — everything
-/// [`classify_effect_origins`] proves about a declaration in isolation, before
+/// [`classify_effect_sites`] proves about a declaration in isolation, before
 /// any propagation (issue #489). This is the propagation-independent half of
 /// the effects pass, and the value ADR-0092 §5's per-package artifact will
 /// persist per declaration: the fixpoint itself is re-run from complete own

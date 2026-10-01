@@ -19,12 +19,11 @@ use crate::ast::{
 use crate::lower_arg_shape::Captures;
 use crate::lower_decl::{DocIndex, lower_hint, lower_params};
 use crate::lower_effect::{
-    EffectScanCx, ReceiverWrites, body_aliased, collect_body_callables, scan_effect_origins,
-    scan_method_calls, scan_throw_origins,
+    EffectScanCx, ReceiverWrites, body_aliased, collect_body_callables, scan_method_calls,
 };
 use crate::lower_expr::lower_arg_value;
 use crate::lower_presence::maybe_undefined_reads;
-use crate::lower_site::{debug_assert_matches_legacy, scan_owner_sites};
+use crate::lower_site::scan_owner_sites;
 use crate::lower_stmt::{
     call_invalidation, expr_end, lower_expr_stmt, lower_stmt, named_call, node_poisons,
     push_byref_captures, scan_guard_chain_no_default, scan_opaque, scan_string_contexts,
@@ -298,8 +297,6 @@ fn build_scope_from(
         method_calls,
         params: Vec::new(),
         ret_ty: None,
-        effect_origins: Vec::new(),
-        throw_origins: Vec::new(),
         sites: Vec::new(),
         guard_chain_no_default,
         is_static: false,
@@ -498,8 +495,6 @@ fn build_hook_expr_scope(
         // Filled by the caller, which is the only place the property's type is known.
         params: Vec::new(),
         ret_ty: None,
-        effect_origins: Vec::new(),
-        throw_origins: Vec::new(),
         sites: Vec::new(),
         guard_chain_no_default,
         is_static: false,
@@ -568,8 +563,6 @@ fn build_closure_scope_from_closure(
     stmt_doc: Option<&StmtAdoption>,
 ) -> Scope {
     let mut stmts = Vec::new();
-    let mut effect_origins = Vec::new();
-    let mut throw_origins = Vec::new();
     let mut sites = Vec::new();
     let mut method_calls = Vec::new();
     let mut guard_chain_no_default = Vec::new();
@@ -601,8 +594,6 @@ fn build_closure_scope_from_closure(
     let mut is_generator = false;
     for s in cl.body.statements.iter() {
         lower_stmt(s, &mut stmts);
-        scan_effect_origins(&Node::Statement(s), &cx, &mut effect_origins);
-        scan_throw_origins(&Node::Statement(s), &[], &[], &cx.locals, &mut throw_origins);
         scan_owner_sites(&Node::Statement(s), &cx, &mut sites);
         scan_method_calls(&Node::Statement(s), &mut method_calls);
         scan_opaque(&Node::Statement(s), &mut opaque, false);
@@ -611,7 +602,6 @@ fn build_closure_scope_from_closure(
             is_generator = node_is_generator(&Node::Statement(s));
         }
     }
-    debug_assert_matches_legacy(&sites, &effect_origins, &throw_origins);
     let poisoned = !opaque.is_empty();
     let def_offset = closure_def_offset(cl);
     let vars = undefined_variable_reads(
@@ -630,8 +620,6 @@ fn build_closure_scope_from_closure(
         method_calls,
         params: lower_params(&cl.parameter_list, rc),
         ret_ty: cl.return_type_hint.as_ref().and_then(|r| lower_hint(&r.hint, rc)),
-        effect_origins,
-        throw_origins,
         sites,
         guard_chain_no_default,
         is_static: cl.r#static.is_some(),
@@ -1220,8 +1208,6 @@ fn build_closure_scope_from_arrow(
     docs: &DocIndex<'_>,
     stmt_doc: Option<&StmtAdoption>,
 ) -> Scope {
-    let mut effect_origins = Vec::new();
-    let mut throw_origins = Vec::new();
     let mut sites = Vec::new();
     // An arrow body is a single expression — no local assignments to resolve.
     let cx = EffectScanCx::new(
@@ -1231,10 +1217,7 @@ fn build_closure_scope_from_arrow(
         ReceiverWrites::poisoned(),
     )
     .with_body(&af.parameter_list, Captures::All, std::iter::once(Node::Expression(af.expression)));
-    scan_effect_origins(&Node::Expression(af.expression), &cx, &mut effect_origins);
-    scan_throw_origins(&Node::Expression(af.expression), &[], &[], &cx.locals, &mut throw_origins);
     scan_owner_sites(&Node::Expression(af.expression), &cx, &mut sites);
-    debug_assert_matches_legacy(&sites, &effect_origins, &throw_origins);
     let mut method_calls = Vec::new();
     scan_method_calls(&Node::Expression(af.expression), &mut method_calls);
     // An arrow body lowers straight to a `return <expr>;` (below) rather than
@@ -1284,8 +1267,6 @@ fn build_closure_scope_from_arrow(
         method_calls,
         params: lower_params(&af.parameter_list, rc),
         ret_ty: af.return_type_hint.as_ref().and_then(|r| lower_hint(&r.hint, rc)),
-        effect_origins,
-        throw_origins,
         sites,
         guard_chain_no_default,
         is_static: af.r#static.is_some(),

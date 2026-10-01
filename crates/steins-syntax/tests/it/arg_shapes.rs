@@ -2,7 +2,7 @@
 //! `ArgShape` a call origin carries per positional argument, by the
 //! argument's form or by a flow-insensitive summary of the frame's writes.
 
-use steins_syntax::{ArgShape, EffectOrigin, SourceTree, Stored};
+use steins_syntax::{ArgShape, EffectOrigin, SourceTree, Stored, derive_effect_origins};
 
 /// The shapes a call to `g` carries, if `origin` is one.
 fn g_shapes(origin: &EffectOrigin) -> Option<Vec<ArgShape>> {
@@ -21,10 +21,10 @@ fn shapes(signature: &str, body: &str) -> Vec<ArgShape> {
     let src = format!("<?php\nfunction f({signature}) {{ {body} }}\n");
     let tree = SourceTree::parse(&src);
     let f = tree.functions().iter().find(|f| f.name == "f").expect("f").clone();
-    f.effect_origins
+    derive_effect_origins(&f.sites)
         .iter()
         .find_map(g_shapes)
-        .unwrap_or_else(|| panic!("no positional call to g in {:?}", f.effect_origins))
+        .unwrap_or_else(|| panic!("no positional call to g in {:?}", derive_effect_origins(&f.sites)))
 }
 
 fn param(name: &str, stores: Stored) -> ArgShape {
@@ -97,8 +97,8 @@ fn an_aliasing_or_importing_frame_shows_no_variable() {
     let calls: Vec<Vec<ArgShape>> = tree
         .scopes()
         .iter()
-        .flat_map(|s| s.effect_origins.iter())
-        .filter_map(g_shapes)
+        .flat_map(|s| derive_effect_origins(&s.sites))
+        .filter_map(|o| g_shapes(&o))
         .collect();
     assert_eq!(calls, [
         vec![ArgShape::Unknown, param("p", Stored::ObjectFree)],
@@ -115,7 +115,7 @@ fn a_this_property_and_a_resolvable_method_call_carry_their_shapes() {
     let tree = SourceTree::parse(src);
     let m = &tree.classes()[0].methods[0];
     let mut seen = Vec::new();
-    for origin in &m.effect_origins {
+    for origin in &derive_effect_origins(&m.sites) {
         match origin {
             EffectOrigin::Call { arg_shapes, .. } => seen.push(("call", arg_shapes.clone())),
             EffectOrigin::MethodCall { method, arg_shapes, .. } => {

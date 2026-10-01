@@ -1,10 +1,10 @@
 //! [`resolve_site`]: the one place a site's callee is resolved, for either lane.
 //!
-//! The walk below is the union of what `classify_effect_origins` and
-//! `classify_throw_origins` each did on their own, with each lane's decisions
-//! selected by the [`Knowledge`] it hands in. Every arm names the legacy
-//! behavior it reproduces; where the two lanes still differ (#864 makes them one),
-//! the difference is a `match` on the knowledge in one place, not a second walk.
+//! The walk below is the union of what the effect lane's and the throw lane's
+//! classifiers each did on their own, with each lane's decisions selected by the
+//! [`Knowledge`] it hands in. Every arm names the legacy behavior it reproduces;
+//! where the two lanes still differ (#864 makes them one), the difference is a
+//! `match` on the knowledge in one place, not a second walk.
 
 use steins_syntax::{
     ArgShape, CallbackRef, ConstArgs, ConstructKind, DynamicSite, EffectRecv, NameRef, RefKind,
@@ -204,21 +204,32 @@ impl Resolver<'_, '_, '_> {
 
     /// A call [`Self::function`] left unresolved.
     fn unresolved_call(&mut self, name: &NameRef, args: &CallArgs<'_>) {
+        let mut gap = GapKind::UnknownFunction;
         if let Knowledge::Effects { plugins } = self.knowledge {
             // A builtin certified pure at this call's arity or operands answers
             // before the plugin channel, which gets the last word here and nowhere
             // else (ADR-0068 precedence): a project body and a catalog row are both
             // already spoken for.
-            if engine::pure_at_call_arity(self.cx, name, args.targets)
-                || engine::certified_at_call_site(self.cx, self.frame, name, args.shapes)
-            {
+            if engine::pure_at_call_arity(self.cx, name, args.targets) {
                 return;
+            }
+            match engine::certified_at_call_site(self.cx, self.frame, name, args.shapes) {
+                Some(Reach::RuledOut) => return,
+                // Certifiable, but an operand may reach user code: that is the gap.
+                Some(reach) => {
+                    self.note_reach(reach);
+                    gap = GapKind::UserCodeReach;
+                }
+                None if engine::arity_defeated(self.cx, name, args.targets) => {
+                    gap = GapKind::ArgumentList;
+                }
+                None => {}
             }
             if let Some(labels) = plugin_call_labels(self.cx, plugins, name) {
                 self.push(Target::Declared(labels.to_vec()));
             }
         }
-        self.gap(GapKind::UnknownFunction);
+        self.gap(gap);
     }
 
     // ---- higher-order calls and callbacks ---------------------------------

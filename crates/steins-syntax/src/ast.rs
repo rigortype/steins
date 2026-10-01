@@ -934,13 +934,10 @@ pub struct FunctionDecl {
     /// Recognized `#[\Steins\Pure]`/`#[\Steins\Effect(...)]` envelope, if present
     /// (ADR-0005/0006/0018). `Some` opts into always-on checking (conservative recognition).
     pub effect_envelope: Option<EffectEnvelope>,
-    /// Every structural effect-origin candidate in body order ([`EffectOrigin`]).
-    /// Computed for *all* functions — effects propagate to `Pure` callers regardless of annotations.
-    pub effect_origins: Vec<EffectOrigin>,
-    /// Every throw-relevant construct in the body with its try/catch guards (ADR-0040); computed for *all* functions.
-    pub throw_origins: Vec<ThrowOrigin>,
-    /// Every call-like and construct-like site of the body, lowered once ([`SiteOrigin`]). The two lists above are its views,
-    /// [`derive_effect_origins`](crate::derive_effect_origins) and [`derive_throw_origins`](crate::derive_throw_origins).
+    /// Every call-like and construct-like site of the body in body order, lowered once ([`SiteOrigin`]) and read by both
+    /// the effect lane and the throw lane. Computed for *all* functions — effects propagate to `Pure` callers regardless of
+    /// annotations. [`derive_effect_origins`](crate::derive_effect_origins) and
+    /// [`derive_throw_origins`](crate::derive_throw_origins) render it as each lane's origin list.
     pub sites: Vec<SiteOrigin>,
     /// Raw `/** … */` docblock immediately preceding this declaration (ADR-0029 adjacency); phpdoc bridge parses `@param`/`@return`.
     pub docblock: Option<String>,
@@ -1024,11 +1021,7 @@ pub struct MethodDecl {
     pub body_span: Option<Span>,
     /// The recognized effect envelope, if declared (see [`FunctionDecl`]).
     pub effect_envelope: Option<EffectEnvelope>,
-    /// Structural effect-origin candidates in the body (see [`EffectOrigin`]); empty for abstract methods.
-    pub effect_origins: Vec<EffectOrigin>,
-    /// Throw-relevant constructs with try/catch guards (ADR-0040); empty for abstract methods.
-    pub throw_origins: Vec<ThrowOrigin>,
-    /// Every call-like and construct-like site of the body ([`SiteOrigin`]); the two lists above are its views. Empty for abstract methods.
+    /// Every call-like and construct-like site of the body ([`SiteOrigin`], see [`FunctionDecl::sites`]); empty for abstract methods.
     pub sites: Vec<SiteOrigin>,
     pub visibility: Visibility,
     pub is_static: bool,
@@ -3269,18 +3262,14 @@ pub struct Scope {
     /// (issue #11) reads the closure's `: R` here. `None` for no/unrepresentable hint, for
     /// a `set` hook (which returns nothing), or for any other scope.
     pub ret_ty: Option<NativeType>,
-    /// Effect-origin candidates of a closure/arrow body ([`ScopeOwner::Closure`]), so a
-    /// closure can be an effect node in the fixpoint (ADR-0033 point 3); empty otherwise.
-    pub effect_origins: Vec<EffectOrigin>,
-    /// Throw-origin candidates of a closure/arrow body — the throw-fixpoint analogue of [`Self::effect_origins`].
-    pub throw_origins: Vec<ThrowOrigin>,
-    /// Every call-like and construct-like site of a closure/arrow body ([`SiteOrigin`]); the two lists above are its views.
+    /// Every call-like and construct-like site of a closure/arrow body ([`SiteOrigin`]), so a
+    /// closure can be an effect and throw node in the fixpoints (ADR-0033 point 3); empty otherwise.
     pub sites: Vec<SiteOrigin>,
     /// Spans of `match (true)`/`match (false)` guard chains in this scope whose
     /// `default` arm is absent (ADR-0088 §5's note on issue #448) — every one is
     /// the same span [`ThrowKind::New`]'s synthetic `UnhandledMatchError` origin
-    /// for the construct already carries (`scan_throw_origins`'s `Node::Match`
-    /// arm), computed independently by `scan_guard_chain_no_default`.
+    /// for the construct already carries (the `Node::Match`
+    /// arm of the site scan), computed independently by `scan_guard_chain_no_default`.
     ///
     /// `lower_match_guard_chain` desugars such a chain to [`StmtKind::If`] with
     /// `else_trace: None` — deliberately (issue #431), so the guard vocabulary and

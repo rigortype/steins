@@ -2,14 +2,13 @@
 //! construct-like [`SiteOrigin`] the effect lane and the throw lane read,
 //! lowered once.
 //!
-//! `scan_effect_origins` and `scan_throw_origins` (`lower_effect.rs`) walk the
-//! same tree and disagree in what they record; this walk records the union, so a
-//! new kind of site is added in one place. Each lane's legacy origin list is a
-//! view of the sites ([`derive_effect_origins`], [`derive_throw_origins`]), and
-//! the `site_oracle` test holds the views equal to the lists the legacy scans
-//! still produce.
+//! The effect lane and the throw lane used to scan the tree separately and
+//! disagree in what they recorded; this walk records the union, so a new kind of
+//! site is added in one place and **a lane never scans the tree**. Each lane's
+//! former origin list is a view of the sites ([`derive_effect_origins`],
+//! [`derive_throw_origins`]), kept for the tests that read the shapes through it.
 //!
-//! The traversal is the legacy scans' own: pre-order over [`children`], not
+//! The traversal is the retired scans' own: pre-order over [`children`], not
 //! descending into nested scopes, with the `try`/`catch` guard stack and the
 //! catch-variable scope the throw scan threads through it.
 
@@ -20,9 +19,7 @@ mod throw;
 
 use mago_syntax::cst::Node;
 
-use crate::ast::{
-    CatchClause, ConstArgs, EffectOrigin, NameRef, SiteKind, SiteOrigin, Span, ThrowOrigin,
-};
+use crate::ast::{CatchClause, ConstArgs, NameRef, SiteKind, SiteOrigin, Span};
 use crate::children;
 use crate::lower_effect::EffectScanCx;
 
@@ -57,26 +54,9 @@ impl SiteScope<'_> {
 
 /// Append every [`SiteOrigin`] of a function-like body subtree to `out`. `node`
 /// is a body statement (or an arrow function's expression); a frame calls this
-/// once per root, next to the legacy scans.
+/// once per root.
 pub(crate) fn scan_owner_sites(node: &Node<'_, '_>, cx: &EffectScanCx, out: &mut Vec<SiteOrigin>) {
     scan_sites(node, &SiteScope { cx, guards: &[], catch_scope: &[] }, out);
-}
-
-/// In a debug build, assert that the two lists derived from `sites` equal the
-/// legacy scans' lists, compared as `Debug` text (a `NameRef`'s `==` ignores its
-/// offset). Called where each owner is lowered, so every PHP snippet any test
-/// parses is an oracle input. S2a (#863) deletes this with the legacy lists.
-pub(crate) fn debug_assert_matches_legacy(
-    sites: &[SiteOrigin],
-    effect: &[EffectOrigin],
-    throw: &[ThrowOrigin],
-) {
-    if cfg!(debug_assertions) {
-        let (derived_effect, derived_throw) =
-            (derive_effect_origins(sites), derive_throw_origins(sites));
-        assert_eq!(format!("{derived_effect:?}"), format!("{effect:?}"), "derived effect origins");
-        assert_eq!(format!("{derived_throw:?}"), format!("{throw:?}"), "derived throw origins");
-    }
 }
 
 /// Walk a subtree, appending its sites in source order. Does not descend into
