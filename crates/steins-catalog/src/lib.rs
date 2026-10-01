@@ -126,6 +126,7 @@ pub use effects::{
     narrowed_stream_labels,
     out_param_written_when,
     out_params,
+    pure_at_arity,
     variadic_tail_is_data,
 };
 

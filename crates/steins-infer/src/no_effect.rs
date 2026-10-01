@@ -110,6 +110,16 @@ const REFUSED_ON_LITERALS: &[(&str, &str)] = &[
     // admitted by the declared `array|int`, and a `TypeError` on a string
     // subject — the array arms are for the array-subject shape.
     ("substr_replace", "array offset or length on a string subject is a TypeError"),
+    // Certified pure rather than folded (issue #851; these three reproduced on
+    // 8.5.11), with a diagnostic on a value the declared `array` admits:
+    // `array_flip([1.5]);` warns that it can only flip strings and integers,
+    // once per skipped entry.
+    ("array_flip", "warning on a value that is neither int nor string"),
+    // `array_key_exists(null, [])` is deprecated, and a fractional float key
+    // (`array_key_exists(1.5, [])`) is an implicit-conversion deprecation:
+    // `mixed $key` admits both literals.
+    ("array_key_exists", "deprecation on a null or fractional-float key"),
+    ("key_exists", "deprecation on a null or fractional-float key"),
 ];
 
 /// Names whose admitted argument counts are not an interval, so the engine's
