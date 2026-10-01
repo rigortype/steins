@@ -39,7 +39,7 @@ use steins_syntax::{
 use super::contract::{conditional_purity, eval_conditional_purity};
 use super::engine;
 use super::method::{EngineMethod, engine_class_of, engine_method, method_edge};
-use super::reach::{Frame, builtin_reach, callback_reaches_user_code};
+use super::reach::{Frame, builtin_reach, callback_reaches_user_code, engine_method_reach};
 use super::{
     Edge, GapKind, Hit, HitKind, Knowledge, Lane, NewTarget, Reach, ResolvedSite, Target,
     new_origin, resolve_new,
@@ -124,6 +124,18 @@ impl<'a> Resolver<'a, '_, '_> {
         if reach == Reach::Possible {
             self.gap(GapKind::UserCodeReach);
         }
+    }
+
+    /// The reach of a call to the engine method or constructor `class::method`: what
+    /// its operands can run through the engine (issue #858). The same rule as a
+    /// builtin function's, read off the site's own operand shapes, in **both lanes**:
+    /// a row answers what the method does, and an operand that may reach user code
+    /// adds the gap beside it. Asked only where a row answers; a method with no row
+    /// on the lane's axis is a gap of its own already.
+    fn engine_operands(&mut self, class: &str, method: &str) {
+        let operands = self.site.operands.as_deref();
+        let reach = engine_method_reach(self.cx, self.frame, (class, method), operands);
+        self.note_reach(reach);
     }
 
     /// Whether this resolution answers the effect lane.
@@ -468,6 +480,7 @@ impl<'a> Resolver<'a, '_, '_> {
         let (cx, frame) = (self.cx, self.frame);
         let gap = match engine_method(cx, frame.class_fqn, frame.params, receiver, method) {
             EngineMethod::Row(hit) => {
+                self.engine_operands(&hit.callee, &hit.method);
                 if !hit.labels.is_empty() {
                     self.push(Target::Engine(hit));
                 }
@@ -515,6 +528,7 @@ impl<'a> Resolver<'a, '_, '_> {
             NewTarget::Absent => {}
             NewTarget::Engine(fqn) if self.effects() => match engine::constructor_effects(&fqn) {
                 Some(labels) => {
+                    self.engine_operands(&fqn, "__construct");
                     let origin = new_origin(class);
                     self.constructor_hit(fqn, origin, labels, &[]);
                 }
@@ -529,7 +543,10 @@ impl<'a> Resolver<'a, '_, '_> {
     /// `origin`: each class its row names. No row is a gap.
     fn engine_constructor_throws(&mut self, fqn: &str, origin: String) {
         match engine::constructor_throws(fqn) {
-            Some(classes) => self.constructor_hit(fqn.to_owned(), origin, &[], classes),
+            Some(classes) => {
+                self.engine_operands(fqn, "__construct");
+                self.constructor_hit(fqn.to_owned(), origin, &[], classes);
+            }
             None => self.gap(engine::missing_row(fqn, GapKind::NoThrowRow)),
         }
     }
