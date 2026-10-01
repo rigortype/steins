@@ -170,6 +170,7 @@ pub use builtins::{
     hierarchy_entry_count,
     invocation_shape,
     is_migrated_resource_class,
+    method_throws,
     param_facts,
     param_facts_mined,
     resource_param,

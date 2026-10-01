@@ -627,7 +627,7 @@ pub fn final_method_effect_labels(class: &str, method: &str) -> Option<&'static 
 
 /// Whether `class` is a global engine class whose ancestry in the mined
 /// hierarchy reaches `Throwable`.
-fn is_builtin_throwable(class: &str) -> bool {
+pub(crate) fn is_builtin_throwable(class: &str) -> bool {
     let mut pending = vec![class];
     let mut seen: Vec<String> = Vec::new();
     while let Some(c) = pending.pop() {
