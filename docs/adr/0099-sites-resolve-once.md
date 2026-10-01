@@ -193,10 +193,9 @@ measures it.
    The wrapper's methods and the filter's `filter()` then run inside later
    `file_exists`, `is_dir`, `filesize`, `fwrite`, `fseek`, `fclose` and their
    kin, which therefore stay on the throwless table: the registering body
-   carries the gap, and the I/O call does not repeat it. A site that might
-   trigger one does not repeat it. The throw lane follows the same
-   attribution, so an error handler that throws `ErrorException` is a gap at
-   its registration. Autoloaders stay as they are: the builtin rows that
+   carries the gap, and the I/O call does not repeat it. The throw lane
+   follows the same attribution, so an error handler that throws
+   `ErrorException` is a gap at its registration. Autoloaders stay as they are: the builtin rows that
    autoload carry ADR-0021's `Autoload` reach, and a class-naming construct
    (`new Foo`, `Foo::`) is not charged for one; unifying the two is
    follow-up.
