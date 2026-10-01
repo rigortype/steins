@@ -297,6 +297,8 @@ fn summaries_for_many_files_equal_the_per_file_summaries() {
     let stranger = SourceFile::new(&db, "other.php".to_owned(), "<?php\nfunction z() {}\n".to_owned());
     let mut targets = inputs.clone();
     targets.push(stranger);
+    // A target named twice answers twice, the same both times.
+    targets.push(inputs[0]);
 
     let batch = steins_infer::effect_summaries_project_files(&db, project, &targets);
     assert_eq!(batch.len(), targets.len());
@@ -306,4 +308,5 @@ fn summaries_for_many_files_equal_the_per_file_summaries() {
     // Cross-file facts reached the batch: `Job::go` sees `time()` through `run`.
     assert!(batch[1].iter().any(|s| s.symbol == "Job::go" && s.labels == ["nondet.time"]), "{:#?}", batch[1]);
     assert!(batch[3].is_empty());
+    assert_eq!(batch[4], batch[0]);
 }

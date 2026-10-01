@@ -154,8 +154,8 @@ fn capture_effect_entries(
     dir: &Path,
 ) -> Vec<effect_baseline::Entry> {
     let mut entries = Vec::new();
-    // The two whole-project fixpoints run once for every non-vendor file, not
-    // once per file (issue #861).
+    // The two whole-project fixpoints run once over all the non-vendor files
+    // together, not once per file (issue #861).
     let targets: Vec<SourceFile> =
         inputs.iter().copied().filter(|&input| !layout.is_vendor(input.path(db))).collect();
     let summaries = effect_summaries_project_files(db, project, &targets);
