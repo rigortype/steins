@@ -734,8 +734,10 @@ pub struct ThrowOrigin {
 
 /// What a [`SiteKind::Dynamic`] site could not name: the callee or class of a
 /// construct whose target is computed, or an anonymous class that may bring a
-/// constructor the scan never sees. [`EffectOrigin::Opaque`] and
-/// [`ThrowKind::Taint`] are both this site seen from one lane.
+/// constructor the scan never sees. Every such site is an [`EffectOrigin::Opaque`]
+/// to the effect lane and a [`ThrowKind::Taint`] to the throw lane; the throw
+/// lane's taint also comes from a [`ThrownKind::Unresolved`] and from a declared
+/// receiver ([`EffectRecv::Var`], [`EffectRecv::PropRead`]) it cannot resolve.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub enum DynamicSite {
@@ -763,8 +765,8 @@ pub enum ThrownKind {
     Unresolved,
 }
 
-/// A statement-level construct a [`SiteKind::Construct`] site is: one the scan
-/// records for its own sake rather than for a callee it resolves.
+/// A language construct a [`SiteKind::Construct`] site is: one the scan records
+/// for its own sake rather than for a callee it resolves.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub enum ConstructKind {
@@ -875,8 +877,11 @@ pub struct SiteOrigin {
     /// Enclosing `try` catch-guards, innermost first ([`ThrowOrigin::guards`]).
     pub guards: Vec<Vec<CatchClause>>,
     /// What each positional argument can be shown to hold ([`ArgShape`]), `None`
-    /// where the legacy effect origin carried none: a named or spread argument,
-    /// a `?->` call, an anonymous class's `new`, and every non-call kind.
+    /// where the legacy effect origin carried none: a named or spread argument; a
+    /// `?->` call; a method or static call whose receiver is not `$this`, `self`,
+    /// `parent` or a class name (`$r->m($o)`, `$this->repo->m()`, `(new Foo)->m()`);
+    /// an anonymous class's `new`; and every [`SiteKind::Callback`],
+    /// [`SiteKind::Dynamic`], [`SiteKind::Throw`] and [`SiteKind::Construct`] site.
     pub operands: Option<Vec<ArgShape>>,
     /// The lvalue root of each positional argument of a named-function call
     /// ([`EffectOrigin::Call`]'s `arg_targets`); `None` for every other kind.

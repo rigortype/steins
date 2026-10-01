@@ -21,10 +21,10 @@
 use std::fmt::Debug;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 
 use steins_syntax::{
-    EffectOrigin, SiteOrigin, SourceTree, ThrowOrigin, derive_effect_origins, derive_throw_origins,
+    ConstructKind, EffectOrigin, SiteKind, SiteOrigin, SourceTree, ThrowOrigin,
+    derive_effect_origins, derive_throw_origins,
 };
 
 /// What an oracle run read.
@@ -34,15 +34,6 @@ struct Report {
     owners: usize,
     sites: usize,
     divergences: Vec<String>,
-}
-
-impl Report {
-    fn absorb(&mut self, other: Self) {
-        self.files += other.files;
-        self.owners += other.owners;
-        self.sites += other.sites;
-        self.divergences.extend(other.divergences);
-    }
 }
 
 /// The first index at which two lists differ, by `Debug` text, with both
@@ -112,8 +103,8 @@ fn check_tree(file: &Path, tree: &SourceTree, report: &mut Report) {
     }
 }
 
-/// Every `.php` file under `root`, skipping the directories `skip` names (by
-/// file name, at any depth) and symlinked directories.
+/// Every `.php` file under `root`, in path order, skipping the directories `skip`
+/// refuses and symlinked directories.
 fn php_files(root: &Path, skip: &dyn Fn(&Path) -> bool, out: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(root) else { return };
     let mut entries: Vec<_> = entries.flatten().collect();
@@ -131,35 +122,19 @@ fn php_files(root: &Path, skip: &dyn Fn(&Path) -> bool, out: &mut Vec<PathBuf>) 
     }
 }
 
-/// Run the oracle over `files`, spread across the machine's threads.
+/// Run the oracle over `files`.
 fn run(files: &[PathBuf]) -> Report {
-    let total_cell = Mutex::new(Report::default());
-    let total = &total_cell;
-    let threads = std::thread::available_parallelism().map_or(1, usize::from);
-    let per = files.len().div_ceil(threads).max(1);
-    std::thread::scope(|scope| {
-        for chunk in files.chunks(per) {
-            // A deep file is parsed under the stack the test thread has; give
-            // it the room a real run has.
-            std::thread::Builder::new()
-                .stack_size(256 << 20)
-                .spawn_scoped(scope, move || {
-                    let mut report = Report::default();
-                    for file in chunk {
-                        let source = fs::read(file).expect("a PHP file reads");
-                        let tree = SourceTree::parse(&String::from_utf8_lossy(&source));
-                        check_tree(file, &tree, &mut report);
-                    }
-                    total.lock().expect("no worker panics").absorb(report);
-                })
-                .expect("a worker thread spawns");
-        }
-    });
-    total_cell.into_inner().expect("no worker panics")
+    let mut report = Report::default();
+    for file in files {
+        let source = fs::read(file).expect("a PHP file reads");
+        let tree = SourceTree::parse(&String::from_utf8_lossy(&source));
+        check_tree(file, &tree, &mut report);
+    }
+    report
 }
 
-/// Fail with the first few divergences, if there are any, and with a message
-/// naming what was read otherwise-empty runs would hide.
+/// Fail on any divergence, naming the first few. A run that read no files or no
+/// sites fails too: it would otherwise pass having checked nothing.
 fn assert_clean(label: &str, report: &Report) {
     assert!(report.files > 0, "{label}: the oracle read no files");
     assert!(report.sites > 0, "{label}: the oracle read no sites in {} files", report.files);
@@ -179,15 +154,19 @@ fn assert_clean(label: &str, report: &Report) {
     );
 }
 
+/// The directories of this repository that hold PHP of its own, relative to the
+/// workspace root: a fixed list, so a run reads the same files wherever the
+/// checkout sits and never reaches `corpus/` or a build directory.
+const REPO_PHP_ROOTS: [&str; 4] = ["composer", "crates", "docs", "harness"];
+
 #[test]
 fn over_repo_files() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let skip = |dir: &Path| {
-        let name = dir.file_name().and_then(|n| n.to_str()).unwrap_or_default();
-        name.starts_with('.') || name == "target" || dir == root.join("corpus")
-    };
+    let skip = |dir: &Path| dir.file_name().is_some_and(|n| n == "target" || n == "vendor");
     let mut files = Vec::new();
-    php_files(&root, &skip, &mut files);
+    for dir in REPO_PHP_ROOTS {
+        php_files(&root.join(dir), &skip, &mut files);
+    }
     assert_clean("repo files", &run(&files));
 }
 
@@ -297,4 +276,68 @@ fn over_edge_shapes() {
     check_tree(Path::new("<edge shapes>"), &tree, &mut report);
     assert_clean("edge shapes", &report);
     assert!(report.sites > 60, "the fixture lowers to many sites, not {}", report.sites);
+}
+
+/// Every site carries the guards of the `try` blocks it sits in, whatever its
+/// kind (an `eval`, an `include` and an `echo` are guarded as a call is), and
+/// the body of a `catch` or `finally` carries only the guards outside its own
+/// `try`. Guards read innermost first.
+#[test]
+fn guards_follow_the_try_structure_for_every_kind() {
+    let src = r"<?php
+function g($x) {
+    try {
+        eval($x);
+        include $x;
+        echo $x;
+        f();
+        try {
+            f();
+        } catch (A $a) {
+            echo 1; eval($x); f();
+        } finally {
+            echo 2; f();
+        }
+    } catch (B $b) {
+        echo 3; f();
+    }
+}
+";
+    let tree = SourceTree::parse(src);
+    let sites = &tree.functions()[0].sites;
+    let guards = |site: &SiteOrigin| {
+        let level = |clauses: &Vec<steins_syntax::CatchClause>| {
+            let names = clauses.iter().flat_map(|c| c.classes.iter().map(|n| n.raw.as_str()));
+            names.collect::<Vec<_>>().join("|")
+        };
+        match site.guards.iter().map(level).collect::<Vec<_>>().join(">").as_str() {
+            "" => "-".to_owned(),
+            guards => guards.to_owned(),
+        }
+    };
+    let label = |site: &SiteOrigin| match &site.kind {
+        SiteKind::Construct(ConstructKind::Eval) => "eval",
+        SiteKind::Construct(ConstructKind::Include(_)) => "include",
+        SiteKind::Construct(ConstructKind::Output(_)) => "echo",
+        SiteKind::Call { .. } => "f",
+        other => panic!("a site this source should not lower to: {other:?}"),
+    };
+    let got: Vec<(&str, String)> = sites.iter().map(|s| (label(s), guards(s))).collect();
+    let expected: Vec<(&str, &str)> = vec![
+        ("eval", "B"),
+        ("include", "B"),
+        ("echo", "B"),
+        ("f", "B"),
+        ("f", "A>B"),
+        ("echo", "B"),
+        ("eval", "B"),
+        ("f", "B"),
+        ("echo", "B"),
+        ("f", "B"),
+        ("echo", "-"),
+        ("f", "-"),
+    ];
+    let expected: Vec<(&str, String)> =
+        expected.into_iter().map(|(l, g)| (l, g.to_owned())).collect();
+    assert_eq!(got, expected);
 }
