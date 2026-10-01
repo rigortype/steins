@@ -67,7 +67,7 @@ requires.
 | [20](#schema-20) | #603 (ADR-0057 note) | misdecode, under-answer | `FunctionDecl` and `MethodDecl` grow `ret_top`; `RetHintKind` grows `Top`. |
 | [21](#schema-21) | #320 (ADR-0096), #352 | misdecode, meaning | `Stmt` grows `value_position` (#320); `CallTarget` grows `Bool` (#352). |
 | [22](#schema-22) | #654 | misdecode | `CondOperand::Other`, `CondExpr::Call` and `CondExpr::Opaque` grow `writes`. |
-| [23](#schema-23) | #859 (ADR-0099 §4.4) | misdecode, under-answer | The `symbols` shard's `PackageShard` grows `magic_property_classes` and `anonymous_subclass_parents`. |
+| [23](#schema-23) | #859 (ADR-0099 §4.4) | misdecode, meaning | The `symbols` shard's `PackageShard` grows `magic_property_classes` and `anonymous_subclass_parents`. |
 
 ## Where the record and the code disagree
 
@@ -348,6 +348,7 @@ the class-likes that declare a property magic method, import a trait or hook
 a property, and the classes and interfaces an anonymous class extends or
 implements. The shard is decoded before the analyzer gate and the wire codec
 reads a struct's fields by position, so a schema-22 shard would decode its
-constants as the new sets: the **misdecode** kind. It is also an
-**under-answer**: a shard that decoded without the sets would let the gate
-read every bound class's declared property as running nothing.
+constants as the new sets: the **misdecode** kind. It is also a **meaning**
+bump, not an under-answer: a shard that decoded without the sets would let the
+gate answer that every bound class's declared property runs nothing, which is
+a wrong answer.

@@ -159,9 +159,26 @@ measures it.
    | ToString | `.`, `.=`, interpolation and heredocs, `(string)`, `echo`/`print`, a loose or ordering comparison (`==`, `!=`, `<`, `<=`, `>`, `>=`, `<=>`, `switch`) with an operand not shown object-free at any depth | the operand is object-free; or an exact class's closed chain has no `__toString`, which for a comparison holds only against an operand shown object-free at any depth | an exact class declares `__toString`, or a bound class's is final | gap |
    | MagicProp | a property read, write, `isset`, `empty`, `unset`, `??`, `??=`, a reference to it | the operand is not an object; or the class is exact, its closed chain declares no `__get`/`__set`/`__isset`/`__unset` and hooks no property of that name | an exact class declares the magic method or the hook | gap (§4.4 for a bound class's declared property) |
    | ArrayAccess | `$x[k]` read, write, `isset`, `empty`, `unset`, `??`, `??=`, a reference to it, list destructuring | the operand is not an object, or an exact class is proven not `ArrayAccess` | an exact class is `ArrayAccess`, or a bound class's `offset*` methods are final | gap |
-   | Iterate | `foreach`, `yield from`, spreading a non-array | the operand is not an object, or an exact class's closed chain is not `Traversable` and hooks no property | an exact `Iterator`'s methods, or an exact `IteratorAggregate`'s `getIterator` together with the methods of the iterator it is shown to return; a bound class's when final | gap |
+   | Iterate | `foreach`, `yield from`, spreading a non-array | the operand is not an object, or an exact class's closed chain is not `Traversable` and hooks no property | an exact `Iterator`'s methods, or an exact `IteratorAggregate`'s `getIterator` together with the methods of the iterator it is shown to return (a `Generator`, which is final; an `ArrayIterator` only if unsubclassed, which no table states, so it is a gap); a bound class's when final | gap |
    | Clone | `clone`, and `clone` with a property list | an exact class's closed chain has no `__clone`, no `__set` where a property list is given, and hooks no property | an exact class declares `__clone` (or `__set`), or a bound class's is final | gap |
    | Call | a method absent from, or inaccessible in, a complete chain on a class declaring `__call`/`__callStatic` | — | an exact class, or a bound class's magic method is final | gap |
+
+   A variable is never taken to hold no object on the frame's writes alone: a
+   named call may take it by reference and store an object into it, so the
+   resolver asks `Frame::held` for every variable operand.
+
+   In an instance frame, `parent::m()` and `Foo::m()` for an `m` the chain
+   lacks run `$this`'s own `__call`, which a subclass may override: the Call
+   row's edge there is the enclosing class's, and only where that class or its
+   `__call` is final.
+
+   A chain that ends at an engine class is closed for a property access except
+   at `ArrayObject` and `ArrayIterator` (and what extends them): with
+   `ARRAY_AS_PROPS` a property fetch is an offset access, which a subclass's
+   `offset*` answers, so such an ancestor opens the chain.
+
+   An intermediate fetch under `isset`, `empty`, `??` or `??=` runs `__isset`
+   (for an offset, `offsetExists`) before the read.
 
    A comparison whose two operands may both be objects is a gap whatever their
    classes: two objects of one class compare property by property, recursively
@@ -268,7 +285,7 @@ throwless default.
 | one resolver, coverage gaps | #863 | byte-identical (no surface shows the kinds yet) |
 | one knowledge, one default | #864 | throw lane: some bodies become exhaustive (`array_keys` once audited), about 206 become `…?` directly (reach, `eval`/`include`), plus the audit's unevidenced names; the baseline format moves |
 | engine methods and constructors | #858 | measured: 4 bodies become `…?` in the effect lane and 5 in the throw lane, none completed; one `effects-envelope` tag is withdrawn. A `sprintf` value is an unproven shape, so `new \RuntimeException(sprintf(…))` in a coercive file gains a gap: that is 3 of the 4 |
-| operator sites | #859 | measured: 700 bodies become `…?` in the effect lane (568 directly, 132 inherited) and 995 in the throw lane; 129 `effects-envelope` tags are withdrawn; no proven label moves and `check --profile strict` is byte-identical; the largest sole causes (measured before the comparison and subclass-shape rules, which add about 40 direct bodies) are call results and array elements as unproven operands (195) and trait-using classes, whose chains are open (105). The textual estimate was about 340 of 6,606 exhaustive bodies directly, before operand proofs (concatenation 134, non-`$this` property access 90, `foreach` 75, interpolation 47, cast 17, loose equality 17, `echo` 7, `unset` 4, `clone` 3) |
+| operator sites | #859 | measured: 703 bodies become `…?` in the effect lane (571 directly, 132 inherited) and 998 in the throw lane; 129 `effects-envelope` tags are withdrawn; no proven label moves and `check --profile strict` is byte-identical; the largest sole causes (measured before the comparison and subclass-shape rules, which add about 40 direct bodies) are call results and array elements as unproven operands (195) and trait-using classes, whose chains are open (105). The textual estimate was about 340 of 6,606 exhaustive bodies directly, before operand proofs (concatenation 134, non-`$this` property access 90, `foreach` 75, interpolation 47, cast 17, loose equality 17, `echo` 7, `unset` 4, `clone` 3) |
 
 Each slice's pull request records its measured diff, classified. The corpus
 checkouts carry no `vendor/`: 1,310 dispatch-sole bodies are universe
@@ -318,6 +335,16 @@ raises are out of the throw lane's model today, as argument checking's
 ### 7.5 Coercion at user boundaries
 
 §4.6's rule is decided and not yet implemented: issue #868.
+
+### 7.6 Implicit conversions and hooks outside §4.3's table
+
+Three more places run user code through an operand and have no row: the
+right-hand side of a string-offset write (`$s[0] = new S` converts the object
+to a string); a dynamic property name that is an object (`(new P)->$n`,
+`$$n`, `P::$$n`), which converts to the name; and a promoted constructor
+property with a `set` hook, which runs the hook on the constructor's
+argument. Each is a gap that no site records today. They are deferred, not
+decided.
 
 ## 8. Relation to earlier decisions
 
