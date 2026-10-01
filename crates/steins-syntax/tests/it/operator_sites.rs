@@ -319,3 +319,44 @@ fn clone_with_a_property_list_is_a_clone_site_beside_the_call_the_parser_reads()
     // A function that merely ends in `clone` is a call and nothing else.
     assert_eq!(forms("return my_clone($o, []);"), []);
 }
+
+#[test]
+fn a_comparison_of_an_array_that_may_hold_an_object_keeps_its_site() {
+    // PHP 8.5: `[$o] == ['x']`, `[$o] < ['y']`, `[$o] <=> ['y']` and a `switch` over
+    // `[$o]` with `case ['x']` run the element's `__toString`.
+    let held = "$l = [$o]; ";
+    assert_eq!(forms(&format!("{held}return $l == ['x'];")), [to_string(C::LooseCompare)]);
+    assert_eq!(forms(&format!("{held}return $l != ['x'];")), [to_string(C::LooseCompare)]);
+    assert_eq!(forms(&format!("{held}return $l < ['y'];")), [to_string(C::OrderCompare)]);
+    assert_eq!(forms(&format!("{held}return $l <=> $l;")), [to_string(C::OrderCompare)]);
+    assert_eq!(forms(&format!("{held}return [$o] == ['x'];")), [to_string(C::LooseCompare)]);
+    assert_eq!(
+        forms(&format!("{held}switch ($l) {{ case ['x']: return 1; }}")),
+        [to_string(C::Switch)]
+    );
+    let op = &ops(&format!("{held}return $l == ['x'];"))[0];
+    assert_eq!(op.operands[0], ArgShape::Local { name: "l".to_owned(), stores: Stored::Array });
+}
+
+#[test]
+fn a_comparison_of_values_holding_no_object_or_against_a_scalar_literal_emits_no_site() {
+    // An object-free local compares without touching an object.
+    assert_eq!(forms("$l = 'x'; return $l == 'y';"), []);
+    assert_eq!(forms("$l = [1]; return $l == ['x'] || $l < [2];"), []);
+    assert_eq!(forms("$l = 'x'; switch ($l) { case 'y': return 1; }"), []);
+    // PHP 8.5: an array holding an object against `null`, a boolean, an integer or a
+    // float compares without touching its elements, so the literal rule holds.
+    let held = "$l = [$o]; ";
+    for rhs in ["null", "true", "false", "1", "-1", "1.5"] {
+        assert_eq!(forms(&format!("{held}return $l == {rhs} || $l < {rhs};")), [], "{rhs}");
+    }
+    assert_eq!(
+        forms(&format!("{held}switch ($l) {{ case 1: return 1; case null: return 2; }}")),
+        []
+    );
+    // The wider rule still holds where nothing compares: conversion and access
+    // leave an array's elements alone.
+    assert_eq!(forms(&format!("{held}return $l . 'x';")), []);
+    assert_eq!(forms(&format!("{held}return (string) $l;")), []);
+    assert_eq!(forms(&format!("{held}echo $l; foreach ($l as $v) {{}} return $l['k'];")), []);
+}
