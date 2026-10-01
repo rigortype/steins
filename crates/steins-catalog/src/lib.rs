@@ -158,7 +158,6 @@ pub use builtins::{
     ResourceReturn,
     builtin_class_display,
     builtin_class_supers,
-    builtin_exception_parent,
     builtin_throws,
     declared_method_return,
     declared_method_return_blocked,

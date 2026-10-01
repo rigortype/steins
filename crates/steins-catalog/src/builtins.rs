@@ -1,7 +1,6 @@
 //! The per-builtin fact tables that are neither effects nor the fold
 //! allowlist: the class hierarchy and display casing mined from php-src
-//! ([`builtin_class_supers`], [`builtin_class_display`], ADR-0043) with the
-//! frozen `Throwable` projection ([`builtin_exception_parent`], ADR-0040), the
+//! ([`builtin_class_supers`], [`builtin_class_display`], ADR-0043), the
 //! curated throw facts ([`builtin_throws`]) and failure-arm causes
 //! ([`failure_arms`], ADR-0042), the callback invocation shapes
 //! ([`invocation_shape`], ADR-0033), the return ladder's catalog rungs
@@ -19,47 +18,6 @@ use crate::{
     resource_params_generated, resource_returns_generated, return_facts_generated,
 };
 
-/// The **builtin SPL/engine exception hierarchy** (ADR-0040): the parent of a
-/// standard PHP `Throwable` class not defined in any project, keyed by its
-/// global simple name (no namespace, case-insensitive). Project classes chain
-/// in through their `extends`.
-///
-/// `Throwable` is the root interface; `Exception`/`Error` implement it; SPL and
-/// engine families descend as PHP defines them. An absent name (and not a
-/// project class) has an **unknown** parent — the caller keeps `Maybe`, never
-/// `No` (FP-safe). Leading backslash stripped; a namespaced name is never a
-/// builtin.
-///
-/// **Frozen throw-system projection**, deliberately *not* widened to the full
-/// mined hierarchy ([`builtin_class_supers`]) per ADR-0043 §5. The test
-/// `exception_parent_agrees_with_generated_hierarchy` proves the two never
-/// conflict.
-#[must_use]
-pub fn builtin_exception_parent(name: &str) -> Option<&'static str> {
-    let bare = name.trim_start_matches('\\');
-    if bare.contains('\\') {
-        return None; // namespaced — not a global engine/SPL class
-    }
-    Some(match bare.to_ascii_lowercase().as_str() {
-        "throwable" => return None,
-        "exception" | "error" => "Throwable",
-        "errorexception" => "Exception",
-        "jsonexception" => "Exception",
-        "runtimeexception" => "Exception",
-        "logicexception" => "Exception",
-        "outofboundsexception" | "overflowexception" | "rangeexception"
-        | "underflowexception" | "unexpectedvalueexception" => "RuntimeException",
-        "badfunctioncallexception" | "domainexception" | "invalidargumentexception"
-        | "lengthexception" | "outofrangeexception" => "LogicException",
-        "badmethodcallexception" => "BadFunctionCallException",
-        "typeerror" | "valueerror" | "arithmeticerror" | "unhandledmatcherror"
-        | "assertionerror" | "compileerror" | "fibererror" => "Error",
-        "divisionbyzeroerror" => "ArithmeticError",
-        "parseerror" => "CompileError",
-        _ => return None,
-    })
-}
-
 /// The **direct supertypes** of a builtin class / interface, for the trinary
 /// is-a oracle (ADR-0043): `Some(list)` of immediate parents/interfaces (a
 /// root returns empty), `None` for an *unknown* external (→ `Unknown`, never
@@ -68,8 +26,8 @@ pub fn builtin_exception_parent(name: &str) -> Option<&'static str> {
 /// The **single source of truth** for the builtin hierarchy: 352 production
 /// classes + interfaces mined from php-src (pin `6bc7c26cf6…`, cross-checked
 /// vs PHP 8.5.8), generated into `hierarchy_generated::HIERARCHY`. Subsumes the
-/// SPL/engine `Throwable` tree (also projected by [`builtin_exception_parent`])
-/// and the enum interface roots.
+/// SPL/engine `Throwable` tree, which the throw lane walks (ADR-0040), and the
+/// enum interface roots.
 ///
 /// Matching is case-insensitive; namespaced builtins (`Random\…`, `FFI\…`)
 /// **are** resolved. **Builtin enums are deliberately absent** (→ `Unknown`):
@@ -1130,27 +1088,26 @@ mod tests {
         }
     }
 
+    /// The rows ADR-0007's checked/unchecked split rests on: the throw lane
+    /// walks this hierarchy to decide `Error` and `LogicException` membership.
     #[test]
-    fn builtin_exception_tree_shape() {
-        use super::builtin_exception_parent as p;
-        assert_eq!(p("Throwable"), None);
-        assert_eq!(p("Exception"), Some("Throwable"));
-        assert_eq!(p("Error"), Some("Throwable"));
-        assert_eq!(p("RuntimeException"), Some("Exception"));
-        assert_eq!(p("LogicException"), Some("Exception"));
-        assert_eq!(p("JsonException"), Some("Exception"));
-        assert_eq!(p("ErrorException"), Some("Exception"));
-        assert_eq!(p("InvalidArgumentException"), Some("LogicException"));
-        assert_eq!(p("OutOfRangeException"), Some("LogicException"));
-        assert_eq!(p("OutOfBoundsException"), Some("RuntimeException"));
-        assert_eq!(p("TypeError"), Some("Error"));
-        assert_eq!(p("DivisionByZeroError"), Some("ArithmeticError"));
-        assert_eq!(p("ArithmeticError"), Some("Error"));
-        assert_eq!(p("UnhandledMatchError"), Some("Error"));
+    fn builtin_class_supers_carries_the_throw_families() {
+        use super::builtin_class_supers as s;
+        assert_eq!(s("Error"), Some(vec!["Throwable"]));
+        assert_eq!(s("LogicException"), Some(vec!["Exception"]));
+        assert_eq!(s("JsonException"), Some(vec!["Exception"]));
+        assert_eq!(s("ErrorException"), Some(vec!["Exception"]));
+        assert_eq!(s("InvalidArgumentException"), Some(vec!["LogicException"]));
+        assert_eq!(s("OutOfRangeException"), Some(vec!["LogicException"]));
+        assert_eq!(s("OutOfBoundsException"), Some(vec!["RuntimeException"]));
+        assert_eq!(s("DivisionByZeroError"), Some(vec!["ArithmeticError"]));
+        assert_eq!(s("ArithmeticError"), Some(vec!["Error"]));
+        assert_eq!(s("UnhandledMatchError"), Some(vec!["Error"]));
+        assert_eq!(s("ArgumentCountError"), Some(vec!["TypeError"]));
+        assert_eq!(s("PDOException"), Some(vec!["RuntimeException"]));
         // Leading backslash tolerated; case-insensitive.
-        assert_eq!(p("\\runtimeexception"), Some("Exception"));
-        assert_eq!(p("App\\Exception"), None);
-        assert_eq!(p("MyCustomThing"), None);
+        assert_eq!(s("\\runtimeexception"), Some(vec!["Exception"]));
+        assert_eq!(s("App\\Exception"), None);
     }
 
     #[test]
@@ -1234,19 +1191,6 @@ mod tests {
                 super::builtin_class_display(key).is_some(),
                 "hierarchy key `{key}` has no display row"
             );
-        }
-    }
-
-    #[test]
-    fn exception_parent_agrees_with_generated_hierarchy() {
-        for &(name, supers) in super::hierarchy_generated::HIERARCHY {
-            if let Some(parent) = super::builtin_exception_parent(name) {
-                assert_eq!(
-                    Some(&parent),
-                    supers.first(),
-                    "throw-tree parent of `{name}` disagrees with generated hierarchy"
-                );
-            }
         }
     }
 

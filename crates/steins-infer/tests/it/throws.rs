@@ -257,8 +257,8 @@ function f(): void { throw new Oops(); }
     assert_eq!(n_undeclared(closed), 1, "Oops is no JsonException");
 }
 
-/// The catalog's full hierarchy replaced the frozen exception table, so an
-/// engine exception the table lacked is now enumerated, and checked.
+/// The throw lane reads the catalog's full builtin hierarchy, so an engine
+/// exception beyond the SPL core is enumerated, and checked.
 #[test]
 fn engine_exception_outside_the_old_table_is_enumerated() {
     let src = "<?php

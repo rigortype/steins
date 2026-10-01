@@ -929,7 +929,7 @@ interface Unrelated {}";
 
     #[test]
     fn engine_classes_answer_from_the_catalog() {
-        // Absent from the frozen exception table, present in the catalog.
+        // Engine exceptions beyond the SPL core resolve through the catalog.
         assert_eq!(sub("<?php", "pdoexception", "runtimeexception"), Certainty::Yes);
         assert_eq!(sub("<?php", "argumentcounterror", "error"), Certainty::Yes);
         assert_eq!(sub("<?php", "pdoexception", "logicexception"), Certainty::No);

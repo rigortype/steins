@@ -348,20 +348,15 @@ Sorted by key for binary search; the TOML is the source of record and the Rust
 file is `@generated` — never edited by hand.
 
 Consulted only by `builtin_class_supers`, which the trinary is-a oracle walks
-transitively. A name absent from the table is an unknown external →
-`Unknown`, never `No`.
+transitively, and the throw lane with it: catch absorption, `@throws` coverage
+and the checked/unchecked split all read this table past the project. A name
+absent from the table is an unknown external → `Unknown`, never `No`.
 
 **Builtin enums are deliberately omitted**: the mining data for their implicit
 interfaces and backing is incomplete, and an incomplete row would produce a
 wrong `No`.
 
-## `builtin_exception_parent(name)` / `builtin_throws(name)`
-
-The standard SPL/engine exception tree, keyed by global simple name
-(case-insensitive, no namespace). Project classes chain into it through their
-`extends` once their own chain leaves the project index. A name absent here and
-not a project class has an **unknown** parent — the caller keeps the chain result
-at `Maybe`, never `No` (ADR-0040's FP-safe side).
+## `builtin_throws(name)`
 
 `builtin_throws` gives the throw classes a builtin can raise. The rows are
 per name and hand-transcribed from `throws.toml`; the fold-allowlist names with
