@@ -142,14 +142,17 @@ pub fn builtin_throws(name: &str) -> Option<&'static [&'static str]> {
         // `putenv`'s assignment without a valid syntax, `flock`'s `$operation`
         // outside `LOCK_*`, `trigger_error`'s unknown `$error_level`, a negative
         // `sleep`/`usleep`, and the NUL byte of `escapeshellarg`/`escapeshellcmd`
-        // and `clearstatcache`'s `$filename`. Reproduced by a 6,000-tuple fuzz on
+        // and `clearstatcache`'s `$filename`, and the NUL byte of the two
+        // `date_create*_from_format` spellings' `$datetime`. Reproduced by a
+        // 6,000-tuple fuzz on
         // PHP 8.5.11 for every name but `chdir`, `chmod`, `sleep` and `usleep`,
         // which the fuzz left out (a changed working directory, a changed mode, a
         // sleep) and which follow the documented parameter kinds.
         "unlink" | "mkdir" | "rmdir" | "touch" | "copy" | "rename" | "symlink" | "readlink"
         | "tempnam" | "file_put_contents" | "realpath" | "fopen" | "glob" | "chdir" | "chmod"
         | "putenv" | "flock" | "trigger_error" | "sleep" | "usleep" | "escapeshellarg"
-        | "escapeshellcmd" | "clearstatcache" => Some(VALUE_ERROR),
+        | "escapeshellcmd" | "clearstatcache" | "date_create_from_format"
+        | "date_create_immutable_from_format" => Some(VALUE_ERROR),
         "sprintf" => Some(SPRINTF),
         // `json_decode`/`json_encode` throw JsonException only under
         // JSON_THROW_ON_ERROR; without flag inspection this key stays synthetic.
