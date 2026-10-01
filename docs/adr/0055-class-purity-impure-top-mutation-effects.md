@@ -638,3 +638,12 @@ place of `exhaustive = false`, and these scan sites are its origin sites. The
 origins are persisted in frozen generations (ADR-0092), in the trace payload,
 so the variant takes no schema bump (issue #828): it moves the analyzer
 fingerprint, which refuses a stored trace before it is decoded.
+
+## Amendment (2026-10-02): operator sites — PENDING ratification
+
+ADR-0099 §4 (issue #859) gives operators that run user code (`__toString`
+through concatenation, interpolation, a cast or a loose comparison;
+`__get`/`__set`/`__isset`/`__unset`; `ArrayAccess`; iteration; `__clone`;
+`__call`) one site each, with an edge to the magic method where the class is
+exact or the method final, and an obstacle otherwise. State constructs stay
+obstacles until E2's labels land. Destructors stay open (ADR-0099 §7.1).

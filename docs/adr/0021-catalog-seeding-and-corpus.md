@@ -343,3 +343,14 @@ Holes this rule does not close, recorded for follow-up:
 - **Precision left on the table.** A literal `sprintf` format names which
   values render through `%s` (about 7% of its failing sites would pass), and
   `in_array(…, true)` compares strictly; neither is read yet.
+
+## Amendment (2026-10-02): the call-site rule holds at every site — PENDING ratification
+
+ADR-0099 (issue #865) takes the holes the second amendment of 2026-10-01
+recorded. The call-site rule of that amendment's §3 holds at every site kind,
+in both the effect and the throw lane: builtin functions, engine methods and
+constructors (a per-method reach row, issue #858), and operator sites (issue
+#859). Function resolution and both lanes ask one predicate, `knows`, whether
+the catalog knows a spelling; a known name with no row on an axis is an
+obstacle on that axis. The literal-format and strict-comparison refinements
+stay with issue #860.

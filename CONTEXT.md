@@ -249,6 +249,22 @@ language constructs, the *only* origins of effects (origin closure).
 Uncatalogued functions widen to unknown-effect.
 _Avoid_: function metadata (PHPStan's artifact)
 
+**Site** (ADR-0099):
+One call-like or operator construct in a body — a call, a method call, a
+`new`, a callback, a `throw`, a language construct, an operator that may run
+a magic method — lowered once and resolved once into what runs there, what
+the engine may run implicitly on its operands (reach), and its obstacles.
+Both the effect and the throw lane read the resolved site; neither scans.
+_Avoid_: origin (the two per-lane lists a site replaces), call site (a site
+need not be a call)
+
+**Obstacle** (ADR-0099):
+A recorded reason an effect or throw answer is incomplete — a dynamic
+callee, an unknown class, unseen code, user code an operand may reach, a
+missing row on an axis. A body is `…?` exactly when its sites left an
+obstacle on that lane.
+_Avoid_: taint (the pre-ADR-0099 bare flag; an obstacle names its cause)
+
 **Interop envelope**:
 The unchecked docblock spelling of an effect envelope — `@phpstan-impure
 <label-list>` (and `@phpstan-pure` as the `{mutate.local}` envelope), sharing
