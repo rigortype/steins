@@ -3,9 +3,8 @@
 //! picture is *closed*, and the lookups on it.
 //!
 //! A chain is **closed** when every ancestor class and trait is something this
-//! analysis can read: a project class-like (one unambiguous declaration, in a
-//! file that parsed, using no trait, since a trait's body is not lowered against
-//! its user) or a class the engine's catalog knows and the project does not
+//! analysis can read: a project class-like (one unambiguous declaration, using
+//! no trait, since a trait's body is not lowered against its user) or a class the engine's catalog knows and the project does not
 //! declare. An *interface* the project cannot read does not open a chain: it has
 //! no body to run. The engine's own classes contribute no *project* code to a
 //! property fetch, a clone or a method lookup, so a chain that ends at one is
@@ -78,7 +77,7 @@ impl<'a> Chain<'a> {
             self.closed &= node.interface || is_engine_class(cx, &node.name);
             return None;
         };
-        self.closed &= !cx.member_incomplete(file) && !cd.uses_traits;
+        self.closed &= !cd.uses_traits;
         if on_lineage { self.lineage.push(cd) } else { self.interfaces.push(cd) }
         let tree = cx.units[file].tree;
         pending.extend(
@@ -190,14 +189,34 @@ pub(super) fn lookup<'a>(
 /// it, declares a property magic method or hooks `member` (ADR-0099 §4.4): such
 /// a subclass can stand in for a bound `class` at the access.
 ///
+/// Three shapes of subclass count, all read off tables the shard builder fills
+/// (so no tree is loaded to ask):
+///
+/// * a class declaring a magic method, or hooking `member`, whose chain reaches
+///   `class`;
+/// * a class importing a trait, whose body is not lowered, so what it brings
+///   (`__get` among it) is unknown;
+/// * an anonymous class, which no index lists: any one extending or implementing
+///   `class` or something under it counts, whatever its body declares, as
+///   `declared_receiver`'s descendant closure reads it (ADR-0049 A4).
+///
 /// A declaring class the index holds under more than one declaration cannot be
 /// placed in the hierarchy, so it counts.
+///
+/// Warm runs stay correct because the generation's affected set reaches the files
+/// involved: its inheritance leg closes over the supertypes of every changed file,
+/// so editing a subclass re-resolves the file of the class it extends and the
+/// files naming that class.
 pub(super) fn subclass_adds_property_magic(cx: &Cx, class: &str, member: Option<&str>) -> bool {
-    cx.index.magic_property_classes().iter().any(|sub| match cx.find_class(sub) {
+    let declaring = cx.index.magic_property_classes().iter().any(|sub| match cx.find_class(sub) {
         None => true,
         Some((_, cd)) => {
-            (declares_any(cd, &PROPERTY_MAGIC) || hooks(cd, member))
+            (cd.uses_traits || declares_any(cd, &PROPERTY_MAGIC) || hooks(cd, member))
                 && Chain::of(cx, sub).has(class)
         }
-    })
+    });
+    declaring
+        || cx.index.anonymous_subclass_parents().iter().any(|parent| {
+            parent.eq_ignore_ascii_case(class) || Chain::of(cx, parent).has(class)
+        })
 }

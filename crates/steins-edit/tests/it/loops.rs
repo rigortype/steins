@@ -112,6 +112,19 @@ fn an_applied_file_enumerates_no_candidate() {
 }
 
 #[test]
+fn a_foreach_in_a_closure_in_the_body_is_not_the_loops_own_subject() {
+    // The loop's subject is a local array, so the loop has no iteration site of its
+    // own to leave out; the closure's `foreach` over an unknown value is the body's.
+    let src = with_proven_subject(
+        "    foreach ($xs as $x) {\n        $out[] = keep(function ($p) { foreach ($p as $q) {} return 1; });\n    }",
+    );
+    let src = src.replace("function run()", "function keep(callable $cb) { return 1; }\nfunction run()");
+    let report = plan(&[("lib.php", &src)]);
+    assert_oracle_complete(&report);
+    assert_eq!(report.oracle.transformed, 0, "{:#?}", report.refusals);
+}
+
+#[test]
 fn a_pure_builtin_body_is_rewritten() {
     let src = with_proven_subject(
         "    foreach ($xs as $x) {\n        $out[] = abs($x);\n    }",

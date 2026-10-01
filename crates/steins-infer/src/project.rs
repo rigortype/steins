@@ -265,6 +265,9 @@ pub(crate) struct Index {
     /// by lowercase FQN: the table the operator resolver reads to rule out a
     /// subclass adding user code to a property access (ADR-0099 §4.4).
     magic_property_classes: HashSet<String>,
+    /// The classes and interfaces the universe's anonymous classes extend or
+    /// implement, as resolved in their files (ADR-0099 §4.4).
+    anonymous_subclass_parents: HashSet<String>,
     // global constants (ADR-0078, issue #198)
     /// Every global constant the universe declares, keyed by
     /// [`steins_syntax::normalize_const_fqn`] (namespace lowercased, final segment
@@ -343,6 +346,7 @@ impl Index {
             magic_obstacles: m.magic_obstacles,
             property_writes: m.property_writes,
             magic_property_classes: m.magic_property_classes,
+            anonymous_subclass_parents: m.anonymous_subclass_parents,
             constants: m.constants,
             files: m.files,
         }
@@ -376,6 +380,7 @@ impl Index {
         idx.magic_obstacles = m.magic_obstacles;
         idx.property_writes = m.property_writes;
         idx.magic_property_classes = m.magic_property_classes;
+        idx.anonymous_subclass_parents = m.anonymous_subclass_parents;
         idx.constants = m.constants;
         idx.files = m.files;
         idx
@@ -438,6 +443,11 @@ impl Index {
     /// `__isset` or `__unset`, or hook a property (ADR-0099 §4.4).
     pub(crate) fn magic_property_classes(&self) -> &HashSet<String> {
         &self.magic_property_classes
+    }
+
+    /// The classes and interfaces some anonymous class extends or implements.
+    pub(crate) fn anonymous_subclass_parents(&self) -> &HashSet<String> {
+        &self.anonymous_subclass_parents
     }
 
     pub(crate) fn resolve_function(&self, fqn: &str) -> Res {

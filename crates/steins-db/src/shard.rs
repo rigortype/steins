@@ -117,6 +117,11 @@ pub struct PackageShard {
     /// hooking a property (ADR-0099 §4.4, issue #859), keyed by the lowercase
     /// FQN the syntax layer gives ([`ClassDecl::fqn`]).
     magic_property_classes: HashSet<String>,
+    /// The classes and interfaces the package's anonymous classes extend or
+    /// implement, resolved in their own file. An anonymous class is invisible to
+    /// the class index, and may add a property magic method to anything it
+    /// extends (ADR-0099 §4.4; ADR-0049 A4 reads them the same way).
+    anonymous_subclass_parents: HashSet<String>,
     /// Global constants the package declares (ADR-0078, issue #198), keyed by
     /// `steins_syntax::normalize_const_fqn`'s spelling, each with the slot of
     /// a file that declares it.
@@ -159,6 +164,10 @@ impl PackageShard {
         self.magic_property_classes.extend(
             tree.classes().iter().filter(|cd| declares_property_magic(cd)).map(|cd| cd.fqn.clone()),
         );
+        for edge in tree.anonymous_class_edges() {
+            let parents = edge.parent.iter().chain(&edge.implements);
+            self.anonymous_subclass_parents.extend(parents.map(|r| tree.resolve_class_fqn(r)));
+        }
         self.property_writes.0.extend(tree.property_write_names().iter().cloned());
         self.property_writes.1 |= tree.writes_computed_property_name();
         self.constants.extend(tree.global_const_decls().iter().map(|d| (d.fqn.clone(), slot)));
@@ -218,6 +227,7 @@ impl PackageShard {
         self.magic_obstacles
             .extend(one.magic_obstacles.iter().map(|(_, o)| (slot, o.clone())));
         self.magic_property_classes.extend(one.magic_property_classes.iter().cloned());
+        self.anonymous_subclass_parents.extend(one.anonymous_subclass_parents.iter().cloned());
         self.property_writes.0.extend(one.property_writes.0.iter().cloned());
         self.property_writes.1 |= one.property_writes.1;
         self.constants.extend(one.constants.keys().map(|key| (key.clone(), slot)));
@@ -388,6 +398,8 @@ pub struct MergedTables {
     pub property_writes: (HashSet<String>, bool),
     /// Every class-like that declares a property magic method or a property hook.
     pub magic_property_classes: HashSet<String>,
+    /// Every class or interface an anonymous class of the universe extends or implements.
+    pub anonymous_subclass_parents: HashSet<String>,
     /// Every global constant the universe declares.
     pub constants: HashSet<String>,
     /// Diagnostic path → file slot for every file in the universe.
@@ -466,6 +478,7 @@ pub fn merge_shards(shards: &[PackageShard]) -> MergedTables {
         m.property_writes.0.extend(s.property_writes.0.iter().cloned());
         m.property_writes.1 |= s.property_writes.1;
         m.magic_property_classes.extend(s.magic_property_classes.iter().cloned());
+        m.anonymous_subclass_parents.extend(s.anonymous_subclass_parents.iter().cloned());
         m.constants.extend(s.constants.keys().cloned());
         for (path, &slot) in &s.files {
             let entry = m.files.entry(path.clone()).or_insert(slot);
@@ -522,11 +535,13 @@ pub fn fallback_package_key(path: &str) -> String {
 
 /// Whether a class-like declares a method the engine runs on a property access
 /// (`__get`, `__set`, `__isset`, `__unset`) or hooks a property: the classes
-/// whose subclasses an operator site cannot rule out (ADR-0099 §4.4). A trait
-/// is not asked: a class using one is already outside every closed chain.
+/// whose subclasses an operator site cannot rule out (ADR-0099 §4.4). A class
+/// using a trait counts: the trait's body is not lowered, so what it imports
+/// (`__get` among it) is unknown.
 fn declares_property_magic(cd: &ClassDecl) -> bool {
     const MAGIC: [&str; 4] = ["__get", "__set", "__isset", "__unset"];
-    cd.methods.iter().any(|m| MAGIC.iter().any(|magic| m.name.eq_ignore_ascii_case(magic)))
+    cd.uses_traits
+        || cd.methods.iter().any(|m| MAGIC.iter().any(|magic| m.name.eq_ignore_ascii_case(magic)))
         || !cd.hooked_properties.is_empty()
         || cd.properties.iter().any(|p| p.hooked)
 }
@@ -607,7 +622,7 @@ mod tests {
             (
                 1,
                 "src/b.php",
-                "<?php function dup() {} /** @method int m() */ class Twice {} class_alias('c', 'made'); $o->w = 1; class Lazy { public function __get($n) {} }",
+                "<?php function dup() {} /** @method int m() */ class Twice {} class_alias('c', 'made'); $o->w = 1; class Lazy { public function __get($n) {} } class Used { use T; } $a = new class extends Lazy {};",
             ),
             (
                 2,
@@ -645,7 +660,10 @@ mod tests {
         assert!(direct.ambiguous_functions.contains("twice_here"), "file-level demotion");
         assert!(direct.ambiguous_classes.contains("dupe"), "file-level class demotion");
         assert!(direct.magic_property_classes.contains("lazy"), "a class declaring __get");
+        assert!(direct.magic_property_classes.contains("used"), "a class importing a trait");
+        assert!(direct.anonymous_subclass_parents.iter().any(|p| p.eq_ignore_ascii_case("lazy")));
         assert_eq!(direct.magic_property_classes, absorbed.magic_property_classes);
+        assert_eq!(direct.anonymous_subclass_parents, absorbed.anonymous_subclass_parents);
     }
 
     /// ADR-0048 §4 for the generation merge: handing the same shards over in

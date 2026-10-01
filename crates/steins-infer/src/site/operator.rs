@@ -55,6 +55,9 @@ pub(super) fn resolve<'a>(
         out: ResolvedSite::default(),
     };
     let shapes = site.operands.as_deref().unwrap_or(&[]);
+    if op.two_objects_compared(shapes) {
+        op.gap();
+    }
     for (position, shape) in shapes.iter().enumerate() {
         match op.subject(shape, receivers.get(position).and_then(Option::as_ref)) {
             Subject::NoObject => {}
@@ -137,6 +140,25 @@ impl<'a> Operator<'a, '_> {
 
     fn edge(&mut self, sym: Sym) {
         self.out.targets.push(Edge::call(sym));
+    }
+
+    /// Whether a comparison sets two operands against each other that may both be
+    /// objects (a `switch` compares its subject with each `case` in turn). Two
+    /// objects of one class compare property by property, recursively through
+    /// arrays, and any property pair may convert an object to a string, so the
+    /// site is a gap whatever the classes are. An operand's own class answers only
+    /// against an operand shown to hold no object at any depth.
+    fn two_objects_compared(&self, shapes: &[ArgShape]) -> bool {
+        let comparison = matches!(self.construct, C::LooseCompare | C::OrderCompare | C::Switch);
+        let may_be_object =
+            |shape: &ArgShape| self.frame.held(self.cx, shape) != Held::ObjectFree;
+        if !comparison || shapes.len() < 2 || !may_be_object(&shapes[0]) {
+            return false;
+        }
+        match self.construct {
+            C::Switch => shapes[1..].iter().any(may_be_object),
+            _ => may_be_object(&shapes[1]),
+        }
     }
 
     /// What the operand `shape`, written `receiver`, may be.
