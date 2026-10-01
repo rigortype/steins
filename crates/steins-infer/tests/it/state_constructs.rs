@@ -138,7 +138,7 @@ fn instance_property_writes_are_not_exhaustive() {
 /// agrees: a pure method may read `$this`), so it stays exhaustive.
 #[test]
 fn instance_property_reads_stay_exhaustive() {
-    let src = "<?php\nclass C {\n    public $x = 0;\n    public function m($o, array $a) { $a[$this->x] = $o->p; foreach ($this->x as $v) {} return $this->x; }\n}\n";
+    let src = "<?php\nclass C {\n    public int $x = 0;\n    public array $items = [];\n    public function m(array $a) { $a[$this->x] = 1; foreach ($this->items as $v) {} return $this->x; }\n}\n";
     let s = summary(src, "C::m");
     assert!(s.labels.is_empty() && s.exhaustive, "{s:?}");
 }

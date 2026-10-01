@@ -122,7 +122,7 @@ fn the_proven_lane_is_untouched_by_the_tolerance() {
 
 /// The logger-pollution shape the ADR was written for: a pure-declared function
 /// reaches the clock and a stream through a logging facade and nothing else.
-const FACADE: &str = "<?php\nclass Logger {\n    public static function debug(string $m): void { fwrite(STDERR, $m . time()); }\n}\nfunction helper(string $m): void { Logger::debug($m); }\n#[\\Steins\\Pure]\nfunction f(string $s): int { helper($s); return 1; }\n";
+const FACADE: &str = "<?php\nclass Logger {\n    public static function debug(string $m): void { fwrite(STDERR, $m); time(); }\n}\nfunction helper(string $m): void { Logger::debug($m); }\n#[\\Steins\\Pure]\nfunction f(string $s): int { helper($s); return 1; }\n";
 
 #[test]
 fn an_attributed_facade_discharges_the_effects_that_flow_through_it() {
@@ -151,7 +151,7 @@ fn a_partially_discharged_label_stays_unmarked() {
     // The marker is a claim about the whole unit: `nondet.time` reaches `f` both via
     // the facade and via a bare `time()`, so one group survives and it is judged —
     // no tilde. The stream write arrives only via the facade and is marked.
-    const BOTH: &str = "<?php\nclass Logger {\n    public static function debug(string $m): void { fwrite(STDERR, $m . time()); }\n}\n#[\\Steins\\Pure]\nfunction f(string $s): int { Logger::debug($s); return time(); }\n";
+    const BOTH: &str = "<?php\nclass Logger {\n    public static function debug(string $m): void { fwrite(STDERR, $m); time(); }\n}\n#[\\Steins\\Pure]\nfunction f(string $s): int { Logger::debug($s); return time(); }\n";
     let (s, margin) = rendered(BOTH, "f", telemetry(&["Logger"]));
     assert_eq!(s.labels, vec!["io.output.stderr".to_owned(), "nondet.time".to_owned()]);
     assert_eq!(s.tolerated, vec!["io.output.stderr".to_owned()]);
@@ -201,7 +201,7 @@ fn a_direct_arrival_keeps_its_report_while_the_facade_path_discharges() {
     // Must-semantics over paths (ADR-0084 §2): `f` reads the clock through the
     // logger AND in its own body; the second arrival was never attributed and is
     // exactly the finding the author needs to see.
-    const BOTH: &str = "<?php\nclass Logger {\n    public static function debug(string $m): void { fwrite(STDERR, $m . time()); }\n}\n#[\\Steins\\Pure]\nfunction f(string $s): int { Logger::debug($s); return time(); }\n";
+    const BOTH: &str = "<?php\nclass Logger {\n    public static function debug(string $m): void { fwrite(STDERR, $m); time(); }\n}\n#[\\Steins\\Pure]\nfunction f(string $s): int { Logger::debug($s); return time(); }\n";
     let kept = effects(BOTH, telemetry(&["Logger"]));
     assert_eq!(kept.len(), 1, "exactly the direct read survives: {kept:#?}");
     assert!(kept[0].message.contains("time() has effect nondet.time"), "{}", kept[0].message);
@@ -334,7 +334,7 @@ fn emptying_the_tolerance_restores_every_finding() {
 fn an_interop_envelope_discharges_the_same_way_the_attribute_does() {
     // Discharge is a property of the judgment, not of the spelling: upstream's
     // `@phpstan-pure` is held to the same bound.
-    const INTEROP: &str = "<?php\nclass Logger {\n    public static function debug(string $m): void { fwrite(STDERR, $m . time()); }\n}\n/** @phpstan-pure */\nfunction f(string $s): int { Logger::debug($s); return 1; }\n";
+    const INTEROP: &str = "<?php\nclass Logger {\n    public static function debug(string $m): void { fwrite(STDERR, $m); time(); }\n}\n/** @phpstan-pure */\nfunction f(string $s): int { Logger::debug($s); return 1; }\n";
     let bare = effects(INTEROP, EffectsPolicy::none());
     assert_eq!(bare.len(), 2, "{bare:#?}");
     assert!(bare[0].message.contains("@phpstan-pure"), "the interop stratum: {}", bare[0].message);
@@ -385,7 +385,7 @@ fn a_group_reached_by_an_unattributed_path_too_is_discharged_for_neither() {
 
 /// A `pure-callable` obligation and a closure that routes its one effect through
 /// an attributed facade.
-const CALLBACK: &str = "<?php\nclass Logger {\n    public static function debug(string $m): void { fwrite(STDERR, $m . time()); }\n}\n/** @param pure-callable $cb */\nfunction takes($cb): void {}\ntakes(static function (string $s): string { Logger::debug($s); return $s; });\n";
+const CALLBACK: &str = "<?php\nclass Logger {\n    public static function debug(string $m): void { fwrite(STDERR, $m); time(); }\n}\n/** @param pure-callable $cb */\nfunction takes($cb): void {}\ntakes(static function (string $s): string { Logger::debug($s); return $s; });\n";
 
 #[test]
 fn a_callback_whose_only_effect_is_discharged_satisfies_pure_callable() {

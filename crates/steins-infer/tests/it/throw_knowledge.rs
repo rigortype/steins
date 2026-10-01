@@ -105,8 +105,13 @@ fn array_keys_is_throw_exhaustive_at_one_argument_only() {
     // `__toString`: at two arguments the operand reaches user code.
     assert!(throw_gaps(&file(true, "array $a", "return array_keys($a);")).is_empty());
     assert_eq!(throw_gaps(&file(true, "array $a, $v", "return array_keys($a, $v);")), ["user-code-reach"]);
-    // A spread list has no arity to certify.
-    assert_eq!(throw_gaps(&file(true, "array $a", "return array_keys(...$a);")), ["user-code-reach"]);
+    // A spread list has no arity to certify. The spread of a variable is also an
+    // iteration site, and the callee may take the variable by reference.
+    assert_eq!(
+        throw_gaps(&file(true, "array $a", "return array_keys(...$a);")),
+        ["user-code-reach", "operator-iteration"]
+    );
+    assert_eq!(throw_gaps(&file(true, "", "return array_keys(...[[1]]);")), ["user-code-reach"]);
     // An array that holds no object and a scalar to find rule the comparison out.
     assert!(throw_gaps(&file(true, "", "return array_keys([1, 2], 1);")).is_empty());
     assert_eq!(throw_gaps(&file(true, "array $a", "return array_keys($a, 1);")), ["user-code-reach"]);
@@ -134,7 +139,10 @@ fn json_encode_throws_only_under_its_flag_and_only_a_readable_flag_clears_it() {
         encode("[1, 2], flags: JSON_PRETTY_PRINT"),
         ["user-code-reach", "flag-dependent-throw"]
     );
-    assert_eq!(encode("...$args"), ["user-code-reach", "flag-dependent-throw"]);
+    assert_eq!(
+        encode("...$args"),
+        ["user-code-reach", "flag-dependent-throw", "operator-iteration"]
+    );
 }
 
 #[test]
