@@ -2,11 +2,12 @@
 //! project declares along the parent line and the interfaces, whether that
 //! picture is *closed*, and the lookups on it.
 //!
-//! A chain is **closed** when every ancestor, trait and interface is something
-//! this analysis can read: a project class-like (one unambiguous declaration, in
-//! a file that parsed, using no trait, since a trait's body is not lowered
-//! against its user) or a class the engine's catalog knows and the project does
-//! not declare. The engine's own classes contribute no *project* code to a
+//! A chain is **closed** when every ancestor class and trait is something this
+//! analysis can read: a project class-like (one unambiguous declaration, in a
+//! file that parsed, using no trait, since a trait's body is not lowered against
+//! its user) or a class the engine's catalog knows and the project does not
+//! declare. An *interface* the project cannot read does not open a chain: it has
+//! no body to run. The engine's own classes contribute no *project* code to a
 //! property fetch, a clone or a method lookup, so a chain that ends at one is
 //! closed for those questions; the questions where an engine class does run
 //! code (a string conversion, an offset access, an iteration) are the
@@ -22,6 +23,13 @@ use crate::dispatch::{Resolution, resolve_in_chain};
 
 /// The four methods the engine runs on a property access.
 pub(super) const PROPERTY_MAGIC: [&str; 4] = ["__get", "__set", "__isset", "__unset"];
+
+/// A name the chain walk reaches, and whether the syntax that named it makes it
+/// an interface (an `implements` entry, or what an interface extends).
+struct Ancestor {
+    name: String,
+    interface: bool,
+}
 
 /// One class's chain: the project declarations on it and whether it is closed.
 pub(super) struct Chain<'a> {
@@ -39,16 +47,16 @@ impl<'a> Chain<'a> {
     pub(super) fn of(cx: &Cx<'a>, fqn: &str) -> Self {
         let mut chain = Self { lineage: Vec::new(), interfaces: Vec::new(), closed: true };
         let mut seen: HashSet<String> = HashSet::new();
-        let mut pending: Vec<String> = Vec::new();
-        let mut next = Some(fqn.to_owned());
-        while let Some(name) = next.take() {
-            if seen.insert(name.to_ascii_lowercase()) {
-                next = chain.visit(cx, &name, true, &mut pending);
+        let mut pending: Vec<Ancestor> = Vec::new();
+        let mut next = Some(Ancestor { name: fqn.to_owned(), interface: false });
+        while let Some(node) = next.take() {
+            if seen.insert(node.name.to_ascii_lowercase()) {
+                next = chain.visit(cx, &node, true, &mut pending);
             }
         }
-        while let Some(name) = pending.pop() {
-            if seen.insert(name.to_ascii_lowercase())
-                && let Some(parent) = chain.visit(cx, &name, false, &mut pending)
+        while let Some(node) = pending.pop() {
+            if seen.insert(node.name.to_ascii_lowercase())
+                && let Some(parent) = chain.visit(cx, &node, false, &mut pending)
             {
                 pending.push(parent);
             }
@@ -56,23 +64,30 @@ impl<'a> Chain<'a> {
         chain
     }
 
-    /// Record `name`, queue its interfaces, and return its parent.
+    /// Record `node`, queue its interfaces, and return its parent.
     fn visit(
         &mut self,
         cx: &Cx<'a>,
-        name: &str,
+        node: &Ancestor,
         on_lineage: bool,
-        pending: &mut Vec<String>,
-    ) -> Option<String> {
-        let Some((file, cd)) = cx.find_class(name) else {
-            self.closed &= is_engine_class(cx, name);
+        pending: &mut Vec<Ancestor>,
+    ) -> Option<Ancestor> {
+        let Some((file, cd)) = cx.find_class(&node.name) else {
+            // An interface the project cannot read carries no body: nothing it
+            // declares can run on a property access, a clone or a method lookup.
+            self.closed &= node.interface || is_engine_class(cx, &node.name);
             return None;
         };
         self.closed &= !cx.member_incomplete(file) && !cd.uses_traits;
         if on_lineage { self.lineage.push(cd) } else { self.interfaces.push(cd) }
         let tree = cx.units[file].tree;
-        pending.extend(cd.implements.iter().map(|r| tree.resolve_class_fqn(r)));
-        cd.parent.as_ref().map(|r| tree.resolve_class_fqn(r))
+        pending.extend(
+            cd.implements
+                .iter()
+                .map(|r| Ancestor { name: tree.resolve_class_fqn(r), interface: true }),
+        );
+        let parent = cd.parent.as_ref()?;
+        Some(Ancestor { name: tree.resolve_class_fqn(parent), interface: cd.is_interface })
     }
 
     fn all(&self) -> impl Iterator<Item = &'a ClassDecl> + '_ {
