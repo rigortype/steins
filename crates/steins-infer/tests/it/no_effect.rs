@@ -166,6 +166,32 @@ fn a_name_whose_literal_call_can_still_diagnose_is_refused() {
     }
 }
 
+#[test]
+fn a_certified_pure_name_over_exactly_typed_literals_is_a_dead_statement() {
+    // Issue #851: the type predicates and the array readers are catalogued pure
+    // without folding. Exactly typed literals leave the call nothing to do.
+    for call in [
+        "is_int(1)",
+        "is_string('x')",
+        "is_null(null)",
+        "get_debug_type(1.5)",
+        "array_values([1, 2])",
+        "array_slice([1, 2], 1)",
+        "array_is_list([1])",
+    ] {
+        reports("", call, "a certified-pure builtin over literals it accepts");
+    }
+    // The three that diagnose on a literal their declared types admit are on
+    // the refusal list: `array_flip` warns on a float value, and the key
+    // predicates deprecate a `null` or fractional key.
+    for call in ["array_flip([1.5])", "array_key_exists(null, [])", "key_exists('k', [])"] {
+        silent("", call, "a literal call can raise a warning or a deprecation");
+    }
+    // `array_keys` is certified at one argument by the effects pass only; its
+    // argument-blind row is uncatalogued, which is silence here.
+    silent("", "array_keys([1])", "the argument-blind row is uncatalogued");
+}
+
 // ---------------------------------------------------------------------------
 // ADR-0096 §3: the argument bar.
 // ---------------------------------------------------------------------------

@@ -11,14 +11,18 @@
 //!
 //! Two seams reach into the fold allowlist, and both read only [`foldable`]: a
 //! foldable name is catalogued pure (`Some(&[])`), and a foldable name's
-//! arguments are all by value.
+//! arguments are all by value. Folding is not the only road to `Some(&[])`: a
+//! name the allowlist leaves out on purpose can be **certified pure** instead
+//! (issue #851), and one, `array_keys`, only at a single arity
+//! ([`pure_at_arity`]).
 
 use crate::fold::foldable;
 
 /// The effect labels (ADR-0018 hierarchical dot-paths) a builtin carries, or
 /// `None` when **uncatalogued** (unknown effects, ADR-0005): `Some(&[])` is
-/// catalogued-pure ([`foldable`] builtins), `Some(&[label, …])` is a proven
-/// `effect.envelope-exceeded` violation from `Pure`, `None` is no finding.
+/// catalogued-pure ([`foldable`] builtins and the `CERTIFIED_PURE` families),
+/// `Some(&[label, …])` is a proven `effect.envelope-exceeded` violation from
+/// `Pure`, `None` is no finding.
 ///
 /// Matching is case-insensitive. Labels follow ADR-0018's taxonomy;
 /// argument-dependent effects use the safe, argument-insensitive upper bound
@@ -178,7 +182,139 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
         _ => None,
     };
 
-    colored.or_else(|| foldable(name).then_some(EMPTY))
+    colored.or_else(|| (foldable(name) || certified_pure(name)).then_some(EMPTY))
+}
+
+/// The builtins **certified pure** without being [`foldable`] (issue #851,
+/// ADR-0021's 2026-10-01 amendment): each answers [`effect_labels`] with the
+/// empty row.
+///
+/// The fold allowlist answers a different question — is this name safe and
+/// worth executing in the sidecar — and purity is only one of its
+/// preconditions. These names are pure and deliberately not folded: narrowing
+/// answers a type predicate and shape projection answers an array reader, so
+/// executing either would add nothing. Before this list, "catalogued pure"
+/// meant "on the fold allowlist", and a body calling `is_int()` was `…?`.
+///
+/// # What certifies a name
+///
+/// At `PINNED_PHP`, php-src shows that the call, for **every** argument its
+/// parameter types accept:
+///
+/// * **runs no userland.** No `callable` parameter; no `string` parameter,
+///   since the coercive mode converts an object argument through its
+///   `__toString`; no loose comparison or string cast of an argument, which
+///   reaches the same method; no class lookup, which autoloads; and no read
+///   of an object's property table, which initializes a lazy object;
+/// * **takes no reference**;
+/// * **reads only its arguments**: no ini setting, locale, clock, environment,
+///   superglobal, engine symbol table or error state;
+/// * **performs no I/O**;
+/// * **throws nothing** but the `TypeError` its parameter types already state.
+///   Every pass that asks "does the catalog know this name" reads the colour
+///   row, and the throws pass then reads a missing
+///   [`builtin_throws`](crate::builtin_throws) row as throwless.
+///
+/// A diagnostic raised on bad input does **not** disqualify a name: an
+/// `E_WARNING` or `E_DEPRECATED` runs an installed error handler, and that
+/// handler's effects belong to its registration (`set_error_handler` is
+/// `global.write`), as they do for every diagnostic the language's own
+/// operators raise. The fold allowlist's rows hold the same rule
+/// (`preg_match` warns on a bad pattern, `strlen(null)` is deprecated).
+/// `array_flip` (a value neither `int` nor `string`), `array_key_exists` and
+/// `key_exists` (a `null` or fractional key) are the members that can raise
+/// one.
+///
+/// PHPStan's `hasSideEffects => false` agrees on every name below. It is
+/// corroboration, not the source of record: it says the same of `current`,
+/// `key`, `get_class` and `array_keys` in every form, which the evidence
+/// below refuses.
+///
+/// # The two families
+///
+/// * **Type questions.** The `is_*` type predicates read the zval's type tag
+///   and nothing else: `is_numeric` parses a string with the engine's own
+///   locale-independent `zend_strtod`; `is_iterable` and `is_countable` test
+///   the class's interfaces and handlers, never calling `getIterator()` or
+///   `count()`; `is_resource` reads the resource's own closed state.
+///   `get_debug_type` names the type from the same tag (its sibling
+///   `gettype` is already [`foldable`]).
+/// * **Array readers.** ADR-0070's certified readers and presence predicates,
+///   each taking its container as `array`, so an object never reaches them.
+///   Each copies, reorders or tests keys and values without comparing or
+///   converting a value. `array_keys` belongs here only at one argument; see
+///   [`pure_at_arity`].
+///
+/// # Deliberately absent
+///
+/// * `current` and `key` accept an object, read its property table, and so
+///   run a lazy object's initializer.
+/// * `get_class()` with no argument throws `Error` outside a class, which no
+///   throw row records.
+/// * `is_callable`, `is_a`, `is_subclass_of`, `get_parent_class`,
+///   `class_exists` and the other `*_exists` questions autoload a class named
+///   by a string, and `defined`/`function_exists` read engine symbol tables
+///   that a later declaration changes.
+/// * `array_search` and `array_combine` compare or cast values, so an object
+///   value runs its `__toString`.
+/// * The string family (`strcmp`, `ord`, `dirname`, …), for the `__toString`
+///   its `string` parameters run under coercive typing.
+/// * `spl_object_id` and `spl_object_hash` answer object identity, which
+///   ADR-0008 counts as `nondet`.
+///
+/// Every name is matched case-insensitively, and an alias is listed with its
+/// target, since [`effect_labels`] matches a spelling.
+const CERTIFIED_PURE: &[&str] = &[
+    // Type questions.
+    "is_string",
+    "is_int",
+    "is_integer", // = is_int
+    "is_long",    // = is_int
+    "is_float",
+    "is_double",  // = is_float
+    "is_bool",
+    "is_array",
+    "is_null",
+    "is_object",
+    "is_scalar",
+    "is_numeric",
+    "is_iterable",
+    "is_countable",
+    "is_resource",
+    "get_debug_type",
+    // Array readers.
+    "array_first",
+    "array_last",
+    "array_key_first",
+    "array_key_last",
+    "array_values",
+    "array_flip",
+    "array_reverse",
+    "array_slice",
+    "array_key_exists",
+    "key_exists", // = array_key_exists
+    "array_is_list",
+];
+
+/// Whether `name` is on [`CERTIFIED_PURE`] (case-insensitive).
+fn certified_pure(name: &str) -> bool {
+    CERTIFIED_PURE.iter().any(|&f| name.eq_ignore_ascii_case(f))
+}
+
+/// Whether a call to the builtin `name` passing exactly `positional`
+/// positional arguments is **certified pure** although the name's
+/// argument-blind row is uncatalogued (issue #851).
+///
+/// `array_keys` is the one such name. With one argument it copies the
+/// array's keys. Given a `$filter_value`, it compares that value loosely with
+/// every element, and comparing an object with a string runs the object's
+/// `__toString`, so [`effect_labels`] keeps the upper bound, which is
+/// unknown. The caller holds the call to its positional argument list: a
+/// named or spread list, or a use as a callback, has no arity to read and
+/// keeps the `…?`.
+#[must_use]
+pub fn pure_at_arity(name: &str, positional: usize) -> bool {
+    positional == 1 && name.eq_ignore_ascii_case("array_keys")
 }
 
 /// The **narrowed** effect labels a dumper earns at a call site that proves
@@ -2766,5 +2902,120 @@ mod tests {
         assert_eq!(narrowed("mkdir", Some(Literal("/tmp/d")), Some(Literal("0777"))), Some(vec!["io.fs.write"]));
         assert_eq!(narrowed("scandir", Some(Literal("/tmp")), Some(Literal("1"))), Some(vec!["io.fs.read"]));
         assert_eq!(narrowed("unlink", Some(Constant("STDOUT")), None), None);
+    }
+
+    // ---- issue #851: purity certified without folding ------------------------
+
+    /// The type questions answer the empty row and stay off the fold
+    /// allowlist: narrowing already answers a predicate, so executing one in
+    /// the sidecar would add nothing.
+    #[test]
+    fn the_type_questions_are_certified_pure_without_folding() {
+        for name in [
+            "is_string", "is_int", "is_integer", "is_long", "is_float", "is_double", "is_bool",
+            "is_array", "is_null", "is_object", "is_scalar", "is_numeric", "is_iterable",
+            "is_countable", "is_resource", "get_debug_type", "IS_INT", "get_DEBUG_TYPE",
+        ] {
+            assert_eq!(effect_labels(name), Some(&[][..]), "{name} is certified pure");
+            assert!(!foldable(name), "{name} must NOT become foldable");
+        }
+        // `gettype` was pure already, through the allowlist.
+        assert!(foldable("gettype") && effect_labels("gettype") == Some(&[][..]));
+    }
+
+    /// The array readers answer the empty row and stay off the fold allowlist:
+    /// shape projection already answers each of them.
+    #[test]
+    fn the_array_readers_are_certified_pure_without_folding() {
+        for name in [
+            "array_first", "array_last", "array_key_first", "array_key_last", "array_values",
+            "array_flip", "array_reverse", "array_slice", "array_key_exists", "key_exists",
+            "array_is_list", "ARRAY_VALUES",
+        ] {
+            assert_eq!(effect_labels(name), Some(&[][..]), "{name} is certified pure");
+            assert!(!foldable(name), "{name} must NOT become foldable");
+        }
+    }
+
+    /// An alias is one C handler under a second spelling, so its row cannot
+    /// differ from its target's.
+    #[test]
+    fn a_certified_alias_answers_as_its_target() {
+        for (alias, target) in [
+            ("is_integer", "is_int"),
+            ("is_long", "is_int"),
+            ("is_double", "is_float"),
+            ("key_exists", "array_key_exists"),
+        ] {
+            assert_eq!(effect_labels(alias), effect_labels(target), "{alias} is {target}");
+        }
+    }
+
+    /// `array_keys` is pure with one argument and uncatalogued in every other
+    /// form: given a `$filter_value` it compares loosely with every element,
+    /// and comparing an object with a string runs its `__toString`.
+    #[test]
+    fn array_keys_is_pure_only_at_one_argument() {
+        assert_eq!(effect_labels("array_keys"), None, "the argument-blind row is the search form's");
+        assert!(super::pure_at_arity("array_keys", 1));
+        assert!(super::pure_at_arity("array_KEYS", 1));
+        for n in [0, 2, 3] {
+            assert!(!super::pure_at_arity("array_keys", n), "array_keys with {n} arguments");
+        }
+        // No other name is certified this way, whatever its row says.
+        for name in ["array_values", "is_int", "array_search", "in_array", "strlen"] {
+            assert!(!super::pure_at_arity(name, 1), "{name} has no arity row");
+        }
+    }
+
+    /// The parts of the certification rule the catalog's own tables can state,
+    /// held for every certified name and for `array_keys`: no reference, no
+    /// callback in any shape, no throw row for the throws pass to have missed,
+    /// and every parameter typed so that an object either cannot reach it or
+    /// reaches a `mixed` slot the evidence covers. A `string` parameter is the
+    /// one refused by type: coercive mode converts an object argument through
+    /// its `__toString`.
+    #[test]
+    fn every_certified_name_meets_the_rule_the_tables_can_check() {
+        const PARAM_TYPES: &[&str] = &["mixed", "array", "int", "?int", "bool"];
+        for &name in super::CERTIFIED_PURE.iter().chain(&["array_keys"]) {
+            assert!(!foldable(name), "{name} is on the allowlist, which answers it already");
+            let facts = param_facts(name).unwrap_or_else(|| panic!("{name} was not mined"));
+            assert!(facts.by_ref.is_empty(), "{name} takes a reference");
+            assert!(facts.callable.is_empty(), "{name} takes a callable");
+            assert!(super::callback_carriers(name).is_empty(), "{name} carries a callback");
+            assert!(out_params(name).is_none(), "{name} has an out-parameter row");
+            assert!(crate::builtin_throws(name).is_none(), "{name} has a throw row");
+            for ty in facts.params {
+                assert!(PARAM_TYPES.contains(ty), "{name} declares `{ty}`");
+            }
+        }
+    }
+
+    /// The exclusions, asserted by name so the boundary is not implied by
+    /// absence. Each can run userland, read engine state, or throw what no row
+    /// records, and PHPStan's metadata calls `current`, `key` and `get_class`
+    /// side-effect-free all the same.
+    #[test]
+    fn the_names_that_can_run_userland_stay_uncatalogued() {
+        for name in [
+            // A lazy object's initializer runs when its property table is read.
+            "current", "key",
+            // `Error` with no argument outside a class.
+            "get_class",
+            // Autoload a class named by a string.
+            "is_callable", "is_a", "is_subclass_of", "get_parent_class", "class_exists",
+            "interface_exists",
+            // Read engine symbol tables that a later declaration changes.
+            "defined", "function_exists",
+            // Compare or cast a value, reaching `__toString`.
+            "array_search", "array_combine",
+            // `string` parameters, converted through `__toString`.
+            "strcmp", "ord", "dirname",
+            // Object identity is `nondet` (ADR-0008).
+            "spl_object_id", "spl_object_hash",
+        ] {
+            assert_eq!(effect_labels(name), None, "{name} must stay uncatalogued");
+        }
     }
 }
