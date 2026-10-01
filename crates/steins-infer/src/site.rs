@@ -41,10 +41,12 @@ pub(crate) use resolve::resolve_site;
 /// exhaustive exactly when that set is empty; propagation joins the sets' emptiness
 /// over the edges a body reaches, as it joined the bit.
 ///
-/// Every place the bit was cleared maps to one kind below. The variants are
-/// numbered by the facts payload's codec, so a new one is **appended**, never
-/// inserted (the payload is decoded past the analyzer gate, so no
-/// `SCHEMA_VERSION` bump follows).
+/// Every place the bit was cleared maps to one kind below, and a site names the
+/// same cause in either lane. The variants are numbered by the facts payload's
+/// codec, by position. That payload is read only behind the analyzer fingerprint
+/// (ADR-0092's amendment of 2026-09-27), so a stored file never meets a binary
+/// that numbers them differently and no `SCHEMA_VERSION` bump follows a change;
+/// new kinds are appended anyway, so the numbers the tests pin stay put.
 ///
 /// The kinds surface in `annotate --format json` and the effect baseline, so that
 /// every coverage change in an A/B names its cause.
@@ -52,29 +54,33 @@ pub(crate) use resolve::resolve_site;
 #[cfg_attr(not(target_arch = "wasm32"), derive(serde::Serialize, serde::Deserialize))]
 pub(crate) enum GapKind {
     /// The callee is computed: a `$f()` call that is not a body-local callback, a
-    /// `$o->$m()` or `$c::m()` call, `static::m()`. Source: [`SiteKind::Dynamic`]
-    /// (both lanes' `Opaque` / `Taint`).
+    /// `$o->$m()` or `$c::m()` call, and the late-bound `static::m()` and `new
+    /// static` of a class a subclass can extend. Source: [`SiteKind::Dynamic`]
+    /// (both lanes' `Opaque` / `Taint`), and `resolve_new`'s `static` arm.
     DynamicCallee,
     /// The class cannot be named: a `new $c()`, an anonymous class that may bring
-    /// its own constructor, or a receiver or `new` whose class chain leaves the
-    /// analysed universe or holds no such member. Source: [`SiteKind::Dynamic`]
-    /// `New` / `AnonymousClass`, `resolve_new`'s `Unknown`, and a method call whose
-    /// chain resolves nowhere.
+    /// its own constructor, a `self`, `parent` or `$this` with no class in scope, or
+    /// a class no project file declares and the catalog does not know (a method or
+    /// `new` whose chain leaves the analysed universe). Source: [`SiteKind::Dynamic`]
+    /// `New` / `AnonymousClass`, and `resolve_new`'s and `method_edge`'s unresolved
+    /// arms.
     UnknownClass,
     /// A statically named function that nothing resolves: no project body, no
-    /// catalog knowledge, an ambiguous or shadowed name. Includes a call whose
-    /// named or spread arguments defeat the arity a certification needs, which the
-    /// code does not tell apart from an uncatalogued name today. Source:
+    /// catalog knowledge, an ambiguous or shadowed name. Source:
     /// `FnResolution::Unknown` at a call (either lane). A known builtin the lane has
-    /// no row for is [`Self::NoEffectRow`] or [`Self::NoThrowRow`] instead.
+    /// no row for is [`Self::NoEffectRow`] or [`Self::NoThrowRow`] instead, and a
+    /// named or spread argument list that defeats an arity is
+    /// [`Self::ArgumentList`].
     UnknownFunction,
-    /// A method call whose receiver names a class but whose body a subclass may
-    /// replace (a non-final `$this->m()`, `self::m()`), or that is a private method
-    /// of another class. Source: the open arms of the method edge.
+    /// A method call whose body another class may replace and that is not a
+    /// non-final `$this` ([`Self::NonFinalThis`]): a private method of another
+    /// class, or an engine method a declared receiver's subclass may replace.
+    /// Source: the open arms of the method edge and of the engine method row.
     OpenMethod,
     /// An ADR-0067 declared receiver (`f(Repo $r) { $r->find(); }`,
     /// `$this->repo->find()`) with no checked bound to import. The throw lane
-    /// reads every such receiver as this, whatever the interface declares.
+    /// reads every such receiver as this, whatever the interface declares (ADR-0099
+    /// §8's ADR-0067 bullet).
     DeclaredReceiver,
     /// An interop envelope (ADR-0082) answered the call: its labels enter the
     /// declared lane, and nothing has checked them, so the answer stays open.
@@ -109,17 +115,28 @@ pub(crate) enum GapKind {
     /// A named or spread argument list that defeats the positional arity a
     /// certification needs: `array_keys(...$a)` cannot be told from
     /// `array_keys($a, $v)`, and only the one-argument form is certified pure.
+    /// Effect lane only: the throw lane reads that call's operands as a
+    /// [`Self::UserCodeReach`].
     ArgumentList,
     /// A builtin that raises only when a flags argument asks it to
     /// (`json_encode(…, JSON_THROW_ON_ERROR)`), called with flags the scan cannot
     /// read as a constant without that flag. Appended after #863's kinds, so the
     /// codec numbers of the earlier ones did not move.
     FlagDependentThrow,
+    /// A method call on a class whose whole chain the project holds, and none
+    /// declares the method: `__call` or `__callStatic` may answer, or the call is
+    /// an `Error`. Source: `method_edge`'s `NotFoundChainComplete`.
+    MethodNotFound,
+    /// A `$this->m()` or `self::m()` in a class a subclass can extend, where a
+    /// subclass may replace `m` (ADR-0099 §5.1's "non-final `$this`"). Source: the
+    /// bound arm of the method edge, and an engine method row a subclass may
+    /// replace.
+    NonFinalThis,
 }
 
 impl GapKind {
     /// Every kind, in the order the facts payload's codec numbers them.
-    pub(crate) const ALL: [Self; 15] = [
+    pub(crate) const ALL: [Self; 17] = [
         Self::DynamicCallee,
         Self::UnknownClass,
         Self::UnknownFunction,
@@ -135,6 +152,8 @@ impl GapKind {
         Self::NoThrowRow,
         Self::ArgumentList,
         Self::FlagDependentThrow,
+        Self::MethodNotFound,
+        Self::NonFinalThis,
     ];
 
     /// The kind's spelling on the surfaces that name it (`annotate --format
@@ -157,6 +176,8 @@ impl GapKind {
             Self::NoThrowRow => "no-throw-row",
             Self::ArgumentList => "argument-list",
             Self::FlagDependentThrow => "flag-dependent-throw",
+            Self::MethodNotFound => "method-not-found",
+            Self::NonFinalThis => "non-final-this",
         }
     }
 }
@@ -232,16 +253,16 @@ impl Knowledge<'_> {
     }
 }
 
-/// One resolved site: what runs, what it may reach, and why the answer is open.
+/// One resolved site: what runs, and why the answer is open.
 ///
+/// What the engine may run through the site's operands is a gap like any other
+/// ([`Reach::Possible`] is [`GapKind::UserCodeReach`]), so it is in [`Self::gaps`].
 /// A site the lane does not record resolves to an empty value.
 #[derive(Debug, Default)]
 pub(crate) struct ResolvedSite {
     /// What runs at the site, in the order a report names it: a call's edge
     /// before the callbacks it hands over, a contract's own labels last.
     pub(crate) targets: Vec<Target>,
-    /// Whether an operand may reach user code through the engine.
-    pub(crate) reach: Reach,
     /// Why the answer is incomplete; the site is covered exactly when empty.
     pub(crate) gaps: BTreeSet<GapKind>,
 }
@@ -337,12 +358,8 @@ impl Hit {
 
 /// Whether the engine may run user code through a site's operands (ADR-0099 §4,
 /// issue #856).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Reach {
-    /// The site asked nothing of its operands: a construct, a throw, a project
-    /// call.
-    #[default]
-    Unasked,
     /// Every operand is ruled out, or the callee reaches nothing.
     RuledOut,
     /// Some operand may reach user code: the site carries [`GapKind::UserCodeReach`].
@@ -355,18 +372,16 @@ pub(crate) enum Reach {
 /// (`eval`, an inclusion: the code it runs may throw anything) are the constructs
 /// both lanes record.
 pub(crate) fn records_throw(site: &SiteOrigin) -> bool {
-    !matches!(
-        &site.kind,
-        SiteKind::Construct(k)
-            if !matches!(k, ConstructKind::MatchNoDefault | ConstructKind::Eval | ConstructKind::Include(_))
-    )
+    use ConstructKind::{Eval, Include, MatchNoDefault};
+    !matches!(&site.kind, SiteKind::Construct(k) if !matches!(k, MatchNoDefault | Eval | Include(_)))
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
-    //! Gap kinds ride the facts payload by variant index, so their order is a
-    //! format fact (ADR-0099 §5.4). The payload is decoded past the analyzer gate,
-    //! which is why a new kind takes no `SCHEMA_VERSION` bump.
+    //! Gap kinds ride the facts payload by variant index. The payload is read only
+    //! behind the analyzer fingerprint (ADR-0092's amendment of 2026-09-27), so no
+    //! stored file meets a binary that numbers them differently and a new kind takes
+    //! no `SCHEMA_VERSION` bump; the codec test keeps `ALL` complete and in step.
     use std::collections::BTreeSet;
 
     use steins_db::{EffectsPolicy, PluginFacts};
@@ -376,6 +391,8 @@ mod tests {
     use crate::facts::{FileFacts, facts_payload, fill_rows, read_facts};
     use crate::project::{FileUnit, Index, LazyTree};
 
+    /// Every kind is numbered by its position in [`GapKind::ALL`], and `ALL` lists
+    /// every variant: the one after the last does not decode.
     #[test]
     fn every_gap_kind_round_trips_the_codec_in_variant_order() {
         for (index, kind) in GapKind::ALL.into_iter().enumerate() {
@@ -402,7 +419,8 @@ mod tests {
         assert_eq!(all.names().len(), GapKind::ALL.len());
         let spelled: BTreeSet<&str> = GapKind::ALL.into_iter().map(GapKind::as_str).collect();
         assert_eq!(spelled.len(), GapKind::ALL.len(), "spellings are distinct");
-        assert_eq!(mask.union(GapMask::of(&BTreeSet::from([GapKind::OpenMethod]))).names().len(), 3);
+        let open = GapMask::of(&BTreeSet::from([GapKind::OpenMethod]));
+        assert_eq!(mask.union(open).names().len(), 3);
     }
 
     /// The facts of a file whose source is `src`, with the own rows the generation
@@ -439,47 +457,237 @@ mod tests {
         assert!(after.throws.iter().all(|(_, r)| r.gaps == all && !r.exhaustive()));
     }
 
-    /// The kinds the resolver records, by the site shape that produces each, are
-    /// the ones the own rows carry — and a body with none is exhaustive.
-    #[test]
-    fn the_resolver_records_the_kind_each_site_shape_produces() {
-        let src = "<?php
-interface Repo {}
-class Open { public function m() {} public function run($f, $c, Repo $r, $o) {
-    $f(); new $c(); unknown_fn(); $this->m(); $r->find();
-    new Engine(); array_keys(...$o); array_walk($o, 'no_such_fn'); strtoupper($o);
-    throw $o;
-}
-public function ev($c) { eval($c); } }
-final class Closed { public function leaf() { return 1; } public function run() { return $this->leaf(); } }";
+    /// The gap kinds of the unit `sym` in `src`, in the effect lane and the throw
+    /// lane.
+    fn kinds_of(src: &str, sym: &crate::Sym) -> (BTreeSet<GapKind>, BTreeSet<GapKind>) {
         let facts = facts_of(src);
         let rows = facts.rows.as_ref().expect("rows filled");
-        let sym = |class: &str, method: &str| crate::Sym::Method(class.to_ascii_lowercase(), method.to_owned());
-        let effects = |class: &str, method: &str| {
-            rows.effects.iter().find(|(s, _)| *s == sym(class, method)).expect("a row").1.gaps.clone()
-        };
-        let throws = |class: &str, method: &str| {
-            rows.throws.iter().find(|(s, _)| *s == sym(class, method)).expect("a row").1.gaps.clone()
-        };
+        let effects = &rows.effects.iter().find(|(s, _)| s == sym).expect("an effect row").1;
+        let throws = &rows.throws.iter().find(|(s, _)| s == sym).expect("a throw row").1;
+        (effects.gaps.clone(), throws.gaps.clone())
+    }
+
+    /// A site shape: what it is, a source, the unit holding it, and the kinds each
+    /// lane records for it (`[]` for a covered site).
+    type Case<'a> = (&'a str, &'a str, crate::Sym, &'a [GapKind], &'a [GapKind]);
+
+    fn func(name: &str) -> crate::Sym {
+        crate::Sym::Func(name.to_owned())
+    }
+
+    fn method(class: &str, m: &str) -> crate::Sym {
+        crate::Sym::Method(class.to_ascii_lowercase(), m.to_owned())
+    }
+
+    /// The shapes a function body holds: calls to functions, classes and builtins.
+    fn function_shapes() -> Vec<Case<'static>> {
         use GapKind::*;
-        let effect_expected: BTreeSet<GapKind> = [
-            DynamicCallee, UnknownClass, UnknownFunction, OpenMethod, DeclaredReceiver, NoEffectRow,
-            ArgumentList, UnresolvedCallback, UserCodeReach,
+        vec![
+            ("a covered body", "<?php function f() { return 1; }", func("f"), &[], &[]),
+            (
+                "a computed callee",
+                "<?php function f($g) { $g(); }",
+                func("f"),
+                &[DynamicCallee],
+                &[DynamicCallee],
+            ),
+            (
+                "a computed class",
+                "<?php function f($c) { new $c(); }",
+                func("f"),
+                &[UnknownClass],
+                &[UnknownClass],
+            ),
+            (
+                "an unknown function",
+                "<?php function f() { unknown_fn(); }",
+                func("f"),
+                &[UnknownFunction],
+                &[UnknownFunction],
+            ),
+            (
+                "a class nobody declares",
+                "<?php function f() { new Nowhere(); }",
+                func("f"),
+                &[UnknownClass],
+                &[UnknownClass],
+            ),
+            (
+                "a static call on a class nobody declares",
+                "<?php function f() { Nowhere::make(); }",
+                func("f"),
+                &[UnknownClass],
+                &[UnknownClass],
+            ),
+            (
+                "an engine class the catalog knows, with no constructor row",
+                "<?php function f() { new ReflectionClass('x'); }",
+                func("f"),
+                &[NoEffectRow],
+                &[NoThrowRow],
+            ),
+            (
+                "an engine method the catalog knows, with no row",
+                "<?php function f() { SplFixedArray::fromArray([]); }",
+                func("f"),
+                &[NoEffectRow],
+                &[NoThrowRow],
+            ),
+            (
+                "an engine method with an effect row and no throw row",
+                "<?php function f() { DateTime::createFromFormat('Y', 'x'); }",
+                func("f"),
+                &[],
+                &[NoThrowRow],
+            ),
+            (
+                "a known builtin with no row on either axis",
+                "<?php declare(strict_types=1); function f(string $s) { return mb_strlen($s); }",
+                func("f"),
+                &[NoEffectRow],
+                &[NoThrowRow],
+            ),
+            (
+                "a spread argument list",
+                "<?php function f(array $a) { return array_keys(...$a); }",
+                func("f"),
+                &[ArgumentList],
+                &[UserCodeReach],
+            ),
+            (
+                "an operand that may reach user code",
+                "<?php function f($o) { return strtoupper($o); }",
+                func("f"),
+                &[UserCodeReach],
+                &[UserCodeReach],
+            ),
+            (
+                "a callback no body resolves",
+                "<?php function f() { array_walk([1], 'no_such_fn'); }",
+                func("f"),
+                &[UnresolvedCallback],
+                &[UnresolvedCallback],
+            ),
         ]
-        .into_iter()
-        .collect();
-        assert_eq!(effects("Open", "run"), effect_expected);
-        // `eval` is unseen code in both lanes.
-        assert_eq!(effects("Open", "ev"), BTreeSet::from([UnseenCode]));
-        assert_eq!(throws("Open", "ev"), BTreeSet::from([UnseenCode]));
-        assert!(effects("Closed", "run").is_empty() && effects("Closed", "leaf").is_empty());
-        let throw_expected: BTreeSet<GapKind> = [
-            DynamicCallee, UnknownClass, UnknownFunction, OpenMethod, DeclaredReceiver,
-            NoThrowRow, UnresolvedCallback, UnresolvedThrow, UserCodeReach,
+    }
+
+    /// The shapes a function body holds that are not a plain call: throws, unseen
+    /// code, state, flags and declared receivers.
+    fn construct_shapes() -> Vec<Case<'static>> {
+        use GapKind::*;
+        vec![
+            (
+                "an unresolvable throw",
+                "<?php function f($o) { throw $o; }",
+                func("f"),
+                &[],
+                &[UnresolvedThrow],
+            ),
+            ("eval", "<?php function f($c) { eval($c); }", func("f"), &[UnseenCode], &[UnseenCode]),
+            (
+                "an inclusion",
+                "<?php function f($p) { include $p; }",
+                func("f"),
+                &[UnseenCode],
+                &[UnseenCode],
+            ),
+            (
+                "a state construct",
+                "<?php function f() { global $g; }",
+                func("f"),
+                &[StateConstruct],
+                &[],
+            ),
+            (
+                "flags the scan cannot read",
+                "<?php function f($flags) { return json_encode([1], $flags); }",
+                func("f"),
+                &[],
+                &[FlagDependentThrow],
+            ),
+            (
+                "a declared receiver",
+                "<?php interface Repo { public function find(): int; }
+                 function f(Repo $r) { return $r->find(); }",
+                func("f"),
+                &[DeclaredReceiver],
+                &[DeclaredReceiver],
+            ),
+            (
+                "a declared receiver with an interop envelope",
+                "<?php interface Repo { /** @phpstan-pure */ public function find(): int; }
+                 function f(Repo $r) { return $r->find(); }",
+                func("f"),
+                &[InteropEnvelope],
+                &[DeclaredReceiver],
+            ),
         ]
-        .into_iter()
-        .collect();
-        assert_eq!(throws("Open", "run"), throw_expected);
-        assert!(throws("Closed", "run").is_empty());
+    }
+
+    /// The shapes a method body holds: the receivers whose class is the unit's.
+    fn method_shapes() -> Vec<Case<'static>> {
+        use GapKind::*;
+        vec![
+            (
+                "a method no class of a complete chain declares",
+                "<?php final class A { public function run() { $this->nope(); } }",
+                method("A", "run"),
+                &[MethodNotFound],
+                &[MethodNotFound],
+            ),
+            (
+                "a non-final $this",
+                "<?php class A { public function m() {} public function run() { $this->m(); } }",
+                method("A", "run"),
+                &[NonFinalThis],
+                &[NonFinalThis],
+            ),
+            (
+                "a private method of another class",
+                "<?php class A { private function p() {} }
+                 class B extends A { public function run() { $this->p(); } }",
+                method("B", "run"),
+                &[OpenMethod],
+                &[OpenMethod],
+            ),
+            (
+                "a late-bound new static",
+                "<?php class A { public function __construct() {}
+                 public function run() { new static(); } }",
+                method("A", "run"),
+                &[DynamicCallee],
+                &[DynamicCallee],
+            ),
+            (
+                "a late-bound static::m()",
+                "<?php class A { public static function m() {}
+                 public function run() { static::m(); } }",
+                method("A", "run"),
+                &[DynamicCallee],
+                &[DynamicCallee],
+            ),
+            (
+                "a closed chain, resolved",
+                "<?php final class A { public function leaf() { return 1; }
+                 public function run() { return $this->leaf(); } }",
+                method("A", "run"),
+                &[],
+                &[],
+            ),
+        ]
+    }
+
+    /// One site shape per body, one expected kind per lane: the kind names the cause
+    /// of exactly the gap that shape produces (ADR-0099 §5.1), and the two lanes
+    /// name the same cause for the same site.
+    #[test]
+    fn the_resolver_records_the_one_kind_each_site_shape_produces() {
+        let cases = function_shapes().into_iter().chain(construct_shapes()).chain(method_shapes());
+        for (shape, src, sym, effects, throws) in cases {
+            let (e, t) = kinds_of(src, &sym);
+            let want = |kinds: &[GapKind]| kinds.iter().copied().collect::<BTreeSet<_>>();
+            assert_eq!(e, want(effects), "effect lane, {shape}:\n{src}");
+            assert_eq!(t, want(throws), "throw lane, {shape}:\n{src}");
+        }
     }
 }

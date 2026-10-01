@@ -568,8 +568,8 @@ inherits its callees' gaps, so a function with no gap of its own still lists
 the kinds that make it `…?`. The kinds are `dynamic-callee`, `unknown-class`,
 `unknown-function`, `open-method`, `declared-receiver`, `interop-envelope`,
 `unresolved-callback`, `unseen-code`, `user-code-reach`, `state-construct`,
-`unresolved-throw`, `no-effect-row`, `no-throw-row`, `argument-list` and
-`flag-dependent-throw`.
+`unresolved-throw`, `no-effect-row`, `no-throw-row`, `argument-list`,
+`flag-dependent-throw`, `method-not-found` and `non-final-this`.
 
 > **If you know PHPStan or Psalm:** this is the batch answer to what you get
 > from sprinkling `\PHPStan\dumpType()` and rerunning — a whole file's

@@ -5,6 +5,14 @@
 //! at ([`engine_exit`]) and the rows [`super::engine`] reads for it. Both lanes
 //! ask the same questions of the same chains, so the constructor a `new` runs
 //! cannot differ between them (issues #804, #849).
+//!
+//! Where the answer is a gap, the kind names the cause (ADR-0099 §5.1), and it
+//! names the same one for the same site in either lane: a receiver that names no
+//! class is [`GapKind::UnknownClass`], a class whose whole chain the project holds
+//! and none declares the method is [`GapKind::MethodNotFound`], a `$this` or
+//! `self::` method a subclass may replace is [`GapKind::NonFinalThis`], a late-bound
+//! `new static` or `static::m()` is [`GapKind::DynamicCallee`], and a method of an
+//! engine class the catalog knows is a missing row on the lane's axis.
 
 use std::collections::HashSet;
 
@@ -16,7 +24,8 @@ use crate::Sym;
 use crate::cx::Cx;
 use crate::dispatch::{Resolution, resolve_in_chain};
 
-/// The project body a method call runs, or why none can be pinned.
+/// The project body a method call runs, or why none can be pinned: the
+/// [`GapKind`] of the site (see the module doc).
 ///
 /// `$this`, `self::` and a bound name the enclosing class only as a bound; a
 /// subclass may stand in for it, so it reaches a method only where no subclass
@@ -35,13 +44,18 @@ pub(super) fn method_edge(
             (enclosing.ok_or(GapKind::UnknownClass)?.to_owned(), false)
         }
         EffectRecv::Parent => {
-            (cx.parent_fqn(enclosing.ok_or(GapKind::UnknownClass)?).ok_or(GapKind::UnknownClass)?, true)
+            let own = enclosing.ok_or(GapKind::UnknownClass)?;
+            (cx.parent_fqn(own).ok_or(GapKind::UnknownClass)?, true)
         }
         EffectRecv::ClassName(name) => (cx.class_fqn(name), true),
         EffectRecv::Var(_) | EffectRecv::PropRead(_) => return Err(GapKind::DeclaredReceiver),
     };
-    let Resolution::Found(r) = resolve_in_chain(cx, &start, method) else {
-        return Err(GapKind::UnknownClass);
+    let r = match resolve_in_chain(cx, &start, method) {
+        Resolution::Found(r) => r,
+        // Every class of the chain is the project's and none declares the method:
+        // `__call` may answer, or the call is an `Error`.
+        Resolution::NotFoundChainComplete => return Err(GapKind::MethodNotFound),
+        Resolution::Unknown => return Err(GapKind::UnknownClass),
     };
     if r.method.visibility == Visibility::Private
         && !enclosing.is_some_and(|e| e.eq_ignore_ascii_case(&r.declaring_class.fqn))
@@ -51,7 +65,7 @@ pub(super) fn method_edge(
     if !exact {
         let declaring_final = r.declaring_class.is_final;
         if !(r.method.is_final || r.method.visibility == Visibility::Private || declaring_final) {
-            return Err(GapKind::OpenMethod);
+            return Err(GapKind::NonFinalThis);
         }
     }
     Ok(Sym::Method(r.declaring_class.fqn.clone(), r.method.name.clone()))
@@ -78,8 +92,10 @@ pub(crate) enum NewTarget {
     /// Anything else — a class no file declares and the engine does not
     /// either, a trait that may supply the constructor, an abstract one,
     /// `static` in a class a subclass can extend with its own, `self` with no
-    /// class in scope — marks the body non-exhaustive.
-    Unknown,
+    /// class in scope — marks the body non-exhaustive, for the cause it carries:
+    /// [`GapKind::DynamicCallee`] for the late-bound `static` (the same kind
+    /// `static::m()` has), [`GapKind::UnknownClass`] for the rest.
+    Unknown(GapKind),
 }
 
 /// Resolve the constructor `new class(...)` runs in a unit whose enclosing
@@ -95,25 +111,30 @@ pub(crate) fn resolve_new(cx: &Cx, enclosing: Option<&str>, class: &StaticClass)
         StaticClass::Named(name) => (cx.class_fqn(name), true),
         StaticClass::SelfKw => match own() {
             Some(e) => (e.to_owned(), true),
-            None => return NewTarget::Unknown,
+            None => return NewTarget::Unknown(GapKind::UnknownClass),
         },
         StaticClass::Parent => match own().and_then(|e| cx.parent_fqn(e)) {
             Some(p) => (p, true),
-            None => return NewTarget::Unknown,
+            None => return NewTarget::Unknown(GapKind::UnknownClass),
         },
         StaticClass::Static => match own() {
             Some(e) => (e.to_owned(), cx.find_class(e).is_some_and(|(_, cd)| cd.is_final)),
-            None => return NewTarget::Unknown,
+            None => return NewTarget::Unknown(GapKind::UnknownClass),
         },
     };
+    // A class a subclass can extend, named by `static`, runs the constructor of
+    // whichever class the call is late-bound to: the callee is computed.
+    let unresolved =
+        NewTarget::Unknown(if exact { GapKind::UnknownClass } else { GapKind::DynamicCallee });
     match resolve_in_chain(cx, &start, "__construct") {
         Resolution::Found(r) if exact || r.method.is_final => {
             NewTarget::Edge(Sym::Method(r.declaring_class.fqn.clone(), r.method.name.clone()))
         }
         Resolution::NotFoundChainComplete if exact => NewTarget::Absent,
-        Resolution::Unknown if exact => engine_exit(cx, &start, "__construct")
-            .map_or(NewTarget::Unknown, NewTarget::Engine),
-        _ => NewTarget::Unknown,
+        Resolution::Unknown if exact => {
+            engine_exit(cx, &start, "__construct").map_or(unresolved, NewTarget::Engine)
+        }
+        _ => unresolved,
     }
 }
 
@@ -195,10 +216,24 @@ pub(super) fn engine_method(
     receiver: &EffectRecv,
     method: &str,
 ) -> EngineMethod {
+    let bound_this = matches!(receiver, EffectRecv::This | EffectRecv::SelfKw);
     match engine_start(cx, enclosing, params, receiver, method) {
-        Some((start, exact, origin)) => engine_row(cx, &start, method, exact, origin),
+        Some((start, exact, origin)) => engine_row(cx, &start, method, (exact, bound_this), origin),
         None => EngineMethod::NotEngine,
     }
+}
+
+/// The engine class a method call's chain leaves the project at, for the throw
+/// lane's gap kind: it reads no row, only which class the site names.
+pub(super) fn engine_class_of(
+    cx: &Cx,
+    enclosing: Option<&str>,
+    params: &[Param],
+    receiver: &EffectRecv,
+    method: &str,
+) -> Option<String> {
+    let (start, ..) = engine_start(cx, enclosing, params, receiver, method)?;
+    engine_exit(cx, &start, method)
 }
 
 /// The class the chain starts at, whether the receiver names it exactly, and the
@@ -230,7 +265,13 @@ fn engine_start(
 
 /// The row a call of `method` on `start`'s chain answers from, when the chain
 /// leaves the project at an engine class ([`engine_exit`]).
-fn engine_row(cx: &Cx, start: &str, method: &str, exact: bool, origin: String) -> EngineMethod {
+fn engine_row(
+    cx: &Cx,
+    start: &str,
+    method: &str,
+    (exact, bound_this): (bool, bool),
+    origin: String,
+) -> EngineMethod {
     let Some(fqn) = engine_exit(cx, start, method) else { return EngineMethod::NotEngine };
     match engine::method_effects(&fqn, method, exact) {
         MethodRow::Labels(labels) => EngineMethod::Row(Hit {
@@ -242,8 +283,12 @@ fn engine_row(cx: &Cx, start: &str, method: &str, exact: bool, origin: String) -
             labels: labels.to_vec(),
             throws: &[],
         }),
+        // A row the engine's class has, that a subclass may replace: `$this` and
+        // `self::` are a non-final `$this` as for a project method, and any other
+        // bound (a declared receiver) is an open method.
+        MethodRow::Open if bound_this => EngineMethod::Gap(GapKind::NonFinalThis),
         MethodRow::Open => EngineMethod::Gap(GapKind::OpenMethod),
-        MethodRow::Missing => EngineMethod::Gap(GapKind::NoEffectRow),
+        MethodRow::Missing => EngineMethod::Gap(engine::missing_row(&fqn, GapKind::NoEffectRow)),
     }
 }
 

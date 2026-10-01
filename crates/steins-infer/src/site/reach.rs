@@ -39,9 +39,9 @@ pub(crate) enum Held {
 
 /// The calling frame a call's argument shapes are read against: the parameter
 /// list an [`ArgShape::Param`] names and every site of the frame, whose named
-/// calls decide whether a variable can be rebound through a reference. A region classified on its own (ADR-0076) still names its whole
-/// frame here, since a call outside the region can rebind a parameter the
-/// region reads.
+/// calls decide whether a variable can be rebound through a reference. A region
+/// classified on its own (ADR-0076) still names its whole frame here, since a
+/// call outside the region can rebind a parameter the region reads.
 pub(crate) struct Frame<'a> {
     pub(crate) class_fqn: Option<&'a str>,
     pub(crate) params: &'a [Param],
