@@ -124,6 +124,8 @@ use crate::throws::{ResolvedCatch, ThrowFact, classify_throw_origins};
 use crate::Sym;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::cx::Cx;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::reach::Frame;
 
 // ---------------------------------------------------------------------------
 // The key hash.
@@ -449,7 +451,8 @@ fn own_rows_of(
             order.push(sym.clone());
         }
         let erow = effects.entry(sym.clone()).or_insert_with(EffectOwnRow::new);
-        classify_effect_origins(&cx, class_fqn, params, effect_origins, plugins, policy, erow);
+        let frame = Frame::new(class_fqn, params, effect_origins);
+        classify_effect_origins(&cx, &frame, effect_origins, plugins, policy, erow);
         let trow = throws.entry(sym).or_insert_with(ThrowOwnRow::new);
         classify_throw_origins(&cx, class_fqn, throw_origins, trow);
     };
