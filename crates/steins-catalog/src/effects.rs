@@ -87,6 +87,15 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
         "strtotime" | "idate" | "gmdate" | "gmmktime" | "getdate" | "localtime" => {
             Some(NONDET_TIME)
         }
+        // The function spellings of `new DateTime(...)` and of the static
+        // `createFromFormat` factories (issue #848), on the constructors'
+        // argument-blind row for `date`'s reason above: `date_create()` reads
+        // the clock unless its string names an absolute time, a format fills
+        // every field it leaves out from the current time unless it resets
+        // them with `!` or `|`, and a string naming no zone reads the ambient
+        // one either way.
+        "date_create" | "date_create_immutable" | "date_create_from_format"
+        | "date_create_immutable_from_format" => Some(NONDET_TIME),
         // The **wrapper-capable** family (issue #318): every filesystem row.
         // Each reaches whatever the stream layer resolves its target to, so the
         // argument-blind row can only be the `io` parent (a stricter row would
@@ -555,6 +564,12 @@ fn scheme_of(target: &str) -> Option<&str> {
 /// catalogued-pure containers here; `stdClass` has none. Any other engine
 /// class stays uncatalogued.
 ///
+/// The static `createFromFormat` factories (issue #848) take the constructors'
+/// row: a field the format leaves out is filled from the current time. The
+/// factories that copy an existing value (`createFromImmutable`,
+/// `createFromMutable`, `createFromInterface`) read no clock and no zone, and
+/// are pure.
+///
 /// The `Throwable` accessors (`getMessage`, `getCode`, `getFile`, `getLine`,
 /// `getPrevious`, `getTrace`, `getTraceAsString`, issue #847) read what the
 /// constructor stored, so they are pure on every engine `Throwable`. They are
@@ -569,7 +584,11 @@ pub fn method_effect_labels(class: &str, method: &str) -> Option<&'static [&'sta
     match (class.to_ascii_lowercase().as_str(), method.to_ascii_lowercase().as_str()) {
         ("pdo", "query" | "exec" | "prepare" | "__construct") => Some(IO_DB),
         ("pdostatement", "execute" | "fetch" | "fetchall") => Some(IO_DB),
-        ("datetime" | "datetimeimmutable", "__construct") => Some(NONDET_TIME),
+        ("datetime" | "datetimeimmutable", "__construct" | "createfromformat") => {
+            Some(NONDET_TIME)
+        }
+        ("datetime", "createfromimmutable" | "createfrominterface")
+        | ("datetimeimmutable", "createfrommutable" | "createfrominterface") => Some(EMPTY),
         (
             "stdclass" | "arrayobject" | "arrayiterator" | "spldoublylinkedlist" | "splstack"
             | "splqueue" | "splobjectstorage" | "splfixedarray" | "splpriorityqueue"
@@ -1659,6 +1678,37 @@ mod tests {
         assert_eq!(method_effect_labels("datetime", "__construct"), time);
         assert_eq!(method_effect_labels("ArrayObject", "__construct"), Some(&[][..]));
         assert_eq!(method_effect_labels("stdClass", "__construct"), Some(&[][..]));
+    }
+
+    /// Every spelling of "build a date from a string" reads the clock the way
+    /// `new DateTime(...)` does (issue #848), and the copying factories read
+    /// nothing.
+    #[test]
+    fn the_date_factories_share_the_constructors_clock_row() {
+        let time = Some(&["nondet.time"][..]);
+        for name in [
+            "date_create",
+            "date_create_immutable",
+            "date_create_from_format",
+            "date_create_immutable_from_format",
+            "DATE_CREATE",
+        ] {
+            assert_eq!(super::effect_labels(name), time, "{name}");
+        }
+        assert_eq!(method_effect_labels("DateTime", "createFromFormat"), time);
+        assert_eq!(method_effect_labels("datetimeimmutable", "CREATEFROMFORMAT"), time);
+        assert_eq!(method_effect_labels("DateTime", "createFromImmutable"), Some(&[][..]));
+        assert_eq!(method_effect_labels("DateTimeImmutable", "createFromMutable"), Some(&[][..]));
+        for class in ["DateTime", "DateTimeImmutable"] {
+            assert_eq!(method_effect_labels(class, "createFromInterface"), Some(&[][..]));
+            // A subclass may override a static factory, so none binds one.
+            assert_eq!(final_method_effect_labels(class, "createFromFormat"), None);
+        }
+        // Each copy goes one way only, and the other factories stay uncatalogued.
+        assert_eq!(method_effect_labels("DateTime", "createFromMutable"), None);
+        assert_eq!(method_effect_labels("DateTimeImmutable", "createFromImmutable"), None);
+        assert_eq!(method_effect_labels("DateTime", "createFromTimestamp"), None);
+        assert_eq!(method_effect_labels("DateTime", "__set_state"), None);
     }
 
     #[test]

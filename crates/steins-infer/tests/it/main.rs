@@ -42,6 +42,7 @@ mod constructor_effects;
 mod constructor_summary;
 mod count_guards;
 mod cross_file;
+mod date_factory_effects;
 mod declaration_fatals;
 mod declaration_only_dispatch;
 mod declared_effects;

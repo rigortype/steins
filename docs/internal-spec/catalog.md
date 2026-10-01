@@ -305,7 +305,11 @@ subclass's `parent::__construct(...)` run: `PDO` is `io.db`, `DateTime` and
 containers, `ArrayObject`, `WeakMap`, `DateInterval` and `stdClass` are pure. The
 `Throwable` accessors (`getMessage`, `getCode`, `getFile`, `getLine`,
 `getPrevious`, `getTrace`, `getTraceAsString`, issue #847) are pure on every
-engine `Throwable`; `__toString` has no row.
+engine `Throwable`; `__toString` has no row. The static
+`DateTime::createFromFormat` and `DateTimeImmutable::createFromFormat` take the
+constructors' `nondet.time`, as their function spellings do in `effect_labels`
+(issue #848), and the copying factories (`createFromImmutable`,
+`createFromMutable`, `createFromInterface`) are pure.
 
 A consumer reaches a row through a project subclass by walking the class's chain
 until it leaves the project, provided no project class on the way declares the
