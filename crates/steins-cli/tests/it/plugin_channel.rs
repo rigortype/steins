@@ -284,6 +284,53 @@ fn an_unsupported_api_version_skips_the_plugin_and_says_so() {
     );
 }
 
+/// A plugin's coloring of a builtin the catalog knows but has no effect row for
+/// (`mb_strlen`: mined signature, no colour) enters the declared lane, and the gap
+/// stays and names itself (ADR-0068, ADR-0099 §3.2). A name the catalog colours
+/// answers from its row, and the plugin is not asked.
+#[test]
+fn a_plugin_coloring_of_a_known_builtin_without_a_row_is_declared_and_the_gap_stays() {
+    let p = Staged::new("known-no-row");
+    p.manifest(
+        r#"{ "steins-plugin-api": 1,
+             "labels": ["acme.cache"],
+             "effects": { "mb_strlen": ["acme.cache"], "strlen": ["acme.cache"] } }"#,
+    );
+    p.write(
+        "src/known.php",
+        concat!(
+            "<?php\n\ndeclare(strict_types=1);\n\n",
+            "function width(string $s): int\n{\n    return mb_strlen($s);\n}\n\n",
+            "function size(string $s): int\n{\n    return strlen($s);\n}\n"
+        ),
+    );
+    let out = steins_cmd()
+        .args(["annotate", "--format", "json", "src/known.php"])
+        .current_dir(&p.0)
+        .output()
+        .expect("run steins annotate");
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).expect("annotate json");
+    let find = |name: &str| {
+        doc["functions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["name"] == name)
+            .unwrap_or_else(|| panic!("no summary for {name}"))
+            .clone()
+    };
+    let width = find("width");
+    assert_eq!(width["declared"], serde_json::json!(["acme.cache"]));
+    assert_eq!(width["effects"], serde_json::json!([]));
+    assert_eq!(width["exhaustive"], false);
+    assert_eq!(width["gaps"], serde_json::json!(["no-effect-row"]));
+    // `strlen` is coloured pure by the catalog, so the plugin is not consulted.
+    let size = find("size");
+    assert_eq!(size["declared"], serde_json::json!([]));
+    assert_eq!(size["exhaustive"], true);
+    assert_eq!(size["gaps"], serde_json::json!([]));
+}
+
 #[test]
 fn a_project_function_of_the_same_name_shadows_the_plugin_coloring() {
     let p = Staged::new("shadowing");

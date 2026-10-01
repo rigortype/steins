@@ -486,3 +486,17 @@ fn a_switch_arm_the_lowering_cannot_structure_is_silence() {
         assert_eq!(dead(&src).len(), 0, "an unstructured switch arm is opaque: {body}");
     }
 }
+
+#[test]
+fn a_builtin_nobody_audited_as_throwless_is_not_a_dead_statement() {
+    // ADR-0099 §3.2: no throw row is not "throws nothing". `strlen` is on the
+    // audited table and reports; `date_create_from_format` raises a `ValueError`
+    // for a NUL byte, so it has a row and is a validity check. Before the audit
+    // both read as throwless, and the second reported.
+    reports("", "strlen('x')", "audited throwless");
+    reports("", "ucwords('a b')", "audited throwless");
+    silent("", "date_create_from_format('Y', '2020')", "a ValueError row");
+    // The audit's table is the gate, not the colour: a coloured name that is on
+    // neither the table nor a row would stay silent until its audit lands.
+    assert!(steins_catalog::throws_of("date_create_from_format").is_some_and(|r| !r.is_empty()));
+}
