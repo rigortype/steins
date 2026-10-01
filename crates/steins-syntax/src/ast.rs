@@ -577,6 +577,28 @@ pub struct ConstArgs {
     pub first: Option<CallTarget>,
     /// Positional argument 1.
     pub second: Option<CallTarget>,
+    /// The positions 1 to 3 whose argument is a [`ConstInt`], as `(position,
+    /// expression)` in position order: a flags argument the catalog can read
+    /// (`json_encode($v, JSON_PRETTY_PRINT | JSON_THROW_ON_ERROR)`, ADR-0099
+    /// §3.3). An argument that is anything else is simply absent. Appended
+    /// **after** the fields above so no persisted field index moves.
+    pub ints: Vec<(u8, ConstInt)>,
+}
+
+/// A constant integer expression a **structural** scan can evaluate: an integer
+/// literal, a bare global-constant fetch, and a `|` of such terms (ADR-0099
+/// §3.3). Whatever needs dataflow (a variable, a class constant, arithmetic
+/// other than `|`) is not one.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
+pub enum ConstInt {
+    /// An integer literal that fits `int`.
+    Int(i64),
+    /// A global constant by spelling, leading `\` stripped, namespaced fetches
+    /// excluded (the same rule as [`CallTarget::ConstFetch`]).
+    Const(String),
+    /// A bitwise or of at least two terms, flattened (`A | B | C` is one node).
+    Or(Vec<ConstInt>),
 }
 
 /// What a **structural** scan can show one positional argument of a named call

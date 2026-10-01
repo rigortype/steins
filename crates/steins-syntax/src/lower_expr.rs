@@ -959,7 +959,7 @@ pub fn php_canonical_int_string(s: impl AsRef<[u8]>) -> Option<i64> {
 ///   hex/octal/binary literal wider than 64 bits would need big-integer arithmetic
 ///   for a spelling that essentially never occurs, so silence is a ceiling, not a
 ///   wrong value.
-fn lower_int_literal(raw: &[u8]) -> ArgValue {
+pub(crate) fn lower_int_literal(raw: &[u8]) -> ArgValue {
     let text = String::from_utf8_lossy(raw);
     // Underscores are digit separators anywhere in the literal (PHP 7.4+).
     let text: String = text.chars().filter(|c| *c != '_').collect();
