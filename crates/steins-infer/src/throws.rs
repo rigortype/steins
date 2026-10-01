@@ -19,7 +19,7 @@ use crate::cx::Cx;
 use crate::facts::FileFacts;
 use crate::project::{Diagnostic, FileUnit, Index};
 use crate::site::reach::Frame;
-use crate::site::{GapKind, GapMask, Knowledge, Target, records_throw, resolve_site};
+use crate::site::{GapKind, GapMask, Knowledge, Lane, Target, records_throw, resolve_site};
 use crate::{Fixpoints, Gate, Sym, THROW_LISKOV_ID, THROW_UNDECLARED_ID};
 use crate::suppress::{Facet, Origin};
 
@@ -438,7 +438,7 @@ pub(crate) fn classify_throw_sites(
     sites: &[SiteOrigin],
     row: &mut ThrowOwnRow,
 ) {
-    let knowledge = Knowledge::ThrowsLegacy;
+    let knowledge = Knowledge::Catalog { lane: Lane::Throws, plugins: None };
     for site in sites {
         let resolved = resolve_site(cx, frame, site, &knowledge);
         row.gaps.extend(resolved.gaps.iter().copied());

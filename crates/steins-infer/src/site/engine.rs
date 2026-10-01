@@ -7,15 +7,14 @@
 //! attaches the answer to the site it returns, so a lane folds rows it was handed
 //! and never asks the catalog.
 //!
-//! The effect lane and the throw lane do not know the same names yet (#864): each
-//! row function documents the knowledge it reproduces.
+//! Both lanes know the same names ([`steins_catalog::knows`]); what differs is the
+//! axis a row is read on. A known name the axis has no row for comes back as a
+//! gap-bearing answer (`None`, or an `Err` naming the [`GapKind`]), never as an
+//! empty row.
 
-use steins_syntax::{ArgShape, CallTarget, ConstArgs, NameRef, RefTarget};
+use steins_syntax::{CallTarget, ConstArgs, ConstInt, RefTarget};
 
-use crate::cx::Cx;
-use crate::project::FnResolution;
-use crate::site::Reach;
-use crate::site::reach::{Frame, builtin_reach};
+use crate::site::GapKind;
 
 /// The by-ref-into-a-caller-local color (ADR-0063 §2.3).
 pub(crate) const MUTATE_LOCAL: &str = "mutate.local";
@@ -124,30 +123,56 @@ pub(crate) fn function_effects(
     labels
 }
 
-/// How the throw lane reads a builtin it knows.
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum ThrowsRole {
-    /// A plain call (`strlen($s)`), or the callee of a higher-order call that is
-    /// not an invoker.
-    Call,
-    /// A builtin handed over as a callback: the invoker calls it.
-    Callback,
-    /// The invoker of a higher-order call (`array_map`, `usort`).
-    Invoker,
+/// The classes a call to the builtin `name` raises, on the throw axis
+/// (ADR-0099 §3.2, §3.3), or the gap that says the catalog cannot tell.
+///
+/// `call` is the call's argument facts: the positional arity (`None` for a named
+/// or spread list) and the constant expressions its arguments are. It is `None`
+/// where there are no arguments to read, a builtin handed over as a callback,
+/// which its invoker calls with arguments of the invoker's choosing.
+///
+/// * A row, or the audited throwless table, answers ([`steins_catalog::throws_of`]).
+/// * A name that raises only under a flag (`json_encode`, `json_decode`) answers
+///   with its flag-free throws when the call shows its flags absent or a constant
+///   expression without the flag, and is a [`GapKind::FlagDependentThrow`]
+///   otherwise: flags the scan cannot read may hold `JSON_THROW_ON_ERROR`, and a
+///   flag that is set makes the call raise a class this table does not state.
+/// * Any other known name is a [`GapKind::NoThrowRow`]: unaudited, never throwless.
+pub(crate) fn function_throws(
+    name: &str,
+    call: Option<(Option<usize>, &ConstArgs)>,
+) -> Result<&'static [&'static str], GapKind> {
+    let Some(gate) = steins_catalog::flag_gated_throw(name) else {
+        return steins_catalog::throws_of(name).ok_or(GapKind::NoThrowRow);
+    };
+    let (arity, consts) = call.ok_or(GapKind::FlagDependentThrow)?;
+    // A named or spread list hides which argument is the flags.
+    let arity = arity.ok_or(GapKind::FlagDependentThrow)?;
+    // An omitted flags argument is its default, `0`.
+    let flags = if arity <= gate.position {
+        Some(0)
+    } else {
+        let position = u8::try_from(gate.position).expect("a flags position is small");
+        consts.ints.iter().find(|(p, _)| *p == position).and_then(|(_, expr)| eval_const_int(expr))
+    };
+    match flags {
+        Some(flags) if flags & gate.flag == 0 => Ok(gate.base),
+        _ => Err(GapKind::FlagDependentThrow),
+    }
 }
 
-/// The classes a builtin the throw lane **knows** raises, in `role`.
-///
-/// **LEGACY DEFAULT — removed by #864 (ADR-0099 §3.2).** A known name with no
-/// `builtin_throws` row reads as *throwless* here, and an invoker's own row is
-/// never read at all. That is unsafe — `strlen($o)` under `@throws void` has an
-/// empty, exhaustive throw set while `$o->__toString()` throws — and it is kept in
-/// this one arm only because this slice must not move an answer. #864 turns the
-/// missing row into [`super::GapKind::NoThrowRow`] and reads the invoker's row.
-pub(crate) fn legacy_throws(name: &str, role: ThrowsRole) -> &'static [&'static str] {
-    match role {
-        ThrowsRole::Call | ThrowsRole::Callback => steins_catalog::builtin_throws(name).unwrap_or(&[]),
-        ThrowsRole::Invoker => &[],
+/// The value of a constant integer expression ([`ConstInt`]): a literal, an engine
+/// constant the catalog states ([`steins_catalog::engine_constant`]), and their
+/// `|`. `None` for a constant the catalog does not state an integer for (a user
+/// `const`, an extension this build lacks): the flags are then unreadable.
+fn eval_const_int(expr: &ConstInt) -> Option<i64> {
+    match expr {
+        ConstInt::Int(v) => Some(*v),
+        ConstInt::Const(name) => match steins_catalog::engine_constant(name)?.value? {
+            steins_catalog::ConstValue::Int(v) => Some(v),
+            _ => None,
+        },
+        ConstInt::Or(terms) => terms.iter().try_fold(0, |acc, term| Some(acc | eval_const_int(term)?)),
     }
 }
 
@@ -200,56 +225,36 @@ pub(crate) fn constructor_throws(class: &str) -> Option<&'static [&'static str]>
     steins_catalog::method_throws(class, "__construct")
 }
 
-/// Whether a call [`Cx::resolve_effect_function`] left unresolved is a builtin
-/// the catalog certifies pure **at this call's arity** (issue #851,
-/// [`steins_catalog::pure_at_arity`]).
-///
-/// `array_keys($a)` copies keys, while `array_keys($a, $v)` compares `$v`
-/// loosely with every element, which runs an object's `__toString`. The
-/// argument-blind row therefore stays uncatalogued, and resolution does not
-/// know the name. This asks resolution again with the arity-aware predicate,
-/// so a namespaced shadow or an ambiguous global keeps the `…?` exactly as an
-/// uncatalogued name would. `targets` is the positional argument list; `None`
-/// (a named or spread argument) has no arity to read.
-pub(crate) fn pure_at_call_arity(
-    cx: &Cx,
-    name: &NameRef,
-    targets: Option<&[RefTarget]>,
-) -> bool {
-    let Some(positional) = targets.map(<[_]>::len) else { return false };
-    let certified = |n: &str| steins_catalog::pure_at_arity(n, positional);
-    matches!(cx.resolve_function_with(name, &certified), FnResolution::Builtin(_))
+/// Whether the builtin `name` called with `positional` positional arguments is
+/// **certified pure at that arity** (issue #851, [`steins_catalog::pure_at_arity`]):
+/// `array_keys($a)` copies keys, while `array_keys($a, $v)` compares `$v` loosely
+/// with every element, which runs an object's `__toString`. The argument-blind
+/// effect row therefore stays absent, and the effect lane asks again with the
+/// call's arity. `positional` is the argument count; `None` (a named or spread
+/// list) has no arity to read.
+pub(crate) fn pure_at_call_arity(name: &str, positional: Option<usize>) -> bool {
+    positional.is_some_and(|n| steins_catalog::pure_at_arity(name, n))
 }
 
-/// Whether a call [`Cx::resolve_effect_function`] left unresolved is a builtin
-/// the catalog certifies pure **at a call site that rules out every argument
-/// reaching user code** (issue #856, [`steins_catalog::certified_at_call_site`]):
-/// the string family, whose `string` parameters run an object's `__toString`
-/// under coercive typing. Resolution is asked again with that list, so a
-/// namespaced shadow or an ambiguous global keeps its `…?`.
-///
-/// `None` when the name is not such a builtin; otherwise the reach the call
-/// site leaves open: [`Reach::RuledOut`] certifies the call, [`Reach::Possible`]
-/// keeps the gap.
-pub(crate) fn certified_at_call_site(
-    cx: &Cx,
-    frame: &Frame,
-    name: &NameRef,
-    shapes: Option<&[ArgShape]>,
-) -> Option<Reach> {
-    match cx.resolve_function_with(name, &steins_catalog::certified_at_call_site) {
-        FnResolution::Builtin(builtin) => Some(builtin_reach(cx, frame, &builtin, shapes, &[])),
-        FnResolution::User(_) | FnResolution::Unknown => None,
-    }
+/// Whether the builtin `name` is certified pure **at a call site that rules out
+/// every argument reaching user code** (issue #856,
+/// [`steins_catalog::certified_at_call_site`]): the string family, whose `string`
+/// parameters run an object's `__toString` under coercive typing. The caller then
+/// holds the call to the reach rule.
+pub(crate) fn certified_at_call_site(name: &str) -> bool {
+    steins_catalog::certified_at_call_site(name)
 }
 
-/// Whether a call with no readable positional argument list (`targets` is
+/// Whether a call with no readable positional argument list (`positional` is
 /// `None`) names a builtin the catalog would certify pure at **some** arity
 /// ([`pure_at_call_arity`] declines it only for want of one).
-pub(crate) fn arity_defeated(cx: &Cx, name: &NameRef, targets: Option<&[RefTarget]>) -> bool {
-    targets.is_none()
-        && matches!(
-            cx.resolve_function_with(name, &|n| steins_catalog::pure_at_arity(n, 1)),
-            FnResolution::Builtin(_)
-        )
+pub(crate) fn arity_defeated(name: &str, positional: Option<usize>) -> bool {
+    positional.is_none() && steins_catalog::pure_at_arity(name, 1)
+}
+
+/// Whether the effect axis has a row for the builtin `name` of its own: an
+/// effect colour or a by-ref out-parameter row. A known name without one is
+/// certified at its call or a [`GapKind::NoEffectRow`].
+pub(crate) fn has_effect_row(name: &str) -> bool {
+    steins_catalog::effect_labels(name).is_some() || steins_catalog::out_params(name).is_some()
 }

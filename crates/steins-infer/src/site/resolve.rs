@@ -2,9 +2,11 @@
 //!
 //! The walk below is the union of what the effect lane's and the throw lane's
 //! classifiers each did on their own, with each lane's decisions selected by the
-//! [`Knowledge`] it hands in. Every arm names the legacy behavior it reproduces;
-//! where the two lanes still differ (#864 makes them one), the difference is a
-//! `match` on the knowledge in one place, not a second walk.
+//! [`Lane`] of the [`Knowledge`] it hands in. Both lanes resolve a name through
+//! the same [`Cx::resolve_function`] (a spelling is a builtin exactly when the
+//! catalog knows it), read the operands' reach and the unseen code the same way,
+//! and differ only in the axis they read a row on: a known name with no row on that
+//! axis is a gap on it, in one place per arm, not a second walk.
 
 use steins_syntax::{
     ArgShape, CallbackRef, ConstArgs, ConstructKind, DynamicSite, EffectRecv, NameRef, RefKind,
@@ -12,12 +14,12 @@ use steins_syntax::{
 };
 
 use super::contract::{conditional_purity, eval_conditional_purity};
-use super::engine::{self, ThrowsRole};
+use super::engine;
 use super::method::{EngineMethod, engine_method, method_edge};
 use super::reach::{Frame, builtin_reach, callback_reaches_user_code};
 use super::{
-    Edge, GapKind, Hit, HitKind, Knowledge, NewTarget, Reach, ResolvedSite, Target, new_origin,
-    resolve_new,
+    Edge, GapKind, Hit, HitKind, Knowledge, Lane, NewTarget, Reach, ResolvedSite, Target,
+    new_origin, resolve_new,
 };
 use crate::Sym;
 use crate::cx::Cx;
@@ -55,7 +57,7 @@ struct Resolver<'a, 'c, 'f> {
     out: ResolvedSite,
 }
 
-impl Resolver<'_, '_, '_> {
+impl<'a> Resolver<'a, '_, '_> {
     fn run(&mut self) {
         let site = self.site;
         match &site.kind {
@@ -101,13 +103,26 @@ impl Resolver<'_, '_, '_> {
         self.out.reach = self.out.reach.max(reach);
     }
 
-    /// The lane's own resolution of a named function: the effect lane knows a
-    /// builtin by a color or an out-parameter row, the throw lane by a color alone.
-    fn function(&self, name: &NameRef) -> FnResolution {
-        match self.knowledge {
-            Knowledge::Effects { .. } => self.cx.resolve_effect_function(name),
-            Knowledge::ThrowsLegacy => self.cx.resolve_function(name),
+    /// Whether this resolution answers the effect lane.
+    fn effects(&self) -> bool {
+        self.knowledge.lane() == Lane::Effects
+    }
+
+    /// The effect lane's plugin channel (ADR-0068); the throw lane has none.
+    fn plugins(&self) -> Option<&'a steins_db::PluginFacts> {
+        let Knowledge::Catalog { plugins, .. } = self.knowledge;
+        *plugins
+    }
+
+    /// The reach of a call to the builtin `name`: what its operands can run through
+    /// the engine (issue #856). A name certified pure at this call's arity
+    /// (`array_keys($a)`) copies and compares nothing, so no operand reaches
+    /// anything.
+    fn call_reach(&self, builtin: &str, args: &CallArgs<'_>) -> Reach {
+        if engine::pure_at_call_arity(builtin, args.targets.map(<[_]>::len)) {
+            return Reach::RuledOut;
         }
+        builtin_reach(self.cx, self.frame, builtin, args.shapes, &[])
     }
 
     /// Record an engine function's hit, if it carries anything on the lane's
@@ -136,27 +151,31 @@ impl Resolver<'_, '_, '_> {
     // ---- named calls ------------------------------------------------------
 
     /// One named call: an edge to a project function (or its conditional-purity
-    /// row, ADR-0063 §2), a builtin's row, or the gap of a name nothing resolves.
+    /// row, ADR-0063 §2), a builtin's row on the lane's axis, or the gap of a name
+    /// nothing resolves.
     ///
-    /// A builtin answers with its row, and the effect lane adds the gap of an
-    /// argument that can reach user code the call site does not rule out (issue
-    /// #856). A name only the call site certifies, `array_keys($a)` at one argument
-    /// (issue #851) or a string-family name whose every reaching argument is ruled
-    /// out (issue #856), answers as a pure builtin before the plugin channel does.
+    /// A builtin answers with its row and, in both lanes, the gap of an argument
+    /// that can reach user code the call site does not rule out (issue #856). A
+    /// known name with no row on the lane's axis is a gap, never an empty answer
+    /// (ADR-0099 §3.2).
     fn named_call(&mut self, name: &NameRef, args: &CallArgs<'_>) {
-        match self.function(name) {
+        match self.cx.resolve_function(name) {
             FnResolution::User(site) => self.user_call(name, site, args),
-            FnResolution::Builtin(builtin) => self.builtin_call(name, &builtin, args),
-            FnResolution::Unknown => self.unresolved_call(name, args),
+            FnResolution::Builtin(builtin) if self.effects() => {
+                self.effect_builtin(name, &builtin, args);
+            }
+            FnResolution::Builtin(builtin) => self.throw_builtin(name, &builtin, args),
+            FnResolution::Unknown => self.unresolved_call(name),
         }
     }
 
     fn user_call(&mut self, name: &NameRef, site: Site, args: &CallArgs<'_>) {
         let decl = self.cx.fn_decl(site);
         let sym = Sym::Func(decl.fqn.clone());
-        let contract = match self.knowledge {
-            Knowledge::Effects { .. } => conditional_purity(decl.docblock.as_ref(), &decl.params),
-            Knowledge::ThrowsLegacy => None,
+        let contract = if self.effects() {
+            conditional_purity(decl.docblock.as_ref(), &decl.params)
+        } else {
+            None
         };
         let Some(cp) = contract else {
             self.push(Edge::call(sym));
@@ -187,49 +206,75 @@ impl Resolver<'_, '_, '_> {
         }
     }
 
-    fn builtin_call(&mut self, name: &NameRef, builtin: &str, args: &CallArgs<'_>) {
-        match self.knowledge {
-            Knowledge::Effects { .. } => {
-                let labels = engine::function_effects(builtin, args.targets, Some(args.consts));
-                self.function_hit(builtin, name.simple(), labels, &[]);
-                let reach = builtin_reach(self.cx, self.frame, builtin, args.shapes, &[]);
-                self.note_reach(reach);
-            }
-            Knowledge::ThrowsLegacy => {
-                let throws = engine::legacy_throws(builtin, ThrowsRole::Call);
-                self.function_hit(builtin, name.simple(), Vec::new(), throws);
-            }
+    /// A builtin call in the effect lane: its colour and out-parameter labels, or,
+    /// for a known name with neither, what its call site certifies.
+    fn effect_builtin(&mut self, name: &NameRef, builtin: &str, args: &CallArgs<'_>) {
+        if !engine::has_effect_row(builtin) {
+            self.effect_unrowed(name, builtin, args);
+            return;
         }
+        let labels = engine::function_effects(builtin, args.targets, Some(args.consts));
+        self.function_hit(builtin, name.simple(), labels, &[]);
+        let reach = builtin_reach(self.cx, self.frame, builtin, args.shapes, &[]);
+        self.note_reach(reach);
     }
 
-    /// A call [`Self::function`] left unresolved.
-    fn unresolved_call(&mut self, name: &NameRef, args: &CallArgs<'_>) {
-        let mut gap = GapKind::UnknownFunction;
-        if let Knowledge::Effects { plugins } = self.knowledge {
-            // A builtin certified pure at this call's arity or operands answers
-            // before the plugin channel, which gets the last word here and nowhere
-            // else (ADR-0068 precedence): a project body and a catalog row are both
-            // already spoken for.
-            if engine::pure_at_call_arity(self.cx, name, args.targets) {
-                return;
-            }
-            match engine::certified_at_call_site(self.cx, self.frame, name, args.shapes) {
-                Some(Reach::RuledOut) => return,
+    /// A known builtin with no colour and no out-parameter row. Two certifications
+    /// answer for it at the call site, before the plugin channel does (ADR-0068
+    /// precedence): `array_keys($a)` at one argument (issue #851), and a
+    /// string-family name whose every reaching argument is ruled out (issue #856).
+    /// Anything else is a [`GapKind::NoEffectRow`].
+    fn effect_unrowed(&mut self, name: &NameRef, builtin: &str, args: &CallArgs<'_>) {
+        let positional = args.targets.map(<[_]>::len);
+        if engine::pure_at_call_arity(builtin, positional) {
+            return;
+        }
+        let mut gap = GapKind::NoEffectRow;
+        if engine::certified_at_call_site(builtin) {
+            match builtin_reach(self.cx, self.frame, builtin, args.shapes, &[]) {
+                Reach::RuledOut => return,
                 // Certifiable, but an operand may reach user code: that is the gap.
-                Some(reach) => {
+                reach => {
                     self.note_reach(reach);
                     gap = GapKind::UserCodeReach;
                 }
-                None if engine::arity_defeated(self.cx, name, args.targets) => {
-                    gap = GapKind::ArgumentList;
-                }
-                None => {}
             }
-            if let Some(labels) = plugin_call_labels(self.cx, plugins, name) {
-                self.push(Target::Declared(labels.to_vec()));
-            }
+        } else if engine::arity_defeated(builtin, positional) {
+            gap = GapKind::ArgumentList;
         }
+        self.plugin_declaration(name);
         self.gap(gap);
+    }
+
+    /// A builtin call in the throw lane: its throw row, the audited throwless
+    /// table, or a gap, and the gap of an operand that may reach user code.
+    fn throw_builtin(&mut self, name: &NameRef, builtin: &str, args: &CallArgs<'_>) {
+        let call = Some((args.targets.map(<[_]>::len), args.consts));
+        match engine::function_throws(builtin, call) {
+            Ok(throws) => self.function_hit(builtin, name.simple(), Vec::new(), throws),
+            Err(kind) => self.gap(kind),
+        }
+        let reach = self.call_reach(builtin, args);
+        self.note_reach(reach);
+    }
+
+    /// A call [`Cx::resolve_function`] left unresolved: no project body and no
+    /// catalog knowledge, or an ambiguous or shadowed name. The plugin channel gets
+    /// the last word here (effect lane) and nowhere else (ADR-0068 precedence): a
+    /// project body and a catalog name are both already spoken for.
+    fn unresolved_call(&mut self, name: &NameRef) {
+        self.plugin_declaration(name);
+        self.gap(GapKind::UnknownFunction);
+    }
+
+    /// The effect lane's plugin channel (ADR-0068): a plugin's declaration for a
+    /// global function no row covers enters the declared lane, and the caller's gap
+    /// stays.
+    fn plugin_declaration(&mut self, name: &NameRef) {
+        let Some(plugins) = self.plugins() else { return };
+        if let Some(labels) = plugin_call_labels(self.cx, plugins, name) {
+            self.push(Target::Declared(labels.to_vec()));
+        }
     }
 
     // ---- higher-order calls and callbacks ---------------------------------
@@ -241,28 +286,34 @@ impl Resolver<'_, '_, '_> {
         let site = self.site;
         let targets = Some(site.ref_targets.as_deref().unwrap_or(&[]));
         let shapes = Some(site.operands.as_deref().unwrap_or(&[]));
-        let FnResolution::Builtin(builtin) = self.cx.resolve_invoker_function(name) else {
+        let invoker = match self.cx.resolve_function(name) {
+            FnResolution::Builtin(builtin) => {
+                engine::invoker_callback_param(&builtin).map(|param| (builtin, param))
+            }
+            _ => None,
+        };
+        let Some((builtin, callback_param)) = invoker else {
             // Not a known invoker: the callee is a normal call, unless it is a user
             // function declaring a conditional-purity contract (ADR-0063 §2).
             let args = CallArgs { targets, consts: &site.const_args, shapes, callbacks };
             self.named_call(name, &args);
             return;
         };
-        let callback_param = engine::invoker_callback_param(&builtin)
-            .expect("resolve_invoker_function's catalog_knows guarantees a shape row");
         let arg_count = site.ref_targets.as_ref().map_or(0, Vec::len);
         // ADR-0063 P1: the call's effect is the invoker's OWN catalog color joined
         // with the envelope of the callback it immediately invokes. The own-color
         // leg is unconditional — an unresolvable (or absent) callback never
-        // *weakens* the invoker's declared color; it only adds a gap.
-        match self.knowledge {
-            Knowledge::Effects { .. } => {
-                let labels = engine::function_effects(&builtin, targets, Some(&site.const_args));
-                self.function_hit(&builtin, name.simple(), labels, &[]);
-            }
-            Knowledge::ThrowsLegacy => {
-                let throws = engine::legacy_throws(&builtin, ThrowsRole::Invoker);
-                self.function_hit(&builtin, name.simple(), Vec::new(), throws);
+        // *weakens* the invoker's declared color; it only adds a gap. The throw
+        // lane reads the invoker's own throw row the same way, and a row the audit
+        // has not given it is a gap there.
+        if self.effects() {
+            let labels = engine::function_effects(&builtin, targets, Some(&site.const_args));
+            self.function_hit(&builtin, name.simple(), labels, &[]);
+        } else {
+            let call = Some((site.ref_targets.as_ref().map(Vec::len), &site.const_args));
+            match engine::function_throws(&builtin, call) {
+                Ok(throws) => self.function_hit(&builtin, name.simple(), Vec::new(), throws),
+                Err(kind) => self.gap(kind),
             }
         }
         let mut handled = Vec::new();
@@ -277,10 +328,8 @@ impl Resolver<'_, '_, '_> {
             }
         }
         // The invoker's other arguments can reach user code as a plain call's can
-        // (`preg_replace_callback`'s subject). The throw lane does not ask yet.
-        if matches!(self.knowledge, Knowledge::Effects { .. }) {
-            self.note_reach(builtin_reach(self.cx, self.frame, &builtin, shapes, &handled));
-        }
+        // (`preg_replace_callback`'s subject).
+        self.note_reach(builtin_reach(self.cx, self.frame, &builtin, shapes, &handled));
     }
 
     /// One resolved callback, wired into the lane's graph (ADR-0033): a closure or
@@ -294,30 +343,37 @@ impl Resolver<'_, '_, '_> {
             }
             CallbackRef::Named(name) => name,
         };
-        match self.function(name) {
+        match self.cx.resolve_function(name) {
             FnResolution::User(site) => {
                 self.push(Edge::call(Sym::Func(self.cx.fn_decl(site).fqn.clone())));
             }
-            FnResolution::Builtin(builtin) => match self.knowledge {
-                Knowledge::Effects { .. } => {
-                    // A builtin passed *as* a callback is invoked by the
-                    // higher-order callee with arguments of its choosing, never
-                    // with an lvalue of this frame — the conditional out-param row
-                    // cannot apply — nor can the call site rule out what those
-                    // arguments reach, and the engine calls it in coercive mode
-                    // (issue #856).
-                    let labels = engine::function_effects(&builtin, None, None);
-                    self.function_hit(&builtin, name.simple(), labels, &[]);
-                    if callback_reaches_user_code(&builtin) {
-                        self.note_reach(Reach::Possible);
-                    }
-                }
-                Knowledge::ThrowsLegacy => {
-                    let throws = engine::legacy_throws(&builtin, ThrowsRole::Callback);
-                    self.function_hit(&builtin, name.simple(), Vec::new(), throws);
-                }
-            },
+            FnResolution::Builtin(builtin) => self.builtin_callback(name, &builtin),
             FnResolution::Unknown => self.gap(GapKind::UnresolvedCallback),
+        }
+    }
+
+    /// A builtin passed *as* a callback is invoked by the higher-order callee with
+    /// arguments of its choosing, never with an lvalue of this frame — the
+    /// conditional out-param row cannot apply, nor a flags argument be read — nor
+    /// can the call site rule out what those arguments reach, and the engine calls
+    /// it in coercive mode (issue #856). Its row on the lane's axis answers as it
+    /// does for a plain call, and a known name with none is a gap.
+    fn builtin_callback(&mut self, name: &NameRef, builtin: &str) {
+        if self.effects() {
+            if engine::has_effect_row(builtin) {
+                let labels = engine::function_effects(builtin, None, None);
+                self.function_hit(builtin, name.simple(), labels, &[]);
+            } else {
+                self.gap(GapKind::NoEffectRow);
+            }
+        } else {
+            match engine::function_throws(builtin, None) {
+                Ok(throws) => self.function_hit(builtin, name.simple(), Vec::new(), throws),
+                Err(kind) => self.gap(kind),
+            }
+        }
+        if callback_reaches_user_code(builtin) {
+            self.note_reach(Reach::Possible);
         }
     }
 
@@ -334,24 +390,23 @@ impl Resolver<'_, '_, '_> {
             }
             Err(miss) => miss,
         };
-        match self.knowledge {
-            Knowledge::Effects { plugins } => self.method_fallback(plugins, receiver, method, miss),
-            Knowledge::ThrowsLegacy => {
-                // `parent::__construct(...)` into an engine class runs the
-                // constructor `new parent` would, and answers from the same row, so
-                // a project exception forwarding to the engine's stays exhaustive.
-                // Any other such call taints, as it always has.
-                let parent_ctor = matches!(receiver, EffectRecv::Parent)
-                    && method.eq_ignore_ascii_case("__construct");
-                if parent_ctor
-                    && let NewTarget::Engine(fqn) =
-                        resolve_new(self.cx, self.frame.class_fqn, &StaticClass::Parent)
-                {
-                    self.engine_constructor_throws(&fqn, "parent::__construct".to_owned());
-                } else {
-                    self.gap(miss);
-                }
-            }
+        if let Some(plugins) = self.plugins() {
+            self.method_fallback(plugins, receiver, method, miss);
+            return;
+        }
+        // `parent::__construct(...)` into an engine class runs the constructor
+        // `new parent` would, and answers from the same row, so a project exception
+        // forwarding to the engine's stays exhaustive. Any other such call taints,
+        // as it always has.
+        let parent_ctor =
+            matches!(receiver, EffectRecv::Parent) && method.eq_ignore_ascii_case("__construct");
+        if parent_ctor
+            && let NewTarget::Engine(fqn) =
+                resolve_new(self.cx, self.frame.class_fqn, &StaticClass::Parent)
+        {
+            self.engine_constructor_throws(&fqn, "parent::__construct".to_owned());
+        } else {
+            self.gap(miss);
         }
     }
 
@@ -421,16 +476,14 @@ impl Resolver<'_, '_, '_> {
         match resolve_new(self.cx, self.frame.class_fqn, class) {
             NewTarget::Edge(sym) => self.push(Edge::call(sym)),
             NewTarget::Absent => {}
-            NewTarget::Engine(fqn) => match self.knowledge {
-                Knowledge::Effects { .. } => match engine::constructor_effects(&fqn) {
-                    Some(labels) => {
-                        let origin = new_origin(class);
-                        self.constructor_hit(fqn, origin, labels, &[]);
-                    }
-                    None => self.gap(GapKind::NoEffectRow),
-                },
-                Knowledge::ThrowsLegacy => self.engine_constructor_throws(&fqn, new_origin(class)),
+            NewTarget::Engine(fqn) if self.effects() => match engine::constructor_effects(&fqn) {
+                Some(labels) => {
+                    let origin = new_origin(class);
+                    self.constructor_hit(fqn, origin, labels, &[]);
+                }
+                None => self.gap(GapKind::NoEffectRow),
             },
+            NewTarget::Engine(fqn) => self.engine_constructor_throws(&fqn, new_origin(class)),
             NewTarget::Unknown => self.gap(GapKind::UnknownClass),
         }
     }
@@ -467,36 +520,41 @@ impl Resolver<'_, '_, '_> {
 
     // ---- constructs and throws --------------------------------------------
 
-    /// A language construct. The effect lane owns output, exit, `eval`, inclusion
-    /// and the state constructs; the throw lane records only a `match` with no
-    /// `default`, which can raise `\UnhandledMatchError` (an `Error`, unchecked, so
-    /// it never enters `throw.undeclared` but surfaces in the annotate margin).
+    /// A language construct. The effect lane owns output, exit and the state
+    /// constructs; both lanes read unseen code (`eval`, an inclusion) as a gap, and
+    /// the throw lane records the `match` with no `default`, which can raise
+    /// `\UnhandledMatchError` (an `Error`, unchecked, so it never enters
+    /// `throw.undeclared` but surfaces in the annotate margin).
     fn construct(&mut self, construct: &ConstructKind) {
-        match (self.knowledge, construct) {
-            (Knowledge::Effects { .. }, ConstructKind::Output(kw)) => {
+        // Dynamic code (ADR-0046 amendment): the code it runs is unseen, and may
+        // throw anything as it may do anything, so the body is `…?` in both lanes.
+        if matches!(construct, ConstructKind::Eval | ConstructKind::Include(_)) {
+            if self.effects() {
+                // The construct itself is proven in the effect lane — `eval`, or
+                // the file read an inclusion is — and the gap sits beside it.
+                match construct {
+                    ConstructKind::Include(kw) => self.push(Target::Construct {
+                        label: "io.fs.read",
+                        spelling: kw.spelling(),
+                    }),
+                    _ => self.push(Target::Construct { label: "eval", spelling: "eval" }),
+                }
+            }
+            self.gap(GapKind::UnseenCode);
+            return;
+        }
+        match (self.effects(), construct) {
+            (true, ConstructKind::Output(kw)) => {
                 self.push(Target::Construct { label: "io.output.buffer", spelling: kw.spelling() });
             }
-            (Knowledge::Effects { .. }, ConstructKind::Exit(kw)) => {
+            (true, ConstructKind::Exit(kw)) => {
                 self.push(Target::Construct { label: "exit", spelling: kw.spelling() });
-            }
-            // Dynamic code (ADR-0046 amendment): the construct itself is proven —
-            // `eval`, or the file read an inclusion is — and the code it runs is
-            // unseen, so the body is `…?` beside it.
-            (Knowledge::Effects { .. }, ConstructKind::Eval) => {
-                self.push(Target::Construct { label: "eval", spelling: "eval" });
-                self.gap(GapKind::UnseenCode);
-            }
-            (Knowledge::Effects { .. }, ConstructKind::Include(kw)) => {
-                self.push(Target::Construct { label: "io.fs.read", spelling: kw.spelling() });
-                self.gap(GapKind::UnseenCode);
             }
             // A state construct's label (`global.*`, `mutate.*`) is not inferred
             // yet (ADR-0055), and `{}` over one would read as proven-pure, so it
             // marks the body `…?` until it is (ADR-0055 amendment, 2026-09-26).
-            (Knowledge::Effects { .. }, ConstructKind::State(_)) => {
-                self.gap(GapKind::StateConstruct);
-            }
-            (Knowledge::ThrowsLegacy, ConstructKind::MatchNoDefault) => {
+            (true, ConstructKind::State(_)) => self.gap(GapKind::StateConstruct),
+            (false, ConstructKind::MatchNoDefault) => {
                 let class = NameRef {
                     raw: "UnhandledMatchError".to_owned(),
                     kind: RefKind::FullyQualified,
@@ -504,15 +562,15 @@ impl Resolver<'_, '_, '_> {
                 };
                 self.thrown(&class, "new");
             }
-            // `eval` and an inclusion have no throw arm (#864), and the effect lane
-            // records no `match`.
-            (Knowledge::ThrowsLegacy, _) | (Knowledge::Effects { .. }, ConstructKind::MatchNoDefault) => {}
+            // The effect lane records no `match`, and the throw lane none of the
+            // constructs the effect lane owns alone.
+            _ => {}
         }
     }
 
     /// A `throw` statement (throw lane only).
     fn throw(&mut self, thrown: &ThrownKind) {
-        if matches!(self.knowledge, Knowledge::Effects { .. }) {
+        if self.effects() {
             return;
         }
         match thrown {

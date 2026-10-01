@@ -158,7 +158,7 @@ fn array_map_callback_throws_propagate_to_summary() {
 }
 
 // Issue #279: HigherOrder dispatch through an aliased builtin import. Fixed by
-// routing the call through `Cx::resolve_invoker_function`'s resolved catalog name
+// routing the call through `Cx::resolve_function`'s resolved catalog name
 // instead of the call's own spelling, so an alias no longer misses invoker treatment.
 
 #[test]
@@ -183,7 +183,7 @@ fn an_aliased_usort_import_dispatches_and_colors_like_the_spelled_call() {
 #[test]
 fn an_aliased_usort_import_propagates_callback_throws_like_the_spelled_call() {
     // Throws-pass twin of the effects test above: only reached if
-    // `resolve_invoker_function` finds the comparator's callback slot through the alias.
+    // `resolve_function` finds the comparator's callback slot through the alias.
     let aliased = "<?php\nuse function usort as u;\n\
                    function f(array $xs): array {\n    \
                    u($xs, function ($a, $b) { return intdiv($a, $b); });\n    \

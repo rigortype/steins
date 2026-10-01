@@ -14,10 +14,11 @@
 //! it sees were read by [`engine`], on its axis only, and a row the catalog does
 //! not have arrives as a gap rather than as an absence.
 //!
-//! This slice (#863) is a refactor and must not move an answer, so the
-//! [`Knowledge`] per lane reproduces what each lane knew before: the effect lane's
-//! predicates exactly, and the throw lane's, unsafe default included. #864 makes
-//! the knowledge one.
+//! Both lanes resolve with one [`Knowledge`] (ADR-0099 §3, #864): a spelling is a
+//! builtin exactly when [`steins_catalog::knows`] says so, a known name with no
+//! row on a lane's axis is a coverage gap on that axis and never a pure or
+//! throwless call, and both lanes read an operand that may reach user code, and
+//! unseen code (`eval`, an inclusion), as gaps.
 
 mod contract;
 pub(crate) mod engine;
@@ -45,8 +46,8 @@ pub(crate) use resolve::resolve_site;
 /// inserted (the payload is decoded past the analyzer gate, so no
 /// `SCHEMA_VERSION` bump follows).
 ///
-/// Nothing surfaces the kinds yet (#864 does); they are recorded so that every
-/// coverage change in an A/B can name its cause.
+/// The kinds surface in `annotate --format json` and the effect baseline, so that
+/// every coverage change in an A/B names its cause.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(not(target_arch = "wasm32"), derive(serde::Serialize, serde::Deserialize))]
 pub(crate) enum GapKind {
@@ -64,7 +65,8 @@ pub(crate) enum GapKind {
     /// catalog knowledge, an ambiguous or shadowed name. Includes a call whose
     /// named or spread arguments defeat the arity a certification needs, which the
     /// code does not tell apart from an uncatalogued name today. Source:
-    /// `FnResolution::Unknown` at a call (either lane).
+    /// `FnResolution::Unknown` at a call (either lane). A known builtin the lane has
+    /// no row for is [`Self::NoEffectRow`] or [`Self::NoThrowRow`] instead.
     UnknownFunction,
     /// A method call whose receiver names a class but whose body a subclass may
     /// replace (a non-final `$this->m()`, `self::m()`), or that is a private method
@@ -93,22 +95,31 @@ pub(crate) enum GapKind {
     /// A thrown or rethrown class the scan cannot name: `throw <expr>`, or a
     /// rethrow of a catch parameter whose clause named a type that did not resolve.
     UnresolvedThrow,
-    /// The chain leaves the project at a class the project does not declare (the
-    /// engine's, as far as the catalog can tell: `new SomeEngine`,
-    /// `SomeEngine::m()`, a declared receiver of a class nothing declares) and the
-    /// catalog has no row for it on the **effect** axis.
+    /// The catalog has no row on the **effect** axis for what the chain reaches: a
+    /// known builtin function with no colour, out-parameter row or certification
+    /// (`trim`, `array_map`), or the chain leaves the project at a class the project
+    /// does not declare (the engine's, as far as the catalog can tell: `new
+    /// SomeEngine`, `SomeEngine::m()`, a declared receiver of a class nothing
+    /// declares).
     NoEffectRow,
-    /// The same, on the **throw** axis.
+    /// The same, on the **throw** axis: a known builtin that is neither on the
+    /// audited throwless table nor carries a throw row ([`steins_catalog::throws_of`]),
+    /// or an engine class whose constructor has none.
     NoThrowRow,
     /// A named or spread argument list that defeats the positional arity a
     /// certification needs: `array_keys(...$a)` cannot be told from
     /// `array_keys($a, $v)`, and only the one-argument form is certified pure.
     ArgumentList,
+    /// A builtin that raises only when a flags argument asks it to
+    /// (`json_encode(…, JSON_THROW_ON_ERROR)`), called with flags the scan cannot
+    /// read as a constant without that flag. Appended after #863's kinds, so the
+    /// codec numbers of the earlier ones did not move.
+    FlagDependentThrow,
 }
 
 impl GapKind {
     /// Every kind, in the order the facts payload's codec numbers them.
-    pub(crate) const ALL: [Self; 14] = [
+    pub(crate) const ALL: [Self; 15] = [
         Self::DynamicCallee,
         Self::UnknownClass,
         Self::UnknownFunction,
@@ -123,6 +134,7 @@ impl GapKind {
         Self::NoEffectRow,
         Self::NoThrowRow,
         Self::ArgumentList,
+        Self::FlagDependentThrow,
     ];
 
     /// The kind's spelling on the surfaces that name it (`annotate --format
@@ -144,6 +156,7 @@ impl GapKind {
             Self::NoEffectRow => "no-effect-row",
             Self::NoThrowRow => "no-throw-row",
             Self::ArgumentList => "argument-list",
+            Self::FlagDependentThrow => "flag-dependent-throw",
         }
     }
 }
@@ -182,22 +195,41 @@ impl GapMask {
     }
 }
 
+/// Which of the two questions a resolution answers: they ask the same thing at
+/// every site (*what code can run here?*) and read different axes of the
+/// catalog for the answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Lane {
+    /// Effect labels (ADR-0005).
+    Effects,
+    /// Escaping throw classes (ADR-0040).
+    Throws,
+}
+
 /// What a lane knows, and so how [`resolve_site`] reads a site for it
-/// (ADR-0099 §3). In this slice each lane keeps its own knowledge, reproduced
-/// exactly; #864 replaces both with one.
+/// (ADR-0099 §3): one body of knowledge, the catalog, read on the lane's axis.
 pub(crate) enum Knowledge<'a> {
-    /// The effect lane: a builtin is known by an effect color or an out-parameter
-    /// row, a call may be certified pure at its arity or its operands, a declared
-    /// receiver imports its interface's envelope, the plugin channel colours
-    /// what nothing else resolves (ADR-0068), and the sites that prove a label of
-    /// their own (output, exit, `eval`, inclusion) do.
-    Effects { plugins: &'a PluginFacts },
-    /// The throw lane as it stood before the sites were shared: a builtin is known
-    /// by an effect color alone, a known name with no throw row is **throwless**
-    /// (the legacy default, see [`engine::legacy_throws`]), a declared receiver is
-    /// unresolvable, the call-site reach rule is not asked, and the constructs the
-    /// effect lane owns (output, exit, `eval`, inclusion, state) are not its sites.
-    ThrowsLegacy,
+    /// A builtin is whatever [`steins_catalog::knows`] says. A known name with no
+    /// row on the lane's axis is a gap on that axis ([`GapKind::NoEffectRow`],
+    /// [`GapKind::NoThrowRow`]); a row, or an empty one the audit evidences, is the
+    /// answer. `plugins` is the effect lane's plugin channel (ADR-0068): it colours
+    /// what no row covers, in the declared lane, and the gap stays. The throw lane
+    /// has none.
+    ///
+    /// The effect lane also reads a declared receiver's interface envelope
+    /// (ADR-0067) and the constructs that prove a label of their own (output,
+    /// exit, `eval`, inclusion); the throw lane keeps a declared receiver a gap
+    /// and records the one construct it owns, a `match` with no `default`, plus
+    /// the unseen code both lanes read.
+    Catalog { lane: Lane, plugins: Option<&'a PluginFacts> },
+}
+
+impl Knowledge<'_> {
+    /// Which axis this knowledge is read on.
+    pub(crate) const fn lane(&self) -> Lane {
+        let Self::Catalog { lane, .. } = self;
+        *lane
+    }
 }
 
 /// One resolved site: what runs, what it may reach, and why the answer is open.
@@ -307,7 +339,8 @@ impl Hit {
 /// issue #856).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Reach {
-    /// The lane did not ask: the throw lane reads no operand shapes yet (#864).
+    /// The site asked nothing of its operands: a construct, a throw, a project
+    /// call.
     #[default]
     Unasked,
     /// Every operand is ruled out, or the callee reaches nothing.
@@ -317,10 +350,16 @@ pub(crate) enum Reach {
 }
 
 /// Whether the throw lane records `site` (it has a [`steins_syntax::ThrowOrigin`]
-/// view): everything but the constructs the effect lane owns. A `match` without a
-/// `default` is the one construct both record.
+/// view): everything but the constructs the effect lane owns alone. A `match`
+/// without a `default` (it can raise `\UnhandledMatchError`) and unseen code
+/// (`eval`, an inclusion: the code it runs may throw anything) are the constructs
+/// both lanes record.
 pub(crate) fn records_throw(site: &SiteOrigin) -> bool {
-    !matches!(&site.kind, SiteKind::Construct(k) if *k != ConstructKind::MatchNoDefault)
+    !matches!(
+        &site.kind,
+        SiteKind::Construct(k)
+            if !matches!(k, ConstructKind::MatchNoDefault | ConstructKind::Eval | ConstructKind::Include(_))
+    )
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -430,14 +469,13 @@ final class Closed { public function leaf() { return 1; } public function run() 
         .into_iter()
         .collect();
         assert_eq!(effects("Open", "run"), effect_expected);
-        // `eval` is the effect lane's alone until #864: its body is `…?` there and
-        // throw-exhaustive here.
+        // `eval` is unseen code in both lanes.
         assert_eq!(effects("Open", "ev"), BTreeSet::from([UnseenCode]));
-        assert!(throws("Open", "ev").is_empty());
+        assert_eq!(throws("Open", "ev"), BTreeSet::from([UnseenCode]));
         assert!(effects("Closed", "run").is_empty() && effects("Closed", "leaf").is_empty());
         let throw_expected: BTreeSet<GapKind> = [
             DynamicCallee, UnknownClass, UnknownFunction, OpenMethod, DeclaredReceiver,
-            NoThrowRow, UnresolvedCallback, UnresolvedThrow,
+            NoThrowRow, UnresolvedCallback, UnresolvedThrow, UserCodeReach,
         ]
         .into_iter()
         .collect();

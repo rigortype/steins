@@ -223,7 +223,7 @@ fn is_value_semantic(var: &str, env: &HashMap<String, Known>, store: &Store) -> 
 /// argument past the declared arity.
 pub(crate) fn arg_is_by_value(cx: &Cx<'_>, callee: &NameRef, position: u32) -> bool {
     let position = position as usize;
-    match cx.resolve_arg_function(callee) {
+    match cx.resolve_function(callee) {
         // The catalog states this name's argument semantics; `Some(true)` is the
         // only admitting answer (`None` cannot occur — it is what made the name
         // resolve to `Builtin` — but is spelled out rather than assumed). Keyed
@@ -264,10 +264,7 @@ pub(crate) fn arg_is_by_value(cx: &Cx<'_>, callee: &NameRef, position: u32) -> b
 /// parameter (`sscanf`'s `&...$vars`) covers every position from its own on.
 pub(crate) fn arg_is_by_ref(cx: &Cx<'_>, callee: &NameRef, position: u32) -> bool {
     let position = position as usize;
-    let catalog_knows = |n: &str| {
-        steins_catalog::param_facts_mined(n) || steins_catalog::by_value_arg(n, 0).is_some()
-    };
-    match cx.resolve_function_with(callee, &catalog_knows) {
+    match cx.resolve_function(callee) {
         FnResolution::Builtin(name) => {
             steins_catalog::by_value_arg(&name, position) == Some(false)
                 || steins_catalog::param_facts(&name).is_some_and(|f| {

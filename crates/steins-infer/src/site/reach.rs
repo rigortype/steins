@@ -147,7 +147,7 @@ enum Callee<'a> {
 
 /// Whether the function `name` takes its argument at `position` by value.
 fn function_by_value(cx: &Cx, name: &NameRef, position: usize) -> bool {
-    match cx.resolve_arg_function(name) {
+    match cx.resolve_function(name) {
         FnResolution::Builtin(builtin) => {
             steins_catalog::by_value_arg(&builtin, position) == Some(true)
         }

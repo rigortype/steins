@@ -266,7 +266,7 @@ fn by_ref_argument_spans(cx: &Cx) -> HashSet<u32> {
 /// arity, a variadic position.
 fn arg_is_by_ref(cx: &Cx<'_>, callee: &NameRef, position: u32) -> bool {
     let position = position as usize;
-    match cx.resolve_arg_function(callee) {
+    match cx.resolve_function(callee) {
         FnResolution::Builtin(builtin_name) => {
             steins_catalog::by_value_arg(&builtin_name, position) == Some(false)
         }

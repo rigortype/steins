@@ -177,7 +177,7 @@ pub(crate) fn check_no_effect(
     // `$config->getTimeout();` dispatches on a variable, which draws no edge in
     // the effect graph and would be silent whatever this function did.
     let Some(name) = call.callee_ref.as_ref() else { return };
-    let does_nothing = match cx.resolve_effect_function(name) {
+    let does_nothing = match cx.resolve_function(name) {
         FnResolution::Builtin(builtin) => {
             builtin_does_nothing(&builtin) && literal_call_shape(&builtin, call)
         }
@@ -240,7 +240,13 @@ fn builtin_does_nothing(name: &str) -> bool {
     // says nothing about the values this site passed; the seam that could
     // (the fold) cannot tell a value from a value-with-a-deprecation, so the
     // row is read as written rather than re-derived per call.
-    if steins_catalog::builtin_throws(name).is_some() {
+    //
+    // A name with **no** row is not a name that throws nothing (ADR-0099 §3.2):
+    // it is a name nobody has audited, and a statement is dead only where the
+    // call is *known* not to raise. [`steins_catalog::throws_of`] answers
+    // `Some(&[])` for exactly the audited names, so an unaudited builtin stays
+    // silent here until its audit lands.
+    if !steins_catalog::throws_of(name).is_some_and(<[_]>::is_empty) {
         return false;
     }
     // The diagnostic and engine-state refusals, for the same reason in the
@@ -368,6 +374,11 @@ mod tests {
     /// row. A row for any other name is dead weight, and a row that stops
     /// earning its place — because a throw row arrives for the name, say — is
     /// caught here rather than left to mislead a reader.
+    ///
+    /// A name nobody has audited as throwless (`json_encode`, `preg_split`,
+    /// `bindec`…) is declined before its refusal is read, so its row is idle
+    /// today; it stays, because it is the reason the name must not be admitted
+    /// when its audit lands. The refusal itself is what this test pins.
     #[test]
     fn every_refusal_row_names_a_call_the_rest_would_judge() {
         for (name, why) in REFUSED_ON_LITERALS {
@@ -375,7 +386,10 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name} ({why}) is not catalogued at all"));
             assert!(labels.iter().all(|l| discardable(l)), "{name} declines on its colour: {labels:?}");
             assert!(steins_catalog::out_params(name).is_none(), "{name} declines on its out-param row");
-            assert!(steins_catalog::builtin_throws(name).is_none(), "{name} declines on its throw row");
+            assert!(
+                steins_catalog::throws_of(name).is_none_or(<[_]>::is_empty),
+                "{name} declines on its throw row"
+            );
             assert!(!builtin_does_nothing(name), "{name} must be refused");
         }
     }

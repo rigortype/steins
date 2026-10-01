@@ -30,7 +30,7 @@ use crate::site::engine::MUTATE_LOCAL;
 use crate::site::method::declared_receiver_fqn;
 use crate::site::reach::Frame;
 use crate::site::{
-    Edge, GapKind, GapMask, Hit, HitKind, Knowledge, ResolvedSite, Target, resolve_site,
+    Edge, GapKind, GapMask, Hit, HitKind, Knowledge, Lane, ResolvedSite, Target, resolve_site,
 };
 use crate::{
     EFFECT_ID, EFFECT_LISKOV_ID, Fixpoints, Gate, INTEROP_UNKNOWN_LABEL_ID, Sym, UNKNOWN_LABEL_ID,
@@ -464,7 +464,7 @@ pub(crate) fn classify_effect_sites(
     policy: &EffectsPolicy,
     row: &mut EffectOwnRow,
 ) {
-    let knowledge = Knowledge::Effects { plugins };
+    let knowledge = Knowledge::Catalog { lane: Lane::Effects, plugins: Some(plugins) };
     for site in sites {
         let resolved = resolve_site(cx, frame, site, &knowledge);
         row.gaps.extend(resolved.gaps.iter().copied());
@@ -1335,7 +1335,7 @@ fn report_unit(
 
     // Envelope-exceeded violations: each site is resolved as the fixpoint resolved
     // it, and what it runs is held to the envelope.
-    let knowledge = Knowledge::Effects { plugins };
+    let knowledge = Knowledge::Catalog { lane: Lane::Effects, plugins: Some(plugins) };
     for site in frame.sites {
         let resolved = resolve_site(cx, frame, site, &knowledge);
         report_site(out, cx, site.span, &resolved, effects, display, bound);
