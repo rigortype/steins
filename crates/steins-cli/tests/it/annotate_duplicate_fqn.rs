@@ -110,6 +110,9 @@ fn assert_json(stdout: &str, expected: &[(&str, u32)], layout: &str) {
                 "effects": ["nondet.time"],
                 "declared": [],
                 "exhaustive": true,
+                "gaps": [],
+                "throws_exhaustive": true,
+                "throws_gaps": [],
             })
         })
         .collect();
