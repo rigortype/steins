@@ -12,18 +12,18 @@ use std::collections::HashSet;
 
 use mago_span::HasSpan;
 use mago_syntax::cst::{
-    Access, AnonymousClass, Argument, ArrayElement, ClassLikeMember, Expression, FunctionCall,
-    Literal, Node, PartialApplication, Statement, UnaryPrefixOperator, Variable,
+    Access, AnonymousClass, Argument, ArrayElement, BinaryOperator, ClassLikeMember, Expression,
+    FunctionCall, Literal, Node, PartialApplication, Statement, UnaryPrefixOperator, Variable,
 };
 
 use crate::ast::{
-    CallExpr, CallTarget, CallbackRef, ConstArgs, NameRef, RefKind, RefTarget, SUPERGLOBALS,
-    StaticClass,
+    ArgValue, CallExpr, CallTarget, CallbackRef, ConstArgs, ConstInt, NameRef, RefKind, RefTarget,
+    SUPERGLOBALS, StaticClass,
 };
 use crate::lower_arg_shape::{Captures, FrameBindings};
 use crate::lower_expr::{
-    first_class_method_ref, first_class_static_ref, lower_method_call, lower_static_call,
-    prop_fetch_of,
+    first_class_method_ref, first_class_static_ref, lower_int_literal, lower_method_call,
+    lower_static_call, prop_fetch_of,
 };
 use crate::lower_scope::{arrow_def_offset, closure_def_offset};
 use crate::lower_stmt::{
@@ -124,12 +124,44 @@ pub(crate) fn const_args_of_call(fc: &FunctionCall<'_>) -> ConstArgs {
         match pos {
             0 => out.first = const_arg_of(p.value),
             1 => out.second = const_arg_of(p.value),
-            // Nothing past position 1 decides a target; the loop runs on only to catch
-            // a named/spread argument further along.
+            // Nothing past position 3 is read; the loop runs on only to catch a
+            // named/spread argument further along.
             _ => {}
+        }
+        if (1..=3).contains(&pos)
+            && let Some(int) = const_int_of(p.value)
+        {
+            out.ints.push((u8::try_from(pos).expect("a position of 1 to 3"), int));
         }
     }
     out
+}
+
+/// One argument expression as a [`ConstInt`], or `None` when it is anything
+/// other than integer literals, bare global constants and their `|` (ADR-0099
+/// §3.3).
+fn const_int_of(expr: &Expression<'_>) -> Option<ConstInt> {
+    match expr.unparenthesized() {
+        Expression::Literal(Literal::Integer(li)) => match lower_int_literal(li.raw) {
+            ArgValue::Int(v) => Some(ConstInt::Int(v)),
+            _ => None,
+        },
+        Expression::ConstantAccess(ca) => {
+            let name = name_ref(&ca.name);
+            (!name.raw.contains('\\')).then_some(ConstInt::Const(name.raw))
+        }
+        Expression::Binary(b) if matches!(b.operator, BinaryOperator::BitwiseOr(_)) => {
+            let mut terms = Vec::new();
+            for side in [b.lhs, b.rhs] {
+                match const_int_of(side)? {
+                    ConstInt::Or(inner) => terms.extend(inner),
+                    term => terms.push(term),
+                }
+            }
+            Some(ConstInt::Or(terms))
+        }
+        _ => None,
+    }
 }
 
 /// One argument expression as a [`CallTarget`], or `None` when not written in source.

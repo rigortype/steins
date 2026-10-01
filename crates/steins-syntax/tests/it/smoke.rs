@@ -449,7 +449,7 @@ fn scans_a_constructor_throw_edge_for_every_new() {
 /// `HigherOrder`, not `Call` — pinned on both arms here.
 #[test]
 fn scans_the_constant_leading_arguments_of_a_named_call() {
-    use steins_syntax::{CallTarget, ConstArgs};
+    use steins_syntax::{CallTarget, ConstArgs, ConstInt};
 
     fn const_args(body: &str) -> ConstArgs {
         let src = format!("<?php function f($h, string $p): void {{ {body} }}");
@@ -464,11 +464,18 @@ fn scans_the_constant_leading_arguments_of_a_named_call() {
     }
     let lit = |s: &str| Some(CallTarget::Literal(s.to_owned()));
 
-    assert_eq!(const_args("fopen('/tmp/x', \"r\");"), ConstArgs { first: lit("/tmp/x"), second: lit("r") });
+    assert_eq!(
+        const_args("fopen('/tmp/x', \"r\");"),
+        ConstArgs { first: lit("/tmp/x"), second: lit("r"), ints: Vec::new() }
+    );
     // A leading `\` is stripped from a constant fetch; a namespaced one is declined.
     assert_eq!(
         const_args("fwrite(\\STDOUT, 'x');"),
-        ConstArgs { first: Some(CallTarget::ConstFetch("STDOUT".to_owned())), second: lit("x") }
+        ConstArgs {
+            first: Some(CallTarget::ConstFetch("STDOUT".to_owned())),
+            second: lit("x"),
+            ints: Vec::new(),
+        }
     );
     assert_eq!(const_args("fwrite(App\\STDOUT, 'x');").first, None);
     // Unreadable structurally: a variable, interpolated string, concatenation, class constant.
@@ -476,7 +483,11 @@ fn scans_the_constant_leading_arguments_of_a_named_call() {
     assert_eq!(const_args("file_get_contents(\"pre{$p}post\");"), ConstArgs::default());
     assert_eq!(const_args("file_get_contents('/tmp/' . $p);"), ConstArgs::default());
     assert_eq!(const_args("file_get_contents(C::PATH);"), ConstArgs::default());
-    assert_eq!(const_args("fread($h, 8);"), ConstArgs::default());
+    // An integer literal at position 1 is an integer argument, not a target.
+    assert_eq!(
+        const_args("fread($h, 8);"),
+        ConstArgs { ints: vec![(1, ConstInt::Int(8))], ..ConstArgs::default() }
+    );
     // A named or spread argument defeats positional mapping wholesale (like `arg_targets`).
     assert_eq!(const_args("file_get_contents(filename: '/tmp/x');"), ConstArgs::default());
     assert_eq!(const_args("file_get_contents(...$p);"), ConstArgs::default());
@@ -493,6 +504,56 @@ fn scans_the_constant_leading_arguments_of_a_named_call() {
         );
     }
     assert_eq!(const_args("print_r($p, false);").second, Some(CallTarget::Bool(false)));
+}
+
+/// ADR-0099 §3.3: the integer-constant arguments at positions 1 to 3, which is
+/// where a flag-gated builtin's flags argument sits.
+#[test]
+fn scans_the_constant_integer_arguments_a_flag_gate_reads() {
+    use steins_syntax::ConstInt;
+
+    fn ints(body: &str) -> Vec<(u8, ConstInt)> {
+        let src = format!("<?php function f($v, $o): void {{ {body} }}");
+        let tree = SourceTree::parse(&src);
+        let f = tree.functions().iter().find(|f| f.name == "f").expect("f").clone();
+        match derive_effect_origins(&f.sites).first().expect("one origin").clone() {
+            EffectOrigin::Call { const_args, .. } | EffectOrigin::HigherOrder { const_args, .. } => {
+                const_args.ints
+            }
+            other => panic!("expected a named-call origin, got {other:?}"),
+        }
+    }
+    let c = |s: &str| ConstInt::Const(s.to_owned());
+
+    assert_eq!(ints("json_encode($v, JSON_THROW_ON_ERROR);"), vec![(1, c("JSON_THROW_ON_ERROR"))]);
+    assert_eq!(ints("json_encode($v, \\JSON_THROW_ON_ERROR);"), vec![(1, c("JSON_THROW_ON_ERROR"))]);
+    // A `|` chain flattens into one node, parentheses and all.
+    assert_eq!(
+        ints("json_decode($v, true, 512, (JSON_BIGINT_AS_STRING | JSON_THROW_ON_ERROR) | 0x10);"),
+        vec![
+            (2, ConstInt::Int(512)),
+            (
+                3,
+                ConstInt::Or(vec![c("JSON_BIGINT_AS_STRING"), c("JSON_THROW_ON_ERROR"), ConstInt::Int(16)])
+            ),
+        ]
+    );
+    // Position 2 and 3 are read as well; position 0 and a fourth argument are not.
+    assert_eq!(
+        ints("json_decode(1, true, 512, 0);"),
+        vec![(2, ConstInt::Int(512)), (3, ConstInt::Int(0))]
+    );
+    // Whatever needs dataflow is declined: a variable, a class constant,
+    // arithmetic other than `|`, a namespaced constant, an overflowing literal.
+    assert!(ints("json_encode($v, $o);").is_empty());
+    assert!(ints("json_encode($v, Flags::THROW);").is_empty());
+    assert!(ints("json_encode($v, JSON_PRETTY_PRINT + JSON_THROW_ON_ERROR);").is_empty());
+    assert!(ints("json_encode($v, JSON_PRETTY_PRINT | $o);").is_empty());
+    assert!(ints("json_encode($v, App\\JSON_THROW_ON_ERROR);").is_empty());
+    assert!(ints("json_encode($v, 99999999999999999999);").is_empty());
+    // A named or spread list defeats positional mapping wholesale.
+    assert!(ints("json_encode($v, flags: JSON_THROW_ON_ERROR);").is_empty());
+    assert!(ints("json_decode(...$o);").is_empty());
 }
 
 // Class / method lowering (class-world extension)
