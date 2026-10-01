@@ -24,9 +24,9 @@
 
 use mago_span::HasSpan;
 use mago_syntax::cst::{
-    Access, Argument, ArrayElement, AssignmentOperator, Binary, BinaryOperator, ClassLikeMemberSelector,
-    DocumentString, Expression, FunctionCall, Literal, Node, StringPart, SwitchCase, UnaryPrefix,
-    UnaryPrefixOperator,
+    Access, Argument, ArrayElement, AssignmentOperator, Binary, BinaryOperator,
+    ClassLikeMemberSelector, DocumentString, Expression, FunctionCall, Literal, Node, StringPart,
+    SwitchCase, UnaryPrefix, UnaryPrefixOperator,
 };
 
 use super::{SiteScope, scan_sites};
@@ -164,7 +164,9 @@ fn iterate_and_clone(node: &Node<'_, '_>, sx: &SiteScope<'_>, out: &mut Vec<Site
             let span = fe.expression.span();
             push(F::Iterate, C::Foreach, span, None, &[fe.expression], sx, out);
         }
-        Node::YieldFrom(y) => push(F::Iterate, C::YieldFrom, y.span(), None, &[y.iterator], sx, out),
+        Node::YieldFrom(y) => {
+            push(F::Iterate, C::YieldFrom, y.span(), None, &[y.iterator], sx, out);
+        }
         Node::PositionalArgument(p) if p.ellipsis.is_some() => {
             push(F::Iterate, C::Spread, p.span(), None, &[p.value], sx, out);
         }
@@ -199,9 +201,9 @@ pub(super) fn clone_with(fc: &FunctionCall<'_>, sx: &SiteScope<'_>, out: &mut Ve
 fn binary(b: &Binary<'_>, sx: &SiteScope<'_>, out: &mut Vec<SiteOrigin>) -> bool {
     let construct = match b.operator {
         BinaryOperator::StringConcat(_) => C::Concat,
-        BinaryOperator::Equal(_) | BinaryOperator::NotEqual(_) | BinaryOperator::AngledNotEqual(_) => {
-            C::LooseCompare
-        }
+        BinaryOperator::Equal(_)
+        | BinaryOperator::NotEqual(_)
+        | BinaryOperator::AngledNotEqual(_) => C::LooseCompare,
         BinaryOperator::LessThan(_)
         | BinaryOperator::LessThanOrEqual(_)
         | BinaryOperator::GreaterThan(_)
