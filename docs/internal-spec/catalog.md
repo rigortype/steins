@@ -292,12 +292,31 @@ namespaced `App\PDO` never collides with the engine's `PDO`; and a class the
 *project* defines shadows the table entirely, because the project's own
 method→method effect edge is a better answer than a hand-written row.
 
-Membership today is one family — `PDO::query`/`exec`/`prepare` and
+The first family was `PDO::query`/`exec`/`prepare` and
 `PDOStatement::execute`/`fetch`/`fetchAll`, all `io.db` (issue #67). That is the
 first producer of a label the registry had carried since ADR-0018 with nothing to
 emit it. `prepare` takes the same coarse colour as the rest: whether it is a
 round trip to the server depends on PDO's emulated-prepares setting, which is
 runtime configuration the catalog cannot read, so the row takes the upper bound.
+
+Constructor rows (`__construct`, issue #804) are what `new C(...)` and a
+subclass's `parent::__construct(...)` run: `PDO` is `io.db`, `DateTime` and
+`DateTimeImmutable` are `nondet.time`, and every engine `Throwable`, the SPL
+containers, `ArrayObject`, `WeakMap`, `DateInterval` and `stdClass` are pure. The
+`Throwable` accessors (`getMessage`, `getCode`, `getFile`, `getLine`,
+`getPrevious`, `getTrace`, `getTraceAsString`, issue #847) are pure on every
+engine `Throwable`; `__toString` has no row.
+
+A consumer reaches a row through a project subclass by walking the class's chain
+until it leaves the project, provided no project class on the way declares the
+method or uses a trait. A receiver that names its class exactly (`new Foo`,
+`Foo::`, `parent::`) may use any row found that way. One that names only a bound
+on its runtime class (`$this`, `self::`, a declared parameter or property) may
+use a row only when `final_method_effect_labels(class, method)` answers, which
+holds only for methods the engine declares `final`, so that no subclass can
+replace the body. Today that means the `Throwable` accessors. The
+`Throwable` interface qualifies too, because PHP refuses a class that implements
+it without extending `Exception` or `Error`.
 
 Breadth — mysqli, the rest of the mining data's method rows — belongs to the
 ADR-0014 generator, not to hand-seeding. What ships here is the row format and
