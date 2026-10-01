@@ -610,54 +610,24 @@ impl<'a> Cx<'a> {
     }
 
     /// Resolve a **function** call reference per PHP name resolution (ADR-0001).
-    pub(crate) fn resolve_function(&self, r: &NameRef) -> FnResolution {
-        self.resolve_function_with(r, &|n| steins_catalog::effect_labels(n).is_some())
-    }
-
-    /// [`Self::resolve_function`] with the effects pass's wider notion of a known
-    /// builtin: a name carrying a by-ref out-parameter row
-    /// ([`steins_catalog::out_params`]) counts too, even with no unconditional
-    /// color and not foldable — `preg_match`/`sort` are exactly that, and P2 is
-    /// what gives them something to say. Scoped to the effects pass on purpose: the
-    /// same widening would also change the *throws* pass's classification of these
-    /// names, left untouched here.
-    pub(crate) fn resolve_effect_function(&self, r: &NameRef) -> FnResolution {
-        self.resolve_function_with(r, &|n| {
-            steins_catalog::effect_labels(n).is_some() || steins_catalog::out_params(n).is_some()
-        })
-    }
-
-    /// [`Self::resolve_function`] with the ADR-0070 notion of a known builtin: a
-    /// name whose argument semantics the catalog can state
-    /// ([`steins_catalog::by_value_arg`], three-valued — `None` means "unknown to
-    /// the catalog"). Distinct from an effect color or a by-ref row: `trim` has no
-    /// out-param row and is still fully described; `sscanf` has neither and stays
-    /// unknown. Scoped to the call-argument survival gate only.
-    pub(crate) fn resolve_arg_function(&self, r: &NameRef) -> FnResolution {
-        self.resolve_function_with(r, &|n| steins_catalog::by_value_arg(n, 0).is_some())
-    }
-
-    /// [`Self::resolve_function`] with the higher-order invocation notion of a
-    /// known builtin: a name the catalog states a callback-invoking shape for
-    /// ([`steins_catalog::invocation_shape`]) — `usort`, `array_map`,
-    /// `call_user_func`, etc. Distinct on purpose: those carry neither an effect
-    /// color nor an out-param row, so [`Self::resolve_effect_function`] would miss
-    /// them.
     ///
-    /// Before issue #279's fix, call sites asked [`steins_catalog::invocation_shape`]
-    /// directly against the call's raw spelling — blind to a `use function usort as
-    /// u;` alias, and blind to shadowing by a project function of the same name.
-    /// Routing through [`Self::resolve_function_with`] fixes both: a project
-    /// declaration wins per ADR-0001 resolution regardless of alias.
-    pub(crate) fn resolve_invoker_function(&self, r: &NameRef) -> FnResolution {
-        self.resolve_function_with(r, &|n| steins_catalog::invocation_shape(n).is_some())
+    /// A spelling is a builtin exactly when the catalog knows it
+    /// ([`steins_catalog::knows`], ADR-0099 §3.1): one predicate for the effect
+    /// lane, the throw lane and every other pass that asks, so a project function
+    /// that shadows a builtin spelling is ambiguous (`Unknown`) for all of them or
+    /// for none. Which axes the catalog has a row on is a separate question the
+    /// resolver ([`crate::site::resolve_site`]) answers per lane, and a known name
+    /// with no row on an axis is a coverage gap there, never a pure or throwless
+    /// call.
+    pub(crate) fn resolve_function(&self, r: &NameRef) -> FnResolution {
+        self.resolve_function_with(r, &steins_catalog::knows)
     }
 
     /// Resolution **as if the catalog knew nothing** — so a `User` answer is
     /// exactly "a project declaration shadows this spelling", and nothing else.
     ///
     /// [`Self::resolve_function`] cannot answer that question. Its notion of a
-    /// known builtin is `effect_labels`, and its global-fallback arm turns a
+    /// known builtin is [`steins_catalog::knows`], and its global-fallback arm turns a
     /// user declaration that shadows a *known* name into `Unknown` rather than
     /// `User` — the comment there calls it ambiguous, which it is. A caller
     /// asking "is this shadowed?" by testing `!matches!(…, User(_))` therefore

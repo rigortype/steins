@@ -124,11 +124,14 @@ pub fn builtin_throws(name: &str) -> Option<&'static [&'static str]> {
         // `$component`, the `$length < 0` of `strncmp`/`strncasecmp`,
         // `str_word_count`'s unknown `$format`, `wordwrap`'s empty `$break` (or a
         // zero `$width` with `$cut_long_words`), `strpbrk`'s empty `$characters`,
-        // `substr_compare`'s offset outside the haystack, and `vsprintf`'s
-        // missing conversion specifier or too short argument array.
+        // `substr_compare`'s offset outside the haystack, `vsprintf`'s missing
+        // conversion specifier or too short argument array, `log`'s `$base` of
+        // zero or below, and `strripos`'s offset outside the haystack (its
+        // siblings `strpos`, `stripos` and `strrpos` carry the row above).
         "dirname" | "max" | "min" | "substr_count" | "array_chunk" | "array_combine"
         | "array_pad" | "array_rand" | "parse_url" | "strncmp" | "strncasecmp"
-        | "str_word_count" | "wordwrap" | "strpbrk" | "substr_compare" | "vsprintf" => {
+        | "str_word_count" | "wordwrap" | "strpbrk" | "substr_compare" | "vsprintf" | "log"
+        | "strripos" => {
             Some(VALUE_ERROR)
         }
         "sprintf" => Some(SPRINTF),
