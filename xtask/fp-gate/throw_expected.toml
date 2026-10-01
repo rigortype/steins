@@ -34,11 +34,25 @@
 # `SkippedTest` covering `SkippedWithMessageException`), flysystem 3 → 0
 # (`FtpConnectionException` implementors). Every other package unchanged.
 
-"composer/composer" = 93
+# Raised 2026-10-01 (issue #849): `new C(...)` now carries its constructor's
+# throws, so a throw raised in a constructor reaches the function that
+# instantiates the class. +6, triaged: composer 91 → 94 (2 TRUE —
+# `new PlatformRepository(...)` throws `\UnexpectedValueException` past
+# `RequireCommand::execute()`'s `@throws ParsingException`; 1 the same shape as
+# nine findings already counted here — `Exception` rethrown by `Silencer::call`
+# reaching `Factory::createComposer()` through `new HttpDownloader`), console
+# 10 → 13 (3 TRUE — `TerminalInputHelper`'s constructor throws the global
+# `\RuntimeException` where `QuestionHelper::ask`/`doAsk`/`getHiddenResponse`
+# declare and catch only Symfony's own). The one FALSE the change first showed
+# (phpunit, an interface catch) was #852's bug, fixed before this landed. The
+# composer row had read 93 against a measured 91 (CI and local alike) since an
+# earlier, unrecorded drop; it is reset to the measured count plus the three.
+
+"composer/composer" = 94
 "sebastianbergmann/phpunit" = 32
 "guzzle/guzzle" = 2
 "Seldaek/monolog" = 7
-"symfony/console" = 10
+"symfony/console" = 13
 "nikic/PHP-Parser" = 1
 
 # Registered 2026-07-24 (v0.1.0 run, oracle idea A): PHPStan's own `src/` as a
