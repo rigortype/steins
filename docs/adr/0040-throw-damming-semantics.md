@@ -89,7 +89,7 @@ that interface, but `throw_subtype` walks `extends` only and judges the catch
 `No`. That defect predates this amendment; the constructor edge only gives it
 one more path.
 
-## Amendment (2026-10-02): the throw lane reads sites, and a missing row is not throwless — PENDING ratification
+## Amendment (2026-10-02): the throw lane reads sites, and a missing row is not throwless — ratified 2026-10-02
 
 ADR-0099 (issue #865). §2's four sources of throw facts are read off one site
 record that the effect lane reads too, so the two lanes cannot disagree about

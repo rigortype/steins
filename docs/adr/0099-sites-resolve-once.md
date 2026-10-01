@@ -1,8 +1,8 @@
 # A body's sites resolve once: reachable code, implicit user code and coverage gaps
 
-**Status: proposed (2026-10-02), PENDING ratification.** Designed
-autonomously under the owner's standing delegation. Tracking issue #865;
-slices #861, #862, #863, #864, #858, #859.
+**Status: accepted 2026-10-02, owner-ratified.** Designed autonomously
+under the owner's standing delegation and ratified after the run landed.
+Tracking issue #865; slices #861, #862, #863, #864, #858, #859.
 
 The effect lane (ADR-0005, ADR-0018) and the throw lane (ADR-0040) answer the
 same question at every call and operator in a body: *what code can run here?*

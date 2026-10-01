@@ -639,7 +639,7 @@ origins are persisted in frozen generations (ADR-0092), in the trace payload,
 so the variant takes no schema bump (issue #828): it moves the analyzer
 fingerprint, which refuses a stored trace before it is decoded.
 
-## Amendment (2026-10-02): operator sites — PENDING ratification
+## Amendment (2026-10-02): operator sites — ratified 2026-10-02
 
 ADR-0099 §4 (issue #859) gives operators that run user code (`__toString`
 through concatenation, interpolation, a cast or a loose or ordering
