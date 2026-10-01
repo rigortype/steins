@@ -134,6 +134,22 @@ pub fn builtin_throws(name: &str) -> Option<&'static [&'static str]> {
         | "strripos" => {
             Some(VALUE_ERROR)
         }
+        // The path family (issue #864): a `p` parameter refuses a path with a NUL
+        // byte with a `ValueError` (PHP 8.0+), and the stream openers refuse an
+        // empty one the same way (`file_put_contents('', …)`: "Path must not be
+        // empty"). The rest of each name's failures are warnings and a `false`
+        // return, so the row is the whole of what it raises. Beside them,
+        // `putenv`'s assignment without a valid syntax, `flock`'s `$operation`
+        // outside `LOCK_*`, `trigger_error`'s unknown `$error_level`, a negative
+        // `sleep`/`usleep`, and the NUL byte of `escapeshellarg`/`escapeshellcmd`
+        // and `clearstatcache`'s `$filename`. Reproduced by a 6,000-tuple fuzz on
+        // PHP 8.5.11 for every name but `chdir`, `chmod`, `sleep` and `usleep`,
+        // which the fuzz left out (a changed working directory, a changed mode, a
+        // sleep) and which follow the documented parameter kinds.
+        "unlink" | "mkdir" | "rmdir" | "touch" | "copy" | "rename" | "symlink" | "readlink"
+        | "tempnam" | "file_put_contents" | "realpath" | "fopen" | "glob" | "chdir" | "chmod"
+        | "putenv" | "flock" | "trigger_error" | "sleep" | "usleep" | "escapeshellarg"
+        | "escapeshellcmd" | "clearstatcache" => Some(VALUE_ERROR),
         "sprintf" => Some(SPRINTF),
         // `json_decode`/`json_encode` throw JsonException only under
         // JSON_THROW_ON_ERROR; without flag inspection this key stays synthetic.

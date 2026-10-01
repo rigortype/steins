@@ -183,6 +183,7 @@ fn lowercase(name: &str) -> String {
 /// line. `throwless_table_is_sorted_lowercase_and_known` pins the order.
 const THROWLESS_NAMES: &[&str] = &[
     "abs",
+    "addcslashes",
     "addslashes",
     "array_all",
     "array_any",
@@ -251,6 +252,7 @@ const THROWLESS_NAMES: &[&str] = &[
     "date_create",
     "date_create_immutable",
     "date_default_timezone_get",
+    "date_default_timezone_set",
     "decbin",
     "dechex",
     "decoct",
@@ -277,9 +279,11 @@ const THROWLESS_NAMES: &[&str] = &[
     "fwrite",
     "gc_collect_cycles",
     "get_debug_type",
+    "get_object_vars",
     "getcwd",
     "getdate",
     "getenv",
+    "gethostname",
     "getmypid",
     "getrandmax",
     "gettype",
@@ -297,6 +301,7 @@ const THROWLESS_NAMES: &[&str] = &[
     "implode",
     "in_array",
     "ini_get",
+    "ini_set",
     "intval",
     "is_array",
     "is_bool",
@@ -346,8 +351,16 @@ const THROWLESS_NAMES: &[&str] = &[
     "pathinfo",
     "phpversion",
     "pi",
+    "posix_getpid",
+    "preg_grep",
+    "preg_last_error",
+    "preg_last_error_msg",
     "preg_quote",
+    "preg_replace",
+    "preg_replace_callback",
+    "preg_split",
     "prev",
+    "print_r",
     "quotemeta",
     "rand",
     "rawurldecode",
@@ -376,6 +389,8 @@ const THROWLESS_NAMES: &[&str] = &[
     "strcasecmp",
     "strcmp",
     "strcspn",
+    "stream_context_get_options",
+    "stream_get_meta_data",
     "stripslashes",
     "stristr",
     "strlen",
@@ -394,15 +409,18 @@ const THROWLESS_NAMES: &[&str] = &[
     "substr_replace",
     "sys_get_temp_dir",
     "time",
+    "tmpfile",
     "trim",
     "uasort",
     "ucfirst",
     "ucwords",
     "uksort",
+    "umask",
     "uniqid",
     "urldecode",
     "urlencode",
     "usort",
+    "var_export",
 ];
 
 #[cfg(test)]
@@ -447,7 +465,8 @@ mod tests {
         assert_eq!(throws_of("\\strtolower"), Some(&[][..]));
         // Known, unaudited: unknown. `strlen` has a colour and `file_put_contents`
         // too, and neither row says what the other does not.
-        assert_eq!(throws_of("file_put_contents"), None);
+        assert_eq!(throws_of("file_put_contents"), Some(&["ValueError"][..]), "a path it refuses");
+        assert_eq!(throws_of("curl_exec"), None);
         assert_eq!(throws_of("class_exists"), None, "autoloads");
         assert_eq!(throws_of("serialize"), None);
         assert_eq!(throws_of("not_a_builtin"), None);

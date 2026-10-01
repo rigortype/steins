@@ -345,10 +345,10 @@ fn annotate_json_shape_pins_colored_pure_and_tainted_functions() {
     assert_eq!(price["throws_exhaustive"], serde_json::json!(true));
     assert_eq!(price["throws_gaps"], serde_json::json!([]));
     assert_eq!(writer["gaps"], serde_json::json!([]));
-    // `file_put_contents` is known and coloured, and no audit says what it raises:
-    // exhaustive on the effect axis, a gap on the throw axis.
-    assert_eq!(writer["throws_exhaustive"], serde_json::json!(false));
-    assert_eq!(writer["throws_gaps"], serde_json::json!(["no-throw-row"]));
+    // `file_put_contents` is coloured and has a throw row (`ValueError` for a path
+    // it refuses), so both lanes are exhaustive.
+    assert_eq!(writer["throws_exhaustive"], serde_json::json!(true));
+    assert_eq!(writer["throws_gaps"], serde_json::json!([]));
     assert_eq!(mystery["gaps"], serde_json::json!(["unknown-function"]));
     assert_eq!(mystery["throws_exhaustive"], serde_json::json!(false));
     assert_eq!(mystery["throws_gaps"], serde_json::json!(["unknown-function"]));
