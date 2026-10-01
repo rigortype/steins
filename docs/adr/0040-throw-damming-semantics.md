@@ -93,9 +93,10 @@ one more path.
 
 ADR-0099 (issue #865). §2's four sources of throw facts are read off one site
 record that the effect lane reads too, so the two lanes cannot disagree about
-what runs at a site. A known builtin with no throw row is an obstacle, never
-throwless; a throw row may be omitted only for the fold allowlist and the
-certified-pure list, where throwlessness is evidenced (issue #864). An
+what runs at a site. A known builtin with no throw row is a coverage gap,
+never throwless; a throw row may be omitted only where php-src shows the name
+raises nothing for the arguments its types admit, argument checking aside, and
+each such name is audited and witnessed (issue #864, ADR-0099 §3.3). An
 argument or operand that may reach user code, and `eval` or an inclusion,
 make the throw set non-exhaustive, because unknown user code may throw
 anything.
