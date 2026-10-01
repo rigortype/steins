@@ -582,10 +582,17 @@ mod tests {
             ),
             (
                 "a spread argument list",
-                "<?php function f(array $a) { return array_keys(...$a); }",
+                "<?php function f() { return array_keys(...[[1]]); }",
                 func("f"),
                 &[ArgumentList],
                 &[UserCodeReach],
+            ),
+            (
+                "a spread of a variable, which the callee may take by reference",
+                "<?php function f(array $a) { return array_keys(...$a); }",
+                func("f"),
+                &[ArgumentList, OperatorIteration],
+                &[UserCodeReach, OperatorIteration],
             ),
             (
                 "an operand that may reach user code",

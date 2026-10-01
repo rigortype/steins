@@ -77,10 +77,19 @@ function skip(string $why): never
 
 #[test]
 fn a_framework_exception_constructor_is_exhaustive() {
-    proven_pure(FRAMEWORK_EXCEPTION, "Failure::__construct");
-    // `new` follows the inherited constructor, so the `#[Pure]` caller stays
-    // exhaustive, and the envelope has nothing to report.
-    proven_pure(FRAMEWORK_EXCEPTION, "skip");
+    // Every call in it is catalogued, so no call is a gap. What remains is the
+    // operators on operands nothing is shown about (a `sprintf` result appended,
+    // an element of an array, the keys of one): ADR-0099 §4.3 has no proof for
+    // them yet, and they are the operator resolver's, not the catalog's.
+    let operator_only = |symbol: &str| {
+        let s = summary(FRAMEWORK_EXCEPTION, symbol);
+        assert!(s.labels.is_empty(), "{symbol}: {s:?}");
+        assert!(s.gaps.iter().all(|kind| kind.starts_with("operator-")), "{symbol}: {s:?}");
+    };
+    operator_only("Failure::__construct");
+    // `new` follows the inherited constructor, so the `#[Pure]` caller inherits its
+    // gaps, and the envelope has nothing to report.
+    operator_only("skip");
     assert!(exceeded(FRAMEWORK_EXCEPTION).is_empty(), "{:#?}", exceeded(FRAMEWORK_EXCEPTION));
 }
 
