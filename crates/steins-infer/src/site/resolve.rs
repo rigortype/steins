@@ -38,6 +38,7 @@ use steins_syntax::{
 
 use super::contract::{conditional_purity, eval_conditional_purity};
 use super::engine;
+use super::operator;
 use super::method::{EngineMethod, engine_class_of, engine_method, method_edge};
 use super::reach::{Frame, builtin_reach, callback_reaches_user_code, engine_method_reach};
 use super::{
@@ -106,9 +107,23 @@ impl<'a> Resolver<'a, '_, '_> {
             }
             SiteKind::Throw(thrown) => self.throw(thrown),
             SiteKind::Construct(construct) => self.construct(construct),
-            // #859 phase 2: the operator resolver; until then an operator site runs nothing here.
-            SiteKind::Operator { .. } => {}
+            SiteKind::Operator { family, construct, receivers, member } => {
+                self.operator((*family, *construct), receivers, member.as_deref());
+            }
         }
+    }
+
+    /// An operator site (ADR-0099 §4.3): the user method the engine runs through
+    /// an operand's class, resolved alike for both lanes.
+    fn operator(
+        &mut self,
+        form: (steins_syntax::OperatorFamily, steins_syntax::OperatorConstruct),
+        receivers: &[Option<EffectRecv>],
+        member: Option<&str>,
+    ) {
+        let resolved = operator::resolve(self.cx, self.frame, self.site, form, receivers, member);
+        self.out.targets.extend(resolved.targets);
+        self.out.gaps.extend(resolved.gaps);
     }
 
     fn gap(&mut self, kind: GapKind) {
@@ -427,6 +442,14 @@ impl<'a> Resolver<'a, '_, '_> {
             }
             Err(miss) => miss,
         };
+        // A class declaring `__call` answers the method it lacks (ADR-0099 §4.3).
+        if miss == GapKind::MethodNotFound {
+            let magic = operator::magic_call_edges(self.cx, self.frame.class_fqn, receiver);
+            if !magic.is_empty() {
+                magic.into_iter().for_each(|sym| self.push(Edge::call(sym)));
+                return;
+            }
+        }
         if let Some(plugins) = self.plugins() {
             self.method_fallback(plugins, receiver, method, miss);
             return;

@@ -120,6 +120,7 @@ mod on_non_object;
 mod opaque_reads;
 mod operand_builtin_return;
 mod operand_position_writes;
+mod operator_rules;
 mod out_param_seed;
 mod override_family;
 mod param_refinement_over_native;

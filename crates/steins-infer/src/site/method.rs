@@ -300,6 +300,21 @@ pub(crate) fn declared_receiver_fqn(
     params: &[Param],
     receiver: &EffectRecv,
 ) -> Option<String> {
+    sole_object_fqn(declared_receiver_type(cx, enclosing, params, receiver)?)
+}
+
+/// The native type an ADR-0067 declared receiver (`$r` a never-written
+/// parameter, `$this->repo` a never-written property) is declared with, whole:
+/// the operator resolver reads every member of a union, where a method call
+/// needs the one class ([`declared_receiver_fqn`]). `None` for any other
+/// receiver, and for a type the lowering does not model (`array`, `mixed`,
+/// `iterable`, `object`: such a member collapses the whole hint).
+pub(crate) fn declared_receiver_type<'a>(
+    cx: &Cx<'a>,
+    enclosing: Option<&str>,
+    params: &'a [Param],
+    receiver: &EffectRecv,
+) -> Option<&'a steins_syntax::NativeType> {
     let ty = match receiver {
         // `f(Repo $r) { $r->find(); }` — the parameter's own declared type. The
         // syntax gate already proved this frame never writes `$r`, so the binding
@@ -314,7 +329,7 @@ pub(crate) fn declared_receiver_fqn(
             return None;
         }
     };
-    sole_object_fqn(ty)
+    Some(ty)
 }
 
 /// The FQN of a declared type that names **exactly one** object type, or `None`

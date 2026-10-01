@@ -261,6 +261,10 @@ pub(crate) struct Index {
     /// [`PROPERTY_UNDEFINED_ID`]: crate::PROPERTY_UNDEFINED_ID
     property_writes: (HashSet<String>, bool),
     // end member absence (ADR-0078, issue #197)
+    /// The class-likes declaring a property magic method or hooking a property,
+    /// by lowercase FQN: the table the operator resolver reads to rule out a
+    /// subclass adding user code to a property access (ADR-0099 §4.4).
+    magic_property_classes: HashSet<String>,
     // global constants (ADR-0078, issue #198)
     /// Every global constant the universe declares, keyed by
     /// [`steins_syntax::normalize_const_fqn`] (namespace lowercased, final segment
@@ -338,6 +342,7 @@ impl Index {
                 .collect(),
             magic_obstacles: m.magic_obstacles,
             property_writes: m.property_writes,
+            magic_property_classes: m.magic_property_classes,
             constants: m.constants,
             files: m.files,
         }
@@ -370,6 +375,7 @@ impl Index {
         let m = merged_tables(units);
         idx.magic_obstacles = m.magic_obstacles;
         idx.property_writes = m.property_writes;
+        idx.magic_property_classes = m.magic_property_classes;
         idx.constants = m.constants;
         idx.files = m.files;
         idx
@@ -427,6 +433,12 @@ impl Index {
         (&self.property_writes.0, self.property_writes.1)
     }
     // end member absence (ADR-0078, issue #197)
+
+    /// The lowercase FQNs of the class-likes that declare `__get`, `__set`,
+    /// `__isset` or `__unset`, or hook a property (ADR-0099 §4.4).
+    pub(crate) fn magic_property_classes(&self) -> &HashSet<String> {
+        &self.magic_property_classes
+    }
 
     pub(crate) fn resolve_function(&self, fqn: &str) -> Res {
         let key = fqn.to_ascii_lowercase();
