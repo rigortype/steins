@@ -374,7 +374,9 @@ pub(crate) enum Reach {
 pub(crate) fn records_throw(site: &SiteOrigin) -> bool {
     use ConstructKind::{Eval, Include, MatchNoDefault};
     let both_lanes = |k: &ConstructKind| matches!(k, MatchNoDefault | Eval | Include(_));
-    !matches!(&site.kind, SiteKind::Construct(k) if !both_lanes(k))
+    // #859 phase 2: an operator site has no throw origin until the resolver reads it.
+    !matches!(&site.kind, SiteKind::Operator { .. })
+        && !matches!(&site.kind, SiteKind::Construct(k) if !both_lanes(k))
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]

@@ -57,6 +57,8 @@ fn effect_origin(site: &SiteOrigin) -> Option<EffectOrigin> {
         SiteKind::Dynamic(_) => EffectOrigin::Opaque { span },
         SiteKind::Throw(_) => return None,
         SiteKind::Construct(construct) => return effect_construct(construct, span),
+        // Read through the resolver only (ADR-0099 §4.3); neither lane keeps an origin for it.
+        SiteKind::Operator { .. } => return None,
     };
     Some(origin)
 }
@@ -102,7 +104,7 @@ fn throw_origin(site: &SiteOrigin) -> Option<ThrowOrigin> {
             kind: RefKind::FullyQualified,
             offset: site.span.start,
         }),
-        SiteKind::Construct(_) => return None,
+        SiteKind::Construct(_) | SiteKind::Operator { .. } => return None,
     };
     Some(ThrowOrigin { kind, span: site.span, guards: site.guards.clone() })
 }
