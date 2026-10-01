@@ -649,9 +649,7 @@ mod tests {
     use std::path::PathBuf;
 
     use steins_gen::{DecodeBudget, EnginePosture, GenerationInputs, Store};
-    use steins_syntax::{
-        ArgValue, EffectOrigin, EffectOriginKind, SiteKind, SiteOrigin, Stmt, StmtKind, ThrowKind,
-    };
+    use steins_syntax::{ArgValue, SiteKind, SiteOrigin, Stmt, StmtKind};
 
     use super::*;
     use crate::shard::{fallback_package_key, merge_shards};
@@ -691,7 +689,7 @@ mod tests {
     /// packages under the fallback grouping, docblocked functions and methods
     /// (contract inputs), namespaced declarations with `use` imports (the
     /// `ctx` leg), value-IR corners the codec exceptions exist for (a
-    /// non-finite float literal, a non-UTF-8 string literal), effect-origin
+    /// non-finite float literal, a non-UTF-8 string literal), construct
     /// keywords (`echo`, `exit`, `require_once`), the trace-IR constructs
     /// [`TRACE_CONSTRUCTS`] names (casts, interpolation, offset writes, the
     /// structured loops) beside `if` and closures, magic-member tags, alias
@@ -726,26 +724,6 @@ mod tests {
             ),
             ("vendor/autoload.php", "<?php\nfunction stray_helper() {}\n"),
         ]
-    }
-
-    /// Every effect origin the parsed fixture carries: functions', methods'
-    /// and closure scopes'.
-    fn fixture_origins<'a>(parsed: &'a [(&'static str, SourceTree)]) -> Vec<&'a EffectOrigin> {
-        let mut origins = Vec::new();
-        for (_, tree) in parsed {
-            for f in tree.functions() {
-                origins.extend(&f.effect_origins);
-            }
-            for c in tree.classes() {
-                for m in &c.methods {
-                    origins.extend(&m.effect_origins);
-                }
-            }
-            for s in tree.scopes() {
-                origins.extend(&s.effect_origins);
-            }
-        }
-        origins
     }
 
     /// Every site the parsed fixture carries: functions', methods' and closure
@@ -965,14 +943,8 @@ mod tests {
         assert!(rendered.contains("inf"), "the non-finite float literal survived lowering");
         assert!(app.functions()[0].docblock.is_some(), "a docblocked function");
         // The payload codec carries an enum by variant index, so every
-        // `EffectOrigin` variant has to survive the disk boundary *by
-        // position*. It only can if the fixture carries it.
-        let origins = fixture_origins(&parsed);
-        for kind in EffectOriginKind::ALL {
-            let carried = origins.iter().any(|o| o.kind() == kind);
-            assert!(carried, "the fixture must carry a {} origin", kind.name());
-        }
-        // So do the sites, which carry the same constructs under a kind of their own.
+        // `SiteKind` variant has to survive the disk boundary *by position*. It
+        // only can if the fixture carries it.
         let sites = fixture_sites(&parsed);
         for kind in SiteKind::ALL {
             let carried = sites.iter().any(|s| s.kind.tag() == kind);
@@ -988,15 +960,10 @@ mod tests {
         for (construct, lowered) in TRACE_CONSTRUCTS {
             assert!(kinds.iter().any(|k| lowered(k)), "the fixture must carry {construct}");
         }
-        // Throw origins ride the codec by variant index too, and the last
-        // `ThrowKind` appended (issue #849) is the `new` edge `Widget::n`'s
-        // `new self()` lowers to.
-        let construct_edge = parsed
-            .iter()
-            .flat_map(|(_, t)| t.classes().iter().flat_map(|c| c.methods.iter()))
-            .flat_map(|m| &m.throw_origins)
-            .any(|o| matches!(o.kind, ThrowKind::Construct { .. }));
-        assert!(construct_edge, "the fixture must carry a constructor throw edge");
+        // The `new` edge `Widget::n`'s `new self()` lowers to rides the codec by
+        // variant index too (issue #849).
+        let construct_edge = sites.iter().any(|s| matches!(s.kind, SiteKind::New { .. }));
+        assert!(construct_edge, "the fixture must carry a constructor edge");
         // Schema 20 (issue #603): `ret_top` sits between `ret` and `ret_span` on
         // both declarations and `RetHintKind::Top` precedes `Other`, so the
         // enforced tops have to be IN the fixture for the positions to be tested.
@@ -1030,22 +997,11 @@ mod tests {
         assert!(all.iter().any(|c| !c.ctx.class_imports.is_empty() || !c.ctx.namespace.is_empty()));
     }
 
-    /// [`EffectOriginKind::ALL`] is what the tests here enumerate, in the order
-    /// the codec numbers the variants by. A variant missing from it does not
-    /// compile (`effect_origin_kinds!` in steins-syntax), but nothing there
-    /// fixes the order, so this pins the list, names and order, against the
-    /// variant list serde itself decodes an [`EffectOrigin`] by.
-    #[test]
-    fn the_effect_origin_kinds_are_every_variant_in_codec_order() {
-        let names: Vec<&str> = EffectOriginKind::ALL.iter().map(|k| k.name()).collect();
-        assert_eq!(names, serde_variants::<EffectOrigin>());
-    }
-
     /// [`SiteKind::ALL`] is what the tests here enumerate for sites, in the
-    /// order the codec numbers the variants by. As for
-    /// [`the_effect_origin_kinds_are_every_variant_in_codec_order`], a variant
-    /// missing from it does not compile, so this pins names and order against
-    /// the variant list serde decodes a [`SiteKind`] by.
+    /// order the codec numbers the variants by. A variant missing from it does
+    /// not compile (`site_kinds!` in steins-syntax), but nothing there fixes the
+    /// order, so this pins names and order against the variant list serde
+    /// decodes a [`SiteKind`] by.
     #[test]
     fn the_site_kinds_are_every_variant_in_codec_order() {
         let names: Vec<&str> = SiteKind::ALL.iter().map(|k| k.name()).collect();
@@ -1068,27 +1024,6 @@ mod tests {
                 let bytes = crate::wire::to_vec(site).expect("a site serializes");
                 let back: SiteOrigin = crate::wire::from_slice(&bytes).expect("a site round-trips");
                 assert_eq!(&back, site, "{name}");
-            }
-        }
-    }
-
-    /// Every effect origin in the fixture round-trips through the payload
-    /// codec on its own, kind by kind, so a kind that stopped decoding fails
-    /// under its own name rather than somewhere inside a whole tree.
-    #[test]
-    fn every_effect_origin_kind_round_trips_through_the_codec() {
-        let parsed = parsed_fixture();
-        let origins = fixture_origins(&parsed);
-        for kind in EffectOriginKind::ALL {
-            let name = kind.name();
-            let of_kind: Vec<&EffectOrigin> =
-                origins.iter().copied().filter(|o| o.kind() == kind).collect();
-            assert!(!of_kind.is_empty(), "the fixture must carry a {name} origin");
-            for origin in of_kind {
-                let bytes = crate::wire::to_vec(origin).expect("an effect origin serializes");
-                let back: EffectOrigin =
-                    crate::wire::from_slice(&bytes).expect("an effect origin round-trips");
-                assert_eq!(&back, origin, "{name}");
             }
         }
     }

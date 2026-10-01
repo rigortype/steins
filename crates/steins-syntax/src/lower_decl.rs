@@ -24,14 +24,13 @@ use crate::ast::{
 };
 use crate::lower_arg_shape::Captures;
 use crate::lower_effect::{
-    EffectScanCx, body_aliased, collect_body_callables, receiver_writes, scan_effect_origins,
-    scan_throw_origins,
+    EffectScanCx, body_aliased, collect_body_callables, receiver_writes,
 };
 use crate::lower_expr::{
     class_const_name, instantiation_class, is_strict_types_one, lower_arg_value, lower_call,
     method_name_of, trace_static_class,
 };
-use crate::lower_site::{debug_assert_matches_legacy, scan_owner_sites};
+use crate::lower_site::scan_owner_sites;
 use crate::names::{
     PREG_FLAG_CONST_NAMES, RefResolver, ctx_of, name_ref, use_binds_php_version_id,
     use_binds_preg_flag_const,
@@ -607,8 +606,6 @@ fn lower_function(
     rc: &RefResolver,
     conditional: bool,
 ) -> FunctionDecl {
-    let mut effect_origins = Vec::new();
-    let mut throw_origins = Vec::new();
     let mut sites = Vec::new();
     let cx = EffectScanCx::new(
         &f.parameter_list,
@@ -618,11 +615,8 @@ fn lower_function(
     )
     .with_body(&f.parameter_list, Captures::None, f.body.statements.iter().map(Node::Statement));
     for s in f.body.statements.iter() {
-        scan_effect_origins(&Node::Statement(s), &cx, &mut effect_origins);
-        scan_throw_origins(&Node::Statement(s), &[], &[], &cx.locals, &mut throw_origins);
         scan_owner_sites(&Node::Statement(s), &cx, &mut sites);
     }
-    debug_assert_matches_legacy(&sites, &effect_origins, &throw_origins);
 
     FunctionDecl {
         name: bytes_to_string(f.name.value),
@@ -637,8 +631,6 @@ fn lower_function(
         span: to_span(f.name.span()),
         body_span: to_span(f.body.span()),
         effect_envelope: attrs_effect_envelope(&f.attribute_lists, aliases),
-        effect_origins,
-        throw_origins,
         sites,
         docblock: docs.preceding(to_span(f.span()).start),
         docblock_span: docs.preceding_span(to_span(f.span()).start),
@@ -1099,8 +1091,6 @@ fn lower_enum(e: &mago_syntax::cst::Enum<'_>, _aliases: &SteinsAttrAliases, docs
 }
 
 fn lower_method(m: &Method<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex, rc: &RefResolver) -> MethodDecl {
-    let mut effect_origins = Vec::new();
-    let mut throw_origins = Vec::new();
     let mut sites = Vec::new();
     if let MethodBody::Concrete(block) = &m.body {
         let cx = EffectScanCx::new(
@@ -1112,12 +1102,9 @@ fn lower_method(m: &Method<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex, rc
         .in_constructor(m.name.value.eq_ignore_ascii_case(b"__construct"))
         .with_body(&m.parameter_list, Captures::None, block.statements.iter().map(Node::Statement));
         for s in block.statements.iter() {
-            scan_effect_origins(&Node::Statement(s), &cx, &mut effect_origins);
-            scan_throw_origins(&Node::Statement(s), &[], &[], &cx.locals, &mut throw_origins);
             scan_owner_sites(&Node::Statement(s), &cx, &mut sites);
         }
     }
-    debug_assert_matches_legacy(&sites, &effect_origins, &throw_origins);
 
     let visibility = visibility_of(&m.modifiers);
 
@@ -1143,8 +1130,6 @@ fn lower_method(m: &Method<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex, rc
             MethodBody::Abstract(_) => None,
         },
         effect_envelope: attrs_effect_envelope(&m.attribute_lists, aliases),
-        effect_origins,
-        throw_origins,
         sites,
         visibility,
         is_static: m.modifiers.iter().any(Modifier::is_static),

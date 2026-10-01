@@ -2,7 +2,10 @@
 //! arrow functions, and first-class callables lower to `ArgValue::Closure` with
 //! their own `ScopeOwner::Closure` scope; by-ref `use (&$x)` poisons, by-value doesn't.
 
-use steins_syntax::{ArgValue, ClosureRef, Scope, ScopeOwner, SourceTree, StmtKind};
+use steins_syntax::{
+    ArgValue, ClosureRef, Scope, ScopeOwner, SourceTree, StmtKind, derive_effect_origins,
+    derive_throw_origins,
+};
 
 /// The closure scopes in a parsed file (ADR-0033 own-scope discipline).
 fn closure_scopes(tree: &SourceTree) -> Vec<&Scope> {
@@ -125,8 +128,8 @@ fn closure_body_effect_and_throw_origins_are_captured() {
     let tree = SourceTree::parse(src);
     let cs = closure_scopes(&tree);
     assert_eq!(cs.len(), 1);
-    assert!(!cs[0].effect_origins.is_empty(), "echo is an effect origin");
-    assert!(!cs[0].throw_origins.is_empty(), "throw is a throw origin");
+    assert!(!derive_effect_origins(&cs[0].sites).is_empty(), "echo is an effect origin");
+    assert!(!derive_throw_origins(&cs[0].sites).is_empty(), "throw is a throw origin");
 }
 
 #[test]

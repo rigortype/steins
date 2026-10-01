@@ -233,7 +233,7 @@
 //! expansion; the descendant reach that a non-final receiver might suggest comes
 //! from the supertype seed instead of from a wider edge. Neither leg is sound
 //! without the other, and the reason the affected set's answer to "what about a
-//! subclass override?" differs from `resolve_effect_edge`'s (which gates on
+//! subclass override?" differs from the resolver's method edge (which gates on
 //! `is_final`, `private` and exactness) is that the two ask different questions:
 //! the effect graph asks whether a propagation *edge* exists, this asks which
 //! files a walk *reads*, and reading a class's declaration is an upward walk

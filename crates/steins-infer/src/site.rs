@@ -93,17 +93,23 @@ pub(crate) enum GapKind {
     /// A thrown or rethrown class the scan cannot name: `throw <expr>`, or a
     /// rethrow of a catch parameter whose clause named a type that did not resolve.
     UnresolvedThrow,
-    /// A known engine class has no row on the **effect** axis (`new SomeEngine`,
-    /// `SomeEngine::m()`), or one only a final method can use.
+    /// The chain leaves the project at a class the project does not declare (the
+    /// engine's, as far as the catalog can tell: `new SomeEngine`,
+    /// `SomeEngine::m()`, a declared receiver of a class nothing declares) and the
+    /// catalog has no row for it on the **effect** axis.
     NoEffectRow,
-    /// A known engine class has no row on the **throw** axis.
+    /// The same, on the **throw** axis.
     NoThrowRow,
+    /// A named or spread argument list that defeats the positional arity a
+    /// certification needs: `array_keys(...$a)` cannot be told from
+    /// `array_keys($a, $v)`, and only the one-argument form is certified pure.
+    ArgumentList,
 }
 
 impl GapKind {
     /// Every kind, in the order the facts payload's codec numbers them.
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 13] = [
+    pub(crate) const ALL: [Self; 14] = [
         Self::DynamicCallee,
         Self::UnknownClass,
         Self::UnknownFunction,
@@ -117,6 +123,7 @@ impl GapKind {
         Self::UnresolvedThrow,
         Self::NoEffectRow,
         Self::NoThrowRow,
+        Self::ArgumentList,
     ];
 }
 
@@ -259,4 +266,111 @@ pub(crate) enum Reach {
 /// `default` is the one construct both record.
 pub(crate) fn records_throw(site: &SiteOrigin) -> bool {
     !matches!(&site.kind, SiteKind::Construct(k) if *k != ConstructKind::MatchNoDefault)
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    //! Gap kinds ride the facts payload by variant index, so their order is a
+    //! format fact (ADR-0099 §5.4). The payload is decoded past the analyzer gate,
+    //! which is why a new kind takes no `SCHEMA_VERSION` bump.
+    use std::collections::BTreeSet;
+
+    use steins_db::{EffectsPolicy, PluginFacts};
+    use steins_syntax::SourceTree;
+
+    use super::GapKind;
+    use crate::facts::{FileFacts, facts_payload, fill_rows, read_facts};
+    use crate::project::{FileUnit, Index, LazyTree};
+
+    #[test]
+    fn every_gap_kind_round_trips_the_codec_in_variant_order() {
+        for (index, kind) in GapKind::ALL.into_iter().enumerate() {
+            let bytes = steins_db::wire::to_vec(&kind).expect("a gap kind serializes");
+            assert_eq!(bytes, [u8::try_from(index).unwrap()], "{kind:?} is numbered by position");
+            let back: GapKind = steins_db::wire::from_slice(&bytes).expect("it round-trips");
+            assert_eq!(back, kind);
+        }
+        // `ALL` lists every variant: the one after the last does not decode.
+        let past = [u8::try_from(GapKind::ALL.len()).unwrap()];
+        assert!(steins_db::wire::from_slice::<GapKind>(&past).is_err(), "ALL misses a variant");
+    }
+
+    /// The facts of a file whose source is `src`, with the own rows the generation
+    /// path builds for it.
+    fn facts_of(src: &str) -> FileFacts {
+        let tree = LazyTree::ready(SourceTree::parse(src));
+        let units = [FileUnit { path: "t.php", tree: &tree }];
+        let index = Index::from_units(&units);
+        let mut facts = vec![FileFacts::from_tree("t.php", units[0].tree)];
+        fill_rows(&mut facts, &units, &index, &PluginFacts::none(), &EffectsPolicy::none());
+        facts.remove(0)
+    }
+
+    /// Every kind survives the facts payload on an own row of each lane, and the
+    /// row decodes equal: the persisted form loses no reason.
+    #[test]
+    fn every_gap_kind_round_trips_the_facts_payload() {
+        let mut facts = facts_of("<?php function f() {}\nfunction g() {}");
+        let rows = facts.rows.as_mut().expect("rows filled");
+        let all: BTreeSet<GapKind> = GapKind::ALL.into_iter().collect();
+        for (_, row) in &mut rows.effects {
+            row.gaps = all.clone();
+        }
+        for (_, row) in &mut rows.throws {
+            row.gaps = all.clone();
+        }
+        assert!(!rows.effects.is_empty() && !rows.throws.is_empty());
+
+        let back = read_facts(&facts_payload(&facts)).expect("the payload decodes");
+        let (before, after) = (facts.rows.as_ref().unwrap(), back.rows.as_ref().unwrap());
+        assert_eq!(before.effects, after.effects);
+        assert_eq!(before.throws, after.throws);
+        assert!(after.effects.iter().all(|(_, r)| r.gaps == all && !r.exhaustive()));
+        assert!(after.throws.iter().all(|(_, r)| r.gaps == all && !r.exhaustive()));
+    }
+
+    /// The kinds the resolver records, by the site shape that produces each, are
+    /// the ones the own rows carry — and a body with none is exhaustive.
+    #[test]
+    fn the_resolver_records_the_kind_each_site_shape_produces() {
+        let src = "<?php
+interface Repo {}
+class Open { public function m() {} public function run($f, $c, Repo $r, $o) {
+    $f(); new $c(); unknown_fn(); $this->m(); $r->find();
+    new Engine(); array_keys(...$o); array_walk($o, 'no_such_fn'); strtoupper($o);
+    throw $o;
+}
+public function ev($c) { eval($c); } }
+final class Closed { public function leaf() { return 1; } public function run() { return $this->leaf(); } }";
+        let facts = facts_of(src);
+        let rows = facts.rows.as_ref().expect("rows filled");
+        let sym = |class: &str, method: &str| crate::Sym::Method(class.to_ascii_lowercase(), method.to_owned());
+        let effects = |class: &str, method: &str| {
+            rows.effects.iter().find(|(s, _)| *s == sym(class, method)).expect("a row").1.gaps.clone()
+        };
+        let throws = |class: &str, method: &str| {
+            rows.throws.iter().find(|(s, _)| *s == sym(class, method)).expect("a row").1.gaps.clone()
+        };
+        use GapKind::*;
+        let effect_expected: BTreeSet<GapKind> = [
+            DynamicCallee, UnknownClass, UnknownFunction, OpenMethod, DeclaredReceiver, NoEffectRow,
+            ArgumentList, UnresolvedCallback, UserCodeReach,
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(effects("Open", "run"), effect_expected);
+        // `eval` is the effect lane's alone until #864: its body is `…?` there and
+        // throw-exhaustive here.
+        assert_eq!(effects("Open", "ev"), BTreeSet::from([UnseenCode]));
+        assert!(throws("Open", "ev").is_empty());
+        assert!(effects("Closed", "run").is_empty() && effects("Closed", "leaf").is_empty());
+        let throw_expected: BTreeSet<GapKind> = [
+            DynamicCallee, UnknownClass, UnknownFunction, OpenMethod, DeclaredReceiver,
+            NoThrowRow, UnresolvedCallback, UnresolvedThrow,
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(throws("Open", "run"), throw_expected);
+        assert!(throws("Closed", "run").is_empty());
+    }
 }

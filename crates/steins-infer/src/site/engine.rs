@@ -14,7 +14,8 @@ use steins_syntax::{ArgShape, CallTarget, ConstArgs, NameRef, RefTarget};
 
 use crate::cx::Cx;
 use crate::project::FnResolution;
-use crate::site::reach::{Frame, reaches_user_code};
+use crate::site::Reach;
+use crate::site::reach::{Frame, builtin_reach};
 
 /// The by-ref-into-a-caller-local color (ADR-0063 §2.3).
 pub(crate) const MUTATE_LOCAL: &str = "mutate.local";
@@ -226,16 +227,29 @@ pub(crate) fn pure_at_call_arity(
 /// the string family, whose `string` parameters run an object's `__toString`
 /// under coercive typing. Resolution is asked again with that list, so a
 /// namespaced shadow or an ambiguous global keeps its `…?`.
+///
+/// `None` when the name is not such a builtin; otherwise the reach the call
+/// site leaves open: [`Reach::RuledOut`] certifies the call, [`Reach::Possible`]
+/// keeps the gap.
 pub(crate) fn certified_at_call_site(
     cx: &Cx,
     frame: &Frame,
     name: &NameRef,
     shapes: Option<&[ArgShape]>,
-) -> bool {
+) -> Option<Reach> {
     match cx.resolve_function_with(name, &steins_catalog::certified_at_call_site) {
-        FnResolution::Builtin(builtin) => {
-            !reaches_user_code(cx, frame, &builtin, shapes, cx.strict(), &[])
-        }
-        FnResolution::User(_) | FnResolution::Unknown => false,
+        FnResolution::Builtin(builtin) => Some(builtin_reach(cx, frame, &builtin, shapes, &[])),
+        FnResolution::User(_) | FnResolution::Unknown => None,
     }
+}
+
+/// Whether a call with no readable positional argument list (`targets` is
+/// `None`) names a builtin the catalog would certify pure at **some** arity
+/// ([`pure_at_call_arity`] declines it only for want of one).
+pub(crate) fn arity_defeated(cx: &Cx, name: &NameRef, targets: Option<&[RefTarget]>) -> bool {
+    targets.is_none()
+        && matches!(
+            cx.resolve_function_with(name, &|n| steins_catalog::pure_at_arity(n, 1)),
+            FnResolution::Builtin(_)
+        )
 }

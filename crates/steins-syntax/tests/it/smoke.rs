@@ -203,7 +203,7 @@ fn poison_markers_are_detected() {
 
 // ADR-0005/0006: `#[\Steins\Pure]` envelope recognition
 
-use steins_syntax::EffectOrigin;
+use steins_syntax::{EffectOrigin, derive_effect_origins, derive_throw_origins};
 
 /// Whether function `f` carries a recognized `Pure` envelope (empty label set).
 fn is_pure(src: &str) -> bool {
@@ -313,7 +313,7 @@ fn scans_effect_origins_across_control_flow() {
     let f = tree.functions().iter().find(|f| f.name == "f").unwrap();
     let mut echo = 0;
     let mut calls = Vec::new();
-    for o in &f.effect_origins {
+    for o in &derive_effect_origins(&f.sites) {
         match o {
             EffectOrigin::Output { keyword, .. } => {
                 assert_eq!(keyword.spelling(), "echo");
@@ -334,7 +334,7 @@ fn scans_exit_and_die() {
     let tree = SourceTree::parse(src);
     let exit_spelling = |name: &str| {
         let func = tree.functions().iter().find(|x| x.name == name).unwrap();
-        match func.effect_origins.first() {
+        match derive_effect_origins(&func.sites).first() {
             Some(EffectOrigin::Exit { keyword, .. }) => Some(keyword.spelling()),
             _ => None,
         }
@@ -355,15 +355,15 @@ fn scans_eval_and_the_four_inclusions() {
     let tree = SourceTree::parse(src);
     let func = |n: &str| tree.functions().iter().find(|x| x.name == n).unwrap();
     let f = func("f");
-    assert!(matches!(f.effect_origins.first(), Some(EffectOrigin::Eval { .. })));
+    assert!(matches!(derive_effect_origins(&f.sites).first(), Some(EffectOrigin::Eval { .. })));
     let calls_h = |o: &EffectOrigin| matches!(o, EffectOrigin::Call { name, .. } if name.simple() == "h");
     assert!(
-        f.effect_origins.iter().any(calls_h),
+        derive_effect_origins(&f.sites).iter().any(calls_h),
         "the operand's call is still an origin: {:?}",
-        f.effect_origins
+        derive_effect_origins(&f.sites)
     );
-    let keywords: Vec<&str> = func("g")
-        .effect_origins
+    let keywords: Vec<&str> = derive_effect_origins(&func("g").sites)
+        
         .iter()
         .filter_map(|o| match o {
             EffectOrigin::Include { keyword, .. } => Some(keyword.spelling()),
@@ -373,12 +373,12 @@ fn scans_eval_and_the_four_inclusions() {
     assert_eq!(keywords, ["include", "include_once", "require", "require_once"]);
     let k = func("k");
     assert!(
-        !k.effect_origins.iter().any(|o| matches!(o, EffectOrigin::Eval { .. })),
+        !derive_effect_origins(&k.sites).iter().any(|o| matches!(o, EffectOrigin::Eval { .. })),
         "a closure's eval is the closure's own: {:?}",
-        k.effect_origins
+        derive_effect_origins(&k.sites)
     );
     let closure = tree.scopes().iter().find(|s| {
-        s.effect_origins.iter().any(|o| matches!(o, EffectOrigin::Eval { .. }))
+        derive_effect_origins(&s.sites).iter().any(|o| matches!(o, EffectOrigin::Eval { .. }))
     });
     assert!(closure.is_some(), "the closure scope carries the eval");
 }
@@ -396,8 +396,7 @@ fn scans_new_by_the_class_it_names() {
                } }\nfunction h(): string { return ''; }";
     let tree = SourceTree::parse(src);
     let f = &tree.classes()[0].methods[0];
-    let shapes: Vec<String> = f
-        .effect_origins
+    let shapes: Vec<String> = derive_effect_origins(&f.sites)
         .iter()
         .filter_map(|o| match o {
             EffectOrigin::New { class, .. } => Some(class.render()),
@@ -406,8 +405,8 @@ fn scans_new_by_the_class_it_names() {
         })
         .collect();
     assert_eq!(shapes, ["Foo", "self", "static", "parent", "?", "?", "Foo", "?", "?"]);
-    let calls = f.effect_origins.iter().filter(|o| matches!(o, EffectOrigin::Call { .. })).count();
-    assert_eq!(calls, 3, "the arguments and the computed class are walked: {:?}", f.effect_origins);
+    let calls = derive_effect_origins(&f.sites).iter().filter(|o| matches!(o, EffectOrigin::Call { .. })).count();
+    assert_eq!(calls, 3, "the arguments and the computed class are walked: {:?}", derive_effect_origins(&f.sites));
 }
 
 /// Issue #849: the throw scan records the same constructor edge for every `new`
@@ -426,8 +425,7 @@ fn scans_a_constructor_throw_edge_for_every_new() {
                } }\nfunction h(): string { return ''; }";
     let tree = SourceTree::parse(src);
     let f = &tree.classes()[0].methods[0];
-    let shapes: Vec<String> = f
-        .throw_origins
+    let shapes: Vec<String> = derive_throw_origins(&f.sites)
         .iter()
         .filter_map(|o| match &o.kind {
             ThrowKind::Construct { class } => Some(class.render()),
@@ -438,10 +436,11 @@ fn scans_a_constructor_throw_edge_for_every_new() {
         .collect();
     let expected = ["Foo", "self", "static", "parent", "?", "?", "Foo", "?", "?", "throw Bar", "Bar"];
     assert_eq!(shapes, expected);
-    let calls = f.throw_origins.iter().filter(|o| matches!(o.kind, ThrowKind::Call(_))).count();
-    assert_eq!(calls, 3, "the arguments and the computed class are walked: {:?}", f.throw_origins);
+    let calls = derive_throw_origins(&f.sites).iter().filter(|o| matches!(o.kind, ThrowKind::Call(_))).count();
+    assert_eq!(calls, 3, "the arguments and the computed class are walked: {:?}", derive_throw_origins(&f.sites));
     let try_at = u32::try_from(src.find("try").unwrap()).unwrap();
-    let mut thrown = f.throw_origins.iter().filter(|o| o.span.start > try_at);
+    let throw_origins = derive_throw_origins(&f.sites);
+    let mut thrown = throw_origins.iter().filter(|o| o.span.start > try_at);
     assert!(thrown.all(|o| o.guards.len() == 1), "both sit inside the `try`");
 }
 
@@ -456,7 +455,7 @@ fn scans_the_constant_leading_arguments_of_a_named_call() {
         let src = format!("<?php function f($h, string $p): void {{ {body} }}");
         let tree = SourceTree::parse(&src);
         let f = tree.functions().iter().find(|f| f.name == "f").expect("f").clone();
-        let origin = f.effect_origins.first().expect("one origin").clone();
+        let origin = derive_effect_origins(&f.sites).first().expect("one origin").clone();
         match origin {
             EffectOrigin::Call { const_args, .. }
             | EffectOrigin::HigherOrder { const_args, .. } => const_args,
@@ -614,7 +613,7 @@ fn nested_closure_bodies_are_not_scanned() {
     let tree = SourceTree::parse(src);
     let f = &tree.functions()[0];
     assert!(
-        !f.effect_origins.iter().any(|o| matches!(o, EffectOrigin::Output { .. })),
+        !derive_effect_origins(&f.sites).iter().any(|o| matches!(o, EffectOrigin::Output { .. })),
         "closure-nested echo is not the outer function's effect"
     );
 }
@@ -630,7 +629,7 @@ fn scans_structural_state_constructs() {
         let src = format!("<?php function f($o, $a, $c): void {{ {body} }}");
         let tree = SourceTree::parse(&src);
         let f = tree.functions().iter().find(|f| f.name == "f").expect("f").clone();
-        f.effect_origins
+        derive_effect_origins(&f.sites)
             .iter()
             .filter_map(|o| match o {
                 EffectOrigin::State { construct, span } => {
@@ -692,7 +691,7 @@ fn a_constructor_initializing_this_records_no_property_write() {
         );
         let tree = SourceTree::parse(&src);
         let m = tree.classes()[0].methods[0].clone();
-        m.effect_origins
+        derive_effect_origins(&m.sites)
             .iter()
             .filter_map(|o| match o {
                 EffectOrigin::State { construct: S::PropertyWrite, span } => {
@@ -733,7 +732,7 @@ fn a_constructor_initializing_this_records_no_property_write() {
     let src = "<?php class C { public $p; public function __construct() { $f = function () { $this->p = 1; }; $f(); } }";
     let tree = SourceTree::parse(src);
     let closure_writes = tree.scopes().iter().any(|s| {
-        s.effect_origins.iter().any(|o| matches!(o, EffectOrigin::State { construct: S::PropertyWrite, .. }))
+        derive_effect_origins(&s.sites).iter().any(|o| matches!(o, EffectOrigin::State { construct: S::PropertyWrite, .. }))
     });
     assert!(closure_writes, "a closure defined in a constructor can run after construction");
 }
@@ -745,8 +744,8 @@ fn a_nested_scope_owns_its_state_constructs() {
     let src = "<?php function f($o): void { $g = function () { global $x; }; $h = fn () => $_GET; }";
     let tree = SourceTree::parse(src);
     let state = |o: &EffectOrigin| matches!(o, EffectOrigin::State { .. });
-    assert!(!tree.functions()[0].effect_origins.iter().any(state), "f owns none of them");
-    let owners = tree.scopes().iter().filter(|s| s.effect_origins.iter().any(state)).count();
+    assert!(!derive_effect_origins(&tree.functions()[0].sites).iter().any(state), "f owns none of them");
+    let owners = tree.scopes().iter().filter(|s| derive_effect_origins(&s.sites).iter().any(state)).count();
     assert_eq!(owners, 2, "the closure and the arrow function each carry their own");
 }
 

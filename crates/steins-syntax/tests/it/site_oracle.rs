@@ -1,11 +1,21 @@
-//! The one site scan against the two it replaces (issue #862): for every owner
-//! the lowering scans, the effect and throw origin lists derived from the
-//! owner's `sites` must equal the lists `scan_effect_origins` and
-//! `scan_throw_origins` still produce.
+//! What the lowered sites guarantee their consumers (issues #862, #863).
 //!
-//! The comparison is on `Debug` text, element by element, not on `==`:
-//! `NameRef`'s equality ignores its source offset, which an origin carries and
-//! a consumer reads.
+//! The lanes read a body's `sites` and nothing else, so a site that no lane
+//! records is a silent hole, and a lane that selects sites by span (region
+//! purity, ADR-0076) reads the span a site carries. For every owner the lowering
+//! scans:
+//!
+//! * every site is recorded by at least one lane: the effect origin list or the
+//!   throw origin list derived from it holds a view of it ([`derive_effect_origins`],
+//!   [`derive_throw_origins`]), and each view sits at the site's span.
+//!
+//! Until #863 this file held the lowering against the two scans it replaced, the
+//! effect and the throw one, and compared the derived lists with theirs element
+//! by element over every PHP file of the repository and of the public corpora. The
+//! scans are gone; the byte-identity A/B of #863 (`check`, `annotate`,
+//! `effect-diff`, and the three transform dry-runs over the ten public packages)
+//! is what that comparison became, and the always-on checks below keep the
+//! structural half.
 //!
 //! * `over_repo_files` is the always-on half, over the PHP files the repository
 //!   keeps outside `corpus/`.
@@ -18,16 +28,14 @@
 //!       --test it site_oracle -- --ignored
 //!   ```
 
-use std::fmt::Debug;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use steins_syntax::{
-    ConstructKind, EffectOrigin, SiteKind, SiteOrigin, SourceTree, ThrowOrigin,
-    derive_effect_origins, derive_throw_origins,
+    ConstructKind, SiteKind, SiteOrigin, SourceTree, derive_effect_origins, derive_throw_origins,
 };
 
-/// What an oracle run read.
+/// What a run read.
 #[derive(Default)]
 struct Report {
     files: usize,
@@ -36,70 +44,40 @@ struct Report {
     divergences: Vec<String>,
 }
 
-/// The first index at which two lists differ, by `Debug` text, with both
-/// elements (`<none>` past a list's end), or `None` when they are equal.
-fn first_divergence<T: Debug>(derived: &[T], legacy: &[T]) -> Option<(usize, String, String)> {
-    let shown = |list: &[T], i: usize| {
-        list.get(i).map_or_else(|| "<none>".to_owned(), |o| format!("{o:?}"))
-    };
-    (0..derived.len().max(legacy.len()))
-        .find(|&i| shown(derived, i) != shown(legacy, i))
-        .map(|i| (i, shown(derived, i), shown(legacy, i)))
-}
-
-/// One owner of one file, as the report names it.
-struct Owner<'a> {
-    file: &'a Path,
-    name: String,
-}
-
-/// Compare one lane of one owner, recording a divergence if the lists differ.
-fn check_lane<T: Debug>(
-    owner: &Owner<'_>,
-    lane: &str,
-    derived: &[T],
-    legacy: &[T],
-    report: &mut Report,
-) {
-    if let Some((index, derived, legacy)) = first_divergence(derived, legacy) {
-        report.divergences.push(format!(
-            "{} owner {}: {lane} lists first differ at index {index}\n  derived: {derived}\n  \
-             legacy:  {legacy}",
-            owner.file.display(),
-            owner.name,
-        ));
-    }
-}
-
-/// Compare both lanes of one owner.
-fn check_owner(
-    owner: &Owner<'_>,
-    (sites, effect, throw): (&[SiteOrigin], &[EffectOrigin], &[ThrowOrigin]),
-    report: &mut Report,
-) {
+/// Check every site of one owner: at least one lane records it, at its span.
+fn check_owner(file: &Path, name: &str, sites: &[SiteOrigin], report: &mut Report) {
     report.owners += 1;
     report.sites += sites.len();
-    check_lane(owner, "effect", &derive_effect_origins(sites), effect, report);
-    check_lane(owner, "throw", &derive_throw_origins(sites), throw, report);
+    for site in sites {
+        let one = std::slice::from_ref(site);
+        let (effect, throw) = (derive_effect_origins(one), derive_throw_origins(one));
+        let spans_ok = effect.iter().all(|o| o.span() == site.span)
+            && throw.iter().all(|o| o.span == site.span);
+        if (effect.is_empty() && throw.is_empty()) || !spans_ok {
+            report.divergences.push(format!(
+                "{} owner {name}: site {:?} has {} effect view(s) and {} throw view(s), spans ok: {spans_ok}",
+                file.display(),
+                site.kind.tag(),
+                effect.len(),
+                throw.len(),
+            ));
+        }
+    }
 }
 
 /// Check every owner of one parsed file.
 fn check_tree(file: &Path, tree: &SourceTree, report: &mut Report) {
     report.files += 1;
-    let owner = |name: String| Owner { file, name };
     for f in tree.functions() {
-        let at = owner(format!("function {}", f.name));
-        check_owner(&at, (&f.sites, &f.effect_origins, &f.throw_origins), report);
+        check_owner(file, &format!("function {}", f.name), &f.sites, report);
     }
     for c in tree.classes() {
         for m in &c.methods {
-            let at = owner(format!("method {}::{}", c.name, m.name));
-            check_owner(&at, (&m.sites, &m.effect_origins, &m.throw_origins), report);
+            check_owner(file, &format!("method {}::{}", c.name, m.name), &m.sites, report);
         }
     }
     for s in tree.scopes() {
-        let at = owner(format!("scope {:?}", s.owner));
-        check_owner(&at, (&s.sites, &s.effect_origins, &s.throw_origins), report);
+        check_owner(file, &format!("scope {:?}", s.owner), &s.sites, report);
     }
 }
 
@@ -122,7 +100,7 @@ fn php_files(root: &Path, skip: &dyn Fn(&Path) -> bool, out: &mut Vec<PathBuf>) 
     }
 }
 
-/// Run the oracle over `files`.
+/// Run the checks over `files`.
 fn run(files: &[PathBuf]) -> Report {
     let mut report = Report::default();
     for file in files {
@@ -136,8 +114,8 @@ fn run(files: &[PathBuf]) -> Report {
 /// Fail on any divergence, naming the first few. A run that read no files or no
 /// sites fails too: it would otherwise pass having checked nothing.
 fn assert_clean(label: &str, report: &Report) {
-    assert!(report.files > 0, "{label}: the oracle read no files");
-    assert!(report.sites > 0, "{label}: the oracle read no sites in {} files", report.files);
+    assert!(report.files > 0, "{label}: the checks read no files");
+    assert!(report.sites > 0, "{label}: the checks read no sites in {} files", report.files);
     assert!(
         report.divergences.is_empty(),
         "{label}: {} divergences over {} files, {} owners, {} sites; first {}:\n{}",
@@ -185,8 +163,8 @@ fn over_corpus() {
 }
 
 /// Constructs the corpora may carry rarely or never, each in a shape the two
-/// legacy scans treat in their own way: the oracle reads them here so a
-/// regression on one does not wait for a corpus run.
+/// lanes treat in their own way: read here so a regression on one does not wait
+/// for a corpus run.
 const EDGE_SHAPES: &str = r#"<?php
 namespace N;
 

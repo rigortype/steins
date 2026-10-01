@@ -10,7 +10,7 @@
 //!
 //! A `&'static str` field would be one: serde's derive implicitly borrows
 //! every `&str` field from the input, a bound no deserializer satisfies, and
-//! `serde(with)` does not lift it. That is why an [`crate::EffectOrigin`]'s
+//! `serde(with)` does not lift it. That is why a [`crate::ConstructKind`]'s
 //! keyword is an enum ([`crate::OutputKeyword`], [`crate::ExitKeyword`],
 //! [`crate::IncludeKeyword`]) and not the spelling itself (issue #829).
 
