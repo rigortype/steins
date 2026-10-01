@@ -946,9 +946,23 @@ pub(crate) fn effect_summary_units(
     plugins: &PluginFacts,
     policy: &EffectsPolicy,
 ) -> Vec<EffectSummary> {
-    let effects = compute_effects(units, index, plugins, policy, &[]);
-    let throws = compute_throws(units, index, &[]);
-    let tree = units[target].tree;
+    let fixpoints = Fixpoints::new(units, index, plugins, policy, &[]);
+    summarize_unit(&fixpoints, target)
+}
+
+/// The [`effect_summary_units`] answer for one `target`, read off fixpoints the
+/// caller already holds (issue #861).
+///
+/// The two whole-project fixpoints do not depend on the target, so a caller
+/// that summarizes many files of one project builds one [`Fixpoints`] and asks
+/// this once per file; each fixpoint then runs at most once however many
+/// targets are asked.
+#[must_use]
+pub(crate) fn summarize_unit(fixpoints: &Fixpoints, target: usize) -> Vec<EffectSummary> {
+    let effects = fixpoints.effects();
+    let throws = fixpoints.throws();
+    let policy = fixpoints.policy();
+    let tree = fixpoints.units()[target].tree;
     let sorted_labels = |sym: &Sym| -> Vec<String> {
         let mut labels: Vec<String> = effects
             .get(sym)

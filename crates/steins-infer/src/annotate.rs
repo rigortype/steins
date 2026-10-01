@@ -15,8 +15,8 @@ use crate::env::Store;
 use crate::project::{Diagnostic, FileUnit, Index, LazyTree};
 use crate::walk::analyze_scope;
 use crate::fold::Folder;
-use crate::{RuntimePostures, check_units};
-use crate::purity::{EffectSummary, effect_summary_units};
+use crate::{Fixpoints, RuntimePostures, check_units};
+use crate::purity::{EffectSummary, effect_summary_units, summarize_unit};
 
 // ---------------------------------------------------------------------------
 // `annotate` facts (ADR-0020): the Rigor-style margin — proven facts only.
@@ -208,6 +208,22 @@ pub fn effect_summaries_project(
     project: Project,
     target: SourceFile,
 ) -> Vec<EffectSummary> {
+    effect_summaries_project_files(db, project, &[target]).pop().unwrap_or_default()
+}
+
+/// [`effect_summaries_project`] for several `targets` at once: the answer at
+/// index `i` is the one for `targets[i]` (empty for a file not in the project).
+///
+/// The effect and throw fixpoints are whole-project and do not depend on the
+/// target, so they run once for the batch and each target's summaries are read
+/// off them (issue #861). The result is the one [`effect_summaries_project`]
+/// gives per file, at the cost of one fixpoint rather than one per target.
+#[must_use]
+pub fn effect_summaries_project_files(
+    db: &dyn Db,
+    project: Project,
+    targets: &[SourceFile],
+) -> Vec<Vec<EffectSummary>> {
     let handles: Vec<SourceFile> = project.files(db).to_vec();
     // One `LazyTree` per file, borrowing the database's own parse: the salsa
     // path holds every tree already, so nothing here is ever deferred.
@@ -222,10 +238,11 @@ pub fn effect_summaries_project(
     let pos: HashMap<SourceFile, usize> =
         handles.iter().enumerate().map(|(i, &f)| (f, i)).collect();
     let index = Index::from_db(db_index, &pos, &units);
-    let Some(target_idx) = handles.iter().position(|&f| f == target) else {
-        return Vec::new();
-    };
-    effect_summary_units(&units, &index, target_idx, project.plugins(db), project.effects(db))
+    let fixpoints = Fixpoints::new(&units, &index, project.plugins(db), project.effects(db), &[]);
+    targets
+        .iter()
+        .map(|t| pos.get(t).map_or_else(Vec::new, |&at| summarize_unit(&fixpoints, at)))
+        .collect()
 }
 
 /// Compute the annotate facts for `target` file within a project view.

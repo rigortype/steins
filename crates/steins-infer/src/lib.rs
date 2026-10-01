@@ -115,7 +115,7 @@ pub use purity::{EffectSummary, RegionPurity, effect_summary, region_purity_proj
 pub use absence::{SAPI_PROVIDED_FUNCTIONS_EXACT, SAPI_PROVIDED_FUNCTION_PREFIXES};
 pub use annotate::{
     FactKind, LineFact, annotate_facts, annotate_file, annotate_project, annotate_project_under,
-    effect_summaries_file, effect_summaries_project,
+    effect_summaries_file, effect_summaries_project, effect_summaries_project_files,
 };
 pub use assert_harness::{AssertObservation, SubjectFact, collect_assert_types, probe_subjects};
 pub use project::{
