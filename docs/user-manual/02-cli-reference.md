@@ -569,7 +569,11 @@ the kinds that make it `…?`. The kinds are `dynamic-callee`, `unknown-class`,
 `unknown-function`, `open-method`, `declared-receiver`, `interop-envelope`,
 `unresolved-callback`, `unseen-code`, `user-code-reach`, `state-construct`,
 `unresolved-throw`, `no-effect-row`, `no-throw-row`, `argument-list`,
-`flag-dependent-throw`, `method-not-found` and `non-final-this`.
+`flag-dependent-throw`, `method-not-found`, `non-final-this`,
+`operator-to-string`, `operator-magic-property`, `operator-array-access`,
+`operator-iteration` and `operator-clone` (the last five are an operator whose
+operand's class the analysis cannot pin: `.`, `echo`, `$o->p`, `$o['k']`,
+`foreach`, `clone`).
 
 > **If you know PHPStan or Psalm:** this is the batch answer to what you get
 > from sprinkling `\PHPStan\dumpType()` and rerunning — a whole file's
