@@ -530,8 +530,9 @@ pub struct EffectSummary {
     /// Whether the throw set is exhaustive (no dynamic/unresolved taint).
     pub throws_exhaustive: bool,
     /// The kinds of gap behind `exhaustive == false` (ADR-0099 §5): this body's
-    /// own and those it inherits through its call edges, spelled as
-    /// [`GapKind::as_str`] and in codec order. Empty exactly when `exhaustive`.
+    /// own and those it inherits through its call edges, in kebab-case (`no-effect-row`)
+    /// and in the order the facts codec numbers the kinds. Empty exactly when
+    /// `exhaustive`.
     pub gaps: Vec<&'static str>,
     /// The same for the throw lane: empty exactly when `throws_exhaustive`.
     pub throws_gaps: Vec<&'static str>,
