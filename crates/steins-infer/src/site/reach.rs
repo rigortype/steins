@@ -303,8 +303,23 @@ pub(crate) fn reaches_user_code(
 ) -> bool {
     let Some(row) = steins_catalog::arg_reach(name) else { return true };
     let Some(shapes) = shapes else { return row.reaches_blind(strict) };
+    operands_reach(cx, frame, shapes, strict, handled, |position| row.at(position))
+}
+
+/// Whether some operand of a call reaches user code, given what each position
+/// does with its argument (`at`): the one rule a builtin function's row
+/// ([`reaches_user_code`]) and an engine method's ([`method_reaches_user_code`])
+/// are both held to. A position in `handled` is answered for already.
+fn operands_reach(
+    cx: &Cx,
+    frame: &Frame,
+    shapes: &[ArgShape],
+    strict: bool,
+    handled: &[usize],
+    at: impl Fn(usize) -> ArgReach,
+) -> bool {
     shapes.iter().enumerate().filter(|(position, _)| !handled.contains(position)).any(
-        |(position, shape)| match row.at(position) {
+        |(position, shape)| match at(position) {
             ArgReach::Inert => false,
             ArgReach::Coerced => !strict && frame.held(cx, shape) == Held::Unknown,
             ArgReach::Object => frame.held(cx, shape) == Held::Unknown,
@@ -312,6 +327,30 @@ pub(crate) fn reaches_user_code(
             ArgReach::Callback | ArgReach::Autoload => true,
         },
     )
+}
+
+/// Whether a call to `class::method`, an engine method or constructor, with
+/// these argument shapes, written in a file whose strictness is `strict`, may
+/// run user code through an argument (issue #858,
+/// [`steins_catalog::method_arg_reach`]). `class` is the engine class the call
+/// resolves to, not the class it is spelled with: a project exception that
+/// inherits `RuntimeException`'s constructor asks for `RuntimeException`.
+///
+/// The rule is [`reaches_user_code`]'s, position for position. A method the
+/// catalog rows on another axis and not on this one reaches blind
+/// (`None` is "the catalog states nothing", never "inert"); so does a call whose
+/// positions the site did not record: a named or spread argument list, or a
+/// receiver the scan does not name by class (`$r->m($o)`, `(new Foo)->m($o)`).
+pub(crate) fn method_reaches_user_code(
+    cx: &Cx,
+    frame: &Frame,
+    (class, method): (&str, &str),
+    shapes: Option<&[ArgShape]>,
+    strict: bool,
+) -> bool {
+    let Some(row) = steins_catalog::method_arg_reach(class, method) else { return true };
+    let Some(shapes) = shapes else { return row.reaches_blind(strict) };
+    operands_reach(cx, frame, shapes, strict, &[], |position| row.at(position))
 }
 
 /// Whether the builtin `name`, handed to another builtin as a callback, may
@@ -332,6 +371,21 @@ pub(crate) fn builtin_reach(
     handled: &[usize],
 ) -> Reach {
     if reaches_user_code(cx, frame, name, shapes, cx.strict(), handled) {
+        Reach::Possible
+    } else {
+        Reach::RuledOut
+    }
+}
+
+/// [`method_reaches_user_code`] as the [`Reach`] a resolved site records, in the
+/// file whose strictness `cx` carries.
+pub(crate) fn engine_method_reach(
+    cx: &Cx,
+    frame: &Frame,
+    callee: (&str, &str),
+    shapes: Option<&[ArgShape]>,
+) -> Reach {
+    if method_reaches_user_code(cx, frame, callee, shapes, cx.strict()) {
         Reach::Possible
     } else {
         Reach::RuledOut

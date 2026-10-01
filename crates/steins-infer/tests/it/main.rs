@@ -59,6 +59,7 @@ mod dump_surface;
 mod dynamic_code_effects;
 mod effects;
 mod embedded_writes;
+mod engine_method_reach;
 mod enforced_top_return;
 mod enum_case_domain;
 mod exhaustiveness;
