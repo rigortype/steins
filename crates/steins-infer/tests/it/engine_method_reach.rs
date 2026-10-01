@@ -125,6 +125,30 @@ fn a_pdo_method_on_an_exact_receiver_coerces_its_statement() {
     assert!(!reaches(&file(true, "Name $o", exec), "f").0);
 }
 
+/// `parent::query(…)` in a subclass of `PDO`: the exact receiver a project
+/// wrapper writes.
+#[test]
+fn a_pdo_wrapper_forwarding_to_parent_is_held_to_the_rule() {
+    let wrapper = |strict: bool, signature: &str, call: &str| {
+        let declare = if strict { "declare(strict_types=1);\n" } else { "" };
+        format!(
+            "<?php\n{declare}\
+             final class Name {{ public function __toString(): string {{ return 'x'; }} }}\n\
+             class Db extends \\PDO {{\n\
+                 public function run({signature}): mixed {{ return parent::{call}; }}\n\
+             }}\n"
+        )
+    };
+    let s = summary(&wrapper(false, "Name $o", "query($o)"), "Db::run");
+    assert_eq!(s.gaps, ["user-code-reach"], "{s:?}");
+    assert_eq!(s.labels, ["io.db"], "the row is kept: {s:?}");
+    assert_eq!(reaches(&wrapper(false, "string $s", "query($s)"), "Db::run"), NEITHER);
+    assert_eq!(reaches(&wrapper(false, "string $s", "query('SELECT 1')"), "Db::run"), NEITHER);
+    assert_eq!(reaches(&wrapper(true, "Name $o", "query($o)"), "Db::run"), NEITHER);
+    assert!(reaches(&wrapper(false, "Name $o", "exec($o)"), "Db::run").0);
+    assert!(!reaches(&wrapper(true, "Name $o", "exec($o)"), "Db::run").0);
+}
+
 /// `(new PDO)->query($s)` names its class but records no operand shapes, so the
 /// row reads blind: `query`'s `$fetchModeArgs` can name a class to autoload in
 /// either mode, and `exec`'s only parameter is a coerced string.
