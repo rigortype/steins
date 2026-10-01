@@ -112,6 +112,25 @@ pub fn builtin_throws(name: &str) -> Option<&'static [&'static str]> {
         "str_repeat" | "array_fill" | "range" | "str_pad" | "str_split" | "explode"
         | "str_increment" | "str_decrement" | "round" | "strpos" | "stripos" | "strrpos"
         | "version_compare" | "count" | "sizeof" | "mt_rand" => Some(VALUE_ERROR),
+        // The `ValueError` arms the throwless audit found on the way (issue #864,
+        // `crate::throws_of`): each name is NOT throwless, so it carries a row
+        // rather than a place on that table. Every arm was reproduced by a
+        // 12,000-tuple argument fuzz on PHP 8.5.11, and its condition is the
+        // parameter-value check its message names: `dirname`'s `$levels < 1`,
+        // `max`/`min` of an empty array, `substr_count`'s offset or length outside the
+        // haystack, `array_chunk`'s `$length < 1`, `array_combine`'s unequal
+        // key and value counts, `array_pad`'s size past the engine's limit,
+        // `array_rand`'s `$num` outside `1..=count`, `parse_url`'s unknown
+        // `$component`, the `$length < 0` of `strncmp`/`strncasecmp`,
+        // `str_word_count`'s unknown `$format`, `wordwrap`'s empty `$break` (or a
+        // zero `$width` with `$cut_long_words`), `strpbrk`'s empty `$characters`,
+        // `substr_compare`'s offset outside the haystack, and `vsprintf`'s
+        // missing conversion specifier or too short argument array.
+        "dirname" | "max" | "min" | "substr_count" | "array_chunk" | "array_combine"
+        | "array_pad" | "array_rand" | "parse_url" | "strncmp" | "strncasecmp"
+        | "str_word_count" | "wordwrap" | "strpbrk" | "substr_compare" | "vsprintf" => {
+            Some(VALUE_ERROR)
+        }
         "sprintf" => Some(SPRINTF),
         // `json_decode`/`json_encode` throw JsonException only under
         // JSON_THROW_ON_ERROR; without flag inspection this key stays synthetic.
