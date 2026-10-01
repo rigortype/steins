@@ -404,7 +404,8 @@ pub(crate) enum Reach {
 pub(crate) fn records_throw(site: &SiteOrigin) -> bool {
     use ConstructKind::{Eval, Include, MatchNoDefault};
     let both_lanes = |k: &ConstructKind| matches!(k, MatchNoDefault | Eval | Include(_));
-    // #859 phase 2: an operator site has no throw origin until the resolver reads it.
+    // An operator site resolves to edges and gaps, never to a fact of its own: what
+    // it throws is raised in the body of the method it reaches.
     !matches!(&site.kind, SiteKind::Operator { .. })
         && !matches!(&site.kind, SiteKind::Construct(k) if !both_lanes(k))
 }

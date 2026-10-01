@@ -51,7 +51,7 @@ fn run_in(dir: &Path, args: &[&str]) -> Run {
 /// A logging facade and two callers: `f` reaches the stream and the clock only
 /// through the facade, `g` also reads the clock in its own body. One policy, two
 /// verdicts about `nondet.time`.
-const SRC: &str = "<?php\nclass Logger {\n    public static function debug(string $m): void { fwrite(STDERR, $m . time()); }\n}\nfunction f(string $s): int { Logger::debug($s); return 1; }\nfunction g(string $s): int { Logger::debug($s); return time(); }\n";
+const SRC: &str = "<?php\nclass Logger {\n    public static function debug(string $m): void { fwrite(STDERR, $m); time(); }\n}\nfunction f(string $s): int { Logger::debug($s); return 1; }\nfunction g(string $s): int { Logger::debug($s); return time(); }\n";
 
 const POLICY: &str = "[effects]\ntolerated = [\"telemetry\"]\n\n[effects.attribution]\n\"Logger\" = [\"telemetry\"]\n";
 

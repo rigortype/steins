@@ -14,8 +14,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use steins_db::{Db, EffectsPolicy, PluginFacts, Project, SourceFile, parse, project_index};
 use steins_syntax::Span;
 use steins_syntax::{
-    ClassDecl, EffectEnvelope, EffectRecv, FunctionDecl, MethodDecl, ScopeOwner, SiteOrigin,
-    SourceTree,
+    ClassDecl, EffectEnvelope, EffectRecv, FunctionDecl, MethodDecl, ScopeOwner, SiteKind,
+    SiteOrigin, SourceTree,
 };
 use steins_phpdoc::{EnvelopeTag, TagKind, scan_docblock};
 
@@ -803,6 +803,36 @@ pub fn region_purity_project(
         .collect()
 }
 
+/// The start of the region's own `foreach` subject (ADR-0099 §4.3's Iterate
+/// family), which its purity leaves out. A region is the loop statement, so its
+/// subject is the first `foreach` operator site inside it. Whether the subject is
+/// an array, proven or vouched for, is the question the transform asks of the
+/// subject separately (`array_map` raises a `TypeError` on a `Traversable`); the
+/// region's purity is about the loop body. A `foreach` nested in the body is a
+/// site like any other.
+fn own_subject_start(
+    tree: &SourceTree,
+    inside: impl Fn(steins_syntax::Span) -> bool,
+) -> Option<u32> {
+    use steins_syntax::OperatorConstruct;
+    let methods = tree.classes().iter().flat_map(|c| &c.methods).map(|m| m.sites.as_slice());
+    let functions = tree.functions().iter().map(|f| f.sites.as_slice());
+    let scopes = tree.scopes().iter().map(|s| s.sites.as_slice());
+    functions
+        .chain(methods)
+        .chain(scopes)
+        .flatten()
+        .filter(|s| {
+            inside(s.span)
+                && matches!(
+                    &s.kind,
+                    SiteKind::Operator { construct: OperatorConstruct::Foreach, .. }
+                )
+        })
+        .map(|s| s.span.start)
+        .min()
+}
+
 /// The per-region half of [`region_purity_project`], against already-computed
 /// fixpoints.
 #[allow(clippy::too_many_arguments)]
@@ -827,12 +857,24 @@ fn region_purity_in(
     // value, restricted to a sub-span.
     let mut row = EffectOwnRow::new();
     let mut trow = ThrowOwnRow::new();
+    let own_subject = own_subject_start(tree, inside);
+    let is_own_subject = |s: &SiteOrigin| {
+        own_subject == Some(s.span.start)
+            && matches!(
+                &s.kind,
+                SiteKind::Operator { construct: steins_syntax::OperatorConstruct::Foreach, .. }
+            )
+    };
 
     let mut take = |class_fqn: Option<&str>, params: &[steins_syntax::Param], sites: &[SiteOrigin]| {
         // The frame is the whole body's: a call outside the region can still
         // rebind a parameter an argument inside it names.
         let frame = Frame::new(class_fqn, params, sites);
-        let picked: Vec<SiteOrigin> = sites.iter().filter(|s| inside(s.span)).cloned().collect();
+        let picked: Vec<SiteOrigin> = sites
+            .iter()
+            .filter(|s| inside(s.span) && !is_own_subject(s))
+            .cloned()
+            .collect();
         classify_effect_sites(&cx, &frame, &picked, plugins, policy, &mut row);
         // The guards are dropped, not carried: this region's own body cannot
         // hold a `try` (a `try` is a statement, and the eligible body is one

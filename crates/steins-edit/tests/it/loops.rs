@@ -114,13 +114,13 @@ fn an_applied_file_enumerates_no_candidate() {
 #[test]
 fn a_pure_builtin_body_is_rewritten() {
     let src = with_proven_subject(
-        "    foreach ($xs as $x) {\n        $out[] = strlen((string) $x);\n    }",
+        "    foreach ($xs as $x) {\n        $out[] = abs($x);\n    }",
     );
     let report = plan(&[("lib.php", &src)]);
     assert_oracle_complete(&report);
     assert_eq!(report.oracle.transformed, 1, "{:#?}", report.refusals);
     let out = report.plan.apply_file("lib.php", &src);
-    assert!(out.contains("array_map(fn ($x) => strlen((string) $x), $xs);"), "got:\n{out}");
+    assert!(out.contains("array_map(fn ($x) => abs($x), $xs);"), "got:\n{out}");
 }
 
 #[test]

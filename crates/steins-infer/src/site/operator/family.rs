@@ -29,7 +29,7 @@ impl<'a> Operator<'a, '_> {
     /// Apply the site's family to one class an operand may be.
     pub(super) fn class(&mut self, bound: &Bound, depth: u8) {
         match self.family {
-            F::ToString => self.to_string(bound),
+            F::ToString => self.string_conversion(bound),
             F::MagicProp => self.magic_property(bound),
             F::ArrayAccess => self.array_access(bound),
             F::Iterate => self.iterate(bound, depth),
@@ -63,7 +63,7 @@ impl<'a> Operator<'a, '_> {
 
     /// `__toString`: an exact class proven not `Stringable` runs nothing; one that
     /// is runs its method; a bound runs it only where it is final.
-    fn to_string(&mut self, bound: &Bound) {
+    fn string_conversion(&mut self, bound: &Bound) {
         if !bound.exact {
             return self.required(bound, "__toString");
         }

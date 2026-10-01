@@ -239,9 +239,11 @@ fn an_exception_that_reads_its_own_trace_gets_the_class_tag() {
     assert!(out.starts_with(tagged), "{out}");
 }
 
-/// The same exception with a type check on its code and the trace's arguments
-/// stripped key by key. `is_int` and the one-argument `array_keys` are
-/// certified pure (issue #851), so the class still earns the tag.
+/// The same exception with a type check on its code and the trace's keys read.
+/// `is_int` and the one-argument `array_keys` are certified pure (issue #851), so
+/// the class still earns the tag. (Iterating the keys and unsetting an element of
+/// the trace are operators on operands nothing is shown about, ADR-0099 §4.3, and
+/// the class earns no tag while the constructor holds them.)
 #[test]
 fn an_exception_that_checks_its_code_and_strips_its_trace_gets_the_class_tag() {
     let lib = concat!(
@@ -254,9 +256,7 @@ fn an_exception_that_checks_its_code_and_strips_its_trace_gets_the_class_tag() {
         "        }\n",
         "        parent::__construct($message, $code);\n",
         "        $this->frames = $this->getTrace();\n",
-        "        foreach (array_keys($this->frames) as $key) {\n",
-        "            unset($this->frames[$key]['args']);\n",
-        "        }\n",
+        "        $keys = array_keys($this->frames);\n",
         "    }\n",
         "}\n",
     );
