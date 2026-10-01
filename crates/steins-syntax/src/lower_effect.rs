@@ -72,7 +72,7 @@ type HigherOrderCall = (NameRef, Vec<(usize, CallbackRef)>, usize);
 /// The positional callback arguments of a named-function call, when at least one is a
 /// resolvable [`CallbackRef`] (ADR-0033). `None` for a non-named-function call, a
 /// named/spread argument, or no resolvable callback.
-fn higher_order_of_call(fc: &FunctionCall<'_>) -> Option<HigherOrderCall> {
+pub(crate) fn higher_order_of_call(fc: &FunctionCall<'_>) -> Option<HigherOrderCall> {
     let Expression::Identifier(id) = fc.function else { return None };
     let mut callbacks: Vec<(usize, CallbackRef)> = Vec::new();
     let mut pos = 0usize;
@@ -97,7 +97,7 @@ fn higher_order_of_call(fc: &FunctionCall<'_>) -> Option<HigherOrderCall> {
 /// The per-position lvalue-root classification of a named call's arguments
 /// (ADR-0063 §2.3). `None` when a named or spread argument defeats positional
 /// mapping — see [`EffectOrigin::Call`]'s `arg_targets`.
-fn arg_targets_of_call(fc: &FunctionCall<'_>, cx: &EffectScanCx) -> Option<Vec<RefTarget>> {
+pub(crate) fn arg_targets_of_call(fc: &FunctionCall<'_>, cx: &EffectScanCx) -> Option<Vec<RefTarget>> {
     let mut targets = Vec::new();
     for arg in fc.argument_list.arguments.iter() {
         match arg {
@@ -113,7 +113,7 @@ fn arg_targets_of_call(fc: &FunctionCall<'_>, cx: &EffectScanCx) -> Option<Vec<R
 /// The proven-constant form of a named call's first two positional arguments
 /// ([`ConstArgs`], issue #318). Empty when a named or spread argument defeats
 /// positional mapping — the same list shapes [`arg_targets_of_call`] withholds.
-fn const_args_of_call(fc: &FunctionCall<'_>) -> ConstArgs {
+pub(crate) fn const_args_of_call(fc: &FunctionCall<'_>) -> ConstArgs {
     let mut out = ConstArgs::default();
     for (pos, arg) in fc.argument_list.arguments.iter().enumerate() {
         let Argument::Positional(p) = arg else { return ConstArgs::default() };
@@ -201,7 +201,7 @@ pub(crate) struct EffectScanCx {
     /// properties are exempt from [`StateConstruct::PropertyWrite`]
     /// ([`property_write_span`]). Only a method sets it: a closure or arrow
     /// function defined in a constructor is a frame of its own.
-    constructor: bool,
+    pub(crate) constructor: bool,
     /// What the frame's variables are shown to hold, for the [`ArgShape`] of a
     /// bare variable argument; opaque until [`Self::with_body`] builds it.
     pub(crate) bindings: FrameBindings,
@@ -449,7 +449,7 @@ where
 
 /// The bare callee variable name of a `$fn(...)` dynamic function call, if the
 /// callee is a direct variable (`$fn`); `None` for other dynamic callees.
-fn direct_var_callee(fc: &FunctionCall<'_>) -> Option<String> {
+pub(crate) fn direct_var_callee(fc: &FunctionCall<'_>) -> Option<String> {
     match fc.function.unparenthesized() {
         Expression::Variable(Variable::Direct(dv)) => Some(strip_dollar(bytes_to_string(dv.name))),
         _ => None,
@@ -750,7 +750,7 @@ pub(crate) fn scan_effect_origins(node: &Node<'_, '_>, cx: &EffectScanCx, out: &
 
 /// The constructor a `new class(...) {...}` expression runs, as the effect and
 /// throw scans both read it (issues #804, #849).
-enum AnonymousConstructor {
+pub(crate) enum AnonymousConstructor {
     /// The class body is never indexed, so a constructor it may bring — its
     /// own, or one a trait it uses supplies — is unseen, and taints like a
     /// dynamic `new`.
@@ -763,7 +763,7 @@ enum AnonymousConstructor {
 
 /// Read the [`AnonymousConstructor`] off an anonymous class's members and
 /// `extends`.
-fn anonymous_class_constructor(ac: &AnonymousClass<'_>) -> AnonymousConstructor {
+pub(crate) fn anonymous_class_constructor(ac: &AnonymousClass<'_>) -> AnonymousConstructor {
     let own_constructor = ac.members.iter().any(|m| match m {
         ClassLikeMember::Method(m) => {
             bytes_to_string(m.name.value).eq_ignore_ascii_case("__construct")
@@ -831,7 +831,7 @@ fn scan_state_construct(node: &Node<'_, '_>, cx: &EffectScanCx, out: &mut Vec<Ef
 /// Whether a direct variable's spelled name (`$` included) is one of the
 /// [`SUPERGLOBALS`]. PHP spells them case-sensitively, and a variable variable
 /// cannot reach one inside a function-like, so the direct spelling is all there is.
-fn is_superglobal(name: &[u8]) -> bool {
+pub(crate) fn is_superglobal(name: &[u8]) -> bool {
     name.strip_prefix(b"$").is_some_and(|n| SUPERGLOBALS.iter().any(|s| s.as_bytes() == n))
 }
 
@@ -856,7 +856,7 @@ fn is_superglobal(name: &[u8]) -> bool {
 /// So is `$self = $this; $self->p = …` (the base is not literally `$this`), a
 /// write to another object's property, and a `$this` write in a closure or arrow
 /// function defined in the constructor, which can run after construction.
-fn property_write_span(node: &Node<'_, '_>, constructor: bool) -> Option<mago_span::Span> {
+pub(crate) fn property_write_span(node: &Node<'_, '_>, constructor: bool) -> Option<mago_span::Span> {
     let written = |e: &Expression<'_>, exempt: bool| writes_property(e, exempt).then(|| e.span());
     match node {
         Node::Assignment(a) => written(a.lhs, constructor),

@@ -17,6 +17,7 @@ mod lower_effect;
 mod lower_expr;
 mod lower_presence;
 mod lower_scope;
+mod lower_site;
 mod lower_stmt;
 mod memo;
 mod names;
@@ -27,6 +28,7 @@ mod tree;
 
 pub use ast::*;
 pub use lower_expr::php_canonical_int_string;
+pub use lower_site::{derive_effect_origins, derive_throw_origins};
 pub use tree::SourceTree;
 
 // ---------------------------------------------------------------------------
