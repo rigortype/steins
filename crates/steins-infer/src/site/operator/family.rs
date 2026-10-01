@@ -16,10 +16,11 @@ use crate::contract::IsA;
 /// The methods an `Iterator` runs over a `foreach`, in the order it calls them.
 const ITERATOR_METHODS: [&str; 5] = ["rewind", "valid", "current", "key", "next"];
 
-/// Engine iterators a `getIterator` may return that run no user code of their
-/// own: a generator's body is the `getIterator` body, already an edge, and an
-/// `ArrayIterator` walks an array.
-const ENGINE_ITERATORS: [&str; 2] = ["generator", "arrayiterator"];
+/// The engine iterator a `getIterator` may return that runs no user code of its
+/// own: a generator's body is the `getIterator` body, already an edge, and
+/// `Generator` is final. `ArrayIterator` is not here: user code can subclass it,
+/// and no table lists the subclasses (anonymous ones included), so it is a gap.
+const ENGINE_ITERATOR: &str = "generator";
 
 /// How deep a `getIterator` that returns another iterator-bearing class is
 /// followed before the site is a gap.
@@ -129,7 +130,7 @@ impl<'a> Operator<'a, '_> {
         }
         self.edge(sym);
         match returned_class(ret) {
-            Some(fqn) if ENGINE_ITERATORS.contains(&fqn) => {}
+            Some(ENGINE_ITERATOR) => {}
             Some(fqn) if depth < ITERATOR_DEPTH => {
                 let exact = self.cx.class_has_no_subclass(fqn);
                 self.iterate(&Bound { fqn: fqn.to_owned(), exact }, depth + 1);

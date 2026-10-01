@@ -253,7 +253,7 @@ fn iteration_records_its_operand() {
     assert_eq!(forms("return [...$o];"), [it(C::Spread)]);
     // An array holds no object to iterate.
     assert_eq!(forms("foreach ([1, 2] as $v) {}"), []);
-    assert_eq!(forms("$l = [1]; foreach ($l as $v) {}"), []);
+    assert_eq!(forms("foreach ([$o] as $v) {}"), []);
 }
 
 #[test]
@@ -272,12 +272,16 @@ fn an_operand_shown_to_hold_no_object_emits_no_site() {
 }
 
 #[test]
-fn a_local_or_array_operand_emits_no_site_but_a_parameter_does() {
-    // A local only ever given object-free values and arrays holds no object.
-    assert_eq!(forms("$l = 'x'; return $l . 'y';"), []);
-    assert_eq!(forms("$l = [1]; return $l['k'];"), []);
+fn an_array_expression_emits_no_site_but_a_variable_does() {
     assert_eq!(forms("echo 'a', 1;"), []);
-    // A parameter's declared type decides, so its site stays.
+    assert_eq!(forms("return [1, 2]['k'];"), []);
+    // A variable keeps its site however the frame writes it: a named call may
+    // take it by reference and store an object into it, which only the resolver
+    // can tell. A local is no exception.
+    let local = one("$l = 'x'; return $l . 'y';");
+    assert_eq!(local.operands[0], ArgShape::Local { name: "l".to_owned(), stores: Stored::ObjectFree });
+    assert_eq!(forms("$l = [1]; return $l['k'];"), [(F::ArrayAccess, C::Read)]);
+    assert_eq!(forms("setv($v); echo $v;"), [(F::ToString, C::Echo)]);
     let param = one("return $s . 'y';");
     assert_eq!(param.operands[0], ArgShape::Param { name: "s".to_owned(), stores: Stored::ObjectFree });
     assert_eq!(forms("return $a['k'];"), [(F::ArrayAccess, C::Read)]);
@@ -340,10 +344,10 @@ fn a_comparison_of_an_array_that_may_hold_an_object_keeps_its_site() {
 
 #[test]
 fn a_comparison_of_values_holding_no_object_or_against_a_scalar_literal_emits_no_site() {
-    // An object-free local compares without touching an object.
-    assert_eq!(forms("$l = 'x'; return $l == 'y';"), []);
-    assert_eq!(forms("$l = [1]; return $l == ['x'] || $l < [2];"), []);
-    assert_eq!(forms("$l = 'x'; switch ($l) { case 'y': return 1; }"), []);
+    // An object-free expression compares without touching an object.
+    assert_eq!(forms("return 'x' == 'y';"), []);
+    assert_eq!(forms("return [1] == ['x'] || [1] < [2];"), []);
+    assert_eq!(forms("switch ('x') { case 'y': return 1; }"), []);
     // PHP 8.5: an array holding an object against `null`, a boolean, an integer or a
     // float compares without touching its elements, so the literal rule holds.
     let held = "$l = [$o]; ";
@@ -356,7 +360,7 @@ fn a_comparison_of_values_holding_no_object_or_against_a_scalar_literal_emits_no
     );
     // The wider rule still holds where nothing compares: conversion and access
     // leave an array's elements alone.
-    assert_eq!(forms(&format!("{held}return $l . 'x';")), []);
-    assert_eq!(forms(&format!("{held}return (string) $l;")), []);
-    assert_eq!(forms(&format!("{held}echo $l; foreach ($l as $v) {{}} return $l['k'];")), []);
+    assert_eq!(forms("return [$o] . 'x';"), []);
+    assert_eq!(forms("return (string) [$o];"), []);
+    assert_eq!(forms("echo [$o]; foreach ([$o] as $v) {} return [$o]['k'];"), []);
 }

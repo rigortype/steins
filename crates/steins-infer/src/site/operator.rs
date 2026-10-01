@@ -73,6 +73,15 @@ pub(super) fn resolve<'a>(
 /// the edges that replace the [`GapKind::MethodNotFound`] of a class that
 /// declares one. Empty for a bound receiver, whose subclass may declare the
 /// missing method itself, and for a class declaring neither.
+///
+/// A class-name receiver is `new Foo`, `Foo::` or `parent::`, which this record
+/// does not tell apart, so the named class's `__call` and `__callStatic` both
+/// count. A call inside a class that is, or may be, an instance of the named
+/// class (`parent::missing()` in an instance method) runs `$this`'s own
+/// `__call`, which a subclass may override: that one is an edge only where the
+/// enclosing class is final or its `__call` is, and otherwise the whole answer is
+/// empty, the gap staying. A frame whose `$this` cannot be an instance of the
+/// named class runs the named class's methods.
 pub(super) fn magic_call_edges(
     cx: &Cx<'_>,
     enclosing: Option<&str>,
@@ -86,13 +95,22 @@ pub(super) fn magic_call_edges(
         },
         _ => return Vec::new(),
     };
-    ["__call", "__callStatic"]
+    let mut edges: Vec<Sym> = ["__call", "__callStatic"]
         .into_iter()
         .filter_map(|method| match chain::lookup(cx, None, &class, method) {
             chain::Lookup::Found { sym, .. } => Some(sym),
             _ => None,
         })
-        .collect()
+        .collect();
+    if let Some(enclosing) = enclosing.filter(|e| cx.is_a(e, &class) != IsA::No) {
+        let exact = cx.class_has_no_subclass(enclosing);
+        match chain::lookup(cx, None, enclosing, "__call") {
+            chain::Lookup::Found { sym, is_final, .. } if exact || is_final => edges.push(sym),
+            chain::Lookup::Absent if exact => {}
+            _ => return Vec::new(),
+        }
+    }
+    edges
 }
 
 /// The coverage gap a family's unpinned site records.
