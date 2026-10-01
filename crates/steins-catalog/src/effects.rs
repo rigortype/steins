@@ -797,7 +797,7 @@ pub fn method_effect_labels(class: &str, method: &str) -> Option<&'static [&'sta
 /// The `Throwable` accessors, lowercased (issue #847). Each is `final` on
 /// `Exception` and on `Error`. `__toString` is not, and a subclass may
 /// override it, so it is not here and has no row.
-const THROWABLE_ACCESSORS: [&str; 7] =
+pub(crate) const THROWABLE_ACCESSORS: [&str; 7] =
     ["getmessage", "getcode", "getfile", "getline", "getprevious", "gettrace", "gettraceasstring"];
 
 /// [`method_effect_labels`] for a receiver that names only a **bound** on its

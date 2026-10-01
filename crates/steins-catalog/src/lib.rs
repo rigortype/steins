@@ -143,8 +143,10 @@ pub use knowledge::{
 mod reach;
 pub use reach::{
     ArgReach,
+    MethodReachRow,
     ReachRow,
     arg_reach,
+    method_arg_reach,
 };
 
 mod labels;
