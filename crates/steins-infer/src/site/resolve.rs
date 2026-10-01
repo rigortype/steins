@@ -7,6 +7,29 @@
 //! catalog knows it), read the operands' reach and the unseen code the same way,
 //! and differ only in the axis they read a row on: a known name with no row on that
 //! axis is a gap on it, in one place per arm, not a second walk.
+//!
+//! # What is knowledge and what is lane
+//!
+//! [`Knowledge`] is one body of facts (the catalog) read by two [`Lane`]s. The arms
+//! below test the lane (`self.effects()`) where the lanes ask different questions,
+//! and each says which it is:
+//!
+//! * **Shared knowledge.** What a spelling resolves to ([`Cx::resolve_function`]);
+//!   whether a builtin's operands reach user code ([`Reach`], a gap in both lanes);
+//!   unseen code (`eval`, an inclusion, a gap in both); which constructor a `new`
+//!   runs and which class a chain leaves the project at; the cause a gap names.
+//! * **Lane semantics, effect only.** ADR-0063 conditional-purity contracts and
+//!   their untainting edges (`user_call`); the call-site certifications and the
+//!   plugin channel (`effect_unrowed`, ADR-0068); the interface envelopes of a
+//!   declared receiver and the engine method rows (`method_fallback`, ADR-0067);
+//!   the constructs that prove a label of their own (output, exit, `eval`'s and an
+//!   inclusion's labels) and the state constructs; the invoker's own colour.
+//! * **Lane semantics, throw only.** The `throw` statement, the `match` with no
+//!   `default`, the throw row of an invoker, a builtin and a constructor (the only
+//!   method-shaped throw rows), and a flag-gated builtin's flags.
+//!
+//! A site is still resolved once **per lane** (ADR-0099 §2.2's single resolution is
+//! a goal the two walks do not meet yet).
 
 use steins_syntax::{
     ArgShape, CallbackRef, ConstArgs, ConstructKind, DynamicSite, EffectRecv, NameRef, RefKind,
@@ -15,7 +38,7 @@ use steins_syntax::{
 
 use super::contract::{conditional_purity, eval_conditional_purity};
 use super::engine;
-use super::method::{EngineMethod, engine_method, method_edge};
+use super::method::{EngineMethod, engine_class_of, engine_method, method_edge};
 use super::reach::{Frame, builtin_reach, callback_reaches_user_code};
 use super::{
     Edge, GapKind, Hit, HitKind, Knowledge, Lane, NewTarget, Reach, ResolvedSite, Target,
@@ -75,9 +98,9 @@ impl<'a> Resolver<'a, '_, '_> {
             SiteKind::New { class } => self.new_site(class),
             SiteKind::Callback { cbref } => self.callback(cbref),
             // A `$f()` the scan cannot name, in either lane.
-            SiteKind::Dynamic(DynamicSite::Call | DynamicSite::MethodCall | DynamicSite::StaticCall) => {
-                self.gap(GapKind::DynamicCallee);
-            }
+            SiteKind::Dynamic(
+                DynamicSite::Call | DynamicSite::MethodCall | DynamicSite::StaticCall,
+            ) => self.gap(GapKind::DynamicCallee),
             SiteKind::Dynamic(DynamicSite::New | DynamicSite::AnonymousClass) => {
                 self.gap(GapKind::UnknownClass);
             }
@@ -95,12 +118,12 @@ impl<'a> Resolver<'a, '_, '_> {
     }
 
     /// Record what the engine may run through an operand: [`Reach::Possible`] is
-    /// the gap [`GapKind::UserCodeReach`].
+    /// the gap [`GapKind::UserCodeReach`]. **Both lanes** read it (ADR-0099 §4):
+    /// user code reached through an argument may do anything, throwing included.
     fn note_reach(&mut self, reach: Reach) {
         if reach == Reach::Possible {
             self.gap(GapKind::UserCodeReach);
         }
-        self.out.reach = self.out.reach.max(reach);
     }
 
     /// Whether this resolution answers the effect lane.
@@ -405,8 +428,22 @@ impl<'a> Resolver<'a, '_, '_> {
                 resolve_new(self.cx, self.frame.class_fqn, &StaticClass::Parent)
         {
             self.engine_constructor_throws(&fqn, "parent::__construct".to_owned());
-        } else {
-            self.gap(miss);
+            return;
+        }
+        // A method of an engine class the catalog knows has no throw row (the only
+        // method-shaped throw rows are constructors): the site names the missing
+        // row, as the effect lane names its own, instead of the chain's exit.
+        // A declared receiver stays a gap of its own (ADR-0099 §8, ADR-0067).
+        let engine = match miss {
+            GapKind::DeclaredReceiver => None,
+            _ => {
+                let (class_fqn, params) = (self.frame.class_fqn, self.frame.params);
+                engine_class_of(self.cx, class_fqn, params, receiver, method)
+            }
+        };
+        match engine {
+            Some(fqn) => self.gap(engine::missing_row(&fqn, GapKind::NoThrowRow)),
+            None => self.gap(miss),
         }
     }
 
@@ -481,10 +518,10 @@ impl<'a> Resolver<'a, '_, '_> {
                     let origin = new_origin(class);
                     self.constructor_hit(fqn, origin, labels, &[]);
                 }
-                None => self.gap(GapKind::NoEffectRow),
+                None => self.gap(engine::missing_row(&fqn, GapKind::NoEffectRow)),
             },
             NewTarget::Engine(fqn) => self.engine_constructor_throws(&fqn, new_origin(class)),
-            NewTarget::Unknown => self.gap(GapKind::UnknownClass),
+            NewTarget::Unknown(kind) => self.gap(kind),
         }
     }
 
@@ -493,7 +530,7 @@ impl<'a> Resolver<'a, '_, '_> {
     fn engine_constructor_throws(&mut self, fqn: &str, origin: String) {
         match engine::constructor_throws(fqn) {
             Some(classes) => self.constructor_hit(fqn.to_owned(), origin, &[], classes),
-            None => self.gap(GapKind::NoThrowRow),
+            None => self.gap(engine::missing_row(fqn, GapKind::NoThrowRow)),
         }
     }
 

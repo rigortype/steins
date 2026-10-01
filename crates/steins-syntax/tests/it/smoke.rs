@@ -320,7 +320,7 @@ fn scans_effect_origins_across_control_flow() {
                 echo += 1;
             }
             EffectOrigin::Call { name, .. } => calls.push(name.simple().to_owned()),
-            other => panic!("no {} origin expected: {other:?}", other.kind().name()),
+            other => panic!("no such origin expected: {other:?}"),
         }
     }
     assert_eq!(echo, 1, "echo inside the if is found");
@@ -363,7 +363,6 @@ fn scans_eval_and_the_four_inclusions() {
         derive_effect_origins(&f.sites)
     );
     let keywords: Vec<&str> = derive_effect_origins(&func("g").sites)
-        
         .iter()
         .filter_map(|o| match o {
             EffectOrigin::Include { keyword, .. } => Some(keyword.spelling()),

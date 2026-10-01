@@ -382,6 +382,11 @@ impl IncludeKeyword {
     }
 }
 
+/// One effect-relevant construct of a body, as the effect lane used to scan for it:
+/// now a **derived view** of the body's [`SiteOrigin`]s
+/// ([`derive_effect_origins`](crate::derive_effect_origins)), kept for the tests
+/// that read site shapes through it. A body persists its sites, not this list, so
+/// no variant order here is a stored fact.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub enum EffectOrigin {
@@ -446,8 +451,7 @@ pub enum EffectOrigin {
     Callback { cbref: CallbackRef, span: Span },
     /// An `eval(...)` construct at `span` — the `eval` effect (ADR-0046
     /// amendment), and, since the payload is code the scan never sees, also
-    /// **non-exhaustive** like [`Self::Opaque`]. Appended after the existing
-    /// variants so no persisted variant index moves.
+    /// **non-exhaustive** like [`Self::Opaque`].
     Eval { span: Span },
     /// An `include`/`include_once`/`require`/`require_once` at `span` — a
     /// proven `io.fs.read` whatever the file holds (ADR-0046 amendment), and
@@ -459,8 +463,7 @@ pub enum EffectOrigin {
     /// ADR-0055 origins whose labels (`global.*`, `mutate.*`) are not inferred
     /// yet. Until they are, one marks the body **non-exhaustive** exactly as
     /// [`Self::Opaque`] does (ADR-0055 amendment, 2026-09-26), so `{}` is never
-    /// read as proven-pure over it. Appended after the existing variants so no
-    /// persisted variant index moves.
+    /// read as proven-pure over it.
     State { construct: StateConstruct, span: Span },
     /// A `new` expression at `span` whose class the scan can name (issue
     /// #804): an effect edge to that class's constructor, inherited ones
@@ -470,79 +473,32 @@ pub enum EffectOrigin {
     /// replace resolves), or `parent`. A dynamic `new $cls()` is an
     /// [`Self::Opaque`] instead, and so is an anonymous class that may declare
     /// a constructor; one that cannot, but extends a class, records that
-    /// parent here. Appended after the existing variants so no persisted
-    /// variant index moves.
+    /// parent here.
     ///
     /// `arg_shapes` mirrors [`Self::MethodCall`]'s, for the constructor the
     /// effects pass resolves; an anonymous class's `new` carries none.
     New { class: StaticClass, span: Span, arg_shapes: Option<Vec<ArgShape>> },
 }
 
-/// [`EffectOriginKind`], and the methods that map an [`EffectOrigin`] onto it,
-/// generated from one list of the variant names, as `refused_rows!` generates
-/// the catalog's list and lookup from one table. A variant added to the enum
-/// and not to the list fails to compile, since `kind()`'s match is exhaustive,
-/// so [`EffectOriginKind::ALL`] cannot leave one out; the steins-db persistence
-/// tests pin the list's order to the order serde numbers the variants by.
-macro_rules! effect_origin_kinds {
-    ($($variant:ident),+ $(,)?) => {
-        impl EffectOrigin {
-            /// Which variant this origin is, fields dropped.
-            #[must_use]
-            pub const fn kind(&self) -> EffectOriginKind {
-                match self {
-                    $(Self::$variant { .. } => EffectOriginKind::$variant,)+
-                }
-            }
-
-            /// The source span of the construct this origin records, whatever
-            /// its shape.
-            #[must_use]
-            pub const fn span(&self) -> Span {
-                match self {
-                    $(Self::$variant { span, .. } => *span,)+
-                }
-            }
+impl EffectOrigin {
+    /// The source span of the construct this origin records, whatever its shape.
+    #[must_use]
+    pub const fn span(&self) -> Span {
+        match self {
+            Self::Call { span, .. }
+            | Self::Output { span, .. }
+            | Self::Exit { span, .. }
+            | Self::MethodCall { span, .. }
+            | Self::Opaque { span, .. }
+            | Self::HigherOrder { span, .. }
+            | Self::Callback { span, .. }
+            | Self::Eval { span }
+            | Self::Include { span, .. }
+            | Self::State { span, .. }
+            | Self::New { span, .. } => *span,
         }
-
-        /// An [`EffectOrigin`]'s variant with its fields dropped
-        /// ([`EffectOrigin::kind`]): what a test names an origin by without
-        /// building one.
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-        pub enum EffectOriginKind {
-            $(#[doc = concat!("[`EffectOrigin::", stringify!($variant), "`].")] $variant,)+
-        }
-
-        impl EffectOriginKind {
-            /// Every kind, in [`EffectOrigin`]'s variant order, which is the
-            /// order the payload codec numbers its variants by.
-            pub const ALL: [Self; [$(stringify!($variant)),+].len()] = [$(Self::$variant),+];
-
-            /// The variant's name as [`EffectOrigin`] spells it (`"HigherOrder"`).
-            #[must_use]
-            pub const fn name(self) -> &'static str {
-                match self {
-                    $(Self::$variant => stringify!($variant),)+
-                }
-            }
-        }
-    };
+    }
 }
-
-// Every `EffectOrigin` variant, in declaration order.
-effect_origin_kinds!(
-    Call,
-    Output,
-    Exit,
-    MethodCall,
-    Opaque,
-    HigherOrder,
-    Callback,
-    Eval,
-    Include,
-    State,
-    New,
-);
 
 /// One call argument in the form a **structural** scan can prove constant
 /// (issue #318). Anything requiring dataflow (variable, concatenation,
@@ -708,7 +664,9 @@ pub struct CatchClause {
 }
 
 /// What a [`ThrowOrigin`] contributes to a body's throw set (ADR-0040) — the
-/// thrown class (explicit-throw) or a propagation edge (call variants), re-filtered by this origin's guards.
+/// thrown class (explicit-throw) or a propagation edge (call variants), re-filtered
+/// by this origin's guards. A derived view of the body's [`SiteOrigin`]s, like
+/// [`EffectOrigin`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub enum ThrowKind {
@@ -736,13 +694,14 @@ pub enum ThrowKind {
     /// class is a [`Self::Taint`] instead, and so is an anonymous class that
     /// may declare a constructor; one that cannot, but extends a class, records
     /// that parent here. Not [`Self::New`], the class a `throw new X` throws:
-    /// that `new` records both. Appended after the existing variants so no
-    /// persisted variant index moves.
+    /// that `new` records both.
     Construct { class: StaticClass },
 }
 
 /// One throw-relevant construct in a function/method body, with ordered
-/// `try`/`catch` guards that may dam it (ADR-0040); computed for *all* functions/methods.
+/// `try`/`catch` guards that may dam it (ADR-0040); computed for *all*
+/// functions/methods. A derived view of the body's [`SiteOrigin`]s, like
+/// [`EffectOrigin`] ([`derive_throw_origins`](crate::derive_throw_origins)).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub struct ThrowOrigin {
@@ -836,7 +795,8 @@ pub enum SiteKind {
 }
 
 /// [`SiteTag`] and the methods that map a [`SiteKind`] onto it, generated from
-/// one list of the variant names exactly as `effect_origin_kinds!` is. A
+/// one list of the variant names, as the catalog's `refused_rows!` generates its list and
+/// lookup from one table. A
 /// variant added to [`SiteKind`] and not to the list fails to compile, since
 /// `tag()`'s match is exhaustive, so [`SiteKind::ALL`] cannot leave one out; the
 /// steins-db persistence tests pin the list's order to the order serde numbers

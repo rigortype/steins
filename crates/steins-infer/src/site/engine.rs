@@ -1,4 +1,6 @@
-//! The only place a lane's catalog rows are read (ADR-0099 §2).
+//! The only place a lane's effect and throw rows are read (ADR-0099 §2). The
+//! argument tables a call's operands are held to (`arg_reach`, the by-value
+//! certification) are [`super::reach`]'s.
 //!
 //! Each function answers one question of the engine's body of knowledge on one
 //! axis: what a builtin function, an engine method or an engine constructor does
@@ -172,7 +174,9 @@ fn eval_const_int(expr: &ConstInt) -> Option<i64> {
             steins_catalog::ConstValue::Int(v) => Some(v),
             _ => None,
         },
-        ConstInt::Or(terms) => terms.iter().try_fold(0, |acc, term| Some(acc | eval_const_int(term)?)),
+        ConstInt::Or(terms) => {
+            terms.iter().try_fold(0, |acc, term| Some(acc | eval_const_int(term)?))
+        }
     }
 }
 
@@ -246,8 +250,9 @@ pub(crate) fn certified_at_call_site(name: &str) -> bool {
 }
 
 /// Whether a call with no readable positional argument list (`positional` is
-/// `None`) names a builtin the catalog would certify pure at **some** arity
-/// ([`pure_at_call_arity`] declines it only for want of one).
+/// `None`) names a builtin the catalog certifies pure at **one** positional
+/// argument (`array_keys`, the only such name): [`pure_at_call_arity`] declines
+/// it only for want of an arity to read.
 pub(crate) fn arity_defeated(name: &str, positional: Option<usize>) -> bool {
     positional.is_none() && steins_catalog::pure_at_arity(name, 1)
 }
@@ -257,4 +262,19 @@ pub(crate) fn arity_defeated(name: &str, positional: Option<usize>) -> bool {
 /// certified at its call or a [`GapKind::NoEffectRow`].
 pub(crate) fn has_effect_row(name: &str) -> bool {
     steins_catalog::effect_labels(name).is_some() || steins_catalog::out_params(name).is_some()
+}
+
+/// The gap for a known name the catalog has no row for on `axis`'s side, at a
+/// class the chain leaves the project at: the axis's missing-row kind when the
+/// catalog knows the class at all, [`GapKind::UnknownClass`] when it does not (a
+/// name nobody declares in the project, such as `new Engine`, is not thereby an
+/// engine class).
+pub(crate) fn missing_row(class: &str, axis: GapKind) -> GapKind {
+    if steins_catalog::builtin_class_display(class).is_some()
+        || steins_catalog::builtin_class_supers(class).is_some()
+    {
+        axis
+    } else {
+        GapKind::UnknownClass
+    }
 }
