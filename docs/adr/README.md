@@ -136,4 +136,4 @@ list in one place.
 | ADR-0096 | [Discardable effects: a dead statement read off the label lattice, not off a curated boolean](0096-discardable-effects-and-dead-statements.md) |
 | ADR-0097 | [`resource` is a type: one runtime kind, an identity on the heap, a state the heap carries](0097-resource-is-a-type.md) |
 | ADR-0098 | [A place, not a variable, names a heap entity: the array element carrier](0098-places-name-heap-entities.md) |
-| ADR-0099 | [A body's sites resolve once: reachable code, implicit user code and obstacles](0099-sites-resolve-once.md) |
+| ADR-0099 | [A body's sites resolve once: reachable code, implicit user code and coverage gaps](0099-sites-resolve-once.md) |

@@ -253,17 +253,18 @@ _Avoid_: function metadata (PHPStan's artifact)
 One call-like or operator construct in a body — a call, a method call, a
 `new`, a callback, a `throw`, a language construct, an operator that may run
 a magic method — lowered once and resolved once into what runs there, what
-the engine may run implicitly on its operands (reach), and its obstacles.
+the engine may run implicitly on its operands (reach), and its coverage gaps.
 Both the effect and the throw lane read the resolved site; neither scans.
-_Avoid_: origin (the two per-lane lists a site replaces), call site (a site
-need not be a call)
+_Avoid_: effect origin / throw origin (the two per-lane lists a site
+replaces)
 
-**Obstacle** (ADR-0099):
+**Coverage gap** (ADR-0099):
 A recorded reason an effect or throw answer is incomplete — a dynamic
 callee, an unknown class, unseen code, user code an operand may reach, a
-missing row on an axis. A body is `…?` exactly when its sites left an
-obstacle on that lane.
-_Avoid_: taint (the pre-ADR-0099 bare flag; an obstacle names its cause)
+missing row on an axis. A body is `…?` on a lane exactly when its sites, or a
+callee its edges reach, left a gap on that lane. Not a **Dischargeable
+obstacle**, which is a silence leg of a check family.
+_Avoid_: obstacle (taken by Dischargeable obstacle)
 
 **Interop envelope**:
 The unchecked docblock spelling of an effect envelope — `@phpstan-impure

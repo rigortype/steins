@@ -185,7 +185,7 @@ No schema bump is needed for that (issue #828, ADR-0092's amendment on what the
 schema number covers): the change moves the analyzer fingerprint, and a
 generation another build published is refused before its trace is decoded.
 
-## Amendment (2026-10-02): unseen code is an obstacle in both lanes — PENDING ratification
+## Amendment (2026-10-02): unseen code is a gap in both lanes — PENDING ratification
 
 ADR-0099 (issue #864). The throw scan had no arm for `eval` or an inclusion,
 so a body holding one was `{eval, …?}` for effects and throw-exhaustive. Both

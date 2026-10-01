@@ -351,6 +351,7 @@ recorded. The call-site rule of that amendment's §3 holds at every site kind,
 in both the effect and the throw lane: builtin functions, engine methods and
 constructors (a per-method reach row, issue #858), and operator sites (issue
 #859). Function resolution and both lanes ask one predicate, `knows`, whether
-the catalog knows a spelling; a known name with no row on an axis is an
-obstacle on that axis. The literal-format and strict-comparison refinements
-stay with issue #860.
+the catalog knows a spelling; a known name with no row on an axis is a
+coverage gap on that axis. Being on the fold allowlist or a certified list
+does not by itself make a name throwless (ADR-0099 §3.3). The literal-format
+and strict-comparison refinements stay with issue #860.
