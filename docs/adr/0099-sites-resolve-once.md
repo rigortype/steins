@@ -112,9 +112,16 @@ measures it.
 3. **A throw row may be omitted only where php-src shows the name raises
    nothing for any argument its parameter types admit**, argument checking's
    `TypeError` and `ArgumentCountError` aside, which the throw lane does not
-   model. A row that omits a flag-dependent throw (`JSON_THROW_ON_ERROR`) is a
-   gap unless the flags argument is a constant expression the scan
-   evaluates and it lacks the flag. The fold
+   model. Argument *binding* is argument checking too: an unknown named
+   parameter (`Error`) and a spread or arity mismatch (`ArgumentCountError`)
+   are raised before the callee runs, whichever builtin it is, and
+   `array_key_exists` and `key_exists` raise a `TypeError` for an array or
+   object key because their stub types the key `mixed`. None is a throw row. A
+   throw that depends on *which value* an admitted argument holds
+   (`array_column([['a' => [1], 'b' => 1]], 'b', 'a')` is a `TypeError`) is not
+   argument checking and gets a row. A row that omits a flag-dependent throw
+   (`JSON_THROW_ON_ERROR`) is a gap unless the flags argument is a constant
+   expression the scan evaluates and it lacks the flag. The fold
    allowlist and the certified lists are *candidates* for that evidence, not
    evidence: `json_encode` throws `JsonException` under its flag,
    `preg_match_all` raises `ValueError` on bad flags. Each name is audited
@@ -178,8 +185,16 @@ measures it.
    the effect lane: a lazy object's initializer is the callback argument of
    `ReflectionClass::newLazyGhost`, `newLazyProxy` and the `resetAsLazy*`
    pair, and is reached there (a `Callback` reach, §4.2); likewise
-   `set_error_handler`, `register_tick_function` and `pcntl_signal`. A site
-   that might trigger one does not repeat it. The throw lane follows the same
+   `set_error_handler`, `register_tick_function` and `pcntl_signal`; and
+   user stream wrappers and filters: a class named to `stream_wrapper_register`
+   or `stream_filter_register`, or a registered filter attached by
+   `stream_filter_append` and `stream_filter_prepend`, is reached at that call
+   (an `Autoload` reach in the catalog's table, which no call site rules out).
+   The wrapper's methods and the filter's `filter()` then run inside later
+   `file_exists`, `is_dir`, `filesize`, `fwrite`, `fseek`, `fclose` and their
+   kin, which therefore stay on the throwless table: the registering body
+   carries the gap, and the I/O call does not repeat it. A site that might
+   trigger one does not repeat it. The throw lane follows the same
    attribution, so an error handler that throws `ErrorException` is a gap at
    its registration. Autoloaders stay as they are: the builtin rows that
    autoload carry ADR-0021's `Autoload` reach, and a class-naming construct

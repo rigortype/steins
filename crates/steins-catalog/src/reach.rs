@@ -223,6 +223,14 @@ const OVERRIDES: &[(&str, &[(usize, ArgReach)])] = &[
     ("preg_replace_callback_array", &[(0, Callback)]),
     // `is_callable` resolves a class named in a string or array.
     ("is_callable", &[(0, Autoload), (2, Inert)]),
+    // A user stream wrapper or filter is attributed to its registration, as an
+    // error handler is (ADR-0099 §4.5): the class named at the registration (and
+    // the filter name that attaches a registered user filter to a stream) is user
+    // code that later runs inside I/O calls, and is never ruled out here.
+    ("stream_wrapper_register", &[(1, Autoload)]),
+    ("stream_filter_register", &[(1, Autoload)]),
+    ("stream_filter_append", &[(1, Autoload)]),
+    ("stream_filter_prepend", &[(1, Autoload)]),
     // By-reference out-parameters whose incoming value is discarded unread.
     ("preg_match", &[(2, Inert)]),
     ("preg_match_all", &[(2, Inert)]),
@@ -286,6 +294,25 @@ mod tests {
         assert_eq!(at("sprintf", 5), ArgReach::Object);
         assert_eq!(at("array_merge", 7), ArgReach::Inert);
         assert_eq!(at("strlen", 3), ArgReach::Inert, "an ArgumentCountError runs nothing");
+    }
+
+    /// A registration that lets user code run inside later I/O calls reaches that
+    /// code at the registration, in every calling mode and for every argument
+    /// (ADR-0099 §4.5); none of them is a throwless name.
+    #[test]
+    fn a_stream_wrapper_or_filter_registration_reaches_user_code() {
+        let registrations = [
+            "stream_wrapper_register",
+            "stream_filter_register",
+            "stream_filter_append",
+            "stream_filter_prepend",
+        ];
+        for name in registrations {
+            assert_eq!(at(name, 1), ArgReach::Autoload, "{name}");
+            let row = arg_reach(name).expect(name);
+            assert!(row.reaches_blind(true), "{name} reaches even in strict mode");
+            assert_eq!(crate::throws_of(name), None, "{name} is not throwless");
+        }
     }
 
     #[test]

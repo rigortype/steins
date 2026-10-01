@@ -18,7 +18,7 @@
 //!
 //! # The throwless table
 //!
-//! `THROWLESS` lists the builtins php-src shows raise nothing for any argument
+//! `THROWLESS_NAMES` lists the builtins php-src shows raise nothing for any argument
 //! their parameter types admit. The fold allowlist and the certified-pure lists
 //! are **candidates** for it, not evidence: they answer whether the engine may
 //! evaluate a name or whether it has an effect, and `json_encode` is foldable
@@ -34,12 +34,17 @@
 //!    `INF`, empty and NUL-carrying strings, malformed encodings, nested arrays
 //!    holding an array key of `PHP_INT_MAX`, `Countable`, `Stringable` and plain
 //!    objects, closures, resources), each run with a swallowing error handler.
-//!    The audit's rule: no `Throwable` other than `TypeError` and its
-//!    `ArgumentCountError`.
+//!    The audit's rule: no `Throwable` other than an `ArgumentCountError` and a
+//!    `TypeError` whose message is an argument check (`name(): Argument #N ($x)
+//!    must be …`). A `TypeError` that depends on *which value* an admitted
+//!    argument holds is not one: `array_column` raises it for an array key
+//!    (`array_column([['a' => [1], 'b' => 1]], 'b', 'a')`), so it has a row.
 //!
 //! **Argument checking is set aside**, as in ADR-0099 §3.3: a `TypeError` from a
-//! parameter type is the same for every builtin, and the throw lane does not
-//! model it. So is the conversion of an *object* argument to a string (`Object
+//! parameter type, an unknown named parameter, a spread or arity mismatch, and
+//! `array_key_exists`'s `TypeError` for an array or object key (its stub types
+//! the key `mixed`) are the same for every builtin, and the throw lane does not
+//! model them. So is the conversion of an *object* argument to a string (`Object
 //! of class X could not be converted to string`, an `Error`): it needs an
 //! object operand, and every argument position that can hold one is a
 //! `Coerced`, `Object` or `Nested` reach ([`crate::arg_reach`]), which the
@@ -47,8 +52,18 @@
 //! object out. A name whose `Error` needs no object is not on the table:
 //! `array_push` and `array_merge_recursive` raise `Error` when a key is
 //! `PHP_INT_MAX` ("Cannot add element to the array as the next element is
-//! already occupied"), `get_class()` raises it outside a class, and
-//! `call_user_func_array` raises it for an unknown named parameter.
+//! already occupied") and `get_class()` raises it outside a class.
+//! `call_user_func_array` is simply unaudited.
+//!
+//! **User code that only registration can attach** is attributed to the
+//! registration (ADR-0099 §4.5), not to the calls it later runs inside. A user
+//! stream wrapper or filter makes `file_exists`, `is_dir`, `filesize`, `fwrite`,
+//! `fseek`, `fclose` and the rest of the stat and handle calls on the table throw
+//! whatever its methods throw; `stream_wrapper_register`,
+//! `stream_filter_register`, `stream_filter_append` and `stream_filter_prepend`
+//! carry an `Autoload` reach ([`crate::arg_reach`]) and no throw row, so the body
+//! that registers one has the gap. For the same reason `gc_collect_cycles` is off
+//! the table: it runs destructors.
 //!
 //! What the table deliberately leaves out, so each stays a gap:
 //!
@@ -107,7 +122,7 @@ pub fn knows(name: &str) -> bool {
 ///
 /// * `Some(&[classes…])` is the [`builtin_throws`] row: the global class names
 ///   the call provably raises for some argument values.
-/// * `Some(&[])` is **audited throwlessness**: the name is on `THROWLESS`.
+/// * `Some(&[])` is **audited throwlessness**: the name is on `THROWLESS_NAMES`.
 /// * `None` is *unknown*, and a name that throws only under a flag
 ///   ([`flag_gated_throw`]) is unknown here too. A lane reads it as a coverage
 ///   gap, never as throwless.
@@ -180,14 +195,13 @@ fn lowercase(name: &str) -> String {
 
 /// The builtins **audited as throwless** (see the module doc for the audit), in
 /// byte order so the table can be binary-searched and a new name is one added
-/// line. `throwless_table_is_sorted_lowercase_and_known` pins the order.
+/// line. `the_throwless_table_is_sorted_lowercase_and_known` pins the order.
 const THROWLESS_NAMES: &[&str] = &[
     "abs",
     "addcslashes",
     "addslashes",
     "array_all",
     "array_any",
-    "array_column",
     "array_count_values",
     "array_diff",
     "array_diff_key",
@@ -280,7 +294,6 @@ const THROWLESS_NAMES: &[&str] = &[
     "ftell",
     "function_exists",
     "fwrite",
-    "gc_collect_cycles",
     "get_debug_type",
     "get_object_vars",
     "getcwd",
@@ -464,6 +477,7 @@ mod tests {
         // A row.
         assert_eq!(throws_of("intdiv"), Some(&["DivisionByZeroError", "ArithmeticError"][..]));
         assert_eq!(throws_of("DIRNAME"), Some(&["ValueError"][..]), "levels < 1");
+        assert_eq!(throws_of("array_column"), Some(&["TypeError"][..]), "an array row value");
         // Audited throwless: an empty row, not a missing one.
         assert_eq!(throws_of("strlen"), Some(&[][..]));
         assert_eq!(throws_of("ARRAY_KEYS"), Some(&[][..]));
@@ -521,6 +535,10 @@ mod tests {
             ("max", "ValueError: no elements"),
             ("json_encode", "JsonException under the flag"),
             ("preg_match_all", "ValueError: bad flags"),
+            ("array_column", "TypeError: an array or object row value is no key"),
+            ("gc_collect_cycles", "runs destructors"),
+            ("stream_wrapper_register", "attaches user code"),
+            ("stream_filter_register", "attaches user code"),
         ];
         for (name, why) in refused {
             assert!(!THROWLESS_NAMES.contains(&name), "{name}: {why}");
