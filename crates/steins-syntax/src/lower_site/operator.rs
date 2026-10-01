@@ -18,11 +18,12 @@
 //! `<=>`, `switch`): an array compares element-wise with another array, so
 //! `[$o] == ['x']`, `[$o] < ['y']` and a `switch` over `[$o]` with `case ['x']`
 //! run `__toString` on the element (witnessed on PHP 8.5). Only an operand that
-//! holds no object at any depth qualifies: an object-free expression. A comparison with a non-string
-//! scalar literal (`null`, a boolean, an integer or a float) on either side is
-//! skipped whatever the other side holds: an object converts to a string for a
-//! string operand only, and an array against a scalar compares without
-//! touching its elements (also witnessed on 8.5).
+//! holds no object at any depth qualifies: an object-free expression. A
+//! comparison with a non-string scalar literal (`null`, a boolean, an integer
+//! or a float) on either side is skipped whatever the other side holds: an
+//! object converts to a string for a string operand only, and an array
+//! against a scalar compares without touching its elements (also witnessed on
+//! 8.5).
 //!
 //! A property or offset access takes the role its context gives it
 //! ([`OperatorConstruct`]): [`chain`] walks an lvalue-like expression and
