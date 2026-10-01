@@ -297,8 +297,65 @@ const CERTIFIED_PURE: &[&str] = &[
 ];
 
 /// Whether `name` is on [`CERTIFIED_PURE`] (case-insensitive).
-fn certified_pure(name: &str) -> bool {
+pub(crate) fn certified_pure(name: &str) -> bool {
     CERTIFIED_PURE.iter().any(|&f| name.eq_ignore_ascii_case(f))
+}
+
+/// The builtins **certified pure at a call site** (issue #856, ADR-0021's
+/// second 2026-10-01 amendment): their own effects are certified as
+/// [`CERTIFIED_PURE`]'s are, and a call to one is pure only where the call site
+/// rules out every argument that can reach user code
+/// ([`arg_reach`](crate::arg_reach)). [`effect_labels`] does not list them, so
+/// no pass reads them as known builtins argument-blind; the effects pass asks
+/// [`certified_at_call_site`] of a call it could not resolve.
+///
+/// These are the string family #851 left out for its `string` parameters,
+/// whose coercion runs an object's `__toString`. Each member's php-src body at
+/// `PINNED_PHP` reads only its arguments, byte by byte or through the
+/// engine's ASCII case folding, takes no reference and performs no I/O:
+///
+/// * `strcmp`, `strncmp`, `strcasecmp`, `strncasecmp`: `zend_binary_strcmp`
+///   and its siblings in `Zend/zend_operators.c`, the case-insensitive pair
+///   through `zend_tolower_ascii`;
+/// * `strspn`, `strcspn`: `php_strspn_strcspn_common`, a byte table;
+/// * `substr_count`, `ord`, `chr`, `bin2hex`, `hex2bin`: byte loops;
+/// * `dirname`: `zend_dirname`, separator scanning;
+/// * `unpack`: `ext/standard/pack.c`, the format read byte by byte.
+///
+/// Deliberately absent, each reading the locale or an ini setting: `basename`
+/// and `pathinfo` (`php_basename` consults `ascii_compatible_locale` and
+/// `php_mblen`), `strnatcmp` and `strnatcasecmp` (C `isdigit`, `isspace`,
+/// `toupper`), `substr_compare` (`zend_binary_strncasecmp_l`), `parse_url`
+/// (C `isalpha`), `escapeshellarg` (`php_mblen`), `strip_tags` (C `isspace`),
+/// `number_format`, the `ctype_*` family, `htmlspecialchars` (`default_charset`)
+/// and the `mb_*` family (`mbstring` ini). `strtok` keeps its position in
+/// interpreter state.
+const CERTIFIED_AT_CALL_SITE: &[&str] = &[
+    "strcmp",
+    "strncmp",
+    "strcasecmp",
+    "strncasecmp",
+    "strspn",
+    "strcspn",
+    "substr_count",
+    "ord",
+    "chr",
+    "bin2hex",
+    "hex2bin",
+    "dirname",
+    "unpack",
+];
+
+/// Whether `name` is certified pure at a call site that rules out its
+/// reaching arguments (case-insensitive): the string family, whose own
+/// effects are certified but whose `string` parameters run an object's
+/// `__toString` under coercive typing (issue #856). It is not on
+/// [`effect_labels`], so no pass reads it as a known builtin; the effects pass
+/// asks this of a call it could not otherwise resolve, then holds the call to
+/// [`arg_reach`](crate::arg_reach).
+#[must_use]
+pub fn certified_at_call_site(name: &str) -> bool {
+    CERTIFIED_AT_CALL_SITE.iter().any(|&f| name.eq_ignore_ascii_case(f))
 }
 
 /// Whether a call to the builtin `name` passing exactly `positional`
@@ -778,6 +835,20 @@ pub(crate) fn is_builtin_throwable(class: &str) -> bool {
         pending.extend(crate::builtin_class_supers(c).unwrap_or_default());
     }
     false
+}
+
+/// Whether the engine class `class` (case-insensitive) is one whose
+/// constructor takes every argument by value, so that `new` or
+/// `parent::__construct()` reaching it rebinds no variable (issue #856).
+///
+/// The engine's Throwables are the set this answers for: reflection on PHP
+/// 8.5.11 finds 60 internal classes implementing `Throwable`, and no
+/// parameter of any of their constructors passed by reference. Any other
+/// engine class answers `false`, which keeps the variables it is handed
+/// unproven.
+#[must_use]
+pub fn engine_constructor_by_value(class: &str) -> bool {
+    is_builtin_throwable(class)
 }
 
 /// The position of an `array` parameter whose **values are callables**, or
@@ -1615,8 +1686,8 @@ mod tests {
         param_facts_generated, param_facts_mined,
     };
     use super::{
-        WrittenWhen, by_value_arg, callables_in_array_param, effect_labels, out_param_written_when,
-        out_params, variadic_tail_is_data,
+        WrittenWhen, by_value_arg, callables_in_array_param, effect_labels,
+        engine_constructor_by_value, out_param_written_when, out_params, variadic_tail_is_data,
     };
 
     #[test]
@@ -1886,6 +1957,16 @@ mod tests {
         // A user class, and an engine class outside `Throwable`, stay uncatalogued.
         assert_eq!(method_effect_labels("App\\Oops", "getMessage"), None);
         assert_eq!(method_effect_labels("ArrayObject", "getMessage"), None);
+    }
+
+    #[test]
+    fn only_an_engine_throwable_constructor_is_stated_by_value() {
+        for class in ["Exception", "RuntimeException", "ErrorException", "TypeError"] {
+            assert!(engine_constructor_by_value(class), "{class}");
+        }
+        for class in ["DateTime", "PDO", "ArrayObject", "App\\Exception"] {
+            assert!(!engine_constructor_by_value(class), "{class}");
+        }
     }
 
     #[test]
