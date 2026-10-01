@@ -1,7 +1,8 @@
 //! The per-builtin fact tables that are neither effects nor the fold
 //! allowlist: the class hierarchy and display casing mined from php-src
 //! ([`builtin_class_supers`], [`builtin_class_display`], ADR-0043), the
-//! curated throw facts ([`builtin_throws`]) and failure-arm causes
+//! curated throw facts ([`builtin_throws`], and [`method_throws`] for engine
+//! constructors) and failure-arm causes
 //! ([`failure_arms`], ADR-0042), the callback invocation shapes
 //! ([`invocation_shape`], ADR-0033), the return ladder's catalog rungs
 //! ([`return_fact`], [`resource_return`], [`declared_return`] and its
@@ -115,6 +116,56 @@ pub fn builtin_throws(name: &str) -> Option<&'static [&'static str]> {
         // `json_decode`/`json_encode` throw JsonException only under
         // JSON_THROW_ON_ERROR; without flag inspection this key stays synthetic.
         "json_decode_throwing" | "json_encode_throwing" => Some(JSON),
+        _ => None,
+    }
+}
+
+/// **Method-shaped throw rows**: the global class names a call to `method` on
+/// the *builtin* class `class` provably raises, or `None` for uncatalogued.
+/// The class-world twin of [`builtin_throws`], under the same contract, and
+/// keyed the way [`crate::method_effect_labels`] is: global class names, both
+/// keys case-insensitive, a project class shadowing the row entirely.
+///
+/// # Membership (issue #849)
+///
+/// Only `__construct` rows, which `new C(...)` and a subclass's
+/// `parent::__construct(...)` run, each probed on PHP 8.5:
+///
+/// * `new PDO(...)` throws `PDOException` whenever the connection fails,
+///   whatever `PDO::ATTR_ERRMODE` says, an unusable DSN included.
+/// * `new SplFixedArray($n)` refuses a negative size with a `ValueError`;
+///   `ArrayObject` and `ArrayIterator` refuse an enum or an object with
+///   overloaded properties with an `InvalidArgumentException`, and
+///   `ArrayObject` an `$iteratorClass` that is not an `ArrayIterator` with a
+///   `TypeError`.
+/// * `FiberError` refuses to be constructed at all, with an `Error`. Every
+///   other engine `Throwable`'s constructor only stores its arguments.
+/// * `stdClass`, the SPL lists, heaps and `SplObjectStorage`, and `WeakMap`
+///   declare no constructor, so nothing runs.
+///
+/// A parameter-type `TypeError` is no row's business, as it is no builtin
+/// function's. Deliberately absent: `DateTime`, `DateTimeImmutable` and
+/// `DateInterval`. They throw only for an argument that does not parse, so
+/// `new DateTimeImmutable()` never does, and what they throw is `Exception`
+/// before PHP 8.3 and a `DateMalformed*Exception` from 8.3 on. Either class,
+/// argument-blind, would be a checked throw manufactured at sites that cannot
+/// raise it, the guess the `json_decode` placeholder above declines too. Any
+/// other engine class stays uncatalogued.
+#[must_use]
+pub fn method_throws(class: &str, method: &str) -> Option<&'static [&'static str]> {
+    const EMPTY: &[&str] = &[];
+    match (class.to_ascii_lowercase().as_str(), method.to_ascii_lowercase().as_str()) {
+        ("pdo", "__construct") => Some(&["PDOException"]),
+        ("splfixedarray", "__construct") => Some(&["ValueError"]),
+        ("arrayobject", "__construct") => Some(&["InvalidArgumentException", "TypeError"]),
+        ("arrayiterator", "__construct") => Some(&["InvalidArgumentException"]),
+        ("fibererror", "__construct") => Some(&["Error"]),
+        (
+            "stdclass" | "spldoublylinkedlist" | "splstack" | "splqueue" | "splobjectstorage"
+            | "splpriorityqueue" | "splminheap" | "splmaxheap" | "weakmap",
+            "__construct",
+        ) => Some(EMPTY),
+        (_, "__construct") if crate::effects::is_builtin_throwable(class) => Some(EMPTY),
         _ => None,
     }
 }
@@ -1121,6 +1172,30 @@ mod tests {
         assert_eq!(super::builtin_throws("HASH"), Some(&["ValueError"][..]));
         assert_eq!(super::builtin_throws("json_decode_throwing"), Some(&["JsonException"][..]));
         assert_eq!(super::builtin_throws("strlen"), None);
+    }
+
+    #[test]
+    fn constructor_throw_rows_cover_the_connection_the_stores_and_every_throwable() {
+        use super::method_throws as t;
+        assert_eq!(t("PDO", "__construct"), Some(&["PDOException"][..]));
+        assert_eq!(t("pdo", "__CONSTRUCT"), Some(&["PDOException"][..]));
+        assert_eq!(t("SplFixedArray", "__construct"), Some(&["ValueError"][..]));
+        assert_eq!(t("ArrayIterator", "__construct"), Some(&["InvalidArgumentException"][..]));
+        assert_eq!(t("FiberError", "__construct"), Some(&["Error"][..]));
+        let throwless = ["stdClass", "SplObjectStorage", "WeakMap", "Exception", "ErrorException"];
+        for class in throwless {
+            assert_eq!(t(class, "__construct"), Some(&[][..]), "{class}");
+        }
+        // Argument-conditional and version-split: deliberately uncatalogued.
+        let unknown = ["DateTime", "DateTimeImmutable", "DateInterval", "SplFileObject", "App\\E"];
+        for class in unknown {
+            assert_eq!(t(class, "__construct"), None, "{class}");
+        }
+        // A constructor row says nothing about the class's other methods.
+        assert_eq!(t("PDO", "query"), None);
+        // The mined hierarchy places `PDOException` under `RuntimeException`, so the
+        // `PDO` row's throw is checked (#852 retired the frozen projection).
+        assert_eq!(super::builtin_class_supers("PDOException"), Some(vec!["RuntimeException"]));
     }
 
     #[test]
