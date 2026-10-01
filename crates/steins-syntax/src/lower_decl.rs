@@ -27,11 +27,11 @@ use crate::lower_effect::{
     EffectScanCx, body_aliased, collect_body_callables, receiver_writes, scan_effect_origins,
     scan_throw_origins,
 };
-use crate::lower_site::scan_owner_sites;
 use crate::lower_expr::{
     class_const_name, instantiation_class, is_strict_types_one, lower_arg_value, lower_call,
     method_name_of, trace_static_class,
 };
+use crate::lower_site::{debug_assert_matches_legacy, scan_owner_sites};
 use crate::names::{
     PREG_FLAG_CONST_NAMES, RefResolver, ctx_of, name_ref, use_binds_php_version_id,
     use_binds_preg_flag_const,
@@ -622,6 +622,7 @@ fn lower_function(
         scan_throw_origins(&Node::Statement(s), &[], &[], &cx.locals, &mut throw_origins);
         scan_owner_sites(&Node::Statement(s), &cx, &mut sites);
     }
+    debug_assert_matches_legacy(&sites, &effect_origins, &throw_origins);
 
     FunctionDecl {
         name: bytes_to_string(f.name.value),
@@ -1116,6 +1117,7 @@ fn lower_method(m: &Method<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex, rc
             scan_owner_sites(&Node::Statement(s), &cx, &mut sites);
         }
     }
+    debug_assert_matches_legacy(&sites, &effect_origins, &throw_origins);
 
     let visibility = visibility_of(&m.modifiers);
 

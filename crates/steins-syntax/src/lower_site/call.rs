@@ -31,8 +31,11 @@ pub(super) fn function_call(fc: &FunctionCall<'_>, sx: &SiteScope<'_>, out: &mut
             Some((_, callbacks, _)) => (to_span(fc.span()), callbacks),
             None => (to_span(id.span()), Vec::new()),
         };
+        let ref_targets = arg_targets_of_call(fc, cx);
+        // `derive` reads a higher-order call's arity off `ref_targets`.
+        debug_assert!(callbacks.is_empty() || ref_targets.is_some());
         let mut site = sx.site(span, SiteKind::Call { name: name_ref(id), callbacks });
-        site.ref_targets = arg_targets_of_call(fc, cx);
+        site.ref_targets = ref_targets;
         site.const_args = const_args_of_call(fc);
         site.operands = arg_shapes_of(&fc.argument_list, &cx.bindings);
         out.push(site);
