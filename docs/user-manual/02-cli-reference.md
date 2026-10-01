@@ -545,7 +545,10 @@ $ steins annotate --format json src/Counter.php
         "io.output.buffer"
       ],
       "declared": [],
-      "exhaustive": true
+      "exhaustive": true,
+      "gaps": [],
+      "throws_exhaustive": true,
+      "throws_gaps": []
     }
   ]
 }
@@ -556,6 +559,17 @@ bounds, and `exhaustive` is the bit the `…?` renders. Nothing is flattened.
 A `tolerated` array joins them where a policy discharges something; the
 tolerated labels stay listed in `effects` too, so a consumer reading only
 `effects` sees the same set it always did.
+
+`gaps` and `throws_gaps` name the **kinds of coverage gap** behind a `…?` in
+the effect lane and the throw lane (`throws_exhaustive` is the throw lane's
+own bit). Each is empty exactly when its lane is exhaustive, and is always
+present, so a reader never has to tell a missing key from a clean body. A body
+inherits its callees' gaps, so a function with no gap of its own still lists
+the kinds that make it `…?`. The kinds are `dynamic-callee`, `unknown-class`,
+`unknown-function`, `open-method`, `declared-receiver`, `interop-envelope`,
+`unresolved-callback`, `unseen-code`, `user-code-reach`, `state-construct`,
+`unresolved-throw`, `no-effect-row`, `no-throw-row`, `argument-list` and
+`flag-dependent-throw`.
 
 > **If you know PHPStan or Psalm:** this is the batch answer to what you get
 > from sprinkling `\PHPStan\dumpType()` and rerunning — a whole file's
@@ -875,7 +889,9 @@ $ echo $?
 Event lines read `<file> <symbol>: <change>`: `+ label` for a newly proven
 effect, `- label` for one gone, `≤→ label` for a declared bound that became
 proven, `+ ≤label (declared)` for a new bound, and one-line coverage notes
-when the exhaustiveness bit flips. A footer counts functions added and
+when the exhaustiveness bit flips, each naming the gap kinds behind it
+(`coverage narrowed (exhaustive → non-exhaustive; now no-effect-row)`; the kinds
+the capture had, when coverage completed). A footer counts functions added and
 removed since the capture, printed only when either is nonzero — deleting
 `src/Ids.php` and its two functions gives:
 
@@ -904,7 +920,13 @@ $ steins effect-diff --baseline effects.json --format json src/
 
 `category` is one of `proven-added`, `proven-removed`,
 `proven-removed-maybe`, `declared-materialized`, `declared-added`,
-`declared-removed`, `coverage-narrowed`, `coverage-completed`.
+`declared-removed`, `coverage-narrowed`, `coverage-completed`. A coverage event
+carries a `gaps` array of the kinds behind the change.
+
+A capture written by an older build (`"steins-effects-baseline": 1`) is
+refused with the version it found; capture it again with `--set-baseline`. The
+file also records the throw lane's `throws_exhaustive` and `throws_gaps` for
+each function, which the report does not compare.
 
 The diff is informational, so a run that finds changes still exits `0`.
 Gating a build on an effect delta is a policy decision this surface does not

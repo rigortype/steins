@@ -204,7 +204,9 @@ effects pass reads the call's arity. `current`, `key`, `get_class`,
 `is_callable`, `is_a`, the `*_exists` questions, `array_search`,
 `array_combine` and the string family stay out, each for a reason the
 amendment records. A certified name is also "known" to every pass that asks the
-catalog whether a name is a builtin, and the throws pass reads it as throwless.
+catalog whether a name is a builtin (`knows(name)`, below). It is **not**
+thereby throwless: the throw lane reads `throws_of(name)`, which answers only
+for a row or an audited name (below).
 
 A row describes what the builtin does; whether its **arguments** can reach user
 code is a separate, per-parameter table (`arg_reach(name)`, issue #856,
@@ -432,6 +434,44 @@ wrong `No`.
 per name and hand-transcribed from `throws.toml`; the fold-allowlist names with
 an input-determined `ValueError` arm (`str_repeat`, `count`, `sprintf`, …)
 carry theirs since issue #320, each reproduced by probe.
+
+## `knows(name)` — what is a builtin
+
+One predicate (ADR-0099 §3.1, issue #864) for "the catalog knows this spelling":
+the union of the effect colours, the out-parameter rows, the by-value
+certification (which includes the mined arginfo), the mined parameter facts, the
+invocation shapes, and the two call-site certified lists. Every pass that
+resolves a function name asks it, so a project function shadowing a builtin
+spelling is ambiguous for all of them or for none. The shadow check
+(`Cx::resolve_shadow`, which answers "no catalog at all") and the
+runtime-existence questions (`function_exists` folding, the absence family) keep
+their own tables.
+
+Knowing a name says nothing about which axes have a row: a known name with no
+row on an axis is a coverage gap there, never pure and never throwless.
+
+## `throws_of(name)` — what a call raises
+
+The throw lane's one composition (ADR-0099 §3.2, §3.3): the `builtin_throws` row
+if there is one, an empty row for a name on the **audited throwless table**, and
+`None` otherwise. `None` is *unknown* and the lane reads it as a gap. No
+pass reads `builtin_throws` itself (a test in `steins-infer` pins that).
+
+The table lists the builtins php-src shows raise nothing for any argument their
+parameter types admit, argument checking's `TypeError` and `ArgumentCountError`
+aside. The fold allowlist and the certified lists are candidates, not evidence.
+Each name was audited by reading its body and by a runtime witness on PHP 8.5.11
+(12,000 argument tuples per name, drawn from every parameter's admitted values);
+the module doc of `knowledge.rs` states the method and what it refused.
+Converting an object argument to a string raises an `Error`, and that is not the
+table's business: every position that can hold an object is an `ArgReach`
+position, and the resolver turns it into a gap of its own unless the call site
+rules the object out.
+
+`json_encode` and `json_decode` raise only under `JSON_THROW_ON_ERROR`
+(`flag_gated_throw(name)`). Their throws are the flag-free ones when the call's
+flags argument is absent or a constant expression the scan evaluates without the
+flag, and a `flag-dependent-throw` gap otherwise.
 
 ## `invocation_shape(name)` — higher-order builtins
 
@@ -664,8 +704,9 @@ format the other tables will follow once a consumer wants them.
   imported row from carrying that authority (the ADR-0069 note of 2026-08-17 states
   the whole argument). So the "no parameter types" sentence above stays true of the
   catalog and always will be, and `--no-php` judges no builtin argument at all.
-- **Flag inspection** — `json_decode`/`json_encode` throw `JsonException` only
-  under `JSON_THROW_ON_ERROR`; without flag inspection those rows stay
-  uncatalogued (widen) rather than manufacture a throw. The keys are present in
-  the source, awaiting the machinery.
+- **A proven `JsonException`.** `json_decode`/`json_encode` throw `JsonException`
+  only under `JSON_THROW_ON_ERROR`. The flag is read (`flag_gated_throw`), but a
+  call that sets it is a coverage gap rather than a proven throw: the synthetic
+  `json_*_throwing` keys are present in the source, awaiting the decision to
+  state the class.
 - **Plugin-registered ecosystem labels and signatures** (ADR-0012, ADR-0039).
