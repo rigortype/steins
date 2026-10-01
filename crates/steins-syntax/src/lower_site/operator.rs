@@ -12,10 +12,18 @@
 //! **A site is not emitted** when every operand's shape shows it holds no
 //! object ([`holds_no_object`]): an object-free expression, an array, or a
 //! local variable the frame writes only object-free values and arrays into. A
-//! `parameter` is never skipped here: its declared type decides. A loose or
-//! ordering comparison with a non-string scalar literal on either side is
-//! skipped too: an object converts to a string for a string operand only,
-//! and to `bool`, `int`, `float` or `null` without running user code.
+//! `parameter` is never skipped here: its declared type decides.
+//!
+//! **A comparison is stricter** (`==`, `!=`, `<>`, `<`, `<=`, `>`, `>=`,
+//! `<=>`, `switch`): an array compares element-wise with another array, so
+//! `[$o] == ['x']`, `[$o] < ['y']` and a `switch` over `[$o]` with `case ['x']`
+//! run `__toString` on the element (witnessed on PHP 8.5). Only an operand that
+//! holds no object at any depth qualifies: an object-free expression, or a
+//! local whose writes are all object-free. A comparison with a non-string
+//! scalar literal (`null`, a boolean, an integer or a float) on either side is
+//! skipped whatever the other side holds: an object converts to a string for a
+//! string operand only, and an array against a scalar compares without
+//! touching its elements (also witnessed on 8.5).
 //!
 //! A property or offset access takes the role its context gives it
 //! ([`OperatorConstruct`]): [`chain`] walks an lvalue-like expression and
@@ -30,7 +38,9 @@ use mago_syntax::cst::{
 };
 
 use super::{SiteScope, scan_sites};
-use crate::ast::{ArgShape, OperatorConstruct as C, OperatorFamily as F, SiteKind, SiteOrigin};
+use crate::ast::{
+    ArgShape, OperatorConstruct as C, OperatorFamily as F, SiteKind, SiteOrigin, Stored,
+};
 use crate::lower_arg_shape::arg_shape;
 use crate::lower_expr::{effect_recv_of_object_declared, method_name_of};
 use crate::stack_guard;
@@ -381,12 +391,21 @@ fn offset_site(
     push_at(F::ArrayAccess, role, span, None, &[container], sx, out);
 }
 
-/// Whether `shape` shows the operand holds no object: an object-free expression,
-/// an array, or a local variable of a frame that writes only such values into
-/// it. A parameter is not: its declared type decides, which only the resolver
-/// reads.
-fn holds_no_object(shape: &ArgShape) -> bool {
-    matches!(shape, ArgShape::ObjectFree | ArgShape::Array | ArgShape::Local { .. })
+/// Whether `shape` shows the operand needs no site under `construct`. For most
+/// forms an operand that is not itself an object qualifies: an object-free
+/// expression, an array (conversion and element access leave its elements
+/// alone), or a local variable of a frame that writes only such values into it.
+/// A comparison also touches an array's elements, so there only an operand that
+/// holds no object at any depth does: an object-free expression or a local
+/// written only object-free values. A parameter never qualifies: its declared
+/// type decides, which only the resolver reads.
+fn holds_no_object(construct: C, shape: &ArgShape) -> bool {
+    let comparison = matches!(construct, C::LooseCompare | C::OrderCompare | C::Switch);
+    match shape {
+        ArgShape::ObjectFree | ArgShape::Local { stores: Stored::ObjectFree, .. } => true,
+        ArgShape::Array | ArgShape::Local { .. } => !comparison,
+        _ => false,
+    }
 }
 
 /// Whether `expr` is a `null`, boolean, integer or float literal (signed or
@@ -430,7 +449,7 @@ fn push_at(
     out: &mut Vec<SiteOrigin>,
 ) {
     let shapes: Vec<ArgShape> = operands.iter().map(|e| arg_shape(e, &sx.cx.bindings)).collect();
-    if shapes.iter().all(holds_no_object) {
+    if shapes.iter().all(|shape| holds_no_object(construct, shape)) {
         return;
     }
     let receivers = operands.iter().map(|e| effect_recv_of_object_declared(e, sx.cx)).collect();
