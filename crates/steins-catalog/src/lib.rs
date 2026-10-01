@@ -119,7 +119,9 @@ pub use effects::{
     by_value_arg_frame,
     callables_in_array_param,
     callback_carriers,
+    certified_at_call_site,
     effect_labels,
+    engine_constructor_by_value,
     final_method_effect_labels,
     method_effect_labels,
     narrowed_output_labels,
@@ -128,6 +130,13 @@ pub use effects::{
     out_params,
     pure_at_arity,
     variadic_tail_is_data,
+};
+
+mod reach;
+pub use reach::{
+    ArgReach,
+    ReachRow,
+    arg_reach,
 };
 
 mod labels;
