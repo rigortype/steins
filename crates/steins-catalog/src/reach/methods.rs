@@ -27,7 +27,8 @@
 //! project class resolves it to its nearest engine ancestor first, as it does
 //! for the effect and throw rows, and asks for that class. The one family
 //! answered by ancestry is the engine `Throwable`s: all 60 of them (PHP
-//! 8.5.11) are rowed by [`is_builtin_throwable`], and 56 share
+//! 8.5.11; `Random\RandomException` is keyed without its namespace, see #871)
+//! are rowed by [`is_builtin_throwable`], and 56 share
 //! `Exception::__construct`'s signature (`Error::__construct` has the same
 //! parameters), so `RuntimeException`, `TypeError` and `JsonException` all
 //! take the default row. The four with their own signature are keyed by name:
@@ -82,10 +83,15 @@
 //!   (`Autoload`) and, for `prepare`, runs a user statement class's
 //!   constructor. A literal array of strings is the same shape as one that
 //!   holds no such key, so the position is `Autoload` and never ruled out.
-//!   `PDO::query`'s `mixed ...$fetchModeArgs` names a row class for
-//!   `FETCH_CLASS` (autoloaded, both modes) or an object for `FETCH_INTO`
-//!   whose `__set` the later `fetch` runs: `Autoload`. `FETCH_FUNC` is
-//!   refused there.
+//!   `PDO::query`'s `?int $fetchMode` and `mixed ...$fetchModeArgs` choose
+//!   the fetch mode and name a row class for `FETCH_CLASS` (autoloaded, both
+//!   modes) or an object for `FETCH_INTO` whose `__set` the later `fetch`
+//!   runs: both are `Autoload`. `FETCH_FUNC` is refused there.
+//!   `PDOStatement::fetch`'s and `fetchAll`'s `int $mode` is `Autoload` too,
+//!   although an `int` is nothing to convert: `FETCH_CLASS | FETCH_CLASSTYPE`
+//!   constructs, and autoloads, the class named in the first column, and
+//!   `FETCH_SERIALIZE` runs `unserialize`, with no prior registration
+//!   (witnessed in both modes).
 //! * `PDOStatement::fetchAll`'s `mixed ...$args` (positions 1 and up) is the
 //!   callable of `FETCH_FUNC` (witnessed to run, both modes) or the class of
 //!   `FETCH_CLASS` (autoloaded): `Callback`. The mode is a runtime integer,
@@ -171,12 +177,14 @@ pub fn method_arg_reach(class: &str, method: &str) -> Option<MethodReachRow> {
         ("pdo", "__construct") => {
             row(&["string", "?string", "?string", "?array"], false, &[(3, Autoload)])
         }
-        ("pdo", "query") => row(&["string", "?int", "mixed"], true, &[(2, Autoload)]),
+        ("pdo", "query") => row(&["string", "?int", "mixed"], true, &[(1, Autoload), (2, Autoload)]),
         ("pdo", "exec") => row(&["string"], false, &[]),
         ("pdo", "prepare") => row(&["string", "array"], false, &[(1, Autoload)]),
         ("pdostatement", "execute") => row(&["?array"], false, &[]),
-        ("pdostatement", "fetch") => row(&["int", "int", "int"], false, &[]),
-        ("pdostatement", "fetchall") => row(&["int", "mixed"], true, &[(1, Callback)]),
+        ("pdostatement", "fetch") => row(&["int", "int", "int"], false, &[(0, Autoload)]),
+        ("pdostatement", "fetchall") => {
+            row(&["int", "mixed"], true, &[(0, Autoload), (1, Callback)])
+        }
         ("datetime" | "datetimeimmutable", "__construct") => {
             row(&["string", "?DateTimeZone"], false, &[(1, Inert)])
         }
@@ -264,7 +272,7 @@ mod tests {
             assert_eq!(at(class, "__construct", 2), ArgReach::Inert, "{class}: a type check");
             assert_eq!(at(class, "__construct", 3), ArgReach::Inert, "{class}: past the list");
         }
-        assert_eq!(at("DOMException","__construct", 0), ArgReach::Coerced);
+        assert_eq!(at("DOMException", "__construct", 0), ArgReach::Coerced);
         assert_eq!(at("\\runtimeexception", "__CONSTRUCT", 0), ArgReach::Coerced);
     }
 
@@ -314,7 +322,7 @@ mod tests {
     #[test]
     fn pdo_coerces_its_sql_and_autoloads_what_its_options_name() {
         assert_eq!(at("PDO", "query", 0), ArgReach::Coerced);
-        assert_eq!(at("PDO", "query", 1), ArgReach::Inert, "?int $fetchMode");
+        assert_eq!(at("PDO", "query", 1), ArgReach::Autoload, "?int $fetchMode: FETCH_CLASS");
         assert_eq!(at("PDO", "query", 2), ArgReach::Autoload, "FETCH_CLASS names a class");
         assert_eq!(at("PDO", "query", 5), ArgReach::Autoload, "the variadic tail repeats");
         assert_eq!(at("PDO", "exec", 0), ArgReach::Coerced);
@@ -324,8 +332,9 @@ mod tests {
         assert_eq!(at("PDO", "__construct", 2), ArgReach::Coerced);
         assert_eq!(at("PDO", "__construct", 3), ArgReach::Autoload);
         assert_eq!(at("PDOStatement", "execute", 0), ArgReach::Nested);
-        assert_eq!(at("PDOStatement", "fetch", 0), ArgReach::Inert);
-        assert_eq!(at("PDOStatement", "fetchAll", 0), ArgReach::Inert);
+        assert_eq!(at("PDOStatement", "fetch", 0), ArgReach::Autoload, "FETCH_CLASS | FETCH_CLASSTYPE");
+        assert_eq!(at("PDOStatement", "fetch", 1), ArgReach::Inert);
+        assert_eq!(at("PDOStatement", "fetchAll", 0), ArgReach::Autoload);
         assert_eq!(at("PDOStatement", "fetchAll", 1), ArgReach::Callback, "FETCH_FUNC");
         assert_eq!(at("PDOStatement", "fetchAll", 4), ArgReach::Callback);
     }

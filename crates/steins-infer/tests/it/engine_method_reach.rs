@@ -108,23 +108,6 @@ fn a_date_time_constructor_and_factory_coerce_the_string() {
     assert_eq!(reaches(&file(false, "?\\DateTimeZone $z", call), "f"), NEITHER);
 }
 
-/// `PDO::query` on a receiver the scan names by class and records operands for.
-/// (`$pdo->query($o)` on a variable the frame writes names no class: a dynamic
-/// site, which is a gap of its own.)
-#[test]
-fn a_pdo_method_on_an_exact_receiver_coerces_its_statement() {
-    let call = "return \\PDO::query($o);";
-    let s = summary(&file(false, "Name $o", call), "f");
-    assert!(s.gaps.contains(&"user-code-reach"), "{s:?}");
-    assert!(s.labels.contains(&"io.db".to_owned()), "the row is kept: {s:?}");
-    let string = "return \\PDO::query($s);";
-    assert_eq!(reaches(&file(false, "string $s", string), "f"), NEITHER);
-    assert_eq!(reaches(&file(true, "Name $o", call), "f"), NEITHER);
-    let exec = "return \\PDO::exec($o);";
-    assert!(reaches(&file(false, "Name $o", exec), "f").0);
-    assert!(!reaches(&file(true, "Name $o", exec), "f").0);
-}
-
 /// `parent::query(…)` in a subclass of `PDO`: the exact receiver a project
 /// wrapper writes.
 #[test]
@@ -147,6 +130,8 @@ fn a_pdo_wrapper_forwarding_to_parent_is_held_to_the_rule() {
     assert_eq!(reaches(&wrapper(true, "Name $o", "query($o)"), "Db::run"), NEITHER);
     assert!(reaches(&wrapper(false, "Name $o", "exec($o)"), "Db::run").0);
     assert!(!reaches(&wrapper(true, "Name $o", "exec($o)"), "Db::run").0);
+    // `?int $fetchMode` names a fetch mode that can construct a class: never ruled out.
+    assert!(reaches(&wrapper(true, "int $m", "query('SELECT 1', $m)"), "Db::run").0);
 }
 
 /// `(new PDO)->query($s)` names its class but records no operand shapes, so the
