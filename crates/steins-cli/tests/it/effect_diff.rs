@@ -114,7 +114,7 @@ fn a_non_exhaustive_current_summary_hedges_the_removal() {
     assert_eq!(
         r.stdout,
         "a.php report: ? - io.output.buffer (possibly removed; current summary non-exhaustive)\n\
-         a.php report: coverage narrowed (exhaustive → non-exhaustive)\n"
+         a.php report: coverage narrowed (exhaustive → non-exhaustive; now unknown-function)\n"
     );
     assert!(
         !r.stdout.contains("report: - io.output.buffer"),
@@ -170,7 +170,7 @@ fn an_exhaustiveness_transition_is_never_folded_into_a_label_event() {
     );
     assert_eq!(
         narrowed.stdout,
-        "a.php report: coverage narrowed (exhaustive → non-exhaustive)\n"
+        "a.php report: coverage narrowed (exhaustive → non-exhaustive; now unknown-function)\n"
     );
 
     let dir = workdir("coverage-back");
@@ -182,7 +182,7 @@ fn an_exhaustiveness_transition_is_never_folded_into_a_label_event() {
     );
     assert_eq!(
         completed.stdout,
-        "a.php report: coverage completed (non-exhaustive → exhaustive)\n"
+        "a.php report: coverage completed (non-exhaustive → exhaustive; was unknown-function)\n"
     );
 }
 
@@ -233,6 +233,29 @@ fn a_coverage_event_carries_a_null_label_in_json() {
     let v: serde_json::Value = serde_json::from_str(&r.stdout).expect("valid json object");
     assert_eq!(v["events"][0]["category"], "coverage-narrowed");
     assert!(v["events"][0]["label"].is_null(), "no label on an exhaustiveness event");
+    assert_eq!(v["events"][0]["gaps"], serde_json::json!(["unknown-function"]), "its cause");
+}
+
+/// The baseline records both lanes' gap kinds, and a version-1 file (no kinds) is
+/// refused with the way out.
+#[test]
+fn the_baseline_stores_gap_kinds_and_a_version_one_file_is_refused() {
+    let dir = workdir("gaps-stored");
+    write(&dir, "a.php", "<?php\nfunction report(): int { unknown_helper(); return 1; }\n");
+    let cap = run_in(&dir, &["effect-diff", "--set-baseline", "a.php"]);
+    assert_eq!(cap.code, 0);
+    let text = std::fs::read_to_string(dir.join("steins-effects-baseline.json")).expect("baseline");
+    let v: serde_json::Value = serde_json::from_str(&text).expect("json");
+    assert_eq!(v["steins-effects-baseline"], 2);
+    let entry = &v["functions"][0];
+    assert_eq!(entry["gaps"], serde_json::json!(["unknown-function"]));
+    assert_eq!(entry["throws_exhaustive"], false);
+    assert_eq!(entry["throws_gaps"], serde_json::json!(["unknown-function"]));
+
+    write(&dir, "steins-effects-baseline.json", "{\"steins-effects-baseline\": 1, \"functions\": []}");
+    let old = run_in(&dir, &["effect-diff", "a.php"]);
+    assert_eq!(old.code, 2);
+    assert!(old.stderr.contains("version 1 is not readable"), "stderr:\n{}", old.stderr);
 }
 
 #[test]

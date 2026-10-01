@@ -117,3 +117,34 @@ fn abstract_method_has_no_summary() {
     let all = effect_summary(&tree, &functions, &classes);
     assert!(all.iter().all(|s| s.symbol != "A::m"), "abstract method omitted (no body to prove)");
 }
+
+// ---- Gap kinds name the cause of each `…?` (ADR-0099 §5) ------------------
+
+/// A body that is exhaustive carries no kinds, and one that is not carries the
+/// kinds its sites produced; a caller inherits its callee's, so every `…?` names
+/// a cause even where the caller's own body is clean.
+#[test]
+fn gap_kinds_are_empty_exactly_when_exhaustive_and_propagate_to_callers() {
+    let src = "<?php
+function clean(): int { return 1; }
+function open(callable $cb): void { $cb(); some_unknown_fn(); }
+function caller(): void { open(fn() => 1); }
+function fine(): int { return clean(); }
+";
+    let clean = summary(src, "clean");
+    assert!(clean.exhaustive && clean.gaps.is_empty(), "got: {:?}", clean.gaps);
+    assert!(clean.throws_exhaustive && clean.throws_gaps.is_empty());
+
+    let open = summary(src, "open");
+    assert_eq!(open.gaps, vec!["dynamic-callee", "unknown-function"]);
+    assert_eq!(open.throws_gaps, vec!["dynamic-callee", "unknown-function"]);
+
+    // `caller` has no gap of its own and inherits both through the call edge.
+    let caller = summary(src, "caller");
+    assert!(!caller.exhaustive);
+    assert_eq!(caller.gaps, open.gaps);
+    assert_eq!(caller.throws_gaps, open.throws_gaps);
+
+    let fine = summary(src, "fine");
+    assert!(fine.exhaustive && fine.gaps.is_empty(), "a clean callee leaves no kind");
+}

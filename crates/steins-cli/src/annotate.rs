@@ -192,6 +192,13 @@ fn load_annotate_project(
 /// `annotate --format json`'s document (issue #65): sorted proven labels,
 /// sorted declared bounds (ADR-0067), exhaustiveness. `tolerated` (ADR-0084 §4)
 /// joins only where discharged, as a subset of `effects`, never a removal.
+///
+/// `gaps` and `throws_gaps` (ADR-0099 §5) name the kinds of coverage gap behind
+/// `exhaustive == false` and `throws_exhaustive == false`, each empty exactly
+/// when its lane is exhaustive. They are always present, even empty, so a reader
+/// never has to tell an absent key from a clean body; `tolerated` is the
+/// optional one because it is a subset that most bodies lack.
+/// `throws_exhaustive` is here so `throws_gaps` can be read on its own.
 fn print_annotate_json(summaries: &[EffectSummary]) {
     let functions: Vec<serde_json::Value> = summaries
         .iter()
@@ -205,6 +212,9 @@ fn print_annotate_json(summaries: &[EffectSummary]) {
             }
             entry.insert("declared".to_owned(), serde_json::json!(s.declared));
             entry.insert("exhaustive".to_owned(), serde_json::json!(s.exhaustive));
+            entry.insert("gaps".to_owned(), serde_json::json!(s.gaps));
+            entry.insert("throws_exhaustive".to_owned(), serde_json::json!(s.throws_exhaustive));
+            entry.insert("throws_gaps".to_owned(), serde_json::json!(s.throws_gaps));
             serde_json::Value::Object(entry)
         })
         .collect();

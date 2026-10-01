@@ -338,6 +338,18 @@ fn annotate_json_shape_pins_colored_pure_and_tainted_functions() {
     assert_eq!(stamp["effects"], serde_json::json!([]));
     assert_eq!(stamp["declared"], serde_json::json!(["nondet.time"]));
     assert_eq!(stamp["exhaustive"], serde_json::json!(true));
+
+    // Gap kinds (ADR-0099 §5) name the cause of each lane's `…?`, and are always
+    // present: empty exactly where the lane is exhaustive.
+    assert_eq!(price["gaps"], serde_json::json!([]));
+    assert_eq!(price["throws_exhaustive"], serde_json::json!(true));
+    assert_eq!(price["throws_gaps"], serde_json::json!([]));
+    assert_eq!(writer["gaps"], serde_json::json!([]));
+    assert_eq!(mystery["gaps"], serde_json::json!(["unknown-function"]));
+    assert_eq!(mystery["throws_exhaustive"], serde_json::json!(false));
+    assert_eq!(mystery["throws_gaps"], serde_json::json!(["unknown-function"]));
+    assert_eq!(stamp["gaps"], serde_json::json!([]));
+    assert_eq!(stamp["throws_gaps"], serde_json::json!(["declared-receiver"]));
 }
 
 #[test]
