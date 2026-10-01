@@ -88,3 +88,14 @@ absorbs the constructor's `CodeCoverageFileExistsException`, which implements
 that interface, but `throw_subtype` walks `extends` only and judges the catch
 `No`. That defect predates this amendment; the constructor edge only gives it
 one more path.
+
+## Amendment (2026-10-02): the throw lane reads sites, and a missing row is not throwless — PENDING ratification
+
+ADR-0099 (issue #865). §2's four sources of throw facts are read off one site
+record that the effect lane reads too, so the two lanes cannot disagree about
+what runs at a site. A known builtin with no throw row is an obstacle, never
+throwless; a throw row may be omitted only for the fold allowlist and the
+certified-pure list, where throwlessness is evidenced (issue #864). An
+argument or operand that may reach user code, and `eval` or an inclusion,
+make the throw set non-exhaustive, because unknown user code may throw
+anything.
