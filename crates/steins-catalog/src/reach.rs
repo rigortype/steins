@@ -36,7 +36,13 @@
 //! `intval($o)`, `boolval($o)`, `gettype($o)`, `array_fill(0, 1, $o)`,
 //! `array_merge([$o])` and `count([$c], COUNT_RECURSIVE)` run none.
 //!
+//! Engine **methods and constructors** are the same question asked of a
+//! `Class::method` key: [`method_arg_reach`], in `reach/methods.rs`.
+//!
 //! [`param_facts`]: crate::param_facts
+
+mod methods;
+pub use methods::{MethodReachRow, method_arg_reach};
 
 use crate::builtins::{ParamFacts, resource_param};
 use crate::effects::certified_pure;
@@ -109,11 +115,17 @@ impl ReachRow {
     /// builtin handed over as a callback.
     #[must_use]
     pub fn reaches_blind(&self, strict: bool) -> bool {
-        (0..self.facts.params.len()).any(|p| match self.at(p) {
-            ArgReach::Inert => false,
-            ArgReach::Coerced => !strict,
-            _ => true,
-        })
+        (0..self.facts.params.len()).any(|p| reaches_past_strictness(self.at(p), strict))
+    }
+}
+
+/// Whether `reach` runs user code that the calling file's strictness alone
+/// does not rule out ([`ReachRow::reaches_blind`] over one position).
+fn reaches_past_strictness(reach: ArgReach, strict: bool) -> bool {
+    match reach {
+        ArgReach::Inert => false,
+        ArgReach::Coerced => !strict,
+        _ => true,
     }
 }
 
