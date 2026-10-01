@@ -82,7 +82,7 @@ fn a_new_occurrence_reads_as_the_headline_line() {
     let r = capture_then(
         &dir,
         "<?php\nfinal class Checkout {\n    public function confirm(): int { return 1; }\n}\n",
-        "<?php\nfinal class Checkout {\n    public function confirm(): int { (new PDO('x'))->query('y'); return 1; }\n}\n",
+        "<?php\nfinal class Checkout {\n    public function confirm(): int { new PDO('x'); return 1; }\n}\n",
         &[],
     );
     assert_eq!(r.code, 0);
@@ -132,7 +132,7 @@ fn a_declared_bound_becoming_proven_is_one_materialization() {
         &format!(
             "<?php\n{REPO}final class Checkout {{\n    public function confirm(Repo $r): string {{ return $r->find(1); }}\n}}\n"
         ),
-        "<?php\nfinal class Checkout {\n    public function confirm(): string { return (new PDO('x'))->query('y'); }\n}\n",
+        "<?php\nfinal class Checkout {\n    public function confirm(): string { new PDO('x'); return 'y'; }\n}\n",
         &[],
     );
     assert_eq!(
