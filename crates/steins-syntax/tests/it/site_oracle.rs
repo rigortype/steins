@@ -63,10 +63,17 @@ struct Owner<'a> {
 }
 
 /// Compare one lane of one owner, recording a divergence if the lists differ.
-fn check_lane<T: Debug>(owner: &Owner<'_>, lane: &str, derived: &[T], legacy: &[T], report: &mut Report) {
+fn check_lane<T: Debug>(
+    owner: &Owner<'_>,
+    lane: &str,
+    derived: &[T],
+    legacy: &[T],
+    report: &mut Report,
+) {
     if let Some((index, derived, legacy)) = first_divergence(derived, legacy) {
         report.divergences.push(format!(
-            "{} owner {}: {lane} lists first differ at index {index}\n  derived: {derived}\n  legacy:  {legacy}",
+            "{} owner {}: {lane} lists first differ at index {index}\n  derived: {derived}\n  \
+             legacy:  {legacy}",
             owner.file.display(),
             owner.name,
         ));
@@ -196,4 +203,98 @@ fn over_corpus() {
         php_files(&root, &|_| false, &mut files);
         assert_clean(&root.display().to_string(), &run(&files));
     }
+}
+
+/// Constructs the corpora may carry rarely or never, each in a shape the two
+/// legacy scans treat in their own way: the oracle reads them here so a
+/// regression on one does not wait for a corpus run.
+const EDGE_SHAPES: &str = r#"<?php
+namespace N;
+
+class K {
+    private $repo;
+    public function __construct(private object $dep) { $this->dep->boot(); $this->x = 1; }
+    public function run(array $a, $o, $cb, ...$rest) {
+        $this->repo->save($a);
+        $o->save(...$rest);
+        $o?->save($a);
+        $o?->$cb();
+        $cb();
+        $fn = fn($x) => strlen($x);
+        $fn();
+        array_map('strtolower', $a);
+        array_map(strtolower(...), $a, ...$rest);
+        str_replace(search: 'a', replace: 'b', subject: $a);
+        fopen('php://stdout', 'w');
+        print_r($a, true);
+        new self($o);
+        new static;
+        new $cb($a);
+        new class($a) extends K { public function __construct($a) { f($a); } };
+        new class(g()) extends K {};
+        new class { use T; };
+        new class { };
+        parent::run($a, $o, $cb);
+        $cb::run();
+        static::run();
+        K::$cache['k'] = h();
+        K::$$o;
+        $_GET['x'] = $GLOBALS['y'];
+        global $g;
+        static $s = 0;
+        $o->p = 1; $o->q[] = 2; $o->r++; unset($o->s);
+        foreach ($a as $o->t) {}
+        echo 'a', f();
+        print 'b';
+        ?>inline<?= $a ?>
+        <?php
+        eval($a);
+        include 'x.php';
+        require_once __DIR__ . '/y.php';
+        exit(f());
+        die;
+        return match ($o) { 1 => throw new \LogicException(), 2 => f() };
+    }
+    public function guards($e) {
+        try {
+            try {
+                throw new \RuntimeException(f());
+            } catch (\InvalidArgumentException | \LogicException $e) {
+                throw $e;
+            } catch (UnknownThing $e) {
+                $e = new \Exception();
+                throw $e;
+            } finally {
+                cleanup();
+            }
+        } catch (\Throwable $t) {
+            g($t);
+            throw $t;
+        }
+        throw $e;
+        throw $this->make();
+        throw new $e();
+        $f = function () use ($e) { try { h(); } catch (\Exception $x) { throw $x; } };
+        $g = fn() => throw new \Exception();
+    }
+}
+function top($p) {
+    $c = 'strlen';
+    $c($p);
+    $h = static function () { return f(); };
+    $h();
+    $h();
+    echo match (true) { $p > 1 => 'a', default => 'b' };
+    echo match (true) { $p > 1 => 'a' };
+}
+"#;
+
+#[test]
+fn over_edge_shapes() {
+    let mut report = Report::default();
+    let tree = SourceTree::parse(EDGE_SHAPES);
+    assert!(tree.parse_errors().is_empty(), "the fixture parses: {:?}", tree.parse_errors());
+    check_tree(Path::new("<edge shapes>"), &tree, &mut report);
+    assert_clean("edge shapes", &report);
+    assert!(report.sites > 60, "the fixture lowers to many sites, not {}", report.sites);
 }

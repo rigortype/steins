@@ -81,7 +81,11 @@ pub(super) fn nullsafe_method_call(
 }
 
 /// A `Foo::m(...)` call.
-pub(super) fn static_method_call(sc: &StaticMethodCall<'_>, sx: &SiteScope<'_>, out: &mut Vec<SiteOrigin>) {
+pub(super) fn static_method_call(
+    sc: &StaticMethodCall<'_>,
+    sx: &SiteScope<'_>,
+    out: &mut Vec<SiteOrigin>,
+) {
     let span = to_span(sc.span());
     if let (Some(receiver), Some(method)) =
         (effect_recv_of_class(sc.class), method_name_of(&sc.method))
@@ -96,7 +100,11 @@ pub(super) fn static_method_call(sc: &StaticMethodCall<'_>, sx: &SiteScope<'_>, 
 }
 
 /// A `new C(...)`: the constructor it runs, or a dynamic site when the class is computed.
-pub(super) fn instantiation(inst: &Instantiation<'_>, sx: &SiteScope<'_>, out: &mut Vec<SiteOrigin>) {
+pub(super) fn instantiation(
+    inst: &Instantiation<'_>,
+    sx: &SiteScope<'_>,
+    out: &mut Vec<SiteOrigin>,
+) {
     let span = to_span(inst.span());
     match trace_static_class(inst.class) {
         Some(class) => {
@@ -113,7 +121,11 @@ pub(super) fn instantiation(inst: &Instantiation<'_>, sx: &SiteScope<'_>, out: &
 
 /// The constructor a `new class(...) {...}` runs, as a site. Its arguments are
 /// the caller's to walk.
-pub(super) fn anonymous_class(ac: &AnonymousClass<'_>, sx: &SiteScope<'_>, out: &mut Vec<SiteOrigin>) {
+pub(super) fn anonymous_class(
+    ac: &AnonymousClass<'_>,
+    sx: &SiteScope<'_>,
+    out: &mut Vec<SiteOrigin>,
+) {
     let span = to_span(ac.span());
     match anonymous_class_constructor(ac) {
         AnonymousConstructor::Unseen => {

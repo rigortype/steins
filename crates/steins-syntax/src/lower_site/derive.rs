@@ -33,9 +33,8 @@ fn effect_origin(site: &SiteOrigin) -> Option<EffectOrigin> {
             const_args: site.const_args.clone(),
             arg_shapes: site.operands.clone(),
         },
-        // A higher-order call carries its lists whole: the scan only forms one
-        // from an all-positional argument list, so `ref_targets` is `Some` and
-        // as long as the call has arguments.
+        // The scan forms a higher-order call only from an all-positional argument
+        // list, so `ref_targets` is `Some` there, one entry per argument.
         SiteKind::Call { name, callbacks } => EffectOrigin::HigherOrder {
             callee: name.clone(),
             callbacks: callbacks.clone(),
