@@ -262,10 +262,15 @@ fn the_baseline_stores_gap_kinds_and_a_version_one_file_is_refused() {
     assert_eq!(v["functions"][0]["gaps"], serde_json::json!(["no-effect-row"]));
     assert_eq!(v["functions"][0]["throws_gaps"], serde_json::json!(["no-throw-row"]));
 
-    write(&dir, "steins-effects-baseline.json", "{\"steins-effects-baseline\": 1, \"functions\": []}");
+    write(
+        &dir,
+        "steins-effects-baseline.json",
+        "{\"steins-effects-baseline\": 1, \"functions\": [{\"file\": \"a.php\", \"symbol\": \"f\", \"proven\": [], \"declared\": [], \"exhaustive\": true}]}",
+    );
     let old = run_in(&dir, &["effect-diff", "a.php"]);
     assert_eq!(old.code, 2);
     assert!(old.stderr.contains("version 1 is not readable"), "stderr:\n{}", old.stderr);
+    assert!(old.stderr.contains("--set-baseline"), "the way out, stderr:\n{}", old.stderr);
 }
 
 #[test]

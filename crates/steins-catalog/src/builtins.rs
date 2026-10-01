@@ -87,6 +87,7 @@ pub fn builtin_throws(name: &str) -> Option<&'static [&'static str]> {
     // PHP 8 turned argument-value misuses from `false`-returns into
     // `ValueError`. Method-shaped constructor throws are deferred.
     const VALUE_ERROR: &[&str] = &["ValueError"];
+    const TYPE_ERROR: &[&str] = &["TypeError"];
     // `sprintf` has two input-determined arms on its FORMAT string alone: an
     // unknown conversion specifier is a `ValueError`, and a placeholder with no
     // argument behind it is an `ArgumentCountError` — the one arity error PHP
@@ -153,6 +154,12 @@ pub fn builtin_throws(name: &str) -> Option<&'static [&'static str]> {
         | "putenv" | "flock" | "trigger_error" | "sleep" | "usleep" | "escapeshellarg"
         | "escapeshellcmd" | "clearstatcache" | "date_create_from_format"
         | "date_create_immutable_from_format" => Some(VALUE_ERROR),
+        // `array_column`'s value-dependent `TypeError` (issue #864's review): a row
+        // value that is an array or an object is no usable key, so the column or
+        // index it names raises "Cannot access offset of type array on array"
+        // (`array_column([['a' => [1], 'b' => 1]], 'b', 'a')`). Not argument
+        // checking, which names a parameter; reproduced on PHP 8.5.11.
+        "array_column" => Some(TYPE_ERROR),
         "sprintf" => Some(SPRINTF),
         // `json_decode`/`json_encode` throw JsonException only under
         // JSON_THROW_ON_ERROR; without flag inspection this key stays synthetic.

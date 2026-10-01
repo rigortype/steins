@@ -373,7 +373,8 @@ pub(crate) enum Reach {
 /// both lanes record.
 pub(crate) fn records_throw(site: &SiteOrigin) -> bool {
     use ConstructKind::{Eval, Include, MatchNoDefault};
-    !matches!(&site.kind, SiteKind::Construct(k) if !matches!(k, MatchNoDefault | Eval | Include(_)))
+    let both_lanes = |k: &ConstructKind| matches!(k, MatchNoDefault | Eval | Include(_));
+    !matches!(&site.kind, SiteKind::Construct(k) if !both_lanes(k))
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]

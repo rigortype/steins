@@ -211,9 +211,9 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
 ///   superglobal, engine symbol table or error state;
 /// * **performs no I/O**;
 /// * **throws nothing** but the `TypeError` its parameter types already state.
-///   Every pass that asks "does the catalog know this name" reads the colour
-///   row, and the throws pass then reads a missing
-///   [`builtin_throws`](crate::builtin_throws) row as throwless.
+///   Certification says nothing about throws, though: a name is throwless only
+///   where the audited table says so ([`throws_of`](crate::throws_of)), and a
+///   missing [`builtin_throws`](crate::builtin_throws) row is a coverage gap.
 ///
 /// A diagnostic raised on bad input does **not** disqualify a name: an
 /// `E_WARNING` or `E_DEPRECATED` runs an installed error handler, and that

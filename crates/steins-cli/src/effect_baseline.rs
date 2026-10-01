@@ -12,8 +12,9 @@
 //! `proven` labels, sorted `declared` bounds (normalized: a bound `proven`
 //! already subsumes is not stored, as it is not rendered), and `exhaustive`,
 //! then the throw lane's `throws_exhaustive` and the kinds of coverage gap behind
-//! each lane's `…?` (`gaps`, `throws_gaps`, ADR-0099 §5). `file` is relative to the baseline file's directory, forward slashes;
-//! `symbol` is namespace-qualified (`App\Checkout::confirm`).
+//! each lane's `…?` (`gaps`, `throws_gaps`, ADR-0099 §5). `file` is relative to
+//! the baseline file's directory, forward slashes; `symbol` is
+//! namespace-qualified (`App\Checkout::confirm`).
 //!
 //! **Comparison universe:** only a function present on **both** sides is
 //! compared. A key on one side alone is silent — a rename/delete must never
@@ -107,16 +108,24 @@ pub fn render(functions: Vec<Entry>) -> String {
 /// shape or unknown version — unlike the diagnostic baseline's hand-edit
 /// tolerance, a dropped entry here would silently shrink the comparison universe
 /// and read as "unchanged", so there is no honest partial reading.
+///
+/// The version is read **before** the entries, so a file of another version is
+/// refused as one (with the way out) rather than failing on the first field its
+/// entries lack or carry too many of.
 pub fn parse(text: &str) -> Result<Document, String> {
-    let doc: Document =
+    let raw: serde_json::Value =
         serde_json::from_str(text).map_err(|e| format!("cannot parse effect baseline: {e}"))?;
-    if doc.version != VERSION {
+    let version = raw
+        .get("steins-effects-baseline")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or("cannot parse effect baseline: no `steins-effects-baseline` version")?;
+    if version != u64::from(VERSION) {
         return Err(format!(
-            "effect baseline version {} is not readable by this build (expected {VERSION})",
-            doc.version
+            "effect baseline version {version} is not readable by this build (expected \
+             {VERSION}); capture it again with `steins effect-diff --set-baseline`"
         ));
     }
-    Ok(doc)
+    serde_json::from_value(raw).map_err(|e| format!("cannot parse effect baseline: {e}"))
 }
 
 /// What kind of change one event records. The order is the report's order.
@@ -441,6 +450,29 @@ mod tests {
         let text = r#"{"steins-effects-baseline": 1, "functions": []}"#;
         let err = parse(text).unwrap_err();
         assert!(err.contains("version 1 is not readable") && err.contains("expected 2"), "{err}");
+        assert!(err.contains("--set-baseline"), "the way out: {err}");
+    }
+
+    /// A real version-1 file holds entries without the version-2 fields. They must
+    /// not be what the refusal trips on.
+    #[test]
+    fn a_version_one_file_with_entries_is_refused_as_a_version() {
+        let text = r#"{
+  "steins-effects-baseline": 1,
+  "functions": [
+    { "file": "a.php", "symbol": "f", "proven": ["io"], "declared": [], "exhaustive": true }
+  ]
+}"#;
+        let err = parse(text).unwrap_err();
+        assert!(err.starts_with("effect baseline version 1 is not readable"), "{err}");
+        assert!(!err.contains("missing field"), "{err}");
+    }
+
+    #[test]
+    fn a_file_without_a_version_says_so() {
+        let err = parse(r#"{"functions": []}"#).unwrap_err();
+        assert!(err.contains("no `steins-effects-baseline` version"), "{err}");
+        assert!(parse("not json").unwrap_err().starts_with("cannot parse effect baseline"));
     }
 
     #[test]
@@ -454,7 +486,8 @@ mod tests {
         assert_eq!(narrowed.events[0].category, Category::CoverageNarrowed);
         assert_eq!(
             narrowed.events[0].line(),
-            "a.php f: coverage narrowed (exhaustive → non-exhaustive; now no-effect-row, user-code-reach)"
+            "a.php f: coverage narrowed (exhaustive → non-exhaustive; \
+             now no-effect-row, user-code-reach)"
         );
 
         // A completion names what the baseline was missing.
@@ -462,7 +495,8 @@ mod tests {
         assert_eq!(completed.events[0].category, Category::CoverageCompleted);
         assert_eq!(
             completed.events[0].line(),
-            "a.php f: coverage completed (non-exhaustive → exhaustive; was no-effect-row, user-code-reach)"
+            "a.php f: coverage completed (non-exhaustive → exhaustive; \
+             was no-effect-row, user-code-reach)"
         );
     }
 
