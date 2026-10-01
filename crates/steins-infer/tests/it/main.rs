@@ -19,6 +19,7 @@ mod builtin_call_ladder;
 mod builtin_method_returns;
 mod builtin_param_types;
 mod builtin_return_facts;
+mod builtin_user_code_reach;
 mod byte_string_values;
 mod call_arg_survival;
 mod call_site_heap_entry;

@@ -27,6 +27,7 @@ use crate::cx::Cx;
 use crate::dispatch::{Resolution, resolve_in_chain};
 use crate::facts::FileFacts;
 use crate::project::{Diagnostic, FileUnit, FnResolution, Index, LazyTree};
+use crate::reach::{Frame, callback_reaches_user_code, reaches_user_code};
 use crate::{
     EFFECT_ID, EFFECT_LISKOV_ID, Fixpoints, Gate, INTEROP_UNKNOWN_LABEL_ID, Sym, UNKNOWN_LABEL_ID,
 };
@@ -206,6 +207,11 @@ fn add_callback_effects(
                     builtin_findings(&builtin_name, span, cx.tree(), cx.path(), None, None, policy)
                 {
                     row.findings.insert(f);
+                }
+                // Nor can the call site rule out what those arguments reach,
+                // and the engine calls it in coercive mode (issue #856).
+                if callback_reaches_user_code(&builtin_name) {
+                    row.exhaustive = false;
                 }
             }
             FnResolution::Unknown => row.exhaustive = false,
@@ -447,15 +453,8 @@ fn effect_own_rows(
     for unit in &ulist {
         let cx = Cx::new(units, index, unit.file);
         let row = rows.entry(unit.sym.clone()).or_insert_with(EffectOwnRow::new);
-        classify_effect_origins(
-            &cx,
-            unit.class_fqn.as_deref(),
-            unit.params,
-            unit.origins,
-            plugins,
-            policy,
-            row,
-        );
+        let frame = Frame::new(unit.class_fqn.as_deref(), unit.params, unit.origins);
+        classify_effect_origins(&cx, &frame, unit.origins, plugins, policy, row);
     }
     if syms.is_empty() {
         return (ulist.into_iter().map(|u| u.sym).collect(), rows);
@@ -621,85 +620,27 @@ fn construct_finding(cx: &Cx, origin: &EffectOrigin) -> Option<EffectFinding> {
 /// the whole body is asked, through exactly the same code: the loop→`array_map`
 /// transform's purity precondition is the fixpoint's own verdict restricted to
 /// the loop body, never a second opinion about what an effect is.
-#[expect(clippy::too_many_lines, reason = "predates the #778 ratchet; split when next reworked")]
 pub(crate) fn classify_effect_origins(
     cx: &Cx,
-    class_fqn: Option<&str>,
-    params: &[steins_syntax::Param],
+    frame: &Frame,
     origins: &[EffectOrigin],
     plugins: &PluginFacts,
     policy: &EffectsPolicy,
     row: &mut EffectOwnRow,
 ) {
+    let (class_fqn, params) = (frame.class_fqn, frame.params);
     for origin in origins {
         match origin {
-            EffectOrigin::Call { name, span, arg_targets, const_args, .. } => {
-                let targets = arg_targets.as_deref();
-                match cx.resolve_effect_function(name) {
-                    FnResolution::User(site) => {
-                        let decl = cx.fn_decl(site);
-                        let sym = Sym::Func(decl.fqn.clone());
-                        match conditional_purity(decl.docblock.as_ref(), &decl.params) {
-                            Some(cp) => {
-                                let r = eval_conditional_purity(&cp, &[], targets, |cbref| {
-                                    add_callback_effects(cx, cbref, *span, policy, row);
-                                });
-                                // A userland out-param row is produced at this
-                                // call site but is the CALLEE's contract, so it
-                                // carries the callee's attribution — the same
-                                // reasoning that stamps a builtin's findings,
-                                // for the same reason: no edge carries these.
-                                let attributed = policy.function_attribution(&decl.fqn);
-                                for label in r.labels {
-                                    row.findings.insert(
-                                        EffectFinding::direct(
-                                            label.to_owned(),
-                                            name.simple().to_owned(),
-                                            cx.tree().position(span.start).line,
-                                            cx.path().to_owned(),
-                                        )
-                                        .attributed_by(attributed),
-                                    );
-                                }
-                                if r.discharge_taint {
-                                    row.untainting.insert(sym);
-                                } else {
-                                    row.edges.insert(sym);
-                                }
-                            }
-                            None => {
-                                row.edges.insert(sym);
-                            }
-                        }
-                    }
-                    FnResolution::Builtin(builtin_name) => {
-                        for f in builtin_findings(
-                            &builtin_name,
-                            *span,
-                            cx.tree(),
-                            cx.path(),
-                            targets,
-                            Some(const_args),
-                            policy,
-                        ) {
-                            row.findings.insert(f);
-                        }
-                    }
-                    // A builtin certified pure only at this call's arity
-                    // (`array_keys($a)`, issue #851): a catalog row too, so it
-                    // answers before the plugin channel does.
-                    FnResolution::Unknown if pure_at_call_arity(cx, name, targets) => {}
-                    // Ambiguous / unresolved: effects unknown → non-exhaustive.
-                    // The plugin channel gets the last word here and nowhere
-                    // else (ADR-0068 precedence): a project body and a catalog
-                    // row are both already spoken for above.
-                    FnResolution::Unknown => {
-                        if let Some(labels) = plugin_call_labels(cx, plugins, name) {
-                            row.declared.extend(labels.iter().cloned());
-                        }
-                        row.exhaustive = false;
-                    }
-                }
+            EffectOrigin::Call { name, span, arg_targets, const_args, arg_shapes } => {
+                let call = NamedCall {
+                    name,
+                    span: *span,
+                    targets: arg_targets.as_deref(),
+                    const_args,
+                    shapes: arg_shapes.as_deref(),
+                    callbacks: &[],
+                };
+                classify_named_call(cx, frame, &call, plugins, policy, row);
             }
             EffectOrigin::Output { .. } | EffectOrigin::Exit { .. } => {
                 row.findings.extend(construct_finding(cx, origin));
@@ -766,7 +707,7 @@ pub(crate) fn classify_effect_origins(
                 arg_targets,
                 const_args,
                 span,
-                ..
+                arg_shapes,
             } => {
                 let targets = Some(arg_targets.as_slice());
                 match cx.resolve_invoker_function(callee) {
@@ -792,74 +733,38 @@ pub(crate) fn classify_effect_origins(
                         ) {
                             row.findings.insert(f);
                         }
+                        let mut handled = Vec::new();
                         if shape.callback_param < *arg_count {
                             match callbacks.iter().find(|(p, _)| *p == shape.callback_param) {
                                 Some((_, cbref)) => {
                                     add_callback_effects(cx, cbref, *span, policy, row);
+                                    handled.push(shape.callback_param);
                                 }
                                 // Callback slot filled by an unresolvable value.
                                 None => row.exhaustive = false,
                             }
                         }
+                        // The invoker's other arguments can reach user code as
+                        // a plain call's can (`preg_replace_callback`'s subject).
+                        let (shapes, strict) = (Some(arg_shapes.as_slice()), cx.strict());
+                        if reaches_user_code(cx, frame, &builtin_name, shapes, strict, &handled) {
+                            row.exhaustive = false;
+                        }
                     }
                     // Not a known invoker: the callee is a normal edge, unless it
                     // is a user function declaring a conditional-purity contract
                     // — a userland catalog row (ADR-0063 §2 decision 2).
-                    FnResolution::User(_) | FnResolution::Unknown => match cx.resolve_effect_function(callee) {
-                        FnResolution::User(site) => {
-                            let decl = cx.fn_decl(site);
-                            let sym = Sym::Func(decl.fqn.clone());
-                            match conditional_purity(decl.docblock.as_ref(), &decl.params) {
-                                Some(cp) => {
-                                    let r = eval_conditional_purity(
-                                        &cp,
-                                        callbacks,
-                                        targets,
-                                        |cbref| add_callback_effects(cx, cbref, *span, policy, row),
-                                    );
-                                    let attributed = policy.function_attribution(&decl.fqn);
-                                    for label in r.labels {
-                                        row.findings.insert(
-                                            EffectFinding::direct(
-                                                label.to_owned(),
-                                                callee.simple().to_owned(),
-                                                cx.tree().position(span.start).line,
-                                                cx.path().to_owned(),
-                                            )
-                                            .attributed_by(attributed),
-                                        );
-                                    }
-                                    if r.discharge_taint {
-                                        row.untainting.insert(sym);
-                                    } else {
-                                        row.edges.insert(sym);
-                                    }
-                                }
-                                None => {
-                                    row.edges.insert(sym);
-                                }
-                            }
-                        }
-                        FnResolution::Builtin(builtin_name) => {
-                            for f in builtin_findings(
-                                &builtin_name,
-                                *span,
-                                cx.tree(),
-                                cx.path(),
-                                targets,
-                                Some(const_args),
-                                policy,
-                            ) {
-                                row.findings.insert(f);
-                            }
-                        }
-                        FnResolution::Unknown => {
-                            if let Some(labels) = plugin_call_labels(cx, plugins, callee) {
-                                row.declared.extend(labels.iter().cloned());
-                            }
-                            row.exhaustive = false;
-                        }
-                    },
+                    FnResolution::User(_) | FnResolution::Unknown => {
+                        let call = NamedCall {
+                            name: callee,
+                            span: *span,
+                            targets,
+                            const_args,
+                            shapes: Some(arg_shapes),
+                            callbacks,
+                        };
+                        classify_named_call(cx, frame, &call, plugins, policy, row);
+                    }
                 }
             }
             // A `$fn()` resolved to a body-local closure — its effects join.
@@ -882,6 +787,95 @@ pub(crate) fn classify_effect_origins(
             EffectOrigin::New { class, span, .. } => {
                 classify_new(cx, class_fqn, class, *span, policy, row);
             }
+        }
+    }
+}
+
+/// A call to a statically named function, as [`classify_named_call`] reads
+/// it: an [`EffectOrigin::Call`], or an [`EffectOrigin::HigherOrder`] whose
+/// callee is not an invoker the catalog knows.
+struct NamedCall<'a> {
+    name: &'a NameRef,
+    span: Span,
+    targets: Option<&'a [steins_syntax::RefTarget]>,
+    const_args: &'a steins_syntax::ConstArgs,
+    shapes: Option<&'a [steins_syntax::ArgShape]>,
+    callbacks: &'a [(usize, steins_syntax::CallbackRef)],
+}
+
+/// Classify one named call into `row`: an edge to a project function (or its
+/// conditional-purity row, ADR-0063 §2), a builtin's catalog row, or the
+/// `…?` of a name nothing resolves.
+///
+/// A builtin answers with its row's findings, and the call is `…?` as well
+/// when an argument can reach user code the call site does not rule out
+/// (issue #856, [`reaches_user_code`]). A name only the call site certifies,
+/// `array_keys($a)` at one argument (issue #851) or a string-family name
+/// whose every reaching argument is ruled out (issue #856), answers as a
+/// pure builtin before the plugin channel does.
+fn classify_named_call(
+    cx: &Cx,
+    frame: &Frame,
+    call: &NamedCall,
+    plugins: &PluginFacts,
+    policy: &EffectsPolicy,
+    row: &mut EffectOwnRow,
+) {
+    let span = call.span;
+    match cx.resolve_effect_function(call.name) {
+        FnResolution::User(site) => {
+            let decl = cx.fn_decl(site);
+            let sym = Sym::Func(decl.fqn.clone());
+            let Some(cp) = conditional_purity(decl.docblock.as_ref(), &decl.params) else {
+                row.edges.insert(sym);
+                return;
+            };
+            let r = eval_conditional_purity(&cp, call.callbacks, call.targets, |cbref| {
+                add_callback_effects(cx, cbref, span, policy, row);
+            });
+            // A userland out-param row is produced at this call site but is
+            // the CALLEE's contract, so it carries the callee's attribution —
+            // the same reasoning that stamps a builtin's findings, for the
+            // same reason: no edge carries these.
+            let attributed = policy.function_attribution(&decl.fqn);
+            for label in r.labels {
+                row.findings.insert(
+                    EffectFinding::direct(
+                        label.to_owned(),
+                        call.name.simple().to_owned(),
+                        cx.tree().position(span.start).line,
+                        cx.path().to_owned(),
+                    )
+                    .attributed_by(attributed),
+                );
+            }
+            if r.discharge_taint {
+                row.untainting.insert(sym);
+            } else {
+                row.edges.insert(sym);
+            }
+        }
+        FnResolution::Builtin(builtin_name) => {
+            let (tree, path, targets) = (cx.tree(), cx.path(), call.targets);
+            let consts = Some(call.const_args);
+            for f in builtin_findings(&builtin_name, span, tree, path, targets, consts, policy) {
+                row.findings.insert(f);
+            }
+            if reaches_user_code(cx, frame, &builtin_name, call.shapes, cx.strict(), &[]) {
+                row.exhaustive = false;
+            }
+        }
+        FnResolution::Unknown if pure_at_call_arity(cx, call.name, call.targets) => {}
+        FnResolution::Unknown if certified_at_call_site(cx, frame, call.name, call.shapes) => {}
+        // Ambiguous / unresolved: effects unknown → non-exhaustive. The plugin
+        // channel gets the last word here and nowhere else (ADR-0068
+        // precedence): a project body and a catalog row are both already
+        // spoken for above.
+        FnResolution::Unknown => {
+            if let Some(labels) = plugin_call_labels(cx, plugins, call.name) {
+                row.declared.extend(labels.iter().cloned());
+            }
+            row.exhaustive = false;
         }
     }
 }
@@ -1203,7 +1197,10 @@ fn region_purity_in(
                     eo: &[EffectOrigin],
                     to: &[ThrowOrigin]| {
         let picked: Vec<EffectOrigin> = eo.iter().filter(|o| inside(o.span())).cloned().collect();
-        classify_effect_origins(&cx, class_fqn, params, &picked, plugins, policy, &mut row);
+        // The frame is the whole body's: a call outside the region can still
+        // rebind a parameter an argument inside it names.
+        let frame = Frame::new(class_fqn, params, eo);
+        classify_effect_origins(&cx, &frame, &picked, plugins, policy, &mut row);
         // The guards are dropped, not carried: this region's own body cannot
         // hold a `try` (a `try` is a statement, and the eligible body is one
         // append), so every guard on a picked origin is an ENCLOSING one — and
@@ -2213,6 +2210,26 @@ fn pure_at_call_arity(
     matches!(cx.resolve_function_with(name, &certified), FnResolution::Builtin(_))
 }
 
+/// Whether a call [`Cx::resolve_effect_function`] left unresolved is a builtin
+/// the catalog certifies pure **at a call site that rules out every argument
+/// reaching user code** (issue #856, [`steins_catalog::certified_at_call_site`]):
+/// the string family, whose `string` parameters run an object's `__toString`
+/// under coercive typing. Resolution is asked again with that list, so a
+/// namespaced shadow or an ambiguous global keeps its `…?`.
+fn certified_at_call_site(
+    cx: &Cx,
+    frame: &Frame,
+    name: &NameRef,
+    shapes: Option<&[steins_syntax::ArgShape]>,
+) -> bool {
+    match cx.resolve_function_with(name, &steins_catalog::certified_at_call_site) {
+        FnResolution::Builtin(builtin) => {
+            !reaches_user_code(cx, frame, &builtin, shapes, cx.strict(), &[])
+        }
+        FnResolution::User(_) | FnResolution::Unknown => false,
+    }
+}
+
 /// The proven effect findings a builtin `name` carries: its unconditional catalog
 /// color ([`steins_catalog::effect_labels`]) joined with the **conditional**
 /// by-ref out-parameter color this particular call earns
@@ -2381,7 +2398,7 @@ pub(crate) fn resolve_new(cx: &Cx, enclosing: Option<&str>, class: &StaticClass)
 /// global, the gates [`builtin_method_findings`] holds a catalogued method to,
 /// for its reasons. `start` itself is the exit when no project file declares
 /// it.
-fn engine_exit(cx: &Cx, start: &str, method: &str) -> Option<String> {
+pub(crate) fn engine_exit(cx: &Cx, start: &str, method: &str) -> Option<String> {
     let mut cur = start.to_owned();
     let mut seen: HashSet<String> = HashSet::new();
     loop {
