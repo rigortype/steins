@@ -26,12 +26,19 @@
 # 2→1) are `undeclared` counts that fell because lowering `implements` enriched
 # the class chain, letting subtype/absorption checks resolve where they widened.
 
+# Ratcheted down 2026-10-01 (issue #852): `throw_subtype` walked `extends` only,
+# so a `@throws` or `catch` naming an interface the thrown class implements was a
+# manufactured `No`. Walking the whole supertype graph removed 55 findings, all
+# triaged FALSE, none added: phpunit 84 → 32 (52: `XmlException` under a declared
+# `\PHPUnit\Util\Exception`, Runner/MockObject/Phpt marker interfaces, a
+# `SkippedTest` covering `SkippedWithMessageException`), flysystem 3 → 0
+# (`FtpConnectionException` implementors). Every other package unchanged.
+
 "composer/composer" = 93
-"sebastianbergmann/phpunit" = 84
+"sebastianbergmann/phpunit" = 32
 "guzzle/guzzle" = 2
 "Seldaek/monolog" = 7
 "symfony/console" = 10
-"thephpleague/flysystem" = 3
 "nikic/PHP-Parser" = 1
 
 # Registered 2026-07-24 (v0.1.0 run, oracle idea A): PHPStan's own `src/` as a
