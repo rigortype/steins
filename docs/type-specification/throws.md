@@ -16,9 +16,18 @@ way ADR-0007 decided:
 | everything else under `Throwable` | **checked** | the recoverable, declarable ones |
 
 The classification is computed through the same hierarchy walk as `is_a`, so it
-is trinary: a class whose chain leaves the project and the builtin exception
-table is **unknown**, and unknown never counts as checked. Only proven-checked
-classes participate.
+is trinary: a class whose chain leaves both the project and the catalog's builtin
+hierarchy is **unknown**, and unknown never counts as checked. Only
+proven-checked classes participate.
+
+The walk covers the whole supertype graph: the parent chain, every `implements`
+list on it, each interface's own `extends`, and the builtin hierarchy past the
+project. A `@throws` or `catch` may therefore name an interface, and a class is
+covered or caught by every interface it or an ancestor implements. `No` needs
+the graph enumerated. An interface no analyzed file declares leaves a miss
+against an interface at `Maybe`, because it could extend anything. It cannot
+hide a class, though: an interface's supertypes are interfaces, so a class
+target is decided by the class chain alone.
 
 ## Origins
 
@@ -76,16 +85,17 @@ the effect syntax (ADR-0006).
 
 `throw.undeclared` (contract layer) fires when a **checked** exception
 **provably escapes** (`Yes`) a function or method whose docblock declares
-`@throws`, and is a subclass of **none** of the declared classes. Only proven
-escapes report; a `Maybe` escape and an unknown hierarchy stay silent.
+`@throws`, and provably is-a **none** of the declared classes or interfaces.
+Only proven escapes report; a `Maybe` escape and an unknown hierarchy stay
+silent.
 
 An undocumented function is never a finding: absent a declaration there is no
 contract to violate. This is the envelope discipline from
 [effects.md](effects.md), applied to throws.
 
 `throw.liskov-widened` (contract layer) fires when an override or implementation
-declares an `@throws` naming a checked class that is a subclass of none of the
-parent method's declared classes. It requires **both** sides to declare
+declares an `@throws` naming a checked class that is-a none of the parent
+method's declared classes or interfaces. It requires **both** sides to declare
 `@throws`; a `Maybe` resolution is silent.
 
 ## The `origin` facet
