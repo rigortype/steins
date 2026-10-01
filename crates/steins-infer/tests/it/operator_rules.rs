@@ -188,6 +188,21 @@ fn a_declared_visible_property_of_a_bound_class_runs_nothing_behind_the_universe
 }
 
 #[test]
+fn an_interface_the_project_cannot_read_opens_no_chain_but_a_parent_class_does() {
+    // An interface has no body to run on a property access.
+    let unread = "class Aware implements \\Psr\\Log\\LoggerAwareInterface { public $logger;\n\
+        public function r() { return $this->logger; } }\n\
+        interface Wide extends \\Psr\\Log\\LoggerInterface {}\n\
+        class Wider implements Wide { public $logger; public function r() { return $this->logger; } }";
+    covered(&file(unread, ""), "Aware::r");
+    covered(&file(unread, ""), "Wider::r");
+    // A parent class it cannot read may declare anything.
+    let parent = "class Child extends \\Psr\\Log\\AbstractLogger { public $logger;\n\
+        public function r() { return $this->logger; } }";
+    gap(&file(parent, ""), "Child::r", PROPERTY);
+}
+
+#[test]
 fn an_undeclared_name_on_a_bound_class_reaches_the_magic_methods() {
     gap(&file(PROPERTY_CLASSES, ""), "Base::u", PROPERTY);
     gap(&file(PROPERTY_CLASSES, "function f(Shape $o) { return $o->p; }"), "f", PROPERTY);
