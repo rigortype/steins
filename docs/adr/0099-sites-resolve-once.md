@@ -97,8 +97,9 @@ measures it.
 1. **A spelling is a builtin if and only if the catalog knows it**
    (`steins_catalog::knows`): one predicate, the union of the tables the
    seven closures read (effect labels, out-parameters, by-value
-   certification, invocation shapes, the pure-at-arity and call-site
-   certified lists), read by both lanes and by function resolution. Two
+   certification including the mined parameter facts it reads, invocation
+   shapes, the pure-at-arity and call-site certified lists), read by both
+   lanes and by function resolution. Two
    questions stay outside it: the shadow check (a user declaration shadowing
    a builtin), which keeps answering no, and runtime-existence questions
    (`function_exists` folding, the absence family), which keep their own
@@ -112,7 +113,8 @@ measures it.
    nothing for any argument its parameter types admit**, argument checking's
    `TypeError` and `ArgumentCountError` aside, which the throw lane does not
    model. A row that omits a flag-dependent throw (`JSON_THROW_ON_ERROR`) is a
-   gap unless the flags argument is a literal without the flag. The fold
+   gap unless the flags argument is a constant expression the scan
+   evaluates and it lacks the flag. The fold
    allowlist and the certified lists are *candidates* for that evidence, not
    evidence: `json_encode` throws `JsonException` under its flag,
    `preg_match_all` raises `ValueError` on bad flags. Each name is audited
@@ -134,10 +136,12 @@ measures it.
    rules below speak of user code only; the engine's own `Error`-family
    raises at operators are §7.4's.
 
-   A class is *exact* when the operand is `new Foo` or a receiver declared as
-   a final in-universe class. It is *bound* for `$this`, for a static form
-   (`self::`, `parent::`, `static::`, `Foo::`) in object context, and for a
-   receiver declared as a non-final class or an interface. An engine class
+   A class is *exact* when the operand is `new Foo`, a receiver declared as a
+   final in-universe class, or `$this` in a final class. It is *bound* for
+   `$this` in a non-final class, for a static form (`self::`, `parent::`,
+   `static::`, `Foo::`) in object context, and for a receiver declared as a
+   non-final class or an interface. A method is final when it is declared
+   final or declared in a final class. An engine class
    answers through its catalog rows, and a missing row is a gap (§3.2). A
    union is ruled out only when every member is; `iterable` reads as
    `array|Traversable`. A *closed chain* is one whose every ancestor, trait
@@ -145,11 +149,11 @@ measures it.
 
    | Family | Constructs | Nothing runs when | Edge when | Otherwise |
    |---|---|---|---|---|
-   | ToString | `.`, `.=`, interpolation and heredocs, `(string)`, `echo`/`print`, a loose or ordering comparison (`==`, `!=`, `<`, `<=`, `>`, `>=`, `<=>`, `switch`) with a non-object operand | the operand is object-free, or an exact class's closed chain has no `__toString` | an exact class declares `__toString`, or a bound class's is final | gap |
+   | ToString | `.`, `.=`, interpolation and heredocs, `(string)`, `echo`/`print`, a loose or ordering comparison (`==`, `!=`, `<`, `<=`, `>`, `>=`, `<=>`, `switch`) with any operand not shown object-free (two objects compare their properties, which may convert) | the operand is object-free, or an exact class's closed chain has no `__toString` | an exact class declares `__toString`, or a bound class's is final | gap |
    | MagicProp | a property read, write, `isset`, `empty`, `unset`, `??`, `??=`, a reference to it | the operand is not an object; or the class is exact, its closed chain declares no `__get`/`__set`/`__isset`/`__unset` and hooks no property of that name | an exact class declares the magic method or the hook | gap (§4.4 for a bound class's declared property) |
    | ArrayAccess | `$x[k]` read, write, `isset`, `empty`, `unset`, `??`, `??=`, a reference to it, list destructuring | the operand is not an object, or an exact class is proven not `ArrayAccess` | an exact class is `ArrayAccess`, or a bound class's `offset*` methods are final | gap |
-   | Iterate | `foreach`, `yield from`, spreading a non-array | the operand is not an object, or an exact class is not `Traversable` and hooks no property | an exact `Iterator`'s methods, or an exact `IteratorAggregate`'s `getIterator` together with the methods of the iterator it is shown to return; a bound class's when final | gap |
-   | Clone | `clone` | an exact class's closed chain has no `__clone` and hooks no property | an exact class declares `__clone`, or a bound class's is final | gap |
+   | Iterate | `foreach`, `yield from`, spreading a non-array | the operand is not an object, or an exact class's closed chain is not `Traversable` and hooks no property | an exact `Iterator`'s methods, or an exact `IteratorAggregate`'s `getIterator` together with the methods of the iterator it is shown to return; a bound class's when final | gap |
+   | Clone | `clone`, and `clone` with a property list | an exact class's closed chain has no `__clone`, no `__set` where a property list is given, and hooks no property | an exact class declares `__clone` (or `__set`), or a bound class's is final | gap |
    | Call | a method absent from, or inaccessible in, a complete chain on a class declaring `__call`/`__callStatic` | — | an exact class, or a bound class's magic method is final | gap |
 
    A bound class is a gap where an exact one runs nothing because a subclass
@@ -159,14 +163,16 @@ measures it.
    (6,482 files): `__invoke` 59, `__toString` 56, `getIterator` 37,
    `__destruct` 20, `__clone` 12, `__call` 9, `__get` 8, `__isset` 6,
    `__callStatic` 5, `__set` 3, `offsetGet` 3, `__unset` 0.
-4. **A bound class's declared property.** `$this->p` on a declared
-   non-private property of a non-final class runs user code only if a
-   subclass unsets it and declares `__get`, or hooks it. Read as a gap
-   unconditionally, every such read would join the dispatch question of §7.2.
-   The default is therefore a universe gate: the access is a gap when some
-   in-universe subclass of the bound class declares one of the four magic
-   methods or hooks a property of that name, and runs nothing otherwise. A
-   subclass outside the universe is §7.2's open question, named there.
+4. **A bound class's declared property.** `$this->p` on a declared property
+   visible in the accessing scope runs user code only if the property is
+   unset and a class in the object's runtime chain declares the matching
+   magic method, or a class hooks it. Read as a gap unconditionally, every
+   such read would join the dispatch question of §7.2. The default is
+   therefore a universe gate: the access is a gap when the bound class's
+   closed chain or some in-universe subclass declares one of the four magic
+   methods or hooks a property of that name, and when the chain is not
+   closed; it runs nothing otherwise. A subclass outside the universe is
+   §7.2's open question, named there.
 5. **Lazy objects, error handlers, tick and signal handlers** are attributed
    to their registration, as ADR-0021 §3 already does for error handlers in
    the effect lane: a lazy object's initializer is the callback argument of
@@ -179,18 +185,27 @@ measures it.
    autoload carry ADR-0021's `Autoload` reach, and a class-naming construct
    (`new Foo`, `Foo::`) is not charged for one; unifying the two is
    follow-up.
-6. **Coercion at user boundaries** is a ToString site too: in a file without
-   `strict_types=1`, an object handed to a user function's or method's
-   `string` parameter, returned from a function declared `: string`, or
-   assigned to a `string`-typed property runs `__toString`. The rule is the
-   ToString row's, applied to the declared type. Its implementation is a
-   follow-up slice after #859.
+6. **Coercion at user boundaries** is a ToString site too. An object handed
+   to a user function's or method's parameter, returned from a function, or
+   assigned to a typed property runs `__toString` when the declared type
+   admits `string` but not the object's class (`?string`, `string|int`,
+   `string|array`) and the governing file is coercive. The governing file
+   differs by boundary: a parameter follows the **calling** file's
+   `strict_types`, a return the **declaring** file's, a property write the
+   **writing** file's. The rule is the ToString row's, applied to the
+   declared type. Its implementation is issue #868, after #859 (§7.5).
 
 ## 5. Decision: coverage gaps replace the bit
 
 1. **Non-exhaustiveness is a set of recorded reasons.** An own row carries
    the gap kinds its sites produced instead of a bare `exhaustive` flag;
    `…?` is the set's non-emptiness, joined over the edges the body reaches.
+   Exhaustive means exhaustive modulo the handlers §4.5 attributes to their
+   registration and the destructors §7.1 leaves open: an `ErrorException`
+   from an error handler, or an exception from a lazy initializer, escapes
+   from the triggering body at runtime while that body's throw set reads
+   exhaustive. `loop-to-array-map` (ADR-0076 §2.3) inherits the same
+   qualification.
    Every place that clears the flag today maps to one kind: a dynamic callee,
    an unknown or ambiguous function, an unknown class, an open method, a
    non-final `$this`, a declared receiver, an unresolved callback, unseen
@@ -276,6 +291,10 @@ exceptions without running user code. §4's table is about user code; these
 raises are out of the throw lane's model today, as argument checking's
 `TypeError` is (§3.3), and modelling them is a separate decision.
 
+### 7.5 Coercion at user boundaries
+
+§4.6's rule is decided and not yet implemented: issue #868.
+
 ## 8. Relation to earlier decisions
 
 - **ADR-0021** (second amendment of 2026-10-01): its call-site rule now holds
@@ -294,8 +313,8 @@ raises are out of the throw lane's model today, as argument checking's
 - **ADR-0063**: untainting edges keep their current reach over gaps (§5.2).
 - **ADR-0084** §3 keeps tolerances away from spelling-producing sites; §5.2
   applies the same reasoning to gaps by analogy.
-- The glossary's **Dischargeable obstacle** (ADR-0046, ADR-0047) is a
-  different notion — a silence leg of a check family that a plugin may
-  discharge. A coverage gap is a reason an effect or throw answer is
+- The glossary's **Dischargeable obstacle** (ADR-0049 A14; ADR-0046 §2 and
+  ADR-0047 use "obstacle" for transform enumeration) is a different notion —
+  a silence leg of a check family that a plugin may discharge. A coverage gap is a reason an effect or throw answer is
   incomplete; the two meet at `__get` and `__call`, which §4 models for the
   lanes and the absence family models for its own proofs.

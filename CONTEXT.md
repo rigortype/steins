@@ -262,7 +262,8 @@ replaces)
 A recorded reason an effect or throw answer is incomplete — a dynamic
 callee, an unknown class, unseen code, user code an operand may reach, a
 missing row on an axis. A body is `…?` on a lane exactly when its sites, or a
-callee its edges reach, left a gap on that lane. Not a **Dischargeable
+callee its edges reach, left a gap on that lane; exhaustive is modulo handlers
+attributed to their registration and destructors (ADR-0099 §4.5, §7.1). Not a **Dischargeable
 obstacle**, which is a silence leg of a check family.
 _Avoid_: obstacle (taken by Dischargeable obstacle)
 
