@@ -156,12 +156,19 @@ measures it.
 
    | Family | Constructs | Nothing runs when | Edge when | Otherwise |
    |---|---|---|---|---|
-   | ToString | `.`, `.=`, interpolation and heredocs, `(string)`, `echo`/`print`, a loose or ordering comparison (`==`, `!=`, `<`, `<=`, `>`, `>=`, `<=>`, `switch`) with any operand not shown object-free (two objects compare their properties, which may convert) | the operand is object-free, or an exact class's closed chain has no `__toString` | an exact class declares `__toString`, or a bound class's is final | gap |
+   | ToString | `.`, `.=`, interpolation and heredocs, `(string)`, `echo`/`print`, a loose or ordering comparison (`==`, `!=`, `<`, `<=`, `>`, `>=`, `<=>`, `switch`) with an operand not shown object-free at any depth | the operand is object-free; or an exact class's closed chain has no `__toString`, which for a comparison holds only against an operand shown object-free at any depth | an exact class declares `__toString`, or a bound class's is final | gap |
    | MagicProp | a property read, write, `isset`, `empty`, `unset`, `??`, `??=`, a reference to it | the operand is not an object; or the class is exact, its closed chain declares no `__get`/`__set`/`__isset`/`__unset` and hooks no property of that name | an exact class declares the magic method or the hook | gap (§4.4 for a bound class's declared property) |
    | ArrayAccess | `$x[k]` read, write, `isset`, `empty`, `unset`, `??`, `??=`, a reference to it, list destructuring | the operand is not an object, or an exact class is proven not `ArrayAccess` | an exact class is `ArrayAccess`, or a bound class's `offset*` methods are final | gap |
    | Iterate | `foreach`, `yield from`, spreading a non-array | the operand is not an object, or an exact class's closed chain is not `Traversable` and hooks no property | an exact `Iterator`'s methods, or an exact `IteratorAggregate`'s `getIterator` together with the methods of the iterator it is shown to return; a bound class's when final | gap |
    | Clone | `clone`, and `clone` with a property list | an exact class's closed chain has no `__clone`, no `__set` where a property list is given, and hooks no property | an exact class declares `__clone` (or `__set`), or a bound class's is final | gap |
    | Call | a method absent from, or inaccessible in, a complete chain on a class declaring `__call`/`__callStatic` | — | an exact class, or a bound class's magic method is final | gap |
+
+   A comparison whose two operands may both be objects is a gap whatever their
+   classes: two objects of one class compare property by property, recursively
+   through arrays, and any property pair may convert an object to a string
+   (witnessed on PHP 8.5). Objects of two different exact classes are
+   uncomparable and run nothing; the rule does not yet draw that distinction.
+   For a `switch` the pairs are the subject against each `case`.
 
    A bound class is a gap where an exact one runs nothing because a subclass
    may add the magic method (`Stringable` is implicit), implement the
@@ -178,7 +185,10 @@ measures it.
    therefore a universe gate: the access is a gap when the bound class's
    closed chain or some in-universe subclass declares one of the four magic
    methods or hooks a property of that name, and when the chain is not
-   closed; it runs nothing otherwise. A subclass outside the universe is
+   closed; it runs nothing otherwise. A subclass that imports a trait counts,
+   since a trait's body is not lowered, and so does an anonymous class
+   extending or implementing the bound class or anything under it, since no
+   index lists one (ADR-0049 A4). A subclass outside the universe is
    §7.2's open question, named there.
 5. **Lazy objects, error handlers, tick and signal handlers** are attributed
    to their registration, as ADR-0021 §3 already does for error handlers in
@@ -258,7 +268,7 @@ throwless default.
 | one resolver, coverage gaps | #863 | byte-identical (no surface shows the kinds yet) |
 | one knowledge, one default | #864 | throw lane: some bodies become exhaustive (`array_keys` once audited), about 206 become `…?` directly (reach, `eval`/`include`), plus the audit's unevidenced names; the baseline format moves |
 | engine methods and constructors | #858 | measured: 4 bodies become `…?` in the effect lane and 5 in the throw lane, none completed; one `effects-envelope` tag is withdrawn. A `sprintf` value is an unproven shape, so `new \RuntimeException(sprintf(…))` in a coercive file gains a gap: that is 3 of the 4 |
-| operator sites | #859 | about 340 of 6,606 exhaustive bodies become `…?` directly, before operand proofs (concatenation 134, non-`$this` property access 90, `foreach` 75, interpolation 47, cast 17, loose equality 17, `echo` 7, `unset` 4, `clone` 3); callers inheriting them come on top |
+| operator sites | #859 | measured: 700 bodies become `…?` in the effect lane (568 directly, 132 inherited) and 995 in the throw lane; 129 `effects-envelope` tags are withdrawn; no proven label moves and `check --profile strict` is byte-identical; the largest sole causes (measured before the comparison and subclass-shape rules, which add about 40 direct bodies) are call results and array elements as unproven operands (195) and trait-using classes, whose chains are open (105). The textual estimate was about 340 of 6,606 exhaustive bodies directly, before operand proofs (concatenation 134, non-`$this` property access 90, `foreach` 75, interpolation 47, cast 17, loose equality 17, `echo` 7, `unset` 4, `clone` 3) |
 
 Each slice's pull request records its measured diff, classified. The corpus
 checkouts carry no `vendor/`: 1,310 dispatch-sole bodies are universe
