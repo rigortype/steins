@@ -33,6 +33,7 @@ use super::{SiteScope, scan_sites};
 use crate::ast::{ArgShape, OperatorConstruct as C, OperatorFamily as F, SiteKind, SiteOrigin};
 use crate::lower_arg_shape::arg_shape;
 use crate::lower_expr::{effect_recv_of_object_declared, method_name_of};
+use crate::stack_guard;
 use crate::{bytes_to_string, to_span};
 
 /// Record the operator sites `node` is, if it is one. Returns `true` when this
@@ -310,6 +311,11 @@ fn target(expr: &Expression<'_>, sx: &SiteScope<'_>, out: &mut Vec<SiteOrigin>) 
 /// it is an intermediate fetch ([`inner`]). Any other expression is walked as
 /// the generic scan would.
 fn chain(expr: &Expression<'_>, role: C, sx: &SiteScope<'_>, out: &mut Vec<SiteOrigin>) {
+    // This recursion does not go through `children`, which is the walk's depth
+    // guard (issue #264), so it asks the guard itself.
+    if stack_guard::exhausted() {
+        return;
+    }
     match expr.unparenthesized() {
         Expression::Access(Access::Property(pa)) => {
             property_site(pa.object, &pa.property, to_span(pa.span()), role, sx, out);
