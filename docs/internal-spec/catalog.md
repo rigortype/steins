@@ -206,6 +206,47 @@ effects pass reads the call's arity. `current`, `key`, `get_class`,
 amendment records. A certified name is also "known" to every pass that asks the
 catalog whether a name is a builtin, and the throws pass reads it as throwless.
 
+A row describes what the builtin does; whether its **arguments** can reach user
+code is a separate, per-parameter table (`arg_reach(name)`, issue #856,
+ADR-0021's second 2026-10-01 amendment). Each position answers one `ArgReach`:
+
+| Reach | What runs | Ruled out at a call site by |
+|---|---|---|
+| `Inert` | nothing | always |
+| `Coerced` | `__toString`, through a coercive `string` parameter | a non-object argument, or `strict_types=1` |
+| `Object` | the builtin converts or counts an object itself | a non-object argument |
+| `Nested` | the builtin also converts or compares what an array holds | an argument with no object at any depth |
+| `Callback` | the callable | never, at a plain call |
+| `Autoload` | the autoloader, for a class named in a string | never |
+
+The table is derived from the mined arginfo (`param_facts`) by declared type:
+a scalar other than `string` is `Inert`, `string` is `Coerced`, a class,
+interface, `object` or `iterable` is `Object`, `array` and `mixed` are
+`Nested`, a declared `callable` is `Callback`, a resource position is `Inert`,
+and a union takes its strongest member. A curated override list records where
+php-src does less (`count` never reads an array's elements, `intval` and
+`gettype` read a tag, the comparator sorts hand values to the callback) or
+where the type cannot say (`is_callable` autoloads, `preg_replace_callback_array`
+maps to callables). A certified name is `Inert` everywhere.
+
+The effects pass applies the table to every catalogued function, coloured,
+pure or out-parameter-only: a call is `…?` unless the call site rules out
+every reaching position, by what the syntax layer shows the argument holds
+(`ArgShape`) or, for `Coerced`, by the calling file's `declare(strict_types=1)`.
+The row's labels apply either way.
+
+The **string family** is certified under the same rule rather than
+argument-blind (`certified_at_call_site(name)`): `strcmp`, `strncmp`,
+`strcasecmp`, `strncasecmp`, `strspn`, `strcspn`, `substr_count`, `ord`, `chr`,
+`bin2hex`, `hex2bin`, `dirname` and `unpack`. They are not on
+`effect_labels`, so no other pass reads them as known builtins; the effects
+pass resolves an otherwise unresolved call against the list and answers pure
+only where the call site rules the `string` parameters out. Names that read the
+locale or an ini setting (`basename`, `pathinfo`, `strnatcmp`,
+`strnatcasecmp`, `substr_compare`, `parse_url`, `escapeshellarg`,
+`strip_tags`, `number_format`, the `ctype_*` and `mb_*` families,
+`htmlspecialchars`) stay out.
+
 Coverage is frequency-seeded (`docs/notes/20260722-builtin-frequency.md`) plus
 the gaps identified in `docs/research/phpsrc-mining/effects_gaps.md`:
 randomness, time, filesystem read/write, output (ADR-0083's `io.output`

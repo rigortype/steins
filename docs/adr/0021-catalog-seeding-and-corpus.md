@@ -177,4 +177,169 @@ list does not repair. `strlen($o)` and the allowlist's other `string`-parameter
 rows run `__toString` under coercive typing, as ADR-0096 noted. `in_array`
 compares loosely, and `count($countable)` runs a userland `count()`.
 `is_callable` reaches the effects pass as a known builtin through its
-out-parameter row and can autoload. They are recorded here, not fixed.
+out-parameter row and can autoload. They are recorded here, not fixed; the
+second amendment of this date closes them.
+
+## Amendment (2026-10-01, second): a builtin call is pure only where its arguments reach no user code — PENDING ratification
+
+Issue #856. **Status: PENDING ratification.** Designed autonomously under the
+owner's standing delegation.
+
+### Context
+
+The first amendment of this date certified names argument-blind and recorded
+the fold allowlist's holes: `strlen($o)` runs `__toString` under coercive
+typing, `in_array` compares loosely, `count($countable)` runs a userland
+`count()`, `is_callable('Foo::bar')` autoloads. The holes were wider than the
+allowlist. Every catalogued function row answered the same whatever its call
+was handed, coloured rows and the out-parameter-only rows (`sort`, `reset`,
+`settype`, `preg_replace`) included, so `implode(',', $objects)`,
+`json_encode($value)` and `usort($rows, $cmp)` with an unresolved comparator
+read as pure too. A user method reached that way can write state, perform I/O
+or throw, so the body's effect set was short: unsound, which the zero-FP
+posture forbids.
+
+### Decision
+
+1. **A row says what a builtin does; the call site says what its arguments
+   reach.** The catalog states, per parameter, the user code an argument can
+   make the builtin run (`arg_reach`, one `ArgReach` per position): `Inert`;
+   `Coerced`, a coercive `string` parameter converting an object through
+   `__toString`; `Object`, the builtin converting, counting or reading an
+   object itself (`strval`, `count`, a lazy object's initializer); `Nested`, the
+   builtin also converting or comparing what an array holds (`implode`,
+   `in_array`, `json_encode`); `Callback`; `Autoload`.
+2. **The row is derived, not listed.** From the mined arginfo, by declared
+   type: a scalar other than `string` is `Inert` (an object is a `TypeError`),
+   `string` is `Coerced`, a class, interface, `object` or `iterable` is
+   `Object`, `array` and `mixed` are `Nested`, a declared `callable` is
+   `Callback`, a resource position is `Inert`, a union takes its strongest
+   member, a variadic tail repeats its last position, and a position past a
+   non-variadic list is an `ArgumentCountError` raised before anything runs. A
+   curated list overrides the derivation where php-src does less (`count`
+   never reads an array's elements, `intval` and `gettype` read a tag, the
+   comparator sorts and the invokers hand values to the callback, an
+   out-parameter is written unread) or where the type cannot say
+   (`is_callable` autoloads, `preg_replace_callback_array` maps to callables).
+   Each override and each reach kind is witnessed in both calling modes on PHP
+   8.5.11. A certified name is `Inert` everywhere.
+3. **The call-site rule.** A call to a catalogued builtin is pure only when
+   every position it fills is ruled out: `Coerced` by an argument shown not to
+   be an object, or by `declare(strict_types=1)` in the calling file, where
+   the object is a `TypeError`; `Object` by an argument shown not to be an
+   object; `Nested` by an argument shown to hold no object at any depth;
+   `Callback` and `Autoload` never, at a plain call (a callback the effects
+   pass resolves already takes ADR-0033's road). Otherwise the call keeps its
+   row's labels and marks the body `…?`. A named or spread argument list
+   reaches whatever strictness alone does not rule out. A builtin handed to
+   another as a callback is called with arguments of its invoker's choosing,
+   and in coercive mode whatever the file declares (`array_map('strlen',
+   [$o])` runs `__toString` under `strict_types=1`), so any reaching position
+   counts. An invoker's own non-callback arguments are held to the rule as a
+   plain call's are. The rule covers every catalogued function: coloured,
+   pure and out-parameter-only rows alike.
+4. **What an argument is shown to hold** (`ArgShape`, on each call origin of
+   the trace payload) is structural; the effects fixpoint runs before the walk
+   whose narrowed facts could say more, so none are read.
+   - By form: a scalar literal, a magic constant, a concatenation or
+     interpolation, a comparison, `<=>`, a logical connective, `!`,
+     `instanceof`, `isset`, `empty`, a cast to a scalar, a ternary or `??` of
+     such, and an array literal of such hold no object. Any other array
+     literal, and an `(array)` cast, is not an object.
+   - A variable whose every binding the frame makes: a by-value parameter,
+     holding its declared type on entry, or a local the frame neither imports
+     nor captures, unset on entry. Either holds the meet of that with every
+     write the frame makes to it: an assignment, a compound assignment, an
+     element write, an increment, an `unset`. A `foreach` or `catch` binding, a
+     destructuring of a value not shown object-free, or a frame with `global`,
+     `static`, `$$v`, `extract`, `include`, a reference or a by-ref capture
+     makes it unknown. A bare variable handed to a named call, a
+     `$this->`/`self::`/`parent::`/`Foo::` method or a `new` is checked against
+     the callee's by-reference flags: the catalog's by-value certification for
+     a builtin, the project's parameter list for a function, method or
+     constructor (a method's declaration binds every override's flags; a
+     constructor answers only for an exact class), and by value for an engine
+     Throwable's constructor, which reflection confirms for all 60. Handed to
+     anything else, it counts as written.
+   - `$this->name`: the declared type of the property, which a read always
+     yields. A `__get` for an unset typed property is checked against the
+     type too (PHP 8.5.11 throws `TypeError` for an object returned for an
+     `array` property).
+5. **The string family is certified under the same rule.**
+   `certified_at_call_site` lists `strcmp`, `strncmp`, `strcasecmp`,
+   `strncasecmp`, `strspn`, `strcspn`, `substr_count`, `ord`, `chr`,
+   `bin2hex`, `hex2bin`, `dirname` and `unpack`: each php-src body at
+   `PINNED_PHP` reads only its arguments, byte by byte or through
+   `zend_tolower_ascii`, takes no reference and performs no I/O. They are not
+   on `effect_labels`, so no other pass reads them as known builtins; the
+   effects pass resolves an otherwise unresolved call against the list and
+   answers pure only where the call site rules the `string` parameters out.
+   Left out, each reading the locale or an ini setting: `basename` and
+   `pathinfo` (`php_mblen`, `ascii_compatible_locale`), `strnatcmp` and
+   `strnatcasecmp` (C `isdigit`, `toupper`), `substr_compare`
+   (`zend_binary_strncasecmp_l`), `parse_url` (C `isalpha`), `escapeshellarg`
+   (`php_mblen`), `strip_tags` (C `isspace`), `number_format`, the `ctype_*`
+   family, `htmlspecialchars` (`default_charset`) and the `mb_*` family.
+   `strtok` keeps its position in interpreter state.
+
+### Measurement
+
+The ten public corpora, 34,222 bodies, 24,704 of them `…?` at the #855 base.
+A throwaway instrumented build recorded each call site's argument shapes and
+the fixpoint was recomputed offline per proof source, with the soundness half
+over the allowlist and out-parameter rows:
+
+| Proofs admitted | Bodies newly `…?` |
+|---|---|
+| none | 891 |
+| `strict_types=1` for `Coerced` | 696 |
+| and an argument's form | 675 |
+| and a parameter the frame never rebinds | 570 |
+| and a call's declared return type | 564 |
+
+Coloured rows added 13 more, and a call's declared return type was left out
+for the 6 it bought. The cost was dominated by `sprintf` values, `count`,
+`in_array`, `implode` and `str_replace`; locals and property reads were the
+largest unproven argument kinds, and the write summary and typed properties
+were then added for them. A broad string-family candidate list released 57
+bodies in the same simulation, where argument-blind certification would have
+released about 70; the thirteen names php-src supports release 37 below.
+
+The landed build, against the base: 364 bodies become `…?` (267 functions and
+methods, 97 closures) and 37 become exhaustive, all through the string
+family, so `…?` bodies go from 24,704 to 25,031. No body's proven labels
+change. `check --profile strict` is byte-identical (8,912 = 8,912), and so is
+`transform throws-envelope`. `transform effects-envelope` writes 853 tags
+where it wrote 895: 46 tags become `effects-not-exhaustive` refusals and 4
+are new, from `bin2hex`, `dirname` and `substr_count` calls the rule now
+certifies. The lost tags are, by the call that keeps them `…?`: a `sprintf`
+value or an `implode` piece the scan cannot show object-free (28), `count`,
+`in_array` and `explode` on unproven arguments (9), an unresolved callback
+handed to `set_error_handler` or `register_shutdown_function` (2), and seven
+single cases. PHPUnit keeps the exceptions under its base exception that
+the first amendment of this date released: the constructor's `$code` is
+written only with `0`, and `parent::__construct()` reaches an engine
+Throwable, so both proofs hold.
+
+### Consequences
+
+No pure row adds a label, so `effect.envelope-exceeded`, `effect.liskov-widened`
+and every other proven-lane finding are unchanged; exhaustiveness never
+manufactures a finding (`provably_impure` reads labels only). What moves is
+the `…?` marker, the effect baseline, and the tags `effects-envelope` writes.
+
+Holes this rule does not close, recorded for follow-up:
+
+- **Engine method and constructor rows.** `new DateTime($o)`, `$pdo->query($o)`
+  and `new \RuntimeException($o)` coerce through `string` parameters too, and
+  the method and constructor rows are not held to `arg_reach`.
+- **The throws pass.** It reads a known builtin with no throw row as
+  throwless, so a `__toString` that throws through `strlen($o)` is still
+  missing from the throw set.
+- **Operators and destructors.** `'a' . $o`, `(string) $o`, `$o == 'x'`, a
+  property read through `__get`, an `ArrayAccess` offset and a destructor run
+  by overwriting a variable are user code the effects pass does not model at
+  all. This rule answers for the builtin's own conversion only.
+- **Precision left on the table.** A literal `sprintf` format names which
+  values render through `%s` (about 7% of its failing sites would pass), and
+  `in_array(…, true)` compares strictly; neither is read yet.

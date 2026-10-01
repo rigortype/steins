@@ -8,6 +8,10 @@
 > name to be pure, but a pure name need not fold. A builtin can be catalogued
 > pure from a certified list without joining the allowlist.
 >
+> Amended by ADR-0021's second 2026-10-01 amendment: a catalogued builtin's row
+> holds at a call only where no argument can reach user code (`__toString`,
+> `Countable::count`, a callback, the autoloader); otherwise the call is `…?`.
+>
 > Amended by ADR-0018: the labels below are now the roots of a hierarchical
 > label taxonomy (`io` ⊃ `io.fs.read`/`io.net.http`/…, `nondet` ⊃
 > `nondet.random`/`nondet.time`; `global-read`/`global-write` spelled
