@@ -100,8 +100,8 @@ fn a_date_time_constructor_and_factory_coerce_the_string() {
         "return new \\DateTimeImmutable($o);",
         "return \\DateTime::createFromFormat('Y', $o);",
     ] {
-        assert_eq!(reaches(&file(false, "Name $o", call), "f").0, true, "{call}");
-        assert_eq!(reaches(&file(true, "Name $o", call), "f").0, false, "{call}");
+        assert!(reaches(&file(false, "Name $o", call), "f").0, "{call}");
+        assert!(!reaches(&file(true, "Name $o", call), "f").0, "{call}");
     }
     // The `DateTimeZone` is an internal class, which no user code can be passed as.
     let call = "return new \\DateTime('now', $z);";
