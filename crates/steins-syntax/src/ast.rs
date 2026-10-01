@@ -390,7 +390,15 @@ pub enum EffectOrigin {
     /// dynamic/method calls aren't recorded here. `arg_targets` classifies each
     /// positional argument's lvalue root (ADR-0063 §2.3); `None` for named/spread.
     /// `const_args` carries the first two args in proven-constant form (issue #318, ADR-0064).
-    Call { name: NameRef, span: Span, arg_targets: Option<Vec<RefTarget>>, const_args: ConstArgs },
+    /// `arg_shapes` says what each positional argument can be shown to hold
+    /// ([`ArgShape`], issue #856), `None` exactly where `arg_targets` is.
+    Call {
+        name: NameRef,
+        span: Span,
+        arg_targets: Option<Vec<RefTarget>>,
+        const_args: ConstArgs,
+        arg_shapes: Option<Vec<ArgShape>>,
+    },
     /// An `echo`/`print`/short-echo, or non-blank inline HTML between `?>` and
     /// `<?php`, at `span` — `io.output.buffer` effect (ADR-0083, OB-capturable).
     Output { keyword: OutputKeyword, span: Span },
@@ -402,7 +410,17 @@ pub enum EffectOrigin {
     /// (`$this->`, `self::`, `parent::`, `Foo::`, `new Foo()->`) — propagates
     /// `#[\Steins\Pure]` edges, and a *declared* receiver (ADR-0067) carries an
     /// interface envelope. Other forms unrecorded.
-    MethodCall { receiver: EffectRecv, method: String, span: Span },
+    ///
+    /// `arg_shapes` is set for a `$this->`, `self::`, `parent::` or `Foo::`
+    /// call with positional arguments, the receivers the effects pass resolves
+    /// well enough to read whether a parameter is by reference ([`ArgShape`],
+    /// issue #856), and `None` otherwise.
+    MethodCall {
+        receiver: EffectRecv,
+        method: String,
+        span: Span,
+        arg_shapes: Option<Vec<ArgShape>>,
+    },
     /// A call the scan can't classify: dynamic or unresolvable receiver/selector.
     /// No proven effect, but marks the body **non-exhaustive** (`…?` marker);
     /// ignored by the envelope check.
@@ -410,8 +428,10 @@ pub enum EffectOrigin {
     /// A call passing a **resolvable callback argument** (closure, first-class
     /// callable, string-literal name; ADR-0033), instead of [`Self::Call`].
     /// Consults `steins_catalog::invocation_shape` for the callback param, else
-    /// falls back to normal resolution. `arg_targets`/`const_args` mirror
-    /// [`Self::Call`]'s (higher-order invokers write out-params too).
+    /// falls back to normal resolution. `arg_targets`/`const_args`/`arg_shapes`
+    /// mirror [`Self::Call`]'s (higher-order invokers write out-params too, and a
+    /// string literal is a callback candidate, so `str_replace('a', 'b', $s)`
+    /// lands here).
     HigherOrder {
         callee: NameRef,
         callbacks: Vec<(usize, CallbackRef)>,
@@ -419,6 +439,7 @@ pub enum EffectOrigin {
         arg_targets: Vec<RefTarget>,
         const_args: ConstArgs,
         span: Span,
+        arg_shapes: Vec<ArgShape>,
     },
     /// A direct `$fn()` call resolved (body-local single-assignment) to a known
     /// callback (ADR-0033); its effects join the caller's. Unresolvable stays [`Self::Opaque`].
@@ -451,7 +472,10 @@ pub enum EffectOrigin {
     /// a constructor; one that cannot, but extends a class, records that
     /// parent here. Appended after the existing variants so no persisted
     /// variant index moves.
-    New { class: StaticClass, span: Span },
+    ///
+    /// `arg_shapes` mirrors [`Self::MethodCall`]'s, for the constructor the
+    /// effects pass resolves; an anonymous class's `new` carries none.
+    New { class: StaticClass, span: Span, arg_shapes: Option<Vec<ArgShape>> },
 }
 
 /// [`EffectOriginKind`], and the methods that map an [`EffectOrigin`] onto it,
@@ -553,6 +577,64 @@ pub struct ConstArgs {
     pub first: Option<CallTarget>,
     /// Positional argument 1.
     pub second: Option<CallTarget>,
+}
+
+/// What a **structural** scan can show one positional argument of a named call
+/// holds (issue #856): enough for the effects pass to rule out the user code a
+/// builtin reaches by converting, comparing or counting an object it was handed
+/// (`__toString`, `Countable::count`, `JsonSerializable`). No flow environment
+/// is consulted, so a local variable is always [`Self::Unknown`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
+pub enum ArgShape {
+    /// Holds no object at any depth. A scalar literal or magic constant; an
+    /// array literal whose every key and value is such, with no spread and no
+    /// `&`; or an expression PHP evaluates to a scalar whatever its operands
+    /// are: a concatenation or interpolated string, a comparison, `<=>`, a
+    /// logical connective, `!`, `instanceof`, `isset`, `empty`, or a cast to
+    /// `int`, `float`, `bool` or `string`. A ternary or `??` qualifies when both
+    /// of its results do. An operand's own `__toString` (`'a' . $o`) runs in
+    /// the operator, before the call, and is not the callee's to answer for.
+    ObjectFree,
+    /// An array, though not one shown to hold no object: an array literal
+    /// with some other element, or an `(array)` cast.
+    Array,
+    /// A bare `$name` naming a by-value, non-variadic parameter of the calling
+    /// frame. Its declared type holds on entry, and every write the frame
+    /// makes to it stores what `stores` says, so the meet of the two holds at
+    /// every read. Whether a named call the frame makes takes it by reference
+    /// is the effects pass's to decide, since only it resolves callees.
+    Param { name: String, stores: Stored },
+    /// A bare `$name` naming any other variable of a frame that makes its
+    /// every binding: neither a parameter nor captured from a parent frame,
+    /// so it starts unset (`null`). Every write stores what `stores` says;
+    /// the by-reference question is the effects pass's, as for a parameter.
+    Local { name: String, stores: Stored },
+    /// `$this->name`: the property's declared type decides. A typed property
+    /// holds a value of its type on every read, the value a `__get` returns
+    /// for an unset one included, which the engine checks against the type.
+    ThisProperty(String),
+    /// Anything else: a call, a property of another object, a constant, a
+    /// variable some write of the frame stores an unknown value into, or one
+    /// a frame imports or aliases.
+    Unknown,
+}
+
+/// What every write a frame makes to a variable is shown to store (an
+/// [`ArgShape::Param`] or [`ArgShape::Local`]): the meet over assignments,
+/// element writes, increments and `unset`, which are the only writes the scan
+/// accepts. A `foreach` or `catch` binding, a write through a reference or an
+/// argument a callee may take by reference makes the variable
+/// [`ArgShape::Unknown`] instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
+pub enum Stored {
+    /// No object at any depth ([`ArgShape::ObjectFree`]); a variable no write
+    /// touches stores nothing, and so stores this.
+    ObjectFree,
+    /// An array, or a value no write made an object, though an element may be
+    /// one ([`ArgShape::Array`]).
+    Array,
 }
 
 /// A resolvable callback argument (ADR-0033): an inline closure/arrow scope (by

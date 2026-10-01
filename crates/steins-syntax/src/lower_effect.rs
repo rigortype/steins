@@ -17,6 +17,7 @@ use crate::ast::{
     IncludeKeyword, NameRef, OutputKeyword, RefKind, RefTarget, SUPERGLOBALS, StateConstruct,
     StaticClass, ThrowKind, ThrowOrigin,
 };
+use crate::lower_arg_shape::{Captures, FrameBindings, arg_shapes_of, method_call_shapes};
 use crate::lower_decl::lower_catch_clause;
 use crate::lower_expr::{
     effect_recv_of_class, effect_recv_of_object, effect_recv_of_object_declared,
@@ -201,6 +202,9 @@ pub(crate) struct EffectScanCx {
     /// ([`property_write_span`]). Only a method sets it: a closure or arrow
     /// function defined in a constructor is a frame of its own.
     constructor: bool,
+    /// What the frame's variables are shown to hold, for the [`ArgShape`] of a
+    /// bare variable argument; opaque until [`Self::with_body`] builds it.
+    pub(crate) bindings: FrameBindings,
 }
 
 impl EffectScanCx {
@@ -218,12 +222,27 @@ impl EffectScanCx {
             .filter(|p| p.is_reference())
             .map(|p| strip_dollar(bytes_to_string(p.variable.name)))
             .collect();
-        Self { locals, byref_params, frame_aliased, writes, constructor: false }
+        let bindings = FrameBindings::opaque();
+        Self { locals, byref_params, frame_aliased, writes, constructor: false, bindings }
     }
 
     /// Mark the frame as a `__construct` body ([`Self::constructor`]).
     pub(crate) const fn in_constructor(mut self, constructor: bool) -> Self {
         self.constructor = constructor;
+        self
+    }
+
+    /// Summarize what `body` stores into the frame's variables
+    /// ([`FrameBindings`]); an aliasing frame keeps the opaque summary.
+    pub(crate) fn with_body<'a, 'arena: 'a>(
+        mut self,
+        params: &mago_syntax::cst::FunctionLikeParameterList<'_>,
+        captures: Captures<'_>,
+        body: impl Iterator<Item = Node<'a, 'arena>>,
+    ) -> Self {
+        if !self.frame_aliased {
+            self.bindings = FrameBindings::new(params, captures, body);
+        }
         self
     }
 }
@@ -548,50 +567,57 @@ fn collect_callable_assigns(
     }
 }
 
+/// The origin of one function call ([`scan_effect_origins`]). A statically
+/// named call is either a builtin (catalog-classified) or a project function
+/// (a propagation edge), and the effects pass decides which; a `$fn()` resolved
+/// to a body-local closure joins its effects; any other dynamic call is opaque.
+fn scan_function_call(fc: &FunctionCall<'_>, cx: &EffectScanCx, out: &mut Vec<EffectOrigin>) {
+    if let Expression::Identifier(id) = fc.function {
+        // A named call passing a resolvable callback is a HigherOrder origin;
+        // otherwise a plain Call edge. `higher_order_of_call` and
+        // `arg_targets_of_call` reject the same named/spread argument lists,
+        // so on the `Some` arm the target vector is exactly `arg_count` long.
+        let arg_targets = arg_targets_of_call(fc, cx);
+        let const_args = const_args_of_call(fc);
+        let arg_shapes = arg_shapes_of(&fc.argument_list, &cx.bindings);
+        match higher_order_of_call(fc) {
+            Some((callee, callbacks, arg_count)) => {
+                out.push(EffectOrigin::HigherOrder {
+                    callee,
+                    callbacks,
+                    arg_count,
+                    // Both helpers reject the same argument lists, so these
+                    // are always `Some` on this arm.
+                    arg_targets: arg_targets.unwrap_or_default(),
+                    const_args,
+                    span: to_span(fc.span()),
+                    arg_shapes: arg_shapes.unwrap_or_default(),
+                });
+            }
+            None => out.push(EffectOrigin::Call {
+                name: name_ref(id),
+                span: to_span(id.span()),
+                arg_targets,
+                const_args,
+                arg_shapes,
+            }),
+        }
+    } else if let Some(cb) = direct_var_callee(fc).and_then(|v| cx.locals.get(&v).cloned()) {
+        // `$fn()` resolved to a body-local single-assignment closure.
+        out.push(EffectOrigin::Callback { cbref: cb, span: to_span(fc.span()) });
+    } else {
+        // A dynamic function call (`$f()`, `($cb)()`) — unprovable.
+        out.push(EffectOrigin::Opaque { span: to_span(fc.span()) });
+    }
+}
+
 /// Walk a function-body subtree, appending every [`EffectOrigin`] found. Does not
 /// descend into nested scopes (function/closure/arrow/class-like bodies), whose
 /// effects are their own concern. `locals` resolves a `$fn()` variable call to a
 /// body-local single-assignment closure (ADR-0033).
 pub(crate) fn scan_effect_origins(node: &Node<'_, '_>, cx: &EffectScanCx, out: &mut Vec<EffectOrigin>) {
     match node {
-        // A statically-named call is either a builtin (catalog-classified) or a
-        // same-file user function (a propagation edge) — the effects pass decides.
-        Node::FunctionCall(fc) => {
-            if let Expression::Identifier(id) = fc.function {
-                // A named call passing a resolvable callback is a HigherOrder origin;
-                // otherwise a plain Call edge. `higher_order_of_call` and
-                // `arg_targets_of_call` reject the same named/spread argument lists,
-                // so on the `Some` arm the target vector is exactly `arg_count` long.
-                let arg_targets = arg_targets_of_call(fc, cx);
-                let const_args = const_args_of_call(fc);
-                match higher_order_of_call(fc) {
-                    Some((callee, callbacks, arg_count)) => {
-                        out.push(EffectOrigin::HigherOrder {
-                            callee,
-                            callbacks,
-                            arg_count,
-                            // Both helpers reject the same argument lists, so this
-                            // is always `Some` on this arm.
-                            arg_targets: arg_targets.clone().unwrap_or_default(),
-                            const_args,
-                            span: to_span(fc.span()),
-                        });
-                    }
-                    None => out.push(EffectOrigin::Call {
-                        name: name_ref(id),
-                        span: to_span(id.span()),
-                        arg_targets,
-                        const_args,
-                    }),
-                }
-            } else if let Some(cb) = direct_var_callee(fc).and_then(|v| cx.locals.get(&v).cloned()) {
-                // `$fn()` resolved to a body-local single-assignment closure.
-                out.push(EffectOrigin::Callback { cbref: cb, span: to_span(fc.span()) });
-            } else {
-                // A dynamic function call (`$f()`, `($cb)()`) — unprovable.
-                out.push(EffectOrigin::Opaque { span: to_span(fc.span()) });
-            }
-        }
+        Node::FunctionCall(fc) => scan_function_call(fc, cx, out),
         // Output-stream writes.
         Node::Echo(e) => {
             let keyword = OutputKeyword::Echo;
@@ -650,7 +676,9 @@ pub(crate) fn scan_effect_origins(node: &Node<'_, '_>, cx: &EffectScanCx, out: &
             if let (Some(recv), Some(method)) =
                 (effect_recv_of_object_declared(mc.object, cx), method_name_of(&mc.method))
             {
-                out.push(EffectOrigin::MethodCall { receiver: recv, method, span: to_span(mc.span()) });
+                let arg_shapes = method_call_shapes(mc.object, &mc.argument_list, &cx.bindings);
+                let span = to_span(mc.span());
+                out.push(EffectOrigin::MethodCall { receiver: recv, method, span, arg_shapes });
             } else {
                 // `$var->m()` / `$o->$m()` — receiver or selector not resolvable.
                 out.push(EffectOrigin::Opaque { span: to_span(mc.span()) });
@@ -660,7 +688,9 @@ pub(crate) fn scan_effect_origins(node: &Node<'_, '_>, cx: &EffectScanCx, out: &
             if let (Some(recv), Some(method)) =
                 (effect_recv_of_object_declared(mc.object, cx), method_name_of(&mc.method))
             {
-                out.push(EffectOrigin::MethodCall { receiver: recv, method, span: to_span(mc.span()) });
+                let span = to_span(mc.span());
+                let arg_shapes = None;
+                out.push(EffectOrigin::MethodCall { receiver: recv, method, span, arg_shapes });
             } else {
                 out.push(EffectOrigin::Opaque { span: to_span(mc.span()) });
             }
@@ -669,7 +699,9 @@ pub(crate) fn scan_effect_origins(node: &Node<'_, '_>, cx: &EffectScanCx, out: &
             if let (Some(recv), Some(method)) =
                 (effect_recv_of_class(sc.class), method_name_of(&sc.method))
             {
-                out.push(EffectOrigin::MethodCall { receiver: recv, method, span: to_span(sc.span()) });
+                let arg_shapes = method_call_shapes(sc.class, &sc.argument_list, &cx.bindings);
+                let span = to_span(sc.span());
+                out.push(EffectOrigin::MethodCall { receiver: recv, method, span, arg_shapes });
             } else {
                 // `$var::m()` / `static::m()` / `Foo::$m()` — unresolvable.
                 out.push(EffectOrigin::Opaque { span: to_span(sc.span()) });
@@ -681,7 +713,13 @@ pub(crate) fn scan_effect_origins(node: &Node<'_, '_>, cx: &EffectScanCx, out: &
         Node::Instantiation(inst) => {
             let span = to_span(inst.span());
             match trace_static_class(inst.class) {
-                Some(class) => out.push(EffectOrigin::New { class, span }),
+                Some(class) => {
+                    let arg_shapes = match &inst.argument_list {
+                        Some(list) => arg_shapes_of(list, &cx.bindings),
+                        None => Some(Vec::new()),
+                    };
+                    out.push(EffectOrigin::New { class, span, arg_shapes });
+                }
                 None => out.push(EffectOrigin::Opaque { span }),
             }
         }
@@ -749,7 +787,9 @@ fn scan_anonymous_class_new(ac: &AnonymousClass<'_>, cx: &EffectScanCx, out: &mu
     let span = to_span(ac.span());
     match anonymous_class_constructor(ac) {
         AnonymousConstructor::Unseen => out.push(EffectOrigin::Opaque { span }),
-        AnonymousConstructor::Inherited(class) => out.push(EffectOrigin::New { class, span }),
+        AnonymousConstructor::Inherited(class) => {
+            out.push(EffectOrigin::New { class, span, arg_shapes: None });
+        }
         AnonymousConstructor::None => {}
     }
     if let Some(list) = &ac.argument_list {

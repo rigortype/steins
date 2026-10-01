@@ -22,6 +22,7 @@ use crate::ast::{
     ReflectionSite, RetBoundKeyword, RetBoundKind, ScalarType, Span, StaticClass, TypeMember,
     Visibility, normalize_const_fqn,
 };
+use crate::lower_arg_shape::Captures;
 use crate::lower_effect::{
     EffectScanCx, body_aliased, collect_body_callables, receiver_writes, scan_effect_origins,
     scan_throw_origins,
@@ -612,7 +613,8 @@ fn lower_function(
         collect_body_callables(f.body.statements.iter()),
         body_aliased(f.body.statements.iter()),
         receiver_writes(f.body.statements.iter()),
-    );
+    )
+    .with_body(&f.parameter_list, Captures::None, f.body.statements.iter().map(Node::Statement));
     for s in f.body.statements.iter() {
         scan_effect_origins(&Node::Statement(s), &cx, &mut effect_origins);
         scan_throw_origins(&Node::Statement(s), &[], &[], &cx.locals, &mut throw_origins);
@@ -1101,7 +1103,8 @@ fn lower_method(m: &Method<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex, rc
             body_aliased(block.statements.iter()),
             receiver_writes(block.statements.iter()),
         )
-        .in_constructor(m.name.value.eq_ignore_ascii_case(b"__construct"));
+        .in_constructor(m.name.value.eq_ignore_ascii_case(b"__construct"))
+        .with_body(&m.parameter_list, Captures::None, block.statements.iter().map(Node::Statement));
         for s in block.statements.iter() {
             scan_effect_origins(&Node::Statement(s), &cx, &mut effect_origins);
             scan_throw_origins(&Node::Statement(s), &[], &[], &cx.locals, &mut throw_origins);

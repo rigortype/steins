@@ -16,6 +16,7 @@ use crate::ast::{
     BodyEnd, HookKind, NsCtx, Param, RetHint, RetHintKind, Runs, SUPERGLOBALS, Scope, ScopeOwner,
     Stmt, StmtKind, UndefinedRead, UnusedCapture,
 };
+use crate::lower_arg_shape::Captures;
 use crate::lower_decl::{DocIndex, lower_hint, lower_params};
 use crate::lower_effect::{
     EffectScanCx, ReceiverWrites, body_aliased, collect_body_callables, scan_effect_origins,
@@ -576,11 +577,22 @@ fn build_closure_scope_from_closure(
     // A closure body is not a declared-receiver frame: the effects pass keys it by
     // definition offset and has no parameter list to read a receiver's declared
     // type from, so every name stays unmodelled (today's `Opaque` taint).
+    let uses: Vec<String> = cl
+        .use_clause
+        .iter()
+        .flat_map(|u| u.variables.iter())
+        .map(|v| strip_dollar(bytes_to_string(v.variable.name)))
+        .collect();
     let cx = EffectScanCx::new(
         &cl.parameter_list,
         collect_body_callables(cl.body.statements.iter()),
         !opaque.is_empty() || body_aliased(cl.body.statements.iter()),
         ReceiverWrites::poisoned(),
+    )
+    .with_body(
+        &cl.parameter_list,
+        Captures::Uses(&uses),
+        cl.body.statements.iter().map(Node::Statement),
     );
     let mut is_generator = false;
     for s in cl.body.statements.iter() {
@@ -1209,7 +1221,8 @@ fn build_closure_scope_from_arrow(
         HashMap::new(),
         node_poisons(&Node::Expression(af.expression)),
         ReceiverWrites::poisoned(),
-    );
+    )
+    .with_body(&af.parameter_list, Captures::All, std::iter::once(Node::Expression(af.expression)));
     scan_effect_origins(&Node::Expression(af.expression), &cx, &mut effect_origins);
     scan_throw_origins(&Node::Expression(af.expression), &[], &[], &cx.locals, &mut throw_origins);
     let mut method_calls = Vec::new();

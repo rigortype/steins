@@ -11,6 +11,7 @@
 use mago_syntax::cst::{Node, Trivia, TriviaKind};
 
 mod ast;
+mod lower_arg_shape;
 mod lower_decl;
 mod lower_effect;
 mod lower_expr;
