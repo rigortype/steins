@@ -5,7 +5,8 @@
 //! purity, ADR-0076) reads the span a site carries. For every owner the lowering
 //! scans:
 //!
-//! * every site is recorded by at least one lane: the effect origin list or the
+//! * every site but an operator site (#859, resolved by the resolver only) is
+//!   recorded by at least one lane: the effect origin list or the
 //!   throw origin list derived from it holds a view of it ([`derive_effect_origins`],
 //!   [`derive_throw_origins`]), and each view sits at the site's span.
 //!
@@ -28,6 +29,7 @@
 //!       --test it site_oracle -- --ignored
 //!   ```
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -42,6 +44,8 @@ struct Report {
     owners: usize,
     sites: usize,
     divergences: Vec<String>,
+    /// Operator sites by `family/construct`, which no lane records (#859).
+    operators: BTreeMap<String, usize>,
 }
 
 /// Check every site of one owner: at least one lane records it, at its span.
@@ -49,6 +53,10 @@ fn check_owner(file: &Path, name: &str, sites: &[SiteOrigin], report: &mut Repor
     report.owners += 1;
     report.sites += sites.len();
     for site in sites {
+        if let SiteKind::Operator { family, construct, .. } = &site.kind {
+            *report.operators.entry(format!("{family:?}/{construct:?}")).or_default() += 1;
+            continue;
+        }
         let one = std::slice::from_ref(site);
         let (effect, throw) = (derive_effect_origins(one), derive_throw_origins(one));
         let spans_ok = effect.iter().all(|o| o.span() == site.span)
@@ -130,6 +138,9 @@ fn assert_clean(label: &str, report: &Report) {
         "{label}: {} files, {} owners, {} sites, no divergence",
         report.files, report.owners, report.sites
     );
+    for (form, count) in &report.operators {
+        eprintln!("{label}: operator {form}: {count}");
+    }
 }
 
 /// The directories of this repository that hold PHP of its own, relative to the
@@ -298,6 +309,8 @@ function g($x) {
         SiteKind::Construct(ConstructKind::Include(_)) => "include",
         SiteKind::Construct(ConstructKind::Output(_)) => "echo",
         SiteKind::Call { .. } => "f",
+        // `echo $x` also converts its parameter operand (#859); `echo 1` converts nothing.
+        SiteKind::Operator { .. } => "echo operator",
         other => panic!("a site this source should not lower to: {other:?}"),
     };
     let got: Vec<(&str, String)> = sites.iter().map(|s| (label(s), guards(s))).collect();
@@ -305,6 +318,7 @@ function g($x) {
         ("eval", "B"),
         ("include", "B"),
         ("echo", "B"),
+        ("echo operator", "B"),
         ("f", "B"),
         ("f", "A>B"),
         ("echo", "B"),

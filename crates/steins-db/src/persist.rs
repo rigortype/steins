@@ -649,7 +649,9 @@ mod tests {
     use std::path::PathBuf;
 
     use steins_gen::{DecodeBudget, EnginePosture, GenerationInputs, Store};
-    use steins_syntax::{ArgValue, SiteKind, SiteOrigin, Stmt, StmtKind};
+    use steins_syntax::{
+        ArgValue, OperatorConstruct, OperatorFamily, SiteKind, SiteOrigin, Stmt, StmtKind,
+    };
 
     use super::*;
     use crate::shard::{fallback_package_key, merge_shards};
@@ -721,6 +723,10 @@ mod tests {
             (
                 "vendor/lib/b/src/state.php",
                 "<?php\nnamespace Lib\\A;\nfunction tally(): int {\n  static $n = 0;\n  return ++$n + \\count($_GET);\n}\n",
+            ),
+            (
+                "vendor/lib/b/src/operators.php",
+                "<?php\nnamespace Lib\\A;\nclass Operators {\n  public function each($o, $b): \\Generator {\n    $s = $o . $b;\n    $s .= $o;\n    $s = \"x{$o}\";\n    $s = <<<T\n      v {$o}\n      T;\n    $s = (string) $o;\n    echo $o;\n    print $o;\n    $t = $o == 'a';\n    $t = $o < $b;\n    switch ($o) { case 'a': break; }\n    $v = $o->p;\n    $o->p = 1;\n    $o->p++;\n    $t = isset($o->p);\n    $t = empty($o->p);\n    unset($o->p);\n    $t = $o->p ?? 1;\n    $o->p ??= 1;\n    $r = &$o->p;\n    [$x, $y] = $o;\n    foreach ($o as $z) {}\n    yield from $o;\n    f(...$o);\n    $c = clone $o;\n    $w = $this->q;\n    $d = clone($o, ['a' => 1]);\n  }\n}\n",
             ),
             ("vendor/autoload.php", "<?php\nfunction stray_helper() {}\n"),
         ]
@@ -1025,6 +1031,49 @@ mod tests {
                 let back: SiteOrigin = crate::wire::from_slice(&bytes).expect("a site round-trips");
                 assert_eq!(&back, site, "{name}");
             }
+        }
+    }
+
+    /// Operator sites carry two more enums, [`OperatorFamily`] and
+    /// [`OperatorConstruct`], that the codec numbers by position; this pins their
+    /// `ALL` lists to the variant order serde decodes them by.
+    #[test]
+    fn the_operator_enums_are_every_variant_in_codec_order() {
+        let families: Vec<String> = OperatorFamily::ALL.iter().map(|v| format!("{v:?}")).collect();
+        assert_eq!(families, serde_variants::<OperatorFamily>());
+        let constructs: Vec<String> =
+            OperatorConstruct::ALL.iter().map(|v| format!("{v:?}")).collect();
+        assert_eq!(constructs, serde_variants::<OperatorConstruct>());
+    }
+
+    /// Every family and every construct of an operator site is in the fixture and
+    /// round-trips through the payload codec with its receivers and member name.
+    #[test]
+    fn every_operator_form_round_trips_through_the_codec() {
+        let parsed = parsed_fixture();
+        let sites = fixture_sites(&parsed);
+        let operators: Vec<&SiteOrigin> =
+            sites.iter().copied().filter(|s| matches!(s.kind, SiteKind::Operator { .. })).collect();
+        for family in OperatorFamily::ALL {
+            let carried = operators.iter().any(
+                |s| matches!(&s.kind, SiteKind::Operator { family: f, .. } if *f == family),
+            );
+            assert!(carried, "the fixture must carry a {family:?} operator site");
+        }
+        for construct in OperatorConstruct::ALL {
+            let carried = operators.iter().any(
+                |s| matches!(&s.kind, SiteKind::Operator { construct: c, .. } if *c == construct),
+            );
+            assert!(carried, "the fixture must carry a {construct:?} operator site");
+        }
+        assert!(operators.iter().any(|s| {
+            matches!(&s.kind, SiteKind::Operator { member: Some(_), receivers, .. }
+                if receivers.iter().any(Option::is_some))
+        }));
+        for site in operators {
+            let bytes = crate::wire::to_vec(site).expect("a site serializes");
+            let back: SiteOrigin = crate::wire::from_slice(&bytes).expect("a site round-trips");
+            assert_eq!(&back, site);
         }
     }
 

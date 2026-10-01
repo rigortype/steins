@@ -15,6 +15,7 @@
 mod call;
 mod construct;
 mod derive;
+mod operator;
 mod throw;
 
 use mago_syntax::cst::Node;
@@ -64,7 +65,10 @@ pub(crate) fn scan_owner_sites(node: &Node<'_, '_>, cx: &EffectScanCx, out: &mut
 /// whose sites are their own owner's.
 fn scan_sites(node: &Node<'_, '_>, sx: &SiteScope<'_>, out: &mut Vec<SiteOrigin>) {
     match node {
-        Node::FunctionCall(fc) => call::function_call(fc, sx, out),
+        Node::FunctionCall(fc) => {
+            call::function_call(fc, sx, out);
+            operator::clone_with(fc, sx, out);
+        }
         Node::MethodCall(mc) => call::method_call(mc, sx, out),
         Node::NullSafeMethodCall(mc) => call::nullsafe_method_call(mc, sx, out),
         Node::StaticMethodCall(sc) => call::static_method_call(sc, sx, out),
@@ -93,7 +97,7 @@ fn scan_sites(node: &Node<'_, '_>, sx: &SiteScope<'_>, out: &mut Vec<SiteOrigin>
         | Node::Trait(_)
         | Node::Enum(_) => return,
         _ => {
-            if construct::lower(node, sx, out) {
+            if construct::lower(node, sx, out) || operator::lower(node, sx, out) {
                 return;
             }
         }

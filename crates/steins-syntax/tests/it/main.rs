@@ -13,6 +13,7 @@ mod grouped_use;
 mod interpolation_value;
 mod isset_value;
 mod method_call_value;
+mod operator_sites;
 mod operator_value;
 mod relative_names;
 mod site_oracle;

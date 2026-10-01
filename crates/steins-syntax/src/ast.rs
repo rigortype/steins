@@ -765,6 +765,159 @@ pub enum ConstructKind {
     MatchNoDefault,
 }
 
+/// The implicit-call family an operator site belongs to (ADR-0099 §4.3): which
+/// engine-run user method the operator may reach through an operand. The
+/// `__call`/`__callStatic` family is not here: it is a resolution of a
+/// [`SiteKind::MethodCall`], not a syntactic site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
+pub enum OperatorFamily {
+    /// An operand converted to a string: `__toString`.
+    ToString,
+    /// A property fetch or store on an operand: `__get`, `__set`, `__isset`,
+    /// `__unset` and property hooks.
+    MagicProp,
+    /// An offset access on an operand: `ArrayAccess::offset*`.
+    ArrayAccess,
+    /// An operand iterated: `Iterator` and `IteratorAggregate` methods.
+    Iterate,
+    /// An operand cloned: `__clone`.
+    Clone,
+}
+
+/// The syntactic form an [`OperatorFamily`] site is. The property and offset
+/// access forms (`Read` to `Destructure`) are shared by [`OperatorFamily::MagicProp`]
+/// and [`OperatorFamily::ArrayAccess`]; the family says which. A form belongs to
+/// one family except those two ([`OperatorConstruct::family_hint`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
+pub enum OperatorConstruct {
+    /// `.` ([`OperatorFamily::ToString`]).
+    Concat,
+    /// `.=`.
+    ConcatAssign,
+    /// A double-quoted string, or a backtick one, with an interpolated expression.
+    Interpolation,
+    /// A heredoc with an interpolated expression.
+    Heredoc,
+    /// A `(string)` or `(binary)` cast.
+    Cast,
+    /// An `echo` or short echo tag; every value is one operand.
+    Echo,
+    /// A `print`.
+    Print,
+    /// `==`, `!=` or `<>`.
+    LooseCompare,
+    /// `<`, `<=`, `>`, `>=` or `<=>`.
+    OrderCompare,
+    /// A `switch`, which compares its subject loosely with every `case`; the
+    /// subject is the first operand and the case values follow.
+    Switch,
+    /// A fetch in value position (`$o->p`, `$a[k]`).
+    Read,
+    /// An assignment target (`$o->p = …`, `$a[k] = …`, `$a[] = …`, a
+    /// destructuring target, a `foreach` target).
+    Write,
+    /// A target the engine reads and then writes: a compound assignment other
+    /// than `??=`, and `++`/`--`.
+    ReadWrite,
+    /// `isset($o->p)`, and an intermediate fetch of an `isset`, `empty` or `??`
+    /// chain (`__isset` then `__get`).
+    Isset,
+    /// `empty($o->p)`.
+    Empty,
+    /// `unset($o->p)`, `unset($a[k])`.
+    Unset,
+    /// The left side of `??`.
+    Coalesce,
+    /// The left side of `??=`.
+    CoalesceAssign,
+    /// `&$o->p`, `&$a[k]`.
+    Reference,
+    /// A list or `[…]` destructuring of an operand: one site per pattern, the
+    /// operand is the value destructured ([`OperatorFamily::ArrayAccess`]).
+    Destructure,
+    /// A `foreach` subject ([`OperatorFamily::Iterate`]).
+    Foreach,
+    /// A `yield from` operand.
+    YieldFrom,
+    /// A spread into a call's arguments or an array literal (`...$x`).
+    Spread,
+    /// A `clone` ([`OperatorFamily::Clone`]).
+    Clone,
+    /// PHP 8.5's `clone($o, [...])` with a property list: it also sets properties
+    /// on the clone, so `__set` may run. The parser reads it as a call of a
+    /// function named `clone`; the lowering recognises that spelling.
+    CloneWith,
+}
+
+impl OperatorFamily {
+    /// Every family, in declaration order, which is the order the payload codec numbers them by.
+    pub const ALL: [Self; 5] =
+        [Self::ToString, Self::MagicProp, Self::ArrayAccess, Self::Iterate, Self::Clone];
+}
+
+impl OperatorConstruct {
+    /// Every form, in declaration order, which is the order the payload codec numbers them by.
+    pub const ALL: [Self; 25] = [
+        Self::Concat,
+        Self::ConcatAssign,
+        Self::Interpolation,
+        Self::Heredoc,
+        Self::Cast,
+        Self::Echo,
+        Self::Print,
+        Self::LooseCompare,
+        Self::OrderCompare,
+        Self::Switch,
+        Self::Read,
+        Self::Write,
+        Self::ReadWrite,
+        Self::Isset,
+        Self::Empty,
+        Self::Unset,
+        Self::Coalesce,
+        Self::CoalesceAssign,
+        Self::Reference,
+        Self::Destructure,
+        Self::Foreach,
+        Self::YieldFrom,
+        Self::Spread,
+        Self::Clone,
+        Self::CloneWith,
+    ];
+
+    /// The family a form belongs to, or `None` for the forms
+    /// [`OperatorFamily::MagicProp`] and [`OperatorFamily::ArrayAccess`] share.
+    #[must_use]
+    pub const fn family_hint(self) -> Option<OperatorFamily> {
+        match self {
+            Self::Concat
+            | Self::ConcatAssign
+            | Self::Interpolation
+            | Self::Heredoc
+            | Self::Cast
+            | Self::Echo
+            | Self::Print
+            | Self::LooseCompare
+            | Self::OrderCompare
+            | Self::Switch => Some(OperatorFamily::ToString),
+            Self::Destructure => Some(OperatorFamily::ArrayAccess),
+            Self::Foreach | Self::YieldFrom | Self::Spread => Some(OperatorFamily::Iterate),
+            Self::Clone | Self::CloneWith => Some(OperatorFamily::Clone),
+            Self::Read
+            | Self::Write
+            | Self::ReadWrite
+            | Self::Isset
+            | Self::Empty
+            | Self::Unset
+            | Self::Coalesce
+            | Self::CoalesceAssign
+            | Self::Reference => None,
+        }
+    }
+}
+
 /// What a [`SiteOrigin`] is. One variant per kind of call-like or
 /// construct-like site the effect and throw scans record between them; each
 /// lane's origin is derived from it ([`crate::derive_effect_origins`],
@@ -792,6 +945,27 @@ pub enum SiteKind {
     Throw(ThrownKind),
     /// An output, exit, `eval`, `include`, state or `match` construct ([`ConstructKind`]).
     Construct(ConstructKind),
+    /// An operator that may run user code through an operand's class (ADR-0099
+    /// §4.3). The site's `operands` hold one [`ArgShape`] per operand that can
+    /// be an object, in the order [`OperatorConstruct`] names; `receivers` is
+    /// parallel to them.
+    ///
+    /// Neither lane's origin list has a view of it: they read it through the
+    /// resolver only.
+    Operator {
+        family: OperatorFamily,
+        construct: OperatorConstruct,
+        /// What names each operand's class without a flow environment, as a
+        /// method call's receiver does ([`EffectRecv::This`] for `$this`,
+        /// [`EffectRecv::ClassName`] for `new Foo`, [`EffectRecv::Var`] and
+        /// [`EffectRecv::PropRead`] for a never-written variable or `$this`
+        /// property); `None` where nothing does. One per operand.
+        receivers: Vec<Option<EffectRecv>>,
+        /// The property name of a [`OperatorFamily::MagicProp`] site when it is
+        /// written as an identifier (`$o->name`); `None` for `$o->$n` and for
+        /// every other family.
+        member: Option<String>,
+    },
 }
 
 /// [`SiteTag`] and the methods that map a [`SiteKind`] onto it, generated from
@@ -840,7 +1014,7 @@ macro_rules! site_kinds {
 }
 
 // Every `SiteKind` variant, in declaration order.
-site_kinds!(Call, MethodCall, New, Callback, Dynamic, Throw, Construct);
+site_kinds!(Call, MethodCall, New, Callback, Dynamic, Throw, Construct, Operator);
 
 /// One call-like or construct-like site in a function-like body, lowered once
 /// for both the effect lane and the throw lane. [`EffectOrigin`]s and
@@ -864,6 +1038,8 @@ pub struct SiteOrigin {
     /// `parent` or a class name (`$r->m($o)`, `$this->repo->m()`, `(new Foo)->m()`);
     /// an anonymous class's `new`; and every [`SiteKind::Callback`],
     /// [`SiteKind::Dynamic`], [`SiteKind::Throw`] and [`SiteKind::Construct`] site.
+    /// A [`SiteKind::Operator`] site always carries `Some`: one shape per operand
+    /// that can be an object.
     pub operands: Option<Vec<ArgShape>>,
     /// The lvalue root of each positional argument of a named-function call
     /// ([`EffectOrigin::Call`]'s `arg_targets`); `None` for every other kind.

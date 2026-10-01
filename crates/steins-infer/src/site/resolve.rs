@@ -106,6 +106,8 @@ impl<'a> Resolver<'a, '_, '_> {
             }
             SiteKind::Throw(thrown) => self.throw(thrown),
             SiteKind::Construct(construct) => self.construct(construct),
+            // #859 phase 2: the operator resolver; until then an operator site runs nothing here.
+            SiteKind::Operator { .. } => {}
         }
     }
 

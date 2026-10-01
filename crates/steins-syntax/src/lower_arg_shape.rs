@@ -64,7 +64,7 @@ fn method_callee_resolvable(receiver: &Expression<'_>) -> bool {
 }
 
 /// One argument expression's [`ArgShape`].
-fn arg_shape(expr: &Expression<'_>, frame: &FrameBindings) -> ArgShape {
+pub(crate) fn arg_shape(expr: &Expression<'_>, frame: &FrameBindings) -> ArgShape {
     match expr.unparenthesized() {
         Expression::Variable(Variable::Direct(dv)) => {
             frame.shape(&strip_dollar(bytes_to_string(dv.name)))
