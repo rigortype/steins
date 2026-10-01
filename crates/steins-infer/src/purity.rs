@@ -685,6 +685,10 @@ pub(crate) fn classify_effect_origins(
                             row.findings.insert(f);
                         }
                     }
+                    // A builtin certified pure only at this call's arity
+                    // (`array_keys($a)`, issue #851): a catalog row too, so it
+                    // answers before the plugin channel does.
+                    FnResolution::Unknown if pure_at_call_arity(cx, name, targets) => {}
                     // Ambiguous / unresolved: effects unknown → non-exhaustive.
                     // The plugin channel gets the last word here and nowhere
                     // else (ADR-0068 precedence): a project body and a catalog
@@ -2184,6 +2188,27 @@ fn stream_target(
         // its arg-blind default.
         steins_syntax::CallTarget::Bool(_) => None,
     }
+}
+
+/// Whether a call [`Cx::resolve_effect_function`] left unresolved is a builtin
+/// the catalog certifies pure **at this call's arity** (issue #851,
+/// [`steins_catalog::pure_at_arity`]).
+///
+/// `array_keys($a)` copies keys, while `array_keys($a, $v)` compares `$v`
+/// loosely with every element, which runs an object's `__toString`. The
+/// argument-blind row therefore stays uncatalogued, and resolution does not
+/// know the name. This asks resolution again with the arity-aware predicate,
+/// so a namespaced shadow or an ambiguous global keeps the `…?` exactly as an
+/// uncatalogued name would. `targets` is the positional argument list; `None`
+/// (a named or spread argument) has no arity to read.
+fn pure_at_call_arity(
+    cx: &Cx,
+    name: &NameRef,
+    targets: Option<&[steins_syntax::RefTarget]>,
+) -> bool {
+    let Some(positional) = targets.map(<[_]>::len) else { return false };
+    let certified = |n: &str| steins_catalog::pure_at_arity(n, positional);
+    matches!(cx.resolve_function_with(name, &certified), FnResolution::Builtin(_))
 }
 
 /// The proven effect findings a builtin `name` carries: its unconditional catalog
