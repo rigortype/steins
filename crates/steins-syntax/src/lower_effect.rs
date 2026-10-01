@@ -2,6 +2,11 @@
 //! ADR-0040): the call/output/exit origins the body performs, the receivers and
 //! callbacks they act on, and the `throw`/`try`/`catch` structure that decides
 //! which throws escape.
+//!
+//! The lanes' scans here are the legacy half of a pair: `lower_site` lowers the
+//! union of what they record once, and derives both origin lists from it. These
+//! scans stay as the oracle that derivation is held equal to (`site_oracle`) while
+//! the lanes still read the lists; they go when the lanes read sites.
 
 use std::collections::HashMap;
 use std::collections::HashSet;
