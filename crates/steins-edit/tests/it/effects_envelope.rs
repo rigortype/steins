@@ -239,6 +239,35 @@ fn an_exception_that_reads_its_own_trace_gets_the_class_tag() {
     assert!(out.starts_with(tagged), "{out}");
 }
 
+/// The same exception with a type check on its code and the trace's arguments
+/// stripped key by key. `is_int` and the one-argument `array_keys` are
+/// certified pure (issue #851), so the class still earns the tag.
+#[test]
+fn an_exception_that_checks_its_code_and_strips_its_trace_gets_the_class_tag() {
+    let lib = concat!(
+        "<?php\n",
+        "class Snapshot extends \\RuntimeException {\n",
+        "    protected array $frames;\n",
+        "    public function __construct(string $message = '', int|string $code = 0) {\n",
+        "        if (!is_int($code)) {\n",
+        "            $code = 0;\n",
+        "        }\n",
+        "        parent::__construct($message, $code);\n",
+        "        $this->frames = $this->getTrace();\n",
+        "        foreach (array_keys($this->frames) as $key) {\n",
+        "            unset($this->frames[$key]['args']);\n",
+        "        }\n",
+        "    }\n",
+        "}\n",
+    );
+    let report = plan(&[("lib.php", lib)]);
+    assert_oracle_complete(&report);
+    assert_eq!(report.oracle.transformed, 1, "{:#?}", report.refusals);
+    let out = report.plan.apply_file("lib.php", lib);
+    let tagged = "<?php\n/**\n * @phpstan-all-methods-pure\n */\nclass Snapshot extends";
+    assert!(out.starts_with(tagged), "{out}");
+}
+
 /// ADR-0055's constructor-creation exemption (#313) covers exactly the `$this`
 /// writes PHPStan's constructor exclusion covers; every other state construct in
 /// a constructor still withholds the class tag, since PHPStan would reject it.
