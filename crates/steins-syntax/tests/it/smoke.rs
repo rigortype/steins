@@ -410,6 +410,41 @@ fn scans_new_by_the_class_it_names() {
     assert_eq!(calls, 3, "the arguments and the computed class are walked: {:?}", f.effect_origins);
 }
 
+/// Issue #849: the throw scan records the same constructor edge for every `new`
+/// the effect scan does, a computed class or an anonymous class that may bring
+/// its own constructor is a taint, and an anonymous class's arguments are the
+/// enclosing frame's calls. A thrown `new` records the thrown class and the
+/// constructor both, under the guards around it.
+#[test]
+fn scans_a_constructor_throw_edge_for_every_new() {
+    use steins_syntax::ThrowKind;
+    let src = "<?php class P { public function f(string $c): void {\n\
+               new Foo(h()); new self; new static(); new parent; new $c(); new (h())();\n\
+               new class extends Foo {}; new class(h()) {}; new class { use T; };\n\
+               new class { public function __construct() {} };\n\
+               try { throw new Bar(); } catch (Baz $e) {}\n\
+               } }\nfunction h(): string { return ''; }";
+    let tree = SourceTree::parse(src);
+    let f = &tree.classes()[0].methods[0];
+    let shapes: Vec<String> = f
+        .throw_origins
+        .iter()
+        .filter_map(|o| match &o.kind {
+            ThrowKind::Construct { class } => Some(class.render()),
+            ThrowKind::New(class) => Some(format!("throw {}", class.simple())),
+            ThrowKind::Taint => Some("?".to_owned()),
+            _ => None,
+        })
+        .collect();
+    let expected = ["Foo", "self", "static", "parent", "?", "?", "Foo", "?", "?", "throw Bar", "Bar"];
+    assert_eq!(shapes, expected);
+    let calls = f.throw_origins.iter().filter(|o| matches!(o.kind, ThrowKind::Call(_))).count();
+    assert_eq!(calls, 3, "the arguments and the computed class are walked: {:?}", f.throw_origins);
+    let try_at = u32::try_from(src.find("try").unwrap()).unwrap();
+    let mut thrown = f.throw_origins.iter().filter(|o| o.span.start > try_at);
+    assert!(thrown.all(|o| o.guards.len() == 1), "both sit inside the `try`");
+}
+
 /// Issue #318: the proven-constant leading args an effect origin carries. A
 /// literal arg is also a resolvable callback ref, so most calls arrive as
 /// `HigherOrder`, not `Call` — pinned on both arms here.

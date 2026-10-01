@@ -649,7 +649,7 @@ mod tests {
     use std::path::PathBuf;
 
     use steins_gen::{DecodeBudget, EnginePosture, GenerationInputs, Store};
-    use steins_syntax::{ArgValue, EffectOrigin, EffectOriginKind, Stmt, StmtKind};
+    use steins_syntax::{ArgValue, EffectOrigin, EffectOriginKind, Stmt, StmtKind, ThrowKind};
 
     use super::*;
     use crate::shard::{fallback_package_key, merge_shards};
@@ -956,6 +956,15 @@ mod tests {
         for (construct, lowered) in TRACE_CONSTRUCTS {
             assert!(kinds.iter().any(|k| lowered(k)), "the fixture must carry {construct}");
         }
+        // Throw origins ride the codec by variant index too, and the last
+        // `ThrowKind` appended (issue #849) is the `new` edge `Widget::n`'s
+        // `new self()` lowers to.
+        let construct_edge = parsed
+            .iter()
+            .flat_map(|(_, t)| t.classes().iter().flat_map(|c| c.methods.iter()))
+            .flat_map(|m| &m.throw_origins)
+            .any(|o| matches!(o.kind, ThrowKind::Construct { .. }));
+        assert!(construct_edge, "the fixture must carry a constructor throw edge");
         // Schema 20 (issue #603): `ret_top` sits between `ret` and `ret_span` on
         // both declarations and `RetHintKind::Top` precedes `Other`, so the
         // enforced tops have to be IN the fixture for the positions to be tested.
