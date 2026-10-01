@@ -10,16 +10,15 @@
 //! there, is the resolver's question: this lowering is syntactic.
 //!
 //! **A site is not emitted** when every operand's shape shows it holds no
-//! object ([`holds_no_object`]): an object-free expression, an array, or a
-//! local variable the frame writes only object-free values and arrays into. A
-//! `parameter` is never skipped here: its declared type decides.
+//! object ([`holds_no_object`]): an object-free expression or an array. A
+//! variable is never skipped here, whatever the frame writes into it: the
+//! resolver decides, since a call may take it by reference.
 //!
 //! **A comparison is stricter** (`==`, `!=`, `<>`, `<`, `<=`, `>`, `>=`,
 //! `<=>`, `switch`): an array compares element-wise with another array, so
 //! `[$o] == ['x']`, `[$o] < ['y']` and a `switch` over `[$o]` with `case ['x']`
 //! run `__toString` on the element (witnessed on PHP 8.5). Only an operand that
-//! holds no object at any depth qualifies: an object-free expression, or a
-//! local whose writes are all object-free. A comparison with a non-string
+//! holds no object at any depth qualifies: an object-free expression. A comparison with a non-string
 //! scalar literal (`null`, a boolean, an integer or a float) on either side is
 //! skipped whatever the other side holds: an object converts to a string for a
 //! string operand only, and an array against a scalar compares without
@@ -39,7 +38,7 @@ use mago_syntax::cst::{
 
 use super::{SiteScope, scan_sites};
 use crate::ast::{
-    ArgShape, OperatorConstruct as C, OperatorFamily as F, SiteKind, SiteOrigin, Stored,
+    ArgShape, OperatorConstruct as C, OperatorFamily as F, SiteKind, SiteOrigin,
 };
 use crate::lower_arg_shape::arg_shape;
 use crate::lower_expr::{effect_recv_of_object_declared, method_name_of};
@@ -353,11 +352,12 @@ fn chain(expr: &Expression<'_>, role: C, sx: &SiteScope<'_>, out: &mut Vec<SiteO
     }
 }
 
-/// The role of an access under another: `isset`, `empty` and `??` fetch their
-/// intermediates the way `isset` does; every other context reads them.
+/// The role of an access under another: `isset`, `empty`, `??` and `??=` fetch
+/// their intermediates the way `isset` does (`__isset`, then `__get`; for an
+/// offset, `offsetExists` first); every other context reads them.
 fn inner(role: C) -> C {
     match role {
-        C::Isset | C::Empty | C::Coalesce => C::Isset,
+        C::Isset | C::Empty | C::Coalesce | C::CoalesceAssign => C::Isset,
         _ => C::Read,
     }
 }
@@ -392,19 +392,17 @@ fn offset_site(
     push_at(F::ArrayAccess, role, span, None, &[container], sx, out);
 }
 
-/// Whether `shape` shows the operand needs no site under `construct`. For most
-/// forms an operand that is not itself an object qualifies: an object-free
-/// expression, an array (conversion and element access leave its elements
-/// alone), or a local variable of a frame that writes only such values into it.
-/// A comparison also touches an array's elements, so there only an operand that
-/// holds no object at any depth does: an object-free expression or a local
-/// written only object-free values. A parameter never qualifies: its declared
-/// type decides, which only the resolver reads.
+/// Whether `shape` shows the operand needs no site under `construct`: an
+/// object-free expression, or an array (conversion and element access leave its
+/// elements alone; a comparison touches them, so there only an object-free
+/// expression qualifies). A variable never does, a local no more than a
+/// parameter: a named call of the frame may take it by reference and store an
+/// object into it, which only the resolver can tell (`Frame::held`).
 fn holds_no_object(construct: C, shape: &ArgShape) -> bool {
     let comparison = matches!(construct, C::LooseCompare | C::OrderCompare | C::Switch);
     match shape {
-        ArgShape::ObjectFree | ArgShape::Local { stores: Stored::ObjectFree, .. } => true,
-        ArgShape::Array | ArgShape::Local { .. } => !comparison,
+        ArgShape::ObjectFree => true,
+        ArgShape::Array => !comparison,
         _ => false,
     }
 }

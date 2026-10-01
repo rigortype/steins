@@ -486,6 +486,58 @@ fn a_missing_method_on_an_exact_class_that_declares_call_is_an_edge() {
 // ---- both lanes, and what is not a site -------------------------------------
 
 #[test]
+fn a_call_inside_an_instance_runs_this_objects_own_call() {
+    // `parent::missing()` in an instance method runs `$this`'s `__call`, which a
+    // subclass may override: the named class's is not the answer.
+    let open = "class Foo { public function __call($n, $a) { echo 'f'; } }\n\
+        class Bar extends Foo { public function viaParent() { return parent::missing(); }\n\
+            public function viaName() { return Foo::missing(); } }";
+    gap(&file(open, ""), "Bar::viaParent", "method-not-found");
+    gap(&file(open, ""), "Bar::viaName", "method-not-found");
+    // Pinned: the enclosing class is final, or its `__call` is.
+    let pinned = "class Foo { public function __call($n, $a) { echo 'f'; } }\n\
+        final class Bar extends Foo { public function viaParent() { return parent::missing(); } }\n\
+        class Baz extends Foo { final public function __call($n, $a) { echo 'z'; }\n\
+            public function viaParent() { return parent::missing(); } }";
+    covered(&file(pinned, ""), "Bar::viaParent");
+    covered(&file(pinned, ""), "Baz::viaParent");
+    assert_eq!(runs(&file(pinned, ""), "Baz::viaParent").0, ["io.output.buffer"]);
+    // A frame that cannot be an instance of the named class runs the named class's.
+    let unrelated = "class Foo { public function __call($n, $a) { echo 'f'; } }\n\
+        class Other { public function m() { return Foo::missing(); } }";
+    covered(&file(unrelated, ""), "Other::m");
+}
+
+#[test]
+fn a_variable_a_call_may_fill_by_reference_is_not_object_free() {
+    let setv = "function setv(&$x) { $x = new Name(); }\n";
+    gap(&file(setv, "function f() { setv($v); echo $v; }"), "f", TO_STRING);
+    gap(&file(setv, "function f() { setv($v); return $v == 'x'; }"), "f", TO_STRING);
+    gap(&file(setv, "function f() { setv($a); foreach ($a as $x) {} }"), "f", ITERATION);
+    // Nothing takes it by reference: it holds the scalar it was given.
+    covered(&file("", "function f() { $v = 'x'; echo $v; }"), "f");
+}
+
+#[test]
+fn a_coalescing_assignment_asks_isset_of_its_intermediates() {
+    let src = "final class K { public function __isset($n) { throw new \\LogicException('i'); }\n\
+        public function __get($n) { return 1; }\n\
+        public function g() { $this->p->q ??= 1; } }";
+    assert_eq!(runs(&file(src, ""), "K::g").1, ["LogicException"]);
+}
+
+#[test]
+fn an_array_iterator_may_be_subclassed_and_array_object_routes_properties_to_offsets() {
+    let src = "final class Coll4 implements \\IteratorAggregate {\n\
+        public function getIterator(): \\ArrayIterator { return new \\ArrayIterator([]); } }\n\
+        final class Sup extends \\ArrayObject { public $p; public function r() { return $this->p; } }\n\
+        final class Ex extends \\RuntimeException { public $p; public function r() { return $this->p; } }";
+    gap(&file(src, "function f(Coll4 $c) { foreach ($c as $v) {} }"), "f", ITERATION);
+    gap(&file(src, ""), "Sup::r", PROPERTY);
+    covered(&file(src, ""), "Ex::r");
+}
+
+#[test]
 fn the_unknown_operand_gap_survives_through_a_caller() {
     let src = file("", "function g($o) { return 'a' . $o; }\nfunction f($o) { return g($o); }");
     assert_eq!(gaps(&src, "g"), [TO_STRING]);

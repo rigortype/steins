@@ -751,6 +751,13 @@ pub struct RegionPurity {
 /// The whole-project fixpoints run **once** for the batch, so a transform run
 /// over a project pays for them once however many loops it enumerates.
 ///
+/// A region that is exactly a `foreach` statement leaves out that loop's own
+/// iteration site (ADR-0099 §4.3's Iterate family; the site carries the
+/// statement's span): the verdict is about the loop body, and the caller must
+/// prove the subject itself, as the loop→`array_map` transform does by requiring
+/// an array (`array_map` raises a `TypeError` on a `Traversable`). A `foreach`
+/// nested in the body, in a closure or not, counts.
+///
 /// A site counts for a region when its span falls inside it, taken over every
 /// effect/throw unit of the region's file — the enclosing function's own sites
 /// plus those of any closure defined inside the region. Counting a closure that

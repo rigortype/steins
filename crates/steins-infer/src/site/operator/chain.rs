@@ -4,11 +4,13 @@
 //!
 //! A chain is **closed** when every ancestor class and trait is something this
 //! analysis can read: a project class-like (one unambiguous declaration, using
-//! no trait, since a trait's body is not lowered against its user) or a class the engine's catalog knows and the project does not
-//! declare. An *interface* the project cannot read does not open a chain: it has
-//! no body to run. The engine's own classes contribute no *project* code to a
-//! property fetch, a clone or a method lookup, so a chain that ends at one is
-//! closed for those questions; the questions where an engine class does run
+//! no trait, since a trait's body is not lowered against its user) or a class
+//! the engine's catalog knows and the project does not declare. An *interface*
+//! the project cannot read does not open a chain: it has no body to run. The
+//! engine's own classes contribute no *project* code to a property fetch, a
+//! clone or a method lookup, so a chain that ends at one is closed for those
+//! questions (`ArrayObject` and `ArrayIterator` excepted: their property access
+//! can be an offset access); the questions where an engine class does run
 //! code (a string conversion, an offset access, an iteration) are the
 //! catalog's is-a verdicts and are asked of [`Cx::supertype_walk`] instead.
 
@@ -139,10 +141,36 @@ fn hooks(cd: &ClassDecl, member: Option<&str>) -> bool {
     }
 }
 
-/// Whether `name` is an engine class: one no project file declares and the
-/// catalog's hierarchy states.
+/// Whether `name` is an engine class a chain may end at: one no project file
+/// declares, the catalog's hierarchy states, and that runs no project code on a
+/// property access. `ArrayObject` and `ArrayIterator` (and what extends them)
+/// do: with `ARRAY_AS_PROPS` a property fetch is an offset access, which is the
+/// user `offset*` of a subclass.
 fn is_engine_class(cx: &Cx, name: &str) -> bool {
-    cx.class_absent(name) && steins_catalog::builtin_class_supers(name).is_some()
+    cx.class_absent(name)
+        && steins_catalog::builtin_class_supers(name).is_some()
+        && !routes_properties_to_offsets(name)
+}
+
+/// Whether the engine class `name` is, or extends, `ArrayObject` or `ArrayIterator`.
+fn routes_properties_to_offsets(name: &str) -> bool {
+    let mut pending = vec![name.to_owned()];
+    let mut seen: HashSet<String> = HashSet::new();
+    while let Some(cur) = pending.pop() {
+        let key = cur.trim_start_matches('\\').to_ascii_lowercase();
+        if key == "arrayobject" || key == "arrayiterator" {
+            return true;
+        }
+        if seen.insert(key) {
+            pending.extend(
+                steins_catalog::builtin_class_supers(&cur)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(str::to_owned),
+            );
+        }
+    }
+    false
 }
 
 /// What a lookup of a magic or interface method on a class finds.
