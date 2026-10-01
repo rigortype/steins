@@ -2289,21 +2289,27 @@ pub(crate) fn resolve_effect_edge(
 }
 
 /// What the constructor a `new` expression runs resolves to (issue #804).
+///
+/// The one answer the effects pass and the throw pass both read (issue #849),
+/// so the two lanes cannot disagree about *which* constructor a `new` runs.
+/// What that constructor does is each lane's own question, asked of its own
+/// catalog row when the constructor is the engine's.
 #[derive(Debug)]
-enum NewTarget {
-    /// A project constructor, declared on the class or inherited: an effect
-    /// edge, exactly as a method call's resolved callee is.
+pub(crate) enum NewTarget {
+    /// A project constructor, declared on the class or inherited: an edge,
+    /// exactly as a method call's resolved callee is.
     Edge(Sym),
     /// No constructor anywhere on a chain the project holds end to end:
     /// nothing runs, so nothing is contributed.
     Absent,
-    /// The chain leaves the project at a global engine class the catalog has a
-    /// `__construct` row for: the class's FQN and that row's labels.
-    Catalog(String, &'static [&'static str]),
-    /// Anything else — a class no file declares and the catalog does not know,
-    /// a trait that may supply the constructor, an abstract one, `static` in a
-    /// class a subclass can extend with its own, `self` with no class in
-    /// scope — marks the body non-exhaustive.
+    /// The chain leaves the project at this global engine class, with no
+    /// project class on the way able to hold a constructor: a lane answers
+    /// from its own `__construct` row for it, and taints without one.
+    Engine(String),
+    /// Anything else — a class no file declares and the engine does not
+    /// either, a trait that may supply the constructor, an abstract one,
+    /// `static` in a class a subclass can extend with its own, `self` with no
+    /// class in scope — marks the body non-exhaustive.
     Unknown,
 }
 
@@ -2314,7 +2320,7 @@ enum NewTarget {
 /// so it resolves only in a final class, or to a final constructor, which no
 /// subclass can replace. In a trait, `self` and `parent` are the using class's,
 /// which the trait body cannot name, so they stay unknown there.
-fn resolve_new(cx: &Cx, enclosing: Option<&str>, class: &StaticClass) -> NewTarget {
+pub(crate) fn resolve_new(cx: &Cx, enclosing: Option<&str>, class: &StaticClass) -> NewTarget {
     let own = || enclosing.filter(|e| !cx.find_class(e).is_some_and(|(_, cd)| cd.is_trait));
     let (start, exact) = match class {
         StaticClass::Named(name) => (cx.class_fqn(name), true),
@@ -2336,10 +2342,8 @@ fn resolve_new(cx: &Cx, enclosing: Option<&str>, class: &StaticClass) -> NewTarg
             NewTarget::Edge(Sym::Method(r.declaring_class.fqn.clone(), r.method.name.clone()))
         }
         Resolution::NotFoundChainComplete if exact => NewTarget::Absent,
-        Resolution::Unknown if exact => match catalog_row(cx, &start, "__construct", true) {
-            Some((fqn, labels)) => NewTarget::Catalog(fqn, labels),
-            None => NewTarget::Unknown,
-        },
+        Resolution::Unknown if exact => engine_exit(cx, &start, "__construct")
+            .map_or(NewTarget::Unknown, NewTarget::Engine),
         _ => NewTarget::Unknown,
     }
 }
@@ -2392,7 +2396,7 @@ fn catalog_row(
 }
 
 /// The findings the catalogued engine method `fqn::method` contributes at
-/// `span` (a constructor's for [`NewTarget::Catalog`]), named `origin` in a
+/// `span` (a constructor's for [`NewTarget::Engine`]), named `origin` in a
 /// `via` provenance and attributed like the class's other catalogued methods.
 fn catalog_findings(
     cx: &Cx,
@@ -2415,7 +2419,7 @@ fn catalog_findings(
 }
 
 /// How a `new` expression's class reads in a finding: `new Clock`, `new static`.
-fn new_origin(class: &StaticClass) -> String {
+pub(crate) fn new_origin(class: &StaticClass) -> String {
     let spelled = match class {
         StaticClass::Named(name) => name.simple(),
         StaticClass::SelfKw => "self",
@@ -2441,11 +2445,14 @@ fn classify_new(
             row.edges.insert(callee);
         }
         NewTarget::Absent => {}
-        NewTarget::Catalog(fqn, labels) => {
-            let origin = new_origin(class);
-            let found = catalog_findings(cx, &fqn, "__construct", labels, &origin, span, policy);
-            row.findings.extend(found);
-        }
+        NewTarget::Engine(fqn) => match steins_catalog::method_effect_labels(&fqn, "__construct") {
+            Some(labels) => {
+                let origin = new_origin(class);
+                let found = catalog_findings(cx, &fqn, "__construct", labels, &origin, span, policy);
+                row.findings.extend(found);
+            }
+            None => row.exhaustive = false,
+        },
         NewTarget::Unknown => row.exhaustive = false,
     }
 }
@@ -2468,7 +2475,11 @@ fn report_new(
         NewTarget::Edge(callee) => {
             emit_transitive(out, cx, &callee, effects, span.start, display, bound);
         }
-        NewTarget::Catalog(fqn, labels) => {
+        NewTarget::Engine(fqn) => {
+            // An engine class without a row is the taint, which reports nothing.
+            let Some(labels) = steins_catalog::method_effect_labels(&fqn, "__construct") else {
+                return;
+            };
             let origin = new_origin(class);
             let found =
                 catalog_findings(cx, &fqn, "__construct", labels, &origin, span, bound.policy);
