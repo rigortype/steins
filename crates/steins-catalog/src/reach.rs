@@ -173,6 +173,7 @@ const OVERRIDES: &[(&str, &[(usize, ArgReach)])] = &[
     ("array_pop", &[(0, Inert)]),
     ("array_push", &[(0, Inert), (1, Inert)]),
     ("array_shift", &[(0, Inert)]),
+    ("shuffle", &[(0, Inert)]),
     ("array_unshift", &[(0, Inert), (1, Inert)]),
     // `array_splice` converts a non-array replacement to an array. Kept at
     // `Object`, the reading that rules out least, although no user code was
@@ -184,6 +185,7 @@ const OVERRIDES: &[(&str, &[(usize, ArgReach)])] = &[
     ("sizeof", &[(0, Object)]),
     // A rendered value: an object runs `__toString`, an array renders as
     // `Array` without its elements being read.
+    ("printf", &[(1, Object)]),
     ("sprintf", &[(1, Object)]),
     ("strval", &[(0, Object)]),
     ("settype", &[(0, Object)]),
@@ -264,6 +266,7 @@ mod tests {
         assert_eq!(at("preg_match", 2), ArgReach::Inert, "an out-parameter is written, not read");
         assert_eq!(at("usort", 0), ArgReach::Inert, "the comparator sees the values");
         assert_eq!(at("ksort", 0), ArgReach::Inert);
+        assert_eq!(at("shuffle", 0), ArgReach::Inert, "a permutation compares nothing");
         assert_eq!(at("sort", 0), ArgReach::Nested);
     }
 
