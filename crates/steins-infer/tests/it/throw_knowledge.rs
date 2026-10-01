@@ -192,6 +192,22 @@ fn an_invokers_own_throw_row_is_read() {
     assert!(throw_gaps(&src).contains(&"no-throw-row"));
 }
 
+#[test]
+fn a_user_stream_wrapper_or_filter_is_a_gap_at_its_registration_not_at_the_io_calls() {
+    // The wrapper's methods run inside later `file_exists`, `fwrite`, … : the body
+    // that registers one carries the gap (ADR-0099 §4.5), and the I/O is audited.
+    for body in [
+        "return stream_wrapper_register('acme', 'Wrapper');",
+        "return stream_filter_register('acme.*', 'Filter');",
+        "return stream_filter_append($h, 'acme.upper');",
+    ] {
+        let gaps = throw_gaps(&file(true, "$h", body));
+        assert!(gaps.contains(&"no-throw-row") && gaps.contains(&"user-code-reach"), "{body}: {gaps:?}");
+    }
+    assert!(throw_gaps(&file(true, "string $p", "return file_exists($p);")).is_empty());
+    assert!(throw_gaps(&file(true, "$h", "return fwrite($h, 'x');")).is_empty());
+}
+
 // ---- One predicate decides what is a builtin (ADR-0099 §3.1) ----------------
 
 #[test]
