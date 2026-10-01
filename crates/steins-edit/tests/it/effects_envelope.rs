@@ -214,6 +214,31 @@ fn all_pure_class_gets_the_class_tag_and_no_method_tags() {
     );
 }
 
+/// A test framework's exception copies its trace in the constructor. The engine
+/// accessors are final and pure (issue #847), so every method is proven pure and
+/// the class earns the tag.
+#[test]
+fn an_exception_that_reads_its_own_trace_gets_the_class_tag() {
+    let lib = concat!(
+        "<?php\n",
+        "class Snapshot extends \\RuntimeException {\n",
+        "    protected array $frames;\n",
+        "    public function __construct(string $message = '') {\n",
+        "        parent::__construct($message);\n",
+        "        $this->frames = $this->getTrace();\n",
+        "    }\n",
+        "    public function frames(): array { return $this->frames; }\n",
+        "    public function describe(): string { return $this->getMessage(); }\n",
+        "}\n",
+    );
+    let report = plan(&[("lib.php", lib)]);
+    assert_oracle_complete(&report);
+    assert_eq!(report.oracle.transformed, 1, "{:#?}", report.refusals);
+    let out = report.plan.apply_file("lib.php", lib);
+    let tagged = "<?php\n/**\n * @phpstan-all-methods-pure\n */\nclass Snapshot extends";
+    assert!(out.starts_with(tagged), "{out}");
+}
+
 /// ADR-0055's constructor-creation exemption (#313) covers exactly the `$this`
 /// writes PHPStan's constructor exclusion covers; every other state construct in
 /// a constructor still withholds the class tag, since PHPStan would reject it.

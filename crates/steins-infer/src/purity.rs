@@ -715,13 +715,12 @@ pub(crate) fn classify_effect_origins(
                     // uncatalogued, undeclared receiver stays the taint it has
                     // always been.
                     //
-                    // The two legs cannot both fire: `builtin_method_findings`
-                    // answers only for `EffectRecv::ClassName` (a catalogued
-                    // external class) and `parent::__construct`,
-                    // `resolve_declared_bound` only for the declared receivers,
-                    // which name no class here.
+                    // The catalog leg goes first. Over a declared receiver it
+                    // answers only for a final engine method (`$e->getMessage()`
+                    // on a `Throwable $e`, issue #847), whose body is the one
+                    // that runs, so an envelope could only restate or loosen it.
                     None => match builtin_method_findings(
-                        cx, class_fqn, receiver, method, *span, policy,
+                        cx, class_fqn, params, receiver, method, *span, policy,
                     ) {
                         Some(fs) => {
                             for f in fs {
@@ -1418,7 +1417,8 @@ pub(crate) fn effect_diagnostics(fx: &Fixpoints<'_>) -> Vec<Diagnostic> {
             else {
                 continue;
             };
-            report_unit(&mut out, &cx, None, &f.name, bound, &f.effect_origins, effects, registry);
+            let origins = &f.effect_origins;
+            report_unit(&mut out, &cx, None, &f.params, &f.name, bound, origins, effects, registry);
         }
         for c in cx.tree().classes() {
             // The class-level tag is one declaration, so its vocabulary is judged
@@ -1463,6 +1463,7 @@ pub(crate) fn effect_diagnostics(fx: &Fixpoints<'_>) -> Vec<Diagnostic> {
                         &mut out,
                         &cx,
                         Some(&c.fqn),
+                        &m.params,
                         &display,
                         bound,
                         &m.effect_origins,
@@ -1703,6 +1704,7 @@ fn report_unit(
     out: &mut Vec<Diagnostic>,
     cx: &Cx,
     class_fqn: Option<&str>,
+    params: &[steins_syntax::Param],
     display: &str,
     bound: OperativeBound<'_>,
     origins: &[EffectOrigin],
@@ -1788,11 +1790,12 @@ fn report_unit(
                     emit_transitive(out, cx, &callee, effects, span.start, display, bound);
                 // There is deliberately no declared-lane leg here: a declared bound
                 // is not a proven effect, and this function only reports proven
-                // ones (ADR-0067 decision 5). An ADR-0067 receiver reaches neither
-                // arm and so reports nothing, which is the whole point.
-                } else if let Some(fs) =
-                    builtin_method_findings(cx, class_fqn, receiver, method, *span, bound.policy)
-                {
+                // ones (ADR-0067 decision 5). An ADR-0067 receiver reaches the
+                // catalog arm only through a final engine method's row (#847),
+                // which is proven, and otherwise reports nothing.
+                } else if let Some(fs) = builtin_method_findings(
+                    cx, class_fqn, params, receiver, method, *span, bound.policy,
+                ) {
                     // A builtin-class catalog row, reported like a builtin call's.
                     for f in fs {
                         if bound.reports(&f) {
@@ -2333,7 +2336,7 @@ fn resolve_new(cx: &Cx, enclosing: Option<&str>, class: &StaticClass) -> NewTarg
             NewTarget::Edge(Sym::Method(r.declaring_class.fqn.clone(), r.method.name.clone()))
         }
         Resolution::NotFoundChainComplete if exact => NewTarget::Absent,
-        Resolution::Unknown if exact => match catalog_constructor(cx, &start) {
+        Resolution::Unknown if exact => match catalog_row(cx, &start, "__construct", true) {
             Some((fqn, labels)) => NewTarget::Catalog(fqn, labels),
             None => NewTarget::Unknown,
         },
@@ -2341,12 +2344,13 @@ fn resolve_new(cx: &Cx, enclosing: Option<&str>, class: &StaticClass) -> NewTarg
     }
 }
 
-/// The catalog's `__construct` row for the engine class `start`'s chain leaves
-/// the project at, when no project class on the way can hold the constructor:
-/// none declares one, and none uses a trait that could supply it. The exit
-/// class must be absent from the project and global, the gates
-/// [`builtin_method_findings`] holds a catalogued method to, for its reasons.
-fn catalog_constructor(cx: &Cx, start: &str) -> Option<(String, &'static [&'static str])> {
+/// The engine class `start`'s chain leaves the project at, when no project
+/// class on the way can hold `method`: none declares it, and none uses a trait
+/// that could supply it. The exit class must be absent from the project and
+/// global, the gates [`builtin_method_findings`] holds a catalogued method to,
+/// for its reasons. `start` itself is the exit when no project file declares
+/// it.
+fn engine_exit(cx: &Cx, start: &str, method: &str) -> Option<String> {
     let mut cur = start.to_owned();
     let mut seen: HashSet<String> = HashSet::new();
     loop {
@@ -2354,30 +2358,53 @@ fn catalog_constructor(cx: &Cx, start: &str) -> Option<(String, &'static [&'stat
             return None;
         }
         let Some((file, cd)) = cx.find_class(&cur) else { break };
-        if cd.uses_traits || cd.methods.iter().any(|m| m.name.eq_ignore_ascii_case("__construct")) {
+        if cd.uses_traits || cd.methods.iter().any(|m| m.name.eq_ignore_ascii_case(method)) {
             return None;
         }
         cur = cx.units[file].tree.resolve_class_fqn(cd.parent.as_ref()?);
     }
-    if cur.contains('\\') || !cx.class_absent(&cur) {
-        return None;
-    }
-    steins_catalog::method_effect_labels(&cur, "__construct").map(|labels| (cur, labels))
+    (!cur.contains('\\') && cx.class_absent(&cur)).then_some(cur)
 }
 
-/// The findings a catalogued engine constructor contributes at `span`
-/// ([`NewTarget::Catalog`]), named `origin` in a `via` provenance and
-/// attributed like the class's other catalogued methods.
-fn constructor_findings(
+/// The catalog row a call of `method` on `start`'s chain answers from, when the
+/// chain leaves the project at an engine class ([`engine_exit`]): that class's
+/// FQN and the row's labels.
+///
+/// `exact` says whether the receiver names its runtime class exactly (`new
+/// Foo`, `Foo::`, `parent::`). One that names only a bound (`$this`, `self::`,
+/// a declared receiver) may be a subclass declared anywhere, so it reaches only
+/// a row no subclass can override ([`steins_catalog::final_method_effect_labels`],
+/// issue #847). PHP refuses a subclass that redeclares a final method, so
+/// whatever the walk passes on the way, the engine's body is the one that runs.
+fn catalog_row(
+    cx: &Cx,
+    start: &str,
+    method: &str,
+    exact: bool,
+) -> Option<(String, &'static [&'static str])> {
+    let fqn = engine_exit(cx, start, method)?;
+    let labels = if exact {
+        steins_catalog::method_effect_labels(&fqn, method)
+    } else {
+        steins_catalog::final_method_effect_labels(&fqn, method)
+    }?;
+    Some((fqn, labels))
+}
+
+/// The findings the catalogued engine method `fqn::method` contributes at
+/// `span` (a constructor's for [`NewTarget::Catalog`]), named `origin` in a
+/// `via` provenance and attributed like the class's other catalogued methods.
+fn catalog_findings(
     cx: &Cx,
     fqn: &str,
+    method: &str,
     labels: &[&str],
     origin: &str,
     span: Span,
     policy: &EffectsPolicy,
 ) -> Vec<EffectFinding> {
     let line = cx.tree().position(span.start).line;
-    let attributed = policy.method_attribution(fqn, "__construct");
+    let attributed = policy.method_attribution(fqn, method);
     labels
         .iter()
         .map(|label| {
@@ -2416,7 +2443,8 @@ fn classify_new(
         NewTarget::Absent => {}
         NewTarget::Catalog(fqn, labels) => {
             let origin = new_origin(class);
-            row.findings.extend(constructor_findings(cx, &fqn, labels, &origin, span, policy));
+            let found = catalog_findings(cx, &fqn, "__construct", labels, &origin, span, policy);
+            row.findings.extend(found);
         }
         NewTarget::Unknown => row.exhaustive = false,
     }
@@ -2442,7 +2470,9 @@ fn report_new(
         }
         NewTarget::Catalog(fqn, labels) => {
             let origin = new_origin(class);
-            for f in constructor_findings(cx, &fqn, labels, &origin, span, bound.policy) {
+            let found =
+                catalog_findings(cx, &fqn, "__construct", labels, &origin, span, bound.policy);
+            for f in found {
                 if bound.reports(&f) {
                     let prefix = format!("{origin} has effect {}", f.label);
                     out.push(exceeded_diag(cx, span.start, &prefix, display, bound, &f.label));
@@ -2463,64 +2493,57 @@ fn report_new(
 /// Three gates stand between a method call and a row, and each one is the
 /// FP-safe side of a question the analyzer cannot otherwise answer:
 ///
-/// * the receiver must be a **named class** (`new PDO(...)->query()`,
-///   `PDO::…`) — `$this`/`self`/`parent` are the project's own world, and a
-///   `$pdo->query()` variable receiver names no class to look up (it is either an
-///   [`EffectOrigin::Opaque`] or an ADR-0067 declared receiver, and both taint
-///   here);
-/// * the name must resolve to a class the project **does not define**
-///   ([`Cx::class_absent`]) — a project `PDO` shadows the catalog, because its
-///   body is the truth and [`resolve_effect_edge`] already drew that edge;
-/// * the resolved FQN must be **global** — the engine's classes are unnamespaced,
+/// * the receiver must **name a class**: `new PDO(...)->query()`, `PDO::…` and
+///   `parent::…` name one exactly; `$this` and `self::` name the enclosing
+///   class, and an ADR-0067 declared receiver the one class its native type
+///   names, each only as a bound a subclass may stand in for. A `$pdo->query()`
+///   on a variable the frame writes names no class (an [`EffectOrigin::Opaque`]);
+/// * the class's chain must **leave the project** at the class the row is keyed
+///   by, with no project class on the way declaring the method or using a trait
+///   that could ([`engine_exit`]). A project `PDO` shadows the catalog, because
+///   its body is the truth and [`resolve_effect_edge`] already drew that edge;
+/// * the exit FQN must be **global** — the engine's classes are unnamespaced,
 ///   so an unimported `PDO` inside `namespace App;` is `App\PDO`, some class of
 ///   the user's that Steins simply has not indexed, and coloring it `io.db` would
 ///   be the guess this analyzer does not make.
 ///
-/// One `parent::` call reaches the catalog too: `parent::__construct(...)` in a
-/// class whose chain leaves the project at an engine class runs that class's
-/// constructor, the one `new` would (issue #804), under the same gates.
+/// A bound receiver reaches only a row whose method the engine declares final
+/// ([`catalog_row`], issue #847): `$this->getTrace()` in a project exception's
+/// constructor runs `Exception::getTrace` whatever subclass `$this` is.
+/// `parent::__construct(...)` into an engine class runs the constructor `new`
+/// would (issue #804).
+///
+/// A catalogued external class is attributable the same way a builtin function
+/// is, and by the same argument: the call site is where the effect is produced.
 fn builtin_method_findings(
     cx: &Cx,
     enclosing: Option<&str>,
+    params: &[steins_syntax::Param],
     receiver: &EffectRecv,
     method: &str,
     span: steins_syntax::Span,
     policy: &EffectsPolicy,
 ) -> Option<Vec<EffectFinding>> {
-    if matches!(receiver, EffectRecv::Parent) && method.eq_ignore_ascii_case("__construct") {
-        let NewTarget::Catalog(fqn, labels) = resolve_new(cx, enclosing, &StaticClass::Parent)
-        else {
-            return None;
-        };
-        let origin = "parent::__construct";
-        return Some(constructor_findings(cx, &fqn, labels, origin, span, policy));
-    }
-    let EffectRecv::ClassName(name) = receiver else { return None };
-    let fqn = cx.class_fqn(name);
-    if fqn.contains('\\') || !cx.class_absent(&fqn) {
-        return None;
-    }
-    let labels = steins_catalog::method_effect_labels(&fqn, method)?;
-    // The source spelling, as the function rows use `name.simple()`.
-    let origin = format!("{}::{}", name.simple(), method);
-    let line = cx.tree().position(span.start).line;
-    // A catalogued external class is attributable the same way a builtin function
-    // is, and by the same argument: the call site is where the effect is produced.
-    let attributed = policy.method_attribution(&fqn, method);
-    Some(
-        labels
-            .iter()
-            .map(|label| {
-                EffectFinding::direct(
-                    (*label).to_owned(),
-                    origin.clone(),
-                    line,
-                    cx.path().to_owned(),
-                )
-                .attributed_by(&attributed)
-            })
-            .collect(),
-    )
+    // The class the chain starts at, whether the receiver names it exactly, and
+    // the source spelling a finding names the call by.
+    let (start, exact, origin) = match receiver {
+        EffectRecv::ClassName(name) => {
+            (cx.class_fqn(name), true, format!("{}::{method}", name.simple()))
+        }
+        EffectRecv::Parent => (cx.parent_fqn(enclosing?)?, true, format!("parent::{method}")),
+        EffectRecv::This => (enclosing?.to_owned(), false, format!("$this->{method}")),
+        EffectRecv::SelfKw => (enclosing?.to_owned(), false, format!("self::{method}")),
+        EffectRecv::Var(var) => {
+            let fqn = declared_receiver_fqn(cx, enclosing, params, receiver)?;
+            (fqn, false, format!("${var}->{method}"))
+        }
+        EffectRecv::PropRead(prop) => {
+            let fqn = declared_receiver_fqn(cx, enclosing, params, receiver)?;
+            (fqn, false, format!("$this->{prop}->{method}"))
+        }
+    };
+    let (fqn, labels) = catalog_row(cx, &start, method, exact)?;
+    Some(catalog_findings(cx, &fqn, method, labels, &origin, span, policy))
 }
 
 /// Which **trust stratum** a declared bound was written in — the one thing a call
@@ -2562,6 +2585,28 @@ fn resolve_declared_bound(
     receiver: &EffectRecv,
     method: &str,
 ) -> Option<DeclaredBound> {
+    let fqn = declared_receiver_fqn(cx, enclosing, params, receiver)?;
+    let (file, decl) = cx.find_class(&fqn)?;
+    if !decl.is_interface {
+        return None;
+    }
+    // The checked stratum beats the unchecked one (ADR-0082 §1): the attribute
+    // walk runs first and unchanged, and the docblock walk is consulted only when
+    // it came back empty — so an interop tag never preempts an attribute
+    // envelope, neither on the same declaration nor anywhere up the hierarchy.
+    nearest_interface_envelope(cx, file, decl, method).map(DeclaredBound::Checked).or_else(|| {
+        nearest_interop_envelope(cx, registry, file, decl, method).map(DeclaredBound::Interop)
+    })
+}
+
+/// The one class or interface an ADR-0067 declared receiver's native type
+/// names ([`sole_object_fqn`]), or `None` for any other receiver or type.
+fn declared_receiver_fqn(
+    cx: &Cx,
+    enclosing: Option<&str>,
+    params: &[steins_syntax::Param],
+    receiver: &EffectRecv,
+) -> Option<String> {
     let ty = match receiver {
         // `f(Repo $r) { $r->find(); }` — the parameter's own declared type. The
         // syntax gate already proved this frame never writes `$r`, so the binding
@@ -2576,18 +2621,7 @@ fn resolve_declared_bound(
             return None;
         }
     };
-    let fqn = sole_object_fqn(ty)?;
-    let (file, decl) = cx.find_class(&fqn)?;
-    if !decl.is_interface {
-        return None;
-    }
-    // The checked stratum beats the unchecked one (ADR-0082 §1): the attribute
-    // walk runs first and unchanged, and the docblock walk is consulted only when
-    // it came back empty — so an interop tag never preempts an attribute
-    // envelope, neither on the same declaration nor anywhere up the hierarchy.
-    nearest_interface_envelope(cx, file, decl, method).map(DeclaredBound::Checked).or_else(|| {
-        nearest_interop_envelope(cx, registry, file, decl, method).map(DeclaredBound::Interop)
-    })
+    sole_object_fqn(ty)
 }
 
 /// The FQN of a declared type that names **exactly one** object type, or `None`

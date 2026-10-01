@@ -161,6 +161,7 @@ mod string_context;
 mod sweep_carriage;
 mod ternary_value;
 mod this_exactness;
+mod throwable_accessors;
 mod throws;
 mod tolerated_effects;
 mod top_level_rebind;
