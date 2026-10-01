@@ -554,6 +554,12 @@ fn scheme_of(target: &str) -> Option<&str> {
 /// constructor only stores its arguments, and so does each constructor of the
 /// catalogued-pure containers here; `stdClass` has none. Any other engine
 /// class stays uncatalogued.
+///
+/// The `Throwable` accessors (`getMessage`, `getCode`, `getFile`, `getLine`,
+/// `getPrevious`, `getTrace`, `getTraceAsString`, issue #847) read what the
+/// constructor stored, so they are pure on every engine `Throwable`. They are
+/// also final, which lets a call through a project subclass reach the row
+/// ([`final_method_effect_labels`]).
 #[must_use]
 pub fn method_effect_labels(class: &str, method: &str) -> Option<&'static [&'static str]> {
     const EMPTY: &[&str] = &[];
@@ -571,8 +577,33 @@ pub fn method_effect_labels(class: &str, method: &str) -> Option<&'static [&'sta
             "__construct",
         ) => Some(EMPTY),
         (_, "__construct") if is_builtin_throwable(class) => Some(EMPTY),
+        (_, m) if THROWABLE_ACCESSORS.contains(&m) && is_builtin_throwable(class) => Some(EMPTY),
         _ => None,
     }
+}
+
+/// The `Throwable` accessors, lowercased (issue #847). Each is `final` on
+/// `Exception` and on `Error`. `__toString` is not, and a subclass may
+/// override it, so it is not here and has no row.
+const THROWABLE_ACCESSORS: [&str; 7] =
+    ["getmessage", "getcode", "getfile", "getline", "getprevious", "gettrace", "gettraceasstring"];
+
+/// [`method_effect_labels`] for a receiver that names only a **bound** on its
+/// runtime class, such as `$this` or a parameter declared `Throwable`, where a
+/// subclass the catalog never saw may stand in (issue #847). A row answers
+/// here only when no subclass can replace the method, because the engine
+/// declares it `final` and every subclass, a project one included, runs the
+/// engine's body. `None` for any other method, with or without a row.
+///
+/// The members are the `Throwable` accessors [`method_effect_labels`] lists,
+/// on every engine `Throwable`. `__toString` is not final, so it is not one.
+/// The interface counts as well: PHP refuses a class that implements
+/// `Throwable` without extending `Exception` or `Error`, and the mined
+/// hierarchy has no engine class that does either.
+#[must_use]
+pub fn final_method_effect_labels(class: &str, method: &str) -> Option<&'static [&'static str]> {
+    let accessor = THROWABLE_ACCESSORS.contains(&method.to_ascii_lowercase().as_str());
+    if accessor && is_builtin_throwable(class) { method_effect_labels(class, method) } else { None }
 }
 
 /// Whether `class` is a global engine class whose ancestry in the mined
@@ -1594,7 +1625,7 @@ mod tests {
         );
     }
 
-    use super::method_effect_labels;
+    use super::{final_method_effect_labels, method_effect_labels};
 
     #[test]
     fn pdo_methods_are_colored_io_db() {
@@ -1641,7 +1672,44 @@ mod tests {
         assert_eq!(method_effect_labels("DateTimeZone", "__construct"), None);
         assert_eq!(method_effect_labels("SplFileObject", "__construct"), None);
         // A constructor row says nothing about the class's other methods.
-        assert_eq!(method_effect_labels("Exception", "getMessage"), None);
+        assert_eq!(method_effect_labels("ArrayObject", "getIterator"), None);
+    }
+
+    #[test]
+    fn the_throwable_accessors_are_pure_on_every_engine_throwable() {
+        let accessors = [
+            "getMessage",
+            "getCode",
+            "getFile",
+            "getLine",
+            "getPrevious",
+            "getTrace",
+            "getTraceAsString",
+        ];
+        let engine = ["Exception", "Error", "RuntimeException", "TypeError", "Throwable"];
+        for class in engine {
+            for method in accessors {
+                let row = Some(&[][..]);
+                assert_eq!(method_effect_labels(class, method), row, "{class}::{method}");
+                assert_eq!(final_method_effect_labels(class, method), row, "{class}::{method}");
+            }
+        }
+        assert_eq!(method_effect_labels("exception", "GETMESSAGE"), Some(&[][..]));
+        // `__toString` is not final, and a subclass may override it.
+        assert_eq!(method_effect_labels("Exception", "__toString"), None);
+        // A user class, and an engine class outside `Throwable`, stay uncatalogued.
+        assert_eq!(method_effect_labels("App\\Oops", "getMessage"), None);
+        assert_eq!(method_effect_labels("ArrayObject", "getMessage"), None);
+    }
+
+    #[test]
+    fn only_a_final_engine_method_answers_for_a_subclass() {
+        // Rows a subclass can override answer only for the exact class.
+        assert_eq!(final_method_effect_labels("PDO", "query"), None);
+        assert_eq!(final_method_effect_labels("DateTime", "__construct"), None);
+        assert_eq!(final_method_effect_labels("Exception", "__construct"), None);
+        assert_eq!(final_method_effect_labels("Exception", "__toString"), None);
+        assert_eq!(final_method_effect_labels("Foo", "getMessage"), None);
     }
 
     #[test]

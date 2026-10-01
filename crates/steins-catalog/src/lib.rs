@@ -120,6 +120,7 @@ pub use effects::{
     callables_in_array_param,
     callback_carriers,
     effect_labels,
+    final_method_effect_labels,
     method_effect_labels,
     narrowed_output_labels,
     narrowed_stream_labels,
