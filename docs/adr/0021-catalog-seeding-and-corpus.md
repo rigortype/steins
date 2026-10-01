@@ -344,7 +344,7 @@ Holes this rule does not close, recorded for follow-up:
   values render through `%s` (about 7% of its failing sites would pass), and
   `in_array(…, true)` compares strictly; neither is read yet.
 
-## Amendment (2026-10-02): the call-site rule holds at every site — PENDING ratification
+## Amendment (2026-10-02): the call-site rule holds at every site — ratified 2026-10-02
 
 ADR-0099 (issue #865) takes the holes the second amendment of 2026-10-01
 recorded. The call-site rule of that amendment's §3 holds at every site kind,

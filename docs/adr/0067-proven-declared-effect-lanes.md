@@ -93,7 +93,7 @@ they waste the contract.
   to avoid. If phpdoc bounds are ever consumed, they enter the declared
   lane tagged by stratum, not a new lane.
 
-## Amendment (2026-10-02): one receiver for both lanes — PENDING ratification
+## Amendment (2026-10-02): one receiver for both lanes — ratified 2026-10-02
 
 ADR-0099 (issue #862). The throw lane lowered `$this->repo->m()` and a typed
 local's method call as a bare taint while the effect lane resolved them as
