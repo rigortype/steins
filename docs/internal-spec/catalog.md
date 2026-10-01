@@ -175,7 +175,36 @@ pseudo-constant configuration, which is not implemented.
 
 Maps a builtin to its effect labels, or `None` for uncatalogued (which widens to
 unknown-effect: exhaustiveness taint, no finding). A coloured entry wins;
-otherwise a foldable builtin is catalogued with the **empty** effect set.
+otherwise a builtin is catalogued with the **empty** effect set when it is
+foldable or **certified pure** (issue #851, ADR-0021's 2026-10-01 amendment).
+
+Purity is a precondition of folding, not its definition, so the certified list
+sits beside the coloured rows rather than on the allowlist. A name is certified
+when php-src at `PINNED_PHP` shows that, for every argument its parameter types
+accept, it runs no userland (no callback, no `string` parameter whose coercion
+runs `__toString`, no loose comparison or string cast of an argument, no
+autoload, no lazy-object initialization), takes no reference, reads only its
+arguments, performs no I/O, and throws only the `TypeError` its types state.
+An `E_WARNING` or `E_DEPRECATED` on bad input does not disqualify a name; the
+error handler's effects belong to its registration. Two families are
+certified:
+
+- the type questions `is_string`, `is_int`/`is_integer`/`is_long`,
+  `is_float`/`is_double`, `is_bool`, `is_array`, `is_null`, `is_object`,
+  `is_scalar`, `is_numeric`, `is_iterable`, `is_countable`, `is_resource` and
+  `get_debug_type`;
+- the array readers `array_first`, `array_last`, `array_key_first`,
+  `array_key_last`, `array_values`, `array_flip`, `array_reverse`,
+  `array_slice`, `array_key_exists`/`key_exists` and `array_is_list`.
+
+`array_keys` is certified only at one positional argument
+(`pure_at_arity(name, positional)`): its search form compares loosely, which
+runs an object's `__toString`, so its argument-blind row stays `None` and the
+effects pass reads the call's arity. `current`, `key`, `get_class`,
+`is_callable`, `is_a`, the `*_exists` questions, `array_search`,
+`array_combine` and the string family stay out, each for a reason the
+amendment records. A certified name is also "known" to every pass that asks the
+catalog whether a name is a builtin, and the throws pass reads it as throwless.
 
 Coverage is frequency-seeded (`docs/notes/20260722-builtin-frequency.md`) plus
 the gaps identified in `docs/research/phpsrc-mining/effects_gaps.md`:

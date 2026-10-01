@@ -4,6 +4,10 @@
 > ambient channel under `io` (`io.output` and its ob-capturability split),
 > and `io.input` joins it.
 >
+> Amended by ADR-0021's 2026-10-01 amendment: the folding gate below needs a
+> name to be pure, but a pure name need not fold. A builtin can be catalogued
+> pure from a certified list without joining the allowlist.
+>
 > Amended by ADR-0018: the labels below are now the roots of a hierarchical
 > label taxonomy (`io` ⊃ `io.fs.read`/`io.net.http`/…, `nondet` ⊃
 > `nondet.random`/`nondet.time`; `global-read`/`global-write` spelled
