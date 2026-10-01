@@ -257,7 +257,7 @@ throwless default.
 | one site scan | #862 | byte-identical |
 | one resolver, coverage gaps | #863 | byte-identical (no surface shows the kinds yet) |
 | one knowledge, one default | #864 | throw lane: some bodies become exhaustive (`array_keys` once audited), about 206 become `…?` directly (reach, `eval`/`include`), plus the audit's unevidenced names; the baseline format moves |
-| engine methods and constructors | #858 | not yet measured; a `sprintf` value is an unproven shape, so `new \RuntimeException(sprintf(…))` in a coercive file gains a gap |
+| engine methods and constructors | #858 | measured: 4 bodies become `…?` in the effect lane and 5 in the throw lane, none completed; one `effects-envelope` tag is withdrawn. A `sprintf` value is an unproven shape, so `new \RuntimeException(sprintf(…))` in a coercive file gains a gap: that is 3 of the 4 |
 | operator sites | #859 | about 340 of 6,606 exhaustive bodies become `…?` directly, before operand proofs (concatenation 134, non-`$this` property access 90, `foreach` 75, interpolation 47, cast 17, loose equality 17, `echo` 7, `unset` 4, `clone` 3); callers inheriting them come on top |
 
 Each slice's pull request records its measured diff, classified. The corpus
