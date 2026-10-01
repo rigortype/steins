@@ -132,6 +132,14 @@ pub use effects::{
     variadic_tail_is_data,
 };
 
+mod knowledge;
+pub use knowledge::{
+    FlagGatedThrow,
+    flag_gated_throw,
+    knows,
+    throws_of,
+};
+
 mod reach;
 pub use reach::{
     ArgReach,
