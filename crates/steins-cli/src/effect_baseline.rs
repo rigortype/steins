@@ -10,8 +10,9 @@
 //! **Format:** one JSON object, a `version` field, then a `functions` array
 //! sorted by `(file, symbol)` for diff stability. Each entry carries sorted
 //! `proven` labels, sorted `declared` bounds (normalized: a bound `proven`
-//! already subsumes is not stored, as it is not rendered), and `exhaustive`.
-//! `file` is relative to the baseline file's directory, forward slashes;
+//! already subsumes is not stored, as it is not rendered), and `exhaustive`,
+//! then the throw lane's `throws_exhaustive` and the kinds of coverage gap behind
+//! each lane's `…?` (`gaps`, `throws_gaps`, ADR-0099 §5). `file` is relative to the baseline file's directory, forward slashes;
 //! `symbol` is namespace-qualified (`App\Checkout::confirm`).
 //!
 //! **Comparison universe:** only a function present on **both** sides is
@@ -29,7 +30,10 @@
 //!   *materialization*: one event, not a removal plus an addition.
 //! * Declared-lane additions/removals are bound changes and say so.
 //! * Exhaustiveness transitions are their own category, never folded into a
-//!   label event.
+//!   label event. Every transition names the gap kinds behind it: the current
+//!   summary's when it narrowed, the baseline's when it completed. The entry
+//!   also stores the throw lane's exhaustiveness and gap kinds, which this
+//!   report does not compare.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -41,7 +45,12 @@ pub const DEFAULT_FILE: &str = "steins-effects-baseline.json";
 
 /// The on-disk format version. Bumped when the entry shape changes; a file whose
 /// version this build does not know is refused rather than misread.
-pub const VERSION: u32 = 1;
+///
+/// Version 2 added the throw lane's `throws_exhaustive` and the kinds of coverage
+/// gap behind both lanes' `…?` (`gaps`, `throws_gaps`, ADR-0099 §5), so a coverage
+/// event can name its cause. A version-1 file is refused like any other unknown
+/// one: re-capture it with `--set-baseline`.
+pub const VERSION: u32 = 2;
 
 /// One captured function summary. Field order is the on-disk key order.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,6 +64,14 @@ pub struct Entry {
     /// Sorted declared labels — bounds, already normalized against `proven`.
     pub declared: Vec<String>,
     pub exhaustive: bool,
+    /// Sorted-by-codec-order kinds of gap behind `exhaustive == false`; empty
+    /// exactly when `exhaustive`.
+    pub gaps: Vec<String>,
+    /// Whether the function's inferred throw set is exhaustive.
+    pub throws_exhaustive: bool,
+    /// The kinds of gap behind `throws_exhaustive == false`; empty exactly when
+    /// `throws_exhaustive`.
+    pub throws_gaps: Vec<String>,
 }
 
 /// The whole file: a version and the sorted entries.
@@ -148,6 +165,10 @@ pub struct Event {
     pub category: Category,
     /// The label the event is about; `None` for an exhaustiveness transition.
     pub label: Option<String>,
+    /// The cause of an exhaustiveness transition: the gap kinds the current
+    /// summary has (narrowed) or the baseline had (completed). Empty for every
+    /// other category.
+    pub gaps: Vec<String>,
 }
 
 impl Event {
@@ -164,12 +185,23 @@ impl Event {
             }
             Category::DeclaredAdded => format!("+ ≤{label} (declared)"),
             Category::DeclaredRemoved => format!("- ≤{label} (declared)"),
-            Category::CoverageNarrowed => "coverage narrowed (exhaustive → non-exhaustive)".to_owned(),
+            Category::CoverageNarrowed => {
+                self.coverage_line("coverage narrowed", "exhaustive → non-exhaustive", "now")
+            }
             Category::CoverageCompleted => {
-                "coverage completed (non-exhaustive → exhaustive)".to_owned()
+                self.coverage_line("coverage completed", "non-exhaustive → exhaustive", "was")
             }
         };
         format!("{} {}: {body}", self.file, self.symbol)
+    }
+
+    /// An exhaustiveness transition's text, with its cause: the gap kinds the
+    /// current summary `now` has, or the baseline `was` carrying.
+    fn coverage_line(&self, what: &str, transition: &str, which: &str) -> String {
+        if self.gaps.is_empty() {
+            return format!("{what} ({transition})");
+        }
+        format!("{what} ({transition}; {which} {})", self.gaps.join(", "))
     }
 }
 
@@ -247,6 +279,7 @@ fn compare_one(b: &Entry, c: &Entry) -> Vec<Event> {
         symbol: c.symbol.clone(),
         category,
         label: Some(label.to_owned()),
+        gaps: Vec::new(),
     };
 
     let mut events: Vec<Event> = Vec::new();
@@ -272,14 +305,18 @@ fn compare_one(b: &Entry, c: &Entry) -> Vec<Event> {
             events.push(emit(Category::DeclaredRemoved, l));
         }
     }
+    let coverage = |category, gaps: &[String]| Event {
+        file: c.file.clone(),
+        symbol: c.symbol.clone(),
+        category,
+        label: None,
+        gaps: gaps.to_vec(),
+    };
     if b.exhaustive != c.exhaustive {
-        let category =
-            if c.exhaustive { Category::CoverageCompleted } else { Category::CoverageNarrowed };
-        events.push(Event {
-            file: c.file.clone(),
-            symbol: c.symbol.clone(),
-            category,
-            label: None,
+        events.push(if c.exhaustive {
+            coverage(Category::CoverageCompleted, &b.gaps)
+        } else {
+            coverage(Category::CoverageNarrowed, &c.gaps)
         });
     }
     events
@@ -307,6 +344,9 @@ mod tests {
             proven: proven.iter().map(|s| (*s).to_owned()).collect(),
             declared: declared.iter().map(|s| (*s).to_owned()).collect(),
             exhaustive,
+            gaps: if exhaustive { Vec::new() } else { vec!["unknown-function".to_owned()] },
+            throws_exhaustive: true,
+            throws_gaps: Vec::new(),
         }
     }
 
@@ -381,15 +421,64 @@ mod tests {
     fn the_file_round_trips() {
         let text = render(vec![entry("f", &["io.db"], &["io.output"], false)]);
         let doc = parse(&text).expect("readable");
-        assert_eq!(doc.version, 1);
+        assert_eq!(doc.version, 2);
         assert_eq!(doc.functions.len(), 1);
         assert_eq!(doc.functions[0].declared, vec!["io.output"]);
-        assert!(text.contains("\"steins-effects-baseline\": 1"));
+        assert_eq!(doc.functions[0].gaps, vec!["unknown-function"]);
+        assert!(text.contains("\"steins-effects-baseline\": 2"));
     }
 
     #[test]
     fn an_unknown_version_is_refused() {
         let text = r#"{"steins-effects-baseline": 99, "functions": []}"#;
         assert!(parse(text).unwrap_err().contains("not readable"));
+    }
+
+    /// A version-1 file has no gap kinds to compare, so it is refused like any
+    /// other version this build does not read, and the message says how to move on.
+    #[test]
+    fn a_version_one_baseline_is_refused() {
+        let text = r#"{"steins-effects-baseline": 1, "functions": []}"#;
+        let err = parse(text).unwrap_err();
+        assert!(err.contains("version 1 is not readable") && err.contains("expected 2"), "{err}");
+    }
+
+    #[test]
+    fn a_coverage_event_names_its_cause_in_either_direction() {
+        let mut open = entry("f", &[], &[], false);
+        open.gaps = vec!["no-effect-row".to_owned(), "user-code-reach".to_owned()];
+        let closed = entry("f", &[], &[], true);
+
+        let narrowed = diff(std::slice::from_ref(&closed), std::slice::from_ref(&open));
+        assert_eq!(narrowed.events.len(), 1);
+        assert_eq!(narrowed.events[0].category, Category::CoverageNarrowed);
+        assert_eq!(
+            narrowed.events[0].line(),
+            "a.php f: coverage narrowed (exhaustive → non-exhaustive; now no-effect-row, user-code-reach)"
+        );
+
+        // A completion names what the baseline was missing.
+        let completed = diff(&[open], &[closed]);
+        assert_eq!(completed.events[0].category, Category::CoverageCompleted);
+        assert_eq!(
+            completed.events[0].line(),
+            "a.php f: coverage completed (non-exhaustive → exhaustive; was no-effect-row, user-code-reach)"
+        );
+    }
+
+    /// The throw lane's data rides the entry but is not compared: this report is
+    /// the effect baseline's, and its events stay the effect lane's.
+    #[test]
+    fn the_throw_lane_is_stored_and_not_compared() {
+        let closed = entry("f", &[], &[], true);
+        let mut open = closed.clone();
+        open.throws_exhaustive = false;
+        open.throws_gaps = vec!["no-throw-row".to_owned()];
+        assert!(diff(std::slice::from_ref(&closed), std::slice::from_ref(&open)).events.is_empty());
+
+        let text = render(vec![open]);
+        let doc = parse(&text).expect("readable");
+        assert!(!doc.functions[0].throws_exhaustive);
+        assert_eq!(doc.functions[0].throws_gaps, vec!["no-throw-row"]);
     }
 }

@@ -108,7 +108,6 @@ pub(crate) enum GapKind {
 
 impl GapKind {
     /// Every kind, in the order the facts payload's codec numbers them.
-    #[cfg(test)]
     pub(crate) const ALL: [Self; 14] = [
         Self::DynamicCallee,
         Self::UnknownClass,
@@ -125,6 +124,62 @@ impl GapKind {
         Self::NoThrowRow,
         Self::ArgumentList,
     ];
+
+    /// The kind's spelling on the surfaces that name it (`annotate --format
+    /// json`, the effect baseline, `effect-diff`): kebab-case. Unlike the codec
+    /// number, a spelling is the kind's public name and does not move.
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::DynamicCallee => "dynamic-callee",
+            Self::UnknownClass => "unknown-class",
+            Self::UnknownFunction => "unknown-function",
+            Self::OpenMethod => "open-method",
+            Self::DeclaredReceiver => "declared-receiver",
+            Self::InteropEnvelope => "interop-envelope",
+            Self::UnresolvedCallback => "unresolved-callback",
+            Self::UnseenCode => "unseen-code",
+            Self::UserCodeReach => "user-code-reach",
+            Self::StateConstruct => "state-construct",
+            Self::UnresolvedThrow => "unresolved-throw",
+            Self::NoEffectRow => "no-effect-row",
+            Self::NoThrowRow => "no-throw-row",
+            Self::ArgumentList => "argument-list",
+        }
+    }
+}
+
+/// A set of [`GapKind`]s as a bit mask: what a propagated row carries, where the
+/// fixpoint joins a callee's set into every caller's. Bit `n` is the kind the
+/// codec numbers `n`, so a kind appended to [`GapKind`] takes the next bit.
+///
+/// A propagated set is empty exactly when the row is exhaustive, so the mask
+/// names every cause of a `…?` a body inherits as well as the ones it makes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct GapMask(u32);
+
+impl GapMask {
+    /// The mask of an own row's kinds.
+    pub(crate) fn of(kinds: &BTreeSet<GapKind>) -> Self {
+        Self(kinds.iter().fold(0, |mask, &kind| mask | 1 << kind as u32))
+    }
+
+    /// Whether no kind is in the set: the exhaustive reading.
+    pub(crate) const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    pub(crate) const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    /// The kinds in the set, in codec order, spelled for a surface.
+    pub(crate) fn names(self) -> Vec<&'static str> {
+        GapKind::ALL
+            .into_iter()
+            .filter(|&kind| self.0 & 1 << kind as u32 != 0)
+            .map(GapKind::as_str)
+            .collect()
+    }
 }
 
 /// What a lane knows, and so how [`resolve_site`] reads a site for it
@@ -293,6 +348,22 @@ mod tests {
         // `ALL` lists every variant: the one after the last does not decode.
         let past = [u8::try_from(GapKind::ALL.len()).unwrap()];
         assert!(steins_db::wire::from_slice::<GapKind>(&past).is_err(), "ALL misses a variant");
+    }
+
+    /// A mask holds exactly the kinds it was built from, spelled in codec order,
+    /// and every kind has its own distinct public spelling.
+    #[test]
+    fn a_mask_names_its_kinds_in_codec_order() {
+        use super::GapMask;
+        let kinds: BTreeSet<GapKind> = [GapKind::NoThrowRow, GapKind::DynamicCallee].into();
+        let mask = GapMask::of(&kinds);
+        assert!(!mask.is_empty() && GapMask::default().is_empty());
+        assert_eq!(mask.names(), vec!["dynamic-callee", "no-throw-row"]);
+        let all = GapMask::of(&GapKind::ALL.into_iter().collect());
+        assert_eq!(all.names().len(), GapKind::ALL.len());
+        let spelled: BTreeSet<&str> = GapKind::ALL.into_iter().map(GapKind::as_str).collect();
+        assert_eq!(spelled.len(), GapKind::ALL.len(), "spellings are distinct");
+        assert_eq!(mask.union(GapMask::of(&BTreeSet::from([GapKind::OpenMethod]))).names().len(), 3);
     }
 
     /// The facts of a file whose source is `src`, with the own rows the generation

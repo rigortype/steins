@@ -168,6 +168,9 @@ fn capture_effect_entries(
                 proven: s.labels,
                 declared: s.declared,
                 exhaustive: s.exhaustive,
+                gaps: s.gaps.iter().map(|&k| k.to_owned()).collect(),
+                throws_exhaustive: s.throws_exhaustive,
+                throws_gaps: s.throws_gaps.iter().map(|&k| k.to_owned()).collect(),
             });
         }
     }
@@ -180,12 +183,17 @@ fn print_effect_diff_json(report: &effect_baseline::Diff) {
         .events
         .iter()
         .map(|e| {
-            serde_json::json!({
+            let mut event = serde_json::json!({
                 "file": e.file,
                 "symbol": e.symbol,
                 "category": e.category.as_str(),
                 "label": e.label,
-            })
+            });
+            // The cause of an exhaustiveness transition, present only there.
+            if !e.gaps.is_empty() {
+                event["gaps"] = serde_json::json!(e.gaps);
+            }
+            event
         })
         .collect();
     let doc = serde_json::json!({

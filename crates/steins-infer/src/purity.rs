@@ -30,7 +30,7 @@ use crate::site::engine::MUTATE_LOCAL;
 use crate::site::method::declared_receiver_fqn;
 use crate::site::reach::Frame;
 use crate::site::{
-    Edge, GapKind, Hit, HitKind, Knowledge, ResolvedSite, Target, resolve_site,
+    Edge, GapKind, GapMask, Hit, HitKind, Knowledge, ResolvedSite, Target, resolve_site,
 };
 use crate::{
     EFFECT_ID, EFFECT_LISKOV_ID, Fixpoints, Gate, INTEROP_UNKNOWN_LABEL_ID, Sym, UNKNOWN_LABEL_ID,
@@ -101,6 +101,9 @@ pub(crate) struct EffectSet {
     /// bound, not an origin, so nothing ever reports them at a source position.
     pub(crate) declared: HashSet<String>,
     pub(crate) exhaustive: bool,
+    /// The kinds of every gap this unit's answer inherits or makes: empty exactly
+    /// when [`Self::exhaustive`], so it names the cause of each `…?`.
+    pub(crate) gaps: GapMask,
     /// This unit's OWN `[effects.attribution]` labels (ADR-0084 §1), resolved once
     /// by [`compute_effects`]. Not a third lane: it says nothing about what this
     /// unit does, only what its effects are *for*, and it is read exclusively as
@@ -325,15 +328,15 @@ fn propagate_effects(
         rows.iter().map(|(s, r)| (s.clone(), r.findings.clone())).collect();
     let mut declared: HashMap<Sym, HashSet<String>> =
         rows.iter().map(|(s, r)| (s.clone(), r.declared.clone())).collect();
-    let mut exhaustive: HashMap<Sym, bool> =
-        rows.iter().map(|(s, r)| (s.clone(), r.exhaustive())).collect();
+    let mut gaps: HashMap<Sym, GapMask> =
+        rows.iter().map(|(s, r)| (s.clone(), GapMask::of(&r.gaps))).collect();
     loop {
         let mut changed = false;
         for sym in syms {
             let Some(row) = rows.get(sym) else { continue };
             let mut incoming: Vec<EffectFinding> = Vec::new();
             let mut incoming_declared: Vec<String> = Vec::new();
-            let mut callee_taint = false;
+            let mut callee_gaps = GapMask::default();
             // Contract-discharged callees (ADR-0063 §2 decision 2): their proven
             // findings still join, their unknown remainder does not.
             for c in row.edges.iter().chain(row.untainting.iter()) {
@@ -352,9 +355,7 @@ fn propagate_effects(
                 }
             }
             for c in &row.edges {
-                if exhaustive.get(c).copied() == Some(false) {
-                    callee_taint = true;
-                }
+                callee_gaps = callee_gaps.union(gaps.get(c).copied().unwrap_or_default());
             }
             let set = findings.entry(sym.clone()).or_default();
             for ef in incoming {
@@ -364,8 +365,10 @@ fn propagate_effects(
             for label in incoming_declared {
                 changed |= dset.insert(label);
             }
-            if callee_taint && exhaustive.get(sym).copied() != Some(false) {
-                exhaustive.insert(sym.clone(), false);
+            let own = gaps.entry(sym.clone()).or_default();
+            let joined = own.union(callee_gaps);
+            if joined != *own {
+                *own = joined;
                 changed = true;
             }
         }
@@ -383,9 +386,16 @@ fn propagate_effects(
         .map(|s| {
             let f = findings.remove(s).unwrap_or_default();
             let dc = declared.remove(s).unwrap_or_default();
-            let ex = exhaustive.get(s).copied().unwrap_or(true);
+            let g = gaps.get(s).copied().unwrap_or_default();
             let at = attribution.remove(s).unwrap_or_default();
-            (s.clone(), EffectSet { findings: f, declared: dc, exhaustive: ex, attribution: at })
+            let set = EffectSet {
+                findings: f,
+                declared: dc,
+                exhaustive: g.is_empty(),
+                gaps: g,
+                attribution: at,
+            };
+            (s.clone(), set)
         })
         .collect()
 }
@@ -519,6 +529,12 @@ pub struct EffectSummary {
     pub throws: Vec<String>,
     /// Whether the throw set is exhaustive (no dynamic/unresolved taint).
     pub throws_exhaustive: bool,
+    /// The kinds of gap behind `exhaustive == false` (ADR-0099 §5): this body's
+    /// own and those it inherits through its call edges, spelled as
+    /// [`GapKind::as_str`] and in codec order. Empty exactly when `exhaustive`.
+    pub gaps: Vec<&'static str>,
+    /// The same for the throw lane: empty exactly when `throws_exhaustive`.
+    pub throws_gaps: Vec<&'static str>,
 }
 
 /// The proven effect set of every concrete function/method in a single file
@@ -627,6 +643,8 @@ pub(crate) fn summarize_unit(fixpoints: &Fixpoints, target: usize) -> Vec<Effect
         cs
     };
     let throws_exhaustive = |sym: &Sym| throws.get(sym).is_none_or(|t| t.exhaustive);
+    let gap_names = |sym: &Sym| effects.get(sym).map_or_else(Vec::new, |e| e.gaps.names());
+    let throws_gap_names = |sym: &Sym| throws.get(sym).map_or_else(Vec::new, |t| t.gaps.names());
 
     // The namespace prefix of a function's index FQN (lowercase-normalized), rejoined
     // with the simple name as declared: `app\renderPage` rather than `app\renderpage`.
@@ -653,6 +671,8 @@ pub(crate) fn summarize_unit(fixpoints: &Fixpoints, target: usize) -> Vec<Effect
             exhaustive: exhaustive(&sym),
             throws: throw_classes(&sym),
             throws_exhaustive: throws_exhaustive(&sym),
+            gaps: gap_names(&sym),
+            throws_gaps: throws_gap_names(&sym),
         });
     }
     for c in tree.classes() {
@@ -676,6 +696,8 @@ pub(crate) fn summarize_unit(fixpoints: &Fixpoints, target: usize) -> Vec<Effect
                 exhaustive: exhaustive(&sym),
                 throws: throw_classes(&sym),
                 throws_exhaustive: throws_exhaustive(&sym),
+                gaps: gap_names(&sym),
+                throws_gaps: throws_gap_names(&sym),
             });
         }
     }

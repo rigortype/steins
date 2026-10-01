@@ -19,7 +19,7 @@ use crate::cx::Cx;
 use crate::facts::FileFacts;
 use crate::project::{Diagnostic, FileUnit, Index};
 use crate::site::reach::Frame;
-use crate::site::{GapKind, Knowledge, Target, records_throw, resolve_site};
+use crate::site::{GapKind, GapMask, Knowledge, Target, records_throw, resolve_site};
 use crate::{Fixpoints, Gate, Sym, THROW_LISKOV_ID, THROW_UNDECLARED_ID};
 use crate::suppress::{Facet, Origin};
 
@@ -59,6 +59,9 @@ pub(crate) struct ThrowFact {
 pub(crate) struct ThrowSet {
     pub(crate) facts: HashMap<ThrowFact, Certainty>,
     pub(crate) exhaustive: bool,
+    /// The kinds of every gap this unit's answer inherits or makes: empty exactly
+    /// when [`Self::exhaustive`], so it names the cause of each `…?`.
+    pub(crate) gaps: GapMask,
 }
 
 /// One `catch` clause with its caught class names already resolved to FQNs
@@ -361,8 +364,8 @@ fn propagate_throws(
 ) -> HashMap<Sym, ThrowSet> {
     let mut facts: HashMap<Sym, HashMap<ThrowFact, Certainty>> =
         rows.iter().map(|(s, r)| (s.clone(), r.facts.clone())).collect();
-    let mut ex: HashMap<Sym, bool> =
-        rows.iter().map(|(s, r)| (s.clone(), r.exhaustive())).collect();
+    let mut gaps: HashMap<Sym, GapMask> =
+        rows.iter().map(|(s, r)| (s.clone(), GapMask::of(&r.gaps))).collect();
     loop {
         let mut changed = false;
         for sym in syms {
@@ -370,8 +373,10 @@ fn propagate_throws(
             let cx = Cx::new(units, index, file);
             let Some(row) = rows.get(sym) else { continue };
             for (callee, guards) in &row.edges {
-                if ex.get(callee).copied() == Some(false) && ex.get(sym).copied() != Some(false) {
-                    ex.insert(sym.clone(), false);
+                let incoming = gaps.get(callee).copied().unwrap_or_default();
+                let own = gaps.entry(sym.clone()).or_default();
+                if own.union(incoming) != *own {
+                    *own = own.union(incoming);
                     changed = true;
                 }
                 let callee_facts: Vec<(ThrowFact, Certainty)> =
@@ -411,8 +416,8 @@ fn propagate_throws(
         .filter(|s| seen.insert(*s))
         .map(|s| {
             let f = facts.remove(s).unwrap_or_default();
-            let x = ex.get(s).copied().unwrap_or(true);
-            (s.clone(), ThrowSet { facts: f, exhaustive: x })
+            let g = gaps.get(s).copied().unwrap_or_default();
+            (s.clone(), ThrowSet { facts: f, exhaustive: g.is_empty(), gaps: g })
         })
         .collect()
 }
