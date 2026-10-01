@@ -11,7 +11,8 @@ use steins_domain::Certainty;
 use steins_phpdoc::{Type as PType, TagKind, scan_docblock};
 use steins_phpdoc::ast::TypeKind as PKind;
 use steins_syntax::{
-    CatchClause, ClassDecl, MethodDecl, NameRef, RefKind, ScopeOwner, ThrowKind, ThrowOrigin,
+    CatchClause, ClassDecl, EffectRecv, MethodDecl, NameRef, RefKind, ScopeOwner, StaticClass,
+    ThrowKind, ThrowOrigin,
 };
 
 use crate::contract::{IsA, parse_tag_type};
@@ -19,7 +20,7 @@ use crate::cx::Cx;
 use crate::facts::FileFacts;
 use crate::project::{Diagnostic, FileUnit, FnResolution, Index};
 use crate::{Fixpoints, Gate, Sym, THROW_LISKOV_ID, THROW_UNDECLARED_ID};
-use crate::purity::resolve_effect_edge;
+use crate::purity::{NewTarget, new_origin, resolve_effect_edge, resolve_new};
 use crate::suppress::{Facet, Origin};
 
 // ---------------------------------------------------------------------------
@@ -509,8 +510,13 @@ pub(crate) fn classify_throw_origins(
             ThrowKind::MethodCall { receiver, method } => {
                 match resolve_effect_edge(cx, class_fqn, receiver, method) {
                     Some(callee) => row.edges.push((callee, guards.clone())),
-                    None => row.exhaustive = false,
+                    None => classify_parent_constructor(
+                        cx, class_fqn, receiver, method, origin.span, &guards, row,
+                    ),
                 }
+            }
+            ThrowKind::Construct { class } => {
+                classify_construct(cx, class_fqn, class, origin.span, &guards, row);
             }
             // A resolved callback's throws propagate through this call site's
             // guards (ADR-0033): a closure/user callback is an edge; a builtin
@@ -550,6 +556,85 @@ pub(crate) fn classify_throw_origins(
             }
             ThrowKind::Taint => row.exhaustive = false,
         }
+    }
+}
+
+/// Classify one `new` origin into `row` (issue #849), through the constructor
+/// [`resolve_new`] names, the one the effects pass resolves the same `new` to:
+/// a project constructor is an edge under this site's guards, a class with
+/// none contributes nothing, an engine one answers from the catalog, and one
+/// that cannot be resolved taints exhaustiveness.
+fn classify_construct(
+    cx: &Cx,
+    enclosing: Option<&str>,
+    class: &StaticClass,
+    span: steins_syntax::Span,
+    guards: &[Vec<ResolvedCatch>],
+    row: &mut ThrowOwnRow,
+) {
+    match resolve_new(cx, enclosing, class) {
+        NewTarget::Edge(callee) => row.edges.push((callee, guards.to_vec())),
+        NewTarget::Absent => {}
+        NewTarget::Engine(fqn) => {
+            engine_constructor_throws(cx, &fqn, &new_origin(class), span, guards, row);
+        }
+        NewTarget::Unknown => row.exhaustive = false,
+    }
+}
+
+/// A method call no project body answers: `parent::__construct(...)` into an
+/// engine class runs the constructor `new parent` would, and answers from the
+/// same row, as the effects pass's twin does (issue #849), so a project
+/// exception forwarding to the engine's stays exhaustive. Any other such call
+/// taints exhaustiveness, as it always has.
+fn classify_parent_constructor(
+    cx: &Cx,
+    enclosing: Option<&str>,
+    receiver: &EffectRecv,
+    method: &str,
+    span: steins_syntax::Span,
+    guards: &[Vec<ResolvedCatch>],
+    row: &mut ThrowOwnRow,
+) {
+    if matches!(receiver, EffectRecv::Parent) && method.eq_ignore_ascii_case("__construct")
+        && let NewTarget::Engine(fqn) = resolve_new(cx, enclosing, &StaticClass::Parent)
+    {
+        engine_constructor_throws(cx, &fqn, "parent::__construct", span, guards, row);
+    } else {
+        row.exhaustive = false;
+    }
+}
+
+/// The throws an engine class's constructor contributes at `span`: each class
+/// its [`steins_catalog::method_throws`] row names, past this site's guards,
+/// displayed as `origin`. No row is the taint.
+fn engine_constructor_throws(
+    cx: &Cx,
+    fqn: &str,
+    origin: &str,
+    span: steins_syntax::Span,
+    guards: &[Vec<ResolvedCatch>],
+    row: &mut ThrowOwnRow,
+) {
+    let Some(classes) = steins_catalog::method_throws(fqn, "__construct") else {
+        row.exhaustive = false;
+        return;
+    };
+    let line = cx.tree().position(span.start).line;
+    for c in classes {
+        let esc = escape_through_guards(cx, c, guards);
+        if esc == Certainty::No {
+            continue;
+        }
+        let fact = ThrowFact {
+            class: (*c).to_owned(),
+            origin: origin.to_owned(),
+            offset: span.start,
+            line,
+            path: cx.path().to_owned(),
+        };
+        let slot = row.facts.entry(fact).or_insert(Certainty::No);
+        *slot = slot.or(esc);
     }
 }
 

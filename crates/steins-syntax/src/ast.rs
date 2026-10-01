@@ -625,6 +625,16 @@ pub enum ThrowKind {
     HigherOrder { callee: NameRef, callbacks: Vec<(usize, CallbackRef)>, arg_count: usize },
     /// A direct `$fn()` call resolved to a known callback — throw analogue of [`EffectOrigin::Callback`] (ADR-0033).
     Callback { cbref: CallbackRef },
+    /// A `new` expression whose class the scan can name (issue #849): a
+    /// propagation edge to the constructor it runs, resolved exactly as
+    /// [`EffectOrigin::New`]'s is, so the two lanes agree on which constructor
+    /// that is. `class` is spelled as a static call's class is. A computed
+    /// class is a [`Self::Taint`] instead, and so is an anonymous class that
+    /// may declare a constructor; one that cannot, but extends a class, records
+    /// that parent here. Not [`Self::New`], the class a `throw new X` throws:
+    /// that `new` records both. Appended after the existing variants so no
+    /// persisted variant index moves.
+    Construct { class: StaticClass },
 }
 
 /// One throw-relevant construct in a function/method body, with ordered

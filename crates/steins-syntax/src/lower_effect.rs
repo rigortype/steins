@@ -710,14 +710,22 @@ pub(crate) fn scan_effect_origins(node: &Node<'_, '_>, cx: &EffectScanCx, out: &
     }
 }
 
-/// The effect origins of a `new class(...) {...}` expression (issue #804): its
-/// arguments, evaluated in this frame, and the constructor that runs here. The
-/// class body is never indexed, so a constructor it may bring — its own, or one
-/// a trait it uses supplies — is unseen, and taints like a dynamic `new`. With
-/// neither, the constructor is the parent's, if it extends one, and none at all
-/// otherwise.
-fn scan_anonymous_class_new(ac: &AnonymousClass<'_>, cx: &EffectScanCx, out: &mut Vec<EffectOrigin>) {
-    let span = to_span(ac.span());
+/// The constructor a `new class(...) {...}` expression runs, as the effect and
+/// throw scans both read it (issues #804, #849).
+enum AnonymousConstructor {
+    /// The class body is never indexed, so a constructor it may bring — its
+    /// own, or one a trait it uses supplies — is unseen, and taints like a
+    /// dynamic `new`.
+    Unseen,
+    /// With neither, the constructor is the parent's, if the class extends one.
+    Inherited(StaticClass),
+    /// And there is none at all otherwise.
+    None,
+}
+
+/// Read the [`AnonymousConstructor`] off an anonymous class's members and
+/// `extends`.
+fn anonymous_class_constructor(ac: &AnonymousClass<'_>) -> AnonymousConstructor {
     let own_constructor = ac.members.iter().any(|m| match m {
         ClassLikeMember::Method(m) => {
             bytes_to_string(m.name.value).eq_ignore_ascii_case("__construct")
@@ -725,11 +733,24 @@ fn scan_anonymous_class_new(ac: &AnonymousClass<'_>, cx: &EffectScanCx, out: &mu
         ClassLikeMember::TraitUse(_) => true,
         _ => false,
     });
-    let parent = ac.extends.as_ref().and_then(|e| e.types.iter().next());
     if own_constructor {
-        out.push(EffectOrigin::Opaque { span });
-    } else if let Some(parent) = parent {
-        out.push(EffectOrigin::New { class: StaticClass::Named(name_ref(parent)), span });
+        return AnonymousConstructor::Unseen;
+    }
+    match ac.extends.as_ref().and_then(|e| e.types.iter().next()) {
+        Some(parent) => AnonymousConstructor::Inherited(StaticClass::Named(name_ref(parent))),
+        None => AnonymousConstructor::None,
+    }
+}
+
+/// The effect origins of a `new class(...) {...}` expression (issue #804): its
+/// arguments, evaluated in this frame, and the constructor that runs here
+/// ([`AnonymousConstructor`]).
+fn scan_anonymous_class_new(ac: &AnonymousClass<'_>, cx: &EffectScanCx, out: &mut Vec<EffectOrigin>) {
+    let span = to_span(ac.span());
+    match anonymous_class_constructor(ac) {
+        AnonymousConstructor::Unseen => out.push(EffectOrigin::Opaque { span }),
+        AnonymousConstructor::Inherited(class) => out.push(EffectOrigin::New { class, span }),
+        AnonymousConstructor::None => {}
     }
     if let Some(list) = &ac.argument_list {
         scan_effect_origins(&Node::PartialArgumentList(list), cx, out);
@@ -924,6 +945,9 @@ pub(crate) fn scan_method_calls(node: &Node<'_, '_>, out: &mut Vec<CallExpr>) {
 ///   clause but inside outer trys; `finally` absorbs nothing).
 /// * `throw new X` records the class; `throw $e` of an enclosing catch parameter
 ///   re-emits that catch's absorbed set (rethrow); any other throw taints.
+/// * Every `new`, a thrown one included, is an edge to the constructor it runs
+///   (issue #849), or a taint when the class is computed or an anonymous class
+///   may bring its own.
 #[expect(clippy::too_many_lines, reason = "predates the #778 ratchet; split when next reworked")]
 pub(crate) fn scan_throw_origins(
     node: &Node<'_, '_>,
@@ -1066,6 +1090,22 @@ pub(crate) fn scan_throw_origins(
                 _ => out.push(ThrowOrigin { kind: ThrowKind::Taint, span: to_span(sc.span()), guards: snapshot() }),
             }
         }
+        // `new C(...)` runs `C`'s constructor here (issue #849): an edge the
+        // throw pass resolves as the effects pass resolves `EffectOrigin::New`,
+        // or a taint when the class is computed. A `throw new X(...)` reaches
+        // this too, so `X`'s constructor's throws join `X` itself. The
+        // arguments are walked below like any call's.
+        Node::Instantiation(inst) => {
+            let kind = trace_static_class(inst.class)
+                .map_or(ThrowKind::Taint, |class| ThrowKind::Construct { class });
+            out.push(ThrowOrigin { kind, span: to_span(inst.span()), guards: snapshot() });
+        }
+        // An anonymous class's body is its own scope, but its constructor runs
+        // at this `new`, and its arguments are evaluated here.
+        Node::AnonymousClass(ac) => {
+            scan_anonymous_class_throws(ac, guards, catch_scope, locals, out);
+            return;
+        }
         // A `match` with no `default` arm can raise `\UnhandledMatchError` at
         // runtime (ADR-0031 Part B) — recorded here as a structural possible-throw;
         // the trace walk separately proves when it is a *certain* terminator.
@@ -1089,7 +1129,6 @@ pub(crate) fn scan_throw_origins(
         Node::Function(_)
         | Node::Closure(_)
         | Node::ArrowFunction(_)
-        | Node::AnonymousClass(_)
         | Node::Class(_)
         | Node::Interface(_)
         | Node::Trait(_)
@@ -1098,5 +1137,29 @@ pub(crate) fn scan_throw_origins(
     }
     for child in children(node) {
         scan_throw_origins(&child, guards, catch_scope, locals, out);
+    }
+}
+
+/// The throw origins of a `new class(...) {...}` expression (issue #849), the
+/// twin of [`scan_anonymous_class_new`]: the constructor that runs here, under
+/// this frame's guards, and the arguments, evaluated in this frame.
+fn scan_anonymous_class_throws(
+    ac: &AnonymousClass<'_>,
+    guards: &[Vec<CatchClause>],
+    catch_scope: &[(String, Vec<NameRef>, bool)],
+    locals: &HashMap<String, CallbackRef>,
+    out: &mut Vec<ThrowOrigin>,
+) {
+    let kind = match anonymous_class_constructor(ac) {
+        AnonymousConstructor::Unseen => Some(ThrowKind::Taint),
+        AnonymousConstructor::Inherited(class) => Some(ThrowKind::Construct { class }),
+        AnonymousConstructor::None => None,
+    };
+    if let Some(kind) = kind {
+        let guards = guards.iter().rev().cloned().collect();
+        out.push(ThrowOrigin { kind, span: to_span(ac.span()), guards });
+    }
+    if let Some(list) = &ac.argument_list {
+        scan_throw_origins(&Node::PartialArgumentList(list), guards, catch_scope, locals, out);
     }
 }
