@@ -3,8 +3,8 @@
 //! `throw.liskov-widened` overrides.
 //!
 //! The consumer-inverted safety asymmetry is the load-bearing joint: only a
-//! **proven** (`Yes`) escape of a **checked** exception, provably a subclass of
-//! **none** of the declared classes, ever fires. Maybe-absorption (a catch of an
+//! **proven** (`Yes`) escape of a **checked** exception, provably is-a **none**
+//! of the declared classes or interfaces, ever fires. Maybe-absorption (a catch of an
 //! unknown external class), unchecked families (`Error`/`LogicException`), and
 //! unproven coverage all stay silent.
 
@@ -170,6 +170,148 @@ fn maybe_absorption_by_unknown_external_stays_silent() {
 fn unknown_external_catch_of_known_throw_is_a_real_escape() {
     let src = "<?php\n/** @throws \\JsonException */\nfunction f(): void { try { throw new \\RuntimeException(); } catch (\\App\\Weird $e) {} }\n";
     assert_eq!(n_undeclared(src), 1, "an unrelated catch of a known throw is a real escape");
+}
+
+// Interfaces on the supertype graph (issue #852): `@throws` and `catch` may name
+// an interface, and the thrown class is-a every interface it or an ancestor
+// implements, through each interface's own `extends`.
+
+const DOMAIN: &str = "<?php
+interface Marker {}
+interface DomainError extends \\Countable, Marker {}
+class Base extends \\RuntimeException implements DomainError {}
+final class Oops extends Base {}
+";
+
+#[test]
+fn interface_in_throws_covers_its_implementor() {
+    let src = "<?php
+interface DomainError {}
+final class Oops extends \\RuntimeException implements DomainError {}
+/** @throws DomainError */
+function f(): void { throw new Oops(); }
+";
+    assert_eq!(n_undeclared(src), 0, "Oops is a DomainError");
+}
+
+#[test]
+fn interface_in_catch_absorbs_its_implementor() {
+    let src = "<?php
+interface DomainError {}
+interface Elsewhere {}
+final class Oops extends \\RuntimeException implements DomainError {}
+/** @throws \\JsonException */
+function g(): void { try { throw new Oops(); } catch (DomainError $e) {} }
+/** @throws \\JsonException */
+function h(): void { try { throw new Oops(); } catch (Elsewhere $e) {} }
+";
+    let ds = undeclared(src);
+    assert_eq!(ds.len(), 1, "only the unrelated catch lets Oops out: {ds:#?}");
+    assert!(ds[0].message.contains("escape h()"), "got: {}", ds[0].message);
+}
+
+#[test]
+fn interface_through_an_ancestor_and_interface_extends() {
+    // `Oops` implements nothing itself; `Base` implements `DomainError`, which
+    // extends `Marker` as its second parent interface.
+    let src = format!("{DOMAIN}
+/** @throws DomainError */
+function a(): void {{ throw new Oops(); }}
+/** @throws Marker */
+function b(): void {{ throw new Oops(); }}
+/** @throws \\JsonException */
+function c(): void {{ try {{ throw new Oops(); }} catch (Marker $e) {{}} }}
+");
+    assert_eq!(n_undeclared(&src), 0);
+}
+
+#[test]
+fn propagated_throw_dammed_by_an_interface_catch() {
+    let src = format!("{DOMAIN}
+function inner(): void {{ throw new Oops(); }}
+function outer(): void {{ try {{ inner(); }} catch (DomainError $e) {{}} }}
+/** @throws \\JsonException */
+function top(): void {{ outer(); }}
+");
+    assert_eq!(n_undeclared(&src), 0, "the interface catch in outer() dams it");
+}
+
+#[test]
+fn engine_interfaces_in_throws_and_catch() {
+    // `Throwable extends Stringable`, so a `catch (\Stringable)` absorbs any throw.
+    let src = format!("{DOMAIN}
+/** @throws \\Throwable */
+function a(): void {{ throw new Oops(); }}
+/** @throws \\JsonException */
+function b(): void {{ try {{ throw new \\RuntimeException(); }} catch (\\Stringable $e) {{}} }}
+");
+    assert_eq!(n_undeclared(&src), 0);
+    // Implementing a catalogued engine interface keeps the hierarchy closed.
+    let closed = "<?php
+final class Oops extends \\RuntimeException implements \\Stringable, \\JsonSerializable {
+    public function jsonSerialize(): mixed { return null; }
+}
+/** @throws \\JsonException */
+function f(): void { throw new Oops(); }
+";
+    assert_eq!(n_undeclared(closed), 1, "Oops is no JsonException");
+}
+
+/// The catalog's full hierarchy replaced the frozen exception table, so an
+/// engine exception the table lacked is now enumerated, and checked.
+#[test]
+fn engine_exception_outside_the_old_table_is_enumerated() {
+    let src = "<?php
+/** @throws \\RuntimeException */
+function covered(): void { throw new \\PDOException(); }
+/** @throws \\JsonException */
+function uncovered(): void { throw new \\PDOException(); }
+/** @throws \\JsonException */
+function unchecked(): void { throw new \\ArgumentCountError(); }
+";
+    let ds = undeclared(src);
+    assert_eq!(ds.len(), 1, "got: {ds:#?}");
+    let msg = &ds[0].message;
+    assert!(msg.starts_with("PDOException can escape uncovered()"), "got: {msg}");
+}
+
+/// An interface no analyzed file declares may extend anything, so it never
+/// yields a `No` against an interface target: a `@throws` or `catch` naming
+/// another unknown interface stays silent.
+#[test]
+fn unknown_external_interface_stays_silent() {
+    let src = "<?php
+final class Oops extends \\RuntimeException implements \\Vendor\\Marker {}
+/** @throws \\Vendor\\DomainError */
+function f(): void { throw new Oops(); }
+/** @throws \\JsonException */
+function g(): void { try { throw new Oops(); } catch (\\Vendor\\DomainError $e) {} }
+";
+    assert_eq!(n_undeclared(src), 0, "a Maybe must not report");
+}
+
+/// Contrast: an unknown interface can only add interfaces, never a class, so a
+/// class target is still decided by the class chain.
+#[test]
+fn unknown_external_interface_cannot_hide_a_class() {
+    let src = "<?php
+final class Oops extends \\RuntimeException implements \\Vendor\\Marker {}
+class Other extends \\Exception {}
+/** @throws Other */
+function f(): void { throw new Oops(); }
+";
+    assert_eq!(n_undeclared(src), 1, "Oops is no Other, whatever Marker extends");
+}
+
+#[test]
+fn liskov_widening_sees_an_interface_abstraction_throws() {
+    let src = "<?php
+interface DomainError {}
+final class Oops extends \\RuntimeException implements DomainError {}
+class Base { /** @throws DomainError */ public function m(): void {} }
+class Sub extends Base { /** @throws Oops */ public function m(): void {} }
+";
+    assert_eq!(liskov(src).len(), 0, "Oops is a DomainError: narrower, not wider");
 }
 
 #[test]

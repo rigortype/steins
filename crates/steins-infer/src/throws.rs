@@ -14,7 +14,7 @@ use steins_syntax::{
     CatchClause, ClassDecl, MethodDecl, NameRef, RefKind, ScopeOwner, ThrowKind, ThrowOrigin,
 };
 
-use crate::contract::parse_tag_type;
+use crate::contract::{IsA, parse_tag_type};
 use crate::cx::Cx;
 use crate::facts::FileFacts;
 use crate::project::{Diagnostic, FileUnit, FnResolution, Index};
@@ -196,35 +196,38 @@ fn add_callback_throws(
     }
 }
 
-/// `sub <: super` through the project inheritance chain **and** the builtin
-/// exception table (ADR-0040), as a [`Certainty`]: `Yes` when the chain reaches
-/// `super`; `No` when the chain is fully known (terminates at a project root or a
-/// builtin root like `Throwable`) without reaching it; `Maybe` when the chain
-/// leaves both the project and the builtin table (an unknown external class —
-/// the FP-safe middle).
+/// `sub <: super` for the throw lane — `catch` absorption, `@throws` coverage,
+/// ADR-0007 accounting (ADR-0040) — as a [`Certainty`], over the supertype walk
+/// the is-a oracle takes ([`Cx::supertype_walk`], ADR-0043 §3): `Yes` when any
+/// path reaches `super` (`extends`, `implements`, an interface's `extends`, the
+/// catalog's builtin hierarchy); `No` when the closure is enumerated without it;
+/// `Maybe` when it leaves the known world (the FP-safe middle).
+///
+/// An `extends`-only walk answered `No` for every interface `super` it missed,
+/// so a `@throws` or `catch` naming an interface the class implements produced
+/// a false `throw.undeclared` (issue #852).
+///
+/// One rule goes past [`Cx::is_a`]: when `super` is provably a class, a name
+/// left unresolved only among the interfaces cannot hide it, because an
+/// interface's supertypes are interfaces. So a class chain that is fully known
+/// still answers `No` when an `implements` entry is an unknown external.
 pub(crate) fn throw_subtype(cx: &Cx, sub_fqn: &str, sup_fqn: &str) -> Certainty {
-    let sup = sup_fqn.trim_start_matches('\\');
-    let mut cur = sub_fqn.trim_start_matches('\\').to_owned();
-    let mut seen: HashSet<String> = HashSet::new();
-    loop {
-        if cur.eq_ignore_ascii_case(sup) {
-            return Certainty::Yes;
-        }
-        if !seen.insert(cur.to_ascii_lowercase()) {
-            return Certainty::Maybe; // cycle → give up
-        }
-        if let Some((file, cd)) = cx.find_class(&cur) {
-            match &cd.parent {
-                Some(pref) => cur = cx.units[file].tree.resolve_class_fqn(pref),
-                None => return Certainty::No, // known project root, no match
-            }
-        } else if let Some(parent) = steins_catalog::builtin_exception_parent(&cur) {
-            cur = parent.to_owned();
-        } else if cur.eq_ignore_ascii_case("Throwable") {
-            return Certainty::No; // known builtin root, no match
-        } else {
-            return Certainty::Maybe; // unknown external class — chain incomplete
-        }
+    let walk = cx.supertype_walk(sub_fqn, sup_fqn);
+    match walk.verdict {
+        IsA::Yes => Certainty::Yes,
+        IsA::No => Certainty::No,
+        IsA::Unknown if walk.chain_closed && provably_class(cx, sup_fqn) => Certainty::No,
+        IsA::Unknown => Certainty::Maybe,
+    }
+}
+
+/// Whether `fqn` is provably a **class**, not an interface: a project class, or
+/// an engine class the catalog places under `Exception` or `Error`. The catalog
+/// records no kinds, but only a class can extend a class.
+fn provably_class(cx: &Cx, fqn: &str) -> bool {
+    match cx.find_class(fqn) {
+        Some((_, cd)) => !cd.is_interface && !cd.is_trait,
+        None => ["Exception", "Error"].iter().any(|root| cx.is_a(fqn, root) == IsA::Yes),
     }
 }
 
@@ -880,4 +883,88 @@ pub(crate) fn interface_abstraction_methods<'a>(
         }
     }
     out
+}
+
+#[cfg(test)]
+mod subtype_tests {
+    //! [`throw_subtype`]'s three verdicts over the full supertype graph (issue
+    //! #852), asserted directly: the acceptance tests see a `Maybe` only as
+    //! silence, and silence does not tell it apart from a `Yes`.
+    use super::*;
+    use crate::project::LazyTree;
+    use steins_syntax::SourceTree;
+
+    fn in_project<T>(src: &str, f: impl FnOnce(&Cx) -> T) -> T {
+        let tree = LazyTree::ready(SourceTree::parse(src));
+        let units = [FileUnit { path: "t.php", tree: &tree }];
+        let index = Index::from_units(&units);
+        f(&Cx::new(&units, &index, 0))
+    }
+
+    fn sub(src: &str, sub: &str, sup: &str) -> Certainty {
+        in_project(src, |cx| throw_subtype(cx, sub, sup))
+    }
+
+    const DOMAIN: &str = "<?php
+interface Marker {}
+interface DomainError extends \\Countable, Marker {}
+class Base extends \\RuntimeException implements DomainError {}
+final class Leaf extends Base {}
+interface Unrelated {}";
+
+    #[test]
+    fn interfaces_on_the_graph_are_supertypes() {
+        assert_eq!(sub(DOMAIN, "base", "domainerror"), Certainty::Yes, "implemented directly");
+        assert_eq!(sub(DOMAIN, "leaf", "domainerror"), Certainty::Yes, "via an ancestor");
+        // `Marker` is the second interface `DomainError` extends, which the
+        // lowering keeps in `implements`.
+        assert_eq!(sub(DOMAIN, "leaf", "marker"), Certainty::Yes, "interface extends interface");
+        assert_eq!(sub(DOMAIN, "domainerror", "marker"), Certainty::Yes);
+        assert_eq!(sub(DOMAIN, "leaf", "throwable"), Certainty::Yes, "engine interface");
+        assert_eq!(sub(DOMAIN, "leaf", "stringable"), Certainty::Yes, "Throwable extends it");
+        // Every edge resolved and none reaches the target.
+        assert_eq!(sub(DOMAIN, "leaf", "unrelated"), Certainty::No);
+        assert_eq!(sub(DOMAIN, "leaf", "logicexception"), Certainty::No);
+    }
+
+    #[test]
+    fn engine_classes_answer_from_the_catalog() {
+        // Absent from the frozen exception table, present in the catalog.
+        assert_eq!(sub("<?php", "pdoexception", "runtimeexception"), Certainty::Yes);
+        assert_eq!(sub("<?php", "argumentcounterror", "error"), Certainty::Yes);
+        assert_eq!(sub("<?php", "pdoexception", "logicexception"), Certainty::No);
+        assert_eq!(sub("<?php", "jsonexception", "throwable"), Certainty::Yes);
+    }
+
+    #[test]
+    fn an_unknown_interface_is_maybe_never_no() {
+        let src = "<?php
+class Oops extends \\RuntimeException implements \\Vendor\\Marker {}
+class Plain extends \\RuntimeException {}";
+        // `\Vendor\Marker` may extend any interface, so an interface target the
+        // graph misses stays open.
+        assert_eq!(sub(src, "oops", "vendor\\domainerror"), Certainty::Maybe);
+        assert_eq!(sub(src, "oops", "unrelated"), Certainty::Maybe);
+        assert_eq!(sub(src, "oops", "vendor\\marker"), Certainty::Yes, "the named interface");
+        // Without it, the same misses are a closed `No`.
+        assert_eq!(sub(src, "plain", "vendor\\domainerror"), Certainty::No);
+    }
+
+    #[test]
+    fn an_unknown_interface_cannot_hide_a_class() {
+        let src = "<?php
+interface Mine extends \\Vendor\\Base {}
+class Oops extends \\RuntimeException implements \\Vendor\\Marker, Mine {}
+class Other extends \\Exception {}";
+        // An interface's supertypes are interfaces, so a closed class chain still
+        // decides a class target, project and engine alike.
+        assert_eq!(sub(src, "oops", "other"), Certainty::No);
+        assert_eq!(sub(src, "oops", "logicexception"), Certainty::No);
+        assert_eq!(sub(src, "oops", "error"), Certainty::No);
+        assert_eq!(in_project(src, |cx| throw_checked(cx, "oops")), Certainty::Yes);
+        // An unknown parent class opens the chain: every miss stays `Maybe`.
+        let open = "<?php class Oops extends \\Vendor\\Base {} class Other extends \\Exception {}";
+        assert_eq!(sub(open, "oops", "other"), Certainty::Maybe);
+        assert_eq!(sub(open, "oops", "logicexception"), Certainty::Maybe);
+    }
 }
