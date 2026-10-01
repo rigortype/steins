@@ -732,6 +732,159 @@ pub struct ThrowOrigin {
     pub guards: Vec<Vec<CatchClause>>,
 }
 
+/// What a [`SiteKind::Dynamic`] site could not name: the callee or class of a
+/// construct whose target is computed, or an anonymous class that may bring a
+/// constructor the scan never sees. [`EffectOrigin::Opaque`] and
+/// [`ThrowKind::Taint`] are both this site seen from one lane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
+pub enum DynamicSite {
+    /// A `$f()` or `($cb)()` call whose callee is not a body-local callback.
+    Call,
+    /// A `$o->m()` call whose receiver or selector is not resolvable.
+    MethodCall,
+    /// A `$c::m()`, `static::m()` or `Foo::$m()` call.
+    StaticCall,
+    /// A `new $c()`.
+    New,
+    /// A `new class {...}` whose constructor may be its own or a trait's.
+    AnonymousClass,
+}
+
+/// What a [`SiteKind::Throw`] site throws, as [`ThrowKind`]'s throw arms say it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
+pub enum ThrownKind {
+    /// `throw new X(...)` — `X` is the class as written.
+    New(NameRef),
+    /// `throw $e` of an enclosing catch's parameter: re-emits what that catch absorbed.
+    Rethrow { caught: Vec<NameRef>, has_unresolvable: bool },
+    /// Any other `throw <expr>`.
+    Unresolved,
+}
+
+/// A statement-level construct a [`SiteKind::Construct`] site is: one the scan
+/// records for its own sake rather than for a callee it resolves.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
+pub enum ConstructKind {
+    /// An `echo`, `print`, short echo or non-blank inline HTML ([`EffectOrigin::Output`]).
+    Output(OutputKeyword),
+    /// An `exit` or `die` ([`EffectOrigin::Exit`]).
+    Exit(ExitKeyword),
+    /// An `eval(...)` ([`EffectOrigin::Eval`]).
+    Eval,
+    /// An `include` or `require`, once or not ([`EffectOrigin::Include`]).
+    Include(IncludeKeyword),
+    /// A structural state construct ([`EffectOrigin::State`]).
+    State(StateConstruct),
+    /// A `match` with no `default` arm, which can raise `\UnhandledMatchError`.
+    MatchNoDefault,
+}
+
+/// What a [`SiteOrigin`] is. One variant per kind of call-like or
+/// construct-like site the effect and throw scans record between them; each
+/// lane's origin is derived from it ([`crate::derive_effect_origins`],
+/// [`crate::derive_throw_origins`]).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
+pub enum SiteKind {
+    /// A call to a statically-named function. `callbacks` is empty for a plain
+    /// call ([`EffectOrigin::Call`], [`ThrowKind::Call`]) and lists the
+    /// resolvable callback arguments of a higher-order call
+    /// ([`EffectOrigin::HigherOrder`], [`ThrowKind::HigherOrder`]).
+    Call { name: NameRef, callbacks: Vec<(usize, CallbackRef)> },
+    /// A method or static call with a resolvable receiver. The receiver is the
+    /// **declared** vocabulary ([`EffectRecv::Var`], [`EffectRecv::PropRead`]
+    /// included); the throw lane reads those two forms as a taint.
+    MethodCall { receiver: EffectRecv, method: String },
+    /// A `new` of a class the scan can name, or of an anonymous class that
+    /// extends one and brings no constructor of its own.
+    New { class: StaticClass },
+    /// A `$fn()` call resolved to a body-local single-assignment callback.
+    Callback { cbref: CallbackRef },
+    /// A call or `new` the scan cannot resolve ([`DynamicSite`]).
+    Dynamic(DynamicSite),
+    /// A `throw` statement ([`ThrownKind`]).
+    Throw(ThrownKind),
+    /// An output, exit, `eval`, `include`, state or `match` construct ([`ConstructKind`]).
+    Construct(ConstructKind),
+}
+
+/// [`SiteTag`] and the methods that map a [`SiteKind`] onto it, generated from
+/// one list of the variant names exactly as `effect_origin_kinds!` is. A
+/// variant added to [`SiteKind`] and not to the list fails to compile, since
+/// `tag()`'s match is exhaustive, so [`SiteKind::ALL`] cannot leave one out; the
+/// steins-db persistence tests pin the list's order to the order serde numbers
+/// the variants by.
+macro_rules! site_kinds {
+    ($($variant:ident),+ $(,)?) => {
+        impl SiteKind {
+            /// Every kind, in [`SiteKind`]'s variant order, which is the order
+            /// the payload codec numbers its variants by.
+            pub const ALL: [SiteTag; [$(stringify!($variant)),+].len()] = SiteTag::ALL;
+
+            /// Which variant this kind is, fields dropped.
+            #[must_use]
+            pub const fn tag(&self) -> SiteTag {
+                match self {
+                    $(Self::$variant { .. } => SiteTag::$variant,)+
+                }
+            }
+        }
+
+        /// A [`SiteKind`]'s variant with its fields dropped ([`SiteKind::tag`]):
+        /// what a test names a site by without building one.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        pub enum SiteTag {
+            $(#[doc = concat!("[`SiteKind::", stringify!($variant), "`].")] $variant,)+
+        }
+
+        impl SiteTag {
+            /// Every tag, in [`SiteKind`]'s variant order.
+            pub const ALL: [Self; [$(stringify!($variant)),+].len()] = [$(Self::$variant),+];
+
+            /// The variant's name as [`SiteKind`] spells it (`"MethodCall"`).
+            #[must_use]
+            pub const fn name(self) -> &'static str {
+                match self {
+                    $(Self::$variant => stringify!($variant),)+
+                }
+            }
+        }
+    };
+}
+
+// Every `SiteKind` variant, in declaration order.
+site_kinds!(Call, MethodCall, New, Callback, Dynamic, Throw, Construct);
+
+/// One call-like or construct-like site in a function-like body, lowered once
+/// for both the effect lane and the throw lane. [`EffectOrigin`]s and
+/// [`ThrowOrigin`]s are views of it.
+///
+/// Each field is what the legacy origins recorded, so the views are exact:
+/// `span` is the span the legacy origin carried (a plain [`SiteKind::Call`]'s is
+/// the callee name's, a higher-order call's the whole call's); `guards` is
+/// [`ThrowOrigin::guards`], innermost first, whatever the kind; and the three
+/// argument fields are set only where the legacy effect origin set them.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
+pub struct SiteOrigin {
+    pub span: Span,
+    pub kind: SiteKind,
+    /// Enclosing `try` catch-guards, innermost first ([`ThrowOrigin::guards`]).
+    pub guards: Vec<Vec<CatchClause>>,
+    /// What each positional argument can be shown to hold ([`ArgShape`]), `None`
+    /// where the legacy effect origin carried none: a named or spread argument,
+    /// a `?->` call, an anonymous class's `new`, and every non-call kind.
+    pub operands: Option<Vec<ArgShape>>,
+    /// The lvalue root of each positional argument of a named-function call
+    /// ([`EffectOrigin::Call`]'s `arg_targets`); `None` for every other kind.
+    pub ref_targets: Option<Vec<RefTarget>>,
+    /// The proven-constant leading arguments of a named-function call; empty for every other kind.
+    pub const_args: ConstArgs,
+}
+
 /// A recognized effect-envelope declaration (ADR-0005/0006/0018): the upper
 /// bound of effects a function/method promises not to exceed. `labels` are
 /// hierarchical dot-path labels (ADR-0018); empty = tightest bound
@@ -781,6 +934,9 @@ pub struct FunctionDecl {
     pub effect_origins: Vec<EffectOrigin>,
     /// Every throw-relevant construct in the body with its try/catch guards (ADR-0040); computed for *all* functions.
     pub throw_origins: Vec<ThrowOrigin>,
+    /// Every call-like and construct-like site of the body, lowered once ([`SiteOrigin`]). The two lists above are its views,
+    /// [`derive_effect_origins`](crate::derive_effect_origins) and [`derive_throw_origins`](crate::derive_throw_origins).
+    pub sites: Vec<SiteOrigin>,
     /// Raw `/** … */` docblock immediately preceding this declaration (ADR-0029 adjacency); phpdoc bridge parses `@param`/`@return`.
     pub docblock: Option<String>,
     /// File byte span of the docblock, when adopted — `docblock` text is the
@@ -867,6 +1023,8 @@ pub struct MethodDecl {
     pub effect_origins: Vec<EffectOrigin>,
     /// Throw-relevant constructs with try/catch guards (ADR-0040); empty for abstract methods.
     pub throw_origins: Vec<ThrowOrigin>,
+    /// Every call-like and construct-like site of the body ([`SiteOrigin`]); the two lists above are its views. Empty for abstract methods.
+    pub sites: Vec<SiteOrigin>,
     pub visibility: Visibility,
     pub is_static: bool,
     pub is_final: bool,
@@ -3111,6 +3269,8 @@ pub struct Scope {
     pub effect_origins: Vec<EffectOrigin>,
     /// Throw-origin candidates of a closure/arrow body — the throw-fixpoint analogue of [`Self::effect_origins`].
     pub throw_origins: Vec<ThrowOrigin>,
+    /// Every call-like and construct-like site of a closure/arrow body ([`SiteOrigin`]); the two lists above are its views.
+    pub sites: Vec<SiteOrigin>,
     /// Spans of `match (true)`/`match (false)` guard chains in this scope whose
     /// `default` arm is absent (ADR-0088 §5's note on issue #448) — every one is
     /// the same span [`ThrowKind::New`]'s synthetic `UnhandledMatchError` origin

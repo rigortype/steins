@@ -649,7 +649,9 @@ mod tests {
     use std::path::PathBuf;
 
     use steins_gen::{DecodeBudget, EnginePosture, GenerationInputs, Store};
-    use steins_syntax::{ArgValue, EffectOrigin, EffectOriginKind, Stmt, StmtKind, ThrowKind};
+    use steins_syntax::{
+        ArgValue, EffectOrigin, EffectOriginKind, SiteKind, SiteOrigin, Stmt, StmtKind, ThrowKind,
+    };
 
     use super::*;
     use crate::shard::{fallback_package_key, merge_shards};
@@ -716,7 +718,7 @@ mod tests {
             ),
             (
                 "vendor/lib/b/src/origins.php",
-                "<?php\nnamespace Lib\\A;\nclass Origins {\n  public function each(array $a, $obj, $dyn): void {\n    $this->each($a, $obj, $dyn);\n    $obj->$dyn();\n    \\array_map('strlen', $a);\n    $f = static function (): int { return 1; };\n    $f();\n    $g = function (): iterable { return []; };\n    $g();\n  }\n}\n",
+                "<?php\nnamespace Lib\\A;\nclass Origins {\n  public function each(array $a, $obj, $dyn): void {\n    $this->each($a, $obj, $dyn);\n    $obj->$dyn();\n    \\array_map('strlen', $a);\n    $f = static function (): int { return 1; };\n    $f();\n    $g = function (): iterable { return []; };\n    $g();\n    try { throw new \\RuntimeException(); } catch (\\Exception $e) { throw $e; }\n  }\n}\n",
             ),
             (
                 "vendor/lib/b/src/state.php",
@@ -744,6 +746,26 @@ mod tests {
             }
         }
         origins
+    }
+
+    /// Every site the parsed fixture carries: functions', methods' and closure
+    /// scopes'.
+    fn fixture_sites<'a>(parsed: &'a [(&'static str, SourceTree)]) -> Vec<&'a SiteOrigin> {
+        let mut sites = Vec::new();
+        for (_, tree) in parsed {
+            for f in tree.functions() {
+                sites.extend(&f.sites);
+            }
+            for c in tree.classes() {
+                for m in &c.methods {
+                    sites.extend(&m.sites);
+                }
+            }
+            for s in tree.scopes() {
+                sites.extend(&s.sites);
+            }
+        }
+        sites
     }
 
     /// Whether a lowered statement is one [`TRACE_CONSTRUCTS`] row's construct.
@@ -950,6 +972,16 @@ mod tests {
             let carried = origins.iter().any(|o| o.kind() == kind);
             assert!(carried, "the fixture must carry a {} origin", kind.name());
         }
+        // So do the sites, which carry the same constructs under a kind of their own.
+        let sites = fixture_sites(&parsed);
+        for kind in SiteKind::ALL {
+            let carried = sites.iter().any(|s| s.kind.tag() == kind);
+            assert!(carried, "the fixture must carry a {} site", kind.name());
+        }
+        assert!(
+            sites.iter().any(|s| !s.guards.is_empty()),
+            "the fixture must carry a site under a catch guard"
+        );
         // The same holds for the trace IR's variants and fields: the equality
         // below tests only the ones the fixture lowers to.
         let kinds = fixture_stmt_kinds(&parsed);
@@ -1007,6 +1039,37 @@ mod tests {
     fn the_effect_origin_kinds_are_every_variant_in_codec_order() {
         let names: Vec<&str> = EffectOriginKind::ALL.iter().map(|k| k.name()).collect();
         assert_eq!(names, serde_variants::<EffectOrigin>());
+    }
+
+    /// [`SiteKind::ALL`] is what the tests here enumerate for sites, in the
+    /// order the codec numbers the variants by. As for
+    /// [`the_effect_origin_kinds_are_every_variant_in_codec_order`], a variant
+    /// missing from it does not compile, so this pins names and order against
+    /// the variant list serde decodes a [`SiteKind`] by.
+    #[test]
+    fn the_site_kinds_are_every_variant_in_codec_order() {
+        let names: Vec<&str> = SiteKind::ALL.iter().map(|k| k.name()).collect();
+        assert_eq!(names, serde_variants::<SiteKind>());
+    }
+
+    /// Every site in the fixture round-trips through the payload codec on its
+    /// own, kind by kind, so a kind that stopped decoding fails under its own
+    /// name rather than somewhere inside a whole tree.
+    #[test]
+    fn every_site_kind_round_trips_through_the_codec() {
+        let parsed = parsed_fixture();
+        let sites = fixture_sites(&parsed);
+        for kind in SiteKind::ALL {
+            let name = kind.name();
+            let of_kind: Vec<&SiteOrigin> =
+                sites.iter().copied().filter(|s| s.kind.tag() == kind).collect();
+            assert!(!of_kind.is_empty(), "the fixture must carry a {name} site");
+            for site in of_kind {
+                let bytes = crate::wire::to_vec(site).expect("a site serializes");
+                let back: SiteOrigin = crate::wire::from_slice(&bytes).expect("a site round-trips");
+                assert_eq!(&back, site, "{name}");
+            }
+        }
     }
 
     /// Every effect origin in the fixture round-trips through the payload

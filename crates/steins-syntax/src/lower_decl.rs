@@ -27,6 +27,7 @@ use crate::lower_effect::{
     EffectScanCx, body_aliased, collect_body_callables, receiver_writes, scan_effect_origins,
     scan_throw_origins,
 };
+use crate::lower_site::scan_owner_sites;
 use crate::lower_expr::{
     class_const_name, instantiation_class, is_strict_types_one, lower_arg_value, lower_call,
     method_name_of, trace_static_class,
@@ -608,6 +609,7 @@ fn lower_function(
 ) -> FunctionDecl {
     let mut effect_origins = Vec::new();
     let mut throw_origins = Vec::new();
+    let mut sites = Vec::new();
     let cx = EffectScanCx::new(
         &f.parameter_list,
         collect_body_callables(f.body.statements.iter()),
@@ -618,6 +620,7 @@ fn lower_function(
     for s in f.body.statements.iter() {
         scan_effect_origins(&Node::Statement(s), &cx, &mut effect_origins);
         scan_throw_origins(&Node::Statement(s), &[], &[], &cx.locals, &mut throw_origins);
+        scan_owner_sites(&Node::Statement(s), &cx, &mut sites);
     }
 
     FunctionDecl {
@@ -635,6 +638,7 @@ fn lower_function(
         effect_envelope: attrs_effect_envelope(&f.attribute_lists, aliases),
         effect_origins,
         throw_origins,
+        sites,
         docblock: docs.preceding(to_span(f.span()).start),
         docblock_span: docs.preceding_span(to_span(f.span()).start),
         conditional,
@@ -1096,6 +1100,7 @@ fn lower_enum(e: &mago_syntax::cst::Enum<'_>, _aliases: &SteinsAttrAliases, docs
 fn lower_method(m: &Method<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex, rc: &RefResolver) -> MethodDecl {
     let mut effect_origins = Vec::new();
     let mut throw_origins = Vec::new();
+    let mut sites = Vec::new();
     if let MethodBody::Concrete(block) = &m.body {
         let cx = EffectScanCx::new(
             &m.parameter_list,
@@ -1108,6 +1113,7 @@ fn lower_method(m: &Method<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex, rc
         for s in block.statements.iter() {
             scan_effect_origins(&Node::Statement(s), &cx, &mut effect_origins);
             scan_throw_origins(&Node::Statement(s), &[], &[], &cx.locals, &mut throw_origins);
+            scan_owner_sites(&Node::Statement(s), &cx, &mut sites);
         }
     }
 
@@ -1137,6 +1143,7 @@ fn lower_method(m: &Method<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex, rc
         effect_envelope: attrs_effect_envelope(&m.attribute_lists, aliases),
         effect_origins,
         throw_origins,
+        sites,
         visibility,
         is_static: m.modifiers.iter().any(Modifier::is_static),
         is_final: m.modifiers.iter().any(Modifier::is_final),

@@ -15,6 +15,7 @@ mod isset_value;
 mod method_call_value;
 mod operator_value;
 mod relative_names;
+mod site_oracle;
 mod smoke;
 mod spread_argument_flatten;
 mod terminality;

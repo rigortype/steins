@@ -22,6 +22,7 @@ use crate::lower_effect::{
     EffectScanCx, ReceiverWrites, body_aliased, collect_body_callables, scan_effect_origins,
     scan_method_calls, scan_throw_origins,
 };
+use crate::lower_site::scan_owner_sites;
 use crate::lower_expr::lower_arg_value;
 use crate::lower_presence::maybe_undefined_reads;
 use crate::lower_stmt::{
@@ -299,6 +300,7 @@ fn build_scope_from(
         ret_ty: None,
         effect_origins: Vec::new(),
         throw_origins: Vec::new(),
+        sites: Vec::new(),
         guard_chain_no_default,
         is_static: false,
         docblock: None,
@@ -498,6 +500,7 @@ fn build_hook_expr_scope(
         ret_ty: None,
         effect_origins: Vec::new(),
         throw_origins: Vec::new(),
+        sites: Vec::new(),
         guard_chain_no_default,
         is_static: false,
         docblock: None,
@@ -567,6 +570,7 @@ fn build_closure_scope_from_closure(
     let mut stmts = Vec::new();
     let mut effect_origins = Vec::new();
     let mut throw_origins = Vec::new();
+    let mut sites = Vec::new();
     let mut method_calls = Vec::new();
     let mut guard_chain_no_default = Vec::new();
     // The closure's own scope is poisoned by a by-ref `use (&$x)` capture (its
@@ -599,6 +603,7 @@ fn build_closure_scope_from_closure(
         lower_stmt(s, &mut stmts);
         scan_effect_origins(&Node::Statement(s), &cx, &mut effect_origins);
         scan_throw_origins(&Node::Statement(s), &[], &[], &cx.locals, &mut throw_origins);
+        scan_owner_sites(&Node::Statement(s), &cx, &mut sites);
         scan_method_calls(&Node::Statement(s), &mut method_calls);
         scan_opaque(&Node::Statement(s), &mut opaque, false);
         scan_guard_chain_no_default(&Node::Statement(s), &mut guard_chain_no_default);
@@ -626,6 +631,7 @@ fn build_closure_scope_from_closure(
         ret_ty: cl.return_type_hint.as_ref().and_then(|r| lower_hint(&r.hint, rc)),
         effect_origins,
         throw_origins,
+        sites,
         guard_chain_no_default,
         is_static: cl.r#static.is_some(),
         docblock: adopt_closure_docblock(docs, to_span(cl.span()).start, def_offset, stmt_doc),
@@ -1215,6 +1221,7 @@ fn build_closure_scope_from_arrow(
 ) -> Scope {
     let mut effect_origins = Vec::new();
     let mut throw_origins = Vec::new();
+    let mut sites = Vec::new();
     // An arrow body is a single expression — no local assignments to resolve.
     let cx = EffectScanCx::new(
         &af.parameter_list,
@@ -1225,6 +1232,7 @@ fn build_closure_scope_from_arrow(
     .with_body(&af.parameter_list, Captures::All, std::iter::once(Node::Expression(af.expression)));
     scan_effect_origins(&Node::Expression(af.expression), &cx, &mut effect_origins);
     scan_throw_origins(&Node::Expression(af.expression), &[], &[], &cx.locals, &mut throw_origins);
+    scan_owner_sites(&Node::Expression(af.expression), &cx, &mut sites);
     let mut method_calls = Vec::new();
     scan_method_calls(&Node::Expression(af.expression), &mut method_calls);
     // An arrow body lowers straight to a `return <expr>;` (below) rather than
@@ -1276,6 +1284,7 @@ fn build_closure_scope_from_arrow(
         ret_ty: af.return_type_hint.as_ref().and_then(|r| lower_hint(&r.hint, rc)),
         effect_origins,
         throw_origins,
+        sites,
         guard_chain_no_default,
         is_static: af.r#static.is_some(),
         docblock: adopt_closure_docblock(docs, to_span(af.span()).start, def_offset, stmt_doc),
