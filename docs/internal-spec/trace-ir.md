@@ -159,6 +159,19 @@ That scan is deliberately *not* reachability-aware: an effect origin in provably
 dead code still counts, because an envelope is a contract about the function's
 code, not about one execution path.
 
+A call origin also carries one `ArgShape` per positional argument (issue #856):
+what the scan can show the argument holds, so the effects pass can rule out the
+user code a builtin reaches through it. The shapes are structural. An
+expression qualifies by its form (a literal, a concatenation, a comparison, an
+array literal of such). A bare variable qualifies through a flow-insensitive
+summary of every write the frame makes to it, met with its declared type when
+it is a parameter, and only in a frame that makes all its bindings (no
+`global`, `static`, `$$v`, `extract`, `include`, reference or by-ref capture). A
+variable handed bare to a named call, a `$this->`/`self::`/`parent::`/`Foo::`
+method or a `new` is left for the effects pass to check against the callee's
+by-reference flags; handed to anything else, it counts as written. `$this->p`
+reads the property's declared type.
+
 ## Not implemented
 
 - **Loop bodies as traces.** Loops are `Opaque`.

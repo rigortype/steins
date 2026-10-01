@@ -633,7 +633,7 @@ pub(crate) fn classify_effect_origins(
 ) {
     for origin in origins {
         match origin {
-            EffectOrigin::Call { name, span, arg_targets, const_args } => {
+            EffectOrigin::Call { name, span, arg_targets, const_args, .. } => {
                 let targets = arg_targets.as_deref();
                 match cx.resolve_effect_function(name) {
                     FnResolution::User(site) => {
@@ -704,7 +704,7 @@ pub(crate) fn classify_effect_origins(
             EffectOrigin::Output { .. } | EffectOrigin::Exit { .. } => {
                 row.findings.extend(construct_finding(cx, origin));
             }
-            EffectOrigin::MethodCall { receiver, method, span } => {
+            EffectOrigin::MethodCall { receiver, method, span, .. } => {
                 match resolve_effect_edge(cx, class_fqn, receiver, method) {
                     Some(callee) => {
                         row.edges.insert(callee);
@@ -766,6 +766,7 @@ pub(crate) fn classify_effect_origins(
                 arg_targets,
                 const_args,
                 span,
+                ..
             } => {
                 let targets = Some(arg_targets.as_slice());
                 match cx.resolve_invoker_function(callee) {
@@ -878,7 +879,7 @@ pub(crate) fn classify_effect_origins(
             // marks the body `…?` until it is (ADR-0055 amendment, 2026-09-26).
             EffectOrigin::State { .. } => row.exhaustive = false,
             // `new C(...)` runs `C`'s constructor (issue #804).
-            EffectOrigin::New { class, span } => {
+            EffectOrigin::New { class, span, .. } => {
                 classify_new(cx, class_fqn, class, *span, policy, row);
             }
         }
@@ -1755,7 +1756,7 @@ fn report_unit(
     // 2. Envelope-exceeded violations.
     for origin in origins {
         match origin {
-            EffectOrigin::Call { name, span, arg_targets, const_args } => {
+            EffectOrigin::Call { name, span, arg_targets, const_args, .. } => {
                 let targets = arg_targets.as_deref();
                 match cx.resolve_effect_function(name) {
                     FnResolution::User(site) => {
@@ -1789,7 +1790,7 @@ fn report_unit(
                     FnResolution::Unknown => {}
                 }
             }
-            EffectOrigin::MethodCall { receiver, method, span } => {
+            EffectOrigin::MethodCall { receiver, method, span, .. } => {
                 if let Some(callee) = resolve_effect_edge(cx, class_fqn, receiver, method) {
                     emit_transitive(out, cx, &callee, effects, span.start, display, bound);
                 // There is deliberately no declared-lane leg here: a declared bound
@@ -1822,6 +1823,7 @@ fn report_unit(
                 arg_targets,
                 const_args,
                 span,
+                ..
             } => {
                 let targets = Some(arg_targets.as_slice());
                 match cx.resolve_invoker_function(callee) {
@@ -1885,7 +1887,7 @@ fn report_unit(
             EffectOrigin::Callback { cbref, span } => {
                 report_callback(out, cx, cbref, effects, span.start, display, bound);
             }
-            EffectOrigin::New { class, span } => {
+            EffectOrigin::New { class, span, .. } => {
                 report_new(out, cx, class_fqn, class, *span, effects, display, bound);
             }
             // Every other origin is a language construct proving its own label

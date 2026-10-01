@@ -1,5 +1,6 @@
 //! The crate's integration tests, compiled as one binary (xtask's `test_layout` guard).
 
+mod arg_shapes;
 mod array_lowering;
 mod binding_presence;
 mod cast_value;
