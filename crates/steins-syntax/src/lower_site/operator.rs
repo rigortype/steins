@@ -171,8 +171,9 @@ fn embedded<'a, 'arena: 'a>(
 fn iterate_and_clone(node: &Node<'_, '_>, sx: &SiteScope<'_>, out: &mut Vec<SiteOrigin>) {
     match node {
         Node::Foreach(fe) => {
-            let span = fe.expression.span();
-            push(F::Iterate, C::Foreach, span, None, &[fe.expression], sx, out);
+            // The site is the statement's, so a consumer holding the loop's span
+            // (a loop region, ADR-0076) finds its own subject by that span.
+            push(F::Iterate, C::Foreach, fe.span(), None, &[fe.expression], sx, out);
         }
         Node::YieldFrom(y) => {
             push(F::Iterate, C::YieldFrom, y.span(), None, &[y.iterator], sx, out);

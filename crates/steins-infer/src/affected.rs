@@ -1061,6 +1061,28 @@ mod tests {
         assert!(out.contains(&2), "a file naming the supertype: {out:?}");
     }
 
+    /// ADR-0099 §4.4's universe gate reads a subclass in another file (one that
+    /// imports a trait, or declares `__get`): whether `Base::r` reads a declared
+    /// property without running user code depends on it, and no call edge says so.
+    /// The inheritance leg is what keeps a warm run correct: editing the subclass
+    /// reaches the file of the class it extends and the files naming that class.
+    #[test]
+    fn a_changed_subclass_reaches_the_property_readers_of_its_parent() {
+        for sub in [
+            "<?php class Sub extends Base { use Magic; }\n",
+            "<?php class Sub extends Base { public function __get($n) { return 1; } }\n",
+        ] {
+            let t = trees(&[
+                "<?php class Base { public int $x; function r() { return $this->x; } }\n",
+                sub,
+                "<?php function f(Base $b) { return $b->x; }\n",
+            ]);
+            let out = affected(&t, &[1], &[]);
+            assert!(out.contains(&0), "the parent's file: {out:?}");
+            assert!(out.contains(&2), "the file naming the parent: {out:?}");
+        }
+    }
+
     /// A name a comment merely *says* is not an edge. Method resolution is
     /// class-first, so nothing can arrive at `Report::render` without naming
     /// `Report`; the tokenizer this replaces edged every file whose prose

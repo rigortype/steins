@@ -803,36 +803,6 @@ pub fn region_purity_project(
         .collect()
 }
 
-/// The start of the region's own `foreach` subject (ADR-0099 §4.3's Iterate
-/// family), which its purity leaves out. A region is the loop statement, so its
-/// subject is the first `foreach` operator site inside it. Whether the subject is
-/// an array, proven or vouched for, is the question the transform asks of the
-/// subject separately (`array_map` raises a `TypeError` on a `Traversable`); the
-/// region's purity is about the loop body. A `foreach` nested in the body is a
-/// site like any other.
-fn own_subject_start(
-    tree: &SourceTree,
-    inside: impl Fn(steins_syntax::Span) -> bool,
-) -> Option<u32> {
-    use steins_syntax::OperatorConstruct;
-    let methods = tree.classes().iter().flat_map(|c| &c.methods).map(|m| m.sites.as_slice());
-    let functions = tree.functions().iter().map(|f| f.sites.as_slice());
-    let scopes = tree.scopes().iter().map(|s| s.sites.as_slice());
-    functions
-        .chain(methods)
-        .chain(scopes)
-        .flatten()
-        .filter(|s| {
-            inside(s.span)
-                && matches!(
-                    &s.kind,
-                    SiteKind::Operator { construct: OperatorConstruct::Foreach, .. }
-                )
-        })
-        .map(|s| s.span.start)
-        .min()
-}
-
 /// The per-region half of [`region_purity_project`], against already-computed
 /// fixpoints.
 #[allow(clippy::too_many_arguments)]
@@ -857,9 +827,14 @@ fn region_purity_in(
     // value, restricted to a sub-span.
     let mut row = EffectOwnRow::new();
     let mut trow = ThrowOwnRow::new();
-    let own_subject = own_subject_start(tree, inside);
+    // The region is the loop statement, and the loop's own iteration site carries the
+    // statement's span (ADR-0099 §4.3's Iterate family): the region's purity leaves it
+    // out. Whether the subject is an array, proven or vouched for, is the question the
+    // transform asks of the subject separately (`array_map` raises a `TypeError` on a
+    // `Traversable`); a `foreach` in the body, in a closure or not, is a site like any
+    // other, since its span is its own.
     let is_own_subject = |s: &SiteOrigin| {
-        own_subject == Some(s.span.start)
+        (s.span.start, s.span.end) == region
             && matches!(
                 &s.kind,
                 SiteKind::Operator { construct: steins_syntax::OperatorConstruct::Foreach, .. }

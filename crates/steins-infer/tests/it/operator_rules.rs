@@ -188,6 +188,45 @@ fn a_declared_visible_property_of_a_bound_class_runs_nothing_behind_the_universe
 }
 
 #[test]
+fn a_subclass_importing_a_trait_or_written_anonymously_closes_the_universe_gate() {
+    // A trait's body is not lowered, so a subclass using one may bring `__get`.
+    let traited = "trait Magic { public function __get($n) { return 1; } }\n\
+        class Base { public int $x = 1; public function r() { return $this->x; } }\n\
+        class Sub extends Base { use Magic; }";
+    gap(&file(traited, ""), "Base::r", PROPERTY);
+    // An anonymous class is listed by no index; one extending the class counts,
+    // whatever its body declares.
+    let anonymous = "class Base3 { public int $x = 1; public function r() { return $this->x; } }\n\
+        class Other { public int $x = 1; public function r() { return $this->x; } }\n\
+        function mk() { return new class extends Base3 { public function __get($n) { return 1; } }; }";
+    gap(&file(anonymous, ""), "Base3::r", PROPERTY);
+    // A class nothing anonymous extends is untouched.
+    covered(&file(anonymous, ""), "Other::r");
+    // So is one an anonymous class implements only an interface of.
+    let sibling = "interface Tag {}\n\
+        class Base4 { public int $x = 1; public function r() { return $this->x; } }\n\
+        function mk() { return new class implements Tag {}; }";
+    covered(&file(sibling, ""), "Base4::r");
+}
+
+#[test]
+fn two_operands_that_may_both_be_objects_compare_property_by_property() {
+    // Objects of one class compare their properties, recursively through arrays,
+    // and any pair may convert an object to a string: a gap whatever the classes.
+    let same = |body: &str| file("", &format!("function f(Plain $a, Plain $b) {{ {body} }}"));
+    gap(&same("return $a == $b;"), "f", TO_STRING);
+    gap(&same("return $a < $b;"), "f", TO_STRING);
+    gap(&same("switch ($a) { case $b: return 1; } return 0;"), "f", TO_STRING);
+    gap(&file("", "function f(Name $a, $b) { return $a == $b; }"), "f", TO_STRING);
+    // Against an operand shown to hold no object at any depth, the class answers.
+    covered(&same("return $a == 'x';"), "f");
+    covered(&same("switch ($a) { case 'x': return 1; } return 0;"), "f");
+    let named = file("", "function f(Name $a, string $s) { return $a == $s; }");
+    covered(&named, "f");
+    assert_eq!(runs(&named, "f").0, ["io.output.buffer"]);
+}
+
+#[test]
 fn an_interface_the_project_cannot_read_opens_no_chain_but_a_parent_class_does() {
     // An interface has no body to run on a property access.
     let unread = "class Aware implements \\Psr\\Log\\LoggerAwareInterface { public $logger;\n\
