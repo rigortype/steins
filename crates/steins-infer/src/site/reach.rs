@@ -16,14 +16,14 @@ use std::collections::HashSet;
 
 use steins_catalog::ArgReach;
 use steins_syntax::{
-    ArgShape, EffectOrigin, EffectRecv, NameRef, Param, StaticClass, Stored, Visibility,
+    ArgShape, EffectRecv, NameRef, Param, SiteKind, SiteOrigin, StaticClass, Stored, Visibility,
 };
 
+use super::{NewTarget, Reach, engine_exit, resolve_new};
 use crate::Sym;
 use crate::cx::Cx;
 use crate::dispatch::{ChainMode, Resolution, resolve_in_chain_mode};
 use crate::project::FnResolution;
-use crate::purity::{NewTarget, engine_exit, resolve_new};
 
 /// What an argument is shown to hold, weakest first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -38,15 +38,14 @@ pub(crate) enum Held {
 }
 
 /// The calling frame a call's argument shapes are read against: the parameter
-/// list an [`ArgShape::Param`] names and every effect origin of the frame,
-/// whose named calls decide whether a variable can be rebound through a
-/// reference. A region classified on its own (ADR-0076) still names its whole
+/// list an [`ArgShape::Param`] names and every site of the frame, whose named
+/// calls decide whether a variable can be rebound through a reference. A region classified on its own (ADR-0076) still names its whole
 /// frame here, since a call outside the region can rebind a parameter the
 /// region reads.
 pub(crate) struct Frame<'a> {
     pub(crate) class_fqn: Option<&'a str>,
     pub(crate) params: &'a [Param],
-    pub(crate) origins: &'a [EffectOrigin],
+    pub(crate) sites: &'a [SiteOrigin],
     /// The variables some named call of the frame may take by reference,
     /// computed on the first variable argument that asks.
     by_ref: OnceCell<HashSet<String>>,
@@ -56,9 +55,9 @@ impl<'a> Frame<'a> {
     pub(crate) fn new(
         class_fqn: Option<&'a str>,
         params: &'a [Param],
-        origins: &'a [EffectOrigin],
+        sites: &'a [SiteOrigin],
     ) -> Self {
-        Self { class_fqn, params, origins, by_ref: OnceCell::new() }
+        Self { class_fqn, params, sites, by_ref: OnceCell::new() }
     }
 
     /// What the argument `shape` describes is shown to hold.
@@ -82,7 +81,7 @@ impl Frame<'_> {
     /// What a variable every write of the frame stores `stores` into holds,
     /// unless a named call of the frame may take it by reference.
     fn variable_held(&self, cx: &Cx, name: &str, stores: Stored) -> Held {
-        let by_ref = self.by_ref.get_or_init(|| passed_by_ref(cx, self.class_fqn, self.origins));
+        let by_ref = self.by_ref.get_or_init(|| passed_by_ref(cx, self.class_fqn, self.sites));
         if by_ref.contains(name) {
             return Held::Unknown;
         }
@@ -99,22 +98,23 @@ impl Frame<'_> {
 /// the half only callee resolution can answer. A builtin answers through the
 /// catalog's by-value certification, a project function through its own
 /// parameter list, and a name neither resolves counts as by reference.
-fn passed_by_ref(cx: &Cx, class_fqn: Option<&str>, origins: &[EffectOrigin]) -> HashSet<String> {
+fn passed_by_ref(cx: &Cx, class_fqn: Option<&str>, sites: &[SiteOrigin]) -> HashSet<String> {
     let mut out = HashSet::new();
-    for origin in origins {
-        let (callee, shapes) = match origin {
-            EffectOrigin::Call { name, arg_shapes: Some(shapes), .. } => {
+    for site in sites {
+        let (callee, shapes) = match (&site.kind, site.operands.as_deref()) {
+            (SiteKind::Call { name, callbacks }, shapes) if callbacks.is_empty() => {
+                let Some(shapes) = shapes else { continue };
                 (Callee::Function(name), shapes)
             }
-            EffectOrigin::HigherOrder { callee, arg_shapes, .. } => {
-                (Callee::Function(callee), arg_shapes)
+            // The scan forms a higher-order call from an all-positional argument
+            // list only, so its shapes are there; an absent list reads as empty.
+            (SiteKind::Call { name, .. }, shapes) => {
+                (Callee::Function(name), shapes.unwrap_or(&[]))
             }
-            EffectOrigin::MethodCall { receiver, method, arg_shapes: Some(shapes), .. } => {
+            (SiteKind::MethodCall { receiver, method }, Some(shapes)) => {
                 (Callee::Method(receiver, method), shapes)
             }
-            EffectOrigin::New { class, arg_shapes: Some(shapes), .. } => {
-                (Callee::New(class), shapes)
-            }
+            (SiteKind::New { class }, Some(shapes)) => (Callee::New(class), shapes),
             _ => continue,
         };
         let mut params: Option<Option<&[Param]>> = None;
@@ -320,4 +320,20 @@ pub(crate) fn reaches_user_code(
 /// declares ([`reaches_user_code`]).
 pub(crate) fn callback_reaches_user_code(name: &str) -> bool {
     steins_catalog::arg_reach(name).is_none_or(|row| row.reaches_blind(false))
+}
+
+/// [`reaches_user_code`] as the [`Reach`] a resolved site records, in the file
+/// whose strictness `cx` carries.
+pub(crate) fn builtin_reach(
+    cx: &Cx,
+    frame: &Frame,
+    name: &str,
+    shapes: Option<&[ArgShape]>,
+    handled: &[usize],
+) -> Reach {
+    if reaches_user_code(cx, frame, name, shapes, cx.strict(), handled) {
+        Reach::Possible
+    } else {
+        Reach::RuledOut
+    }
 }

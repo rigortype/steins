@@ -115,17 +115,19 @@ use steins_syntax::{DynamismKind, IncludePath, RetHintKind, ScopeOwner, SourceTr
 use crate::affected::{alias_key_edges, declared_keys, footprint_keys, inherit_keys};
 use crate::purity::EffectOwnRow;
 #[cfg(not(target_arch = "wasm32"))]
-use crate::purity::{EffectFinding, classify_effect_origins};
+use crate::site::GapKind;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::purity::{EffectFinding, classify_effect_sites};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::project::{FileUnit, Index};
 use crate::throws::ThrowOwnRow;
 #[cfg(not(target_arch = "wasm32"))]
-use crate::throws::{ResolvedCatch, ThrowFact, classify_throw_origins};
+use crate::throws::{ResolvedCatch, ThrowFact, classify_throw_sites};
 use crate::Sym;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::cx::Cx;
 #[cfg(not(target_arch = "wasm32"))]
-use crate::reach::Frame;
+use crate::site::reach::Frame;
 
 // ---------------------------------------------------------------------------
 // The key hash.
@@ -443,26 +445,24 @@ fn own_rows_of(
     let mut classify = |sym: Sym,
                         class_fqn: Option<&str>,
                         params: &[steins_syntax::Param],
-                        effect_origins: &[steins_syntax::EffectOrigin],
-                        throw_origins: &[steins_syntax::ThrowOrigin],
+                        sites: &[steins_syntax::SiteOrigin],
                         syms: &mut Vec<Sym>| {
         syms.push(sym.clone());
         if !effects.contains_key(&sym) {
             order.push(sym.clone());
         }
         let erow = effects.entry(sym.clone()).or_insert_with(EffectOwnRow::new);
-        let frame = Frame::new(class_fqn, params, effect_origins);
-        classify_effect_origins(&cx, &frame, effect_origins, plugins, policy, erow);
+        let frame = Frame::new(class_fqn, params, sites);
+        classify_effect_sites(&cx, &frame, sites, plugins, policy, erow);
         let trow = throws.entry(sym).or_insert_with(ThrowOwnRow::new);
-        classify_throw_origins(&cx, class_fqn, throw_origins, trow);
+        classify_throw_sites(&cx, &frame, sites, trow);
     };
     for f in tree.functions() {
         classify(
             Sym::Func(f.fqn.clone()),
             None,
             &f.params,
-            &f.effect_origins,
-            &f.throw_origins,
+            &f.sites,
             &mut syms,
         );
     }
@@ -472,8 +472,7 @@ fn own_rows_of(
                 Sym::Method(c.fqn.clone(), m.name.clone()),
                 Some(&c.fqn),
                 &m.params,
-                &m.effect_origins,
-                &m.throw_origins,
+                &m.sites,
                 &mut syms,
             );
         }
@@ -484,8 +483,7 @@ fn own_rows_of(
                 Sym::Closure(unit.path.to_owned(), *def_offset),
                 None,
                 &scope.params,
-                &scope.effect_origins,
-                &scope.throw_origins,
+                &scope.sites,
                 &mut syms,
             );
         }
@@ -549,7 +547,8 @@ struct StoredRows {
 struct StoredEffectRow {
     findings: Vec<EffectFinding>,
     declared: Vec<String>,
-    exhaustive: bool,
+    /// The gap kinds, sorted: exhaustive exactly when empty.
+    gaps: Vec<GapKind>,
     edges: Vec<Sym>,
     untainting: Vec<Sym>,
 }
@@ -560,7 +559,8 @@ struct StoredEffectRow {
 struct StoredThrowRow {
     /// `(fact, certainty)` pairs — a JSON object cannot key on a struct.
     facts: Vec<(ThrowFact, u8)>,
-    exhaustive: bool,
+    /// The gap kinds, sorted: exhaustive exactly when empty.
+    gaps: Vec<GapKind>,
     edges: Vec<(Sym, Vec<Vec<ResolvedCatch>>)>,
 }
 
@@ -679,7 +679,7 @@ pub(crate) fn facts_payload(facts: &FileFacts) -> Vec<u8> {
                         StoredEffectRow {
                             findings,
                             declared,
-                            exhaustive: row.exhaustive,
+                            gaps: row.gaps.iter().copied().collect(),
                             edges,
                             untainting,
                         },
@@ -697,7 +697,7 @@ pub(crate) fn facts_payload(facts: &FileFacts) -> Vec<u8> {
                         sym.clone(),
                         StoredThrowRow {
                             facts,
-                            exhaustive: row.exhaustive,
+                            gaps: row.gaps.iter().copied().collect(),
                             edges: row.edges.clone(),
                         },
                     )
@@ -724,7 +724,7 @@ pub(crate) fn read_facts(bytes: &[u8]) -> Result<FileFacts, Miss> {
         for (fact, byte) in row.facts {
             facts.insert(fact, certainty_of(byte).ok_or_else(corrupt)?);
         }
-        throws.push((sym, ThrowOwnRow { facts, exhaustive: row.exhaustive, edges: row.edges }));
+        throws.push((sym, ThrowOwnRow { facts, gaps: row.gaps.into_iter().collect(), edges: row.edges }));
     }
     Ok(FileFacts {
         parse_error: stored.parse_error,
@@ -751,7 +751,7 @@ pub(crate) fn read_facts(bytes: &[u8]) -> Result<FileFacts, Miss> {
                         EffectOwnRow {
                             findings: row.findings.into_iter().collect(),
                             declared: row.declared.into_iter().collect(),
-                            exhaustive: row.exhaustive,
+                            gaps: row.gaps.into_iter().collect(),
                             edges: row.edges.into_iter().collect(),
                             untainting: row.untainting.into_iter().collect(),
                         },

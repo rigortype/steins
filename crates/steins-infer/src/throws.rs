@@ -5,22 +5,22 @@
 //! diagnostics built on it. The escape sweep ([`crate::escapes`]) and the effects
 //! pass ([`crate::purity`]) consume the fixpoint through the `pub(crate)` items.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use steins_domain::Certainty;
 use steins_phpdoc::{Type as PType, TagKind, scan_docblock};
 use steins_phpdoc::ast::TypeKind as PKind;
 use steins_syntax::{
-    CatchClause, ClassDecl, EffectRecv, MethodDecl, NameRef, RefKind, ScopeOwner, StaticClass,
-    ThrowKind, ThrowOrigin,
+    CatchClause, ClassDecl, MethodDecl, NameRef, RefKind, ScopeOwner, SiteOrigin, Span,
 };
 
 use crate::contract::{IsA, parse_tag_type};
 use crate::cx::Cx;
 use crate::facts::FileFacts;
-use crate::project::{Diagnostic, FileUnit, FnResolution, Index};
+use crate::project::{Diagnostic, FileUnit, Index};
+use crate::site::reach::Frame;
+use crate::site::{GapKind, Knowledge, Target, records_throw, resolve_site};
 use crate::{Fixpoints, Gate, Sym, THROW_LISKOV_ID, THROW_UNDECLARED_ID};
-use crate::purity::{NewTarget, new_origin, resolve_effect_edge, resolve_new};
 use crate::suppress::{Facet, Origin};
 
 // ---------------------------------------------------------------------------
@@ -109,7 +109,7 @@ fn resolve_guards(cx: &Cx, guards: &[Vec<CatchClause>]) -> Guards {
 }
 
 /// One unit's **own** contribution to the throw fixpoint — everything
-/// [`classify_throw_origins`] proves about a declaration in isolation, before
+/// [`classify_throw_sites`] proves about a declaration in isolation, before
 /// any propagation (issue #489). This is the propagation-independent half of
 /// the throw system, and the value ADR-0092 §5's per-package artifact will
 /// persist per declaration: the fixpoint itself is re-run from complete own
@@ -123,9 +123,9 @@ pub(crate) struct ThrowOwnRow {
     /// The unit's own escaping throw facts, each at its best escape
     /// [`Certainty`] past the origin's enclosing guards (`No` never enters).
     pub(crate) facts: HashMap<ThrowFact, Certainty>,
-    /// The own-exhaustiveness bit: `false` once any origin in this body is
-    /// dynamic/unresolved. Propagation can only lower it further.
-    pub(crate) exhaustive: bool,
+    /// Why this body's own throw set is incomplete ([`GapKind`]): exhaustive
+    /// exactly when empty. Propagation can only add to it.
+    pub(crate) gaps: BTreeSet<GapKind>,
     /// Guarded call edges: the resolved callee plus the ordered
     /// (innermost-first) guard stacks the callee's throws must escape through,
     /// with the caught class names already resolved ([`ResolvedCatch`]).
@@ -136,64 +136,26 @@ impl ThrowOwnRow {
     /// Fold another row for the same [`Sym`] into this one — the twin of
     /// [`crate::purity::EffectOwnRow::absorb`], and equal to classifying both
     /// bodies into one row for the same reason: the fact map joins by
-    /// [`Certainty::or`] exactly as `classify_throw_origins` does, the edge
+    /// [`Certainty::or`] exactly as `classify_throw_sites` does, the edge
     /// list concatenates (propagation is order-independent), and the
-    /// exhaustiveness bit only ever clears.
+    /// gap set only ever grows.
     pub(crate) fn absorb(&mut self, other: &Self) {
         for (fact, cert) in &other.facts {
             let slot = self.facts.entry(fact.clone()).or_insert(Certainty::No);
             *slot = slot.or(*cert);
         }
-        self.exhaustive &= other.exhaustive;
+        self.gaps.extend(other.gaps.iter().copied());
         self.edges.extend(other.edges.iter().cloned());
     }
 
-    /// The empty row: a unit with no origins raises nothing and is exhaustive.
+    /// The empty row: a unit with no sites raises nothing and is exhaustive.
     pub(crate) fn new() -> Self {
-        Self { facts: HashMap::new(), exhaustive: true, edges: Vec::new() }
+        Self { facts: HashMap::new(), gaps: BTreeSet::new(), edges: Vec::new() }
     }
-}
 
-/// Wire a resolved callback's throws into the throw graph (ADR-0033), filtered by
-/// the call site's `guards`: a closure/user callback is an edge; a builtin
-/// callback contributes its curated throws directly; an unknown callback taints.
-fn add_callback_throws(
-    cx: &Cx,
-    cbref: &steins_syntax::CallbackRef,
-    span: steins_syntax::Span,
-    guards: &[Vec<ResolvedCatch>],
-    row: &mut ThrowOwnRow,
-) {
-    match cbref {
-        steins_syntax::CallbackRef::Closure(off) => {
-            row.edges.push((Sym::Closure(cx.path().to_owned(), *off), guards.to_vec()));
-        }
-        steins_syntax::CallbackRef::Named(name) => match cx.resolve_function(name) {
-            FnResolution::User(site) => {
-                row.edges.push((Sym::Func(cx.fn_decl(site).fqn.clone()), guards.to_vec()));
-            }
-            FnResolution::Builtin(builtin_name) => {
-                if let Some(classes) = steins_catalog::builtin_throws(&builtin_name) {
-                    for c in classes {
-                        let esc = escape_through_guards(cx, c, guards);
-                        if esc == Certainty::No {
-                            continue;
-                        }
-                        let line = cx.tree().position(span.start).line;
-                        let fact = ThrowFact {
-                            class: (*c).to_owned(),
-                            origin: format!("{}()", name.simple()),
-                            offset: span.start,
-                            line,
-                            path: cx.path().to_owned(),
-                        };
-                        let slot = row.facts.entry(fact).or_insert(Certainty::No);
-                        *slot = slot.or(esc);
-                    }
-                }
-            }
-            FnResolution::Unknown => row.exhaustive = false,
-        },
+    /// Whether every site of this body resolved: no gap was recorded.
+    pub(crate) fn exhaustive(&self) -> bool {
+        self.gaps.is_empty()
     }
 }
 
@@ -310,7 +272,8 @@ fn throw_own_rows(
         sym: Sym,
         file: usize,
         class_fqn: Option<String>,
-        origins: &'a [ThrowOrigin],
+        sites: &'a [SiteOrigin],
+        params: &'a [steins_syntax::Param],
     }
     // The files whose rows this run already holds (issue #516) — folded in
     // without their trees being decoded, in the order the enumeration below
@@ -331,7 +294,13 @@ fn throw_own_rows(
             continue;
         }
         for f in u.tree.functions() {
-            ulist.push(Unit { sym: Sym::Func(f.fqn.clone()), file: fi, class_fqn: None, origins: &f.throw_origins });
+            ulist.push(Unit {
+                sym: Sym::Func(f.fqn.clone()),
+                file: fi,
+                class_fqn: None,
+                sites: &f.sites,
+                params: &f.params,
+            });
         }
         for c in u.tree.classes() {
             for m in &c.methods {
@@ -339,7 +308,8 @@ fn throw_own_rows(
                     sym: Sym::Method(c.fqn.clone(), m.name.clone()),
                     file: fi,
                     class_fqn: Some(c.fqn.clone()),
-                    origins: &m.throw_origins,
+                    sites: &m.sites,
+                    params: &m.params,
                 });
             }
         }
@@ -350,7 +320,8 @@ fn throw_own_rows(
                     sym: Sym::Closure(u.path.to_owned(), *def_offset),
                     file: fi,
                     class_fqn: None,
-                    origins: &scope.throw_origins,
+                    sites: &scope.sites,
+                    params: &scope.params,
                 });
             }
         }
@@ -360,7 +331,8 @@ fn throw_own_rows(
         let cx = Cx::new(units, index, unit.file);
         sym_file.insert(unit.sym.clone(), unit.file);
         let row = rows.entry(unit.sym.clone()).or_insert_with(ThrowOwnRow::new);
-        classify_throw_origins(&cx, unit.class_fqn.as_deref(), unit.origins, row);
+        let frame = Frame::new(unit.class_fqn.as_deref(), unit.params, unit.sites);
+        classify_throw_sites(&cx, &frame, unit.sites, row);
     }
     if syms.is_empty() {
         return (ulist.into_iter().map(|u| u.sym).collect(), sym_file, rows);
@@ -390,7 +362,7 @@ fn propagate_throws(
     let mut facts: HashMap<Sym, HashMap<ThrowFact, Certainty>> =
         rows.iter().map(|(s, r)| (s.clone(), r.facts.clone())).collect();
     let mut ex: HashMap<Sym, bool> =
-        rows.iter().map(|(s, r)| (s.clone(), r.exhaustive)).collect();
+        rows.iter().map(|(s, r)| (s.clone(), r.exhaustive())).collect();
     loop {
         let mut changed = false;
         for sym in syms {
@@ -445,197 +417,74 @@ fn propagate_throws(
         .collect()
 }
 
-/// Classify one unit's (or one **region**'s — ADR-0076) throw origins into its
-/// [`ThrowOwnRow`]. The regional twin of [`classify_effect_origins`]:
+/// Classify one unit's (or one **region**'s — ADR-0076) sites into its
+/// [`ThrowOwnRow`]. The regional twin of [`crate::purity::classify_effect_sites`]:
 /// a sub-span of a body is asked exactly the question the whole body is asked, so
 /// the loop transform's "proven throw set empty" precondition is the throw pass's
 /// own verdict rather than a second opinion about what a throw is.
-pub(crate) fn classify_throw_origins(
+///
+/// Each site is resolved once ([`resolve_site`]) under the throw lane's
+/// knowledge and folded into the row: a thrown class or an engine row's classes
+/// are facts past the site's guards, a project callee is a guarded edge, and a gap
+/// makes the row non-exhaustive.
+pub(crate) fn classify_throw_sites(
     cx: &Cx,
-    class_fqn: Option<&str>,
-    origins: &[ThrowOrigin],
+    frame: &Frame,
+    sites: &[SiteOrigin],
     row: &mut ThrowOwnRow,
 ) {
-    let add_fact = |class: String, origin: String, span: steins_syntax::Span, cert: Certainty, d: &mut HashMap<ThrowFact, Certainty>| {
-        if cert == Certainty::No {
-            return;
-        }
-        let line = cx.tree().position(span.start).line;
-        let fact = ThrowFact {
-            class,
-            origin,
-            offset: span.start,
-            line,
-            path: cx.path().to_owned(),
-        };
-        let slot = d.entry(fact).or_insert(Certainty::No);
-        *slot = slot.or(cert);
-    };
-    for origin in origins {
-        // One resolution per origin, in the file whose tree is in hand — see
-        // [`ResolvedCatch`] for why this moved out of propagation.
-        let guards = resolve_guards(cx, &origin.guards);
-        match &origin.kind {
-            ThrowKind::New(class) => {
-                let d_fqn = cx.class_fqn(class);
-                let esc = escape_through_guards(cx, &d_fqn, &guards);
-                let display = format!("new {}", last_segment(&d_fqn));
-                add_fact(d_fqn, display, origin.span, esc, &mut row.facts);
-            }
-            ThrowKind::Rethrow { caught, has_unresolvable } => {
-                for cref in caught {
-                    let d_fqn = cx.class_fqn(cref);
-                    let esc = escape_through_guards(cx, &d_fqn, &guards);
-                    let display = format!("rethrow {}", last_segment(&d_fqn));
-                    add_fact(d_fqn, display, origin.span, esc, &mut row.facts);
-                }
-                if *has_unresolvable {
-                    row.exhaustive = false;
-                }
-            }
-            ThrowKind::Call(name) => match cx.resolve_function(name) {
-                FnResolution::User(site) => {
-                    row.edges.push((Sym::Func(cx.fn_decl(site).fqn.clone()), guards.clone()));
-                }
-                FnResolution::Builtin(builtin_name) => {
-                    if let Some(classes) = steins_catalog::builtin_throws(&builtin_name) {
-                        for c in classes {
-                            let esc = escape_through_guards(cx, c, &guards);
-                            add_fact((*c).to_owned(), format!("{}()", name.simple()), origin.span, esc, &mut row.facts);
-                        }
-                    }
-                }
-                FnResolution::Unknown => row.exhaustive = false,
-            },
-            ThrowKind::MethodCall { receiver, method } => {
-                match resolve_effect_edge(cx, class_fqn, receiver, method) {
-                    Some(callee) => row.edges.push((callee, guards.clone())),
-                    None => classify_parent_constructor(
-                        cx, class_fqn, receiver, method, origin.span, &guards, row,
-                    ),
-                }
-            }
-            ThrowKind::Construct { class } => {
-                classify_construct(cx, class_fqn, class, origin.span, &guards, row);
-            }
-            // A resolved callback's throws propagate through this call site's
-            // guards (ADR-0033): a closure/user callback is an edge; a builtin
-            // callback contributes its curated throws; unknown taints.
-            ThrowKind::Callback { cbref } => {
-                add_callback_throws(cx, cbref, origin.span, &guards, row);
-            }
-            ThrowKind::HigherOrder { callee, callbacks, arg_count } => {
-                match cx.resolve_invoker_function(callee) {
-                    FnResolution::Builtin(builtin_name) => {
-                        let shape = steins_catalog::invocation_shape(&builtin_name)
-                            .expect("resolve_invoker_function's catalog_knows guarantees a shape row");
-                        if shape.callback_param < *arg_count {
-                            match callbacks.iter().find(|(p, _)| *p == shape.callback_param) {
-                                Some((_, cbref)) => add_callback_throws(
-                                    cx, cbref, origin.span, &guards, row,
-                                ),
-                                None => row.exhaustive = false,
-                            }
-                        }
-                    }
-                    FnResolution::User(_) | FnResolution::Unknown => match cx.resolve_function(callee) {
-                        FnResolution::User(site) => {
-                            row.edges.push((Sym::Func(cx.fn_decl(site).fqn.clone()), guards.clone()));
-                        }
-                        FnResolution::Builtin(builtin_name) => {
-                            if let Some(classes) = steins_catalog::builtin_throws(&builtin_name) {
-                                for c in classes {
-                                    let esc = escape_through_guards(cx, c, &guards);
-                                    add_fact((*c).to_owned(), format!("{}()", callee.simple()), origin.span, esc, &mut row.facts);
-                                }
-                            }
-                        }
-                        FnResolution::Unknown => row.exhaustive = false,
-                    },
-                }
-            }
-            ThrowKind::Taint => row.exhaustive = false,
-        }
-    }
-}
-
-/// Classify one `new` origin into `row` (issue #849), through the constructor
-/// [`resolve_new`] names, the one the effects pass resolves the same `new` to:
-/// a project constructor is an edge under this site's guards, a class with
-/// none contributes nothing, an engine one answers from the catalog, and one
-/// that cannot be resolved taints exhaustiveness.
-fn classify_construct(
-    cx: &Cx,
-    enclosing: Option<&str>,
-    class: &StaticClass,
-    span: steins_syntax::Span,
-    guards: &[Vec<ResolvedCatch>],
-    row: &mut ThrowOwnRow,
-) {
-    match resolve_new(cx, enclosing, class) {
-        NewTarget::Edge(callee) => row.edges.push((callee, guards.to_vec())),
-        NewTarget::Absent => {}
-        NewTarget::Engine(fqn) => {
-            engine_constructor_throws(cx, &fqn, &new_origin(class), span, guards, row);
-        }
-        NewTarget::Unknown => row.exhaustive = false,
-    }
-}
-
-/// A method call no project body answers: `parent::__construct(...)` into an
-/// engine class runs the constructor `new parent` would, and answers from the
-/// same row, as the effects pass's twin does (issue #849), so a project
-/// exception forwarding to the engine's stays exhaustive. Any other such call
-/// taints exhaustiveness, as it always has.
-fn classify_parent_constructor(
-    cx: &Cx,
-    enclosing: Option<&str>,
-    receiver: &EffectRecv,
-    method: &str,
-    span: steins_syntax::Span,
-    guards: &[Vec<ResolvedCatch>],
-    row: &mut ThrowOwnRow,
-) {
-    if matches!(receiver, EffectRecv::Parent) && method.eq_ignore_ascii_case("__construct")
-        && let NewTarget::Engine(fqn) = resolve_new(cx, enclosing, &StaticClass::Parent)
-    {
-        engine_constructor_throws(cx, &fqn, "parent::__construct", span, guards, row);
-    } else {
-        row.exhaustive = false;
-    }
-}
-
-/// The throws an engine class's constructor contributes at `span`: each class
-/// its [`steins_catalog::method_throws`] row names, past this site's guards,
-/// displayed as `origin`. No row is the taint.
-fn engine_constructor_throws(
-    cx: &Cx,
-    fqn: &str,
-    origin: &str,
-    span: steins_syntax::Span,
-    guards: &[Vec<ResolvedCatch>],
-    row: &mut ThrowOwnRow,
-) {
-    let Some(classes) = steins_catalog::method_throws(fqn, "__construct") else {
-        row.exhaustive = false;
-        return;
-    };
-    let line = cx.tree().position(span.start).line;
-    for c in classes {
-        let esc = escape_through_guards(cx, c, guards);
-        if esc == Certainty::No {
+    let knowledge = Knowledge::ThrowsLegacy;
+    for site in sites {
+        let resolved = resolve_site(cx, frame, site, &knowledge);
+        row.gaps.extend(resolved.gaps.iter().copied());
+        if resolved.targets.is_empty() {
             continue;
         }
-        let fact = ThrowFact {
-            class: (*c).to_owned(),
-            origin: origin.to_owned(),
-            offset: span.start,
-            line,
-            path: cx.path().to_owned(),
-        };
-        let slot = row.facts.entry(fact).or_insert(Certainty::No);
-        *slot = slot.or(esc);
+        // One resolution per site, in the file whose tree is in hand — see
+        // [`ResolvedCatch`] for why this moved out of propagation.
+        let guards = resolve_guards(cx, &site.guards);
+        for target in &resolved.targets {
+            match target {
+                Target::Edge(edge) => row.edges.push((edge.sym.clone(), guards.clone())),
+                Target::Thrown { class, display } => {
+                    let esc = escape_through_guards(cx, class, &guards);
+                    add_fact(cx, &mut row.facts, class, display, site.span, esc);
+                }
+                Target::Engine(hit) => {
+                    let origin = hit.throw_origin();
+                    for class in hit.throws {
+                        let esc = escape_through_guards(cx, class, &guards);
+                        add_fact(cx, &mut row.facts, class, &origin, site.span, esc);
+                    }
+                }
+                Target::Declared(_) | Target::Construct { .. } => {}
+            }
+        }
     }
+}
+
+/// Record a throw fact at `span` at escape certainty `cert`; a throw no guard
+/// lets through (`No`) never enters.
+fn add_fact(
+    cx: &Cx,
+    facts: &mut HashMap<ThrowFact, Certainty>,
+    class: &str,
+    origin: &str,
+    span: Span,
+    cert: Certainty,
+) {
+    if cert == Certainty::No {
+        return;
+    }
+    let fact = ThrowFact {
+        class: class.to_owned(),
+        origin: origin.to_owned(),
+        offset: span.start,
+        line: cx.tree().position(span.start).line,
+        path: cx.path().to_owned(),
+    };
+    let slot = facts.entry(fact).or_insert(Certainty::No);
+    *slot = slot.or(cert);
 }
 
 /// The last `\`-segment of an FQN (for a compact throw display).
@@ -700,7 +549,7 @@ pub(crate) fn collect_class_names(ty: &PType, f: &mut dyn FnMut(&str)) {
 /// not to cover their subject's Verified domain. [`emit_undeclared`] consults it
 /// to decide whether a structurally-recorded `UnhandledMatchError` origin (every
 /// default-less `match`, scanned independently of coverage — see
-/// [`scan_throw_origins`]'s own `Node::Match` arm) is a REPORTABLE contribution.
+/// the site scan's `match` arm) is a REPORTABLE contribution.
 pub(crate) fn throw_diagnostics(
     fx: &Fixpoints<'_>,
     uncovered: &HashMap<usize, HashSet<u32>>,
@@ -731,7 +580,7 @@ pub(crate) fn throw_diagnostics(
             }
             let sym = Sym::Func(f.fqn.clone());
             emit_undeclared(
-                &mut out, &cx, index, units, &sym, &f.name, &declared, throws, &f.throw_origins,
+                &mut out, &cx, index, units, &sym, &f.name, &declared, throws, &f.sites,
                 uncovered,
             );
         }
@@ -743,7 +592,7 @@ pub(crate) fn throw_diagnostics(
                     let sym = Sym::Method(c.fqn.clone(), m.name.clone());
                     emit_undeclared(
                         &mut out, &cx, index, units, &sym, &display, &declared, throws,
-                        &m.throw_origins, uncovered,
+                        &m.sites, uncovered,
                     );
                 }
                 // Liskov: an override/impl whose declared throws widen the parent's.
@@ -766,7 +615,7 @@ fn emit_undeclared(
     display: &str,
     declared: &[String],
     throws: &HashMap<Sym, ThrowSet>,
-    decl_origins: &[ThrowOrigin],
+    decl_sites: &[SiteOrigin],
     uncovered: &HashMap<usize, HashSet<u32>>,
 ) {
     let Some(set) = throws.get(sym) else { return };
@@ -828,12 +677,12 @@ fn emit_undeclared(
         // The `origin` facet (ADR-0050 §4), productionizing the measurement note's
         // rule: DIRECT iff the escaping throw's origin is in the annotated
         // declaration's OWN body — same file as the declaration (`cx.cur`) *and* a
-        // member of its own scanned `throw_origins` — else PROPAGATED (it arrived up
+        // member of its own throw-recording `sites` — else PROPAGATED (it arrived up
         // a call edge). The origin offset is a unique file byte position and
-        // `throw_origins` is scoped to this one declaration's body, so the
+        // `sites` is scoped to this one declaration's body, so the
         // same-file-plus-own-origin test is exact even when a callee shares the file.
         let origin = if ofile == cx.cur
-            && decl_origins.iter().any(|o| o.span.start == fact.offset)
+            && decl_sites.iter().any(|o| records_throw(o) && o.span.start == fact.offset)
         {
             Origin::Direct
         } else {
