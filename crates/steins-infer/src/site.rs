@@ -23,6 +23,7 @@
 mod contract;
 pub(crate) mod engine;
 pub(crate) mod method;
+mod operator;
 pub(crate) mod reach;
 mod resolve;
 
@@ -132,11 +133,30 @@ pub(crate) enum GapKind {
     /// bound arm of the method edge, and an engine method row a subclass may
     /// replace.
     NonFinalThis,
+    /// An operand converted to a string (ADR-0099 §4.3's ToString family: `.`,
+    /// interpolation, `(string)`, `echo`, a loose comparison) that may be an
+    /// object whose `__toString` the site cannot pin: a class a subclass may give
+    /// one, an interface, an unknown class, a chain the project does not hold
+    /// end to end. Source: the operator resolver ([`SiteKind::Operator`]).
+    OperatorToString,
+    /// A property fetch or store on an operand whose class may run `__get`,
+    /// `__set`, `__isset`, `__unset` or a property hook (the MagicProp family,
+    /// including §4.4's universe gate).
+    OperatorMagicProperty,
+    /// An offset access on an operand that may be an `ArrayAccess` object (the
+    /// ArrayAccess family: `$x[k]`, `isset`, `unset`, destructuring).
+    OperatorArrayAccess,
+    /// An operand iterated (`foreach`, `yield from`, a spread) that may be a
+    /// `Traversable` object whose iterator methods the site cannot pin.
+    OperatorIteration,
+    /// An operand cloned whose `__clone` (or `__set`, for `clone` with a property
+    /// list) the site cannot pin.
+    OperatorClone,
 }
 
 impl GapKind {
     /// Every kind, in the order the facts payload's codec numbers them.
-    pub(crate) const ALL: [Self; 17] = [
+    pub(crate) const ALL: [Self; 22] = [
         Self::DynamicCallee,
         Self::UnknownClass,
         Self::UnknownFunction,
@@ -154,6 +174,11 @@ impl GapKind {
         Self::FlagDependentThrow,
         Self::MethodNotFound,
         Self::NonFinalThis,
+        Self::OperatorToString,
+        Self::OperatorMagicProperty,
+        Self::OperatorArrayAccess,
+        Self::OperatorIteration,
+        Self::OperatorClone,
     ];
 
     /// The kind's spelling on the surfaces that name it (`annotate --format
@@ -178,6 +203,11 @@ impl GapKind {
             Self::FlagDependentThrow => "flag-dependent-throw",
             Self::MethodNotFound => "method-not-found",
             Self::NonFinalThis => "non-final-this",
+            Self::OperatorToString => "operator-to-string",
+            Self::OperatorMagicProperty => "operator-magic-property",
+            Self::OperatorArrayAccess => "operator-array-access",
+            Self::OperatorIteration => "operator-iteration",
+            Self::OperatorClone => "operator-clone",
         }
     }
 }
