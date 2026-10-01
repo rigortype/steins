@@ -17,7 +17,9 @@
 //! * **Shared knowledge.** What a spelling resolves to ([`Cx::resolve_function`]);
 //!   whether a builtin's operands reach user code ([`Reach`], a gap in both lanes);
 //!   unseen code (`eval`, an inclusion, a gap in both); which constructor a `new`
-//!   runs and which class a chain leaves the project at; the cause a gap names.
+//!   runs and which class a chain leaves the project at; the user method an
+//!   operator runs through an operand's class ([`operator`], ADR-0099 §4.3); the
+//!   cause a gap names.
 //! * **Lane semantics, effect only.** ADR-0063 conditional-purity contracts and
 //!   their untainting edges (`user_call`); the call-site certifications and the
 //!   plugin channel (`effect_unrowed`, ADR-0068); the interface envelopes of a
@@ -38,8 +40,8 @@ use steins_syntax::{
 
 use super::contract::{conditional_purity, eval_conditional_purity};
 use super::engine;
-use super::operator;
 use super::method::{EngineMethod, engine_class_of, engine_method, method_edge};
+use super::operator;
 use super::reach::{Frame, builtin_reach, callback_reaches_user_code, engine_method_reach};
 use super::{
     Edge, GapKind, Hit, HitKind, Knowledge, Lane, NewTarget, Reach, ResolvedSite, Target,

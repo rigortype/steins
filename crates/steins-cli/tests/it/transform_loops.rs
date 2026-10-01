@@ -97,7 +97,7 @@ const FIXTURE: &str = "\
 
 function label(int $n): string
 {
-    return 'n=' . ($n * 2);
+    return 'n=' . $n;
 }
 
 function run(): array
@@ -149,7 +149,7 @@ fn both_spellings_produce_identical_output_under_the_real_php() {
         before_out, after_out,
         "the two spellings disagree under php:\nbefore:\n{before_out}\nafter:\n{after_out}"
     );
-    assert!(before_out.contains("'n=6'"), "fixture produced nothing to compare:\n{before_out}");
+    assert!(before_out.contains("'n=3'"), "fixture produced nothing to compare:\n{before_out}");
 }
 
 #[test]
