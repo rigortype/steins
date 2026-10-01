@@ -103,6 +103,12 @@
 //!   `ArgumentCountError` before running, and a position past the list is
 //!   `Inert`.
 //!
+//! No rowed method takes a parameter by reference (checked with
+//! `ReflectionParameter::isPassedByReference` on PHP 8.5.11), so a call site
+//! may read a variable it hands to one as unchanged by the call
+//! ([`engine_constructor_by_value`](crate::engine_constructor_by_value) for the
+//! constructors).
+//!
 //! The row answers what the **arguments** can reach and nothing else, as
 //! [`arg_reach`](crate::arg_reach) does. User code that a method's own design
 //! runs, whatever it was given, is not described by it: a `PDOStatement`

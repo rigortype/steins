@@ -127,7 +127,7 @@ fn passed_by_ref(cx: &Cx, class_fqn: Option<&str>, sites: &[SiteOrigin]) -> Hash
                 Callee::Function(name) => function_by_value(cx, name, position),
                 _ => match params.get_or_insert_with(|| callee_params(cx, class_fqn, &callee)) {
                     Some(list) => position_by_value(list, position),
-                    None => engine_constructor(cx, class_fqn, &callee),
+                    None => engine_by_value(cx, class_fqn, &callee),
                 },
             };
             if !by_value {
@@ -205,11 +205,14 @@ fn method_params<'a>(cx: &Cx<'a>, class: &str, method: &str) -> Option<&'a [Para
     decl.methods.iter().find(|m| m.name.eq_ignore_ascii_case(method)).map(|m| m.params.as_slice())
 }
 
-/// Whether a call no project declaration answers runs the constructor of an
-/// engine class the catalog states takes every argument by value
-/// ([`steins_catalog::engine_constructor_by_value`]): `parent::__construct()`
-/// or `new` reaching an engine exception.
-fn engine_constructor(cx: &Cx, class_fqn: Option<&str>, callee: &Callee) -> bool {
+/// Whether a call no project declaration answers runs an engine constructor or
+/// method that takes every argument by value: `parent::__construct()` or `new`
+/// reaching an engine exception ([`steins_catalog::engine_constructor_by_value`]),
+/// or a method the catalog rows for its arguments ([`steins_catalog::method_arg_reach`]),
+/// none of which takes a parameter by reference (checked with
+/// `ReflectionParameter::isPassedByReference` on PHP 8.5.11), so a variable
+/// handed to `PDO::query()` or `DateTime::createFromFormat()` is not rebound.
+fn engine_by_value(cx: &Cx, class_fqn: Option<&str>, callee: &Callee) -> bool {
     let start = match callee {
         Callee::New(class) => match resolve_new(cx, class_fqn, class) {
             NewTarget::Engine(fqn) => fqn,
@@ -222,6 +225,11 @@ fn engine_constructor(cx: &Cx, class_fqn: Option<&str>, callee: &Callee) -> bool
                 Some(fqn) => fqn,
                 None => return false,
             }
+        }
+        Callee::Method(_, method) => {
+            return method_start(cx, class_fqn, callee)
+                .and_then(|start| engine_exit(cx, &start, method))
+                .is_some_and(|fqn| steins_catalog::method_arg_reach(&fqn, method).is_some());
         }
         _ => return false,
     };

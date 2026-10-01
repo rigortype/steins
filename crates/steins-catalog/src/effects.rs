@@ -841,14 +841,16 @@ pub(crate) fn is_builtin_throwable(class: &str) -> bool {
 /// constructor takes every argument by value, so that `new` or
 /// `parent::__construct()` reaching it rebinds no variable (issue #856).
 ///
-/// The engine's Throwables are the set this answers for: reflection on PHP
-/// 8.5.11 finds 60 internal classes implementing `Throwable`, and no
-/// parameter of any of their constructors passed by reference. Any other
-/// engine class answers `false`, which keeps the variables it is handed
-/// unproven.
+/// Two sets answer for it, both checked with `ReflectionParameter::isPassedByReference`
+/// on PHP 8.5.11: the engine's Throwables (60 internal classes implement
+/// `Throwable`, and no parameter of any of their constructors is by
+/// reference), and the classes whose constructor has a
+/// [`method_arg_reach`](crate::method_arg_reach) row (`PDO`, `DateTime`,
+/// `ArrayObject` and the rest of that table). Any other engine class answers
+/// `false`, which keeps the variables it is handed unproven.
 #[must_use]
 pub fn engine_constructor_by_value(class: &str) -> bool {
-    is_builtin_throwable(class)
+    is_builtin_throwable(class) || crate::method_arg_reach(class, "__construct").is_some()
 }
 
 /// The position of an `array` parameter whose **values are callables**, or
@@ -1960,11 +1962,15 @@ mod tests {
     }
 
     #[test]
-    fn only_an_engine_throwable_constructor_is_stated_by_value() {
-        for class in ["Exception", "RuntimeException", "ErrorException", "TypeError"] {
+    fn only_a_throwable_or_a_reach_rowed_constructor_is_stated_by_value() {
+        for class in [
+            "Exception", "RuntimeException", "ErrorException", "TypeError", "DateTime", "PDO",
+            "ArrayObject",
+        ] {
             assert!(engine_constructor_by_value(class), "{class}");
         }
-        for class in ["DateTime", "PDO", "ArrayObject", "App\\Exception"] {
+        // No claim for a class the catalog does not row, or one it does not know.
+        for class in ["SplFileObject", "App\\Exception"] {
             assert!(!engine_constructor_by_value(class), "{class}");
         }
     }

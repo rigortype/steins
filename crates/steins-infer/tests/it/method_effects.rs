@@ -59,7 +59,18 @@ fn io_db_shows_up_in_the_effect_summary() {
     let src = "<?php\nfunction f(): void { (new \\PDO(\"sqlite::memory:\"))->query(\"SELECT 1\"); }\n";
     let s = summary(src, "f");
     assert_eq!(s.labels, vec!["io.db".to_owned()], "the summary names the label");
-    assert!(s.exhaustive, "a catalogued row is a complete answer — no `…?`");
+    // `(new \PDO)->query(…)` names its class but records no operand shapes, so the
+    // row's statement and `$fetchModeArgs` read blind (issue #858): the label stays
+    // and the body is `…?`.
+    assert_eq!(s.gaps, ["user-code-reach"], "{s:?}");
+
+    // Written on an exact receiver, whose operands are recorded, a literal
+    // statement reaches nothing and the catalogued row is a complete answer.
+    let src = "<?php\nclass Db extends \\PDO {\n    \
+               public function run(): void { parent::query(\"SELECT 1\"); }\n}\n";
+    let s = summary(src, "Db::run");
+    assert_eq!(s.labels, vec!["io.db".to_owned()], "the summary names the label");
+    assert!(s.exhaustive, "a catalogued row is a complete answer — no `…?`: {s:?}");
 }
 
 // Subsumption: the envelope that passes and the one that does not
