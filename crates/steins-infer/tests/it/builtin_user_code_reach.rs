@@ -125,7 +125,6 @@ fn the_fold_allowlist_rows_answer_by_their_arguments() {
     for (signature, call) in [
         ("", "implode(',', ['a', 'b'])"),
         ("int $i", "strval($i)"),
-        ("string $s, int $i", "sprintf('%s-%d', $s, $i)"),
         ("array $a", "array_merge($a, [1])"),
         ("mixed $v", "gettype($v)"),
         ("mixed $v", "intval($v)"),
@@ -214,8 +213,14 @@ fn s7_array_search_is_held_to_the_reach_rule() {
 #[test]
 fn s8_a_call_result_is_an_argument_shape() {
     // The engine constructor's `Coerced` message position, handed a `string` result.
-    let message = "return new \\RuntimeException(sprintf('%s!', $s));";
+    let message = "return new \\RuntimeException(strtoupper($s));";
     proven_pure(&file(false, "string $s", message), "f");
+    // `sprintf`'s result is just as much a `string`: the call is ruled out, and the
+    // only thing left is the locale read the row carries (ADR-0101).
+    let message = "return new \\RuntimeException(sprintf('%s!', $s));";
+    let s = summary(&file(false, "string $s", message), "f");
+    assert!(s.exhaustive && s.gaps.is_empty(), "{s:?}");
+    assert_eq!(s.labels, ["global.read.setting.locale"], "{s:?}");
     // `count()` reaches `Countable::count` through an object, never through a list.
     proven_pure(&file(false, "string $s", "return count(explode(',', $s));"), "f");
     proven_pure(&file(false, "string $s", "return strlen(strtoupper($s));"), "f");
@@ -230,11 +235,22 @@ fn s8_a_call_result_is_an_argument_shape() {
     assert!(!s.exhaustive && s.gaps == ["user-code-reach"], "{s:?}");
 }
 
-/// `vsprintf` stays uncertified (issue #991: `%f`, `%g` and `%G` read
-/// `LC_NUMERIC`), so even an object-free call keeps its `no-effect-row`.
+/// `sprintf` and `vsprintf` are held to the reach rule like the rest of the
+/// fold allowlist's rows, and carry the locale read beside it (issue #991,
+/// ADR-0101): `%f`, `%g` and `%G` read `LC_NUMERIC`, so neither is pure. An
+/// object-free call is exhaustive with the read and no gap; a `%s` over a value
+/// that may be an object is `user-code-reach`.
 #[test]
-fn s7_vsprintf_keeps_its_missing_effect_row() {
-    let src = file(false, "", "return vsprintf('%s-%s', ['a', 'b']);");
-    let s = summary(&src, "f");
-    assert!(!s.exhaustive && s.gaps == ["no-effect-row"], "{s:?}");
+fn s7_the_printf_family_carries_the_locale_read_beside_the_reach_rule() {
+    for (signature, call) in [
+        ("string $s, int $i", "sprintf('%s-%d', $s, $i)"),
+        ("", "vsprintf('%s-%s', ['a', 'b'])"),
+    ] {
+        let s = summary(&file(false, signature, &format!("return {call};")), "f");
+        assert!(s.exhaustive && s.gaps.is_empty(), "{call}: {s:?}");
+        assert_eq!(s.labels, ["global.read.setting.locale"], "{call}");
+    }
+    let s = summary(&file(false, "mixed $v", "return sprintf('%s', $v);"), "f");
+    assert!(!s.exhaustive && s.gaps == ["user-code-reach"], "{s:?}");
+    assert_eq!(s.labels, ["global.read.setting.locale"]);
 }

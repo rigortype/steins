@@ -763,7 +763,7 @@ fn an_argued_variadic_tail_still_folds() {
     let Some(mut folder) = live("an_argued_variadic_tail_still_folds") else { return };
     const SRC: &str = "<?php\n\
          \\PHPStan\\dumpType(sprintf(\"%s-%d\", \"a\", 7));\n\
-         \\PHPStan\\dumpType(sprintf(\"%05.2f\", 1.5));\n\
+         \\PHPStan\\dumpType(sprintf(\"%05.2F\", 1.5));\n\
          \\PHPStan\\dumpType(sprintf(\"no args\"));\n";
     assert_eq!(dumps(SRC, &mut folder), vec!["'a-7'", "'01.50'", "'no args'"]);
     assert!(
@@ -774,6 +774,47 @@ fn an_argued_variadic_tail_still_folds() {
         !steins_catalog::variadic_tail_is_data("array_udiff")
             && !steins_catalog::foldable("array_udiff"),
         "the family the rule exists for is neither argued nor admitted"
+    );
+}
+
+/// **A fold does not bake the locale in** (ADR-0101 §3.3, issue #991).
+///
+/// The runner always answers under `LC_NUMERIC=C`, and a fold is a claim about
+/// the project's runtime, which declared nothing about its locale. So a literal
+/// format that keeps the read (`%f`, `%g`, `%G`, or a format the parser cannot
+/// read) is not folded, while one that shows no such conversion — `%d-%s`, `%F`,
+/// `%e`, `%h`, `%%f` — folds as it always did. Both halves matter: the refusal
+/// has to hold, and the ordinary call has to keep its value.
+#[test]
+fn a_printf_format_that_reads_the_locale_does_not_fold() {
+    let Some(mut folder) = live("a_printf_format_that_reads_the_locale_does_not_fold") else {
+        return;
+    };
+    const SRC: &str = "<?php\n\
+         \\PHPStan\\dumpType(sprintf(\"%d-%s\", 1, \"a\"));\n\
+         \\PHPStan\\dumpType(sprintf(\"%.2F\", 1.5));\n\
+         \\PHPStan\\dumpType(sprintf(\"%e\", 1.5));\n\
+         \\PHPStan\\dumpType(sprintf(\"%h\", 1.5));\n\
+         \\PHPStan\\dumpType(sprintf(\"100%%f\"));\n\
+         \\PHPStan\\dumpType(sprintf(\"%f\", 1.5));\n\
+         \\PHPStan\\dumpType(sprintf(\"%.2f\", 1.5));\n\
+         \\PHPStan\\dumpType(sprintf(\"%g\", 1.5));\n\
+         \\PHPStan\\dumpType(sprintf(\"%G\", 1.5));\n\
+         \\PHPStan\\dumpType(sprintf(\"%d %f\", 1, 1.5));\n";
+    assert_eq!(
+        dumps(SRC, &mut folder),
+        vec![
+            "'1-a'",
+            "'1.50'",
+            "'1.500000e+0'",
+            "'1.5'",
+            "'100%f'",
+            "string",
+            "string",
+            "string",
+            "string",
+            "non-empty-string",
+        ]
     );
 }
 

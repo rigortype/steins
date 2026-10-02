@@ -1166,6 +1166,10 @@ impl<E: FoldEngine> EngineFolder<E> {
         if fold_shape_refusal(name, &fargs).is_some() {
             return None;
         }
+        // The ambient-setting gate (ADR-0101 §3.3), before the engine is asked.
+        if fold_reads_ambient_setting(name, &fargs) {
+            return None;
+        }
         if !fold_within_allocation_budget(name, &fargs) {
             return None;
         }
@@ -1320,6 +1324,28 @@ fn fold_shape_refusal(name: &str, args: &[FoldArg]) -> Option<FoldShapeRefusal> 
             }
         })
         .map(FoldShapeRefusal::Carrier)
+}
+
+/// Whether folding `name(args)` would bake an **ambient setting** into the
+/// value (ADR-0101 §3.3): a printf-family call whose literal format keeps the
+/// locale read, that is some `%f`, `%g` or `%G`, or a format the parser cannot
+/// read as the engine does.
+///
+/// The allowlist is permission to ask the engine, not a promise that every
+/// call is pure, and the runner always answers under `LC_NUMERIC=C`. A fold is
+/// a claim about the project's runtime, which declared nothing about its
+/// locale, so `sprintf('%.2f', 1.5)` is left to the row (`global.read.setting
+/// .locale`) and not folded to `'1.50'`. A literal format that shows no reading
+/// conversion (`'%d-%s'`, `'%.2F'`) folds as before.
+///
+/// A format that is not a string, or no argument at all, declines too: the
+/// verdict reads a string literal and nothing else.
+fn fold_reads_ambient_setting(name: &str, args: &[FoldArg]) -> bool {
+    let Some(family) = steins_catalog::printf_family(name) else { return false };
+    match args.get(family.format_position()) {
+        Some(FoldArg::Str(format)) => steins_catalog::format_reads_locale(format),
+        _ => true,
+    }
 }
 
 /// Which fold lane an engine of this integer width gets — the width half of
@@ -1608,5 +1634,109 @@ mod shape_gate_tests {
             FoldShapeRefusal::Unmined.reason("no_such_builtin"),
             "no_such_builtin has no mined parameter row, so no callee position is visible"
         );
+    }
+}
+
+/// The ambient-setting gate (ADR-0101 §3.3, issue #991): a printf-family fold
+/// whose literal format keeps the locale read never reaches the engine, and one
+/// that shows no such conversion still does.
+#[cfg(test)]
+mod ambient_gate_tests {
+    use super::{EngineFolder, FoldArg, FoldEngine, FoldResult, Folder, fold_reads_ambient_setting};
+    use steins_sidecar::{
+        ClassReflection, ConstantDefined, EnvInfo, FoldValue, PregCompile, Reflection,
+    };
+    use steins_syntax::ArgValue;
+
+    fn s(v: &str) -> FoldArg {
+        FoldArg::Str(v.to_owned())
+    }
+
+    /// An engine that answers every fold with `'ran'` and records the questions.
+    #[derive(Default)]
+    struct Counting {
+        folds: Vec<String>,
+    }
+
+    impl FoldEngine for Counting {
+        fn env(&mut self) -> Option<EnvInfo> {
+            Some(EnvInfo {
+                php_version: "8.5.11".to_owned(),
+                extensions: Vec::new(),
+                sapi: "cli".to_owned(),
+                int_size: Some(8),
+            })
+        }
+        fn reflect(&mut self, _target: &str) -> Option<Reflection> {
+            None
+        }
+        fn reflect_class(&mut self, _target: &str) -> Option<ClassReflection> {
+            None
+        }
+        fn fold(&mut self, name: &str, _args: &[FoldArg], _strict: bool) -> FoldResult {
+            self.folds.push(name.to_owned());
+            FoldResult::Value(FoldValue::Str("ran".to_owned()))
+        }
+        fn preg_compile(&mut self, _pattern: &str) -> Option<PregCompile> {
+            None
+        }
+        fn constant_defined(&mut self, _name: &str) -> Option<ConstantDefined> {
+            None
+        }
+    }
+
+    fn asked(name: &str, args: &[&str]) -> bool {
+        let mut folder = EngineFolder::with_engine(Counting::default());
+        let args: Vec<ArgValue> = args.iter().map(|a| ArgValue::Str((*a).into())).collect();
+        folder.fold(name, &args, true);
+        !folder.engine.folds.is_empty()
+    }
+
+    /// `f`, `g` and `G` refuse, whatever flags and width sit before them; every
+    /// other conversion, `%%f` and a format with no conversion are admitted.
+    #[test]
+    fn a_format_that_keeps_the_read_does_not_fold() {
+        for format in ["%f", "%.2f", "%05.1f", "%g", "%G", "%d %f", "%1$.3g", "%%%f"] {
+            assert!(fold_reads_ambient_setting("sprintf", &[s(format), FoldArg::Float(1.5)]));
+        }
+        for format in ["%d-%s", "%F", "%.2F", "%e", "%E", "%h", "%H", "%%f", "plain", "", "%5s"] {
+            assert!(!fold_reads_ambient_setting("sprintf", &[s(format), FoldArg::Int(1)]));
+        }
+    }
+
+    /// What the parser cannot read keeps the read, and so does a format that is
+    /// no string.
+    #[test]
+    fn an_unreadable_or_absent_format_does_not_fold() {
+        for format in ["%q", "%d %q", "%", "%*d", "%.*F", "%0$s"] {
+            assert!(fold_reads_ambient_setting("sprintf", &[s(format)]), "{format}");
+        }
+        assert!(fold_reads_ambient_setting("sprintf", &[FoldArg::Int(5)]));
+        assert!(fold_reads_ambient_setting("sprintf", &[]));
+    }
+
+    /// The gate is about the printf family, not about the letter `f`: every other
+    /// name passes through it, and `vsprintf` and `printf` share the reading
+    /// even though the allowlist does not admit them.
+    #[test]
+    fn only_the_printf_family_is_held_to_the_format() {
+        assert!(!fold_reads_ambient_setting("strtoupper", &[s("%f")]));
+        assert!(!fold_reads_ambient_setting("str_replace", &[s("%f"), s("a"), s("b")]));
+        assert!(fold_reads_ambient_setting("vsprintf", &[s("%f"), FoldArg::Array(vec![])]));
+        assert!(fold_reads_ambient_setting("printf", &[s("%g")]));
+        assert!(!fold_reads_ambient_setting("vsprintf", &[s("%d"), FoldArg::Array(vec![])]));
+    }
+
+    /// Through the seam: the engine is not asked for a call that keeps the read,
+    /// and is asked for one that does not, so the gate buys silence only where
+    /// the answer would have been under an assumed locale.
+    #[test]
+    fn the_engine_is_asked_only_when_the_format_is_locale_free() {
+        assert!(asked("sprintf", &["%d-%s", "1", "a"]));
+        assert!(asked("sprintf", &["%.2F", "1.5"]));
+        assert!(!asked("sprintf", &["%.2f", "1.5"]));
+        assert!(!asked("sprintf", &["%g", "1.5"]));
+        assert!(!asked("sprintf", &["%f"]));
+        assert!(asked("strtoupper", &["%f"]));
     }
 }

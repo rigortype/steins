@@ -372,6 +372,17 @@ mod tests {
     use steins_domain::PhpStr;
     use steins_syntax::ArgValue;
 
+    /// ADR-0101 §2.2: a locale read is a `global.read` child, so it is
+    /// discardable by prefix with no row of its own (throwing the read away
+    /// leaves the world as it was), and the cell's write is not.
+    #[test]
+    fn the_locale_read_is_discardable_and_its_write_is_not() {
+        assert!(discardable("global.read.setting.locale"));
+        assert!(discardable("global.read.setting"));
+        assert!(!discardable("global.write.setting.locale"));
+        assert!(!discardable("global.write"));
+    }
+
     /// A refusal row is held to a name the rest of the predicate would judge:
     /// one the catalog colours discardable with no out-parameter and no throw
     /// row. A row for any other name is dead weight, and a row that stops
