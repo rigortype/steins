@@ -41,7 +41,10 @@ use crate::{
 // `Undefined array key`); keys are PHP's own — positional (a hole `[, $b]`
 // skips its index), explicit for `['a' => $x] = $m`, nested patterns
 // recurse; TARGETS stay silent (write positions, ADR-0049/0052 audit note
-// G7(e)). See [`StmtKind::Destructure`] / [`check_destructure_source`].
+// G7(e)). A SCALAR destructure source is not a plain read (issue #931): `null`
+// is silent on every version and int/float/bool/string warn `Cannot use <type> as
+// array` from PHP 8.5 only, so it has its own rule on the version interval.
+// See [`StmtKind::Destructure`] / [`check_destructure_source`].
 //
 // v1 scope (deferred, all safe silence): Error-grade object case (needs
 // ArrayAccess is-a), TypeError string-key-on-string, string-base offset
@@ -242,8 +245,24 @@ pub(crate) fn check_offset_read(
         return;
     }
 
-    // Case 2 — container base (`offset.missing`, warning-grade): key must be
-    // a proven single value (leg (c)), canonicalized via the shared helper (A10).
+    check_container_offset_read(cx, base, key, &base_fact, env, poisoned, span, out);
+}
+
+/// Case 2 of the offset family — a container base (`offset.missing`,
+/// warning-grade), shared by the plain read and the destructure source: the key
+/// must be a proven single value (leg (c)), canonicalized via the shared helper
+/// (A10), and `base_fact` the proven whole container.
+#[allow(clippy::too_many_arguments)]
+fn check_container_offset_read(
+    cx: &Cx,
+    base: &ArgValue,
+    key: &ArgValue,
+    base_fact: &Fact,
+    env: &HashMap<String, Known>,
+    poisoned: bool,
+    span: Span,
+    out: &mut Vec<Diagnostic>,
+) {
     let Some(Fact::Singleton(key_val)) = offset_operand_fact(key, env, poisoned)
     else {
         return;
@@ -253,7 +272,7 @@ pub(crate) fn check_offset_read(
     };
 
     let (our_key, php_key) = render_offset_key(&canon);
-    match &base_fact {
+    match base_fact {
         // A single proven array (including `Singleton([])` from an `=== []` guard):
         // key absence is definite (leg (b)).
         Fact::Singleton(Val::Array(entries)) => {
@@ -266,7 +285,7 @@ pub(crate) fn check_offset_read(
                     format!(
                         "offset {our_key} provably missing — {} is {} on this path; reads null with \"Undefined array key {php_key}\"",
                         base.render(),
-                        render_val(&base_fact_val(&base_fact)),
+                        render_val(&base_fact_val(base_fact)),
                     ),
                     out,
                 );
@@ -529,11 +548,86 @@ fn judge_shape_read(
     }
 }
 
+/// The PHP type word of a destructure source that PHP 8.5 refuses with
+/// `Cannot use <word> as array`: a proven `int`, `float`, `bool` or `string`
+/// (witnessed 8.5.11, silent on 8.4.25). `None` for `null` (silent on every
+/// version), an array (a container, Case 2) and anything else.
+fn destructure_scalar_word(v: &Val) -> Option<&'static str> {
+    match v {
+        Val::Int(_) => Some("int"),
+        Val::Float(_) => Some("float"),
+        Val::Bool(_) => Some("bool"),
+        Val::Str(_) => Some("string"),
+        Val::Null | Val::Array(_) => None,
+    }
+}
+
+/// The first `PHP_VERSION_ID` at which destructuring a scalar warns (PHP 8.5.0).
+const DESTRUCTURE_SCALAR_WARNS_FROM: u32 = 80500;
+
+/// Whether the whole analysed `PHP_VERSION_ID` interval is at or above
+/// [`DESTRUCTURE_SCALAR_WARNS_FROM`]: the declared target's floor when the project
+/// declares one, else the sidecar's minor ([`Cx::version_id`]). A straddling
+/// interval, an unknown one, and one a userland `PHP_VERSION_ID` constant unpinned
+/// all answer `false`, which is silence.
+fn scalar_destructure_warns(cx: &Cx) -> bool {
+    cx.version_id.is_some_and(|(lo, _)| lo >= DESTRUCTURE_SCALAR_WARNS_FROM)
+}
+
+/// Judge one first-level read of a destructure source (issue #931). The plain
+/// read's Case 1 does not transfer: `$v[0]` on a scalar warns `Trying to access
+/// array offset on <type>` on every version, and `[$x] = $v` does not.
+///
+/// - `null` is silent on every version.
+/// - `int`, `float`, `bool` and `string` warn `Cannot use <type> as array` from
+///   PHP 8.5, so they report only where [`scalar_destructure_warns`] proves it.
+/// - A container source is Case 2, unchanged: the key is read as `$m[0]` reads it.
+/// - An object source is a fatal on every version and stays silent here, as the
+///   offset family has no object case.
+#[allow(clippy::too_many_arguments)]
+fn check_destructure_read(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    source: &ArgValue,
+    key: &ArgValue,
+    env: &HashMap<String, Known>,
+    poisoned: bool,
+    span: Span,
+    out: &mut Vec<Diagnostic>,
+) {
+    // A9 (global), and the `Verified` whole value (N2), as at the plain read.
+    if !folder.absence_family_available() {
+        return;
+    }
+    let Some(source_fact) = offset_operand_fact(source, env, poisoned) else {
+        return;
+    };
+    if let Fact::Singleton(v) = &source_fact
+        && let Some(word) = destructure_scalar_word(v)
+    {
+        if scalar_destructure_warns(cx) {
+            emit_offset(
+                cx,
+                span,
+                OFFSET_ON_UNSUPPORTED_ID,
+                OffsetGrade::Warning,
+                format!(
+                    "destructuring {} — provably {word}; from PHP 8.5 each target reads null with \"Cannot use {word} as array\"",
+                    source.render(),
+                ),
+                out,
+            );
+        }
+        return;
+    }
+    check_container_offset_read(cx, source, key, &source_fact, env, poisoned, span, out);
+}
+
 /// Judge the source of a destructuring assignment `[$a, $b] = <source>;` as
 /// the read position it is (issue #288, ADR-0049 §7 A7 whitelist extended).
 ///
 /// Both legs run, as at the assignment-RHS position: the proof leg
-/// ([`check_offset_read`]) on a `Verified` whole container, the strict leg
+/// ([`check_destructure_read`]) on a `Verified` whole value, the strict leg
 /// ([`judge_shape_read`]) on the declared shape — disjoint via the usual
 /// `Verified` vs. `Asserted` operand gates.
 ///
@@ -578,7 +672,7 @@ pub(crate) fn check_destructure_source(
     };
     for path in reads {
         let [key] = path.as_slice() else { continue };
-        check_offset_read(cx, folder, source, key, env, poisoned, span, out);
+        check_destructure_read(cx, folder, source, key, env, poisoned, span, out);
         match (&call_shape, source) {
             (_, ArgValue::Var(_)) => check_shape_read(cx, source, key, env, poisoned, span, out),
             (Some(shape), _) => {
