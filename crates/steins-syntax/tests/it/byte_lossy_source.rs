@@ -114,8 +114,6 @@ fn a_name_over_a_replaced_byte_marks_the_tree() {
         b"<?php const K\xC9 = 1;",
         b"<?php use Foo\\Bar\xC9;",
         b"<?php #[Attr\xC9] function g() {}",
-        // A string read as a name.
-        b"<?php array_map('cb\xC9', []);",
     ] {
         assert!(parse_bytes(src).names_lossy(), "{}", String::from_utf8_lossy(src));
     }
@@ -129,6 +127,11 @@ fn a_replaced_byte_that_is_no_name_leaves_the_names_alone() {
         b"<?php $s = \"\x82\xA0\"; $t = ['\x82' => 1]; echo $s;",
         b"<html>\x82\xA0</html><?php class A {}",
         b"<?php class A {} ?>\n\x82\xA0 trailing text",
+        // A string read as a name declines at its own site and marks nothing (ADR-0080 §2.5):
+        // a callable, a string argument of a named call, an effect label.
+        b"<?php array_map('cb\xC9', []);",
+        b"<?php var_dump(strlen(\"\x82\")); g(\"\x82\"); $v = \"\x82\";",
+        b"<?php #[Effect('io\xC9')] function f() {}",
     ] {
         assert!(!parse_bytes(src).names_lossy(), "{}", String::from_utf8_lossy(src));
     }
