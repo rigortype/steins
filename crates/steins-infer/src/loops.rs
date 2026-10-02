@@ -139,9 +139,8 @@ pub(crate) fn walk_loop(
             loop_entry_forget(writes, reads, &[], *poisons, &mut benv, &mut bstore);
             loop_fallthrough_forget(w, writes, reads, *poisons, *may_return, env, store);
             apply_loop_exit_negation(w, folder, cond, *break_free, env, store);
-            let verdict = eval_cond(w, folder, cond, &benv, &bstore, w.scope.poisoned);
             let body_flow = walk_loop_body(w, folder, body, benv, bstore, descent, facts, out);
-            do_while_flow(*break_free, *continue_free, verdict, body_flow)
+            do_while_flow(*break_free, *continue_free, body_flow)
         }
         _ => unreachable!("walk_trace hands walk_loop the four loop kinds only"),
     }
@@ -153,23 +152,21 @@ pub(crate) fn walk_loop(
 /// to leave the body either, the successor is unreachable — `while (true) { …;
 /// return; }` is the `if (true) { return; }` twin `walk_if` already terminates.
 /// Anything less than that pair falls through: an undecided header may fail, and a
-/// `break` leaves without failing it. A `do`-`while` asks this and one more question
-/// ([`do_while_flow`]).
+/// `break` leaves without failing it. A `do`-`while` is not this question: its
+/// reachability is the body's ([`do_while_flow`]).
 fn loop_flow(break_free: bool, verdict: Certainty) -> Flow {
     if break_free && verdict == Certainty::Yes { Flow::Terminated } else { Flow::FellThrough }
 }
 
-/// What a `do`-`while` does to the code after it (issue #679): [`loop_flow`]'s
-/// answer, or the one only this loop can give — its body runs at least once, so a
-/// body that terminates on every path decides the successor.
+/// What a `do`-`while` does to the code after it (issue #679): its body runs at
+/// least once, so a body that terminates on every path decides the successor.
 ///
-/// [`loop_flow`]'s half holds here on the same terms. `verdict` is the condition
-/// evaluated on the body's entry env, which holds at every point inside the loop
-/// (every name the loop can rebind is forgotten in it), so it holds at every test
-/// too; that is not the entry narrowing the variant forbids, which would state the
-/// test's outcome *before* the first one ran.
+/// The header's verdict is deliberately not consulted, unlike [`loop_flow`]'s: a
+/// `do { … } while (true);` falls through here. The entry env misses writes that
+/// reach a tested name through an alias the sets do not name (`$GLOBALS['go']` at
+/// file scope), so a `Yes` on it would silence a successor PHP does reach.
 ///
-/// The body's half needs both jump gates. `body_flow` counts a `break` or
+/// The body needs both jump gates. `body_flow` counts a `break` or
 /// `continue` as terminating its path — it leaves the block it is written in — but
 /// a `break` of this loop lands on the successor and a `continue` of it lands on the
 /// condition, which may fail. `break_free` rules out the first (and any jump out of
@@ -177,14 +174,9 @@ fn loop_flow(break_free: bool, verdict: Certainty) -> Flow {
 /// the body walk stopped at belongs to a nested construct whose own walk already
 /// answered for it. What is left is `return`, `throw`, `exit` and a `never` call,
 /// none of which comes back.
-fn do_while_flow(
-    break_free: bool,
-    continue_free: bool,
-    verdict: Certainty,
-    body_flow: Flow,
-) -> Flow {
+fn do_while_flow(break_free: bool, continue_free: bool, body_flow: Flow) -> Flow {
     let body_decides = break_free && continue_free && body_flow == Flow::Terminated;
-    if body_decides { Flow::Terminated } else { loop_flow(break_free, verdict) }
+    if body_decides { Flow::Terminated } else { Flow::FellThrough }
 }
 
 /// The env a **structured loop's fall-through** starts in (issue #651) — the same
