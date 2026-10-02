@@ -68,28 +68,36 @@ built into the xtask binary so a malformed one stops the gate before it runs,
 and a row's triage note is the comment block directly above it. Moving a count
 is a conscious, comment-triaged act, never a drive-by.
 
-**The local ledger.** Rows for the projects `corpus.local.toml` injects — the
-private monorepo's counts, its triage pins, and the comment ledger of every
-reseed above them — are not in those files. They live in `fp-gate.local.toml`
-at the repository root, gitignored beside `corpus.local.toml` (in a worktree it
-is copied in the same way), and the gate merges it over the built-in tables
-when it is present (`xtask/src/gate/ledger.rs`). The file takes `[[finding]]`
-pins and `[phpdoc]` / `[throw]` / `[effect]` / `[possibly]` count tables, the
-same row shapes the tracked files use. The merge refuses, before any analysis:
-a row for a name `corpus.local.toml` does not list, and so a row for a public
-package (its baseline is reviewed in the tracked file, not drifted in an
-untracked one); a project with rows in the same table of both homes; and a
-file that is malformed or has a pin the built-in validation would refuse. A
-missing file is the CI case and is silent in the verdict, but the report's first
-line says whether the ledger was loaded and how many rows it contributed, so a
-run without it cannot pass for one that held it.
+**The local ledger.** Rows for the **private-corpus projects** — the
+`corpus.local.toml` projects whose code is not public: the private monorepo's
+counts, its triage pins, and the comment ledger of every reseed above them —
+are not in those files. They live in `fp-gate.local.toml` at the repository
+root, gitignored beside `corpus.local.toml` (in a worktree it is copied in the
+same way), and the gate merges it over the built-in tables
+(`xtask/src/gate/ledger.rs`). `phpstan/phpstan-src` is a `corpus.local.toml`
+project too but public code, so its rows stay in the tracked tables, and a test
+holds the tracked tables to the public corpus plus that one name. The ledger
+takes `[[finding]]` pins and `[phpdoc]` / `[throw]` / `[effect]` / `[possibly]`
+count tables, the same row shapes the tracked files use. Before any analysis the
+gate refuses: a row for a package of the pinned public corpus (its baseline is
+reviewed in the tracked file, not drifted in an untracked one); a project with
+rows in the same table of both homes; a file that is malformed or has a pin the
+built-in validation would refuse; and an **absent** ledger when
+`corpus.local.toml` lists any project, since those projects would then expect
+zero everywhere and read as a wall of regressions. An *empty*
+`fp-gate.local.toml` is the explicit way to run with no local rows. With no
+`corpus.local.toml` project (CI, a fresh clone) an absent ledger is simply the
+public baselines. Rows for a name `corpus.local.toml` does not list are unused,
+not errors. The line under the report's header says whether the ledger was
+loaded, how many rows it contributed and how many were unused, so a run without
+it cannot pass for one that held it.
 
 Triaged true positives in the proof layer are **fingerprint-pinned**
 (`EXPECTED_PROOF_FINDINGS`, `xtask/fp-gate/expected_proof_findings.toml`),
 matched at finding precision — package + id + path suffix + line + a message
 substring — so a known-good finding does not re-block, and *any* drift does.
-The pins for public packages are the tracked file's; those for a local project
-are in the local ledger, with path suffixes deliberately shortened past the
+The pins for public packages are the tracked file's; those for a private-corpus
+project are in the local ledger, with path suffixes deliberately shortened past the
 private-corpus directory names. The discipline is staged opening:
 a new family lands in measurement, its findings are triaged verbatim, and only
 then are TRUEs pinned or counts seeded.

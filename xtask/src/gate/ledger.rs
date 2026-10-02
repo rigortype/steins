@@ -1,16 +1,15 @@
 //! The local ledger: baselines for the private corpus, kept out of the tree.
 //!
 //! The tracked tables under `xtask/fp-gate/` describe what anyone can
-//! reproduce — the pinned public corpus. A private project's counts and
-//! triage pins describe code this repository must not name, and each reseed
-//! of them (a count moved, a finding triaged, the reason written above the
-//! row) is a ledger entry about that code. Those rows live in
+//! reproduce — the pinned public corpus. A private-corpus project's counts and
+//! triage pins (a *private-corpus project* being a `corpus.local.toml` project
+//! whose code is not public) describe code this repository must not name, and
+//! each reseed of them (a count moved, a finding triaged, the reason written
+//! above the row) is a ledger entry about that code. Those rows live in
 //! `fp-gate.local.toml` at the repository root instead, gitignored like
-//! `corpus.local.toml` beside it. The gate reads it when it is present and
-//! merges it with the built-in tables, so a checkout without it (CI, a fresh
-//! clone, an agent worktree until the file is copied in) runs on the public
-//! baselines alone — which the report says, so a green gate cannot be mistaken
-//! for one that held the private ledger.
+//! `corpus.local.toml` beside it. The gate merges it with the built-in tables
+//! at run time. `phpstan/phpstan-src` is listed in `corpus.local.toml` too but
+//! is public code, so its rows stay in the tracked tables.
 //!
 //! ```toml
 //! # Pins: the same `[[finding]]` rows `expected_proof_findings.toml` takes.
@@ -31,10 +30,21 @@
 //!
 //! The rules, each of which refuses before any analysis runs:
 //!
-//! - **Local rows only.** A name in the overlay must be a project that
-//!   `corpus.local.toml` lists. A public package's baseline is reviewed in the
-//!   tracked file; letting it live in an untracked one would let it drift
-//!   unseen, which is the property the tracked tables exist for.
+//! - **A listed local project needs the file.** When `corpus.local.toml` lists
+//!   any project and the ledger is absent, the gate stops: a private project
+//!   measured without its baselines expects zero everywhere, and a wall of
+//!   "regressions" that are really a missing file is worse than no run. An
+//!   *empty* `fp-gate.local.toml` is the explicit way to run with no local
+//!   rows. With no `corpus.local.toml` project (CI, a fresh clone) an absent
+//!   ledger is simply the public baselines, and the report says so.
+//! - **No public package.** A row for a package in the pinned public corpus is
+//!   refused: its baseline is reviewed in the tracked file, and letting it
+//!   live in an untracked one would let it drift unseen, which is the property
+//!   the tracked tables exist for.
+//! - **Unlisted names are unused, not errors.** A row for a name
+//!   `corpus.local.toml` does not list (a project removed from it, or one that
+//!   exists only on another machine) matches no report row, so it never gates;
+//!   the report line counts them so a typo is visible.
 //! - **One home per project.** A project name that has rows in a built-in table
 //!   may not have rows in the same table of the overlay (and a package with
 //!   built-in pins may not have overlay pins): a ledger split across two files
@@ -42,9 +52,8 @@
 //! - **Same validation.** Overlay pins go through the checks the built-in pins
 //!   do, and an unknown field or a misspelt table is an error, not a row short
 //!   of a field.
-//! - **Absent is empty, unreadable is an error.** A missing file is the CI
-//!   case and says nothing; a file that exists but cannot be read or parsed
-//!   stops the gate, naming it.
+//! - **Unreadable is an error.** A file that exists but cannot be read or
+//!   parsed stops the gate, naming it.
 
 use std::path::{Path, PathBuf};
 
@@ -76,39 +85,51 @@ struct OverlayFile {
 /// Whether, and with how much, the overlay took part in this run.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum Overlay {
-    /// No file: the built-in baselines alone.
+    /// No file, and no local project that needed one: the built-in baselines
+    /// alone.
     #[default]
     Absent,
-    /// A file was read and merged; the counts are the rows it contributed.
-    Loaded { pins: usize, phpdoc: usize, throw: usize, effect: usize, possibly: usize },
+    /// A file was read and merged; the counts are the rows it contributed, of
+    /// which `unlisted` name a project `corpus.local.toml` does not list.
+    Loaded {
+        pins: usize,
+        phpdoc: usize,
+        throw: usize,
+        effect: usize,
+        possibly: usize,
+        unlisted: usize,
+    },
 }
 
 impl Overlay {
     /// The report line saying which of the two the run was.
-    pub fn report_line(&self, local_projects: usize) -> String {
+    pub fn report_line(&self) -> String {
         match self {
-            Overlay::Absent if local_projects == 0 => format!(
-                "ledger: {OVERLAY_FILE} absent — built-in baselines only (no local projects in \
-                 corpus.local.toml, so there is no private ledger to hold)."
-            ),
             Overlay::Absent => format!(
-                "ledger: {OVERLAY_FILE} ABSENT — built-in baselines only; the private-corpus pins \
-                 and reseed ledger are NOT in force. {local_projects} local project(s) are \
-                 measured without it, and one with no built-in row expects zero everywhere."
+                "ledger: {OVERLAY_FILE} absent — built-in baselines only (corpus.local.toml lists \
+                 no project, so there is no private ledger to hold)."
             ),
-            Overlay::Loaded { pins, phpdoc, throw, effect, possibly } => format!(
-                "ledger: {OVERLAY_FILE} loaded — {} row(s) merged with the built-in baselines \
-                 ({pins} pin(s), {phpdoc} phpdoc, {throw} throw, {effect} effect, {possibly} \
-                 possibly).",
-                pins + phpdoc + throw + effect + possibly
-            ),
+            Overlay::Loaded { pins, phpdoc, throw, effect, possibly, unlisted } => {
+                let mut line = format!(
+                    "ledger: {OVERLAY_FILE} loaded — {} row(s) merged with the built-in \
+                     baselines ({pins} pin(s), {phpdoc} phpdoc, {throw} throw, {effect} effect, \
+                     {possibly} possibly).",
+                    pins + phpdoc + throw + effect + possibly
+                );
+                if *unlisted > 0 {
+                    line.push_str(&format!(
+                        " {unlisted} row(s) for unlisted project(s), unused."
+                    ));
+                }
+                line
+            }
         }
     }
 }
 
-/// Read the overlay's text. A missing file is `None` (the CI case); any other
-/// failure is an error, because an overlay that exists and was skipped would be
-/// the private ledger silently dropped.
+/// Read the overlay's text. A missing file is `None`; any other failure is an
+/// error, because an overlay that exists and was skipped would be the private
+/// ledger silently dropped.
 pub fn read_overlay(path: &Path) -> Result<Option<String>, String> {
     match std::fs::read_to_string(path) {
         Ok(text) => Ok(Some(text)),
@@ -128,52 +149,55 @@ pub struct Roster<'a> {
 impl Roster<'_> {
     /// Why `name` may not carry an overlay row, or `None` when it may.
     fn refusal(&self, name: &str, tracked_file: &str) -> Option<String> {
-        if self.public.contains(&name) {
-            Some(format!(
+        self.public.contains(&name).then(|| {
+            format!(
                 "`{name}` is a public corpus package: its baseline belongs in \
                  {BASELINE_DIR}/{tracked_file}, where a change to it is reviewed"
-            ))
-        } else if !self.local.contains(&name) {
-            Some(format!(
-                "`{name}` is not a project listed in corpus.local.toml, so there is no local \
-                 project for the row to describe"
-            ))
-        } else {
-            None
-        }
+            )
+        })
     }
+
+    fn lists(&self, name: &str) -> bool { self.local.contains(&name) }
 }
 
-/// Merge the overlay's text (if any) into the built-in `base`. Every refusal
-/// names [`OVERLAY_FILE`] and, for a clash, the tracked file it clashes with.
+/// Merge the overlay's text (`None` when the file is absent) into the built-in
+/// `base`. Every refusal names [`OVERLAY_FILE`] and, for a clash, the tracked
+/// file it clashes with.
 pub fn merge(
     base: Baselines,
     text: Option<&str>,
     roster: &Roster<'_>,
 ) -> Result<Baselines, String> {
-    let Some(text) = text else { return Ok(base) };
+    let Some(text) = text else {
+        if roster.local.is_empty() {
+            return Ok(base);
+        }
+        return Err(format!(
+            "{OVERLAY_FILE} is absent, but corpus.local.toml lists {} project(s). Their \
+             baselines live in {OVERLAY_FILE}; measured without it they expect zero everywhere \
+             and every finding would read as a regression. Restore the file, or create an empty \
+             one to run with no local rows.",
+            roster.local.len()
+        ));
+    };
     let file: OverlayFile =
         toml::from_str(text).map_err(|e| format!("{OVERLAY_FILE} is malformed: {e}"))?;
     validate_pins(OVERLAY_FILE, &file.finding)?;
 
     let mut base = base;
-    let summary = Overlay::Loaded {
-        pins: file.finding.len(),
-        phpdoc: file.phpdoc.len(),
-        throw: file.throw.len(),
-        effect: file.effect.len(),
-        possibly: file.possibly.len(),
-    };
+    let mut unlisted = file.finding.iter().filter(|p| !roster.lists(&p.package)).count();
+    let counts = [file.phpdoc.len(), file.throw.len(), file.effect.len(), file.possibly.len()];
 
-    let pin_names: Vec<&str> = file.finding.iter().map(|p| p.package.as_str()).collect();
-    for name in &pin_names {
+    for p in &file.finding {
+        let name = p.package.as_str();
         if let Some(why) = roster.refusal(name, "expected_proof_findings.toml") {
             return Err(format!("{OVERLAY_FILE}: a [[finding]] pin: {why}"));
         }
-        if base.proof.iter().any(|p| p.package == *name) {
+        if base.proof.iter().any(|b| b.package == name) {
             return Err(clash(name, "[[finding]] pins", "expected_proof_findings.toml"));
         }
     }
+    let pins = file.finding.len();
     let tables = [
         ("phpdoc", "phpdoc_expected.toml", &mut base.phpdoc, file.phpdoc),
         ("throw", "throw_expected.toml", &mut base.throw, file.throw),
@@ -188,11 +212,13 @@ pub fn merge(
             if into.0.contains_key(name) {
                 return Err(clash(name, &format!("[{table}] rows"), tracked));
             }
+            unlisted += usize::from(!roster.lists(name));
         }
         into.0.extend(from.0);
     }
     base.proof.extend(file.finding);
-    base.overlay = summary;
+    let [phpdoc, throw, effect, possibly] = counts;
+    base.overlay = Overlay::Loaded { pins, phpdoc, throw, effect, possibly, unlisted };
     Ok(base)
 }
 
@@ -223,7 +249,7 @@ mod tests {
                        message_contains = \"$x is never bound\"\n";
 
     /// A built-in baseline small enough to reason about: a public package with
-    /// a `phpdoc` row and a pin, and one local project (`local-b`) whose
+    /// a `phpdoc` row and a pin, and one listed project (`local-b`) whose
     /// `throw` row is built in.
     fn base() -> Baselines {
         let pin = PIN.replace("local-a", "pub/pkg");
@@ -240,12 +266,32 @@ mod tests {
     fn merged(text: &str) -> Result<Baselines, String> { merge(base(), Some(text), &roster()) }
 
     #[test]
-    fn an_absent_overlay_leaves_the_built_in_tables_alone() {
-        let b = merge(base(), None, &roster()).unwrap();
+    fn an_absent_overlay_is_the_built_in_tables_when_no_local_project_needs_one() {
+        // CI and a fresh clone: no corpus.local.toml project, no ledger, no fuss.
+        let nobody = Roster { public: PUBLIC, local: &[] };
+        let b = merge(base(), None, &nobody).unwrap();
         assert_eq!((b.phpdoc.total(), b.throw.total(), b.proof.len()), (2, 7, 1));
         assert_eq!(b.overlay, Overlay::Absent);
         let none = std::env::temp_dir().join("steins-xtask-test-no-such-fp-gate-local.toml");
         assert_eq!(read_overlay(&none), Ok(None));
+    }
+
+    #[test]
+    fn an_absent_overlay_with_a_listed_local_project_is_refused() {
+        let err = merge(base(), None, &roster()).unwrap_err();
+        assert!(err.starts_with("fp-gate.local.toml is absent"), "{err}");
+        assert!(err.contains("corpus.local.toml lists 2 project(s)"), "{err}");
+        assert!(err.contains("empty one"), "{err}");
+    }
+
+    #[test]
+    fn an_empty_overlay_is_the_explicit_way_to_run_with_no_local_rows() {
+        let b = merged("").unwrap();
+        assert_eq!((b.phpdoc.total(), b.throw.total(), b.proof.len()), (2, 7, 1));
+        let zero =
+            Overlay::Loaded { pins: 0, phpdoc: 0, throw: 0, effect: 0, possibly: 0, unlisted: 0 };
+        assert_eq!(b.overlay, zero);
+        assert!(b.overlay.report_line().contains("0 row(s)"));
     }
 
     #[test]
@@ -259,21 +305,20 @@ mod tests {
         assert_eq!(b.proof.len(), 2);
         assert_eq!(
             b.overlay,
-            Overlay::Loaded { pins: 1, phpdoc: 1, throw: 0, effect: 0, possibly: 1 }
+            Overlay::Loaded { pins: 1, phpdoc: 1, throw: 0, effect: 0, possibly: 1, unlisted: 0 }
         );
-        let line = b.overlay.report_line(2);
+        let line = b.overlay.report_line();
         assert!(line.contains("loaded") && line.contains("3 row(s)"), "{line}");
         assert!(line.contains("1 pin(s)") && line.contains("1 phpdoc"), "{line}");
     }
 
     #[test]
     fn the_report_line_tells_a_gate_without_the_ledger_from_one_with_it() {
-        let absent = Overlay::Absent.report_line(1);
-        assert!(absent.contains("ABSENT") && absent.contains("NOT in force"), "{absent}");
-        assert!(absent.contains("1 local project(s)"), "{absent}");
-        // Nothing local to hold a ledger for: still says so, without the alarm.
-        let ci = Overlay::Absent.report_line(0);
-        assert!(ci.contains("absent") && !ci.contains("NOT in force"), "{ci}");
+        let absent = Overlay::Absent.report_line();
+        assert!(absent.contains("absent") && absent.contains("built-in baselines only"), "{absent}");
+        let loaded = merged("").unwrap().overlay.report_line();
+        assert!(loaded.contains("loaded"), "{loaded}");
+        assert!(!loaded.contains("unlisted"), "{loaded}");
     }
 
     #[test]
@@ -306,11 +351,23 @@ mod tests {
     }
 
     #[test]
-    fn a_name_corpus_local_does_not_list_may_not_carry_an_overlay_row() {
-        let err = merged("[effect]\n\"nowhere\" = 1\n").unwrap_err();
-        assert!(err.contains("`nowhere`") && err.contains("corpus.local.toml"), "{err}");
-        let pin = merged(&PIN.replace("local-a", "nowhere")).unwrap_err();
-        assert!(pin.contains("corpus.local.toml"), "{pin}");
+    fn rows_for_an_unlisted_project_are_unused_and_counted_not_refused() {
+        let text = format!(
+            "{}\n{PIN}\n[effect]\n\"nowhere\" = 1\n[possibly]\n\"local-a\" = 1\n",
+            PIN.replace("local-a", "nowhere")
+        );
+        let b = merged(&text).unwrap();
+        assert_eq!(b.effect.expected("nowhere"), 1);
+        assert_eq!(
+            b.overlay,
+            Overlay::Loaded { pins: 2, phpdoc: 0, throw: 0, effect: 1, possibly: 1, unlisted: 2 }
+        );
+        let line = b.overlay.report_line();
+        assert!(line.contains("2 row(s) for unlisted project(s), unused"), "{line}");
+        // The duplicate refusal still covers an unlisted name.
+        let mut dup = base();
+        dup.effect = parse_table("t.toml", "\"nowhere\" = 1\n").unwrap();
+        assert!(merge(dup, Some("[effect]\n\"nowhere\" = 2\n"), &roster()).is_err());
     }
 
     #[test]

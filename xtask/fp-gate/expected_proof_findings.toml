@@ -3,9 +3,11 @@
 # `ExpectedProofFinding` documents the fields. One `[[finding]]` per pin; a
 # row's triage note is the comment block directly above it.
 #
-# Rows for local projects (the ones `corpus.local.toml` injects) do not live
-# here: they are in the gitignored `fp-gate.local.toml` at the repository root,
-# which the gate merges in when it is present (`xtask/src/gate/ledger.rs`).
+# Rows for private-corpus projects (the `corpus.local.toml` projects whose code
+# is not public) do not live here: they are in the gitignored
+# `fp-gate.local.toml` at the repository root, which the gate merges in
+# (`xtask/src/gate/ledger.rs`). `phpstan/phpstan-src` is listed in
+# `corpus.local.toml` too but is public code, so its rows stay here.
 #
 # Triaged TRUE proof-layer positives (ADR-0043 §5). Each row's triage is in
 # the comment beside it; adding a row is a conscious, orchestrator-visible act.
@@ -272,18 +274,10 @@ path_suffix = "Tests/EventListener/ErrorListenerTest.php"
 line = 126
 message_contains = "NonStringInput::getParameterOption(): Return value must be of type mixed"
 
-# `variable.undefined` (ADR-0078, issue #194), triaged 2026-08-08. Eleven
-# TRUE positives — reads of a name bound nowhere in scope. Two FP-shaped
-# sites from the same run (a same-variable `empty($x)?:` ternary) are fixed
-# at source (both isset/empty arms now shield) and not pinned here. The ten
-# monorepo ones: 4 exception-message typos (incl. `$this->$mode` for
-# `->mode`, `$withd` for `$width`), 1 renamed logger field, 1 KVS setter
-# always storing 0 (live defect), 2 accidental-pass `$offset` reads
-# (`array_splice(…, null)` degrades gracefully), 1 deleted-parameter read,
-# 1 stale fixture. Path suffixes are kept short — full paths carry the
-# private project's name. `$a = $b;` below (no `$b` anywhere) is written
-# to make PHPUnit observe a PHP warning; the `@`-suppressed twin beneath
-# stays silent, correctly.
+# `variable.undefined` (ADR-0078, issue #194), triaged 2026-08-08: a TRUE
+# positive, a read of a name bound nowhere in scope. `$a = $b;` below (no `$b`
+# anywhere) is written to make PHPUnit observe a PHP warning; the
+# `@`-suppressed twin beneath stays silent, correctly.
 [[finding]]
 package = "sebastianbergmann/phpunit"
 id = "variable.undefined"
