@@ -14,7 +14,7 @@ use steins_gen::{
     DriftKind, Fingerprint, Generation, Miss, PackageKind, PackageName, SourceDrift,
     SourceInventory,
 };
-use steins_syntax::SourceTree;
+use steins_syntax::{SourceTree, Utf8Loss, decode_source};
 
 use super::identity::analyzer_version;
 use super::{GenerationError, GenerationParams, sources_section};
@@ -163,10 +163,16 @@ impl OpenArtifact {
 /// bytes this text is (the file's content fingerprint is what licensed the
 /// load), and parsing is a pure function of bytes. A payload miss here is
 /// therefore a cost, silently absorbed, exactly as an eager per-file miss was.
-fn deferred_tree(open: &Arc<OpenArtifact>, path: &str, text: &Arc<String>) -> LazyTree<'static> {
+fn deferred_tree(
+    open: &Arc<OpenArtifact>,
+    path: &str,
+    text: &Arc<String>,
+    loss: Option<&Arc<Utf8Loss>>,
+) -> LazyTree<'static> {
     let open = Arc::clone(open);
     let path = path.to_owned();
     let text = Arc::clone(text);
+    let loss = loss.map(Arc::clone);
     LazyTree::deferred(move || {
         // Where a test counts the tree decodes (issue #828).
         #[cfg(test)]
@@ -180,7 +186,7 @@ fn deferred_tree(open: &Arc<OpenArtifact>, path: &str, text: &Arc<String>) -> La
             let mut reader = open.reader.lock().expect("the artifact lock is never poisoned");
             open.trace.read_tree(&mut reader, &path)
         };
-        decoded.unwrap_or_else(|_| SourceTree::parse(&text))
+        decoded.unwrap_or_else(|_| SourceTree::parse_with_loss(&text, loss.as_deref()))
     })
 }
 
@@ -195,6 +201,10 @@ pub(super) struct Captured {
     /// Diagnostic path → the file's text, shared with the deferred tree
     /// handles that fall back to re-parsing it.
     pub(super) texts: HashMap<String, Arc<String>>,
+    /// Diagnostic path → what the decode replaced, for each file that was **not valid
+    /// UTF-8** (issue #927) and no other: the parse reads a literal's and a name's real
+    /// bytes through it. Rare, so the map is nearly always empty.
+    pub(super) losses: HashMap<String, Arc<Utf8Loss>>,
     /// Each file's sealed content fingerprint, by universe slot.
     pub(super) contents: Vec<Fingerprint>,
 }
@@ -227,6 +237,7 @@ pub(super) fn capture(
     // needs to know which files of a *changed* package actually changed, which
     // the package-level fingerprint cannot say.)
     let mut texts: HashMap<String, Arc<String>> = HashMap::with_capacity(diag.len());
+    let mut losses: HashMap<String, Arc<Utf8Loss>> = HashMap::new();
     let mut contents: Vec<Option<Fingerprint>> = std::iter::repeat_n(None, diag.len()).collect();
     for (name, slots) in groups {
         let kind = p.partition.universe().get(&name).map_or(PackageKind::Root, |member| member.kind);
@@ -236,7 +247,7 @@ pub(super) fn capture(
             |captured| {
                 let slot = slots[captured.index];
                 contents[slot] = Some(captured.entry.content);
-                texts.insert(diag[slot].clone(), Arc::new(text_of(captured.bytes)));
+                keep_text(&mut texts, &mut losses, &diag[slot], captured.bytes);
             },
         )
         .map_err(|error| GenerationError::Capture { package: name.to_string(), error })?;
@@ -263,14 +274,14 @@ pub(super) fn capture(
             })?;
             contents[slot] = inventory.entry(&key).map(|entry| entry.content);
             let bytes = inventory.read(&key).map_err(GenerationError::Sealed)?;
-            texts.insert(diag[slot].clone(), Arc::new(text_of(bytes)));
+            keep_text(&mut texts, &mut losses, &diag[slot], bytes);
         }
     }
     let contents: Vec<Fingerprint> = contents
         .into_iter()
         .map(|c| c.expect("every captured file has a sealed content hash"))
         .collect();
-    Ok((Captured { diag, plans, texts, contents }, inventories))
+    Ok((Captured { diag, plans, texts, losses, contents }, inventories))
 }
 
 /// The load-or-parse phase's product: per universe slot, what the analysis
@@ -319,7 +330,7 @@ pub(super) fn load_or_parse(
     captured: &Captured,
     notes: &mut Vec<String>,
 ) -> Loaded {
-    let Captured { diag, plans, texts, contents } = captured;
+    let Captured { diag, plans, texts, losses, contents } = captured;
     let mut lazy_slots: Vec<Option<LazyTree<'static>>> =
         std::iter::repeat_with(|| None).take(diag.len()).collect();
     let mut fact_slots: Vec<Option<FileFacts>> =
@@ -348,10 +359,11 @@ pub(super) fn load_or_parse(
                 for (slot, facts) in loaded.loaded {
                     fact_slots[slot] = Some(facts);
                     facts_copyable[slot] = true;
-                    lazy_slots[slot] = Some(deferred_tree(open, &diag[slot], &texts[&diag[slot]]));
+                    let (path, loss) = (&diag[slot], losses.get(&diag[slot]));
+                    lazy_slots[slot] = Some(deferred_tree(open, path, &texts[path], loss));
                 }
                 for &slot in &loaded.stale {
-                    let tree = SourceTree::parse(&texts[&diag[slot]]);
+                    let tree = parse_slot(&diag[slot], texts, losses);
                     fact_slots[slot] = Some(FileFacts::from_tree(&diag[slot], &tree));
                     lazy_slots[slot] = Some(LazyTree::ready(tree));
                 }
@@ -385,7 +397,7 @@ pub(super) fn load_or_parse(
             }
             Err(refusal) => {
                 for &slot in &plan.slots {
-                    let tree = SourceTree::parse(&texts[&diag[slot]]);
+                    let tree = parse_slot(&diag[slot], texts, losses);
                     fact_slots[slot] = Some(FileFacts::from_tree(&diag[slot], &tree));
                     lazy_slots[slot] = Some(LazyTree::ready(tree));
                 }
@@ -799,42 +811,31 @@ fn build_shard(plan: &Plan, facts: &[Option<FileFacts>]) -> PackageShard {
     shard
 }
 
-/// One sealed file's bytes as the text the analysis reads — the same
-/// lossy-UTF-8 spelling `steins-cli`'s cold path produces (`project.rs`), and
-/// the same one [`super::generation_check`] produced when it read through the seal.
+/// One sealed file's bytes as the text the analysis reads, kept in `texts`; and, when the
+/// bytes are not valid UTF-8, what the decode replaced, kept in `losses` (issue #927).
 ///
-/// Written as `from_utf8` with a lossy fallback rather than as
-/// `from_utf8_lossy(&bytes).into_owned()` so that the ordinary case — a valid
-/// UTF-8 source file — takes the buffer the capture already allocated instead
-/// of copying the universe a second time. The invalid case is byte-for-byte
-/// what it always was: `U+FFFD` per ill-formed sequence.
-fn text_of(bytes: Vec<u8>) -> String {
-    String::from_utf8(bytes)
-        .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
+/// The text is `String::from_utf8_lossy(&bytes)` byte for byte — the spelling `steins-cli`'s
+/// cold path produces (`project.rs`) — and a valid UTF-8 source file, the ordinary case,
+/// takes the buffer the capture already allocated instead of copying the universe a second
+/// time ([`decode_source`] says so).
+fn keep_text(
+    texts: &mut HashMap<String, Arc<String>>,
+    losses: &mut HashMap<String, Arc<Utf8Loss>>,
+    path: &str,
+    bytes: Vec<u8>,
+) {
+    let (text, loss) = decode_source(bytes);
+    if let Some(loss) = loss {
+        losses.insert(path.to_owned(), Arc::new(loss));
+    }
+    texts.insert(path.to_owned(), Arc::new(text));
 }
 
-#[cfg(test)]
-mod tests {
-    use super::text_of;
-
-    /// The optimized spelling is the old one, byte for byte, on valid and
-    /// ill-formed input alike — the property the whole capture-once change
-    /// rests on being invisible to what is analyzed.
-    #[test]
-    fn text_of_equals_from_utf8_lossy() {
-        for case in [
-            b"<?php echo 1;\n".to_vec(),
-            Vec::new(),
-            "<?php // \u{3042}\u{3044}\n".as_bytes().to_vec(),
-            // A lone continuation byte, and a truncated three-byte sequence.
-            b"<?php \x80 \xe3\x81 end\n".to_vec(),
-            vec![0xff, 0xfe, 0xfd],
-        ] {
-            assert_eq!(
-                text_of(case.clone()),
-                String::from_utf8_lossy(&case).into_owned(),
-                "{case:?}"
-            );
-        }
-    }
+/// Parse one captured file, reading its loss map when it has one.
+fn parse_slot(
+    path: &str,
+    texts: &HashMap<String, Arc<String>>,
+    losses: &HashMap<String, Arc<Utf8Loss>>,
+) -> SourceTree {
+    SourceTree::parse_with_loss(&texts[path], losses.get(path).map(|l| &**l))
 }

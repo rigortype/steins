@@ -9,8 +9,10 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use std::sync::Arc;
+
 use salsa::Storage;
-use steins_syntax::{FunctionDecl, SourceTree};
+use steins_syntax::{FunctionDecl, SourceTree, Utf8Loss};
 
 pub mod composer;
 pub mod effects;
@@ -41,19 +43,29 @@ pub trait Db: salsa::Database {}
 /// A source file input: its path (for diagnostics) and full text. Mutating the
 /// text via [`salsa::Setter`] creates a new revision and invalidates only the
 /// queries that depended on it.
+///
+/// `loss` is how `text` was decoded when the file on disk was **not valid UTF-8** (issue
+/// #927, ADR-0080 §3.2 interim): the points where an ill-formed sequence became U+FFFD,
+/// with the bytes each replaced. It is `None` for every file that was valid and for text
+/// that never was bytes (stdin, the playground). Build one with a loss through
+/// `SourceFile::builder(path, text).loss(Some(loss)).new(db)`; [`SourceFile::new`] is the
+/// valid-UTF-8 case.
 #[salsa::input]
 pub struct SourceFile {
     #[returns(deref)]
     pub path: String,
     #[returns(deref)]
     pub text: String,
+    #[default]
+    #[returns(ref)]
+    pub loss: Option<Arc<Utf8Loss>>,
 }
 
 /// Parse a file into the owned, Mago-free [`SourceTree`] (ADR-0003). Memoized:
 /// re-parsing only happens when the file text changes.
 #[salsa::tracked]
 pub fn parse(db: &dyn Db, file: SourceFile) -> SourceTree {
-    SourceTree::parse(file.text(db))
+    SourceTree::parse_with_loss(file.text(db), file.loss(db).as_deref())
 }
 
 /// The per-file index of user-defined function declarations. A separate query
