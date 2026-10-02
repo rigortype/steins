@@ -40,6 +40,20 @@
 //!    argument holds is not one: `array_column` raises it for an array key
 //!    (`array_column([['a' => [1], 'b' => 1]], 'b', 'a')`), so it has a row.
 //!
+//! A third part is mechanical. `docs/research/phpsrc-mining/audit_throwless.py`
+//! resolves every name on the table to the C function php-src runs for it
+//! (through the generated `*_arginfo.h` tables, so an alias such as `join` is
+//! `implode`'s, and through the `FileFunction` macro that defines `file_exists`
+//! and its stat siblings), walks that function's call graph at the pinned
+//! php-src, and lists each raise it can reach. Its output,
+//! `docs/research/phpsrc-mining/throwless_audit.md`, classifies every name as
+//! `none`, `argument-checking` or `destructor-hazard`, or `needs-row` for a name
+//! that left the table, and a test below holds the table to it. The pin is
+//! php-src master (8.6.0-dev) and this table is the 8.5 line's, so a raise that
+//! exists only there is recorded as such in the note (`8.6:`), and not as a row:
+//! `array_filter`'s `$mode` and `pathinfo`'s `$flags` are a `ValueError` on 8.6
+//! and accepted on 8.5.11.
+//!
 //! **Argument checking is set aside**, as in ADR-0099 §3.3: a `TypeError` from a
 //! parameter type, an unknown named parameter, a spread or arity mismatch, and
 //! `array_key_exists`'s `TypeError` for an array or object key (its stub types
@@ -53,7 +67,14 @@
 //! `array_push` and `array_merge_recursive` raise `Error` when a key is
 //! `PHP_INT_MAX` ("Cannot add element to the array as the next element is
 //! already occupied") and `get_class()` raises it outside a class.
-//! `call_user_func_array` is simply unaudited.
+//! `call_user_func_array` is simply unaudited. An `array` parameter also admits an
+//! array that contains itself by reference, and comparing two of them is an
+//! `Error` ("Nesting level too deep - recursive dependency?"): `in_array`,
+//! `array_search`, `array_keys`, `array_unique`, `sort`, `rsort`, `asort` and
+//! `arsort` compare their elements and carry a row, as do `array_replace_recursive`
+//! and `array_walk_recursive` ("Recursion detected"), and `date_create` and
+//! `date_create_immutable`, which raise `Error` for a user subclass of
+//! `DateTimeZone` that never ran the parent's constructor (issue #881).
 //!
 //! **User code that only registration can attach** is attributed to the
 //! registration (ADR-0099 §4.5), not to the calls it later runs inside. A user
@@ -138,6 +159,47 @@ pub fn throws_of(name: &str) -> Option<&'static [&'static str]> {
     })
 }
 
+/// [`throws_of`] for a call whose every argument is a **flat literal** (a scalar,
+/// or an array literal of scalars): the one question where a value the row
+/// exists for cannot be passed.
+///
+/// A name in `REFERENCE_VALUE_ERROR` carries the row `["Error"]` because an
+/// `array` parameter admits an array that contains itself by reference, and a
+/// `DateTimeZone` parameter a subclass that never ran the parent's constructor.
+/// No literal is either, so such a call raises nothing, and the answer is the
+/// empty row. Any other name answers as [`throws_of`] does.
+#[must_use]
+pub fn throws_of_literals(name: &str) -> Option<&'static [&'static str]> {
+    let row = throws_of(name);
+    if row.is_some_and(|r| r == ["Error"])
+        && REFERENCE_VALUE_ERROR.binary_search(&lowercase(name).as_str()).is_ok()
+    {
+        return Some(&[]);
+    }
+    row
+}
+
+/// The names whose throw row is the `Error` a value that no literal is raises:
+/// two distinct arrays that contain themselves compared (`in_array`,
+/// `array_search`, `array_keys`, `array_unique`, `sort`, `rsort`, `asort`,
+/// `arsort`), a recursive array walked (`array_replace_recursive`,
+/// `array_walk_recursive`) and an uninitialised `DateTimeZone` subclass
+/// (`date_create`, `date_create_immutable`). In byte order.
+const REFERENCE_VALUE_ERROR: &[&str] = &[
+    "array_keys",
+    "array_replace_recursive",
+    "array_search",
+    "array_unique",
+    "array_walk_recursive",
+    "arsort",
+    "asort",
+    "date_create",
+    "date_create_immutable",
+    "in_array",
+    "rsort",
+    "sort",
+];
+
 /// A builtin that raises **only when a flag argument asks it to**: `json_encode`
 /// and `json_decode` throw `JsonException` under `JSON_THROW_ON_ERROR`, and
 /// nothing otherwise (ADR-0099 §3.3).
@@ -217,7 +279,6 @@ const THROWLESS_NAMES: &[&str] = &[
     "array_key_exists",
     "array_key_first",
     "array_key_last",
-    "array_keys",
     "array_last",
     "array_map",
     "array_merge",
@@ -225,20 +286,14 @@ const THROWLESS_NAMES: &[&str] = &[
     "array_product",
     "array_reduce",
     "array_replace",
-    "array_replace_recursive",
     "array_reverse",
-    "array_search",
     "array_shift",
     "array_slice",
     "array_splice",
     "array_sum",
-    "array_unique",
     "array_unshift",
     "array_values",
     "array_walk",
-    "array_walk_recursive",
-    "arsort",
-    "asort",
     "base64_decode",
     "base64_encode",
     "basename",
@@ -265,8 +320,6 @@ const THROWLESS_NAMES: &[&str] = &[
     "ctype_xdigit",
     "current",
     "date",
-    "date_create",
-    "date_create_immutable",
     "date_default_timezone_get",
     "date_default_timezone_set",
     "decbin",
@@ -315,7 +368,6 @@ const THROWLESS_NAMES: &[&str] = &[
     "hypot",
     "idate",
     "implode",
-    "in_array",
     "ini_get",
     "ini_set",
     "intval",
@@ -387,13 +439,11 @@ const THROWLESS_NAMES: &[&str] = &[
     "restore_error_handler",
     "restore_exception_handler",
     "rewind",
-    "rsort",
     "rtrim",
     "sha1",
     "shuffle",
     "similar_text",
     "sin",
-    "sort",
     "soundex",
     "spl_object_hash",
     "spl_object_id",
@@ -480,8 +530,12 @@ mod tests {
         assert_eq!(throws_of("array_column"), Some(&["TypeError"][..]), "an array row value");
         // Audited throwless: an empty row, not a missing one.
         assert_eq!(throws_of("strlen"), Some(&[][..]));
-        assert_eq!(throws_of("ARRAY_KEYS"), Some(&[][..]));
+        assert_eq!(throws_of("ARRAY_FILTER"), Some(&[][..]));
         assert_eq!(throws_of("\\strtolower"), Some(&[][..]));
+        // A row the audit added: recursive arrays compare to an `Error`.
+        assert_eq!(throws_of("ARRAY_KEYS"), Some(&["Error"][..]), "search form; see function_throws");
+        assert_eq!(throws_of("in_array"), Some(&["Error"][..]));
+        assert_eq!(throws_of("date_create"), Some(&["Error"][..]), "an uninitialised tz subclass");
         // Known, unaudited: unknown. `strlen` has a colour and `file_put_contents`
         // too, and neither row says what the other does not.
         assert_eq!(throws_of("file_put_contents"), Some(&["ValueError"][..]), "a path it refuses");
@@ -489,6 +543,21 @@ mod tests {
         assert_eq!(throws_of("class_exists"), None, "autoloads");
         assert_eq!(throws_of("serialize"), None);
         assert_eq!(throws_of("not_a_builtin"), None);
+    }
+
+    #[test]
+    fn a_literal_call_cannot_pass_the_value_a_reference_error_needs() {
+        use super::{REFERENCE_VALUE_ERROR, throws_of_literals};
+        assert!(REFERENCE_VALUE_ERROR.windows(2).all(|w| w[0] < w[1]), "sorted, no duplicates");
+        for name in REFERENCE_VALUE_ERROR {
+            assert_eq!(throws_of(name), Some(&["Error"][..]), "{name}: the row");
+            assert_eq!(throws_of_literals(name), Some(&[][..]), "{name}: over literals");
+        }
+        assert_eq!(throws_of_literals("IN_ARRAY"), Some(&[][..]), "case-insensitive");
+        // Every other answer is `throws_of`'s.
+        for name in ["intdiv", "dirname", "strlen", "json_decode", "class_exists", "ksort"] {
+            assert_eq!(throws_of_literals(name), throws_of(name), "{name}");
+        }
     }
 
     #[test]
@@ -516,6 +585,64 @@ mod tests {
         }
     }
 
+    /// One row of the generated audit note's table.
+    struct AuditRow {
+        name: String,
+        on_table: bool,
+        class: String,
+    }
+
+    /// The table of `docs/research/phpsrc-mining/throwless_audit.md`: the lines
+    /// that open with a backticked name, split into their cells.
+    fn audit_rows() -> Vec<AuditRow> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/research/phpsrc-mining/throwless_audit.md");
+        let note =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        note.lines()
+            .filter(|l| l.starts_with("| `"))
+            .map(|l| {
+                let cells: Vec<&str> = l.trim_matches('|').split('|').map(str::trim).collect();
+                assert!(cells.len() >= 4, "audit table row: {l}");
+                AuditRow {
+                    name: cells[0].trim_matches('`').to_owned(),
+                    on_table: cells[1] == "yes",
+                    class: cells[3].to_owned(),
+                }
+            })
+            .collect()
+    }
+
+    /// The table is held to the generated audit (issue #881): every name on it is
+    /// in the note with a class that raises nothing for an admitted value, and a
+    /// name the audit found raising one (`needs-row`) is off the table and has a
+    /// throw row. The note is regenerated by `audit_throwless.py`, and a re-pin or
+    /// a new name shows up here as a missing or unreviewed row.
+    #[test]
+    fn the_table_is_what_the_audit_classes_as_raising_nothing_for_an_admitted_value() {
+        const CLEAN: [&str; 3] = ["argument-checking", "destructor-hazard", "none"];
+        let rows = audit_rows();
+        for name in THROWLESS_NAMES {
+            let row = rows
+                .iter()
+                .find(|r| r.name == *name)
+                .unwrap_or_else(|| panic!("{name} is on the table and missing from the audit"));
+            assert!(row.on_table, "{name}: the note says it is off the table");
+            assert!(CLEAN.contains(&row.class.as_str()), "{name}: audited as {}", row.class);
+        }
+        for row in &rows {
+            let listed = THROWLESS_NAMES.contains(&row.name.as_str());
+            assert_eq!(row.on_table, listed, "{}: the note and the table disagree", row.name);
+            if row.class == "needs-row" {
+                assert!(!listed, "{} raises for an admitted value", row.name);
+                assert!(builtin_throws(&row.name).is_some(), "{}: needs-row has no row", row.name);
+            } else {
+                assert!(CLEAN.contains(&row.class.as_str()), "{}: {}", row.name, row.class);
+            }
+        }
+        assert_eq!(rows.iter().filter(|r| r.on_table).count(), THROWLESS_NAMES.len());
+    }
+
     /// The names an audit refused, so a later edit that adds one back meets the
     /// reason here. Each throws for an input its parameter types admit.
     #[test]
@@ -539,6 +666,18 @@ mod tests {
             ("gc_collect_cycles", "runs destructors"),
             ("stream_wrapper_register", "attaches user code"),
             ("stream_filter_register", "attaches user code"),
+            ("in_array", "Error: two distinct recursive arrays compare"),
+            ("array_search", "Error: two distinct recursive arrays compare"),
+            ("array_keys", "Error: a recursive array against a search value"),
+            ("array_unique", "Error: SORT_REGULAR compares recursive arrays"),
+            ("sort", "Error: SORT_REGULAR compares recursive arrays"),
+            ("rsort", "Error: SORT_REGULAR compares recursive arrays"),
+            ("asort", "Error: SORT_REGULAR compares recursive arrays"),
+            ("arsort", "Error: SORT_REGULAR compares recursive arrays"),
+            ("array_replace_recursive", "Error: Recursion detected"),
+            ("array_walk_recursive", "Error: Recursion detected"),
+            ("date_create", "Error: an uninitialised DateTimeZone subclass"),
+            ("date_create_immutable", "Error: an uninitialised DateTimeZone subclass"),
         ];
         for (name, why) in refused {
             assert!(!THROWLESS_NAMES.contains(&name), "{name}: {why}");

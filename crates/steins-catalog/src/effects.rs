@@ -3097,7 +3097,13 @@ mod tests {
             assert!(facts.callable.is_empty(), "{name} takes a callable");
             assert!(super::callback_carriers(name).is_empty(), "{name} carries a callback");
             assert!(out_params(name).is_none(), "{name} has an out-parameter row");
-            assert!(crate::builtin_throws(name).is_none(), "{name} has a throw row");
+            // `array_keys` carries the `Error` of its search form, which compares
+            // two recursive arrays; at the one argument it is certified at, the
+            // throw lane reads it as raising nothing (`function_throws`).
+            assert!(
+                name == "array_keys" || crate::builtin_throws(name).is_none(),
+                "{name} has a throw row"
+            );
             for ty in facts.params {
                 assert!(PARAM_TYPES.contains(ty), "{name} declares `{ty}`");
             }
