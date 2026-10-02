@@ -70,6 +70,9 @@ pub(crate) fn walk(
             // `define(...)` (ADR-0078, issue #198): same split as `class_alias` above —
             // literal name mints a global constant, computed name dams.
             classify_define(c, call_conditional, out);
+            // `dl(...)` (issue #928): a run-time extension load — recorded as a dam site
+            // for the `extension_loaded()` fold, whatever its arguments.
+            classify_dl(c, out);
             // `func_get_args()` under a typed signature (issue #30, report-only): the
             // declared argument shape is one the body then bypasses.
             if typed_sig
@@ -550,6 +553,21 @@ fn classify_define(c: &FunctionCall<'_>, conditional: bool, out: &mut Lowered) {
             conditional,
         }),
         None => out.dynamism.push(DynamismSite { kind: DynamismKind::DefineDynamic, span }),
+    }
+}
+
+/// Classify a `dl(...)` call (issue #928): any call of the global `dl` is an
+/// [`DynamismKind::ExtensionLoad`] site. Callee recognition matches `class_alias`'s
+/// (unqualified/fully-qualified only); the arguments are irrelevant, since which
+/// extension loads is a run-time value.
+fn classify_dl(c: &FunctionCall<'_>, out: &mut Lowered) {
+    let Expression::Identifier(id) = c.function else { return };
+    if !matches!(id, Identifier::Local(_) | Identifier::FullyQualified(_)) {
+        return;
+    }
+    if bytes_to_string(id.last_segment()).eq_ignore_ascii_case("dl") {
+        out.dynamism
+            .push(DynamismSite { kind: DynamismKind::ExtensionLoad, span: to_span(c.span()) });
     }
 }
 

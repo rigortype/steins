@@ -22,6 +22,7 @@ use crate::lower_effect::{
     EffectScanCx, ReceiverWrites, body_aliased, collect_body_callables, scan_method_calls,
 };
 use crate::lower_expr::lower_arg_value;
+use crate::lower_guards::scan_guard_regions;
 use crate::lower_presence::{maybe_undefined_reads, push_guard_root, subtree_has_goto};
 use crate::lower_site::scan_owner_sites;
 use crate::lower_stmt::{
@@ -465,6 +466,8 @@ fn build_hook_expr_scope(
     scan_guard_chain_no_default(&node, &mut guard_chain_no_default);
     let mut string_contexts = Vec::new();
     scan_string_contexts(&node, &mut string_contexts);
+    let mut guards = Vec::new();
+    scan_guard_regions(&node, &mut guards);
     let stmt = match kind {
         HookKind::Get => Stmt {
             span: to_span(expr.span()),
@@ -475,6 +478,7 @@ fn build_hook_expr_scope(
             },
             invalidated: call_invalidation(&node),
             string_contexts,
+            guards,
             // The body IS the return, so the trace always terminates — which is why
             // an arrow-bodied `get` can never be a `type.return-missing` site.
             end: BodyEnd::Terminates,
@@ -486,6 +490,7 @@ fn build_hook_expr_scope(
         HookKind::Set => Stmt {
             span: to_span(expr.span()),
             string_contexts,
+            guards,
             end: expr_end(expr),
             has_terminator: subtree_has_function_exit(&node),
             ..lower_expr_stmt(expr)
@@ -1512,11 +1517,14 @@ fn build_closure_scope_from_arrow(
     // centrally for every other statement, is bypassed by this one-statement trace.
     let mut string_contexts = Vec::new();
     scan_string_contexts(&Node::Expression(af.expression), &mut string_contexts);
+    let mut guards = Vec::new();
+    scan_guard_regions(&Node::Expression(af.expression), &mut guards);
     let ret = Stmt {
         span,
         kind: StmtKind::Return { value, call, span },
         invalidated,
         string_contexts,
+        guards,
         // An arrow body IS a `return`, so the scope's trace always terminates —
         // which is precisely why `fn () => …` can never be a `type.return-missing`
         // site, no matter what it declares (ADR-0078, issue #199).

@@ -693,6 +693,9 @@ pub(crate) enum Vouch {
     Function(String),
     /// `class_exists`/`interface_exists`/`trait_exists`/`enum_exists('N')` vouched `N`.
     Class(String),
+    /// `property_exists(C, 'p')` vouched `C::$p` (issue #930) — `class` is lowercased,
+    /// `property` is kept as written: property names are case-sensitive.
+    Property { class: String, property: String },
 }
 
 /// One arm of a [`Store::contract`] lane: a declared-type alternative plus the
@@ -969,6 +972,16 @@ impl Store {
         self.vouched.contains(&Vouch::Method {
             class: class.to_ascii_lowercase(),
             method: method.to_ascii_lowercase(),
+        })
+    }
+
+    /// Whether a positive `property_exists(C, 'p')` guard on this path vouched
+    /// `class::$p` (issue #930). The class is matched case-insensitively, the property
+    /// name exactly.
+    pub(crate) fn vouches_property(&self, class: &str, property: &str) -> bool {
+        self.vouched.contains(&Vouch::Property {
+            class: class.trim_start_matches('\\').to_ascii_lowercase(),
+            property: property.to_owned(),
         })
     }
 

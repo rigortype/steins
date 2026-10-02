@@ -785,11 +785,11 @@ fn collect_type_guards(cx: &Cx, cond: &CondExpr, then: bool, out: &mut Vec<TypeG
             }
         }
         CondExpr::Not(c) => collect_type_guards(cx, c, !then, out),
-        CondExpr::And(a, b) if then => {
+        CondExpr::And(a, b, _) if then => {
             collect_type_guards(cx, a, then, out);
             collect_type_guards(cx, b, then, out);
         }
-        CondExpr::Or(a, b) if !then => {
+        CondExpr::Or(a, b, _) if !then => {
             collect_type_guards(cx, a, then, out);
             collect_type_guards(cx, b, then, out);
         }

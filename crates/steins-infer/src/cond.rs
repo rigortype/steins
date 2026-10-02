@@ -28,7 +28,7 @@ use crate::offsets::{ShapeRead, offset_key_of, offset_operand_fact, shape_read_a
 use crate::predicates::apply_type_narrowing;
 use crate::refine::{apply_refinements, collect_refine};
 use crate::transfers::{transfer_arg_fact, transfer_arg_known};
-use crate::walk::{WalkCx, mark_dead_cond_calls, mark_dead_span};
+use crate::walk::{WalkCx, mark_dead_operand, mark_dead_span};
 
 // ---------------------------------------------------------------------------
 // Condition evaluation → `Certainty` (ADR-0031 stage 1).
@@ -198,24 +198,24 @@ pub(crate) fn eval_cond(
         // `&&`/`||` sequence it — `b` in `a && b` sees `then_refinements(a)`; `b`
         // in `a || b` sees `else_refinements(a)` (De Morgan). Only the operand env
         // threads; the composed verdict stays the trinary `and`/`or`.
-        CondExpr::And(a, b) => {
+        CondExpr::And(a, b, span) => {
             let va = eval_cond(w, folder, a, env, store, poisoned);
             // `a` false => `b` never runs. `b`'s span is unevaluated code, not
             // merely unnarrowed, so a finding there would be a false positive —
             // record it dead, as a decided `if` records its skipped branch.
             if va == Certainty::No {
-                mark_dead_cond_calls(w, b);
+                mark_dead_operand(w, b, *span);
                 return Certainty::No;
             }
             let (benv, bstore) =
                 threaded_operand_env(w.cx, a, true, env, store, poisoned);
             va.and(eval_cond(w, folder, b, &benv, &bstore, poisoned))
         }
-        CondExpr::Or(a, b) => {
+        CondExpr::Or(a, b, span) => {
             let va = eval_cond(w, folder, a, env, store, poisoned);
             // `a` true => `b` never runs. Same unevaluated-span reasoning, De Morgan-mirrored.
             if va == Certainty::Yes {
-                mark_dead_cond_calls(w, b);
+                mark_dead_operand(w, b, *span);
                 return Certainty::Yes;
             }
             let (benv, bstore) =

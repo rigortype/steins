@@ -80,6 +80,7 @@ mod function_identity;
 mod generics_carry;
 mod guard_conjunct_writes;
 mod guard_join_cross_lane;
+mod guard_positions;
 mod higher_order_join;
 mod hyphen_reservation;
 mod implicit_nullable_param;

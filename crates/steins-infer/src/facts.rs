@@ -240,6 +240,7 @@ pub(crate) enum CandidateKind {
     Include { target: Option<String> },
     ClassAlias,
     DefineDynamic,
+    ExtensionLoad,
 }
 
 /// A file's fixpoint own rows: the declarations it contributes, in the order
@@ -345,6 +346,7 @@ pub(crate) fn dam_candidates_of(path: &str, tree: &SourceTree) -> Vec<DamCandida
                     }
                     DynamismKind::ClassAlias => CandidateKind::ClassAlias,
                     DynamismKind::DefineDynamic => CandidateKind::DefineDynamic,
+                    DynamismKind::ExtensionLoad => CandidateKind::ExtensionLoad,
                 },
             }
         })

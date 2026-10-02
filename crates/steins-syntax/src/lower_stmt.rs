@@ -14,8 +14,9 @@ use mago_syntax::cst::{
 use crate::ast::{
     AppendStmt, ArgValue, ArrayKey, ArrayLiteralElement, ArrayLiteralSite, BinaryOperandOp, BodyEnd,
     CallExpr, Callee, CondExpr, CondOperand, ForeachBodyShape, ForeachSite, InvalidatedVar,
-    MatchArmT, NameRef, OpaqueConstruct, OpaqueSite, OperandSite, OperandSiteKind, PrevStmt, RunArg,
-    RunCall, Runs, Span, Stmt, StmtKind, StringContextKind, StringContextSite, UnaryOperandOp,
+    MatchArmT, NameRef, OpaqueConstruct, OpaqueSite, OperandSite, OperandSiteKind, OperandSpan,
+    PrevStmt, RunArg, RunCall, Runs, Span, Stmt, StmtKind, StringContextKind, StringContextSite,
+    UnaryOperandOp,
 };
 use crate::lower_expr::{
     append_base, assert_stmt_cond, const_key_offset, const_key_offset_path, destructure_reads,
@@ -23,6 +24,7 @@ use crate::lower_expr::{
     lower_array_key, lower_call, lower_cond, lower_cond_operand, lower_construct_call,
     lower_method_call, lower_opaque, lower_static_call, opaque_sets, prop_fetch_of,
 };
+use crate::lower_guards::guard_regions_of;
 use crate::memo;
 use crate::names::name_ref;
 use crate::{bytes_to_string, children, strip_dollar, to_span};
@@ -138,6 +140,7 @@ pub(crate) fn lower_stmt(s: &Statement<'_>, out: &mut Vec<Stmt>) {
     out.push(Stmt {
         span: stmt_span,
         string_contexts: string_context_sites(s),
+        guards: guard_regions_of(s),
         // The reachability foundation's central fill (ADR-0078, issue #199) — read
         // off the CST statement, never off the lowered `kind`. See `stmt_end`.
         end: stmt_end(s),
@@ -182,6 +185,15 @@ fn stmt_runs(s: &Statement<'_>, kind: &StmtKind) -> Runs {
                     for c in a.conditions.iter() {
                         scan_runs(&Node::Expression(c), &mut runs);
                     }
+                }
+            }
+        }
+        // A `switch (true)` chain (issue #928) is an `if` whose conditions are the
+        // case labels.
+        (Statement::Switch(sw), StmtKind::If { .. }, _) => {
+            for case in sw.body.cases() {
+                if let Some(label) = case.expression() {
+                    scan_runs(&Node::Expression(label), &mut runs);
                 }
             }
         }
@@ -1274,7 +1286,7 @@ fn lower_match_guard_chain(m: &mago_syntax::cst::Match<'_>) -> Option<Stmt> {
                     let one = guard_arm_cond(c, sense)?;
                     cond = Some(match cond {
                         None => one,
-                        Some(acc) => CondExpr::Or(Box::new(acc), Box::new(one)),
+                        Some(acc) => CondExpr::Or(Box::new(acc), Box::new(one), OperandSpan::NONE),
                     });
                 }
                 links.push((cond?, lower_expr_position(a.expression)));
@@ -1410,20 +1422,56 @@ fn arm_cond_is_bool_valued(cond: &CondExpr) -> bool {
 /// fall-through-to-the-body semantics; a trailing `break` is stripped (end-of-arm,
 /// not a trace terminator). A stray `break`/`continue`/`goto` inside a case body
 /// makes the whole construct opaque — modeling it as an arm would be unsound.
+///
+/// A `switch (true)` whose cases are not all variables and literals is offered to
+/// [`lower_switch_true`] before it is given up (issue #928).
 fn lower_switch(sw: &mago_syntax::cst::Switch<'_>) -> Option<Stmt> {
-    let subject = usable_operand(sw.expression)?;
-    let mut arms: Vec<MatchArmT> = Vec::new();
+    let by_value = usable_operand(sw.expression)
+        .and_then(|subject| Some((subject, collect_switch_arms(sw, false, usable_operand)?)));
+    let Some((subject, SwitchArms { arms, default })) = by_value else {
+        return lower_switch_true(sw);
+    };
+    let arms = arms
+        .into_iter()
+        .map(|(conditions, trace)| MatchArmT { conditions, trace })
+        .collect();
+    Some(Stmt::lowered(StmtKind::Match { subject, arms, default, loose: true }, Vec::new()))
+}
+
+/// The case arms of a structured `switch`, generic over what a case label lowers to:
+/// each arm carries its labels (stacked empty labels in front) and its body, and
+/// `default` is the default body when there is one.
+struct SwitchArms<C> {
+    arms: Vec<(Vec<C>, Vec<Stmt>)>,
+    default: Option<Vec<Stmt>>,
+}
+
+/// Read a `switch`'s cases into [`SwitchArms`], under the conditions
+/// [`lower_switch`] documents: every label lowers through `lower_label`, and every
+/// non-empty case ends in `break`/`return`/`throw`/`exit` with no stray jump.
+///
+/// `last_may_end` lets the **last** case end without any of those — it has no next case
+/// to fall into, so running off its end leaves the switch exactly as a `break` does —
+/// and lets trailing empty labels stand for the no-op bodies they are.
+fn collect_switch_arms<C>(
+    sw: &mago_syntax::cst::Switch<'_>,
+    last_may_end: bool,
+    lower_label: impl Fn(&Expression<'_>) -> Option<C>,
+) -> Option<SwitchArms<C>> {
+    let mut arms: Vec<(Vec<C>, Vec<Stmt>)> = Vec::new();
     let mut default: Option<Vec<Stmt>> = None;
     // Conditions of consecutive empty case labels, waiting to stack onto the next
     // non-empty case body; `pending_default` records an empty `default:` label.
-    let mut pending: Vec<CondOperand> = Vec::new();
+    let mut pending: Vec<C> = Vec::new();
     let mut pending_default = false;
 
-    for case in sw.body.cases() {
-        // The case's own comparison operand (None for `default`), rejected early
-        // if it does not lower to a variable/literal.
+    let cases = sw.body.cases();
+    let last = cases.len().checked_sub(1);
+    for (position, case) in cases.iter().enumerate() {
+        // The case's own label (None for `default`), rejected early if it does not
+        // lower.
         let cond = match case.expression() {
-            Some(e) => Some(usable_operand(e)?),
+            Some(e) => Some(lower_label(e)?),
             None => None,
         };
         if case.is_empty() {
@@ -1447,7 +1495,7 @@ fn lower_switch(sw: &mago_syntax::cst::Switch<'_>) -> Option<Stmt> {
             return None;
         }
         let trace = lower_trace(body);
-        if !ends_break {
+        if !ends_break && !(last_may_end && Some(position) == last) {
             // No break: the body must terminate, or it would fall through to the
             // next case (which structuring cannot model).
             let terminates = matches!(
@@ -1463,7 +1511,7 @@ fn lower_switch(sw: &mago_syntax::cst::Switch<'_>) -> Option<Stmt> {
             Some(c) if !pending_default => {
                 let mut conditions = std::mem::take(&mut pending);
                 conditions.push(c);
-                arms.push(MatchArmT { conditions, trace });
+                arms.push((conditions, trace));
             }
             // This body is (or is reached by fall-through from) `default:`; a
             // default subsumes any stacked case conditions (it catches all).
@@ -1477,12 +1525,57 @@ fn lower_switch(sw: &mago_syntax::cst::Switch<'_>) -> Option<Stmt> {
         pending.clear();
         pending_default = false;
     }
-    // Trailing empty labels with no following body do nothing at runtime, but
-    // structuring them as no-op arms is fiddly; bail to Opaque (sound).
-    if !pending.is_empty() || pending_default {
+    // Trailing empty labels with no following body do nothing at runtime. The by-value
+    // `Match` does not model them as no-op arms (fiddly there) and bails to `Opaque`; a
+    // chain reads a trailing `default:` as an empty `else` and trailing `case`s as an
+    // empty arm.
+    if last_may_end {
+        if pending_default {
+            if default.is_some() {
+                return None;
+            }
+            default = Some(Vec::new());
+            pending.clear();
+        } else if !pending.is_empty() {
+            arms.push((std::mem::take(&mut pending), Vec::new()));
+        }
+    } else if !pending.is_empty() || pending_default {
         return None;
     }
-    Some(Stmt::lowered(StmtKind::Match { subject, arms, default, loose: true }, Vec::new()))
+    Some(SwitchArms { arms, default })
+}
+
+/// Structure a `switch (true) { case <test>: … }` as the `if`/`elseif`/`else` chain it
+/// is (issue #928). `true == <test>` holds exactly when `<test>` is truthy, so each case
+/// label lowers as the condition an `if` would carry, stacked labels join with `||`, and
+/// the `default` body — taken only when no case matches, wherever it is written — is the
+/// `else`. Under [`collect_switch_arms`]'s conditions, so no case falls through into the
+/// next and none jumps out of the construct.
+///
+/// What this buys is the same guard discharge an `if` has: `case defined('X'): return X;`
+/// is a call in guard position, folded and pruned as an `if` condition is. A `switch`
+/// with no `case` at all (`default:` alone) stays `Opaque`.
+fn lower_switch_true(sw: &mago_syntax::cst::Switch<'_>) -> Option<Stmt> {
+    if bool_literal_subject(sw.expression) != Some(true) {
+        return None;
+    }
+    let SwitchArms { arms, default } =
+        collect_switch_arms(sw, true, |e| Some((lower_cond(e), to_span(e.span()))))?;
+    let mut links = arms.into_iter().map(|(labels, trace)| {
+        let cond = labels
+            .into_iter()
+            .reduce(|(acc, _), (one, span)| {
+                (CondExpr::Or(Box::new(acc), Box::new(one), OperandSpan(span)), span)
+            })
+            .map(|(cond, _)| cond)
+            .expect("an arm carries at least its own label");
+        (cond, trace)
+    });
+    let (cond, then_trace) = links.next()?;
+    Some(Stmt::lowered(
+        StmtKind::If { cond, then_trace, elseifs: links.collect(), else_trace: default },
+        Vec::new(),
+    ))
 }
 
 /// Lower an operand to a *usable* [`CondOperand`] — a bare variable, a literal, or

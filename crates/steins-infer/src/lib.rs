@@ -64,6 +64,7 @@ mod foreach_bind;
 mod foreach_check;
 mod generics;
 mod global_consts;
+mod guard_sweep;
 mod heap;
 mod ids;
 mod inaccessible;

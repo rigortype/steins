@@ -13,8 +13,8 @@ use steins_domain::PhpStr;
 
 use crate::ast::{
     Arg, ArgValue, ArrayKey, CallExpr, Callee, CastTarget, ClosureRef, CmpOp, CondExpr, CondOperand,
-    EffectRecv, IssetOperand, LogicalOp, NameRef, NamedArg, Receiver, RefKind, Span, StaticClass,
-    Stmt, StmtKind, ValueOp,
+    EffectRecv, IssetOperand, LogicalOp, NameRef, NamedArg, OperandSpan, Receiver, RefKind, Span,
+    StaticClass, Stmt, StmtKind, ValueOp,
     flatten_spread_operand,
 };
 use crate::lower_effect::EffectScanCx;
@@ -200,10 +200,12 @@ fn lower_guard_arg(expr: &Expression<'_>) -> Option<CondExpr> {
             BinaryOperator::And(_) | BinaryOperator::LowAnd(_) => Some(CondExpr::And(
                 Box::new(lower_guard_arg(b.lhs)?),
                 Box::new(lower_guard_arg(b.rhs)?),
+                OperandSpan(to_span(b.rhs.span())),
             )),
             BinaryOperator::Or(_) | BinaryOperator::LowOr(_) => Some(CondExpr::Or(
                 Box::new(lower_guard_arg(b.lhs)?),
                 Box::new(lower_guard_arg(b.rhs)?),
+                OperandSpan(to_span(b.rhs.span())),
             )),
             // Equality/identity over a constant-key projection is the tag
             // discrimination guard (A-G4); `lower_binary_cond` decides whether the
@@ -1088,6 +1090,7 @@ pub(crate) fn lower_cond(expr: &Expression<'_>) -> CondExpr {
                     var,
                     key: Box::new(key),
                 })))),
+                OperandSpan::NONE,
             ),
             None => CondExpr::Opaque { reads: cond_reads(expr), writes: cond_writes(expr) },
         },
@@ -1101,19 +1104,23 @@ pub(crate) fn lower_cond(expr: &Expression<'_>) -> CondExpr {
         // charged its operand the by-reference conservatism an unmodellable
         // condition owes, which discarded every fact the variable had.
         Expression::Construct(Construct::Isset(iss)) => {
-            let operands: Option<Vec<CondExpr>> = iss
+            let operands: Option<Vec<(CondExpr, OperandSpan)>> = iss
                 .values
                 .iter()
                 .map(|v| {
                     const_key_offset(v)
                         .map(|(var, key)| CondExpr::Isset { var, key: Box::new(key) })
                         .or_else(|| bare_var_name(v).map(|var| CondExpr::IssetVar { var }))
+                        .map(|c| (c, OperandSpan(to_span(v.span()))))
                 })
                 .collect();
             match operands {
                 Some(parts) if !parts.is_empty() => parts
                     .into_iter()
-                    .reduce(|a, b| CondExpr::And(Box::new(a), Box::new(b)))
+                    .reduce(|(a, _), (b, span)| {
+                        (CondExpr::And(Box::new(a), Box::new(b), span), span)
+                    })
+                    .map(|(c, _)| c)
                     .expect("non-empty"),
                 _ => CondExpr::Opaque { reads: cond_reads(expr), writes: cond_writes(expr) },
             }
@@ -1219,7 +1226,7 @@ fn cast_target(operator: &UnaryPrefixOperator<'_>) -> Option<CastTarget> {
 }
 
 /// Lower a binary-operator condition (comparison / `instanceof` / `&&` / `||`).
-fn lower_binary_cond(b: &Binary<'_>) -> CondExpr {
+pub(crate) fn lower_binary_cond(b: &Binary<'_>) -> CondExpr {
     let op = cmp_op_of(&b.operator);
     if let Some(op) = op {
         let lhs = lower_cond_operand(b.lhs);
@@ -1269,12 +1276,16 @@ fn lower_binary_cond(b: &Binary<'_>) -> CondExpr {
                 }
             }
         }
-        BinaryOperator::And(_) | BinaryOperator::LowAnd(_) => {
-            CondExpr::And(Box::new(lower_cond(b.lhs)), Box::new(lower_cond(b.rhs)))
-        }
-        BinaryOperator::Or(_) | BinaryOperator::LowOr(_) => {
-            CondExpr::Or(Box::new(lower_cond(b.lhs)), Box::new(lower_cond(b.rhs)))
-        }
+        BinaryOperator::And(_) | BinaryOperator::LowAnd(_) => CondExpr::And(
+            Box::new(lower_cond(b.lhs)),
+            Box::new(lower_cond(b.rhs)),
+            OperandSpan(to_span(b.rhs.span())),
+        ),
+        BinaryOperator::Or(_) | BinaryOperator::LowOr(_) => CondExpr::Or(
+            Box::new(lower_cond(b.lhs)),
+            Box::new(lower_cond(b.rhs)),
+            OperandSpan(to_span(b.rhs.span())),
+        ),
         // Any other binary operator (arithmetic, `<`, `.`, …): opaque, reading its
         // whole subtree.
         _ => {

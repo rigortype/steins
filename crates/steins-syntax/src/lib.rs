@@ -15,6 +15,7 @@ mod lower_arg_shape;
 mod lower_decl;
 mod lower_effect;
 mod lower_expr;
+mod lower_guards;
 mod lower_presence;
 mod lower_scope;
 mod lower_site;

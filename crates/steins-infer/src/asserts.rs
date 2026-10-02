@@ -596,7 +596,7 @@ fn collect_pure_guard_bases(cx: &Cx, cond: &CondExpr, out: &mut Vec<String>) {
             }
         }
         CondExpr::Not(c) => collect_pure_guard_bases(cx, c, out),
-        CondExpr::And(a, b) | CondExpr::Or(a, b) => {
+        CondExpr::And(a, b, _) | CondExpr::Or(a, b, _) => {
             collect_pure_guard_bases(cx, a, out);
             collect_pure_guard_bases(cx, b, out);
         }
@@ -650,7 +650,7 @@ fn collect_presence_guard_keys(cx: &Cx, cond: &CondExpr, out: &mut Vec<String>) 
             }
         }
         CondExpr::Not(c) => collect_presence_guard_keys(cx, c, out),
-        CondExpr::And(a, b) | CondExpr::Or(a, b) => {
+        CondExpr::And(a, b, _) | CondExpr::Or(a, b, _) => {
             collect_presence_guard_keys(cx, a, out);
             collect_presence_guard_keys(cx, b, out);
         }
@@ -740,7 +740,7 @@ fn collect_cond_opaque_reads(cx: &Cx, cond: &CondExpr, ce: &CondEnv, out: &mut V
             collect_operand_opaque_reads(cx, operand, ce, out);
         }
         CondExpr::Not(c) => collect_cond_opaque_reads(cx, c, ce, out),
-        CondExpr::And(a, b) | CondExpr::Or(a, b) => {
+        CondExpr::And(a, b, _) | CondExpr::Or(a, b, _) => {
             collect_cond_opaque_reads(cx, a, ce, out);
             collect_cond_opaque_reads(cx, b, ce, out);
         }
@@ -980,7 +980,7 @@ fn cond_reach(cond: &CondExpr, out: &mut Vec<String>) {
         }
         CondExpr::Call { reads, .. } | CondExpr::Opaque { reads, .. } => charge(reads),
         CondExpr::Not(c) => cond_reach(c, out),
-        CondExpr::And(a, b) | CondExpr::Or(a, b) => {
+        CondExpr::And(a, b, _) | CondExpr::Or(a, b, _) => {
             cond_reach(a, out);
             cond_reach(b, out);
         }

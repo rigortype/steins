@@ -11,6 +11,7 @@ mod dynamic_call_var;
 mod foreach_sites;
 mod global_constants;
 mod grouped_use;
+mod guard_lowering;
 mod interpolation_value;
 mod isset_value;
 mod loop_nesting;

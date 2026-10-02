@@ -50,6 +50,7 @@ A dam site is any of:
 | `Eval` | every `eval(...)` — code as data, universe havoc |
 | `Include` | every **non-vendor** `include`/`require` whose path is not provably in-universe |
 | `ClassAlias` | every `class_alias(...)` whose class names are **not known at compile time** — a runtime class-name mint |
+| `ExtensionLoad` | every `dl(...)` call, vendor code included — an extension loaded at run time brings functions, classes and constants the boot surface never listed, and changes what `extension_loaded()` answers |
 
 "Not provably in-universe" is deliberately strict for includes: an unproven
 path, a bare-relative literal (the runtime resolves it against `include_path`,

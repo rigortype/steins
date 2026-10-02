@@ -436,11 +436,11 @@ pub(crate) fn collect_guard_calls<'a>(cond: &'a CondExpr, then: bool, out: &mut 
     match cond {
         CondExpr::Call { call, .. } => out.push((call, then)),
         CondExpr::Not(c) => collect_guard_calls(c, !then, out),
-        CondExpr::And(a, b) if then => {
+        CondExpr::And(a, b, _) if then => {
             collect_guard_calls(a, true, out);
             collect_guard_calls(b, true, out);
         }
-        CondExpr::Or(a, b) if !then => {
+        CondExpr::Or(a, b, _) if !then => {
             collect_guard_calls(a, false, out);
             collect_guard_calls(b, false, out);
         }
@@ -470,11 +470,11 @@ pub(crate) fn collect_truthy_calls<'a>(
             out.extend(cmp_truthy_witness(*op, lhs, rhs, then));
         }
         CondExpr::Not(c) => collect_truthy_calls(c, !then, out),
-        CondExpr::And(a, b) if then => {
+        CondExpr::And(a, b, _) if then => {
             collect_truthy_calls(a, true, out);
             collect_truthy_calls(b, true, out);
         }
-        CondExpr::Or(a, b) if !then => {
+        CondExpr::Or(a, b, _) if !then => {
             collect_truthy_calls(a, false, out);
             collect_truthy_calls(b, false, out);
         }
@@ -554,7 +554,7 @@ fn collect_all_calls<'a>(cond: &'a CondExpr, out: &mut Vec<&'a CallExpr>) {
         }
         CondExpr::Instanceof { operand, .. } => out.extend(operand_call(operand)),
         CondExpr::Not(c) => collect_all_calls(c, out),
-        CondExpr::And(a, b) | CondExpr::Or(a, b) => {
+        CondExpr::And(a, b, _) | CondExpr::Or(a, b, _) => {
             collect_all_calls(a, out);
             collect_all_calls(b, out);
         }
@@ -586,11 +586,11 @@ pub(crate) fn collect_refine(cond: &CondExpr, then: bool, out: &mut Vec<Refine>)
             }
         }
         CondExpr::Not(c) => collect_refine(c, !then, out),
-        CondExpr::And(a, b) if then => {
+        CondExpr::And(a, b, _) if then => {
             collect_refine(a, true, out);
             collect_refine(b, true, out);
         }
-        CondExpr::Or(a, b) if !then => {
+        CondExpr::Or(a, b, _) if !then => {
             collect_refine(a, false, out);
             collect_refine(b, false, out);
         }
@@ -722,11 +722,11 @@ pub(crate) fn collect_same_expr_call_guards(cond: &CondExpr, then: bool, out: &m
             }
         }
         CondExpr::Not(c) => collect_same_expr_call_guards(c, !then, out),
-        CondExpr::And(a, b) if then => {
+        CondExpr::And(a, b, _) if then => {
             collect_same_expr_call_guards(a, true, out);
             collect_same_expr_call_guards(b, true, out);
         }
-        CondExpr::Or(a, b) if !then => {
+        CondExpr::Or(a, b, _) if !then => {
             collect_same_expr_call_guards(a, false, out);
             collect_same_expr_call_guards(b, false, out);
         }
@@ -749,11 +749,11 @@ fn collect_instanceof<'a>(
             out.push((v.as_str(), class_ref, then));
         }
         CondExpr::Not(c) => collect_instanceof(c, !then, out),
-        CondExpr::And(a, b) if then => {
+        CondExpr::And(a, b, _) if then => {
             collect_instanceof(a, true, out);
             collect_instanceof(b, true, out);
         }
-        CondExpr::Or(a, b) if !then => {
+        CondExpr::Or(a, b, _) if !then => {
             collect_instanceof(a, false, out);
             collect_instanceof(b, false, out);
         }
@@ -793,11 +793,11 @@ fn collect_enum_identity<'a>(
             out.push((var, sc, case, positive));
         }
         CondExpr::Not(c) => collect_enum_identity(c, !then, out),
-        CondExpr::And(a, b) if then => {
+        CondExpr::And(a, b, _) if then => {
             collect_enum_identity(a, true, out);
             collect_enum_identity(b, true, out);
         }
-        CondExpr::Or(a, b) if !then => {
+        CondExpr::Or(a, b, _) if !then => {
             collect_enum_identity(a, false, out);
             collect_enum_identity(b, false, out);
         }

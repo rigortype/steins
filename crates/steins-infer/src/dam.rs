@@ -18,7 +18,10 @@
 //!   swallowed a class or function declaration;
 //! - every `define(...)` naming a **runtime-minted constant** (issue #198 —
 //!   [`steins_syntax::DynamismKind::DefineDynamic`]); narrower: dams
-//!   `constant.undefined` only ([`DamKind::dams_names`]).
+//!   `constant.undefined` only ([`DamKind::dams_names`]);
+//! - every `dl(...)` call (issue #928 —
+//!   [`steins_syntax::DynamismKind::ExtensionLoad`]): the loaded-extension set stops
+//!   being the boot surface's, so the `extension_loaded()` fold reads this site too.
 //!
 //! Vendor presumption (ADR-0046 §2): `eval`/dynamic-include under `vendor/` is
 //! presumed composer plumbing. A `class_alias` with compile-time-known names
@@ -60,6 +63,10 @@ pub enum DamKind {
     /// Narrower blast radius: dams `constant.undefined` only
     /// ([`DamKind::dams_names`] spells the asymmetry).
     DefineDynamic,
+    /// A `dl(...)` call (issue #928): an extension loaded at run time brings functions,
+    /// classes and constants the boot surface never listed, and changes what
+    /// `extension_loaded()` answers. Dams every valve, including in vendor code.
+    ExtensionLoad,
 }
 
 impl DamKind {
@@ -219,6 +226,8 @@ pub(crate) fn dam_facts_from(
                 // Same reason as `class_alias`: a computed `define` mints a
                 // project-visible name wherever it sits, so it dams even in vendor.
                 CandidateKind::DefineDynamic => DamKind::DefineDynamic,
+                // Wherever it sits: a loaded extension is process-wide.
+                CandidateKind::ExtensionLoad => DamKind::ExtensionLoad,
             };
             sites.push(DamSite {
                 path: u.path.to_owned(),

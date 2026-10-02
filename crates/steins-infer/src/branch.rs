@@ -247,8 +247,10 @@ pub(crate) fn apply_cond_side(
         // Guard-respect leg (ADR-0049 §4): an existence guard vouches its symbol on
         // the side where it holds true — including the negated-guard else-branch,
         // `if (!method_exists(...)) {} else <here>`.
-        if returns_true && let Some(v) = existence_vouch(w.cx, store, call) {
-            store.vouch(v);
+        if returns_true {
+            for v in existence_vouch(w.cx, store, call) {
+                store.vouch(v);
+            }
         }
     }
     // The out-parameter seed on both sides, for the same reason: `if
@@ -388,7 +390,7 @@ fn collect_cond_vars(cond: &CondExpr, out: &mut Vec<String>) {
         CondExpr::Truthy(op) => push_cond_operand_var(op, out),
         CondExpr::Instanceof { operand, .. } => push_cond_operand_var(operand, out),
         CondExpr::Not(c) => collect_cond_vars(c, out),
-        CondExpr::And(a, b) | CondExpr::Or(a, b) => {
+        CondExpr::And(a, b, _) | CondExpr::Or(a, b, _) => {
             collect_cond_vars(a, out);
             collect_cond_vars(b, out);
         }
