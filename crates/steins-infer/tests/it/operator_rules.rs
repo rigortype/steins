@@ -633,14 +633,53 @@ fn s8_a_call_php_may_bind_elsewhere_proves_nothing() {
     gap(conditional, "f", TO_STRING);
 }
 
-/// Row 8.8: a final engine accessor holds a string, in both lanes; the throw lane's
-/// `declared-receiver` (the interface envelope it cannot read) stays.
+/// A conditionally declared class anywhere on the chain from the receiver's up to the declaring
+/// one binds by load order, so the declaration read at the top may not be the one below it
+/// (the dispatch-side twin is issue #998).
+#[test]
+fn s8_a_conditional_class_in_the_middle_of_the_chain_proves_nothing() {
+    let chain = |open: &str, close: &str| {
+        let classes = format!(
+            "class Base2 {{ public function name(): string {{ return 'b'; }} }}\n\
+             {open}class Mid2 extends Base2 {{}}{close}\nclass Leaf2 extends Mid2 {{}}"
+        );
+        file(&format!("{RETURNS}{classes}"), "function f(Leaf2 $l) { return 'x' . $l->name(); }")
+    };
+    assert!(operator_gaps(&chain("", ""), "f").is_empty());
+    let guarded = chain("if (!class_exists('Mid2')) { ", " }");
+    assert_eq!(operator_gaps(&guarded, "f"), [TO_STRING]);
+}
+
+/// Row 8.8, as the review of #996 corrected it: a final `Throwable` accessor holds what its
+/// typed property backs. `getFile()`, `getLine()` and `getTraceAsString()` hold no object, in
+/// both lanes (the throw lane keeps the `declared-receiver` of the interface envelope it
+/// cannot read). `getMessage()` and `getCode()` read an untyped property a subclass may fill
+/// with an object (`getMessage()` then runs its `__toString`, witnessed on PHP 8.5.11, and
+/// `getCode()` returns it), so they stay a gap on every receiver (issue #997 is the same
+/// premise on master, in the effect lane's own accessor row).
 #[test]
 fn s8_a_final_engine_accessor_returns_a_string() {
-    let src = returns("function f(\\Throwable $e) { return 'x' . $e->getMessage(); }");
-    assert_eq!(lane_gaps(&src, "f"), (vec![], vec!["declared-receiver"]));
-    let exact = returns("function f() { return 'x' . (new \\RuntimeException('m'))->getMessage(); }");
-    assert!(operator_gaps(&exact, "f").is_empty());
+    for accessor in ["getFile()", "getLine()", "getTraceAsString()"] {
+        let src = returns(&format!("function f(\\Throwable $e) {{ return 'x' . $e->{accessor}; }}"));
+        assert_eq!(lane_gaps(&src, "f"), (vec![], vec!["declared-receiver"]), "{accessor}");
+        let new = format!("function f() {{ return 'x' . (new \\RuntimeException('m'))->{accessor}; }}");
+        assert!(operator_gaps(&returns(&new), "f").is_empty(), "{accessor}");
+    }
+    for accessor in ["getMessage()", "getCode()"] {
+        for receiver in ["\\Throwable $e", "\\RuntimeException $e", "RtEvil $e"] {
+            let function = format!("function f({receiver}) {{ return 'x' . $e->{accessor}; }}");
+            let src = file(&format!("{RETURNS}class RtEvil extends \\RuntimeException {{}}"), &function);
+            assert_eq!(operator_gaps(&src, "f"), [TO_STRING], "{accessor} on {receiver}");
+        }
+        let new = format!("function f() {{ return 'x' . (new \\RuntimeException('m'))->{accessor}; }}");
+        assert_eq!(operator_gaps(&returns(&new), "f"), [TO_STRING], "{accessor}");
+    }
+    // The review's witness: a constructor that hands a subclass's message on is not pure.
+    let relay = "class RT extends \\RuntimeException {}\nclass PFE extends RT {}\n\
+        final class Relay extends RT { public function __construct(PFE $e) {\n\
+        parent::__construct($e->getMessage(), $e->getCode()); } }";
+    let s = summary(&returns(relay), "Relay::__construct");
+    assert!(!s.exhaustive, "{s:?}");
     // `getTrace()` is an array that may hold objects: not an object itself.
     let trace = returns("function f(\\Throwable $e) { return 'x' . $e->getTrace(); }");
     assert!(!lane_gaps(&trace, "f").0.contains(&TO_STRING));
