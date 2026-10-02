@@ -530,7 +530,7 @@ pub(crate) fn walk_match(
             } else {
                 let mut benv = env.clone();
                 let mut bclasses = store.clone();
-                subtract_no_match_path(w, subject, arms, loose, &mut benv, &mut bclasses);
+                let _ = subtract_no_match_path(w, subject, arms, loose, &mut benv, &mut bclasses);
                 if walk_trace(w, folder, dtrace, &mut benv, &mut bclasses, descent, facts, true, out)
                     == Flow::FellThrough
                 {
@@ -547,7 +547,8 @@ pub(crate) fn walk_match(
             if no_match_taken != Certainty::No {
                 let mut benv = env.clone();
                 let mut bclasses = store.clone();
-                subtract_no_match_path(w, subject, arms, loose, &mut benv, &mut bclasses);
+                let landed =
+                    subtract_no_match_path(w, subject, arms, loose, &mut benv, &mut bclasses);
                 if loose {
                     fell.push((benv, bclasses));
                 } else {
@@ -564,7 +565,10 @@ pub(crate) fn walk_match(
                     // was all-`Verified` AND emptied, never for one merely absent.
                     // A narrowed-but-non-empty residue is the missing-a-case
                     // shape; an un-narrowed or absent lane is ignorance, and stays
-                    // silent (ADR-0002) exactly as the sentinel declines it.
+                    // silent (ADR-0002) exactly as the sentinel declines it. An arm
+                    // condition the subtraction could not model (`landed` false)
+                    // voids the verdict outright: the mark may be an earlier
+                    // guard's, which says nothing about this construct's arms.
                     //
                     // Plain per-scope walk only: a descent's `bclasses` reflects
                     // one caller's hypothetical bindings, not a fact this
@@ -572,6 +576,7 @@ pub(crate) fn walk_match(
                     // restriction, and `Store::contract` is never even seeded on a
                     // descent — see `analyze_scope`'s own seeding gate).
                     if descent.is_none()
+                        && landed
                         && let CondOperand::Var(name) = subject
                         && bclasses.contract_narrowed(name)
                         && !bclasses.contract_emptied(name)
@@ -746,6 +751,15 @@ fn refine_match_arm_enum_case(
 /// construct's structuring. The narrowing itself is kept either way; it is only the
 /// *claim* that is withheld.
 ///
+/// Clearing the mark is not enough on its own, because a guard *before* the
+/// construct may have set it, and that mark has to survive here for the code after
+/// a `switch`. So the function also returns whether every condition landed, and a
+/// default-less `match` asks that before it reports a missing case. Without it,
+/// `if ($s instanceof Suit) { match ($s) { …, $clubs => 3 } }` reported the case a
+/// variable arm covers as an uncovered `\UnhandledMatchError`, because the earlier
+/// guard's mark stood in for this construct's evidence (the same with a class
+/// constant arm, or after `$s === null`).
+///
 /// # `switch` subtracts the same set, and its residue is never evidence
 ///
 /// A `switch` compares loosely, so its no-match path proves `$s != c`, which
@@ -774,8 +788,8 @@ fn subtract_no_match_path(
     loose: bool,
     env: &mut HashMap<String, Known>,
     store: &mut Store,
-) {
-    let CondOperand::Var(name) = subject else { return };
+) -> bool {
+    let CondOperand::Var(name) = subject else { return false };
     let oracle = ProjectIsa { cx: w.cx, demote_catalog: w.cx.a11_demote_catalog() };
     // The mark an earlier guard on this path already set is this construct's to
     // keep, never to earn: only what happens below is judged.
@@ -823,4 +837,5 @@ fn subtract_no_match_path(
     if (loose || !every_condition_landed) && !was_narrowed {
         store.narrowed.remove(name);
     }
+    every_condition_landed
 }
