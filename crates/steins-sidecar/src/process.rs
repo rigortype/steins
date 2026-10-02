@@ -198,10 +198,16 @@ impl Channel {
         let line = match self.lines.recv_timeout(BOOT_TIMEOUT) {
             Ok(line) => line?,
             Err(RecvTimeoutError::Timeout) => {
-                return Err(Error::new(ErrorKind::TimedOut, "php did not answer its boot handshake"));
+                return Err(Error::new(
+                    ErrorKind::TimedOut,
+                    "php did not answer its boot handshake",
+                ));
             }
             Err(RecvTimeoutError::Disconnected) => {
-                return Err(Error::new(ErrorKind::UnexpectedEof, "php exited during its boot handshake"));
+                return Err(Error::new(
+                    ErrorKind::UnexpectedEof,
+                    "php exited during its boot handshake",
+                ));
             }
         };
         let answered = serde_json::from_str::<serde_json::Value>(line.trim()).ok().is_some_and(|v| {
@@ -274,7 +280,7 @@ impl Sidecar {
     /// Spawn the sidecar: launch `php -r <runner source>`, resolving `php`
     /// from `PATH`. Returns an error when the process cannot be started
     /// (missing `php`, IO failure) or does not answer its boot handshake within
-    /// [`BOOT_TIMEOUT`] (issue #891) — the caller turns either into the
+    /// its 20-second boot timeout (issue #891) — the caller turns either into the
     /// sound-subset posture.
     pub fn spawn() -> std::io::Result<Self> {
         Self::spawn_with("php")

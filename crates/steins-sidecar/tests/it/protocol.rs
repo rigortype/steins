@@ -1032,7 +1032,9 @@ fn a_slow_booting_child_costs_no_request() {
 #[test]
 fn a_slow_booting_replacement_costs_no_request() {
     let Some(shim) = Shim::new("a_slow_booting_replacement", |marker| {
-        format!("if [ -e '{marker}' ]; then sleep 0.5; else : > '{marker}'; fi\nexec \"$REAL\" \"$@\"")
+        format!(
+            "if [ -e '{marker}' ]; then sleep 0.5; else : > '{marker}'; fi\nexec \"$REAL\" \"$@\""
+        )
     }) else {
         return;
     };
@@ -1068,7 +1070,10 @@ fn a_child_that_fails_its_handshake_is_a_failed_spawn() {
         }) else {
             return;
         };
-        assert!(Sidecar::spawn_with(&shim.php()).is_err(), "a handshake that {tag} fails the spawn");
+        assert!(
+            Sidecar::spawn_with(&shim.php()).is_err(),
+            "a handshake that {tag} fails the spawn"
+        );
     }
 }
 
