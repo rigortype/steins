@@ -1200,25 +1200,11 @@ pub(crate) fn apply_offset_write(
                 )
                 .promote_present(&first, false, true);
             }
-            // **A write that adds or revives a key does not carry list-ness**
-            // (issue #884). `promote_present` hands on the receiver's `is_list`,
-            // which is a guard narrowing and is sound for an `isset` but not for
-            // a write: `$a[1000] = v` on a list leaves a non-list, and against an
-            // unsealed tail the denotational verdict is `Maybe`, so the stale
-            // `Yes` would survive `normalize`. Only the witnessed extension
-            // above recomputes it from a real sequence; an overwrite of a key
-            // that is already `Required` changes no key, so it keeps the flag.
+            // A write that adds a key does not carry list-ness (issue #884).
             let extended = witnessed_order.is_some() && shape.field(&first).is_none();
             let overwrite = shape.field(&first).is_some_and(|(_, p, _)| p.is_required());
             if !extended && !overwrite {
-                next = ShapeFact::normalize_counted(
-                    next.fields.clone(),
-                    next.tail.clone(),
-                    Certainty::Maybe,
-                    next.non_empty,
-                    next.covers.clone(),
-                    next.count_bound,
-                );
+                next = without_list_verdict(&next);
             }
             if nested { set_slot_fact(&next, &first, None) } else { set_slot_fact(&next, &first, slot) }
         }
@@ -1343,6 +1329,26 @@ fn fact_is_integer(f: &Fact) -> bool {
         | Fact::General { base: Base::Int, nullable: false } => true,
         _ => false,
     }
+}
+
+/// The shape with its `is_list` verdict reset to `Maybe`, for a write that adds
+/// or revives a key (issue #884).
+///
+/// `promote_present` hands on the receiver's `is_list`, which is a guard
+/// narrowing: sound for an `isset`, not for a write. `$a[1000] = v` on a list
+/// leaves a non-list, and against an unsealed tail the denotational verdict is
+/// `Maybe`, so the stale `Yes` would survive `normalize`. Only the witnessed
+/// extension recomputes the flag, from a real sequence; an overwrite of a key
+/// that is already `Required` changes no key and keeps it.
+fn without_list_verdict(shape: &ShapeFact) -> ShapeFact {
+    ShapeFact::normalize_counted(
+        shape.fields.clone(),
+        shape.tail.clone(),
+        Certainty::Maybe,
+        shape.non_empty,
+        shape.covers.clone(),
+        shape.count_bound,
+    )
 }
 
 /// Replace one field's value slot, keeping every other component. `None` sets the
