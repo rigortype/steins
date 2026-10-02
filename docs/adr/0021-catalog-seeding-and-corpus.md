@@ -403,6 +403,69 @@ change the kinds behind their `…?` (9 swap `no-effect-row` for
 4 gain `user-code-reach` beside a `no-effect-row` another call keeps), every
 one an `array_search` call.
 
+### Note (2026-10-03): a call result is read off its declared return — PENDING ratification
+
+Issue #877, run 2 (S8). **Status: PENDING ratification.** Designed autonomously under the owner's
+standing delegation. Decision 4's list of what an argument is shown to hold gains one form, and
+only that form: a call whose callee the scan can name. Arithmetic results (`GMP` and
+`BcMath\Number` overload them) and a local assigned from a call (the syntax crate cannot ask the
+catalog what the call returns) stay unproven; they are #877's other sub-slices.
+
+`ArgShape::Call` names a plain call's function and `ArgShape::MethodCall` a method or static
+call's receiver and method, the receiver spelled as a method-call site's is (`$this`, `self::`,
+`parent::`, `Foo::`, `new Foo`, a declared parameter or `$this->p` the frame never writes). The
+engine reads what the callee's declared return holds, and the same answer serves an operator's
+operand (ADR-0099 §4.3) and a builtin's or engine method's argument:
+
+- **A builtin function**: the mined return row (ADR-0069), through the contract lowering the value
+  lane uses, so the phpdoc spellings read as they are (`int<1, max>|0`, `uppercase-string`,
+  `non-empty-string|false`, `list<string>`, `string|null|array`). A scalar, `null` or a string
+  family holds no object at any depth; an array holds none when its keys and values hold none and
+  is otherwise not an object itself; a union is its weakest member; a class (`GMP`), `object`,
+  `mixed`, `iterable`, `callable`, a resource and `static` hold anything. A row whose declared
+  return moved across the supported minors is read only for a target at or past the move (ADR-0052
+  A11), and a project function that shadows the name wins by resolution.
+- **A project function or method**: the native return hint as written, read like a parameter's
+  (`hint_held`). A function that is declared conditionally, or an unqualified name inside a
+  namespace that matched only a global function (PHP binds a namespaced one if anything defines
+  it), declines. A method is the declaration the receiver's chain resolves, abstract and interface
+  declarations included (ADR-0049 A16): PHP refuses an override whose return type is not covariant
+  (an untyped override is refused too), so the declared native type binds every subclass in or out
+  of the universe, and the final guard of dispatch is not needed for a return. The call must be one
+  the scope can make: a private method only from its own class, a protected one only from a
+  subclass, because the engine hands any other call to `__call`, which may return an object
+  whatever the hidden method declares.
+- **An engine method**: the mined method row for the class the chain leaves the project at, for a
+  receiver that names its class exactly (`new Foo`, `Foo::`, `parent::`), and for a bound receiver
+  (`$this`, `self::`, a declared parameter) only a final `Throwable` accessor (`getMessage()`,
+  `getLine()`, `getTraceAsString()`: `Exception` and `Error` declare them final). Any other engine
+  method on a bound receiver stays unproven, because the engine's declared type there may be a
+  tentative one, which a userland override is free to ignore: `Countable::count()` returns what the
+  class returns (witnessed on PHP 8.5.11, an override returning an object runs `__toString`).
+
+Witnessed on PHP 8.5.11, each against the rule: a namespaced `strlen` returning an object is what
+`strlen($s)` calls in that namespace; a `function_exists`-guarded function binds by load order; a
+private method called from outside is `__call`'s; a `: static` or class return is an object; an
+untyped function and a `: S` function are objects; `current()` is `mixed`; `gmp_init()` returns a
+`GMP`; an array result converts to `Array` and runs nothing.
+
+Public corpora, `check --profile strict --no-php --vendor-diagnostics --no-cache`, base against
+head: of 28,847 functions 2,321 change the kinds behind their `…?`, none gains a kind, 84 become
+exhaustive (63 in both lanes, 20 in the throw lane only, 1 in the effect lane only) and none loses
+exhaustiveness; no proven label moves. By the one callee category that suffices (a variant with
+only that category enabled): a builtin's return 1,850 (66 become exhaustive), a project method's
+native return 390 (17), a final `Throwable` accessor 5 (1), and 72 need two categories or inherit
+the change through a call edge. The kinds removed: `operator-to-string` 1,272 functions,
+`operator-iteration` 1,044 (`foreach (explode(…) as …)`), `user-code-reach` 297 in the effect
+lane and 465 in the throw lane, `operator-array-access` 119 (`explode(…)[0]`). `effect-diff`
+reports 64 `coverage-completed` events and nothing else. `check` under `default` is byte-identical
+but for the vendored-finding counts (composer 332 to 325, phpunit 173 to 167). Under `strict`,
+`throw.maybe-undeclared` loses 283 findings and gains none (see ADR-0099's amendment of this
+date). `transform effects-envelope` goes from 723 to 741 edits, 14 `@phpstan-impure nondet.time`
+tags and 4 class-wide `@phpstan-all-methods-pure` tags that were refused as not exhaustive, with
+none lost and no new diagnostic after the edit; `throws-envelope` (1,934) and `loop-to-array-map`
+(0) are byte-identical.
+
 ## Amendment (2026-10-02): the call-site rule holds at every site — ratified 2026-10-02
 
 ADR-0099 (issue #865) takes the holes the second amendment of 2026-10-01

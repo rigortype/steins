@@ -158,14 +158,19 @@ fn a_pdo_options_array_reaches_the_autoloader() {
     assert!(!reaches(&file(false, "", call), "f").0);
 }
 
-/// `sprintf` is a call, and a call's value is an unproven shape: no rule here
-/// knows it returns a string, so a coercive file keeps the gap and a strict one
-/// does not.
+/// A call's value is read off the callee's declared return (issue #877, row 8.3):
+/// `sprintf` declares a `string`, so the message is no object in either file. A
+/// call whose declared return proves nothing keeps the gap in a coercive file and
+/// leaves a strict one alone.
 #[test]
-fn a_sprintf_message_is_an_unproven_shape() {
+fn a_sprintf_message_is_a_string_by_its_declared_return() {
     let call = "return new \\RuntimeException(sprintf('%s', $s));";
-    assert_eq!(reaches(&file(false, "string $s", call), "f"), BOTH);
+    assert_eq!(reaches(&file(false, "string $s", call), "f"), NEITHER);
     assert_eq!(reaches(&file(true, "string $s", call), "f"), NEITHER);
+    for message in ["current($a)", "json_decode($s)"] {
+        let call = format!("return new \\RuntimeException({message});");
+        assert_eq!(reaches(&file(false, "string $s, array $a", &call), "f"), BOTH, "{message}");
+    }
     // A literal, a concatenation and an interpolation are strings by their form.
     for message in ["'plain'", "'a' . $s", "\"a $s\""] {
         let call = format!("return new \\RuntimeException({message});");
