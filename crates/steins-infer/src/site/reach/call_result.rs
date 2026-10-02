@@ -26,6 +26,8 @@
 //! enclosing scope cannot reach, a name PHP may bind to another function at run
 //! time).
 
+use std::collections::HashSet;
+
 use steins_contract::ContractTy;
 use steins_syntax::{EffectRecv, NameRef, Span, Visibility};
 
@@ -102,9 +104,25 @@ fn receiver_start(cx: &Cx, frame: &Frame, receiver: &EffectRecv) -> Option<(Stri
 /// method the enclosing scope cannot see is a call the engine hands to `__call`.
 fn project_method_held(cx: &Cx, frame: &Frame, start: &str, found: &ResolvedMethod) -> Held {
     let declaring = found.declaring_class;
-    let conditional = |fqn: &str| cx.find_class(fqn).is_none_or(|(_, cd)| cd.conditional);
-    if conditional(start) || conditional(&declaring.fqn) {
-        return Held::Unknown;
+    // A conditional class binds by load order, and so does the chain it sits on: any
+    // class from the receiver's up to the declaring one may be a different declaration.
+    let mut cur = start.to_owned();
+    let mut seen: HashSet<String> = HashSet::new();
+    loop {
+        if !seen.insert(cur.to_ascii_lowercase()) {
+            return Held::Unknown;
+        }
+        match cx.find_class(&cur) {
+            Some((_, cd)) if !cd.conditional => {}
+            _ => return Held::Unknown,
+        }
+        if cur.eq_ignore_ascii_case(&declaring.fqn) {
+            break;
+        }
+        match cx.parent_fqn(&cur) {
+            Some(parent) => cur = parent,
+            None => return Held::Unknown,
+        }
     }
     let reachable = match found.method.visibility {
         Visibility::Public => true,
@@ -125,6 +143,15 @@ fn project_method_held(cx: &Cx, frame: &Frame, start: &str, found: &ResolvedMeth
 /// accessor, which no subclass replaces.
 fn engine_method_held(cx: &Cx, start: &str, method: &str, exact: bool) -> Held {
     let Some(exit) = engine_exit(cx, start, method) else { return Held::Unknown };
+    // `getMessage()` and `getCode()` read an untyped property (`protected $message`,
+    // `protected $code`) a subclass may fill with an object, which the return then
+    // converts (`__toString` runs in the accessor) or hands back: no receiver is shown
+    // to hold a string, `parent::` and `Foo::` run on `$this` and `new` is not told
+    // apart from them. `getFile()` and `getLine()` read typed properties, and
+    // `getTrace()` and `getTraceAsString()` a private typed one.
+    if ["getmessage", "getcode"].contains(&method.to_ascii_lowercase().as_str()) {
+        return Held::Unknown;
+    }
     if !exact && steins_catalog::final_method_effect_labels(&exit, method).is_none() {
         return Held::Unknown;
     }
@@ -163,6 +190,8 @@ fn contract_held(ty: &ContractTy) -> Held {
         ContractTy::ArrayAny { .. } => Held::NonObject,
         ContractTy::ListOf { elem, .. } => elements_held([&**elem]),
         ContractTy::MapOf { key, val, .. } => elements_held([&**key, &**val]),
+        // A shape that is not sealed and types no tail admits extra keys of any type.
+        ContractTy::Shape { sealed: false, unsealed: None, .. } => Held::NonObject,
         ContractTy::Shape { fields, unsealed, .. } => {
             let tail =
                 unsealed.iter().flat_map(|(key, val)| key.as_deref().into_iter().chain([&**val]));
@@ -223,6 +252,10 @@ mod tests {
         assert_eq!(held("string|null|array"), Held::NonObject);
         assert_eq!(held("array{a: int, b: string}"), Held::ObjectFree);
         assert_eq!(held("array{a: int, b: object}"), Held::NonObject);
+        // An unsealed shape with no typed tail admits extra keys of any type.
+        assert_eq!(held("array{a: int, ...}"), Held::NonObject);
+        assert_eq!(held("list{int, ...}"), Held::NonObject);
+        assert_eq!(held("array{a: int, ...<string, int>}"), Held::ObjectFree);
         for object in [
             "mixed", "GMP", "object", "\\Foo", "static", "self", "$this", "callable", "resource",
             "iterable", "string|Foo", "int|object", "?Closure", "string|false|DateTime",
