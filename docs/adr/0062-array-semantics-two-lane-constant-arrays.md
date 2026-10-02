@@ -1331,8 +1331,9 @@ Amendment J's weak row nor A-G8's decline of a nested-shape update.
 
 Issue #884, the root cause of #658. A-G6 states the bound as "lifting or seeding
 a shape beyond 256 fields degrades to the tail-only summary", and the code
-enforced exactly that: at `ShapeFact::lift`, at `from_witnessed_entries`, and at
-the seed site. It was enforced at no *producer* of a wider shape —
+enforced that for literals: at `ShapeFact::lift` and at
+`from_witnessed_entries`, with the value-seeding site in `fact.rs` bounding its
+own key list. It was enforced at no *producer* of a wider shape —
 `array_push_written_fact`'s ordered leg, `apply_offset_write`'s witnessed
 extension and `array_unshift_written_fact` each grow a sealed shape by one key
 and hand it to `normalize_counted`, which accepted any width.
@@ -1372,16 +1373,37 @@ The search relies on `fields` being sorted by key with one entry per key, an
 invariant `normalize_counted` establishes (and asserts once per build in debug
 builds) and the reason `ShapeFact` has no struct-literal constructor outside it.
 
-**The one semantic movement, pinned by a test.** After 300 straight-line appends
+**The semantic movement, pinned by tests.** After 300 straight-line appends
 the array has keys `0..=299`. `$a[300]` is `offset.undeclared` before this
 amendment (the sealed list cannot carry the key, and the read really is
 undefined) and is silent after it: the summary `non-empty-array<int, int<0,
-299>>` admits any integer key. `$a['k']` stays `offset.undeclared`, because the
-summary's key class is `int`. At 256 appends nothing moves — the shape is still
-listed, and `$a[256]` is reported. This is the trade A-G6 already made for a
-300-entry literal, now made for the array the analysis built itself; it can only
-lose a proof: the summary is a widening, admitting every array the listed shape
-admitted.
+299>>` admits any integer key, so `$a[-1]` goes silent too. `$a['k']` stays
+`offset.undeclared`, because the summary's key class is `int`. At 256 appends
+nothing moves — the shape is still listed, and `$a[256]` is reported. In general
+a proven finding on any key *of the summary's key class* can disappear, for
+every producer that builds a wide shape: appends, offset writes,
+`array_push` and `array_unshift`, the join of two shapes whose keys together
+exceed 256, and a docblock `array{…}` wider than 256 (the contract lowering goes
+through `to_shape_fact` and so through `normalize_counted`, which is new reach:
+the bound used to stop at values). This is the trade A-G6 already made for a
+300-entry literal, now made for every array the analysis builds or reads.
+
+Past the bound the shape is also no longer a witnessed list: after the 258th
+append it is `non-empty-array<int, …>` (the general append leg does not put
+list-ness back, Amendment K), so `count()` widens to `int<1, max>` and
+`array_is_list` to `bool`. Both are sound and neither produces a finding.
+
+The degradation itself only widens: the summary admits every array the listed
+shape admitted. A write that adds a key now also resets `is_list` to `Maybe`
+unless the witnessed sequence recomputes it. That fixes a defect that predates
+this amendment: `promote_present` carried the receiver's `is_list` through a
+write, so `$a[1000] = 'x'` on a declared `non-empty-list<int>`, or on a
+300-entry literal, kept the list verdict and the result was reported as a list
+violating an `associative-array` declaration; the width bound only made it easy
+to reach, because the shape that keeps `is_list: Yes` over an unsealed integer
+tail is exactly what the bound produces. An overwrite of a key that is already
+`Required` changes no key and keeps the flag (Amendment K's append argument,
+applied to keyed writes).
 
 **Measured.** `check --profile strict --no-cache --no-php` is byte-identical to
 the pre-amendment build on all ten public corpus packages, so no finding there

@@ -121,3 +121,93 @@ fn writes_at_the_bound_keep_the_key_list() {
     let src = writes(256, "$x = $a['k255']; $y = $a['k256'];");
     assert_eq!(undeclared(&src), ["offset 'k256'"]);
 }
+
+// A write that adds a key does not carry list-ness (issue #884, review).
+//
+// Degrading at the 257th write keeps `is_list` at `Yes`, which is true of the
+// keys `0..=256` written in order. The next write at a gap then took the
+// unwitnessed path, whose `promote_present` handed the receiver's flag on, and
+// against an unsealed integer tail the denotational verdict is `Maybe`, so the
+// stale `Yes` survived: `{1000: 'x', ...}` rendered as a non-empty list, was
+// rejected by an `associative-array` declaration and folded `array_is_list`
+// to true. PHP says false. The same defect was on master for a declared
+// `non-empty-list` and for a 300-entry literal; the bound only made it easy
+// to reach.
+
+fn int_writes(n: usize, tail: &str) -> String {
+    source(n, |i| format!("$a[{i}] = {i};"), tail)
+}
+
+/// Every diagnostic a source produces whose id is in the `phpdoc.` family.
+fn phpdoc_findings(src: &str) -> Vec<String> {
+    let tree = SourceTree::parse(src);
+    check_with(&tree, &[], "t.php", &mut Mock::default())
+        .into_iter()
+        .filter(|d| d.id.starts_with("phpdoc."))
+        .map(|d| format!("{}: {}", d.id, d.message))
+        .collect()
+}
+
+#[test]
+fn a_gap_write_after_the_bound_leaves_a_non_list() {
+    let dump = dumped(&int_writes(257, "$a[1000] = 'x'; \\PHPStan\\dumpType($a);"));
+    assert!(!dump.contains("list"), "a gap write makes no list: {dump}");
+}
+
+#[test]
+fn a_gap_write_after_the_bound_satisfies_an_associative_declaration() {
+    let mut src = String::from(
+        "<?php\n/** @return associative-array<int, int|string> */\nfunction g(): array {\n$a = [];\n",
+    );
+    for i in 0..257 {
+        src.push_str(&format!("$a[{i}] = {i};\n"));
+    }
+    src.push_str("$a[1000] = 'x';\nreturn $a;\n}\n");
+    src.push_str("/** @param associative-array<int, int|string> $x */\n");
+    src.push_str("function take(array $x): void {}\n");
+    src.push_str("function h(): void { $b = g(); take($b); }\n");
+    assert_eq!(phpdoc_findings(&src), Vec::<String>::new());
+}
+
+#[test]
+fn a_gap_write_on_a_declared_list_leaves_a_non_list() {
+    let src = "<?php\n/** @param non-empty-list<int> $d */\n\
+               function f(array $d): void { $d[1000] = 5; \\PHPStan\\dumpType($d); }\n";
+    let dump = dumped(src);
+    assert!(!dump.contains("list"), "a gap write makes no list: {dump}");
+}
+
+#[test]
+fn a_gap_write_on_a_wide_literal_leaves_a_non_list() {
+    let items: Vec<String> = (0..300).map(|i| i.to_string()).collect();
+    let src = format!(
+        "<?php\nfunction f(): void {{ $a = [{}]; $a[1000] = 1; \\PHPStan\\dumpType($a); }}\n",
+        items.join(", ")
+    );
+    let dump = dumped(&src);
+    assert!(!dump.contains("list"), "a gap write makes no list: {dump}");
+}
+
+#[test]
+fn overwriting_a_key_the_list_already_has_keeps_it_a_list() {
+    let src = "<?php\nfunction f(): void { $a = [1, 2, 3]; $a[1] = 9; \\PHPStan\\dumpType($a); }\n";
+    assert_eq!(dumped(src), "dumped type: list{1, 9, 3}");
+}
+
+// A docblock shape wider than the bound goes through the same constructor, so
+// it degrades too: the contract-lowering reach of Amendment M.
+
+#[test]
+fn a_declared_shape_past_the_bound_is_summarized_too() {
+    let fields: Vec<String> = (0..300).map(|i| format!("k{i}: int")).collect();
+    let src = format!(
+        "<?php\n/** @param array{{{}}} $d */\nfunction f(array $d): void {{ $x = $d['nope']; }}\n",
+        fields.join(", ")
+    );
+    // Master reports `'nope'` against the sealed 300-key shape; the summary's
+    // key class is `string`, which admits it.
+    assert_eq!(undeclared(&src), Vec::<String>::new());
+    let narrow = "<?php\n/** @param array{k0: int, k1: int} $d */\n\
+                  function f(array $d): void { $x = $d['nope']; }\n";
+    assert_eq!(undeclared(narrow), ["offset 'nope'"]);
+}
