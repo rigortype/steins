@@ -464,7 +464,8 @@ pub fn narrowed_output_labels(name: &str, return_mode: bool) -> Option<&'static 
 /// setlocale(LC_ALL, "")` answers `fr_FR`), so a call whose **only** locale is a
 /// written, non-empty string literal reads none. `positional` is the call's
 /// argument count, which must be exactly two: a third argument is a fallback
-/// locale tried when the first fails, and it may be `''`. `'0'` stays on the
+/// locale tried when the first fails, and it may be `''`. The name is the
+/// literal up to its first NUL byte, as C reads it. `'0'` stays on the
 /// row, since it is the query form and narrows to the read in a later slice
 /// (ADR-0101 D6). An array of locales, a variable and a constant fetch are not
 /// read here and keep the row.
@@ -474,6 +475,9 @@ pub fn narrowed_setlocale_labels(
     locale: &str,
     positional: usize,
 ) -> Option<&'static [&'static str]> {
+    // C reads the name up to its first NUL, so `"\0C"` is `''` (the environment)
+    // and `"0\0x"` is the query.
+    let locale = locale.split('\0').next().unwrap_or_default();
     if positional != 2
         || locale.is_empty()
         || locale == "0"
@@ -1868,6 +1872,10 @@ mod tests {
         }
         assert_eq!(super::narrowed_setlocale_labels("setlocale", "", 2), None, "the environment");
         assert_eq!(super::narrowed_setlocale_labels("setlocale", "0", 2), None, "the query form");
+        for nul in ["\0", "\0C", "0\0x"] {
+            assert_eq!(super::narrowed_setlocale_labels("setlocale", nul, 2), None, "{nul:?}");
+        }
+        assert_eq!(super::narrowed_setlocale_labels("setlocale", "C\0x", 2), write, "cut at the NUL");
         assert_eq!(super::narrowed_setlocale_labels("setlocale", "C", 3), None, "a fallback locale");
         assert_eq!(super::narrowed_setlocale_labels("setlocale", "C", 1), None);
         assert_eq!(super::narrowed_setlocale_labels("putenv", "C", 2), None, "only setlocale");
