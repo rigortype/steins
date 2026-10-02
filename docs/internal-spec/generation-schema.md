@@ -361,8 +361,10 @@ a wrong answer.
 `anonymous_subclass_parents`: the class-likes that declare `__destruct` or
 import a trait, whose body is not lowered. The shard is decoded before the
 analyzer gate and the wire codec reads a struct's fields by position, so a
-schema-23 shard would decode the anonymous-subclass parents as the new set and
-the constants as the parents: the **misdecode** kind. It is the **meaning**
+schema-23 shard would be read at the wrong field from the set onward (a set
+of strings where the new set sits, and a map where the anonymous-subclass
+parents sit), which most likely fails the decode and, if a payload happened to
+decode, would hold the wrong table: the **misdecode** kind. It is the **meaning**
 kind as well, prospectively: the drop sites that land after this row read the
 set to say whether some subclass of a bound class runs a destructor, and a
 shard without it would answer no. Nothing reads the set yet, and the gap kind
