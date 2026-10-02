@@ -59,27 +59,38 @@ is stated.
 `effect.*`) are held separately: they are true findings that legitimately abound
 in released code, so they gate as **per-package increase tripwires**, not
 red-on-sight (ADR-0050 §9). The seeded expectations are hand-maintained tables:
-`PHPDOC_EXPECTED` (784 findings across nine entries as of the
-#665–#670 alias-body reseed — the legacy monorepo alone at 617, and the table's
-own triage comments are the authority on every move since), `THROW_EXPECTED`
-(44,592 — dominated by the legacy monorepo's 44,372, and including the 20
-`throw.undeclared` TRUEs seeded for phpstan-src at its registration), and
-`EFFECT_EXPECTED`, seeded **empty**: an all-zero tripwire that is vacuous until
-an envelope-annotated package lands, and correct the day one does. Each table is
-a TOML file under `xtask/fp-gate/` named after it (`PHPDOC_EXPECTED` is
-`phpdoc_expected.toml`), built into the xtask binary so a malformed one stops
-the gate before it runs, and a row's triage note is the comment block directly
-above it. Moving a count is a conscious, comment-triaged act, never a drive-by.
+`PHPDOC_EXPECTED`, `THROW_EXPECTED` (including the 20 `throw.undeclared` TRUEs
+seeded for phpstan-src at its registration), `EFFECT_EXPECTED`, and
+`POSSIBLY_EXPECTED` for the possibly-grade proof ids; the tables' own triage
+comments are the authority on every move. Each table is a TOML file under
+`xtask/fp-gate/` named after it (`PHPDOC_EXPECTED` is `phpdoc_expected.toml`),
+built into the xtask binary so a malformed one stops the gate before it runs,
+and a row's triage note is the comment block directly above it. Moving a count
+is a conscious, comment-triaged act, never a drive-by.
+
+**The local ledger.** Rows for the projects `corpus.local.toml` injects — the
+private monorepo's counts, its triage pins, and the comment ledger of every
+reseed above them — are not in those files. They live in `fp-gate.local.toml`
+at the repository root, gitignored beside `corpus.local.toml` (in a worktree it
+is copied in the same way), and the gate merges it over the built-in tables
+when it is present (`xtask/src/gate/ledger.rs`). The file takes `[[finding]]`
+pins and `[phpdoc]` / `[throw]` / `[effect]` / `[possibly]` count tables, the
+same row shapes the tracked files use. The merge refuses, before any analysis:
+a row for a name `corpus.local.toml` does not list, and so a row for a public
+package (its baseline is reviewed in the tracked file, not drifted in an
+untracked one); a project with rows in the same table of both homes; and a
+file that is malformed or has a pin the built-in validation would refuse. A
+missing file is the CI case and is silent in the verdict, but the report's first
+line says whether the ledger was loaded and how many rows it contributed, so a
+run without it cannot pass for one that held it.
 
 Triaged true positives in the proof layer are **fingerprint-pinned**
 (`EXPECTED_PROOF_FINDINGS`, `xtask/fp-gate/expected_proof_findings.toml`),
 matched at finding precision — package + id + path suffix + line + a message
 substring — so a known-good finding does not re-block, and *any* drift does.
-Currently **13 pins**: the monolog
-`stdClass`-into-`MongoDBHandler` TypeError the package's own test expects, ten
-S2 `call.undefined-method` findings on the legacy monorepo, and two S5
-`call.too-few-arguments` findings there (path suffixes deliberately shortened
-past the private-corpus directory names). The discipline is staged opening:
+The pins for public packages are the tracked file's; those for a local project
+are in the local ledger, with path suffixes deliberately shortened past the
+private-corpus directory names. The discipline is staged opening:
 a new family lands in measurement, its findings are triaged verbatim, and only
 then are TRUEs pinned or counts seeded.
 

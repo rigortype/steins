@@ -4,6 +4,10 @@
 # `"<name>" = <expected count>`; a name with no row expects zero. A row's
 # triage note is the comment block directly above it.
 #
+# Rows for local projects (the ones `corpus.local.toml` injects) do not live
+# here: they are in the gitignored `fp-gate.local.toml` at the repository root,
+# which the gate merges in when it is present (`xtask/src/gate/ledger.rs`).
+#
 # Permanent gate policy for the **possibly-grade** proof ids (ADR-0081 §8):
 # `variable.maybe-undefined`, `property.maybe-undefined` and
 # `type.return-maybe-missing`, selected by floor rather than by name (see
@@ -195,19 +199,3 @@
 # parameter; the null arm is real, its inhabitation is what the grade does
 # not claim.
 "phpstan/phpstan-src" = 11
-
-# 120 (111 `variable.maybe-undefined` over 85,282 files + 9 absorbed
-# `type.return-maybe-missing`) → 121, 2026-08-14 with issue #330 PR2:
-# `array_merge` joined the fold allowlist, so it stopped being an uncatalogued
-# name whose by-ref parameters might WRITE an argument, and an argument read
-# became a read (the issue #77 bind-free distinction). The row is a data
-# provider returning `array_merge($a, $b)` where `$b` is bound only inside a
-# `foreach` — the third sibling of two already-baselined rows of that shape in
-# the same function, not a new class of claim. TRUE at the possibly grade.
-# 121 → 131, 2026-08-16 with issue #391: ten `type.maybe-argument-mismatch`
-# rows on a Verified premise — a natively declared `string|null` / `int|null`
-# / `string|false` handed to a native `string`/`int` parameter under
-# `strict_types` (four sites are one helper called with the same nullable
-# local four times). Every pre-existing `variable.maybe-undefined` and
-# `type.return-maybe-missing` count is unchanged.
-"pxxxx-monorepo" = 131

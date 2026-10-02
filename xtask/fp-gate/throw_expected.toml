@@ -3,6 +3,10 @@
 # package or local project, `"<name>" = <expected count>`; a name with no row
 # expects zero. A row's triage note is the comment block directly above it.
 #
+# Rows for local projects (the ones `corpus.local.toml` injects) do not live
+# here: they are in the gitignored `fp-gate.local.toml` at the repository root,
+# which the gate merges in when it is present (`xtask/src/gate/ledger.rs`).
+#
 # Permanent gate policy for `throw.*` findings (ADR-0040/0007), identical in
 # spirit to [`PHPDOC_EXPECTED`]: an undeclared **checked** throw escaping a
 # written `@throws`, or a Liskov-widened override, is a contract-layer claim
@@ -75,43 +79,3 @@
 #            enforcement: an allowlist cannot silently readmit a fixture tree
 #            added later, a denylist can.
 "phpstan/phpstan-src" = 21
-
-# Ledger. Every move on this row has been corpus state, not a checker change,
-# and the standing class is the same: an `@throws`-annotated declaration with an
-# undeclared base-exception escape, arriving with new application code. The
-# proof layer stayed 0 across all of them.
-#   43964 → 44372  2026-07-24, live-tree drift (~210 files gained: 84,038 →
-#                  84,248). 3-sample verbatim triage, all TRUE.
-#   44372 → 44343  2026-08-01, the standing DOWNWARD drift, reseeded in its own
-#                  pass (never inside a fix commit). Observed unchanged across
-#                  every session since 2026-07-25 — cross-commit stability plus
-#                  the #63 determinism fix rule out a checker cause.
-#   44343 → 44374  2026-08-05, the corpus-state movement `PHPDOC_EXPECTED`
-#                  records in the same run, established the same two ways (every
-#                  public count exact; the gate at the 44343-seed commit
-#                  reproduces 44374 today). NOT triaged finding-by-finding — at
-#                  this volume the attribution is the only honest evidence, and a
-#                  finding-level diff needs a corpus state nobody retained.
-#   44374 → 43886  **Reseed 2026-08-09, downward**, with the corpus pin, and this
-#                  one has a direct attribution: the measured revision replaces a
-#                  bespoke exception class with concrete assertions across the
-#                  tree, and an assertion where a `throw` used to be is exactly
-#                  one `throw.undeclared` fewer. A baseline 488 above the truth
-#                  would swallow the next 488 real regressions in silence.
-#   43886 → 44112  2026-08-19, **two components, measured separately** so that
-#                  neither hides behind the other:
-#                  * +206 is live-tree drift. Unmodified master measures 44092
-#                    at the corpus revision this run saw, against a baseline
-#                    seeded at an earlier one — established by running the gate
-#                    on master itself, not inferred. Not triaged
-#                    finding-by-finding; at this volume the attribution is the
-#                    only honest evidence, as the 2026-08-05 row already records.
-#                  * +20 is issue #433's `\UnhandledMatchError` origin, and this
-#                    half IS triaged finding-by-finding: 4 distinct sites,
-#                    multiplied to 20 by propagation to declaring callers. Every
-#                    one is a `default`-less `match` over a subject the engine
-#                    types wider than its docblock does — native `string` with a
-#                    `@phpstan-param 'asc'|'desc'`, and its kin. The docblock is
-#                    unenforced, so the throw is real, which is exactly the cell
-#                    ADR-0088 §5 gates on the Verified grade.
-"pxxxx-monorepo" = 44112
