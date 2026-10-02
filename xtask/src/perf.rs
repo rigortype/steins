@@ -77,6 +77,12 @@ const BASELINE_FILE: &str = "perf.local.toml";
 /// crossed budget prints a note, timing never fails.
 const COLD_BUDGET_FRACTION: f64 = 0.10;
 
+/// Cold runs the parent repeats in its own process after the children, graded in
+/// the determinism comparison only (never timed, never counted for RSS). Two, so
+/// a state leak that needs a second use to show is caught as well as one that
+/// shows on the first.
+const SAME_PROCESS_REPEATS: usize = 2;
+
 /// Headroom over the blessed peak RSS that `--check-rss` allows (issue #913).
 /// Resident-set peaks are far steadier than wall clock — the same tree in the
 /// same build moves by a couple of percent — so, unlike timing, this one gates;
@@ -132,6 +138,9 @@ pub fn run(args: &[String]) -> Result<bool, String> {
         |n| n.to_string_lossy().into_owned(),
     );
     let mut baseline = read_baseline(&baseline_path)?;
+    if parsed.check_rss {
+        preflight_check_rss(&parsed.targets, &baseline, posture, &baseline_label)?;
+    }
 
     let mut green = true;
     let mut blessed: Vec<BaselineEntry> = Vec::new();
@@ -141,12 +150,13 @@ pub fn run(args: &[String]) -> Result<bool, String> {
 
         match &m.determinism {
             Determinism::Ok => println!(
-                "    determinism: OK — {runs}/{runs} cold runs serialize byte-identically (the cold half of warm ≡ cold, ADR-0092 §5)"
+                "    determinism: OK — {runs} cold child run(s) and {SAME_PROCESS_REPEATS} same-process repeat(s) serialize byte-identically (the cold half of warm ≡ cold, ADR-0092 §5)"
             ),
             Determinism::Mismatch { run_index, diff } => {
                 green = false;
                 println!(
-                    "    determinism: FAILED — run {run_index} serializes differently from run 1 on identical inputs"
+                    "    determinism: FAILED — {} serializes differently from run 1 on identical inputs",
+                    run_label(*run_index, runs)
                 );
                 for line in diff.lines() {
                     println!("      {line}");
@@ -224,19 +234,16 @@ struct BaselineCheck<'a> {
 fn check_baseline(c: &BaselineCheck) -> Result<bool, String> {
     let (target, m, label) = (c.target, c.m, c.label);
     match verdict(c.entry, m, c.posture) {
-        BaselineVerdict::NoBaseline if c.check_rss => Err(format!(
-            "target `{target}`: --check-rss compares against a blessed peak, and {label} has no entry for this target; `--bless` one first"
-        )),
+        BaselineVerdict::NoBaseline if c.check_rss => Err(no_entry_error(target, label)),
         BaselineVerdict::NoBaseline => {
             println!(
                 "    baseline: none recorded for this target on this machine — `--bless` to pin one"
             );
             Ok(true)
         }
-        BaselineVerdict::PostureMismatch { recorded } => Err(format!(
-            "target `{target}`: baseline was blessed under posture `{recorded}` but this run is `{}` — a cross-posture compare is an error, not a number; re-run under the blessed posture or re-bless",
-            c.posture.as_str()
-        )),
+        BaselineVerdict::PostureMismatch { recorded } => {
+            Err(posture_error(target, &recorded, c.posture))
+        }
         BaselineVerdict::HashMismatch { recorded } => {
             println!(
                 "    baseline: FINDINGS HASH MISMATCH — recorded {} findings over {} files (sha256 {}…), measured {} findings over {} files (sha256 {}…). The target tree moved or the analyzer changed what it finds; triage, then re-bless consciously.",
@@ -257,6 +264,46 @@ fn check_baseline(c: &BaselineCheck) -> Result<bool, String> {
     }
 }
 
+fn no_entry_error(target: &str, label: &str) -> String {
+    format!(
+        "target `{target}`: --check-rss compares against a blessed peak, and {label} has no entry for this target; `--bless` one first"
+    )
+}
+
+fn posture_error(target: &str, recorded: &str, posture: Posture) -> String {
+    format!(
+        "target `{target}`: baseline was blessed under posture `{recorded}` but this run is `{}` — a cross-posture compare is an error, not a number; re-run under the blessed posture or re-bless",
+        posture.as_str()
+    )
+}
+
+fn not_blessed_error(target: &str, label: &str) -> String {
+    format!(
+        "target `{target}`: --check-rss, but the blessed entry in {label} predates peak RSS recording; re-bless it"
+    )
+}
+
+/// What `--check-rss` needs before it is worth measuring anything: for every
+/// target, a blessed entry under this posture that carries a peak. Checked up
+/// front so a missing ceiling costs an error at once, not after the runs.
+fn preflight_check_rss(
+    targets: &[String],
+    baseline: &Baseline,
+    posture: Posture,
+    label: &str,
+) -> Result<(), String> {
+    for target in targets {
+        let entry = baseline.get(target).ok_or_else(|| no_entry_error(target, label))?;
+        if entry.posture != posture.as_str() {
+            return Err(posture_error(target, &entry.posture, posture));
+        }
+        if entry.peak_rss_mb.is_none() {
+            return Err(not_blessed_error(target, label));
+        }
+    }
+    Ok(())
+}
+
 /// Print the peak-RSS movement against the blessed value and, under
 /// `--check-rss`, turn a peak over the ceiling into red. Without the flag it
 /// is advisory, like the timing line above it.
@@ -267,10 +314,7 @@ fn report_peak_rss(c: &BaselineCheck, recorded: &BaselineEntry) -> Result<bool, 
             "target `{target}`: --check-rss, but this platform reports no peak RSS for a child process"
         )),
         RssVerdict::NotMeasured => Ok(true),
-        RssVerdict::NotBlessed if c.check_rss => Err(format!(
-            "target `{target}`: --check-rss, but the blessed entry in {} predates peak RSS recording; re-bless it",
-            c.label
-        )),
+        RssVerdict::NotBlessed if c.check_rss => Err(not_blessed_error(target, c.label)),
         RssVerdict::NotBlessed => {
             println!(
                 "    peak RSS vs baseline: none blessed (the entry predates it) — `--bless` to record"
@@ -459,6 +503,9 @@ pub struct Measurement {
     pub peak_rss_mb: Vec<Option<f64>>,
     /// The median of [`Self::peak_rss_mb`]; `None` unless every run reported one.
     pub median_peak_rss_mb: Option<f64>,
+    /// Each run's `wait4` figure, MB: information only (see
+    /// [`ColdRun::reaped_peak_rss_bytes`]); never blessed or gated.
+    pub reaped_peak_rss_mb: Vec<Option<f64>>,
     pub determinism: Determinism,
 }
 
@@ -482,10 +529,14 @@ struct ColdRun {
     timing: RunTiming,
     serialized: String,
     id_counts: BTreeMap<String, usize>,
-    /// The run's peak resident set in bytes, as its parent read it from `wait4`
+    /// The run's own peak resident set in bytes, as the child measured itself
     /// (see [`child`]); `None` for a run made in this process, which has no
-    /// such number of its own, and on a platform that reports none.
+    /// peak of its own, and on a platform with no per-process reading.
     peak_rss_bytes: Option<u64>,
+    /// What the parent's `wait4` reported for the child and the descendants it
+    /// reaped. Information only: on Linux it can carry the parent's own
+    /// high-water mark, and it folds the PHP sidecar in. Never blessed or gated.
+    reaped_peak_rss_bytes: Option<u64>,
 }
 
 /// Measure `dir` over `runs` cold runs, each in a child process so each has a
@@ -527,24 +578,35 @@ fn measure_on_worker(
     for _ in 0..runs {
         cold.push(runner(dir, posture)?);
     }
+    // The same-process repeats: children start from nothing, so none of them
+    // can show state a long-lived host carries from one analysis to the next
+    // (the process-global walk pool, thread-locals, the sidecar timeout cell).
+    // These two run here, in the parent, one after the other. They are graded
+    // in the byte comparison below and nowhere else: not in the timings, and
+    // not in the RSS, which is the children's.
+    let mut same_process: Vec<ColdRun> = Vec::with_capacity(SAME_PROCESS_REPEATS);
+    for _ in 0..SAME_PROCESS_REPEATS {
+        same_process.push(cold_run(dir, posture)?);
+    }
+    let compared: Vec<&ColdRun> = cold.iter().chain(&same_process).collect();
 
     // Inputs must hold still for the oracle to mean anything: a tree that
     // changes mid-invocation is an operator problem, not nondeterminism.
-    if let Some(moved) = cold.iter().position(|r| r.files != cold[0].files) {
+    if let Some(moved) = compared.iter().position(|r| r.files != compared[0].files) {
         return Err(format!(
-            "target `{}` changed while measuring: run 1 saw {} files, run {} saw {}",
+            "target `{}` changed while measuring: run 1 saw {} files, {} saw {}",
             dir.display(),
-            cold[0].files,
-            moved + 1,
-            cold[moved].files
+            compared[0].files,
+            run_label(moved + 1, runs),
+            compared[moved].files
         ));
     }
 
-    let determinism = match cold.iter().position(|r| r.serialized != cold[0].serialized) {
+    let determinism = match compared.iter().position(|r| r.serialized != compared[0].serialized) {
         None => Determinism::Ok,
         Some(i) => Determinism::Mismatch {
             run_index: i + 1,
-            diff: determinism_diff(&cold[0], &cold[i]),
+            diff: determinism_diff(compared[0], compared[i]),
         },
     };
 
@@ -556,6 +618,8 @@ fn measure_on_worker(
     };
     let peak_rss_mb: Vec<Option<f64>> =
         cold.iter().map(|r| r.peak_rss_bytes.map(child::bytes_to_mb)).collect();
+    let reaped_peak_rss_mb: Vec<Option<f64>> =
+        cold.iter().map(|r| r.reaped_peak_rss_bytes.map(child::bytes_to_mb)).collect();
     let median_peak_rss_mb = peak_rss_mb
         .iter()
         .copied()
@@ -572,8 +636,19 @@ fn measure_on_worker(
         median,
         peak_rss_mb,
         median_peak_rss_mb,
+        reaped_peak_rss_mb,
         determinism,
     })
+}
+
+/// How the oracle names run `index` (1-based, over the children then the
+/// same-process repeats) when it reports a mismatch.
+fn run_label(index: usize, child_runs: usize) -> String {
+    if index <= child_runs {
+        format!("run {index}")
+    } else {
+        format!("same-process repeat {}", index - child_runs)
+    }
 }
 
 /// One cold run: fresh DB, fresh folder, the `fp-gate` load path
@@ -635,6 +710,7 @@ fn cold_run(dir: &Path, posture: Posture) -> Result<ColdRun, String> {
         serialized: canonical_serialization(diags),
         id_counts,
         peak_rss_bytes: None,
+        reaped_peak_rss_bytes: None,
     })
 }
 
@@ -1117,12 +1193,23 @@ fn read_baseline(path: &Path) -> Result<Baseline, String> {
 /// Write the baseline with a short provenance header (`corpus.lock.toml`'s shape).
 fn write_baseline(path: &Path, baseline: &Baseline) -> Result<(), String> {
     let body = toml::to_string_pretty(baseline).expect("baseline serializes");
-    let text = format!(
+    let text = format!("{}\n{body}", baseline_header(path == repo_root().join(BASELINE_FILE)));
+    std::fs::write(path, text).map_err(|e| format!("write {}: {e}", path.display()))
+}
+
+/// The header comment: the default file is machine-local and untracked, while a
+/// file named by `--baseline` may be tracked and shared, so it must not say so.
+fn baseline_header(default_file: bool) -> &'static str {
+    if default_file {
         "# Machine-local perf baselines (ADR-0092 §5 / ROADMAP M5). Generated by\n\
          # `cargo xtask perf <target>... --bless`. Untracked: the timings are this\n\
-         # machine's; the findings hash pins the cold analysis of each target tree.\n\n{body}"
-    );
-    std::fs::write(path, text).map_err(|e| format!("write {}: {e}", path.display()))
+         # machine's; the findings hash pins the cold analysis of each target tree.\n"
+    } else {
+        "# Perf baselines (ADR-0092 §5 / ROADMAP M5). Generated by `cargo xtask perf\n\
+         # <target>... --bless --baseline <this file>`. The findings hash pins the cold\n\
+         # analysis of each target tree; the timings and the peak RSS are one machine's\n\
+         # and one build profile's, so bless on the machine and profile that checks.\n"
+    }
 }
 
 /// A [`BaselineEntry`] from a finished measurement, timings rounded to 0.1 ms
@@ -1188,13 +1275,17 @@ fn print_measurement(target: &str, posture: Posture, m: &Measurement) {
     }
     for (i, t) in m.timings.iter().enumerate() {
         let rss = m.peak_rss_mb.get(i).copied().flatten();
+        let reaped = m.reaped_peak_rss_mb.get(i).copied().flatten();
         println!(
-            "    run {}: load+parse {:.1} ms, analyze {:.1} ms, total {:.1} ms{}",
+            "    run {}: load+parse {:.1} ms, analyze {:.1} ms, total {:.1} ms{}{}",
             i + 1,
             t.load_ms,
             t.analyze_ms,
             t.total_ms,
-            rss.map_or_else(String::new, |mb| format!(", peak RSS {mb:.1} MB"))
+            rss.map_or_else(String::new, |mb| format!(", peak RSS {mb:.1} MB")),
+            reaped.map_or_else(String::new, |mb| format!(
+                " [wait4, incl. reaped descendants, info only: {mb:.1} MB]"
+            ))
         );
     }
     println!(
@@ -1713,6 +1804,7 @@ mod tests {
             median: RunTiming { load_ms: 1.0, analyze_ms: 1.0, total_ms: 2.0 },
             peak_rss_mb: vec![],
             median_peak_rss_mb: None,
+            reaped_peak_rss_mb: vec![],
             determinism: Determinism::Ok,
         };
         // Same posture, different hash → the hash mismatch reds.
@@ -1783,6 +1875,7 @@ mod tests {
             median: RunTiming { load_ms: 1.0, analyze_ms: 1.0, total_ms: 2.0 },
             peak_rss_mb: vec![rss],
             median_peak_rss_mb: rss,
+            reaped_peak_rss_mb: vec![rss],
             determinism: Determinism::Ok,
         };
         let check = |e: Option<&BaselineEntry>, m: &Measurement, check_rss| {
@@ -1818,6 +1911,45 @@ mod tests {
         assert_eq!(ok.baseline.as_deref(), Some("perf.ci.toml"));
         assert!(args(&["t", "--baseline"]).is_err());
         assert!(!args(&["t"]).expect("parses").check_rss);
+    }
+
+    #[test]
+    fn the_header_claims_local_and_untracked_only_for_the_default_file() {
+        assert!(baseline_header(true).contains("Untracked"));
+        assert!(!baseline_header(false).contains("Untracked"));
+        assert!(!baseline_header(false).contains("Machine-local"));
+        assert!(baseline_header(false).contains("--baseline"));
+    }
+
+    /// `--check-rss` refuses before it measures: no entry, a posture mismatch,
+    /// and an entry without a peak are each an error here.
+    #[test]
+    fn check_rss_preflight_refuses_what_it_could_not_check() {
+        let entry = |path: &str, posture: &str, peak| BaselineEntry {
+            path: path.to_owned(),
+            posture: posture.to_owned(),
+            files: 1,
+            findings: 0,
+            findings_sha256: String::new(),
+            load_ms: 0.0,
+            analyze_ms: 0.0,
+            total_ms: 0.0,
+            peak_rss_mb: peak,
+        };
+        let mut baseline = Baseline::default();
+        baseline.upsert(entry("good", "php", Some(100.0)));
+        baseline.upsert(entry("old", "php", None));
+        baseline.upsert(entry("other", "no-php", Some(100.0)));
+        let ok = |targets: &[&str]| {
+            let targets: Vec<String> = targets.iter().map(|t| (*t).to_owned()).collect();
+            preflight_check_rss(&targets, &baseline, Posture::Php, "perf.ci.toml")
+        };
+        assert_eq!(ok(&["good"]), Ok(()));
+        assert!(ok(&["missing"]).unwrap_err().contains("no entry"));
+        assert!(ok(&["old"]).unwrap_err().contains("re-bless"));
+        assert!(ok(&["other"]).unwrap_err().contains("cross-posture"));
+        // One bad target among good ones fails the whole invocation.
+        assert!(ok(&["good", "old"]).is_err());
     }
 
     #[test]

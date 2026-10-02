@@ -25,7 +25,7 @@
 //!   mine-resource-params [--php-src DIR]
 //!                            scan php-src's stubs for `@param resource` positions into the resource-params TOML
 //!   nsrt [DIR]               assertType harness (oracle idea B) over phpstan-src nsrt
-//!   perf <DIR>… [--runs N] [--bless] [--no-php] [--warm] [--paranoid] [--check-rss]
+//!   perf <DIR>… [--runs N] [--bless] [--no-php] [--warm] [--paranoid] [--edits] [--check-rss] [--baseline PATH]
 //!                            cold perf baseline, peak RSS per run + its ceiling, and the determinism half of warm ≡ cold (ADR-0092 §5)
 //!   phpdoc-oracle [--check]  diff steins-phpdoc against the real phpstan/phpdoc-parser
 //! ```
@@ -209,7 +209,7 @@ const COMMANDS: &[Command] = &[
     // ADR-0092 §5: a determinism or blessed-findings break blocks; timing never does.
     Command {
         name: "perf",
-        usage: "<DIR>… [--runs N] [--bless] [--no-php] [--warm] [--paranoid] [--check-rss]",
+        usage: "<DIR>… [--runs N] [--bless] [--no-php] [--warm] [--paranoid] [--edits] [--check-rss] [--baseline PATH]",
         run: |args| verdict(perf::run(args)),
     },
     Command {
