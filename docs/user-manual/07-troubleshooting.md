@@ -424,13 +424,19 @@ written this way. The sidecar's child is then the wrapper, and the real
 `php` is the wrapper's own child. Steins 0.1.8 and earlier closed a
 sidecar child by killing it and waiting for its output to end, but
 killing the wrapper missed the interpreter, which kept that output open,
-so the wait never ended. Every close was exposed: the end of a run, a
-request that timed out, a replaced child.
+so the wait never ended: at the end of the run, or earlier, when a request
+timed out and its child was replaced.
 
 **Fixed after 0.1.8.** A later steins closes the child's input, kills the
-child's whole process group (the wrapper and everything it started), and
-stops waiting for the child's output after half a second. A wrapper that
-does not `exec` works as it is (issue #894).
+child's whole process group on Unix (the wrapper and everything it started
+that stays in the group), and stops waiting for the child's output after
+half a second. A wrapper that does not `exec` works as it is (issue #894).
+An interpreter that leaves the group, as behind `exec setsid php "$@"` on
+Linux, survives the kill; the run still finishes, but the first time steins
+has to stop waiting on one it stops replacing the sidecar, so the rest of
+the run is degraded (the notice described under
+["the sidecar spawns but never answers"](#the-sidecar-spawns-but-never-answers))
+and publishes no cache generation.
 
 **Fix for 0.1.8 and earlier.** Make the wrapper `exec` the interpreter, so
 the process steins started *is* `php`:
