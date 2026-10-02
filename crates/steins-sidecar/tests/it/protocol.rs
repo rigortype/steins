@@ -1126,3 +1126,174 @@ fn a_replacement_that_fails_its_handshake_is_a_strike() {
     assert!(matches!(sc.fold("strtoupper", &[s("a")], true), FoldResult::Widen { .. }));
     assert_eq!(sc.strikes(), 3, "past the cap no further boot is attempted");
 }
+
+// ---------------------------------------------------------------------------
+// Wrappers (issue #894): a `php` that runs the real interpreter without `exec`.
+//
+// Version managers and container shims often do this, and then the child the
+// sidecar holds is a shell whose own child is the interpreter. Killing the shell
+// left the interpreter alive, holding stdout open, and every close waited on it
+// forever. These tests run each step on a watchdog thread, so a close that
+// blocks fails the test instead of hanging it.
+// ---------------------------------------------------------------------------
+
+/// Run `body` on its own thread and return what it returns, failing rather than
+/// hanging when it does not finish within `limit`.
+#[cfg(unix)]
+fn within<T: Send + 'static>(
+    limit: Duration,
+    what: &str,
+    body: impl FnOnce() -> T + Send + 'static,
+) -> T {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        let _ = tx.send(body());
+    });
+    match rx.recv_timeout(limit) {
+        Ok(value) => value,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            panic!("{what} did not return within {limit:?}")
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => match handle.join() {
+            Err(panic) => std::panic::resume_unwind(panic),
+            Ok(()) => unreachable!("the body either sends or panics"),
+        },
+    }
+}
+
+/// Whether `pid` is gone, waited for up to a few seconds: a killed process
+/// whose parent died is reaped by init, not at once.
+#[cfg(unix)]
+fn gone(pid: u32) -> bool {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let alive = std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
+        if !alive {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// The pid of the interpreter answering `sc`, which behind a wrapper is not the
+/// process the sidecar spawned.
+#[cfg(unix)]
+fn interpreter_pid(sc: &mut Sidecar) -> u32 {
+    match sc.fold("getmypid", &[], true) {
+        FoldResult::Value(FoldValue::Int(pid)) => u32::try_from(pid).expect("a pid"),
+        other => panic!("getmypid answers with a pid, got {other:?}"),
+    }
+}
+
+/// Spawn, a timeout's poison, the revive that closes the poisoned child, and
+/// the final close all return promptly behind a wrapper that does not `exec`,
+/// and no interpreter is left behind.
+#[cfg(unix)]
+#[test]
+fn a_wrapper_that_does_not_exec_neither_hangs_nor_leaks() {
+    let Some(shim) = Shim::new("a_wrapper_that_does_not_exec", |_| "\"$REAL\" \"$@\"".to_owned())
+    else {
+        return;
+    };
+    let php = shim.php();
+    let limit = Duration::from_secs(15);
+    let mut sc = within(limit, "spawn", move || Sidecar::spawn_with(&php).expect("it boots"));
+    let first = interpreter_pid(&mut sc);
+
+    let (mut sc, lost) = within(limit, "a timed-out request", move || {
+        sc.set_timeout(Duration::from_millis(20));
+        // Longer than `gone` waits: an interpreter only told to stop by its
+        // closed stdin would outlive the check, so only the kill passes it.
+        let lost = sc.fold("usleep", &[int(30_000_000)], true);
+        (sc, lost)
+    });
+    assert!(matches!(lost, FoldResult::Widen { .. }), "the timeout widens, got {lost:?}");
+    assert!(sc.is_poisoned());
+
+    let (sc, second) = within(limit, "the revive that closes the poisoned child", move || {
+        sc.set_timeout(Duration::from_secs(2));
+        let second = interpreter_pid(&mut sc);
+        (sc, second)
+    });
+    assert!(gone(first), "the poisoned interpreter {first} is not left running");
+    assert_ne!(first, second, "the revive started a fresh interpreter");
+
+    within(limit, "the final close", move || drop(sc));
+    assert!(gone(second), "the last interpreter {second} is not left running");
+}
+
+/// A failed boot handshake closes the child too, and behind a wrapper whose
+/// descendant holds stdout open that close returned only when the descendant
+/// did. It returns promptly now, and takes the descendant with it.
+#[cfg(unix)]
+#[test]
+fn a_failed_handshake_behind_a_wrapper_does_not_hang() {
+    let Some(shim) = Shim::new("a_failed_handshake_behind_a_wrapper", |marker| {
+        // The pid is recorded before the wrong answer, which is what ends the
+        // boot and so the wrapper.
+        format!("sleep 600 &\necho $! > '{marker}'\necho '{{\"hello\":1}}'\nwait")
+    }) else {
+        return;
+    };
+    let php = shim.php();
+    let err = within(Duration::from_secs(15), "a failed spawn", move || {
+        Sidecar::spawn_with(&php).err().expect("a handshake answered wrongly fails the spawn")
+    });
+    assert!(is_boot_failure(&err), "a wrong answer is a boot failure, got {err:?}");
+    let marker = shim.dir.join("marker");
+    let pid: u32 = std::fs::read_to_string(&marker)
+        .expect("the wrapper recorded its descendant")
+        .trim()
+        .parse()
+        .expect("a pid");
+    assert!(gone(pid), "the wrapper's descendant {pid} is not left running");
+}
+
+/// A descendant that leaves the process group escapes the kill and holds stdout
+/// open for as long as it likes. The close gives up on it after a short grace
+/// instead of waiting: the run's time is not the stranger's to spend.
+#[cfg(unix)]
+#[test]
+fn a_descendant_that_escapes_the_group_cannot_hold_a_close() {
+    let has_perl = std::process::Command::new("perl")
+        .arg("-e1")
+        .status()
+        .is_ok_and(|status| status.success());
+    if !has_perl {
+        eprintln!("SKIP a_descendant_that_escapes_the_group: no `perl` to leave the group with");
+        return;
+    }
+    let Some(shim) = Shim::new("a_descendant_that_escapes_the_group", |marker| {
+        // The escapee records its pid once it has its own group, and the
+        // wrapper answers wrongly only after that, so the kill never races it.
+        format!(
+            "perl -e 'setpgrp(0, 0); open(my $f, \">\", $ARGV[0]) or die; print $f $$; \
+             close($f); exec(\"sleep\", \"600\")' '{marker}' &\n\
+             while [ ! -s '{marker}' ]; do sleep 0.01; done\n\
+             echo '{{\"hello\":1}}'\nwait"
+        )
+    }) else {
+        return;
+    };
+    let php = shim.php();
+    let started = std::time::Instant::now();
+    let err = within(Duration::from_secs(15), "a failed spawn", move || {
+        Sidecar::spawn_with(&php).err().expect("a handshake answered wrongly fails the spawn")
+    });
+    let elapsed = started.elapsed();
+    let pid: u32 = std::fs::read_to_string(shim.dir.join("marker"))
+        .expect("the escapee recorded its pid")
+        .trim()
+        .parse()
+        .expect("a pid");
+    let _ = std::process::Command::new("kill").args(["-9", &pid.to_string()]).status();
+    assert!(is_boot_failure(&err), "a wrong answer is a boot failure, got {err:?}");
+    assert!(elapsed < Duration::from_secs(10), "the close gave up on the escapee, took {elapsed:?}");
+}

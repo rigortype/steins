@@ -11,3 +11,7 @@ workspace = true
 
 [dependencies]
 serde_json.workspace = true
+
+# Signals a child's whole process group on close (issue #894).
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
