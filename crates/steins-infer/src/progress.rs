@@ -183,6 +183,7 @@ impl Progress {
 /// A file whose walk is in progress, from [`Progress::file_start`]. The file
 /// is in flight until this drops, so an unwind through the walk cannot leave a
 /// stale entry behind.
+#[must_use = "the file leaves the in-flight list when the guard drops"]
 pub(crate) struct FileWalk<'a> {
     progress: &'a Progress,
     path: &'a str,

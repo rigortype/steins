@@ -144,7 +144,7 @@ impl Expiry {
             let mark = if standing.elapsed >= self.deadline { '*' } else { ' ' };
             out.push_str(&format!("\n  {mark} {}", standing.render()));
         }
-        out.push_str(&next_step(head));
+        out.push_str(&next_step(&self.projects));
         out.push_str(
             "\n  `--deadline SECS` changes the limit and `--deadline 0` removes it; the \
              engine itself has no wall-clock budget",
@@ -174,10 +174,7 @@ impl Standing {
             secs(snapshot.elapsed),
         ));
         if snapshot.in_flight.is_empty() {
-            out.push_str(
-                "\n      no file of this project is walking; it may be waiting on the shared \
-                 walk pool or on another running project in this list",
-            );
+            out.push_str(&idle_line(snapshot.last_phase.as_deref()));
         } else {
             out.push_str(&format!("\n      files in flight ({}):", snapshot.in_flight.len()));
             for file in &snapshot.in_flight {
@@ -192,18 +189,39 @@ impl Standing {
     }
 }
 
-/// What to run next, from the project that outlived its deadline: its
-/// longest-running file if it has one in flight.
-fn next_step(head: &Standing) -> String {
-    let file = head.snapshot.as_ref().and_then(|s| s.in_flight.first());
-    match file {
-        Some(file) => format!(
-            "\n  next step: re-run `steins check --progress --no-cache --profile strict \
-             <file>` on `{}`, the longest-running file of `{}` (a pinned corpus package's paths \
-             are relative to the repository root, a local project's to its own root)",
-            file.path, head.project
+/// Why a project with no file in flight is not walking, read off the last
+/// phase it finished: after `purity oracle` the walk is the running phase, so
+/// its files are queued behind another project on the shared walk pool; before
+/// it, the project is still in whole-project work.
+fn idle_line(last_phase: Option<&str>) -> String {
+    match last_phase {
+        Some("purity oracle") => "\n      no file of this project is walking; it may be waiting \
+             on the shared walk pool or on another running project in this list"
+            .to_owned(),
+        Some(phase) => format!(
+            "\n      no file of this project is walking; it is in whole-project work after \
+             `{phase}`, not in the per-file walk"
         ),
-        None => "\n  next step: no file of the oldest project is walking, so read the phases \
+        None => "\n      no file of this project is walking; no phase has finished yet".to_owned(),
+    }
+}
+
+/// What to run next: the longest-running file in flight, the oldest project's
+/// first and any other listed project's after it.
+fn next_step(projects: &[Standing]) -> String {
+    let file = projects.iter().find_map(|standing| {
+        let file = standing.snapshot.as_ref()?.in_flight.first()?;
+        Some((file, &standing.project))
+    });
+    match file {
+        Some((file, project)) => format!(
+            "\n  next step: re-run `steins check --progress --no-cache --profile strict \
+             <file>` on `{}`, the longest-running file of `{project}` (a pinned corpus \
+             package's paths are relative to the repository root, a local project's to its own \
+             root)",
+            file.path
+        ),
+        None => "\n  next step: no listed project has a file walking, so read the phases \
                  above, or re-run `steins check --progress --no-cache --profile strict <dir>` \
                  on the project to see them"
             .to_owned(),
@@ -489,11 +507,49 @@ fn phase_split(lines: &[String]) -> String {
 mod tests {
     use std::sync::mpsc;
 
+    use steins_infer::InFlightFile;
+
     use super::*;
     use crate::corpus_local::LocalProject;
 
     fn args(a: &[&str]) -> Vec<String> {
         a.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    /// After `purity oracle` the walk is the running phase, so a project with
+    /// no file in flight is waiting on the shared pool; and the next step falls
+    /// back to another listed project's file.
+    #[test]
+    fn an_idle_walk_points_at_the_pool_and_the_next_step_at_another_project() {
+        let snapshot = |phase: &str, files: Vec<InFlightFile>| ProgressSnapshot {
+            last_phase: Some(phase.to_owned()),
+            since_phase: Duration::from_secs(1),
+            elapsed: Duration::from_secs(9),
+            in_flight: files,
+        };
+        let walking =
+            InFlightFile { path: "src/Slow.php".to_owned(), running: Duration::from_secs(8) };
+        let expiry = Expiry {
+            deadline: Duration::from_secs(5),
+            projects: vec![
+                Standing {
+                    project: "old/one".to_owned(),
+                    pass: "cold",
+                    elapsed: Duration::from_secs(9),
+                    snapshot: Some(snapshot("purity oracle", Vec::new())),
+                },
+                Standing {
+                    project: "young/two".to_owned(),
+                    pass: "cold",
+                    elapsed: Duration::from_secs(6),
+                    snapshot: Some(snapshot("purity oracle", vec![walking])),
+                },
+            ],
+        };
+        let text = expiry.render();
+        assert!(text.contains("shared walk pool"), "{text}");
+        let next = "on `src/Slow.php`, the longest-running file of `young/two`";
+        assert!(text.contains(next), "{text}");
     }
 
     #[test]
@@ -583,7 +639,7 @@ mod tests {
         assert!(text.contains("DEADLINE EXCEEDED: project `acme/widgets`"), "{text}");
         assert!(text.contains("last phase finished: `parse`"), "{text}");
         assert!(text.contains("no file of this project is walking"), "{text}");
-        assert!(text.contains("shared walk pool"), "{text}");
+        assert!(text.contains("whole-project work after `parse`"), "{text}");
     }
 
     #[test]
@@ -632,7 +688,7 @@ mod tests {
         assert!(text.contains("projects running (2)"), "{text}");
         assert!(text.contains("\n  * old/one (12.00 s in total)"), "{text}");
         assert!(text.contains("\n    young/two (3.00 s in total)"), "{text}");
-        assert!(text.contains("next step: no file of the oldest project is walking"), "{text}");
+        assert!(text.contains("next step: no listed project has a file walking"), "{text}");
     }
 
     #[test]
