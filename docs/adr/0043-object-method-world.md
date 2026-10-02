@@ -181,3 +181,63 @@ proper-descendant receivers.
    change), conformance rerun (`objects_static_return_mismatch` closes:
    the harness tag group accepts the single return-site finding; zero
    flips elsewhere).
+
+## Amendment (2026-10-03): class identity is resolved, not spelled — PENDING ratification
+
+**Status: PENDING ratification.** Designed autonomously under the owner's standing
+direction (issues #926 and #917, the default-surface false-positive sweep #963).
+
+§3's oracle compared two class names as spellings: `Real` is-a `Alias` was `No`
+whenever `Alias` was not literally on `Real`'s supertype closure. Two names for one class
+reach the walk from two places, and both were proven false positives under `strict_types`
+and in `throw.undeclared` (PHP accepts every one of them):
+
+- a project's `class_alias(Real::class, 'Alias')`, which the index already folded for
+  existence (the alias name resolves to the target's declaration site) but the is-a walk
+  never consulted; and
+- php-src's one class-level stub `@alias`: `DOMException` is also `Dom\DOMException`, and
+  `ReflectionClass::getName()` answers `DOMException` for either.
+
+**The rule.** Names meet as **identities**. `Cx::class_identity(name)` is the project
+declaration's own lowercase FQN when `find_class` answers `Unique` (an alias edge shares
+its target's site, so alias and target answer one declaration); else, for a name no
+project file declares, the declared name of the catalog class it is a second name of
+(`steins_catalog::builtin_class_alias`); else the name itself. `supertype_walk` compares
+the identity of every visited node with the identity of the target, so the reflexive
+`Yes`, the `seen` set and the `Stringable` special case all speak identity. An ambiguous
+name (two declarations, nothing to pick) stays its own identity: a guess may widen a `Yes`
+and never a `No`, and the walk already reads an ambiguous ancestor as incomplete.
+
+**The alias fold is a fixpoint.** The index mints `class_alias` edges in rounds: each round
+resolves every pending edge against the snapshot it began with and mints the round
+together, so `class_alias(Real::class, 'A1'); class_alias('A1', 'A2');` resolves whatever
+order the calls are written in, and a result is a fact about the multiset of edges, never
+about visit order (ADR-0048). An edge whose target is ambiguous is dropped (ambiguity only
+grows); one whose target is absent waits; a cycle no declaration stands under mints nothing
+and ends because every round resolves an edge or stops. The affected-set declaration table
+repeats its alias pass to the same fixpoint, so a file naming the end of a chain still
+reaches the declaring file in one hop.
+
+**An unseen target declines.** A walk that would answer `No` for a target resolved in
+neither the project (ambiguous names included) nor the catalog, while the dam is not clear
+(a dynamic `class_alias`, an `eval`, an unprovable include), answers `Unknown`: the
+runtime-minted class might be the target, and might be the class the walk enumerated. A
+known class's mismatch still proves, since an alias renames nothing that exists, and in a
+clear universe a name nothing declares stays a proven `No`, `class.undefined`'s case.
+
+**The catalog learns aliases.** `extract_hierarchy.py` reads a class-level `/** @alias X */`
+docblock (the docblock directly above the declaration; method- and function-level `@alias`
+tags are other things) and emits `aliases = [...]` on the declared class's row; at
+`php-8.5.11` that is exactly `Dom\DOMException` on `DOMException`. `gen-catalog` renders
+`class_aliases_generated.rs`, a second name is no row of the hierarchy or display tables, and
+`builtin_class_supers` and `builtin_class_display` answer through `builtin_class_alias`, so
+no name has two answers. The sidecar's `ReflectedClass.name` as a second source, for classes
+the pinned stubs do not declare (PECL), is a follow-up.
+
+Witnessed on PHP 8.5.11: `takes(\Dom\DOMException $e)` accepts `new \DOMException`; a
+`catch (\Dom\DOMException)` catches a thrown `\DOMException` and the converse; `is_a(new
+DOMException, 'Dom\DOMException')` is true; an alias passed where its target (or another
+alias of it) is declared is accepted in strict mode, for classes, interfaces and enums.
+Controls that stay findings: an unrelated class against a param typed with an alias of
+`Real`, an alias of `Real` against a param typed `Other`, and, under a dynamic
+`class_alias`, a known class's mismatch (while a param typed with an unknown name declines).

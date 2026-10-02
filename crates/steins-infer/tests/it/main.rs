@@ -27,6 +27,7 @@ mod callable_obligations;
 mod callable_signature;
 mod cast_value_position;
 mod certified_pure_builtins;
+mod class_identity;
 mod class_undefined;
 mod closure_effects;
 mod closure_liskov;
