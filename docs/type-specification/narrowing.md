@@ -213,6 +213,18 @@ the branch it protects, so the absence family ([object-model.md](object-model.md
 This is a soundness rule, not a convenience: emitting an absence finding across a
 guard that checked for exactly that would be a false positive.
 
+**A guard discharges the same way in every position** (ADR-0049 amendment
+2026-10-03). `defined`, `class_exists`, `function_exists` and `extension_loaded`
+fold against the project index, the dam and the analysing PHP; a decided one
+marks the ternary arm or the `&&`/`||` operand PHP never evaluates as dead, in
+`return`, `echo`, an argument, an assignment or a bare statement as in an `if`,
+and a `switch (true)` case is judged as an `elseif` is. `extension_loaded('x')`
+is answered from the loaded-extension list of the analysing PHP, and stays
+undecided without one and wherever the project calls `dl()`. `method_exists`,
+`is_callable([$o, 'm'])` and `property_exists` vouch for the member on every
+class the receiver can be: the heap class of a variable bound by `new`, else each
+class of its narrowed declared type.
+
 ## Short-circuit threading
 
 Implemented (ADR-0052 §6 / N3). The operands of `&&`/`||` no longer all
