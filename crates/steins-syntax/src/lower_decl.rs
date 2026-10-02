@@ -30,7 +30,7 @@ use crate::lower_expr::{
     class_const_name, instantiation_class, is_strict_types_one, lower_arg_value, lower_call,
     method_name_of, trace_static_class,
 };
-use crate::lower_site::scan_owner_sites;
+use crate::lower_site::{promoted_hook_sites, scan_owner_sites};
 use crate::names::{
     PREG_FLAG_CONST_NAMES, RefResolver, ctx_of, name_ref, use_binds_php_version_id,
     use_binds_preg_flag_const,
@@ -1112,7 +1112,8 @@ fn lower_enum(e: &mago_syntax::cst::Enum<'_>, _aliases: &SteinsAttrAliases, docs
 }
 
 fn lower_method(m: &Method<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex, rc: &RefResolver) -> MethodDecl {
-    let mut sites = Vec::new();
+    // A hooked promoted parameter runs its hook before the first statement.
+    let mut sites = promoted_hook_sites(&m.parameter_list);
     if let MethodBody::Concrete(block) = &m.body {
         let cx = EffectScanCx::new(
             &m.parameter_list,

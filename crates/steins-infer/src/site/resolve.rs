@@ -40,7 +40,9 @@ use steins_syntax::{
 
 use super::contract::{conditional_purity, eval_conditional_purity};
 use super::engine;
-use super::method::{EngineMethod, engine_class_of, engine_method, method_edge};
+use super::method::{
+    EngineMethod, engine_class_of, engine_method, method_edge, new_hooks, parent_constructor_hooks,
+};
 use super::operator;
 use super::reach::{Frame, builtin_reach, callback_reaches_user_code, engine_method_reach};
 use super::{
@@ -466,6 +468,7 @@ impl<'a> Resolver<'a, '_, '_> {
             && let NewTarget::Engine(fqn) =
                 resolve_new(self.cx, self.frame.class_fqn, &StaticClass::Parent)
         {
+            self.hooked_engine_code(parent_constructor_hooks(self.cx, self.frame.class_fqn));
             self.engine_constructor_throws(&fqn, "parent::__construct".to_owned());
             return;
         }
@@ -506,8 +509,9 @@ impl<'a> Resolver<'a, '_, '_> {
     ) {
         let (cx, frame) = (self.cx, self.frame);
         let gap = match engine_method(cx, frame.class_fqn, frame.params, receiver, method) {
-            EngineMethod::Row(hit) => {
+            EngineMethod::Row { hit, hooked } => {
                 self.engine_operands(&hit.callee, &hit.method);
+                self.hooked_engine_code(hooked);
                 if !hit.labels.is_empty() {
                     self.push(Target::Engine(hit));
                 }
@@ -550,7 +554,11 @@ impl<'a> Resolver<'a, '_, '_> {
     /// catalog's row for an engine one, nothing for a class with none, and a gap
     /// for one that cannot be resolved.
     fn new_site(&mut self, class: &StaticClass) {
-        match resolve_new(self.cx, self.frame.class_fqn, class) {
+        let target = resolve_new(self.cx, self.frame.class_fqn, class);
+        if matches!(target, NewTarget::Engine(_)) {
+            self.hooked_engine_code(new_hooks(self.cx, self.frame.class_fqn, class));
+        }
+        match target {
             NewTarget::Edge(sym) => self.push(Edge::call(sym)),
             NewTarget::Absent => {}
             NewTarget::Engine(fqn) if self.effects() => match engine::constructor_effects(&fqn) {
@@ -563,6 +571,14 @@ impl<'a> Resolver<'a, '_, '_> {
             },
             NewTarget::Engine(fqn) => self.engine_constructor_throws(&fqn, new_origin(class)),
             NewTarget::Unknown(kind) => self.gap(kind),
+        }
+    }
+
+    /// The engine's own code, run on an object whose class chain hooks a property,
+    /// may run the hook: the gap beside the engine row (ADR-0099 §4.2, issue #875).
+    fn hooked_engine_code(&mut self, hooked: bool) {
+        if hooked {
+            self.gap(GapKind::OperatorMagicProperty);
         }
     }
 

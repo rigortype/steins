@@ -19,6 +19,7 @@ use std::collections::HashSet;
 use steins_syntax::{ClassDecl, MethodDecl, NativeType, PropertyDecl};
 
 use crate::Sym;
+use crate::contract::IsA;
 use crate::cx::Cx;
 use crate::dispatch::{Resolution, resolve_in_chain};
 
@@ -211,6 +212,36 @@ pub(super) fn lookup<'a>(
         }
         Resolution::Unknown => Lookup::Unknown,
     }
+}
+
+/// Whether an engine class's code, run on an object of `class`, may run a property
+/// hook: a project class-like on `class`'s own chain hooks a property, or, for a
+/// class the object is only bounded by (`$this` in a non-final class, a declared
+/// receiver), some class in the universe that can stand in for it does.
+///
+/// The engine writes the properties of its own classes in its constructors
+/// (`Exception::__construct` sets `$message`, `$code`, `$previous`) and reads them
+/// in their accessors (`getMessage()`), so a hook a project subclass declares on
+/// one runs there (ADR-0099 §4.2, issue #875). Which property the engine touches
+/// is not read here: any hook on the chain counts.
+pub(super) fn hooks_property(cx: &Cx, class: &str, exact: bool) -> bool {
+    Chain::of(cx, class).hooks(None) || (!exact && subclass_hooks_property(cx, class))
+}
+
+/// [`subclass_adds_property_magic`] for a hook on any property, with the stand-in
+/// tested through the is-a walk instead of [`Chain::has`]: a chain never lists an
+/// engine class (`Throwable`, `Exception`), so `has` is false for a bound that is
+/// one. A class counts when it hooks a property or imports a trait (whose body is
+/// not lowered), and an anonymous class counts for the parents the index lists.
+fn subclass_hooks_property(cx: &Cx, class: &str) -> bool {
+    let stands_in = |sub: &str| {
+        let walk = cx.supertype_walk(sub, class);
+        walk.verdict != IsA::No || (walk.catalog && cx.a11_demote_catalog())
+    };
+    cx.index.magic_property_classes().iter().any(|sub| match cx.find_class(sub) {
+        None => true,
+        Some((_, cd)) => (cd.uses_traits || hooks(cd, None)) && stands_in(sub),
+    }) || cx.index.anonymous_subclass_parents().iter().any(|parent| stands_in(parent))
 }
 
 /// Whether a class in the universe other than `class`'s own chain, but extending

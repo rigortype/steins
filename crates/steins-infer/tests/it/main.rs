@@ -82,6 +82,7 @@ mod guard_conjunct_writes;
 mod guard_join_cross_lane;
 mod guard_positions;
 mod higher_order_join;
+mod hook_and_name_sites;
 mod hyphen_reservation;
 mod implicit_nullable_param;
 mod inaccessible_members;

@@ -24,6 +24,7 @@ use crate::ast::{CatchClause, ConstArgs, NameRef, SiteKind, SiteOrigin, Span};
 use crate::children;
 use crate::lower_effect::EffectScanCx;
 
+pub(crate) use operator::promoted_hook_sites;
 pub use derive::{derive_effect_origins, derive_throw_origins};
 
 /// One catch variable in scope for rethrow precision: its name (no `$`), the

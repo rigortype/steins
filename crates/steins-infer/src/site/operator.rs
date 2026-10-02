@@ -54,7 +54,15 @@ pub(super) fn resolve<'a>(
         member,
         out: ResolvedSite::default(),
     };
-    let shapes = site.operands.as_deref().unwrap_or(&[]);
+    let mut shapes = site.operands.as_deref().unwrap_or(&[]);
+    if let (C::OffsetValue, [_, container, ..]) = (construct, shapes) {
+        // The value converts only into a string container, which an offset write on
+        // anything else (an array, an `ArrayAccess` object) does not make of it.
+        if frame.container_not_string(cx, container) {
+            return op.out;
+        }
+        shapes = &shapes[..1];
+    }
     if op.two_objects_compared(shapes) {
         op.gap();
     }
@@ -66,6 +74,13 @@ pub(super) fn resolve<'a>(
         }
     }
     op.out
+}
+
+/// Whether the engine's code run on an object of `class` may run a project
+/// property hook ([`chain::hooks_property`]): a hook on the chain, and for a
+/// `class` that is only a bound, one on a class that may stand in for it.
+pub(super) fn engine_chain_hooks(cx: &Cx<'_>, class: &str, exact: bool) -> bool {
+    chain::hooks_property(cx, class, exact)
 }
 
 /// The `__call` and `__callStatic` bodies a method call on an *exact* class the

@@ -78,6 +78,26 @@ impl<'a> Frame<'a> {
 }
 
 impl Frame<'_> {
+    /// Whether the container of an offset write is shown to hold no string, so the
+    /// write stores an element (or calls `offsetSet`) and converts the value
+    /// nothing. The syntax layer builds this operand's shape only for a variable
+    /// the frame never leaves a string ([`ArgShape::Param`] or [`ArgShape::Local`]
+    /// with [`Stored::Array`], `FrameBindings::container_shape`), which leaves the
+    /// by-reference question to answer here as for any variable; `$this->p` is
+    /// read against the property's declared type, which admits no `string`,
+    /// `mixed` or `callable`.
+    pub(crate) fn container_not_string(&self, cx: &Cx, shape: &ArgShape) -> bool {
+        match shape {
+            ArgShape::Array => true,
+            ArgShape::Param { name, stores: Stored::Array }
+            | ArgShape::Local { name, stores: Stored::Array } => !self.rebound_by_call(cx, name),
+            ArgShape::ThisProperty(name) => {
+                this_property_hint(cx, self.class_fqn, name, hint_non_string).unwrap_or(false)
+            }
+            _ => false,
+        }
+    }
+
     /// Whether a named call of the frame may take the variable `name` by
     /// reference, and so rebind it. The syntax layer counts every other write
     /// ([`steins_syntax::DynamicSite::Call`]'s `var`); this is the half only
@@ -277,7 +297,19 @@ fn hint_held(hint: &str) -> Held {
 /// magic property instead), and a hooked one, whose hook is arbitrary user
 /// code. A property no class of the chain declares holds anything.
 fn this_property_held(cx: &Cx, class_fqn: Option<&str>, name: &str) -> Held {
-    let Some(start) = class_fqn else { return Held::Unknown };
+    this_property_hint(cx, class_fqn, name, hint_held).unwrap_or(Held::Unknown)
+}
+
+/// What `read` makes of the declared type of the property `$this->name` reaches,
+/// under the rule of [`this_property_held`] (an ancestor's private property, a hooked
+/// one and an undeclared one answer nothing), or `None` for an untyped one.
+fn this_property_hint<T>(
+    cx: &Cx,
+    class_fqn: Option<&str>,
+    name: &str,
+    read: impl Fn(&str) -> T,
+) -> Option<T> {
+    let start = class_fqn?;
     let mut cur = start.to_owned();
     let mut seen: HashSet<String> = HashSet::new();
     while seen.insert(cur.to_ascii_lowercase()) {
@@ -291,14 +323,26 @@ fn this_property_held(cx: &Cx, class_fqn: Option<&str>, name: &str) -> Held {
                 break;
             }
             let hint = prop.hint_span.and_then(|span| cx.units[file].tree.source_slice(span));
-            return hint.map_or(Held::Unknown, hint_held);
+            return hint.map(read);
         }
         match &class.parent {
             Some(parent) => cur = cx.units[file].tree.resolve_class_fqn(parent),
             None => break,
         }
     }
-    Held::Unknown
+    None
+}
+
+/// Whether the type spelled `hint` admits no string: no member is `string`,
+/// `mixed` or `callable` (a function name is one). A class name, `array`,
+/// `iterable`, `object` and the numbers and booleans hold none.
+fn hint_non_string(hint: &str) -> bool {
+    let mut members = hint
+        .split(|c: char| matches!(c, '|' | '&' | '(' | ')' | '?') || c.is_whitespace())
+        .filter(|m| !m.is_empty())
+        .peekable();
+    members.peek().is_some()
+        && members.all(|m| !matches!(m.to_ascii_lowercase().as_str(), "string" | "mixed" | "callable"))
 }
 
 /// Whether a call to the builtin `name` with these argument shapes, written in

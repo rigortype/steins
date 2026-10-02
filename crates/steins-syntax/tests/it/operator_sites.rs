@@ -165,7 +165,10 @@ fn a_property_access_takes_the_role_its_context_gives_it() {
     assert_eq!(magic("$o->p ??= 1;"), [prop(C::CoalesceAssign)]);
     assert_eq!(magic("$r = &$o->p;"), [prop(C::Reference)]);
     assert_eq!(magic("return $o?->p;"), [prop(C::Read)]);
-    assert_eq!(one("$o->$s = 1;").member, None, "a dynamic name has no member");
+    // A dynamic name has no member, and its conversion is a site of its own.
+    let dynamic = ops("$o->$s = 1;");
+    assert_eq!(dynamic[0].member, None);
+    assert_eq!(forms("$o->$s = 1;"), [prop(C::Write), to_string(C::Name)]);
 }
 
 #[test]
@@ -363,4 +366,205 @@ fn a_comparison_of_values_holding_no_object_or_against_a_scalar_literal_emits_no
     assert_eq!(forms("return [$o] . 'x';"), []);
     assert_eq!(forms("return (string) [$o];"), []);
     assert_eq!(forms("echo [$o]; foreach ([$o] as $v) {} return [$o]['k'];"), []);
+}
+
+// ---- Name operands and offset-write values (ADR-0099 §4.3, #880) -------------
+
+/// The Name sites of `body`, in the harness's `K::f($o, array $a, string $s)`.
+fn names(body: &str) -> Vec<Op> {
+    ops(body).into_iter().filter(|o| o.construct == C::Name).collect()
+}
+
+#[test]
+fn a_dynamic_property_name_is_a_to_string_site_on_the_name_expression() {
+    // The access itself stays a MagicProp read, in source order before the name.
+    assert_eq!(forms("return $o->$s;"), [(F::MagicProp, C::Read), to_string(C::Name)]);
+    let name = &names("return $o->$s;")[0];
+    assert_eq!(name.operands, [param("s")]);
+    assert_eq!(name.receivers, [Some(EffectRecv::Var("s".to_owned()))]);
+    // Written, `{$e}`, nullsafe, and as an lvalue.
+    assert_eq!(names("return $o->{$o};")[0].operands, [param("o")]);
+    assert_eq!(names("return $o?->$s;").len(), 1);
+    assert_eq!(names("$o->$s = 1;").len(), 1);
+    assert_eq!(names("unset($o->$s);").len(), 1);
+    assert_eq!(names("return isset($o->$s->$s);").len(), 2);
+    // A name that is no object shows none; an identifier has no name expression; a
+    // dynamic method name is a dynamic callee, not a conversion of this kind.
+    assert_eq!(names("return $o->{'x'};"), []);
+    assert_eq!(names("return $o->{$s . 'x'};"), []);
+    assert_eq!(names("return $o->x;"), []);
+    assert_eq!(names("return $o->$s();"), []);
+}
+
+#[test]
+fn a_variable_variable_converts_the_name_it_is_read_by() {
+    let nested = names("return $$s;");
+    assert_eq!(nested.len(), 1, "{nested:?}");
+    // The frame holds a `$$`, so no name of it is shown (ADR-0001's give-up list).
+    assert_eq!(nested[0].operands, [ArgShape::Unknown]);
+    // `${expr}` converts the expression; `$$$n` converts `$$n` and then `$n`.
+    assert_eq!(names("return ${$o};").len(), 1);
+    assert_eq!(names("return ${$s . 'x'};"), []);
+    assert_eq!(names("return ${'x'};"), []);
+    let triple = names("return $$$s;");
+    assert_eq!(triple.len(), 2, "{triple:?}");
+    // As an lvalue and in a by-reference position the name converts as well.
+    assert_eq!(names("$$s = 1;").len(), 1);
+    assert_eq!(names("return isset($$s);").len(), 1);
+}
+
+#[test]
+fn a_static_property_name_is_converted_and_a_plain_one_is_not() {
+    let site = names("return K::$$s;");
+    assert_eq!(site.len(), 1, "{site:?}");
+    assert_eq!(names("return K::$repo;"), []);
+    assert_eq!(names("return K::${'x'};"), []);
+}
+
+/// The one offset-write value site of `body`.
+fn offset_value(body: &str) -> Op {
+    let all: Vec<Op> = ops(body).into_iter().filter(|o| o.construct == C::OffsetValue).collect();
+    assert_eq!(all.len(), 1, "{body}: {all:?}");
+    all.into_iter().next().unwrap()
+}
+
+#[test]
+fn an_offset_write_records_its_value_and_what_its_container_is_shown_to_be() {
+    let write = offset_value("$s[0] = $o;");
+    assert_eq!((write.family, write.construct), to_string(C::OffsetValue));
+    // `$s` is a `string` parameter: no non-string shape, though the write is an element write.
+    assert_eq!(write.operands, [param("o"), ArgShape::Unknown]);
+    assert_eq!(write.receivers, [Some(EffectRecv::Var("o".to_owned())), None]);
+    // An `array` parameter no whole-variable write touches is shown not to be a string.
+    let array = ArgShape::Param { name: "a".to_owned(), stores: Stored::Array };
+    assert_eq!(offset_value("$a[0] = $o;").operands, [param("o"), array.clone()]);
+    assert_eq!(offset_value("$a['k'] = $o;").operands[1], array);
+    // `$this->repo` is read by the engine against the property's declared type.
+    assert_eq!(
+        offset_value("$this->repo[0] = $o;").operands[1],
+        ArgShape::ThisProperty("repo".to_owned()),
+    );
+    // Not a variable or `$this->p`: an element, a call, another object's property.
+    assert_eq!(offset_value("$a[1][0] = $o;").operands[1], ArgShape::Unknown);
+    assert_eq!(offset_value("$o->p[0] = $o;").operands[1], ArgShape::Unknown);
+    assert_eq!(offset_value("f()[0] = $o;").operands[1], ArgShape::Unknown);
+}
+
+#[test]
+fn a_local_container_is_a_non_string_only_while_every_whole_write_shows_it() {
+    let local = |stores| ArgShape::Local { name: "l".to_owned(), stores };
+    let container = |body: &str| offset_value(body).operands[1].clone();
+    // Never written whole (an offset write makes `null` an array), array literals,
+    // `null`, numbers, booleans and objects.
+    assert_eq!(container("$l[0] = $o;"), local(Stored::Array));
+    assert_eq!(container("$l = []; $l[0] = $o;"), local(Stored::Array));
+    assert_eq!(container("$l = [1, 2]; $l = array(); $l[0] = $o;"), local(Stored::Array));
+    assert_eq!(container("$l = null; $l[0] = $o;"), local(Stored::Array));
+    assert_eq!(container("$l = new K; $l[0] = $o;"), local(Stored::Array));
+    assert_eq!(container("$l = (array) $s; $l[0] = $o;"), local(Stored::Array));
+    assert_eq!(container("$l = []; $l += [1]; $l[0] = $o;"), local(Stored::Array));
+    // A string, a call, another variable, `.=`, a destructuring target, a `foreach`
+    // binding: any of them may leave a string.
+    for write in [
+        "$l = 'abc';",
+        "$l = f();",
+        "$l = $s;",
+        "$l = []; $l .= 'x';",
+        "$l = []; $l = $a;",
+        "[$l] = $a;",
+        "list('k' => $l) = $a;",
+        "foreach ($a as $l) {}",
+        "try { f(); } catch (Exception $l) {}",
+    ] {
+        assert_eq!(container(&format!("{write} $l[0] = $o;")), ArgShape::Unknown, "{write}");
+    }
+    // The write after the offset write counts as well: the scan is flow-insensitive.
+    assert_eq!(container("$l[0] = $o; $l = 'abc';"), ArgShape::Unknown);
+}
+
+#[test]
+fn a_parameter_container_is_a_non_string_only_by_its_declared_type() {
+    let container = |hint: &str, body: &str| {
+        let src = format!("<?php\nclass K {{ public function f({hint} $c, $o) {{ {body} }} }}\n");
+        let tree = SourceTree::parse(&src);
+        assert!(tree.parse_errors().is_empty(), "{hint}: {:?}", tree.parse_errors());
+        let site = tree.classes()[0].methods[0]
+            .sites
+            .iter()
+            .find(|s| matches!(&s.kind, SiteKind::Operator { construct: C::OffsetValue, .. }))
+            .expect("an offset-write value site");
+        site.operands.clone().unwrap()[1].clone()
+    };
+    let array = ArgShape::Param { name: "c".to_owned(), stores: Stored::Array };
+    for hint in ["array", "?array", "array|null", "K", "?K", "\\ArrayAccess", "int", "iterable", "object"]
+    {
+        assert_eq!(container(hint, "$c[0] = $o;"), array, "{hint}");
+    }
+    // A type that admits a string, or none at all, may be one.
+    for hint in ["string", "?string", "array|string", "mixed", "callable", ""] {
+        assert_eq!(container(hint, "$c[0] = $o;"), ArgShape::Unknown, "{hint}");
+    }
+    // A whole-variable write the declared type does not vouch for rules it out.
+    assert_eq!(container("array", "$c = 'abc'; $c[0] = $o;"), ArgShape::Unknown);
+    assert_eq!(container("array", "$c = []; $c[0] = $o;"), array);
+}
+
+#[test]
+fn an_offset_write_of_a_value_holding_no_object_or_an_append_emits_no_value_site() {
+    let writes = |body: &str| forms(body).into_iter().filter(|f| f.1 == C::OffsetValue).count();
+    assert_eq!(writes("$s[0] = 'z';"), 0);
+    assert_eq!(writes("$s[0] = 1 . 'x';"), 0);
+    assert_eq!(writes("$s[0] = [$o];"), 0);
+    // `$c[] = v` on a string is a fatal error, never a conversion.
+    assert_eq!(writes("$s[] = $o;"), 0);
+    // A compound assignment into an offset is not a plain write.
+    assert_eq!(writes("$a[0] .= $o;"), 0);
+    assert_eq!(writes("$s[0] = $o;"), 1);
+}
+
+#[test]
+fn a_destructuring_or_foreach_target_that_is_an_offset_stores_an_unknown_value() {
+    let list = offset_value("[$s[0]] = $a;");
+    assert_eq!(list.operands, [ArgShape::Unknown, ArgShape::Unknown]);
+    assert_eq!(list.receivers, [None, None]);
+    assert_eq!(offset_value("foreach ($a as $s[0]) {}").operands[0], ArgShape::Unknown);
+}
+
+/// The MagicProp `Write` sites of a constructor, by the member they name.
+fn promoted(params: &str, body: &str) -> Vec<(Option<String>, Vec<Option<EffectRecv>>)> {
+    let src = format!("<?php\nclass K {{ public function __construct({params}) {{ {body} }} }}\n");
+    let tree = SourceTree::parse(&src);
+    assert!(tree.parse_errors().is_empty(), "{params}: {:?}", tree.parse_errors());
+    tree.classes()[0].methods[0]
+        .sites
+        .iter()
+        .filter_map(|s| match &s.kind {
+            SiteKind::Operator { family: F::MagicProp, construct: C::Write, member, receivers } => {
+                Some((member.clone(), receivers.clone()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_hooked_promoted_parameter_is_a_magic_property_write_on_this_in_the_constructor() {
+    let hooked = promoted("public string $p { set(string $v) { $this->p = $v; } }", "");
+    assert_eq!(hooked, [(Some("p".to_owned()), vec![Some(EffectRecv::This)])]);
+    // One per hooked parameter; a plain promoted one and an ordinary one are not.
+    let two = promoted(
+        "public string $a { get => 'x'; }, public int $b, string $c, public int $d { set => 1; }",
+        "",
+    );
+    assert_eq!(two.iter().map(|s| s.0.as_deref()).collect::<Vec<_>>(), [Some("a"), Some("d")]);
+    assert_eq!(promoted("public string $p", ""), []);
+    assert_eq!(promoted("string $p", ""), []);
+    // The prologue runs before the body: the site leads the constructor's list.
+    let src = "<?php\nclass K { public function __construct(public int $p { set => 1; }) { echo 'x'; } }\n";
+    let tree = SourceTree::parse(src);
+    let sites = &tree.classes()[0].methods[0].sites;
+    assert!(matches!(sites[0].kind, SiteKind::Operator { member: Some(_), .. }), "{sites:?}");
+    // A method other than a constructor cannot promote.
+    let plain = SourceTree::parse("<?php\nclass K { public function m(int $p) {} }\n");
+    assert!(plain.classes()[0].methods[0].sites.is_empty());
 }
