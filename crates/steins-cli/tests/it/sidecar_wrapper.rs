@@ -5,16 +5,31 @@
 //! sidecar's child is then the wrapper and the interpreter is its child, and
 //! closing the sidecar at the end of the run waited on an interpreter the kill
 //! never reached, so `check` never exited. The wrapper here stands in front of
-//! the host's real `php` on a private `PATH` (`Command::env`, as in
-//! `sidecar_handshake.rs`), and the run is polled against a deadline so a hang
-//! fails the test instead of stalling the suite.
+//! the host's real `php`, its directory prepended to the child's `PATH` only
+//! (`Command::env`, as in `sidecar_handshake.rs`), and the run is polled against
+//! a deadline so a hang fails the test instead of stalling the suite.
+#![cfg(unix)]
 
-use std::path::PathBuf;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name)
+}
+
+/// `text` as one single-quoted `sh` word: a `'` inside closes the quote, adds an
+/// escaped quote, and reopens it.
+fn sh_quote(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "'\\''"))
+}
+
+/// The child's `PATH`: `dir` first, then the one this test runs under.
+fn path_with(dir: &Path) -> OsString {
+    let inherited = std::env::var_os("PATH").unwrap_or_default();
+    let dirs = std::iter::once(dir.to_path_buf()).chain(std::env::split_paths(&inherited));
+    std::env::join_paths(dirs).expect("a PATH entry with a separator in it")
 }
 
 /// A fresh directory holding a `php` that runs the real one without `exec`, or
@@ -31,8 +46,8 @@ fn wrapper_dir() -> Option<PathBuf> {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create the wrapper dir");
     let php = dir.join("php");
-    std::fs::write(&php, format!("#!/bin/sh\n'{}' \"$@\"\n", real.display()))
-        .expect("write the wrapper");
+    let real = sh_quote(&real.to_string_lossy());
+    std::fs::write(&php, format!("#!/bin/sh\n{real} \"$@\"\n")).expect("write the wrapper");
     std::fs::set_permissions(&php, std::fs::Permissions::from_mode(0o755)).expect("chmod");
     Some(dir)
 }
@@ -47,7 +62,7 @@ fn check_finishes_behind_a_php_wrapper_that_does_not_exec() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_steins"))
         .env_remove("GITHUB_ACTIONS")
         .args(["check", "--no-cache", path.to_str().unwrap()])
-        .env("PATH", &dir)
+        .env("PATH", path_with(&dir))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
