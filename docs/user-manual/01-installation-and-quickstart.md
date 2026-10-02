@@ -303,9 +303,23 @@ error line above on stderr — so a renamed directory reds the build instead
 of keeping it green (ADR-0050 §7). A path that *exists* and happens to
 contain no `.php` files is a genuine no-op and still exits `0`.
 
-## Known limitations (v0.1.4, honest)
+## Known limitations (honest)
 
-- **No warm or incremental runs.** Every `check` is a cold batch analysis.
+- **Warm runs, not a resident server.** `check` caches its analysis in
+  `.steins/`, so a second run over an unchanged tree, or one after a small
+  edit, reuses what it can (see [the analysis
+  cache](02-cli-reference.md#the-analysis-cache)). Each run is still a
+  fresh process: nothing stays resident between runs.
+- **No path exclusion yet.** Every file under the paths you name is
+  analyzed. `[paths.sets]` and `[[policy]]` (ADR-0023) are designed but not
+  shipped, and today they parse and do nothing (see [the configuration
+  chapter](03-configuration.md#designed-not-yet-shipped)). Name the
+  directories you want checked instead of the project root, and use the
+  baseline or `@steins-ignore` for findings you accept.
+- **Large projects need a lot of memory.** The whole parsed project is held
+  in memory for the run, so a project of tens of thousands of files can
+  peak at tens of gigabytes. Measuring and lowering this is tracked as
+  issue #890.
 - **No LSP or editor server yet.** `annotate` gives a one-shot margin view
   of inferred types and effects; a resident `lsp` server is later work.
 - **The dump surface is live.** `PHPStan\dumpType($e)` prints the inferred
