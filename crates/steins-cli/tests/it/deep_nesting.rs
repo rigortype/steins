@@ -92,3 +92,70 @@ fn a_deep_property_chain_does_not_overflow_the_stack() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A function with `depth` nested loops, `$x` read before the innermost `if` binds it:
+/// every read of `$x` is a `variable.maybe-undefined`.
+fn deep_loop_src(kind: &str, depth: usize) -> String {
+    let mut src = String::from("<?php\n\nfunction walk(array $a, bool $c): void\n{\n");
+    for i in 0..depth {
+        match kind {
+            "foreach" => src.push_str(&format!("foreach ($a as $v{i}) {{\n")),
+            "while" => src.push_str("while ($c) {\n"),
+            _ => src.push_str(&format!("for ($i{i} = 0; $i{i} < 10; $i{i}++) {{\n")),
+        }
+        if i % 8 == 0 {
+            src.push_str("echo $x;\n");
+        }
+    }
+    src.push_str("if ($c) { $x = 1; }\necho $x;\n");
+    for _ in 0..depth {
+        src.push_str("}\n");
+    }
+    src.push_str("}\n");
+    src
+}
+
+/// Issue #793: the binding-presence pass walked a loop body up to three times per
+/// enclosing loop, so `foreach` 20 deep took 11 s and 22 deep 43 s in a release build.
+/// This is the whole `check` — lowering and analysis — on a nest that did not finish,
+/// pinned to a wall-clock budget generous for a debug build (the cached run is
+/// well under a second). The subprocess is killed at the deadline so a regression
+/// fails the test instead of hanging the suite.
+#[test]
+fn deeply_nested_loops_check_in_bounded_time() {
+    const BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+    let dir = workdir("loops");
+    for kind in ["foreach", "while", "for"] {
+        let file = write(&dir, &format!("{kind}.php"), &deep_loop_src(kind, 24));
+        let started = std::time::Instant::now();
+        let mut child = steins_cmd()
+            .args(["check", "--profile", "strict", "--no-php", "--no-cache", "--format", "json"])
+            .arg(&file)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("run steins");
+        let mut stdout = child.stdout.take().expect("piped stdout");
+        let reader = std::thread::spawn(move || {
+            let mut out = String::new();
+            std::io::Read::read_to_string(&mut stdout, &mut out).expect("read stdout");
+            out
+        });
+        while child.try_wait().expect("poll steins").is_none() {
+            if started.elapsed() > BUDGET {
+                let _ = child.kill();
+                panic!("`steins check` on 24 nested `{kind}` loops overran {BUDGET:?}");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let out = reader.join().expect("reader thread");
+        eprintln!("24 nested `{kind}`: checked in {:?}", started.elapsed());
+        // Four reads: levels 0, 8 and 16, and the innermost.
+        assert_eq!(
+            out.matches("variable.maybe-undefined").count(),
+            4,
+            "the nest's reads of `$x` must still report:\n{out}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

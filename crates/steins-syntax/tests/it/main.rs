@@ -12,6 +12,7 @@ mod global_constants;
 mod grouped_use;
 mod interpolation_value;
 mod isset_value;
+mod loop_nesting;
 mod method_call_value;
 mod operator_sites;
 mod operator_value;
