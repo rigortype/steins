@@ -22,7 +22,7 @@ use crate::lower_effect::{
     EffectScanCx, ReceiverWrites, body_aliased, collect_body_callables, scan_method_calls,
 };
 use crate::lower_expr::lower_arg_value;
-use crate::lower_presence::{maybe_undefined_reads, push_guard_root};
+use crate::lower_presence::{maybe_undefined_reads, push_guard_root, subtree_has_goto};
 use crate::lower_site::scan_owner_sites;
 use crate::lower_stmt::{
     block_end, call_invalidation, expr_end, lower_expr_stmt, lower_stmt, named_call, node_poisons,
@@ -720,9 +720,20 @@ pub(crate) struct VarUsage {
     /// terms, because a binding form must not depend on a read being recorded.
     pub(crate) arg_candidates: Vec<UndefinedRead>,
     /// Reads a **disjunctive** shield covers: each is discharged only when every name in
-    /// its [`Shield::joint`] set is never bound, so [`Self::settle`] decides them once the
-    /// whole scope's bindings are known.
-    conditional: Vec<(UndefinedRead, Vec<String>)>,
+    /// one of its [`Shield::joint`] sets is never bound, so [`Self::settle`] decides them
+    /// once the whole scope's bindings are known. A read can sit under several.
+    conditional: Vec<(UndefinedRead, Vec<Vec<String>>)>,
+    /// The root local of **every** function-call argument, bare or reached through an
+    /// offset or property. `bound` leaves these out (a by-value read of `$y` in `f($y)`
+    /// binds nothing), but a callee may take the slot by reference and bind it
+    /// (`preg_match($p, $s, $y)`, `parse_str($q, $y['k'])`), so [`Self::settle`] counts
+    /// them as possibly bound.
+    call_arg_roots: std::collections::HashSet<String>,
+    /// The scope holds a `goto` or a label, which lands control after a guard, or inside
+    /// one of its arms, without evaluating the condition: the rules that read "only this
+    /// outcome reaches here" ([`terminating_guard_names`], the sided arms of an `if`)
+    /// stand down. The right-operand rule needs no such guard — see `scan_var_usage`.
+    goto_present: bool,
     dammed: bool,
 }
 
@@ -752,28 +763,37 @@ impl VarUsage {
         if always_bound(&name) {
             return;
         }
-        let mut joint = None;
+        let mut joints: Vec<Vec<String>> = Vec::new();
         for shield in shielded.iter().filter(|s| s.name == name) {
             if shield.joint.is_empty() {
                 return;
             }
-            joint.get_or_insert(&shield.joint);
+            joints.push(shield.joint.clone());
         }
         let read = UndefinedRead { name, span: to_span(dv.span()) };
-        match joint {
-            Some(joint) => self.conditional.push((read, joint.clone())),
-            None => self.reads.push(read),
+        if joints.is_empty() {
+            self.reads.push(read);
+        } else {
+            self.conditional.push((read, joints));
         }
     }
 
     /// Decide the parked reads, now that `bound` is complete: a disjunction guard
     /// (`isset($x) || isset($y)`) leaves its body unreachable only when **no** disjunct
-    /// can hold, so a read stays discharged only while every name the guard tests is
-    /// never bound. Otherwise the read is recorded as if nothing shielded it, which is
-    /// what it was before the guard was read at all.
-    fn settle(&mut self) {
-        for (read, joint) in std::mem::take(&mut self.conditional) {
-            if joint.iter().any(|n| self.bound.contains(n)) {
+    /// can hold, so a read stays discharged only while every name one of the guards
+    /// covering it tests is *provably* never bound. Otherwise the read is recorded as if
+    /// nothing shielded it, which is what it was before the guard was read at all.
+    ///
+    /// "Never bound" here is wider than the definite pass's own set: `bound` omits a name
+    /// a callee binds by reference through a function-call argument, and the names PHP
+    /// supplies ([`always_bound`]: the superglobals, `$GLOBALS`, `$this`), and either
+    /// can make a disjunct hold.
+    pub(crate) fn settle(&mut self) {
+        for (read, joints) in std::mem::take(&mut self.conditional) {
+            let possibly_bound = |n: &String| {
+                always_bound(n) || self.bound.contains(n) || self.call_arg_roots.contains(n)
+            };
+            if joints.iter().all(|joint| joint.iter().any(possibly_bound)) {
                 self.reads.push(read);
             }
         }
@@ -1106,6 +1126,9 @@ pub(crate) fn scan_var_usage(node: &Node<'_, '_>, guarded: bool, shielded: &[Shi
             // form must not depend on its argument occurrence being collected as a
             // read. See `Scope::ref_arg_candidates`.
             for arg in fc.argument_list.arguments.iter() {
+                let mut roots = Vec::new();
+                push_guard_root(arg.value(), &mut roots);
+                acc.call_arg_roots.extend(roots);
                 if let Argument::Positional(p) = arg
                     && p.ellipsis.is_none()
                     && let Expression::Variable(mago_syntax::cst::Variable::Direct(dv)) =
@@ -1169,10 +1192,16 @@ pub(crate) fn scan_var_usage(node: &Node<'_, '_>, guarded: bool, shielded: &[Shi
             scan_var_usage(&Node::Expression(i.condition), guarded, shielded, acc);
             let extended = extend_shield(shielded, guard_tested_names(i.condition));
             let base = extended.as_deref().unwrap_or(shielded);
-            let proved = extend_shield(base, bound_when(i.condition, true));
+            // A `goto` can land inside an arm without evaluating the condition, so with
+            // one in the scope the arms take no sided shield.
+            let goto_present = acc.goto_present;
+            let sided = |want_true| {
+                if goto_present { Vec::new() } else { bound_when(i.condition, want_true) }
+            };
+            let proved = extend_shield(base, sided(true));
             let then = proved.as_deref().unwrap_or(base);
             scan_statement_seq(i.body.statements().iter(), guarded, then, acc);
-            let proved = extend_shield(base, bound_when(i.condition, false));
+            let proved = extend_shield(base, sided(false));
             let rest = proved.as_deref().unwrap_or(base);
             for (cond, stmts) in i.body.else_if_clauses() {
                 scan_var_usage(&Node::Expression(cond), guarded, rest, acc);
@@ -1314,7 +1343,7 @@ pub(crate) fn scan_var_usage(node: &Node<'_, '_>, guarded: bool, shielded: &[Shi
         };
         scan_var_usage(&child, guarded, inner, acc);
         if let Node::Statement(Statement::If(i)) = &child
-            && let Some(added) = terminating_guard_names(i)
+            && let Some(added) = terminating_guard_names(i, acc.goto_present)
         {
             running = extend_shield(inner, added);
         }
@@ -1334,8 +1363,12 @@ pub(crate) fn scan_var_usage(node: &Node<'_, '_>, guarded: bool, shielded: &[Shi
 /// return $x;` (a false `isset` proves nothing) and
 /// `if (!isset($x) && $c) { return; } print($x);` (the other conjunct can be what
 /// came out false) all keep reporting.
-fn terminating_guard_names(i: &mago_syntax::cst::If<'_>) -> Option<Vec<Shield>> {
-    if !i.body.else_if_clauses().is_empty() || i.body.else_statements().is_some() {
+///
+/// A `goto` or label anywhere in the scope turns the rule off (`goto_present`): a jump
+/// forward lands after the guard without evaluating it, so "only the false outcome
+/// reaches here" no longer holds.
+fn terminating_guard_names(i: &mago_syntax::cst::If<'_>, goto_present: bool) -> Option<Vec<Shield>> {
+    if goto_present || !i.body.else_if_clauses().is_empty() || i.body.else_statements().is_some() {
         return None;
     }
     let names = bound_when(i.condition, false);
@@ -1357,7 +1390,7 @@ fn scan_statement_seq<'ast, 'arena>(
         let inner = running.as_deref().unwrap_or(shielded);
         scan_var_usage(&Node::Statement(s), guarded, inner, acc);
         if let Statement::If(i) = s
-            && let Some(added) = terminating_guard_names(i)
+            && let Some(added) = terminating_guard_names(i, acc.goto_present)
         {
             running = extend_shield(inner, added);
         }
@@ -1386,6 +1419,7 @@ fn undefined_variable_reads(
             acc.bind_direct(&v.variable);
         }
     }
+    acc.goto_present = statements.iter().any(|s| subtree_has_goto(&Node::Statement(s)));
     scan_statement_seq(statements.iter().copied(), false, &[], &mut acc);
     acc.settle();
     if acc.dammed {
