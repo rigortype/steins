@@ -9,19 +9,18 @@
 //! This asks. Each row of `hierarchy.toml` is offered to the live engine by its
 //! stored key; the engine's own `ReflectionClass::getName()` must lowercase to that
 //! key and carry the casing php-src declares. A row the engine lacks has to **say
-//! why**, and there is no floor that lets an unexplained absence through:
+//! why**, and there is no floor that lets an unexplained absence through. Exactly
+//! these explain one:
 //!
 //! * its extension is not loaded here (`extension_loaded` of the stub's extension);
-//! * the row is marked `absent_on_pinned`: the pinned release's own stubs do not declare
-//!   it. The miner reads that from php-src at the release tag, never from the PHP it
-//!   runs on, so a build with or without an extension marks the same rows. A marked row
-//!   must in turn be absent from any PHP whose minor is at most the pinned one;
-//! * this PHP is an older minor than the pinned release, which may lack a class of a
-//!   loaded extension that the release added; or
-//! * the row is one of [`STUB_ONLY`], declared in a stub and registered by no build.
+//! * this PHP is an older minor than the pin (`steins_catalog::PINNED_PHP`), which may
+//!   lack a class of a loaded extension that the pinned release added; or
+//! * the row is one of [`STUB_ONLY`].
 //!
-//! A row mined under a wrong key (`Dom\Text` as `Text`) is declared at the tag under that
-//! same wrong key, so it is unmarked, absent, and its extension loaded: unexplained. The
+//! The table is the pinned release's (the stubs at tag `php-8.5.11`), so a row is a class
+//! that release declares when its extension is built in. A row mined under a wrong key
+//! (`Dom\Text` as `Text`) is declared at the tag under that same wrong key, so it is
+//! absent with its extension loaded on a PHP of the pinned minor: unexplained. The
 //! catalog also holds the converse statically: every namespaced class PHP 8.5.11 declares
 //! is a row under its FQN (`every_namespaced_class_php_src_declares_is_keyed_by_fqn`).
 //!
@@ -29,16 +28,16 @@
 
 use steins_sidecar::Sidecar;
 
-/// Rows that are declared in a stub and registered by no build: the pseudo-classes
-/// `ext/pdo_pgsql` and `ext/pdo_sqlite` hang their driver methods on (`PDO_PGSql_Ext`,
-/// `PDO_SQLite_Ext`). Lowercased.
+/// Rows declared in a stub that is explicit about them not being classes: `ext/pdo_pgsql`
+/// and `ext/pdo_sqlite` hang their driver methods on `PDO_PGSql_Ext` and `PDO_SQLite_Ext`
+/// ("These are extension methods for PDO. This is not a real class."), and no build
+/// registers either. Lowercased.
 const STUB_ONLY: &[&str] = &["pdo_pgsql_ext", "pdo_sqlite_ext"];
 
 /// One `[[class]]` row of `hierarchy.toml`, as far as this test reads it.
 struct Row {
     name: String,
     source: String,
-    marked: bool,
 }
 
 /// The committed hierarchy's rows. The file is the generator's input, written in one
@@ -52,14 +51,12 @@ fn rows() -> Vec<Row> {
     let mut rows: Vec<Row> = Vec::new();
     for line in text.lines() {
         if line == "[[class]]" {
-            rows.push(Row { name: String::new(), source: String::new(), marked: false });
+            rows.push(Row { name: String::new(), source: String::new() });
         } else if let Some(row) = rows.last_mut() {
             if let Some(v) = line.strip_prefix("name = '") {
                 row.name = v.trim_end_matches('\'').to_owned();
             } else if let Some(v) = line.strip_prefix("source = '") {
                 row.source = v.trim_end_matches('\'').to_owned();
-            } else if line == "absent_on_pinned = true" {
-                row.marked = true;
             }
         }
     }
@@ -91,8 +88,10 @@ fn every_hierarchy_key_resolves_under_the_key_it_is_stored_as() {
     };
     let env = sidecar.env().expect("a live engine answers `env`");
     let loaded: Vec<String> = env.extensions.iter().map(|e| e.to_ascii_lowercase()).collect();
-    let pinned = minor_of(steins_catalog::hierarchy_pinned_tag().trim_start_matches("php-"));
-    let live = minor_of(&env.php_version);
+    let older = {
+        let (major, minor) = minor_of(&env.php_version);
+        (major as u16, minor as u16) < steins_catalog::PINNED_PHP
+    };
 
     let rows = rows();
     assert!(rows.len() >= 300, "hierarchy.toml lists only {} rows", rows.len());
@@ -100,20 +99,11 @@ fn every_hierarchy_key_resolves_under_the_key_it_is_stored_as() {
     let mut unexplained: Vec<String> = Vec::new();
     for row in &rows {
         let key = row.name.to_ascii_lowercase();
-        // The generated table and the TOML it came from agree on the mark.
-        assert_eq!(
-            steins_catalog::builtin_class_absent_on_pinned(&key),
-            row.marked,
-            "`{}`: the generated mark disagrees with hierarchy.toml",
-            row.name
-        );
         let answer = sidecar.reflect_class(&key).expect("a live engine answers");
         let Some(class) = answer.declaration else {
             let ext = extension_of(&row.source);
-            let explained = row.marked
-                || !loaded.contains(&ext)
-                || live < pinned
-                || STUB_ONLY.contains(&key.as_str());
+            let explained =
+                !loaded.contains(&ext) || older || STUB_ONLY.contains(&key.as_str());
             if !explained {
                 unexplained.push(format!("{} (extension `{ext}` is loaded)", row.name));
             }
@@ -127,12 +117,6 @@ fn every_hierarchy_key_resolves_under_the_key_it_is_stored_as() {
         );
         assert_eq!(class.name, row.name, "`{key}`: the engine's casing is not the stored one");
         assert!(class.internal, "`{key}` is a class of the engine, not the project's: {class:?}");
-        assert!(
-            !(row.marked && live <= pinned),
-            "`{key}` is marked absent_on_pinned, and PHP {} (not newer than {}) declares it",
-            env.php_version,
-            steins_catalog::hierarchy_pinned_tag()
-        );
         resolved += 1;
     }
     assert!(
@@ -163,7 +147,6 @@ fn the_always_present_namespaced_rows_resolve() {
         let key = class.to_ascii_lowercase();
         let found = sidecar.reflect_class(&key).expect("a live engine answers");
         assert!(found.exists(), "`{class}` must resolve on every supported PHP");
-        assert!(!steins_catalog::builtin_class_absent_on_pinned(&key), "{class}");
     }
 }
 

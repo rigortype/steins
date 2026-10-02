@@ -22,41 +22,37 @@ artefact.
 
 ## The class hierarchy
 
-`phpsrc-mining/hierarchy.toml` is the odd one out: no xtask, and the engine is a cross-check rather
-than a source. It is the output of `extract_hierarchy.py` over the pinned php-src checkout's stubs,
-and `cargo xtask gen-catalog` turns it into `hierarchy_generated.rs` and
-`display_names_generated.rs`:
+`phpsrc-mining/hierarchy.toml` is the odd one out: no xtask and no engine. It is the output of
+`extract_hierarchy.py` over the stubs of a php-src checkout **at the pinned release tag**, and
+`cargo xtask gen-catalog` turns it into `hierarchy_generated.rs` and `display_names_generated.rs`.
+The pin is `php-8.5.11` (`steins_catalog::PINNED_PHP` is its minor):
 
 ```sh
-PHP_SRC_ROOT=<php-src checkout> PHP_BIN=<php of the pinned minor> \
-  python3 docs/research/phpsrc-mining/extract_hierarchy.py \
+git -C <php-src> fetch origin tag php-8.5.11
+git -C <php-src> worktree add --detach <scratch>/php-src-8.5.11 php-8.5.11
+PHP_SRC_ROOT=<scratch>/php-src-8.5.11 python3 docs/research/phpsrc-mining/extract_hierarchy.py \
   > docs/research/phpsrc-mining/hierarchy.toml
 cargo xtask gen-catalog
+git -C <php-src> worktree remove <scratch>/php-src-8.5.11
 ```
+
+The script refuses a checkout that is not exactly at a release tag, and writes the tag into the
+header. Reading `master` instead would list classes only php-src's development branch declares
+(`Io\Poll\PollException`, `StreamException`), and the lanes would answer for classes the pinned
+PHP does not have; that was the first mining (#871). A bump of the pin is a new tag, a re-mine and
+a `PINNED_PHP` change together.
 
 Every key is the class's FQN: the script reads a `namespace` statement across lines and resolves a
 parent the way PHP does (a leading backslash is fully qualified, anything else is relative to the
 declaring namespace), and it says on stderr when a relative parent names no declaration. A run that
-prints such a line has found a stub that spells a parent the engine does not read that way (#871);
-read the line before committing.
+prints such a line has found a stub that spells a parent the engine does not read that way; read
+the line before committing.
 
-**The stubs are not the pinned release.** php-src's stubs are a development branch and the pinned
-PHP is an older minor, so a row can name a class that release lacks (`Io\Poll\PollException`,
-`StreamException`). The script parses every `*.stub.php` at the release tag (`PINNED_TAG`, default
-the newest stable `php-<minor>.<n>` tag in the checkout, for the minor of `PHP_BIN`) with the same
-parser, writes `absent_on_pinned = true` on the rows whose class that tag does not declare, and
-records the tag in `pinned_tag`. The mark is read from php-src, not from the PHP it runs on, so
-an extension a build lacks (`EnchantBroker`, `com_exception`) moves nothing. `PHP_BIN` is only the
-minor to pin and a sanity check: the script warns on stderr when `PHP_BIN` declares a marked row
-or lacks an unmarked one whose extension it has loaded (`PDO_PGSql_Ext` and `PDO_SQLite_Ext` are
-stub-only pseudo-classes and always warn). A marked row stays in the is-a walk and the display
-names, but the catalog does not treat it as an engine class, so a `new` of it stays a gap. The
-checkout has to hold the tag (`git fetch --tags` first).
-
-The `engine_hierarchy_keys` test holds each row to a live PHP's `ReflectionClass`; a row the
-running PHP lacks has to say why (its extension is not loaded, it is marked, the PHP is an older
-minor than the pinned release, or it is a stub-only pseudo-class), and no share of unexplained
-absences is tolerated.
+Membership is the pin's, not the running engine's, as the function rows are: a class of an
+extension the build lacks (`SNMPException`, `com_exception`) is still a row. The
+`engine_hierarchy_keys` test holds each row to a live PHP's `ReflectionClass`; a row the running
+PHP lacks has to say why (its extension is not loaded, the PHP is an older minor than the pin, or
+it is a stub-only pseudo-class), and no share of unexplained absences is tolerated.
 
 ## The engine set
 

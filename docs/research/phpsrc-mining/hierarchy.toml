@@ -1,14 +1,10 @@
 # hierarchy.toml — builtin class/interface/enum hierarchy mined from php-src stubs
-# php-src commit: 6bc7c26cf67a9480b5ef9d6191aebe87fa931183 (Thu Jul 9 2026)
-# Pinned release: php-8.5.6 (fcc29c8d6d6ee6f5ba2d941f0a2a6ea6aa6ee633). A row whose class is not declared
-# by that release's own stubs carries `absent_on_pinned = true`, and the catalog does
-# not treat it as an engine class. Extensions a build lacks do not enter into it.
+# php-src tag: php-8.5.11 (597eb0b4e32cc8802e112fe13cc92fb5636a1781)
+# php-src commit: 678778973bb4d4185c06ef1320de50f1a975d3c8
 # Names preserve declared casing; Steins lowercases at its seam.
 # Namespaced names are fully-qualified (no leading backslash).
 # Test-only extensions (ext/zend_test, ext/skeleton, ext/dl_test, sapi/*) are EXCLUDED.
-# Total production declarations: 368
-
-pinned_tag = 'php-8.5.6'
+# Total production declarations: 337
 
 [[class]]
 name = 'Attribute'
@@ -365,7 +361,7 @@ kind = 'class'
 extends = []
 implements = []
 final = true
-source = 'ext/curl/curl.stub.php:3721'
+source = 'ext/curl/curl.stub.php:3714'
 
 [[class]]
 name = 'CurlMultiHandle'
@@ -373,7 +369,7 @@ kind = 'class'
 extends = []
 implements = []
 final = true
-source = 'ext/curl/curl.stub.php:3729'
+source = 'ext/curl/curl.stub.php:3722'
 
 [[class]]
 name = 'CurlShareHandle'
@@ -381,7 +377,7 @@ kind = 'class'
 extends = []
 implements = []
 final = true
-source = 'ext/curl/curl.stub.php:3737'
+source = 'ext/curl/curl.stub.php:3730'
 
 [[class]]
 name = 'CurlSharePersistentHandle'
@@ -389,7 +385,7 @@ kind = 'class'
 extends = []
 implements = []
 final = true
-source = 'ext/curl/curl.stub.php:3745'
+source = 'ext/curl/curl.stub.php:3738'
 
 [[class]]
 name = 'CURLFile'
@@ -523,98 +519,98 @@ name = 'DOMDocumentType'
 kind = 'class'
 extends = ['DOMNode']
 implements = []
-source = 'ext/dom/php_dom.stub.php:238'
+source = 'ext/dom/php_dom.stub.php:235'
 
 [[class]]
 name = 'DOMCdataSection'
 kind = 'class'
 extends = ['DOMText']
 implements = []
-source = 'ext/dom/php_dom.stub.php:259'
+source = 'ext/dom/php_dom.stub.php:274'
 
 [[class]]
 name = 'DOMComment'
 kind = 'class'
 extends = ['DOMCharacterData']
 implements = []
-source = 'ext/dom/php_dom.stub.php:264'
+source = 'ext/dom/php_dom.stub.php:279'
 
 [[class]]
 name = 'DOMParentNode'
 kind = 'interface'
 extends = []
 implements = []
-source = 'ext/dom/php_dom.stub.php:269'
+source = 'ext/dom/php_dom.stub.php:284'
 
 [[class]]
 name = 'DOMChildNode'
 kind = 'interface'
 extends = []
 implements = []
-source = 'ext/dom/php_dom.stub.php:281'
+source = 'ext/dom/php_dom.stub.php:296'
 
 [[class]]
 name = 'DOMNode'
 kind = 'class'
 extends = []
 implements = []
-source = 'ext/dom/php_dom.stub.php:295'
+source = 'ext/dom/php_dom.stub.php:310'
 
 [[class]]
 name = 'DOMNameSpaceNode'
 kind = 'class'
 extends = []
 implements = []
-source = 'ext/dom/php_dom.stub.php:422'
+source = 'ext/dom/php_dom.stub.php:482'
 
 [[class]]
 name = 'DOMImplementation'
 kind = 'class'
 extends = []
 implements = []
-source = 'ext/dom/php_dom.stub.php:461'
+source = 'ext/dom/php_dom.stub.php:551'
 
 [[class]]
 name = 'DOMDocumentFragment'
 kind = 'class'
 extends = ['DOMNode']
 implements = ['DOMParentNode']
-source = 'ext/dom/php_dom.stub.php:473'
+source = 'ext/dom/php_dom.stub.php:563'
 
 [[class]]
 name = 'DOMNodeList'
 kind = 'class'
 extends = []
 implements = ['IteratorAggregate', 'Countable']
-source = 'ext/dom/php_dom.stub.php:508'
+source = 'ext/dom/php_dom.stub.php:607'
 
 [[class]]
 name = 'DOMCharacterData'
 kind = 'class'
 extends = ['DOMNode']
 implements = ['DOMChildNode']
-source = 'ext/dom/php_dom.stub.php:522'
+source = 'ext/dom/php_dom.stub.php:624'
 
 [[class]]
 name = 'DOMAttr'
 kind = 'class'
 extends = ['DOMNode']
 implements = []
-source = 'ext/dom/php_dom.stub.php:573'
+source = 'ext/dom/php_dom.stub.php:684'
 
 [[class]]
 name = 'DOMElement'
 kind = 'class'
 extends = ['DOMNode']
 implements = ['DOMParentNode', 'DOMChildNode']
-source = 'ext/dom/php_dom.stub.php:596'
+source = 'ext/dom/php_dom.stub.php:719'
 
 [[class]]
 name = 'DOMDocument'
 kind = 'class'
 extends = ['DOMNode']
 implements = ['DOMParentNode']
-source = 'ext/dom/php_dom.stub.php:710'
+source = 'ext/dom/php_dom.stub.php:854'
 
 [[class]]
 name = 'DOMException'
@@ -622,210 +618,210 @@ kind = 'class'
 extends = ['Exception']
 implements = []
 final = true
-source = 'ext/dom/php_dom.stub.php:904'
+source = 'ext/dom/php_dom.stub.php:1073'
 
 [[class]]
 name = 'DOMText'
 kind = 'class'
 extends = ['DOMCharacterData']
 implements = []
-source = 'ext/dom/php_dom.stub.php:913'
+source = 'ext/dom/php_dom.stub.php:1082'
 
 [[class]]
 name = 'DOMNamedNodeMap'
 kind = 'class'
 extends = []
 implements = ['IteratorAggregate', 'Countable']
-source = 'ext/dom/php_dom.stub.php:933'
+source = 'ext/dom/php_dom.stub.php:1105'
 
 [[class]]
 name = 'DOMEntity'
 kind = 'class'
 extends = ['DOMNode']
 implements = []
-source = 'ext/dom/php_dom.stub.php:953'
+source = 'ext/dom/php_dom.stub.php:1128'
 
 [[class]]
 name = 'DOMEntityReference'
 kind = 'class'
 extends = ['DOMNode']
 implements = []
-source = 'ext/dom/php_dom.stub.php:983'
+source = 'ext/dom/php_dom.stub.php:1170'
 
 [[class]]
 name = 'DOMNotation'
 kind = 'class'
 extends = ['DOMNode']
 implements = []
-source = 'ext/dom/php_dom.stub.php:988'
+source = 'ext/dom/php_dom.stub.php:1175'
 
 [[class]]
 name = 'DOMProcessingInstruction'
 kind = 'class'
 extends = ['DOMNode']
 implements = []
-source = 'ext/dom/php_dom.stub.php:997'
+source = 'ext/dom/php_dom.stub.php:1190'
 
 [[class]]
 name = 'DOMXPath'
 kind = 'class'
 extends = []
 implements = []
-source = 'ext/dom/php_dom.stub.php:1010'
+source = 'ext/dom/php_dom.stub.php:1206'
 
 [[class]]
 name = 'Dom\ParentNode'
 kind = 'interface'
 extends = []
 implements = []
-source = 'ext/dom/php_dom.stub.php:1125'
+source = 'ext/dom/php_dom.stub.php:1324'
 
 [[class]]
 name = 'Dom\ChildNode'
 kind = 'interface'
 extends = []
 implements = []
-source = 'ext/dom/php_dom.stub.php:1135'
+source = 'ext/dom/php_dom.stub.php:1334'
 
 [[class]]
 name = 'Dom\Implementation'
 kind = 'class'
 extends = []
 implements = []
-source = 'ext/dom/php_dom.stub.php:1147'
+source = 'ext/dom/php_dom.stub.php:1346'
 
 [[class]]
 name = 'Dom\Node'
 kind = 'class'
 extends = []
 implements = []
-source = 'ext/dom/php_dom.stub.php:1157'
+source = 'ext/dom/php_dom.stub.php:1356'
 
 [[class]]
 name = 'Dom\NodeList'
 kind = 'class'
 extends = []
 implements = ['IteratorAggregate', 'Countable']
-source = 'ext/dom/php_dom.stub.php:1239'
+source = 'ext/dom/php_dom.stub.php:1474'
 
 [[class]]
 name = 'Dom\NamedNodeMap'
 kind = 'class'
 extends = []
 implements = ['IteratorAggregate', 'Countable']
-source = 'ext/dom/php_dom.stub.php:1254'
+source = 'ext/dom/php_dom.stub.php:1492'
 
 [[class]]
 name = 'Dom\DtdNamedNodeMap'
 kind = 'class'
 extends = []
 implements = ['IteratorAggregate', 'Countable']
-source = 'ext/dom/php_dom.stub.php:1273'
+source = 'ext/dom/php_dom.stub.php:1514'
 
 [[class]]
 name = 'Dom\HTMLCollection'
 kind = 'class'
 extends = []
 implements = ['IteratorAggregate', 'Countable']
-source = 'ext/dom/php_dom.stub.php:1292'
+source = 'ext/dom/php_dom.stub.php:1536'
 
 [[class]]
 name = 'Dom\AdjacentPosition'
 kind = 'enum'
 extends = []
 implements = []
-source = 'ext/dom/php_dom.stub.php:1309'
+source = 'ext/dom/php_dom.stub.php:1556'
 
 [[class]]
 name = 'Dom\Element'
 kind = 'class'
 extends = ['Dom\Node']
 implements = ['Dom\ParentNode', 'Dom\ChildNode']
-source = 'ext/dom/php_dom.stub.php:1317'
+source = 'ext/dom/php_dom.stub.php:1564'
 
 [[class]]
 name = 'Dom\HTMLElement'
 kind = 'class'
 extends = ['Dom\Element']
 implements = []
-source = 'ext/dom/php_dom.stub.php:1431'
+source = 'ext/dom/php_dom.stub.php:1712'
 
 [[class]]
 name = 'Dom\Attr'
 kind = 'class'
 extends = ['Dom\Node']
 implements = []
-source = 'ext/dom/php_dom.stub.php:1435'
+source = 'ext/dom/php_dom.stub.php:1716'
 
 [[class]]
 name = 'Dom\CharacterData'
 kind = 'class'
 extends = ['Dom\Node']
 implements = ['Dom\ChildNode']
-source = 'ext/dom/php_dom.stub.php:1461'
+source = 'ext/dom/php_dom.stub.php:1760'
 
 [[class]]
 name = 'Dom\Text'
 kind = 'class'
 extends = ['Dom\CharacterData']
 implements = []
-source = 'ext/dom/php_dom.stub.php:1489'
+source = 'ext/dom/php_dom.stub.php:1797'
 
 [[class]]
 name = 'Dom\CDATASection'
 kind = 'class'
 extends = ['Dom\Text']
 implements = []
-source = 'ext/dom/php_dom.stub.php:1499'
+source = 'ext/dom/php_dom.stub.php:1810'
 
 [[class]]
 name = 'Dom\ProcessingInstruction'
 kind = 'class'
 extends = ['Dom\CharacterData']
 implements = []
-source = 'ext/dom/php_dom.stub.php:1501'
+source = 'ext/dom/php_dom.stub.php:1812'
 
 [[class]]
 name = 'Dom\Comment'
 kind = 'class'
 extends = ['Dom\CharacterData']
 implements = []
-source = 'ext/dom/php_dom.stub.php:1507'
+source = 'ext/dom/php_dom.stub.php:1821'
 
 [[class]]
 name = 'Dom\DocumentType'
 kind = 'class'
 extends = ['Dom\Node']
 implements = ['Dom\ChildNode']
-source = 'ext/dom/php_dom.stub.php:1512'
+source = 'ext/dom/php_dom.stub.php:1826'
 
 [[class]]
 name = 'Dom\DocumentFragment'
 kind = 'class'
 extends = ['Dom\Node']
 implements = ['Dom\ParentNode']
-source = 'ext/dom/php_dom.stub.php:1537'
+source = 'ext/dom/php_dom.stub.php:1869'
 
 [[class]]
 name = 'Dom\Entity'
 kind = 'class'
 extends = ['Dom\Node']
 implements = []
-source = 'ext/dom/php_dom.stub.php:1562'
+source = 'ext/dom/php_dom.stub.php:1906'
 
 [[class]]
 name = 'Dom\EntityReference'
 kind = 'class'
 extends = ['Dom\Node']
 implements = []
-source = 'ext/dom/php_dom.stub.php:1572'
+source = 'ext/dom/php_dom.stub.php:1925'
 
 [[class]]
 name = 'Dom\Notation'
 kind = 'class'
 extends = ['Dom\Node']
 implements = []
-source = 'ext/dom/php_dom.stub.php:1574'
+source = 'ext/dom/php_dom.stub.php:1927'
 
 [[class]]
 name = 'Dom\Document'
@@ -833,7 +829,7 @@ kind = 'class'
 extends = ['Dom\Node']
 implements = ['Dom\ParentNode']
 abstract = true
-source = 'ext/dom/php_dom.stub.php:1582'
+source = 'ext/dom/php_dom.stub.php:1941'
 
 [[class]]
 name = 'Dom\HTMLDocument'
@@ -841,7 +837,7 @@ kind = 'class'
 extends = ['Dom\Document']
 implements = []
 final = true
-source = 'ext/dom/php_dom.stub.php:1673'
+source = 'ext/dom/php_dom.stub.php:2054'
 
 [[class]]
 name = 'Dom\XMLDocument'
@@ -849,7 +845,7 @@ kind = 'class'
 extends = ['Dom\Document']
 implements = []
 final = true
-source = 'ext/dom/php_dom.stub.php:1696'
+source = 'ext/dom/php_dom.stub.php:2077'
 
 [[class]]
 name = 'Dom\TokenList'
@@ -857,7 +853,7 @@ kind = 'class'
 extends = []
 implements = ['IteratorAggregate', 'Countable']
 final = true
-source = 'ext/dom/php_dom.stub.php:1734'
+source = 'ext/dom/php_dom.stub.php:2118'
 
 [[class]]
 name = 'Dom\NamespaceInfo'
@@ -865,7 +861,7 @@ kind = 'class'
 extends = []
 implements = []
 final = true
-source = 'ext/dom/php_dom.stub.php:1760'
+source = 'ext/dom/php_dom.stub.php:2147'
 
 [[class]]
 name = 'Dom\XPath'
@@ -873,7 +869,7 @@ kind = 'class'
 extends = []
 implements = []
 final = true
-source = 'ext/dom/php_dom.stub.php:1772'
+source = 'ext/dom/php_dom.stub.php:2159'
 
 [[class]]
 name = 'EnchantBroker'
@@ -1112,15 +1108,6 @@ implements = []
 source = 'ext/intl/php_intl.stub.php:170'
 
 [[class]]
-name = 'IntlNumberRangeFormatter'
-kind = 'class'
-extends = []
-implements = []
-final = true
-absent_on_pinned = true
-source = 'ext/intl/rangeformatter/rangeformatter.stub.php:9'
-
-[[class]]
 name = 'ResourceBundle'
 kind = 'class'
 extends = []
@@ -1206,28 +1193,28 @@ kind = 'class'
 extends = []
 implements = []
 final = true
-source = 'ext/mysqli/mysqli.stub.php:600'
+source = 'ext/mysqli/mysqli.stub.php:595'
 
 [[class]]
 name = 'mysqli'
 kind = 'class'
 extends = []
 implements = []
-source = 'ext/mysqli/mysqli.stub.php:614'
+source = 'ext/mysqli/mysqli.stub.php:609'
 
 [[class]]
 name = 'mysqli_result'
 kind = 'class'
 extends = []
 implements = ['IteratorAggregate']
-source = 'ext/mysqli/mysqli.stub.php:1026'
+source = 'ext/mysqli/mysqli.stub.php:1016'
 
 [[class]]
 name = 'mysqli_stmt'
 kind = 'class'
 extends = []
 implements = []
-source = 'ext/mysqli/mysqli.stub.php:1145'
+source = 'ext/mysqli/mysqli.stub.php:1135'
 
 [[class]]
 name = 'mysqli_warning'
@@ -1235,7 +1222,7 @@ kind = 'class'
 extends = []
 implements = []
 final = true
-source = 'ext/mysqli/mysqli.stub.php:1320'
+source = 'ext/mysqli/mysqli.stub.php:1310'
 
 [[class]]
 name = 'mysqli_sql_exception'
@@ -1243,7 +1230,7 @@ kind = 'class'
 extends = ['RuntimeException']
 implements = []
 final = true
-source = 'ext/mysqli/mysqli.stub.php:1333'
+source = 'ext/mysqli/mysqli.stub.php:1323'
 
 [[class]]
 name = 'Odbc\Connection'
@@ -1260,38 +1247,12 @@ implements = []
 source = 'ext/odbc/odbc.stub.php:18'
 
 [[class]]
-name = 'Openssl\OpensslException'
-kind = 'class'
-extends = ['Exception']
-implements = []
-absent_on_pinned = true
-source = 'ext/openssl/openssl.stub.php:7'
-
-[[class]]
-name = 'Openssl\Psk'
-kind = 'class'
-extends = []
-implements = []
-final = true
-absent_on_pinned = true
-source = 'ext/openssl/openssl.stub.php:14'
-
-[[class]]
-name = 'Openssl\Session'
-kind = 'class'
-extends = []
-implements = []
-final = true
-absent_on_pinned = true
-source = 'ext/openssl/openssl.stub.php:35'
-
-[[class]]
 name = 'OpenSSLCertificate'
 kind = 'class'
 extends = []
 implements = []
 final = true
-source = 'ext/openssl/openssl.stub.php:477'
+source = 'ext/openssl/openssl.stub.php:417'
 
 [[class]]
 name = 'OpenSSLCertificateSigningRequest'
@@ -1299,7 +1260,7 @@ kind = 'class'
 extends = []
 implements = []
 final = true
-source = 'ext/openssl/openssl.stub.php:485'
+source = 'ext/openssl/openssl.stub.php:425'
 
 [[class]]
 name = 'OpenSSLAsymmetricKey'
@@ -1307,14 +1268,14 @@ kind = 'class'
 extends = []
 implements = []
 final = true
-source = 'ext/openssl/openssl.stub.php:493'
+source = 'ext/openssl/openssl.stub.php:433'
 
 [[class]]
 name = 'Pcntl\QosClass'
 kind = 'enum'
 extends = []
 implements = []
-source = 'ext/pcntl/pcntl.stub.php:1115'
+source = 'ext/pcntl/pcntl.stub.php:1114'
 
 [[class]]
 name = 'PDOException'
@@ -1407,7 +1368,7 @@ kind = 'class'
 extends = []
 implements = []
 final = true
-source = 'ext/pgsql/pgsql.stub.php:968'
+source = 'ext/pgsql/pgsql.stub.php:986'
 
 [[class]]
 name = 'PgSql\Result'
@@ -1415,7 +1376,7 @@ kind = 'class'
 extends = []
 implements = []
 final = true
-source = 'ext/pgsql/pgsql.stub.php:976'
+source = 'ext/pgsql/pgsql.stub.php:994'
 
 [[class]]
 name = 'PgSql\Lob'
@@ -1423,7 +1384,7 @@ kind = 'class'
 extends = []
 implements = []
 final = true
-source = 'ext/pgsql/pgsql.stub.php:984'
+source = 'ext/pgsql/pgsql.stub.php:1002'
 
 [[class]]
 name = 'PharException'
@@ -1459,7 +1420,7 @@ kind = 'class'
 extends = []
 implements = ['Random\Engine']
 final = true
-source = 'ext/random/random.stub.php:53'
+source = 'ext/random/random.stub.php:50'
 
 [[class]]
 name = 'Random\Engine\PcgOneseq128XslRr64'
@@ -1467,7 +1428,7 @@ kind = 'class'
 extends = []
 implements = ['Random\Engine']
 final = true
-source = 'ext/random/random.stub.php:69'
+source = 'ext/random/random.stub.php:66'
 
 [[class]]
 name = 'Random\Engine\Xoshiro256StarStar'
@@ -1475,7 +1436,7 @@ kind = 'class'
 extends = []
 implements = ['Random\Engine']
 final = true
-source = 'ext/random/random.stub.php:91'
+source = 'ext/random/random.stub.php:88'
 
 [[class]]
 name = 'Random\Engine\Secure'
@@ -1483,21 +1444,21 @@ kind = 'class'
 extends = []
 implements = ['Random\CryptoSafeEngine']
 final = true
-source = 'ext/random/random.stub.php:116'
+source = 'ext/random/random.stub.php:113'
 
 [[class]]
 name = 'Random\Engine'
 kind = 'interface'
 extends = []
 implements = []
-source = 'ext/random/random.stub.php:125'
+source = 'ext/random/random.stub.php:122'
 
 [[class]]
 name = 'Random\CryptoSafeEngine'
 kind = 'interface'
 extends = ['Random\Engine']
 implements = []
-source = 'ext/random/random.stub.php:130'
+source = 'ext/random/random.stub.php:127'
 
 [[class]]
 name = 'Random\Randomizer'
@@ -1505,56 +1466,56 @@ kind = 'class'
 extends = []
 implements = []
 final = true
-source = 'ext/random/random.stub.php:137'
+source = 'ext/random/random.stub.php:134'
 
 [[class]]
 name = 'Random\IntervalBoundary'
 kind = 'enum'
 extends = []
 implements = []
-source = 'ext/random/random.stub.php:166'
+source = 'ext/random/random.stub.php:163'
 
 [[class]]
 name = 'Random\RandomError'
 kind = 'class'
 extends = ['Error']
 implements = []
-source = 'ext/random/random.stub.php:176'
+source = 'ext/random/random.stub.php:173'
 
 [[class]]
 name = 'Random\BrokenRandomEngineError'
 kind = 'class'
 extends = ['Random\RandomError']
 implements = []
-source = 'ext/random/random.stub.php:183'
+source = 'ext/random/random.stub.php:180'
 
 [[class]]
 name = 'Random\RandomException'
 kind = 'class'
 extends = ['Exception']
 implements = []
-source = 'ext/random/random.stub.php:190'
+source = 'ext/random/random.stub.php:187'
 
 [[class]]
 name = 'ReflectionException'
 kind = 'class'
 extends = ['Exception']
 implements = []
-source = 'ext/reflection/php_reflection.stub.php:8'
+source = 'ext/reflection/php_reflection.stub.php:5'
 
 [[class]]
 name = 'Reflection'
 kind = 'class'
 extends = []
 implements = []
-source = 'ext/reflection/php_reflection.stub.php:12'
+source = 'ext/reflection/php_reflection.stub.php:9'
 
 [[class]]
 name = 'Reflector'
 kind = 'interface'
 extends = ['Stringable']
 implements = []
-source = 'ext/reflection/php_reflection.stub.php:18'
+source = 'ext/reflection/php_reflection.stub.php:15'
 
 [[class]]
 name = 'ReflectionFunctionAbstract'
@@ -1562,14 +1523,14 @@ kind = 'class'
 extends = []
 implements = ['Reflector']
 abstract = true
-source = 'ext/reflection/php_reflection.stub.php:23'
+source = 'ext/reflection/php_reflection.stub.php:20'
 
 [[class]]
 name = 'ReflectionFunction'
 kind = 'class'
 extends = ['ReflectionFunctionAbstract']
 implements = []
-source = 'ext/reflection/php_reflection.stub.php:120'
+source = 'ext/reflection/php_reflection.stub.php:117'
 
 [[class]]
 name = 'ReflectionGenerator'
@@ -1577,56 +1538,56 @@ kind = 'class'
 extends = []
 implements = []
 final = true
-source = 'ext/reflection/php_reflection.stub.php:148'
+source = 'ext/reflection/php_reflection.stub.php:145'
 
 [[class]]
 name = 'ReflectionMethod'
 kind = 'class'
 extends = ['ReflectionFunctionAbstract']
 implements = []
-source = 'ext/reflection/php_reflection.stub.php:167'
+source = 'ext/reflection/php_reflection.stub.php:164'
 
 [[class]]
 name = 'ReflectionClass'
 kind = 'class'
 extends = []
 implements = ['Reflector']
-source = 'ext/reflection/php_reflection.stub.php:237'
+source = 'ext/reflection/php_reflection.stub.php:234'
 
 [[class]]
 name = 'ReflectionObject'
 kind = 'class'
 extends = ['ReflectionClass']
 implements = []
-source = 'ext/reflection/php_reflection.stub.php:441'
+source = 'ext/reflection/php_reflection.stub.php:438'
 
 [[class]]
 name = 'PropertyHookType'
 kind = 'enum'
 extends = []
 implements = []
-source = 'ext/reflection/php_reflection.stub.php:446'
+source = 'ext/reflection/php_reflection.stub.php:443'
 
 [[class]]
 name = 'ReflectionProperty'
 kind = 'class'
 extends = []
 implements = ['Reflector']
-source = 'ext/reflection/php_reflection.stub.php:453'
+source = 'ext/reflection/php_reflection.stub.php:450'
 
 [[class]]
 name = 'ReflectionClassConstant'
 kind = 'class'
 extends = []
 implements = ['Reflector']
-source = 'ext/reflection/php_reflection.stub.php:584'
+source = 'ext/reflection/php_reflection.stub.php:577'
 
 [[class]]
 name = 'ReflectionParameter'
 kind = 'class'
 extends = []
 implements = ['Reflector']
-source = 'ext/reflection/php_reflection.stub.php:643'
+source = 'ext/reflection/php_reflection.stub.php:636'
 
 [[class]]
 name = 'ReflectionType'
@@ -1634,42 +1595,42 @@ kind = 'class'
 extends = []
 implements = ['Stringable']
 abstract = true
-source = 'ext/reflection/php_reflection.stub.php:726'
+source = 'ext/reflection/php_reflection.stub.php:717'
 
 [[class]]
 name = 'ReflectionNamedType'
 kind = 'class'
 extends = ['ReflectionType']
 implements = []
-source = 'ext/reflection/php_reflection.stub.php:737'
+source = 'ext/reflection/php_reflection.stub.php:728'
 
 [[class]]
 name = 'ReflectionUnionType'
 kind = 'class'
 extends = ['ReflectionType']
 implements = []
-source = 'ext/reflection/php_reflection.stub.php:746'
+source = 'ext/reflection/php_reflection.stub.php:737'
 
 [[class]]
 name = 'ReflectionIntersectionType'
 kind = 'class'
 extends = ['ReflectionType']
 implements = []
-source = 'ext/reflection/php_reflection.stub.php:751'
+source = 'ext/reflection/php_reflection.stub.php:742'
 
 [[class]]
 name = 'ReflectionExtension'
 kind = 'class'
 extends = []
 implements = ['Reflector']
-source = 'ext/reflection/php_reflection.stub.php:757'
+source = 'ext/reflection/php_reflection.stub.php:748'
 
 [[class]]
 name = 'ReflectionZendExtension'
 kind = 'class'
 extends = []
 implements = ['Reflector']
-source = 'ext/reflection/php_reflection.stub.php:803'
+source = 'ext/reflection/php_reflection.stub.php:794'
 
 [[class]]
 name = 'ReflectionReference'
@@ -1677,35 +1638,35 @@ kind = 'class'
 extends = []
 implements = []
 final = true
-source = 'ext/reflection/php_reflection.stub.php:831'
+source = 'ext/reflection/php_reflection.stub.php:822'
 
 [[class]]
 name = 'ReflectionAttribute'
 kind = 'class'
 extends = []
 implements = ['Reflector']
-source = 'ext/reflection/php_reflection.stub.php:844'
+source = 'ext/reflection/php_reflection.stub.php:835'
 
 [[class]]
 name = 'ReflectionEnum'
 kind = 'class'
 extends = ['ReflectionClass']
 implements = []
-source = 'ext/reflection/php_reflection.stub.php:864'
+source = 'ext/reflection/php_reflection.stub.php:855'
 
 [[class]]
 name = 'ReflectionEnumUnitCase'
 kind = 'class'
 extends = ['ReflectionClassConstant']
 implements = []
-source = 'ext/reflection/php_reflection.stub.php:879'
+source = 'ext/reflection/php_reflection.stub.php:870'
 
 [[class]]
 name = 'ReflectionEnumBackedCase'
 kind = 'class'
 extends = ['ReflectionEnumUnitCase']
 implements = []
-source = 'ext/reflection/php_reflection.stub.php:889'
+source = 'ext/reflection/php_reflection.stub.php:880'
 
 [[class]]
 name = 'ReflectionFiber'
@@ -1713,14 +1674,14 @@ kind = 'class'
 extends = []
 implements = []
 final = true
-source = 'ext/reflection/php_reflection.stub.php:897'
+source = 'ext/reflection/php_reflection.stub.php:888'
 
 [[class]]
 name = 'ReflectionConstant'
 kind = 'class'
 extends = []
 implements = ['Reflector']
-source = 'ext/reflection/php_reflection.stub.php:916'
+source = 'ext/reflection/php_reflection.stub.php:907'
 
 [[class]]
 name = 'SessionHandlerInterface'
@@ -1850,7 +1811,7 @@ kind = 'class'
 extends = []
 implements = []
 final = true
-source = 'ext/sockets/sockets.stub.php:2204'
+source = 'ext/sockets/sockets.stub.php:2056'
 
 [[class]]
 name = 'AddressInfo'
@@ -1858,14 +1819,14 @@ kind = 'class'
 extends = []
 implements = []
 final = true
-source = 'ext/sockets/sockets.stub.php:2212'
+source = 'ext/sockets/sockets.stub.php:2064'
 
 [[class]]
 name = 'SodiumException'
 kind = 'class'
 extends = ['Exception']
 implements = []
-source = 'ext/sodium/libsodium.stub.php:970'
+source = 'ext/sodium/libsodium.stub.php:804'
 
 [[class]]
 name = 'ArrayObject'
@@ -2274,22 +2235,14 @@ name = 'SQLite3Stmt'
 kind = 'class'
 extends = []
 implements = []
-source = 'ext/sqlite3/sqlite3.stub.php:243'
+source = 'ext/sqlite3/sqlite3.stub.php:245'
 
 [[class]]
 name = 'SQLite3Result'
 kind = 'class'
 extends = []
 implements = []
-source = 'ext/sqlite3/sqlite3.stub.php:287'
-
-[[class]]
-name = 'SortDirection'
-kind = 'enum'
-extends = []
-implements = []
-absent_on_pinned = true
-source = 'ext/standard/basic_functions.stub.php:93'
+source = 'ext/sqlite3/sqlite3.stub.php:289'
 
 [[class]]
 name = '__PHP_Incomplete_Class'
@@ -2297,21 +2250,21 @@ kind = 'class'
 extends = []
 implements = []
 final = true
-source = 'ext/standard/basic_functions.stub.php:1493'
+source = 'ext/standard/basic_functions.stub.php:1480'
 
 [[class]]
 name = 'AssertionError'
 kind = 'class'
 extends = ['Error']
 implements = []
-source = 'ext/standard/basic_functions.stub.php:1497'
+source = 'ext/standard/basic_functions.stub.php:1484'
 
 [[class]]
 name = 'RoundingMode'
 kind = 'enum'
 extends = []
 implements = []
-source = 'ext/standard/basic_functions.stub.php:3132'
+source = 'ext/standard/basic_functions.stub.php:3109'
 
 [[class]]
 name = 'Directory'
@@ -2320,146 +2273,6 @@ extends = []
 implements = []
 final = true
 source = 'ext/standard/dir.stub.php:92'
-
-[[class]]
-name = 'Io\IoException'
-kind = 'class'
-extends = ['Exception']
-implements = []
-absent_on_pinned = true
-source = 'ext/standard/io_poll.stub.php:9'
-
-[[class]]
-name = 'Io\Poll\Backend'
-kind = 'enum'
-extends = []
-implements = []
-absent_on_pinned = true
-source = 'ext/standard/io_poll.stub.php:15'
-
-[[class]]
-name = 'Io\Poll\Event'
-kind = 'enum'
-extends = []
-implements = []
-absent_on_pinned = true
-source = 'ext/standard/io_poll.stub.php:33'
-
-[[class]]
-name = 'Io\Poll\Handle'
-kind = 'interface'
-extends = []
-implements = []
-absent_on_pinned = true
-source = 'ext/standard/io_poll.stub.php:43'
-
-[[class]]
-name = 'Io\Poll\Watcher'
-kind = 'class'
-extends = []
-implements = []
-final = true
-absent_on_pinned = true
-source = 'ext/standard/io_poll.stub.php:51'
-
-[[class]]
-name = 'Io\Poll\Context'
-kind = 'class'
-extends = []
-implements = []
-final = true
-absent_on_pinned = true
-source = 'ext/standard/io_poll.stub.php:82'
-
-[[class]]
-name = 'Io\Poll\PollException'
-kind = 'class'
-extends = ['Io\IoException']
-implements = []
-absent_on_pinned = true
-source = 'ext/standard/io_poll.stub.php:94'
-
-[[class]]
-name = 'Io\Poll\FailedPollOperationException'
-kind = 'class'
-extends = ['Io\Poll\PollException']
-implements = []
-abstract = true
-absent_on_pinned = true
-source = 'ext/standard/io_poll.stub.php:96'
-
-[[class]]
-name = 'Io\Poll\FailedContextInitializationException'
-kind = 'class'
-extends = ['Io\Poll\FailedPollOperationException']
-implements = []
-absent_on_pinned = true
-source = 'ext/standard/io_poll.stub.php:135'
-
-[[class]]
-name = 'Io\Poll\FailedHandleAddException'
-kind = 'class'
-extends = ['Io\Poll\FailedPollOperationException']
-implements = []
-absent_on_pinned = true
-source = 'ext/standard/io_poll.stub.php:137'
-
-[[class]]
-name = 'Io\Poll\FailedWatcherModificationException'
-kind = 'class'
-extends = ['Io\Poll\FailedPollOperationException']
-implements = []
-absent_on_pinned = true
-source = 'ext/standard/io_poll.stub.php:139'
-
-[[class]]
-name = 'Io\Poll\FailedPollWaitException'
-kind = 'class'
-extends = ['Io\Poll\FailedPollOperationException']
-implements = []
-absent_on_pinned = true
-source = 'ext/standard/io_poll.stub.php:141'
-
-[[class]]
-name = 'Io\Poll\BackendUnavailableException'
-kind = 'class'
-extends = ['Io\Poll\PollException']
-implements = []
-absent_on_pinned = true
-source = 'ext/standard/io_poll.stub.php:143'
-
-[[class]]
-name = 'Io\Poll\InactiveWatcherException'
-kind = 'class'
-extends = ['Io\Poll\PollException']
-implements = []
-absent_on_pinned = true
-source = 'ext/standard/io_poll.stub.php:145'
-
-[[class]]
-name = 'Io\Poll\HandleAlreadyWatchedException'
-kind = 'class'
-extends = ['Io\Poll\PollException']
-implements = []
-absent_on_pinned = true
-source = 'ext/standard/io_poll.stub.php:147'
-
-[[class]]
-name = 'Io\Poll\InvalidHandleException'
-kind = 'class'
-extends = ['Io\Poll\PollException']
-implements = []
-absent_on_pinned = true
-source = 'ext/standard/io_poll.stub.php:149'
-
-[[class]]
-name = 'StreamPollHandle'
-kind = 'class'
-extends = []
-implements = ['Io\Poll\Handle']
-final = true
-absent_on_pinned = true
-source = 'ext/standard/io_poll.stub.php:157'
 
 [[class]]
 name = 'php_user_filter'
@@ -2474,7 +2287,7 @@ kind = 'class'
 extends = []
 implements = []
 final = true
-source = 'ext/standard/user_filters.stub.php:62'
+source = 'ext/standard/user_filters.stub.php:59'
 
 [[class]]
 name = 'SysvMessageQueue'
@@ -2527,53 +2340,28 @@ name = 'Uri\UriException'
 kind = 'class'
 extends = ['Exception']
 implements = []
-source = 'ext/uri/php_uri.stub.php:10'
+source = 'ext/uri/php_uri.stub.php:7'
 
 [[class]]
 name = 'Uri\UriError'
 kind = 'class'
 extends = ['Error']
 implements = []
-source = 'ext/uri/php_uri.stub.php:15'
+source = 'ext/uri/php_uri.stub.php:12'
 
 [[class]]
 name = 'Uri\InvalidUriException'
 kind = 'class'
 extends = ['Uri\UriException']
 implements = []
-source = 'ext/uri/php_uri.stub.php:20'
+source = 'ext/uri/php_uri.stub.php:17'
 
 [[class]]
 name = 'Uri\UriComparisonMode'
 kind = 'enum'
 extends = []
 implements = []
-source = 'ext/uri/php_uri.stub.php:24'
-
-[[class]]
-name = 'Uri\Rfc3986\UriType'
-kind = 'enum'
-extends = []
-implements = []
-absent_on_pinned = true
-source = 'ext/uri/php_uri.stub.php:32'
-
-[[class]]
-name = 'Uri\Rfc3986\UriHostType'
-kind = 'enum'
-extends = []
-implements = []
-absent_on_pinned = true
-source = 'ext/uri/php_uri.stub.php:40'
-
-[[class]]
-name = 'Uri\Rfc3986\UriBuilder'
-kind = 'class'
-extends = []
-implements = []
-final = true
-absent_on_pinned = true
-source = 'ext/uri/php_uri.stub.php:48'
+source = 'ext/uri/php_uri.stub.php:21'
 
 [[class]]
 name = 'Uri\Rfc3986\Uri'
@@ -2581,21 +2369,21 @@ kind = 'class'
 extends = []
 implements = []
 final = true
-source = 'ext/uri/php_uri.stub.php:78'
+source = 'ext/uri/php_uri.stub.php:30'
 
 [[class]]
 name = 'Uri\WhatWg\InvalidUrlException'
 kind = 'class'
 extends = ['Uri\InvalidUriException']
 implements = []
-source = 'ext/uri/php_uri.stub.php:154'
+source = 'ext/uri/php_uri.stub.php:102'
 
 [[class]]
 name = 'Uri\WhatWg\UrlValidationErrorType'
 kind = 'enum'
 extends = []
 implements = []
-source = 'ext/uri/php_uri.stub.php:161'
+source = 'ext/uri/php_uri.stub.php:109'
 
 [[class]]
 name = 'Uri\WhatWg\UrlValidationError'
@@ -2603,15 +2391,7 @@ kind = 'class'
 extends = []
 implements = []
 final = true
-source = 'ext/uri/php_uri.stub.php:195'
-
-[[class]]
-name = 'Uri\WhatWg\UrlHostType'
-kind = 'enum'
-extends = []
-implements = []
-absent_on_pinned = true
-source = 'ext/uri/php_uri.stub.php:204'
+source = 'ext/uri/php_uri.stub.php:143'
 
 [[class]]
 name = 'Uri\WhatWg\Url'
@@ -2619,7 +2399,7 @@ kind = 'class'
 extends = []
 implements = []
 final = true
-source = 'ext/uri/php_uri.stub.php:214'
+source = 'ext/uri/php_uri.stub.php:153'
 
 [[class]]
 name = 'XMLParser'
@@ -2672,45 +2452,4 @@ extends = []
 implements = []
 final = true
 source = 'ext/zlib/zlib.stub.php:158'
-
-[[class]]
-name = 'StreamErrorCode'
-kind = 'enum'
-extends = []
-implements = []
-absent_on_pinned = true
-source = 'main/streams/stream_errors.stub.php:9'
-
-[[class]]
-name = 'StreamErrorMode'
-kind = 'enum'
-extends = []
-implements = []
-absent_on_pinned = true
-source = 'main/streams/stream_errors.stub.php:112'
-
-[[class]]
-name = 'StreamErrorStore'
-kind = 'enum'
-extends = []
-implements = []
-absent_on_pinned = true
-source = 'main/streams/stream_errors.stub.php:119'
-
-[[class]]
-name = 'StreamError'
-kind = 'class'
-extends = []
-implements = []
-final = true
-absent_on_pinned = true
-source = 'main/streams/stream_errors.stub.php:128'
-
-[[class]]
-name = 'StreamException'
-kind = 'class'
-extends = ['Exception']
-implements = []
-absent_on_pinned = true
-source = 'main/streams/stream_errors.stub.php:138'
 
