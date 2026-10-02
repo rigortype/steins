@@ -24,7 +24,8 @@ use crate::{
     CALL_TOO_FEW_ARGUMENTS_ID, CALL_TOO_MANY_ARGUMENTS_ID, CALL_UNDEFINED_FUNCTION_ID,
     CALL_UNDEFINED_METHOD_ID, CALL_UNKNOWN_NAMED_ARGUMENT_ID, CLASS_UNDEFINED_ID,
     DEBUG_PHPDOC_TYPE_ID, DEBUG_TRACE_ID, DEBUG_TYPE_ID, DEBUG_VAR_DUMP_ID, EFFECT_ID,
-    CLASS_ABSTRACT_UNIMPLEMENTED_ID, CLASS_EXTENDS_FINAL_ID,
+    CLASS_ABSTRACT_UNIMPLEMENTED_ID, CLASS_EXTENDS_FINAL_ID, EFFECT_MAYBE_ENVELOPE_EXCEEDED_ID,
+    THROW_MAYBE_UNDECLARED_ID,
     EFFECT_LISKOV_ID, FOREACH_NON_ITERABLE_ID, ID, INTEROP_UNKNOWN_LABEL_ID, INVALID_OPERAND_ID,
     NEVER_PARAM_REACHABLE_ID,
     OFFSET_MAYBE_MISSING_ID,
@@ -424,6 +425,14 @@ pub const DIAGNOSTIC_REGISTRY: &[(&str, Layer, Floor)] = &[
     (THROW_LISKOV_ID, Layer::Contract, Floor::Contracts),
     (EFFECT_ID, Layer::Contract, Floor::Contracts),
     (EFFECT_LISKOV_ID, Layer::Contract, Floor::Contracts),
+    // The `maybe-` siblings of the two envelope checks (ADR-0100, issue #800):
+    // the possibly leg of `effect.envelope-exceeded` / `throw.undeclared` is a
+    // gap, never a proof, so it sits at the strict floor — `offset.maybe-missing`
+    // is the precedent — and a `contracts` run keeps its meaning. Contract layer
+    // for the same reason their definite twins are: the claim is about what the
+    // code's own declaration says.
+    (EFFECT_MAYBE_ENVELOPE_EXCEEDED_ID, Layer::Contract, Floor::Strict),
+    (THROW_MAYBE_UNDECLARED_ID, Layer::Contract, Floor::Strict),
     // interop-label hygiene (ADR-0082 amendment, issue #311): NOT the mechanics
     // layer its twin `effect.unknown-label` carries — mechanics is unsuppressable
     // and always-on, the fail-closed posture the owner ruling refused for

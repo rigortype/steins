@@ -9,6 +9,8 @@
 //! [`crate::fixpoints`], not here: the throw system and the escape sweep key on
 //! it too.
 
+mod floor;
+
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use steins_db::{Db, EffectsPolicy, PluginFacts, Project, SourceFile, parse, project_index};
@@ -26,6 +28,7 @@ use crate::throws::{
 use crate::cx::Cx;
 use crate::facts::FileFacts;
 use crate::project::{Diagnostic, FileUnit, Index, LazyTree};
+use self::floor::Floor;
 use crate::site::engine::MUTATE_LOCAL;
 use crate::site::method::declared_receiver_fqn;
 use crate::site::reach::Frame;
@@ -1042,6 +1045,10 @@ pub(crate) fn effect_diagnostics(fx: &Fixpoints<'_>) -> Vec<Diagnostic> {
     // The registry this project's declared labels are judged against (ADR-0068):
     // builtin taxonomy plus whatever the plugin channel registered.
     let registry = plugins.registry();
+    // The declarations a caller's inherited gap is owed to (the strict floor's
+    // discharge 4, ADR-0100 §4): read before the loop, because a callee may live in
+    // a file the loop has not reached.
+    let enveloped = floor::enveloped_syms(units, index, registry, policy);
     let mut out = Vec::new();
     for fi in 0..units.len() {
         let cx = Cx::new(units, index, fi);
@@ -1074,7 +1081,8 @@ pub(crate) fn effect_diagnostics(fx: &Fixpoints<'_>) -> Vec<Diagnostic> {
                 continue;
             };
             let frame = Frame::new(None, &f.params, &f.sites);
-            report_unit(&mut out, &cx, &frame, plugins, &f.name, bound, effects, registry);
+            let floor = Floor::new(&enveloped, f.docblock.as_ref());
+            report_unit(&mut out, &cx, &frame, plugins, &f.name, bound, (effects, registry, &floor));
         }
         for c in cx.tree().classes() {
             // The class-level tag is one declaration, so its vocabulary is judged
@@ -1116,7 +1124,9 @@ pub(crate) fn effect_diagnostics(fx: &Fixpoints<'_>) -> Vec<Diagnostic> {
                 {
                     let display = format!("{}::{}", c.name, m.name);
                     let frame = Frame::new(Some(&c.fqn), &m.params, &m.sites);
-                    report_unit(&mut out, &cx, &frame, plugins, &display, bound, effects, registry);
+                    let floor = Floor::new(&enveloped, m.docblock.as_ref());
+                    let judged = (effects, registry, &floor);
+                    report_unit(&mut out, &cx, &frame, plugins, &display, bound, judged);
                 }
                 // Liskov (ADR-0033 point 5): a concrete implementation whose PROVEN
                 // effects exceed an abstraction's effect envelope. Interfaces carry
@@ -1319,33 +1329,38 @@ impl OperativeBound<'_> {
         self.exceeds(&f.label) && !attribution_tolerated(f, self.policy)
     }
 
-    /// How `effect.envelope-exceeded` quotes the declaration back, in the
-    /// author's own syntax.
-    fn declared_clause(self, exceeding_label: &str) -> String {
+    /// The envelope as its author spelled it: the attribute, or the interop tag
+    /// with its label list in the tag's own grammar (ADR-0082 §4: comma-separated
+    /// dot-paths, unquoted). The pure tags take no labels, so the tag name is the
+    /// whole bound.
+    fn spelled(self) -> String {
         let tag = self.spelling.tag_name();
         match self.spelling {
             EnvelopeSpelling::Attribute if self.labels.is_empty() => "#[\\Steins\\Pure]".to_owned(),
             EnvelopeSpelling::Attribute => {
                 let quoted: Vec<String> = self.labels.iter().map(|l| format!("'{l}'")).collect();
-                format!(
-                    "#[\\Steins\\Effect({})] — {exceeding_label} exceeds the envelope",
-                    quoted.join(", ")
-                )
+                format!("#[\\Steins\\Effect({})]", quoted.join(", "))
             }
-            // The pure tags take no labels, so the tag name is the whole bound.
             EnvelopeSpelling::Interop(_) if self.labels.is_empty() => tag.to_owned(),
-            // The label list is written in the tag's own grammar (ADR-0082 §4):
-            // comma-separated dot-paths, unquoted.
-            EnvelopeSpelling::Interop(_) => format!(
-                "{tag} {} — {exceeding_label} exceeds the envelope",
-                self.labels.join(", ")
-            ),
+            EnvelopeSpelling::Interop(_) => format!("{tag} {}", self.labels.join(", ")),
         }
+    }
+
+    /// How `effect.envelope-exceeded` quotes the declaration back, in the
+    /// author's own syntax.
+    fn declared_clause(self, exceeding_label: &str) -> String {
+        let spelled = self.spelled();
+        if self.labels.is_empty() {
+            return spelled;
+        }
+        format!("{spelled} — {exceeding_label} exceeds the envelope")
     }
 }
 
 /// Emit the diagnostics for one declared-envelope unit (ADR-0005/0018).
-#[allow(clippy::too_many_arguments)]
+///
+/// `judged` is what the unit is judged **with**: the fixpoint's effect sets, the
+/// label registry, and the strict floor's per-unit facts ([`Floor`]).
 fn report_unit(
     out: &mut Vec<Diagnostic>,
     cx: &Cx,
@@ -1353,17 +1368,19 @@ fn report_unit(
     plugins: &PluginFacts,
     display: &str,
     bound: OperativeBound<'_>,
-    effects: &HashMap<Sym, EffectSet>,
-    registry: &steins_catalog::LabelRegistry,
+    judged: (&HashMap<Sym, EffectSet>, &steins_catalog::LabelRegistry, &Floor<'_>),
 ) {
+    let (effects, registry, floor) = judged;
     report_unknown_labels(out, cx, display, bound, registry);
 
     // Envelope-exceeded violations: each site is resolved as the fixpoint resolved
-    // it, and what it runs is held to the envelope.
+    // it, and what it runs is held to the envelope. The strict floor reads the same
+    // resolution for the gaps the proven lane is silent about.
     let knowledge = Knowledge::Catalog { lane: Lane::Effects, plugins: Some(plugins) };
     for site in frame.sites {
         let resolved = resolve_site(cx, frame, site, &knowledge);
         report_site(out, cx, site.span, &resolved, effects, display, bound);
+        floor.report_site(out, cx, frame, site, &resolved, effects, display, bound);
     }
 }
 

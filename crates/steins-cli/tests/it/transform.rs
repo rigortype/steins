@@ -611,3 +611,43 @@ fn effects_envelope_json_format_emits_report_and_postcheck() {
     assert_eq!(v["applied"], false);
     assert_eq!(v["report"]["plan"]["edits"].as_array().unwrap().len(), 1);
 }
+
+// The strict floor (ADR-0100): a tag a transform writes is verifiable
+
+/// The two envelope writers only write a tag where the lane is exhaustive, and the
+/// strict floor only names a gap where it is not: so a project the writers have
+/// annotated checks clean of the `maybe-` siblings at `--profile strict`, on the
+/// very tags they wrote.
+#[test]
+fn written_envelopes_leave_no_sibling_finding_at_strict() {
+    let proj = TempProject::new("floor-written-tags");
+    proj.write(
+        "lib.php",
+        "<?php\n\
+         function writes(): void { file_put_contents(\"/x\", \"y\"); }\n\
+         function shouts(string $s): void { echo strtoupper($s); }\n\
+         function fails(): void { throw new \\RuntimeException(\"boom\"); }\n\
+         function calls(): void { writes(); fails(); }\n\
+         class Box {\n\
+         \x20   public function open(int $d): int { if ($d === 0) { throw new \\LogicException(\"zero\"); } return $d; }\n\
+         \x20   public function save(): void { file_put_contents(\"/y\", \"z\"); }\n\
+         }\n",
+    );
+
+    for transform in ["effects-envelope", "throws-envelope"] {
+        let r = run(&["transform", transform, "--apply", proj.path()]);
+        assert_eq!(r.code, 0, "{transform} stderr:\n{}", r.stderr);
+    }
+    let written = proj.read("lib.php");
+    assert!(written.contains("@phpstan-impure io.fs.write"), "no effect tag written:\n{written}");
+    assert!(written.contains("@throws"), "no throws tag written:\n{written}");
+
+    let args = ["check", "--profile", "strict", "--no-cache", "--no-php", "--format", "json"];
+    let r = run(&[args.as_slice(), &[proj.path()]].concat());
+    assert!(
+        !r.stdout.contains("effect.maybe-envelope-exceeded")
+            && !r.stdout.contains("throw.maybe-undeclared"),
+        "a written tag drew a sibling finding:\n{}",
+        r.stdout
+    );
+}

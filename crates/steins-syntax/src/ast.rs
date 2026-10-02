@@ -719,11 +719,18 @@ pub struct ThrowOrigin {
 /// to the effect lane and a [`ThrowKind::Taint`] to the throw lane; the throw
 /// lane's taint also comes from a [`ThrownKind::Unresolved`] and from a declared
 /// receiver ([`EffectRecv::Var`], [`EffectRecv::PropRead`]) it cannot resolve.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub enum DynamicSite {
     /// A `$f()` or `($cb)()` call whose callee is not a body-local callback.
-    Call,
+    ///
+    /// `var` is the callee's name (no `$`) when it is a bare variable naming a
+    /// by-value, non-variadic parameter of the frame that no statement of the
+    /// frame writes: the one case whose value is exactly what the caller bound,
+    /// which is what a declared contract on the parameter (`pure-callable`,
+    /// `@pure-unless-callable-is-impure`) speaks about. `None` for every other
+    /// callee, a rebound parameter and a local alike.
+    Call { var: Option<String> },
     /// A `$o->m()` call whose receiver or selector is not resolvable.
     MethodCall,
     /// A `$c::m()`, `static::m()` or `Foo::$m()` call.
