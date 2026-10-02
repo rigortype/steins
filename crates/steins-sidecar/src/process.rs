@@ -180,14 +180,15 @@ const SPAWN_BUSY_BACKOFF: Duration = Duration::from_millis(10);
 /// [`std::io::ErrorKind::ExecutableFileBusy`] (issue #910).
 ///
 /// On Linux `execve` refuses an executable that some process still holds open
-/// for writing. A thread that has just written a script and closed it can still
-/// lose to a concurrent `fork` on another thread: the forked child inherits the
-/// write descriptor and drops it only at its own `exec`, so for that window the
-/// script is busy. The same refusal meets a package manager that is replacing
-/// the `php` binary. Both clear within milliseconds, so a few short retries turn
-/// a spurious engine-off into a slightly later start. Any other error, and a
-/// busy one that outlasts the attempts, is returned as it came, so a spawn that
-/// really fails still fails exactly as before.
+/// for writing. That meets an interpreter rewritten in place, such as a version
+/// manager regenerating its `php` shim, and (as in this crate's tests) a script
+/// just written by a thread that races a concurrent `fork` on another: the
+/// forked child inherits the write descriptor and drops it only at its own
+/// `exec`, so for that window the script is busy. Both clear within
+/// milliseconds, so a few short retries turn a spurious engine-off into a
+/// slightly later start. Any other error, and a busy one that outlasts the
+/// attempts, is returned as it came, so a spawn that really fails still fails
+/// exactly as before.
 ///
 /// Generic over the spawner so the policy is testable without a real `exec`.
 fn spawn_retrying_busy<T>(
