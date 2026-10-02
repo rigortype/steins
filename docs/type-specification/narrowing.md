@@ -213,16 +213,25 @@ the branch it protects, so the absence family ([object-model.md](object-model.md
 This is a soundness rule, not a convenience: emitting an absence finding across a
 guard that checked for exactly that would be a false positive.
 
-**A guard discharges the same way in every position** (ADR-0049 A25). `defined`, `class_exists`, `function_exists` and `extension_loaded`
-fold against the project index, the dam and the analysing PHP; a decided one
-marks the ternary arm or the `&&`/`||` operand PHP never evaluates as dead, in
-`return`, `echo`, an argument, an assignment or a bare statement as in an `if`,
-and a `switch (true)` case is judged as an `elseif` is. `extension_loaded('x')`
-is answered from the loaded-extension list of the analysing PHP, and stays
-undecided without one and wherever the project calls `dl()`. `method_exists`,
-`is_callable([$o, 'm'])` and `property_exists` vouch for the member on every
-class the receiver can be: the heap class of a variable bound by `new`, else each
-class of its narrowed declared type.
+**A guard discharges the same way in every position** (ADR-0049 A25).
+`defined`, `class_exists` and `function_exists` fold against the project index, the
+dam and the analysing PHP, and `extension_loaded` against the analysing PHP's
+extension list. A decided one marks the ternary arm or the `&&`/`||` operand PHP
+never evaluates as dead, in an expression statement, `return`, `echo`, an arrow
+body or a hook body as in an `if` condition, and a `switch (true)` case is judged
+as an `elseif` is. A ternary inside an `if`/`while`/`for` condition, the subject
+of a `foreach`/`switch`/`match`, and the arguments of `unset`/`isset` are not
+swept. `extension_loaded` stays undecided without a sidecar and wherever the
+project calls `dl()`. A class declared under a condition, and a project class
+asked about with an `$autoload` that is not literally `true`, leave `class_exists`
+undecided.
+
+A member guard on a `$var` receiver is about that binding. `method_exists($v, 'm')`
+and `is_callable([$v, 'm'])` fold to false when every narrowed, native-typed declared
+arm provably lacks `m` (the declared-receiver lane's own ladder), so the guarded body
+is dead; an arm that may have `m` leaves the guard undecided. `property_exists($v, 'p')`
+cannot fold, since it is true for a dynamic property, and vouches `$v->p` until the
+binding is rebound. An allocation-proven receiver keeps the exact-class vouch.
 
 ## Short-circuit threading
 

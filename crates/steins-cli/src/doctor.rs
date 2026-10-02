@@ -872,11 +872,20 @@ fn section_coverage(
                 "    existence-absence claims (undefined function/class) stay silent where these stand (ADR-0049 §2)"
             );
         }
-        // Every dam kind closes the constant valve too (ADR-0078, #198).
-        line!(
-            sec,
-            "    `constant.undefined` stays silent where any of these stand — a runtime-name define is a constant-only dam"
-        );
+        // Every dam kind but `dl()` closes the constant valve too (ADR-0078, #198).
+        if !dam.constants_are_clear() {
+            line!(
+                sec,
+                "    `constant.undefined` stays silent where any of these stand — a runtime-name define is a constant-only dam"
+            );
+        }
+        // `dl()` closes neither valve (issue #928).
+        if dam_counts[5] > 0 {
+            line!(
+                sec,
+                "    `extension_loaded()` is undecided where a dl() call stands; no name or constant valve closes"
+            );
+        }
     }
 
     let reflection_total: usize = reflection.iter().sum();

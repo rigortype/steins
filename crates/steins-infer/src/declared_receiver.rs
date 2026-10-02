@@ -329,14 +329,6 @@ pub(crate) fn check_phpdoc_undefined_method(
     let Some(lane) = declared_receiver_conjuncts(cx, arms) else {
         return;
     };
-    // Guard-respect leg (ADR-0049 §4, issue #930): a positive `method_exists($var, 'm')`
-    // or `is_callable([$var, 'm'])` dominating this site vouched the method on every
-    // class of the receiver's declared arms, and the programmer's evidence outranks a
-    // proof that rests on the same closed world — in it the guard is simply false and
-    // the call unreachable. Read exactly as the exact-receiver lane reads it.
-    if lane.iter().flatten().any(|class| store.vouches_method(class, &method)) {
-        return;
-    }
     // A13: minimum over the participating (post-narrowing) arms, computed
     // here so it can never drift from the arms the claim rests on.
     let id = declared_receiver_id(arms);
@@ -345,22 +337,9 @@ pub(crate) fn check_phpdoc_undefined_method(
     if !folder.absence_family_available() {
         return;
     }
-    // Every arm — and for an intersection, every CONJUNCT — must provably
-    // lack the method: member lookup over an inhabited intersection is the
-    // union of the arms (issue #234), so only absence from all conjuncts
-    // counts. `arm_provably_lacks_method` returns `None` both for "method is
-    // there" and "a leg couldn't close", covering both rules in one fold.
-    let mut arm_names: Vec<String> = Vec::with_capacity(lane.len());
-    for conjuncts in &lane {
-        let mut names: Vec<String> = Vec::with_capacity(conjuncts.len());
-        for f in conjuncts {
-            match arm_provably_lacks_method(cx, folder, f, &method) {
-                Some(name) => names.push(name),
-                None => return, // any conjunct not provably-absent ⇒ silence.
-            }
-        }
-        arm_names.push(names.join("&"));
-    }
+    let Some(arm_names) = lane_provably_lacks_method(cx, folder, &lane, &method) else {
+        return;
+    };
 
     let pos = cx.tree().position(call.span.start);
     let arms_disp = arm_names.join("|");
@@ -377,6 +356,63 @@ pub(crate) fn check_phpdoc_undefined_method(
         facet: None,
         fix: None,
     });
+}
+
+/// The display names of every arm of `lane` when **every arm — and for an intersection,
+/// every conjunct — provably lacks** `method`, or `None`. Member lookup over an inhabited
+/// intersection is the union of the arms (issue #234), so only absence from all
+/// conjuncts counts. [`arm_provably_lacks_method`] returns `None` both for "the method is
+/// there" and "a leg couldn't close", covering both rules in one fold.
+///
+/// The one ladder both readers of the declared-receiver lane share: the finding
+/// ([`check_phpdoc_undefined_method`]) and the `method_exists`/`is_callable` fold
+/// ([`declared_receiver_lacks_method`]), so a guard is dead exactly where the lane would
+/// have reported inside it.
+fn lane_provably_lacks_method(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    lane: &[Vec<String>],
+    method: &str,
+) -> Option<Vec<String>> {
+    let mut arm_names: Vec<String> = Vec::with_capacity(lane.len());
+    for conjuncts in lane {
+        let mut names: Vec<String> = Vec::with_capacity(conjuncts.len());
+        for f in conjuncts {
+            names.push(arm_provably_lacks_method(cx, folder, f, method)?);
+        }
+        arm_names.push(names.join("&"));
+    }
+    Some(arm_names)
+}
+
+/// Whether the declared-receiver lane of `$var` **proves** `method` absent, under the
+/// ladder [`check_phpdoc_undefined_method`] reports with, restricted to a lane that
+/// reports on the proof layer: not poisoned, not an exact receiver (that is the exact
+/// lane's), a non-empty narrowed lane every arm of which is `Verified`, a lane the
+/// declared-receiver reading admits, and a live absence family.
+///
+/// A `method_exists($var, 'm')` or `is_callable([$var, 'm'])` over such a receiver is
+/// provably false (issue #930), so the body it guards is dead.
+pub(crate) fn declared_receiver_lacks_method(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    store: &Store,
+    poisoned: bool,
+    var: &str,
+    method: &str,
+) -> bool {
+    if poisoned || store.is_exact(var) {
+        return false;
+    }
+    let Some(arms) = store.contract_arms(var) else { return false };
+    if arms.iter().any(|a| a.stratum != Stratum::Verified) {
+        return false;
+    }
+    let Some(lane) = declared_receiver_conjuncts(cx, arms) else { return false };
+    if !folder.absence_family_available() {
+        return false;
+    }
+    lane_provably_lacks_method(cx, folder, &lane, method).is_some()
 }
 
 /// The declared-receiver lane's id for a narrowed arm lane (ADR-0049 A13):

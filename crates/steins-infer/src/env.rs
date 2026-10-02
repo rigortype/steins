@@ -659,7 +659,8 @@ pub(crate) struct Store {
     /// liar. Walk-local (ADR-0048): bound on the guarded branch clone, intersected
     /// at a join (so `if (method_exists(C,'m')) {} (new C)->m();` never silences
     /// the tail), and untouched by [`Self::unbind`]/[`Self::clear`] — a symbol's
-    /// existence doesn't change on rebind or barrier.
+    /// existence doesn't change on rebind or barrier. The exception is the one vouch
+    /// that is about a binding rather than a symbol, [`Vouch::VarProperty`].
     pub(crate) vouched: HashSet<Vouch>,
     /// **Same-expression guards** (issue #421's follow-up to #418): call
     /// expressions (`ArgValue::Call`/`MethodCall`) a `!== null`/`!== false`
@@ -693,9 +694,13 @@ pub(crate) enum Vouch {
     Function(String),
     /// `class_exists`/`interface_exists`/`trait_exists`/`enum_exists('N')` vouched `N`.
     Class(String),
-    /// `property_exists(C, 'p')` vouched `C::$p` (issue #930) — `class` is lowercased,
-    /// `property` is kept as written: property names are case-sensitive.
-    Property { class: String, property: String },
+    /// `property_exists($var, 'p')` vouched `$var->p` **for this binding** (issue #930) —
+    /// `property` is kept as written: property names are case-sensitive. Keyed by the
+    /// variable, not by a class: `property_exists` answers true for a dynamic property
+    /// too, so it says nothing about the class's other instances, and a vouch that named
+    /// the class would leak to every other receiver of it. Dropped with the binding
+    /// ([`Store::unbind`], [`Store::clear`]).
+    VarProperty { var: String, property: String },
 }
 
 /// One arm of a [`Store::contract`] lane: a declared-type alternative plus the
@@ -852,6 +857,8 @@ impl Store {
         // The narrowed mark describes THIS binding's guard history; a rebound var
         // starts a fresh one with none (issue #428).
         self.narrowed.remove(var);
+        // A property vouch is about the binding too (issue #930).
+        self.vouched.retain(|v| !matches!(v, Vouch::VarProperty { var: x, .. } if x == var));
     }
 
     /// Drop every element place under `var` (ADR-0098 §2.3). Called wherever
@@ -902,6 +909,7 @@ impl Store {
         self.members.clear();
         self.contract.clear();
         self.narrowed.clear();
+        self.vouched.retain(|v| !matches!(v, Vouch::VarProperty { .. }));
         self.may_hold_places = false;
     }
 
@@ -975,12 +983,12 @@ impl Store {
         })
     }
 
-    /// Whether a positive `property_exists(C, 'p')` guard on this path vouched
-    /// `class::$p` (issue #930). The class is matched case-insensitively, the property
-    /// name exactly.
-    pub(crate) fn vouches_property(&self, class: &str, property: &str) -> bool {
-        self.vouched.contains(&Vouch::Property {
-            class: class.trim_start_matches('\\').to_ascii_lowercase(),
+    /// Whether a positive `property_exists($var, 'p')` guard on this path vouched
+    /// `$var->p` for the binding `var` holds now (issue #930). The property name is
+    /// matched exactly.
+    pub(crate) fn vouches_var_property(&self, var: &str, property: &str) -> bool {
+        self.vouched.contains(&Vouch::VarProperty {
+            var: var.to_owned(),
             property: property.to_owned(),
         })
     }

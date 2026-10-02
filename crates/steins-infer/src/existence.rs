@@ -4,7 +4,6 @@
 
 use std::collections::HashSet;
 
-use steins_contract::ContractTy;
 use steins_domain::Certainty;
 use steins_syntax::{
     ArgValue, ArrayKey, CallExpr, ClassDecl, EXISTENCE_PREDICATES, NameRef, RefKind, StaticClass,
@@ -12,6 +11,7 @@ use steins_syntax::{
 
 use crate::cx::Cx;
 use crate::dam::DamKind;
+use crate::declared_receiver::declared_receiver_lacks_method;
 use crate::env::{Store, Vouch};
 use crate::fold::Folder;
 use crate::project::{FnResolution, Res};
@@ -92,8 +92,17 @@ fn existence_predicate(cx: &Cx, call: &CallExpr) -> Option<&'static str> {
 }
 
 /// Fold a recognized existence-guard call to a verdict (the N3 machinery). Anything
-/// unrecognized or short of closure is `Maybe`.
-pub(crate) fn eval_existence_call(w: &WalkCx, folder: &mut dyn Folder, call: &CallExpr) -> Certainty {
+/// unrecognized or short of closure is `Maybe`. `store` is the branch's, read only by
+/// the member guards over a `$var` receiver ([`member_guard_verdict`]).
+pub(crate) fn eval_existence_call(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    store: &Store,
+    call: &CallExpr,
+) -> Certainty {
+    if let Some(verdict) = member_guard_verdict(w, folder, store, call) {
+        return verdict;
+    }
     let Some(pred) = existence_predicate(w.cx, call) else {
         return Certainty::Maybe;
     };
@@ -162,8 +171,39 @@ pub(crate) fn eval_existence_call(w: &WalkCx, folder: &mut dyn Folder, call: &Ca
         let Some(name) = existence_class_literal(w.cx, &call.args[0].value) else {
             return Certainty::Maybe;
         };
-        classlike_exists_verdict(w.cx, folder, pred, &name)
+        // The `$autoload` argument: absent is `true`, and a literal `true` is the same
+        // question. Anything else asks whether the class is *already loaded*, which
+        // a declaration in the project does not answer.
+        let autoload = call.args.get(1).is_none_or(|a| matches!(a.value, ArgValue::Bool(true)));
+        classlike_exists_verdict(w.cx, folder, pred, &name, autoload)
     }
+}
+
+/// The verdict of `method_exists($v, 'm')` / `is_callable([$v, 'm'])` over a `$var`
+/// receiver (issue #930), or `None` when `call` is neither — so literal-class
+/// `method_exists` keeps its N3 path.
+///
+/// `No` where the declared-receiver lane **proves** `m` absent on every narrowed arm
+/// ([`declared_receiver_lacks_method`], the ladder the lane reports with): the guard is
+/// provably false and the body it guards is dead, exactly where the lane would have
+/// reported inside it. Otherwise `Maybe` — an arm that may have `m` leaves the guard
+/// undecided, and an allocation-proven receiver stays with the exact-class vouch.
+fn member_guard_verdict(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    store: &Store,
+    call: &CallExpr,
+) -> Option<Certainty> {
+    let shape = member_guard_shape(w.cx, call)?;
+    if shape.kind != MemberGuard::Method {
+        return None;
+    }
+    let ArgValue::Var(var) = shape.receiver else { return None };
+    let ArgValue::Str(method) = shape.member else { return None };
+    let method = method.as_str()?;
+    let lacks =
+        declared_receiver_lacks_method(w.cx, folder, store, w.scope.poisoned, var, method);
+    Some(if lacks { Certainty::No } else { Certainty::Maybe })
 }
 
 /// Resolve a *literal* class reference in an existence-predicate argument to an FQN:
@@ -334,19 +374,28 @@ fn extension_loaded_verdict(cx: &Cx, folder: &mut dyn Folder, name: &str) -> Cer
 /// verdict (ADR-0049 §4 / S1 existence). A uniquely-indexed unconditional project
 /// class-like of the MATCHING kind is present; an absent name the boot surface reports
 /// as resident is present; an absent name the boot surface reports NOT-resident is
-/// provably absent. A conditional decl (dam standing), an ambiguous name, a kind
-/// mismatch (`class_exists` on an interface), or an unanswerable homonym is `Maybe`.
+/// provably absent. A conditional declaration, a project declaration under an
+/// `$autoload` that is not literally `true`, an ambiguous name, a kind mismatch
+/// (`class_exists` on an interface), or an unanswerable homonym is `Maybe`.
+///
+/// A conditional declaration is `Maybe` whatever the dam says: whether it ran is a
+/// run-time fact (`if (PHP_VERSION_ID < 80000) { class Polyfill {} }`,
+/// `if (getenv('X')) { class C {} }`), so `Yes` would kill the `else` of a guard that is
+/// the very way the program tolerates the declaration being absent (issue #978 on the
+/// polyfill trade-off). A declaration is not a loaded class either:
+/// `class_exists('Later', false)` is false until the declaring file has run.
 fn classlike_exists_verdict(
     cx: &Cx,
     folder: &mut dyn Folder,
     pred: &str,
     name: &str,
+    autoload: bool,
 ) -> Certainty {
     let lname = name.trim_start_matches('\\').to_ascii_lowercase();
     match cx.index.resolve_class(&lname) {
         Res::Unique(site) => {
             let (_, cd) = cx.class_decl(site);
-            if cd.conditional && !cx.dam.is_clear() {
+            if cd.conditional || !autoload {
                 return Certainty::Maybe;
             }
             // A PHP enum satisfies both `enum_exists` and `class_exists`; a plain
@@ -382,13 +431,13 @@ fn classlike_kind_matches(pred: &str, cd: &ClassDecl) -> bool {
 
 /// The symbols a positive existence guard call vouches for (ADR-0049 §4 guard-respect
 /// leg), resolved against the branch store. Empty when the call isn't a recognized
-/// guard or its subject can't be pinned to a concrete symbol.
+/// guard or its subject can't be pinned.
 ///
-/// The member guards (`method_exists`, `is_callable([$o, 'm'])`, `property_exists`)
-/// vouch a member of whatever the receiver can be, read the way the absence emitters
-/// read it ([`receiver_classes`]): the one class of an allocation-proven `$var`, else one
-/// vouch per class of its narrowed declared arms — a parameter `N $n` has no allocation,
-/// and the guard `method_exists($n, 'go')` is exactly as much evidence for `N::go`.
+/// The member guards vouch **this binding**, never a class through a declared arm:
+/// `method_exists($o, 'm')` and `is_callable([$o, 'm'])` vouch `C::m` for the one class
+/// an allocation-proven `$o` holds (the N3 exact-class vouch; a declared receiver is
+/// *folded* instead, [`member_guard_verdict`]), and `property_exists($v, 'p')` vouches
+/// `$v->p` for the binding `$v` holds ([`Vouch::VarProperty`]).
 pub(crate) fn existence_vouch(cx: &Cx, store: &Store, call: &CallExpr) -> Vec<Vouch> {
     if let Some(vouches) = member_guard_vouch(cx, store, call) {
         return vouches;
@@ -432,23 +481,39 @@ pub(crate) fn existence_vouch(cx: &Cx, store: &Store, call: &CallExpr) -> Vec<Vo
     }
 }
 
-/// The vouches of the member-existence guards, or `None` when `call` is not one.
-/// `method_exists($r, 'm')` and `is_callable([$r, 'm'])` vouch a method;
-/// `property_exists($r, 'p')` vouches a property. The method name is lowercased (PHP
-/// method names are case-insensitive), the property name kept as written.
-fn member_guard_vouch(cx: &Cx, store: &Store, call: &CallExpr) -> Option<Vec<Vouch>> {
+/// Which member a member guard asks about.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MemberGuard {
+    Method,
+    Property,
+}
+
+/// A recognized member guard's parts: `method_exists($r, 'm')`, `is_callable([$r, 'm'])`
+/// (both [`MemberGuard::Method`]) and `property_exists($r, 'p')`.
+struct MemberShape<'a> {
+    kind: MemberGuard,
+    receiver: &'a ArgValue,
+    member: &'a ArgValue,
+}
+
+/// Read `call` as a member guard of the global builtin, or `None`. Positional
+/// arguments only; the `is_callable` pair is its only argument, in either key spelling.
+fn member_guard_shape<'a>(cx: &Cx, call: &'a CallExpr) -> Option<MemberShape<'a>> {
     let callee = global_function_callee(cx, call)?;
     if !call.positional_only {
         return None;
     }
-    let (receiver, member, is_method) = if callee.eq_ignore_ascii_case("method_exists") {
+    if callee.eq_ignore_ascii_case("method_exists") {
         let [recv, name] = call.args.as_slice() else { return None };
-        (&recv.value, &name.value, true)
+        Some(MemberShape { kind: MemberGuard::Method, receiver: &recv.value, member: &name.value })
     } else if callee.eq_ignore_ascii_case("property_exists") {
         let [recv, name] = call.args.as_slice() else { return None };
-        (&recv.value, &name.value, false)
+        Some(MemberShape {
+            kind: MemberGuard::Property,
+            receiver: &recv.value,
+            member: &name.value,
+        })
     } else if callee.eq_ignore_ascii_case("is_callable") {
-        // `is_callable([$r, 'm'])` — the pair form, as the only argument.
         let [arg] = call.args.as_slice() else { return None };
         let ArgValue::Array(items) = &arg.value else { return None };
         let [(k0, recv), (k1, name)] = items.as_slice() else { return None };
@@ -457,50 +522,44 @@ fn member_guard_vouch(cx: &Cx, store: &Store, call: &CallExpr) -> Option<Vec<Vou
         if !positional(k0, 0) || !positional(k1, 1) {
             return None;
         }
-        (recv, name, true)
+        Some(MemberShape { kind: MemberGuard::Method, receiver: recv, member: name })
     } else {
-        return None;
-    };
-    let ArgValue::Str(member) = member else { return Some(Vec::new()) };
-    let Some(member) = member.as_str() else { return Some(Vec::new()) };
-    let vouches = receiver_classes(cx, store, receiver)
-        .into_iter()
-        .map(|class| {
-            let class = class.trim_start_matches('\\').to_ascii_lowercase();
-            if is_method {
-                Vouch::Method { class, method: member.to_ascii_lowercase() }
-            } else {
-                Vouch::Property { class, property: member.to_owned() }
-            }
-        })
-        .collect();
-    Some(vouches)
+        None
+    }
 }
 
-/// The classes a member guard's receiver argument can denote: a literal class
-/// (`N::class`, `'N'`); a `$var` read the way the absence emitters read it — the heap
-/// class of an allocation-proven variable, else every class a narrowed declared arm
-/// names (a plain class, or each member of an intersection). Empty for anything else.
+/// The vouches of the member-existence guards, or `None` when `call` is not one. The
+/// method name is lowercased (PHP method names are case-insensitive), the property name
+/// kept as written.
+fn member_guard_vouch(cx: &Cx, store: &Store, call: &CallExpr) -> Option<Vec<Vouch>> {
+    let shape = member_guard_shape(cx, call)?;
+    let ArgValue::Str(member) = shape.member else { return Some(Vec::new()) };
+    let Some(member) = member.as_str() else { return Some(Vec::new()) };
+    Some(match shape.kind {
+        MemberGuard::Method => receiver_classes(cx, store, shape.receiver)
+            .into_iter()
+            .map(|class| Vouch::Method {
+                class: class.trim_start_matches('\\').to_ascii_lowercase(),
+                method: member.to_ascii_lowercase(),
+            })
+            .collect(),
+        // Only a variable receiver names a binding the vouch can be about.
+        MemberGuard::Property => match shape.receiver {
+            ArgValue::Var(var) => {
+                vec![Vouch::VarProperty { var: var.clone(), property: member.to_owned() }]
+            }
+            _ => Vec::new(),
+        },
+    })
+}
+
+/// The classes a method guard's receiver argument names: a literal class (`N::class`,
+/// `'N'`), or the heap class of an allocation-proven `$var`. Empty for anything else —
+/// in particular **not** the classes of a declared arm, which is a union the guard's
+/// truth names only some of.
 fn receiver_classes(cx: &Cx, store: &Store, receiver: &ArgValue) -> Vec<String> {
     let ArgValue::Var(v) = receiver else {
         return existence_class_literal(cx, receiver).into_iter().collect();
     };
-    if let Some(class) = store.class_of(v) {
-        return vec![class.to_owned()];
-    }
-    let mut classes = Vec::new();
-    for arm in store.contract_arms(v).unwrap_or(&[]) {
-        match &arm.ty {
-            ContractTy::Class(f) => classes.push(f.clone()),
-            ContractTy::Inter(members) => {
-                for m in members {
-                    if let ContractTy::Class(f) = m {
-                        classes.push(f.clone());
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    classes
+    store.class_of(v).map(str::to_owned).into_iter().collect()
 }
