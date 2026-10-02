@@ -678,6 +678,27 @@ contrast, reports its arguments' inferred facts at **warn** level by default
 legal working PHP and `dumpType()` is not. See
 [profiles, baseline, and suppression](05-profiles-and-baseline.md#the-dump-ids).
 
+### A file reports `internal.panic`
+
+**Symptom.** A finding `error[internal.panic]` at line 1 of one file, a
+`steins: N file(s) panicked in analysis` line on stderr, and exit `2`.
+
+**Cause.** Steins hit an internal error, a panic, while analyzing that
+file. It is a bug in Steins, never in your code. The file's own findings
+are missing from the run; every other file was analyzed as usual, and its
+findings in the report are real. The run exits `2` because an incomplete
+report is no verdict on your code.
+
+**Fix.** Report it, with the finding's message (it names the panic and the
+place in the analyzer that raised it), the Steins version, and the smallest
+file that still reproduces it. Rerunning with `RUST_BACKTRACE=1` prints the
+full panic report and backtrace on stderr, which makes the report much
+more useful. There is no switch to silence it: a profile, an ignore, the
+vendor filter and the baseline all pass it through, and `--set-baseline`
+refuses to write from such a run. Until a fix ships, the only way around is
+to leave the file out of the paths you pass. That hides its findings
+openly, where a silenced panic would hide them without saying so.
+
 ## Where to go next
 
 - **Every flag, every exit code:** [the CLI reference](02-cli-reference.md).

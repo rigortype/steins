@@ -281,7 +281,9 @@ $ steins check . --format json
 - `0` — nothing fail-level was displayed (a clean run, or a warn-only run).
 - `1` — at least one fail-level finding was displayed.
 - `2` — usage or config error (unknown flag, unknown profile, bad
-  `steins.toml`, **a path argument that does not exist**). For example
+  `steins.toml`, **a path argument that does not exist**), or Steins itself
+  failed on a file: an `internal.panic` finding names it, and the rest of
+  the report is printed as usual. For example
   `--profile nope` prints
 
   ```
