@@ -418,20 +418,32 @@ impl DeclTable {
         // first pass does, and which is also true — that file's `class_alias`
         // call is what mints the name) would leave the body's own file
         // unreachable and let its caller replay a stale finding.
-        let mut minted: Vec<(u64, Vec<usize>)> = Vec::new();
-        for f in facts {
-            for (alias, target) in &f.alias_edges {
-                if let Some(targets) = files.get(target) {
-                    minted.push((*alias, targets.clone()));
+        //
+        // The merge folds an alias of an alias (issue #926), so this does too: the
+        // pass repeats until no edge adds a file, and a chain's end reaches the
+        // declaring file whatever order the calls are written in. The sets only
+        // grow and are bounded by the file count, so a cycle of aliases ends.
+        loop {
+            let mut minted: Vec<(u64, Vec<usize>)> = Vec::new();
+            for f in facts {
+                for (alias, target) in &f.alias_edges {
+                    if let Some(targets) = files.get(target) {
+                        minted.push((*alias, targets.clone()));
+                    }
                 }
             }
-        }
-        for (alias, targets) in minted {
-            let entry = files.entry(alias).or_default();
-            for target in targets {
-                if !entry.contains(&target) {
-                    entry.push(target);
+            let mut grew = false;
+            for (alias, targets) in minted {
+                let entry = files.entry(alias).or_default();
+                for target in targets {
+                    if !entry.contains(&target) {
+                        entry.push(target);
+                        grew = true;
+                    }
                 }
+            }
+            if !grew {
+                break;
             }
         }
         Self { files }
@@ -1009,6 +1021,20 @@ mod tests {
         // And the delta leg reaches the aliasing file through either end.
         assert_eq!(affected(&t, &[], &["c:lib\\real"]), vec![1]);
         assert_eq!(affected(&t, &[], &["c:shortcut"]), vec![1, 2]);
+    }
+
+    /// The merge folds an alias of an alias (issue #926), so a file naming only
+    /// the chain's end reads the body in the declaring file, whatever order the
+    /// `class_alias` calls are written in.
+    #[test]
+    fn a_chain_of_aliases_reaches_the_target_declarations_file() {
+        let t = trees(&[
+            "<?php\nnamespace Lib;\nclass Real { public int $n = 1; }\n",
+            "<?php\nclass_alias('mid', 'top');\n",
+            "<?php\nclass_alias('lib\\\\real', 'mid');\n",
+            "<?php\nfunction use_it(\\Top $s): int { return $s->n; }\n",
+        ]);
+        assert_eq!(affected(&t, &[0], &[]), vec![0, 1, 2, 3]);
     }
 
     /// The receiver shape this leg cannot resolve, pinned so a later tightening
