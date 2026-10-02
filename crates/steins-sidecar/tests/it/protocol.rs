@@ -784,8 +784,8 @@ fn timeout_poisons_and_the_lost_request_widens() {
     assert!(matches!(r, FoldResult::Widen { .. }), "timeout widens, got {r:?}");
     assert!(sc.is_poisoned(), "timeout poisons the instance");
     // Lost for good (never re-sent — it misbehaved); the next request revives
-    // the instance via respawn (full PHP startup, tens of ms, past the 20ms forced).
-    sc.set_timeout(Duration::from_secs(2));
+    // the instance via respawn. The 20ms deadline stays: PHP's startup is the
+    // boot handshake's, not this request's (issue #891).
     assert_eq!(
         sc.fold("strtolower", &[FoldArg::Str("ABC".to_owned())], true),
         FoldResult::Value(FoldValue::Str("abc".to_owned())),
@@ -953,4 +953,145 @@ fn a_type_mismatched_argument_throws_rather_than_being_coerced() {
         );
     }
     assert!(!sc.is_poisoned(), "a TypeError is a result, not a protocol failure");
+}
+
+// ---------------------------------------------------------------------------
+// Boot (issue #891): PHP's own startup is not charged to a request.
+//
+// A request's budget starts when it is written, and a fresh child's first
+// request waits out the interpreter's boot: cheap on an idle machine, seconds
+// on a loaded one. These tests stand a shell shim in for `php` that sleeps
+// before it execs the real one (the sleeping is the shim's, the test code never
+// does), against a request timeout shorter than the boot.
+// ---------------------------------------------------------------------------
+
+/// A throwaway directory holding one executable shim `php`, removed on drop.
+#[cfg(unix)]
+struct Shim {
+    dir: std::path::PathBuf,
+}
+
+#[cfg(unix)]
+impl Shim {
+    /// The shim's body is `script(marker)`, with `$REAL` bound to the real
+    /// `php` and `marker` a path inside the shim's directory for the script to
+    /// leave a mark at. `None` (printing a skip marker) when there is no `php`
+    /// on `PATH` to stand behind.
+    fn new(test: &str, script: impl FnOnce(&str) -> String) -> Option<Self> {
+        use std::os::unix::fs::PermissionsExt;
+        let Some(real) = std::env::var_os("PATH").and_then(|path| {
+            std::env::split_paths(&path).map(|dir| dir.join("php")).find(|php| php.is_file())
+        }) else {
+            eprintln!("SKIP {test}: no `php` on PATH to stand behind");
+            return None;
+        };
+        let dir = std::env::temp_dir().join(format!("steins-shim-{}-{test}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create the shim dir");
+        let marker = dir.join("marker");
+        let body = script(&marker.to_string_lossy());
+        let path = dir.join("php");
+        std::fs::write(&path, format!("#!/bin/sh\nREAL='{}'\n{body}\n", real.display()))
+            .expect("write the shim");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        Some(Self { dir })
+    }
+
+    fn php(&self) -> String {
+        self.dir.join("php").to_string_lossy().into_owned()
+    }
+}
+
+#[cfg(unix)]
+impl Drop for Shim {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// The boot is slower than the request budget, and costs nothing: the child
+/// answers, no death is charged.
+#[cfg(unix)]
+#[test]
+fn a_slow_booting_child_costs_no_request() {
+    let Some(shim) = Shim::new("a_slow_booting_child", |_| {
+        "sleep 0.5\nexec \"$REAL\" \"$@\"".to_owned()
+    }) else {
+        return;
+    };
+    let mut sc = Sidecar::spawn_with(&shim.php()).expect("a slow boot is still a boot");
+    sc.set_timeout(Duration::from_millis(150));
+    assert!(sc.env().is_some(), "the first request is not charged the boot");
+    assert_eq!(sc.deaths(), 0, "a slow boot is not a lost child");
+    assert!(!sc.is_poisoned());
+}
+
+/// The same clock on the respawn path: the first child boots fast, the
+/// replacement slowly. The bomb costs its one child; the fold after it, which
+/// revives the instance, is answered.
+#[cfg(unix)]
+#[test]
+fn a_slow_booting_replacement_costs_no_request() {
+    let Some(shim) = Shim::new("a_slow_booting_replacement", |marker| {
+        format!("if [ -e '{marker}' ]; then sleep 0.5; else : > '{marker}'; fi\nexec \"$REAL\" \"$@\"")
+    }) else {
+        return;
+    };
+    let mut sc = Sidecar::spawn_with(&shim.php()).expect("the first boot is fast");
+
+    let bomb = [s("x"), int(2_000_000_000)];
+    assert!(matches!(sc.fold("str_repeat", &bomb, true), FoldResult::Widen { .. }));
+    assert_eq!(sc.deaths(), 1, "the bomb killed the first child");
+
+    sc.set_timeout(Duration::from_millis(150));
+    assert_eq!(
+        sc.fold("strtoupper", &[s("alive")], true),
+        FoldResult::Value(FoldValue::Str("ALIVE".to_owned())),
+        "the replacement's boot is not charged to the fold that revived it"
+    );
+    assert_eq!(sc.deaths(), 1, "and no second child was lost to the slow boot");
+    assert_eq!(sc.respawns(), 1);
+    assert_eq!(sc.strikes(), 0, "the answer cleared the strike");
+}
+
+/// A child that exits, or answers its handshake with something that is not the
+/// answer, is a failed spawn (the engine-off posture), and is not left running.
+#[cfg(unix)]
+#[test]
+fn a_child_that_fails_its_handshake_is_a_failed_spawn() {
+    for (tag, script) in [
+        ("exits", "exit 1"),
+        ("garbage", "echo 'not json'\nexec cat > /dev/null"),
+        ("wrong_id", "echo '{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{}}'\nexec cat > /dev/null"),
+    ] {
+        let Some(shim) = Shim::new(&format!("a_child_that_fails_its_handshake_{tag}"), |_| {
+            script.to_owned()
+        }) else {
+            return;
+        };
+        assert!(Sidecar::spawn_with(&shim.php()).is_err(), "a handshake that {tag} fails the spawn");
+    }
+}
+
+/// On a revive a failed handshake is a strike like a failed spawn: the fold
+/// widens, the instance stays poisoned, and the cap still bounds the attempts.
+#[cfg(unix)]
+#[test]
+fn a_replacement_that_fails_its_handshake_is_a_strike() {
+    let Some(shim) = Shim::new("a_replacement_that_fails_its_handshake", |marker| {
+        format!("if [ -e '{marker}' ]; then exit 1; else : > '{marker}'; fi\nexec \"$REAL\" \"$@\"")
+    }) else {
+        return;
+    };
+    let mut sc = Sidecar::spawn_with(&shim.php()).expect("the first boot works");
+
+    let bomb = [s("x"), int(2_000_000_000)];
+    assert!(matches!(sc.fold("str_repeat", &bomb, true), FoldResult::Widen { .. }));
+    for strike in 1..=3 {
+        assert!(matches!(sc.fold("strtoupper", &[s("a")], true), FoldResult::Widen { .. }));
+        assert_eq!(sc.strikes(), strike, "each failed boot is charged");
+        assert!(sc.is_poisoned());
+    }
+    assert_eq!(sc.deaths(), 1, "a child that never booted is not a child lost");
+    assert!(matches!(sc.fold("strtoupper", &[s("a")], true), FoldResult::Widen { .. }));
+    assert_eq!(sc.strikes(), 3, "past the cap no further boot is attempted");
 }

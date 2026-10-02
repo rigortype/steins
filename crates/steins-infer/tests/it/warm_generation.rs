@@ -160,7 +160,20 @@ fn run_with(
         paranoid,
         progress: &Progress::off(),
     };
-    generation_check(&params).expect("the generation lifecycle runs")
+    let outcome = generation_check(&params).expect("the generation lifecycle runs");
+    // A run that lost a sidecar answer publishes nothing (ADR-0092, #784), so
+    // the assertions after it would fail as a miscount — a `Cold` where `Warm`
+    // was expected, `(0, 4)` loaded where `(4, 0)` was. Name the cause instead:
+    // the machine could not keep `php` answering, which is no regression of the
+    // generation under test (issue #891).
+    let lost: Vec<&String> =
+        outcome.report.notes.iter().filter(|n| n.starts_with("the PHP sidecar lost")).collect();
+    assert!(
+        lost.is_empty(),
+        "the PHP sidecar lost an answer on this machine, so this run published nothing and the \
+         expectations below it are void; the notes say: {lost:?}"
+    );
+    outcome
 }
 
 /// The byte-identity comparison: every field of every finding, in the CLI's
