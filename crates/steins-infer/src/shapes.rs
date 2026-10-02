@@ -1168,11 +1168,14 @@ pub(crate) fn apply_offset_write(
             if let Some(order) = witnessed_order.as_ref()
                 && next.field(&first).is_none()
             {
+                // The value rides in with the key: past the width bound the
+                // constructor folds this slot into the tail summary (A-G6),
+                // and `set_slot_fact` below finds no field left to fill.
                 let mut fields = next.fields.clone();
                 fields.push((
                     first.clone(),
                     steins_domain::Presence::Required { witnessed: true },
-                    None,
+                    if nested { None } else { slot.clone().map(Box::new) },
                 ));
                 next = ShapeFact::normalize_counted(
                     fields,

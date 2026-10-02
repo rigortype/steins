@@ -278,6 +278,7 @@ amendment governs.
   rather than a novel constant) degrades to the tail-only summary
   (unsealed key-class/value join + non_empty + isList). Orthogonal to the
   OneOf cap (8), which governs how many whole arrays stay finite.
+  *(Amendment M: the bound holds at the constructor, for every producer.)*
 - **A-G7 — No general meet in v1.** Narrowing ships as targeted
   refinement operators (presence promotion, arm subtraction, isList flip,
   non_empty set, cover recording); a general ⊓ waits for a real consumer.
@@ -1325,3 +1326,64 @@ frame-private or not — `$b['k'] = $v` on an `ArrayAccess` receiver runs
 `StmtKind::Barrier` names no target and keeps the total clear. And the base's own
 update is unchanged: this row is about the barrier's *width*, and widens neither
 Amendment J's weak row nor A-G8's decline of a nested-shape update.
+
+## Amendment M (2026-10-02): the width bound holds at the constructor, for every producer — PENDING ratification
+
+Issue #884, the root cause of #658. A-G6 states the bound as "lifting or seeding
+a shape beyond 256 fields degrades to the tail-only summary", and the code
+enforced exactly that: at `ShapeFact::lift`, at `from_witnessed_entries`, and at
+the seed site. It was enforced at no *producer* of a wider shape —
+`array_push_written_fact`'s ordered leg, `apply_offset_write`'s witnessed
+extension and `array_unshift_written_fact` each grow a sealed shape by one key
+and hand it to `normalize_counted`, which accepted any width.
+
+That gap was a correctness hole only in the sense that a wide shape is allowed
+to exist; what it cost was time. Every rebuild of a witnessed shape costs
+O(width²): the ordered leg looked each key up with a linear `find`, and
+`with_order` tested every key against the order with `contains`. N straight-line
+appends to one variable therefore cost O(N³) (release build, `$a = [];` then
+`$a[] = i;` N times):
+
+| N | before | after |
+| --- | --- | --- |
+| 1,000 | 0.41 s | 0.06 s |
+| 2,000 | 2.71 s | 0.07 s |
+| 3,000 | 8.87 s | 0.08 s |
+| 4,000 | 31.2 s | 0.06 s |
+| 8,000 | (not run) | 0.06 s |
+
+and 2,000 `$a['k…'] = i;` writes went from 4.63 s to 0.14 s. A generated file
+with tens of thousands of such statements did not finish, which is #658.
+
+> **The ruling.** The bound holds at the constructor.
+> `ShapeFact::normalize_counted`, the enforcement point of the drop discipline
+> that every derived shape is built through, degrades a field list wider than
+> `SHAPE_WIDTH_LIMIT` to the tail-only summary, exactly as a 300-entry literal
+> does at `lift`: the key class and the value slot of every field that is not
+> proven `Absent` are joined into the tail (and joined again with whatever the
+> tail already admitted), the count bound is kept, `non_empty` and `is_list` are
+> settled from the fields before they go, and the covers and the order witness
+> are dropped, as no keys remain to cover or to sequence. The bound is a
+> property of the type, not of the callers, so a new producer cannot forget it.
+
+Two further changes make the rebuild itself cheap and are not semantic:
+`with_order` checks membership through a set, and `field_of` is a binary search.
+The search relies on `fields` being sorted by key with one entry per key, an
+invariant `normalize_counted` establishes (and asserts once per build in debug
+builds) and the reason `ShapeFact` has no struct-literal constructor outside it.
+
+**The one semantic movement, pinned by a test.** After 300 straight-line appends
+the array has keys `0..=299`. `$a[300]` is `offset.undeclared` before this
+amendment (the sealed list cannot carry the key, and the read really is
+undefined) and is silent after it: the summary `non-empty-array<int, int<0,
+299>>` admits any integer key. `$a['k']` stays `offset.undeclared`, because the
+summary's key class is `int`. At 256 appends nothing moves — the shape is still
+listed, and `$a[256]` is reported. This is the trade A-G6 already made for a
+300-entry literal, now made for the array the analysis built itself; it can only
+lose a proof: the summary is a widening, admitting every array the listed shape
+admitted.
+
+**Measured.** `check --profile strict --no-cache --no-php` is byte-identical to
+the pre-amendment build on all ten public corpus packages, so no finding there
+moves.
+
