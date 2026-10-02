@@ -227,6 +227,11 @@ impl Channel {
     /// manager, a container shim), and one that runs the interpreter without
     /// `exec` leaves the interpreter a grandchild that killing the child alone
     /// would miss (issue #894).
+    ///
+    /// Its own group is not the terminal's foreground group, so a Ctrl-C reaches
+    /// steins and not the child. Nothing is lost by that: steins does not catch
+    /// the signal, its death closes the child's stdin, and the runner's read
+    /// loop ends at that EOF, after the request in flight if there is one.
     fn launch(bin: &str) -> std::io::Result<Self> {
         let mut command = Command::new(bin);
         command
