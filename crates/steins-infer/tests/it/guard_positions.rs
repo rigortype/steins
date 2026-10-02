@@ -16,8 +16,11 @@
 
 use steins_infer::{
     CALL_UNDEFINED_FUNCTION_ID, CALL_UNDEFINED_METHOD_ID, CLASS_UNDEFINED_ID, CONSTANT_UNDEFINED_ID,
-    Diagnostic, Folder, PHPDOC_UNDEFINED_METHOD_ID, PROPERTY_MAYBE_UNDEFINED_ID,
-    PROPERTY_UNDEFINED_ID, check_with,
+    Diagnostic, EngineFolder, FoldEngine, Folder, NoFold, PHPDOC_UNDEFINED_METHOD_ID,
+    PROPERTY_MAYBE_UNDEFINED_ID, PROPERTY_UNDEFINED_ID, check_with,
+};
+use steins_sidecar::{
+    ClassReflection, ConstantDefined, EnvInfo, FoldArg, FoldResult, PregCompile, Reflection,
 };
 use steins_syntax::{ArgValue, SourceTree};
 
@@ -374,4 +377,77 @@ fn a_member_vouch_survives_the_early_return_only_on_its_own_path() {
                if ($f) { if (!method_exists($n, 'go')) { return; } }\n\
                $n->go();\n}\n";
     assert_eq!(run(src).len(), 1, "the other path reaches the call unguarded");
+}
+
+// ---------------------------------------------------------------------------
+// The folder's answer: the sidecar `env()` extension list.
+// ---------------------------------------------------------------------------
+
+/// A transport whose `env()` lists `extensions` (or declines), counting the asks.
+struct ExtensionEngine {
+    extensions: Option<Vec<String>>,
+    env_calls: u32,
+    restarts: u32,
+}
+
+impl FoldEngine for ExtensionEngine {
+    fn env(&mut self) -> Option<EnvInfo> {
+        self.env_calls += 1;
+        Some(EnvInfo {
+            php_version: "8.5.9".to_owned(),
+            extensions: self.extensions.clone()?,
+            sapi: "cli".to_owned(),
+            int_size: Some(8),
+        })
+    }
+    fn reflect(&mut self, _target: &str) -> Option<Reflection> {
+        None
+    }
+    fn reflect_class(&mut self, _target: &str) -> Option<ClassReflection> {
+        None
+    }
+    fn fold(&mut self, _name: &str, _args: &[FoldArg], _strict: bool) -> FoldResult {
+        FoldResult::widen("stub")
+    }
+    fn preg_compile(&mut self, _pattern: &str) -> Option<PregCompile> {
+        None
+    }
+    fn constant_defined(&mut self, _name: &str) -> Option<ConstantDefined> {
+        None
+    }
+    fn restarts(&self) -> u32 {
+        self.restarts
+    }
+}
+
+#[test]
+fn the_engine_folder_answers_extension_loaded_from_env_once() {
+    let engine = ExtensionEngine {
+        extensions: Some(vec!["Core".to_owned(), "Zend OPcache".to_owned()]),
+        env_calls: 0,
+        restarts: 0,
+    };
+    let mut folder = EngineFolder::with_engine(engine);
+    assert_eq!(folder.boot_surface_extension("core"), Some(true));
+    assert_eq!(folder.boot_surface_extension("zend opcache"), Some(true));
+    assert_eq!(folder.boot_surface_extension("redis"), Some(false));
+    assert_eq!(folder.engine_mut().env_calls, 1, "the list is one whole-run answer");
+}
+
+#[test]
+fn an_unanswerable_env_leaves_extension_loaded_undecided_and_is_asked_again_after_a_respawn() {
+    let engine = ExtensionEngine { extensions: None, env_calls: 0, restarts: 0 };
+    let mut folder = EngineFolder::with_engine(engine);
+    assert_eq!(folder.boot_surface_extension("json"), None);
+    assert_eq!(folder.boot_surface_extension("json"), None);
+    assert_eq!(folder.engine_mut().env_calls, 1, "a decline is memoized within a child");
+    // The replacement child answers: the standing decline must not outlive the child.
+    folder.engine_mut().restarts = 1;
+    folder.engine_mut().extensions = Some(vec!["json".to_owned()]);
+    assert_eq!(folder.boot_surface_extension("json"), Some(true));
+}
+
+#[test]
+fn the_folder_default_declines_extension_loaded() {
+    assert_eq!(NoFold.boot_surface_extension("json"), None);
 }
