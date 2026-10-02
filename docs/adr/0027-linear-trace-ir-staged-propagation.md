@@ -375,19 +375,34 @@ has answered for it. What remains is `return`, `throw`, `exit` and a `: never`
 call, and none of those comes back. A body that terminates on every path
 only by `continue` is therefore not terminated.
 
-**The header half applies too.** The condition, evaluated on the body's entry
-env, is the verdict of every test the loop makes, since that env holds
-everywhere inside the loop. So `Yes` plus `break_free` proves the successor
-unreachable here as it does for `while (true)`. This is not the entry
-narrowing the 2026-09-10 amendment withholds. That narrowing would state a
-test's outcome before the first test runs. This reads a verdict that every
-test shares.
+**The header is not read.** The `while (true)` rule above is deliberately not
+extended to `do`-`while`, so `do { … } while (true);` still falls through in
+the walker. The entry env misses a write that reaches a tested name through
+an alias the loop's sets do not name. At file scope `$GLOBALS['go'] = false`
+rewrites `$go` without putting `go` in `writes`, so a `Yes` read off `$go`
+would silence a successor PHP does reach. The same hole exists for `while`
+and is tracked on its own; this amendment does not widen it.
 
-**`stmt_end` agrees.** The syntactic terminality row for `do`-`while` answers
-`Terminates` when the body's `block_end` terminates and the body is both
-break-free and continue-free. It shares the lowering's scans. Otherwise it
-falls back to the infinite-loop row it had. `type.return-missing` and its
-`maybe-` sibling stop reporting a function that ends in such a loop.
+**A `switch` case's stray-jump scan counts levels.** The `do`-`while` rule
+trusts a nested construct's own answer, so that answer has to be right. A
+structured `switch` refused a case holding a `break` or `continue`, but did
+not look inside a nested loop. A `break 2` or `continue 2` there leaves the
+switch and lands after it, so the case does not end in its `return`, and the
+switch was structured as if it did. The scan now shares the loop scans'
+depth counting: a jump reaches the switch, or past it, when its level exceeds
+its depth.
+
+**The syntactic and presence passes agree.** The `stmt_end` row for
+`do`-`while` answers `Terminates` when the body is break-free and
+continue-free and its `block_end` terminates. When the body is undecided (a
+`try` in it), the row answers `Unknown`, because the body is the only way to
+the condition. Otherwise it falls back to the infinite-loop row it had.
+`type.return-missing` and its `maybe-` sibling stop reporting a function that
+ends in such a loop. The binding-presence pass answers `Terminated` for a
+`do`-`while` whose body reaches neither a `break` nor its back edge. A branch
+join then drops that arm as it drops a `return`. That pass credits every
+`break` and `continue` to the innermost loop whatever its level, so it is
+gated by the same two lowering scans.
 
 The trace payload changes shape, but under the 2026-09-27 narrowing
 (`docs/internal-spec/generation-schema.md`) a trace-IR change moves the
@@ -395,8 +410,12 @@ analyzer version, and that refuses every stored trace. `SCHEMA_VERSION` does
 not move.
 
 Fixtures: `crates/steins-infer/tests/it/loop_exit_condition.rs`. They cover the
-two shapes from the issue, nested constructs that own their own jumps, and the
-negative controls: a conditional return, `break`, `continue`, `break 2` and
-`continue 2`, and a body that terminates only by `continue`. Also
-`crates/steins-syntax/tests/it/terminality.rs` and
-`crates/steins-infer/tests/it/return_missing.rs` for the `stmt_end` row.
+two shapes from the issue, nested constructs that own their own jumps, the
+negative controls (a conditional return, `break`, `continue`, `break 2` and
+`continue 2`, and a body that terminates only by `continue`), the
+`$GLOBALS` alias that keeps the header unread, a jump out of a loop nested in
+a `switch` case, and a terminating loop inside an `if` arm. Also
+`crates/steins-syntax/tests/it/terminality.rs`,
+`crates/steins-syntax/tests/it/binding_presence.rs`,
+`crates/steins-syntax/tests/it/trace_stmt_lowering.rs` for `continue_free`,
+and `crates/steins-infer/tests/it/return_missing.rs`.
