@@ -442,6 +442,17 @@ absent from the table is an unknown external → `Unknown`, never `No`.
 interfaces and backing is incomplete, and an incomplete row would produce a
 wrong `No`.
 
+### `class_aliases_generated` — a class's second name
+
+A class-level `/** @alias X */` in a stub gives one class entry two names
+(`DOMException` is also `Dom\DOMException`, the only one at `php-8.5.11`). The
+miner emits it as `aliases = [...]` on the declared class's row and `gen-catalog`
+renders `(lowercased second name, declared name)` pairs. The second name is **no
+row** of the hierarchy or display tables: `builtin_class_supers` and
+`builtin_class_display` answer through `builtin_class_alias`, and `Cx::class_identity`
+resolves the pair to one identity before the is-a oracle compares names (ADR-0043,
+class identity is resolved, not spelled).
+
 ## `builtin_throws(name)`
 
 `builtin_throws` gives the throw classes a builtin can raise. The rows are

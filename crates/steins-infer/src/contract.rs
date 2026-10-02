@@ -1517,12 +1517,15 @@ impl<'a> Cx<'a> {
     /// (issue #852).
     pub(crate) fn supertype_walk(&self, sub_fqn: &str, super_fqn: &str) -> SupertypeWalk {
         let target = super_fqn.trim_start_matches('\\');
+        // Names meet as identities ([`Self::class_identity`]), never as spellings: a
+        // literal `class_alias` and a stub's `@alias` make two names one class.
+        let target_id = self.class_identity(target);
         // `Stringable` is implicitly implemented by any class with a `__toString`
         // method (PHP 8.0+), invisible to the explicit parent/`implements` closure.
         // For this target only: a proven `__toString` is a definite `Yes`, and a
         // trait-using class (merged methods unmodeled — might declare
         // `__toString`) forces `Unknown` rather than an unsound `No`.
-        let stringable_target = target.eq_ignore_ascii_case("Stringable");
+        let stringable_target = target_id == "stringable";
         // Each queued name carries whether it is provably an interface: named in
         // an `implements` list, or a supertype of an interface.
         let mut queue: Vec<(String, bool)> =
@@ -1532,11 +1535,12 @@ impl<'a> Cx<'a> {
         // Whether a visited class may implicitly gain `Stringable` via a trait.
         let mut maybe_stringable = false;
         while let Some((cur, interface)) = queue.pop() {
-            if cur.eq_ignore_ascii_case(target) {
+            let cur_id = self.class_identity(&cur);
+            if cur_id == target_id {
                 walk.verdict = IsA::Yes;
                 return walk;
             }
-            if !seen.insert(cur.to_ascii_lowercase()) {
+            if !seen.insert(cur_id) {
                 continue;
             }
             if let Some((file, cd)) = self.find_class(&cur) {
@@ -1567,7 +1571,24 @@ impl<'a> Cx<'a> {
         if stringable_target && maybe_stringable {
             walk.verdict = IsA::Unknown;
         }
+        if walk.verdict == IsA::No && self.target_unseen(target) {
+            // The target names nothing the analysis can see, and a runtime-minted class
+            // (a dynamic `class_alias`, an `eval`, an include) could be what it names —
+            // the very class the walk enumerated. In a clear universe a name nothing
+            // declares stays a proven `No`: that is `class.undefined`'s case, not this
+            // walk's to soften.
+            walk.verdict = IsA::Unknown;
+        }
         walk
+    }
+
+    /// Whether `target` names no class the analysis can see (neither a project class,
+    /// ambiguous ones included, nor a catalog one) **and** the universe can still mint
+    /// one: a dam stands.
+    fn target_unseen(&self, target: &str) -> bool {
+        !self.dam.is_clear()
+            && self.class_absent(target)
+            && steins_catalog::builtin_class_display(target).is_none()
     }
 
     /// The **direct** supertypes (parent + `implements`, plus an enum's implicit

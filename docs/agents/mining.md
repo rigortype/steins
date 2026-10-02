@@ -24,7 +24,10 @@ artefact.
 
 `phpsrc-mining/hierarchy.toml` is the odd one out: no xtask and no engine. It is the output of
 `extract_hierarchy.py` over the stubs of a php-src checkout **at the pinned release tag**, and
-`cargo xtask gen-catalog` turns it into `hierarchy_generated.rs` and `display_names_generated.rs`.
+`cargo xtask gen-catalog` turns it into `hierarchy_generated.rs`, `display_names_generated.rs` and
+`class_aliases_generated.rs` (a class-level `/** @alias X */` becomes `aliases = [...]` on the
+declared class's row; `Dom\DOMException` on `DOMException` is the only one at the pin, and a re-mine
+that finds another has found a second name for a class, so read it before committing).
 The pin is `php-8.5.11` (`steins_catalog::PINNED_PHP` is its minor):
 
 ```sh

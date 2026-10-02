@@ -234,6 +234,31 @@ impl<'a> Cx<'a> {
         }
     }
 
+    /// The **identity** of a class name: the lowercase name every spelling of one class
+    /// shares, so two names compare as one class exactly when their identities are equal
+    /// (ADR-0043, *class identity is resolved, not spelled*).
+    ///
+    /// In order: the project declaration's own FQN when the name resolves `Unique`
+    /// ([`Self::find_class`] — a literal `class_alias` edge minted the name at its
+    /// target's site, so an alias and its target answer the same declaration); else,
+    /// for a name no project file declares ([`Self::class_absent`], the issue #67
+    /// precedence), the declared name of the catalog's class this is a second name of
+    /// ([`steins_catalog::builtin_class_alias`]); else the name itself. An ambiguous or
+    /// unresolved name is its own identity: a verdict about it cannot be widened by a
+    /// guess, and the walk already reads such a node as incomplete.
+    pub(crate) fn class_identity(&self, name: &str) -> String {
+        let name = name.trim_start_matches('\\');
+        if let Some((_, cd)) = self.find_class(name) {
+            return cd.fqn.clone();
+        }
+        if self.class_absent(name)
+            && let Some(declared) = steins_catalog::builtin_class_alias(name)
+        {
+            return declared.to_ascii_lowercase();
+        }
+        name.to_ascii_lowercase()
+    }
+
     /// The source-cased, namespace-qualified display form of a class FQN (matching
     /// PHPStan, no leading `\`). A project class contributes its declared casing
     /// ([`ClassDecl::display`]); a name no project file declares
