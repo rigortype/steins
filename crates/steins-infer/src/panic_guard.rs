@@ -26,8 +26,10 @@
 //! walk it defers to whatever hook was installed before.
 //!
 //! **Salsa cancellation is not a fault.** Salsa cancels a query by unwinding
-//! with a [`salsa::Cancelled`] payload; that is control flow, and is re-raised
-//! rather than reported.
+//! with a [`salsa::Cancelled`] payload; a local cancellation or a pending write
+//! is control flow, and is re-raised rather than reported. The third payload,
+//! `PropagatedPanic`, is a panic on another thread surfacing in a query this
+//! walk waited on, and is reported as this file's panic.
 //!
 //! **The test hook.** A debug build panics on purpose in the walk of any file
 //! whose diagnostic path ends with the value of [`TEST_PANIC_ENV`]. Release
@@ -90,14 +92,26 @@ fn catch<T>(f: impl FnOnce() -> T) -> Result<T, String> {
     match result {
         Ok(value) => Ok(value),
         Err(payload) => {
-            if payload.is::<salsa::Cancelled>() {
-                panic::resume_unwind(payload);
+            if let Some(cancelled) = payload.downcast_ref::<salsa::Cancelled>() {
+                if is_cancellation(cancelled) {
+                    panic::resume_unwind(payload);
+                }
+                // A query this walk waited on panicked on another thread: that
+                // panic is this file's too.
+                return Err(cancelled.to_string());
             }
             let recorded = CAUGHT.take();
             // `resume_unwind` runs no hook, so a payload may arrive unrecorded.
             Err(recorded.unwrap_or_else(|| payload_text(payload.as_ref()).to_owned()))
         }
     }
+}
+
+/// Whether `cancelled` is salsa asking the query to stop — a local
+/// cancellation or a pending write — rather than `PropagatedPanic`, a query
+/// this thread blocked on having panicked on the thread computing it.
+fn is_cancellation(cancelled: &salsa::Cancelled) -> bool {
+    matches!(cancelled, salsa::Cancelled::Local | salsa::Cancelled::PendingWrite)
 }
 
 /// Install the capturing hook over whatever hook is current, once per process.
@@ -224,6 +238,19 @@ mod tests {
         });
         let payload = outer.expect_err("the cancellation is not swallowed");
         assert!(payload.is::<salsa::Cancelled>());
+        let local = panic::catch_unwind(|| {
+            catch(|| -> u8 { panic::resume_unwind(Box::new(salsa::Cancelled::Local)) })
+        });
+        assert!(local.is_err(), "a local cancellation unwinds on through too");
+    }
+
+    /// A panic propagated from the thread computing a query is a panic.
+    #[test]
+    fn a_propagated_panic_is_this_files_panic() {
+        let caught = catch(|| -> u8 {
+            panic::resume_unwind(Box::new(salsa::Cancelled::PropagatedPanic))
+        });
+        assert_eq!(caught, Err("cancelled because of propagated panic".to_owned()));
     }
 
     #[test]
