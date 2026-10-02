@@ -364,3 +364,69 @@ that a silent run means something.
    - **Touching `doctor`'s exit posture** — its always-`0`
      environment-degradation stance and `1`-on-contradiction split
      (ADR-0054 §10) are unchanged by this amendment.
+
+## Amendment (2026-10-02): `internal.panic`, and what exit `2` covers (issue #895 D3) — PENDING ratification
+
+One panic anywhere in the per-file analysis used to unwind the whole run:
+no file named, the report of every other file lost, and the process exit
+code Rust's default `101`, which no contract here mentions. The owner's
+decision D3 on the release-readiness tracker (#895) makes a panic a
+finding instead.
+
+1. **A new mechanics id, `internal.panic`.** A file whose walk panics
+   gets exactly one `internal.panic` finding, at its line 1, column 1,
+   carrying the panic message and where in the analyzer it was raised.
+   The file's other findings are dropped (the walk never finished its
+   block), and every other file is analyzed as if nothing happened.
+   Point 1's mechanics list gains it.
+2. **It rides outside every channel, not only the suppression ones.**
+   The existing mechanics ids are claims about the code's apparatus;
+   this one is a claim about the tool. So it goes one step past point 1:
+   besides profile `disable`/`warn` and inline ignores, the vendor
+   filter (ADR-0015) and the baseline pass it through too. A panic in a
+   vendor file is still the tool failing, and a baseline entry for it
+   would hide a bug report. It is never part of a capture surface
+   (point 8): `--set-baseline` refuses to write from a run that reports
+   one, because that baseline would lack the panicked files' findings,
+   and counting the id in the resolved id-set would make every baseline
+   written before it existed announce an id it can never carry. Like the
+   debug lane (ADR-0053 §4), its display is decided apart from capture.
+3. **Exit `2` now covers the tool failing (amends point 7).** `2` meant
+   "usage/config errors". It now means **the run is no verdict on the
+   code**: the invocation, the configuration, or Steins itself failed.
+   It still never means "your code has a problem", and it beats `1`: a
+   run that displays an `internal.panic` exits `2` whatever else it
+   displays. Unlike a usage error, such a run still prints its report in
+   every format, because the other files' findings are real. A
+   consumer that reads `2` as "no verdict" stays correct: `triage`
+   forwards the `2` and drops the stream, the right answer for a
+   measurement that would be partial. Only `check` maps the id to an
+   exit code; the MCP `check` tool carries it as a finding.
+4. **What is isolated: the per-file walk, only.** The scope walk and the
+   file's own passes run under `catch_unwind` on every path that walks:
+   the cold pipeline, the generation orchestrator's fan-out, the
+   single-file entry points. The parse and the index (salsa queries on
+   the cold path, the load on the warm one), the whole-universe facts,
+   the two fixpoints and the reporting passes over them are not isolated.
+   None of them is one file's work, so a panic there has no file to name,
+   and it still unwinds the process. A salsa cancellation unwinds
+   through the guard untouched: it is control flow, not a fault.
+5. **Isolation is the binary's choice, not the library's.** The `steins`
+   binary turns it on for every subcommand (a resident `mcp` server
+   survives a panic too). A library caller, the in-process test suites
+   among them, keeps the old unwinding, so a test that asserts the
+   absence of a finding cannot pass because the walk producing it
+   panicked and became a finding the test does not look at. The panic
+   hook the binary installs keeps the message off stderr while a walk is
+   guarded and prints the standard report when `RUST_BACKTRACE` is set.
+6. **The cache never keeps one** (ADR-0092's 2026-10-02 amendment): a run
+   that reports `internal.panic` publishes no generation.
+7. **Refusals.**
+   - **A switch to turn isolation off, or the id into a warning.** A
+     tool failure that can be quieted is the false all-clear of the
+     2026-08-01 amendment by another door.
+   - **Keeping the panicked file's partial findings.** Each was judged on
+     its own, but the block is unfinished; the zero-FP posture prefers
+     the one finding that says so.
+   - **Retrying the walk.** The analysis is deterministic, so a retry
+     panics again and doubles the cost of the report.
