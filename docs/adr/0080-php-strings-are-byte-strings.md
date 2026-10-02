@@ -145,6 +145,67 @@ future consumer and this repo already demonstrated it does not generalize.
    separate decision. Recorded here so the boundary is explicit: this ADR makes
    the *value lane* byte-exact; the *source lane* remains UTF-8-lossy, and a
    file that is not valid UTF-8 keeps its existing behaviour.
+
+   *Amendment (2026-10-03, issue #927; PENDING ratification — the interim).*
+   The full move stays deferred, but "keeps its existing behaviour" turned out
+   to mean manufactured findings on legacy Shift-JIS and EUC-JP sources: two
+   literals `"\x82\xA0"` and `"\x82\xA2"` both decoded to two U+FFFD, so
+   `array.duplicate-key` fired, `$a === $b` folded to `true`, `strlen` folded
+   to `6`, and two property names that differed in a replaced byte were one
+   property. §2.9 refuses "lower to unknown" as a palliative, and the interim
+   is not that: it keeps the byte-exact value, and declines only where the
+   decode has made two *names* alike. The decoded `String` stays the text every
+   span, offset and splice is computed on. What changes is that the decode
+   keeps what it replaced:
+
+   - **The decode map.** `steins_syntax::decode_source` is
+     `String::from_utf8_lossy`, byte for byte, and for a file that is not valid
+     UTF-8 also returns a `Utf8Loss`: one point per replacement, holding the
+     decoded offset it sits at and the one to three raw bytes it replaced.
+     Decoded text plus those points is the raw file (`Utf8Loss::raw_bytes`), so
+     the points are kept rather than a second copy of the file. A valid file
+     has no `Utf8Loss`, and a genuine U+FFFD in it is an ordinary character.
+   - **Values (§2.4).** A string literal whose token spans a point lowers to
+     the bytes the file spells, so it is a `PhpStr::Bytes` and compares, hashes
+     and keys by bytes, and the fold lane declines it (§2.6). The parser's own
+     unescaper reads the escapes: the raw token is cut at each point and the
+     segments are unescaped separately, which is exact because an escape
+     consumes only ASCII and a point is three non-ASCII bytes. The result is
+     checked against the parser's `value` with U+FFFD at the points, and a
+     literal that disagrees declines.
+   - **Names (§2.5, extended).** A name token (identifier of any form, or a
+     variable) that spans a point, or a string literal read *as* a name (a
+     callable, an effect label), marks the tree (`SourceTree::names_lossy`).
+     The analyzer skips such a file's own passes, silently and without the
+     `syntax.unparsable` finding or its dam, because the source is fine and
+     only the text it was read as is not, and no caller descends into its
+     function and method bodies. The declarations stay in the index, where they
+     can only silence an absence claim. This is deliberately file-wide: two
+     names that differ only in replaced bytes cannot be told apart by any lane
+     reading the decoded text.
+   - **Writers.** `check --fix`, `transform` (at plan time, so a dry run does
+     not offer a diff `--apply` would refuse), MCP `apply_plan` and `annotate`
+     refuse a file whose bytes on disk are not valid UTF-8, by name, before
+     writing anything. They splice into the decoding, and writing it back
+     would replace the file's own bytes with U+FFFD. `effect-diff` only reads
+     sources and writes its baseline, so it needs no refusal.
+   - **Transport.** The loss rides on the salsa input (`SourceFile::loss`,
+     a defaulted field, so `SourceFile::new` is unchanged), on the generation
+     capture (`Captured`, `GenerationOutcome::losses`) for the warm path, and
+     on a thread-local for the duration of one parse, like the stack guard and
+     the memo, since the lowering has no context to hang it on. Persisted
+     formats: `SourceTree` gains a field and the per-file facts gain
+     `names_lossy`. Both are decoded only past the analyzer gate, so there is
+     no `SCHEMA_VERSION` bump; the `symbols` shard and the `summaries` rows are
+     unchanged.
+
+   Still open, and still §3.2's: the source text is the decoding, so the
+   writers cannot touch these files and the LSP and fix-it offsets are the
+   decoding's; effect and throw summaries are keyed by name across files and
+   are not declined for a file whose names collapsed; and a name inside a
+   docblock is not read through the map. §3.3 (salsa backdating) is closed
+   for what the value lane reads, because a literal's bytes are in the tree,
+   but not for a byte-lossy file that differs only in a comment.
 3. **Salsa backdating.** `SourceTree` derives `Eq`, and two file revisions
    differing only in invalid bytes inside a string literal currently produce
    equal trees, so downstream queries are backdated and findings go stale after
