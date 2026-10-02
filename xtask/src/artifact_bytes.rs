@@ -45,7 +45,7 @@ use std::path::{Path, PathBuf};
 
 use steins_db::{EffectsPolicy, PluginFacts, composer};
 use steins_gen::{SectionName, Store};
-use steins_infer::{GenerationParams, RuntimePostures, generation_check};
+use steins_infer::{GenerationParams, Progress, RuntimePostures, generation_check};
 use steins_syntax::SourceTree;
 
 use crate::corpus::collect_php_files;
@@ -163,6 +163,7 @@ fn measure_in_store(dir: &Path, store: &Path, php: bool) -> Result<Measurement, 
         postures: RuntimePostures::default(),
         php,
         paranoid: false,
+        progress: &Progress::off(),
     };
     generation_check(&params).map_err(|e| format!("cold generation build: {e}"))?;
 

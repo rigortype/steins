@@ -31,8 +31,8 @@ use std::path::{Path, PathBuf};
 
 use steins_db::{EffectsPolicy, PluginFacts, composer};
 use steins_infer::{
-    Diagnostic, GenerationMode, GenerationOutcome, GenerationParams, PackageKind, RuntimePostures,
-    generation_check,
+    Diagnostic, GenerationMode, GenerationOutcome, GenerationParams, PackageKind, Progress,
+    RuntimePostures, generation_check,
 };
 use steins_sidecar::Sidecar;
 
@@ -158,6 +158,7 @@ fn run_with(
         postures: RuntimePostures::default(),
         php: true,
         paranoid,
+        progress: &Progress::off(),
     };
     generation_check(&params).expect("the generation lifecycle runs")
 }

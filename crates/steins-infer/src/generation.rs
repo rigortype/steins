@@ -242,6 +242,10 @@ pub struct GenerationParams<'a> {
     /// the environment to decide passes `false` — which every caller but a
     /// test and `cargo xtask perf --paranoid` does.
     pub paranoid: bool,
+    /// Where the run says its phases and slow files as it goes (issue #885):
+    /// [`Progress::off`] says nothing, and the outcome is the same whatever the
+    /// handle.
+    pub progress: &'a Progress,
 }
 
 /// What one gated run produced: the findings, plus everything the caller's
@@ -460,16 +464,7 @@ impl std::error::Error for GenerationError {
 /// or the decision to keep `CURRENT` (`publish_or_reuse`); and the outcome
 /// (`report`).
 pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, GenerationError> {
-    generation_check_reporting(p, &Progress::off())
-}
-
-/// [`generation_check`] reporting its phases and slow files through `progress`
-/// as it goes (issue #885). Cost reporting and nothing else: the outcome is
-/// the same whatever the handle.
-pub fn generation_check_reporting(
-    p: &GenerationParams<'_>,
-    progress: &Progress,
-) -> Result<GenerationOutcome, GenerationError> {
+    let progress = p.progress;
     let t_capture = Instant::now();
     let store = Store::open(p.store_root).map_err(GenerationError::Store)?;
     let mut notes: Vec<String> = Vec::new();
@@ -516,7 +511,7 @@ pub fn generation_check_reporting(
         stamp: identity.stamp(p),
     };
     progress.phase("fold engine");
-    let analysis = analyze(p, &captured, &mut loaded, &mut fold.folder, delta, &replay, progress);
+    let analysis = analyze(p, &captured, &mut loaded, &mut fold.folder, delta, &replay);
     walk_notes(&analysis, replay.candidates, &mut notes);
 
     // Identity, honestly filled (see the module docs for in/out reasoning).
@@ -658,7 +653,6 @@ fn analyze(
     folder: &mut crate::RecordingFolder,
     delta: NameDelta,
     replay: &Replay<'_>,
-    progress: &Progress,
 ) -> Analysis {
     let t_analyze = Instant::now();
     let index = Index::from_merged(merge_shards(&loaded.shards));
@@ -739,7 +733,7 @@ fn analyze(
         p.plugins,
         p.effects,
         Some(&mut control),
-        progress,
+        p.progress,
     );
     drop(units);
     // Off the merged index: the gated path must not force a salsa parse just to

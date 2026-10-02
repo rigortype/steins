@@ -125,7 +125,7 @@ pub use project::{
 };
 
 use project::Index;
-pub use progress::{DEFAULT_SLOW_FILE, Progress};
+pub use progress::Progress;
 pub use walk_fleet::WALK_WORKERS_ENV;
 pub use walk_plan::Divergence;
 
@@ -134,7 +134,7 @@ pub(crate) use fact_util::{
     is_pure_class_contract, join_into, phpdoc_object_guard_blind, rendered_cval, val_of_key,
 };
 pub(crate) use fixpoints::{Fixpoints, Gate, Sym};
-pub(crate) use pipeline::{check_units, check_units_controlled, check_units_reporting};
+pub(crate) use pipeline::{check_units, check_units_controlled};
 
 /// The `[runtime] final-keyword` posture (issue #234), re-exported so the CLI can
 /// resolve `steins.toml` into [`RuntimePostures`] without depending on
@@ -229,7 +229,7 @@ pub use fold_process::{ProcessEngine, SidecarFolder};
 pub use generation::{
     FoldReport, GenerationError, GenerationMode, GenerationOutcome, GenerationParams,
     GenerationReport, PARANOID_ENV, PackageKind, PackageReport, PhaseTimings, SOURCES_SECTION,
-    WalkReport, generation_check, generation_check_reporting,
+    WalkReport, generation_check,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use summaries::SUMMARIES_SECTION;
@@ -331,7 +331,7 @@ pub fn check_project_reporting(
     // The salsa path parses lazily, so the parse and the index are paid by the
     // lines above: this is where they have been.
     progress.phase("parse");
-    check_units_reporting(
+    check_units_controlled(
         &units,
         &index,
         folder,
@@ -339,6 +339,7 @@ pub fn check_project_reporting(
         project.layout(db),
         project.plugins(db),
         project.effects(db),
+        None,
         progress,
     )
 }

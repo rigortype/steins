@@ -231,7 +231,7 @@ mod tests {
     use steins_db::{EffectsPolicy, PackagePartition, PluginFacts, ProjectLayout};
 
     use super::{GenerationParams, config_identity};
-    use crate::{FinalKeyword, OsFamily, RuntimePostures};
+    use crate::{FinalKeyword, OsFamily, Progress, RuntimePostures};
 
     /// Render `config_identity` for fixed params, as `(key, value)` string pairs.
     fn identity_rows(
@@ -255,6 +255,7 @@ mod tests {
             postures: RuntimePostures { warning_handler_abort, final_keyword, os_pin },
             php: false,
             paranoid: false,
+            progress: &Progress::off(),
         };
         config_identity(&params)
     }

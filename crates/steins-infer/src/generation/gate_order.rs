@@ -27,7 +27,7 @@ use std::sync::{Mutex, PoisonError};
 use steins_db::{EffectsPolicy, PluginFacts, composer};
 
 use super::{GenerationMode, GenerationOutcome, GenerationParams, generation_check};
-use crate::RuntimePostures;
+use crate::{Progress, RuntimePostures};
 
 // ---------------------------------------------------------------------------
 // The seams.
@@ -176,6 +176,7 @@ fn run(root: &Path, files: &[PathBuf], analyzer: Option<&'static str>) -> Genera
         postures: RuntimePostures::default(),
         php: false,
         paranoid: true,
+        progress: &Progress::off(),
     };
     FOREIGN_ANALYZER.with(|slot| slot.set(analyzer));
     let outcome = generation_check(&params);

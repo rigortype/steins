@@ -25,8 +25,8 @@ use std::process::ExitCode;
 use steins_db::{Project, SteinsDatabase, parse as parse_tree};
 use steins_edit::{ByteSpan, Edit, EditPlan};
 use steins_infer::{
-    Diagnostic, InlineOutcome, SOUND_SUBSET_NOTICE, SidecarFolder, apply_inline_ignores,
-    Progress, check_project_reporting,
+    Diagnostic, InlineOutcome, Progress, SOUND_SUBSET_NOTICE, SidecarFolder, apply_inline_ignores,
+    check_project_reporting,
 };
 use steins_syntax::SourceTree;
 
@@ -172,7 +172,7 @@ pub(crate) fn run_check(args: &[String]) -> ExitCode {
     // Built before the first file is read, so the run's clock covers it.
     let progress = progress_for(args.progress);
     let files = collect_files(&args.paths);
-    progress.phase_with("discover", &format!("{} file(s)", files.len()));
+    progress.phase_with("discover", || format!("{} file(s)", files.len()));
 
     // Coverage posture (ADR-0004): `--no-php` runs the sound subset (notice up
     // front); otherwise folds via a lazily-spawned sidecar.
@@ -360,14 +360,13 @@ pub(crate) fn analyze_check(req: &CheckRequest<'_>) -> Result<CheckOutcome, Setu
             for w in said {
                 errln!("steins: {w}");
             }
-            let findings: Vec<Diagnostic> =
-                check_project_reporting(
-                    &loaded.db,
-                    loaded.project,
-                    &mut folder,
-                    postures,
-                    &req.progress,
-                );
+            let findings: Vec<Diagnostic> = check_project_reporting(
+                &loaded.db,
+                loaded.project,
+                &mut folder,
+                postures,
+                &req.progress,
+            );
             let (inline, vendor_suppressed) =
                 suppression_pipeline(&loaded, findings, &surface, req.vendor_diagnostics);
             (loaded, inline, vendor_suppressed)

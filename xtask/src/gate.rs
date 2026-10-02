@@ -55,8 +55,8 @@ use rayon::prelude::*;
 use steins_db::composer;
 use steins_db::{EffectsPolicy, PluginFacts, ProjectLayout};
 use steins_infer::{
-    Diagnostic, Floor, GenerationMode, GenerationParams, Layer, RuntimePostures, generation_check,
-    layer, surface_floor,
+    Diagnostic, Floor, GenerationMode, GenerationParams, Layer, Progress, RuntimePostures,
+    generation_check, layer, surface_floor,
 };
 
 use crate::corpus::{PACKAGES, checkout_dir, collect_php_files, read_lock, repo_root};
@@ -751,6 +751,7 @@ fn analyze_through_generations(
         // (`STEINS_GENERATIONS_PARANOID=1`) — it walks every file and would
         // more than double the gate on every PR.
         paranoid: false,
+        progress: &Progress::off(),
     };
 
     let t = Instant::now();

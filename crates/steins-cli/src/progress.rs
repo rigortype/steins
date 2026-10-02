@@ -10,10 +10,14 @@
 
 use std::time::Duration;
 
-use steins_infer::{DEFAULT_SLOW_FILE, Progress};
+use steins_infer::Progress;
 
-/// Setting this to anything but `0`, `false` or the empty string turns the
-/// channel on, as `--progress` does.
+/// The walk time at or above which a file is named when
+/// [`SLOW_MS_ENV`] does not say otherwise.
+const DEFAULT_SLOW_FILE: Duration = Duration::from_millis(250);
+
+/// Setting this to `1` turns the channel on, as `--progress` does. Only `1`
+/// does, as for `STEINS_GENERATIONS_PARANOID`; any other value leaves it off.
 pub(crate) const PROGRESS_ENV: &str = "STEINS_PROGRESS";
 
 /// The walk time, in milliseconds, at or above which a file is named
@@ -23,8 +27,7 @@ pub(crate) const SLOW_MS_ENV: &str = "STEINS_PROGRESS_SLOW_MS";
 /// The handle for one `check` run: on when `flag` is set or the environment
 /// asks, off otherwise. The environment is read here, once.
 pub(crate) fn progress_for(flag: bool) -> Progress {
-    let env = std::env::var(PROGRESS_ENV).ok();
-    if !flag && !env.as_deref().is_some_and(is_on) {
+    if !flag && !std::env::var(PROGRESS_ENV).is_ok_and(|v| v == "1") {
         return Progress::off();
     }
     let slow = std::env::var(SLOW_MS_ENV)
@@ -32,8 +35,4 @@ pub(crate) fn progress_for(flag: bool) -> Progress {
         .and_then(|v| v.trim().parse::<u64>().ok())
         .map_or(DEFAULT_SLOW_FILE, Duration::from_millis);
     Progress::new(|line| errln!("steins: progress: {line}"), slow)
-}
-
-fn is_on(value: &str) -> bool {
-    !matches!(value.trim(), "" | "0" | "false")
 }

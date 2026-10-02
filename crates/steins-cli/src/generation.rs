@@ -44,7 +44,7 @@ use std::path::{Component, Path, PathBuf};
 use steins_db::{EffectsPolicy, PluginFacts, ProjectLayout};
 use steins_infer::{
     Diagnostic, GenerationParams, INLINE_IGNORE, LazyTree, RuntimePostures,
-    generation_check_reporting,
+    generation_check,
 };
 use steins_syntax::SourceTree;
 
@@ -127,11 +127,12 @@ pub(crate) fn try_generation_check(
         // The verifier is environment-driven here (`STEINS_GENERATIONS_PARANOID`),
         // which `generation_check` reads for itself; the CLI never forces it.
         paranoid: false,
+        progress: &req.progress,
     };
     // A failure here is cost, never meaning (ADR-0092 §2), so it degrades to
     // the ordinary cold path in silence — and having printed nothing yet is
     // what lets the cold path own stderr whole.
-    let outcome = generation_check_reporting(&params, &req.progress).ok()?;
+    let outcome = generation_check(&params).ok()?;
     notices.extend(outcome.attribution_notices);
     notices.extend(runtime_warnings.iter().cloned());
 

@@ -235,11 +235,13 @@ Deleting `.steins/` at any time is safe; the next run rebuilds it.
 ### Progress
 
 A run over a large tree prints nothing until it finishes, so a slow run looks
-like a hung one. `--progress` (or `STEINS_PROGRESS=1` in the environment; `0`,
-`false` and the empty string are off) makes `check` say where it is, on
-stderr, as it goes. It is off by default, and off it changes nothing: stdout
-and stderr are byte-for-byte what a build without the flag wrote. On, it
-adds lines and changes nothing else — no finding, no exit code.
+like a hung one. `--progress` (or `STEINS_PROGRESS=1` in the environment;
+only the value `1` turns it on) makes `check` say where it is, on stderr, as
+it goes. It is off by default, and off it changes nothing: stdout and stderr
+are byte-for-byte what a build without the flag wrote. On, it adds lines and
+changes nothing else — no finding, no exit code. `steins triage` runs
+`check` as a child process, so `STEINS_PROGRESS=1` in its environment makes
+that child say its progress too.
 
 ```
 $ steins check --progress src
@@ -250,7 +252,7 @@ steins: progress: fold engine: 3.1 ms (elapsed 235.7 ms)
 steins: progress: universe: 18.4 ms (elapsed 254.1 ms)
 steins: progress: purity oracle: 0.0 ms (elapsed 254.1 ms)
 steins: progress: slow file: src/Generated/Map.php walked in 612.8 ms
-steins: progress: walk: 1204.5 ms (elapsed 1458.6 ms, 214 of 214 file(s) walked)
+steins: progress: walk: 1204.5 ms (elapsed 1458.6 ms, 214 of 214 file(s) walked on 4 worker(s))
 steins: progress: report: 87.3 ms (elapsed 1545.9 ms, fixpoints in all: effects 60.2 ms, throws 12.9 ms)
 steins: progress: persist: 22.0 ms (elapsed 1567.9 ms)
 steins: progress: suppress: 1.6 ms (elapsed 1569.5 ms)
@@ -259,15 +261,24 @@ steins: progress: output: 0.4 ms (elapsed 1569.9 ms)
 ```
 
 Each phase line is written when the phase **ends**: the time the phase took,
-then the time since the run began. So the last line printed names the phase
-that finished last, and the run is inside the next one. The phases are
+then the time since the run began. So the last phase line printed names the
+phase that finished last, and the run is inside the next one. The phases are
 `discover` (collecting files), then on the cached path `capture`, `parse`
 and `fold engine`, or on the `--no-cache` path just `parse` (which there
 includes building the project index); then `universe`, `purity oracle`,
 `walk`, `report` (whose detail gives the two fixpoints' total cost, which
 the earlier lines may already have paid for), `persist` (cached path only),
 `suppress` and `output`. A run that replays a file from the cache does not
-walk it, and `walk` says how many it did.
+walk it, and `walk` says how many it did and on how many workers.
+
+Two things bend that sequence. A cached run that degrades (an unopenable
+store, a source that moved under the seal) falls back to the `--no-cache`
+sequence, so the lines of the abandoned cached attempt are followed by the
+cold run's own, `parse` included. The `output` time also covers everything
+between `suppress` and the end of the report: the baseline match and, under
+`--fix`, the post-check re-analysis, which says nothing of its own.
+`--set-baseline` returns before `output`, so a baseline run has no `output`
+line.
 
 A line naming a file is printed when a single file's walk took at least
 **250 ms**; the name is the path findings report the file under.
