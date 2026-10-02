@@ -213,6 +213,14 @@ impl FrameBindings {
         frame
     }
 
+    /// Whether `name` is a by-value, non-variadic parameter that no statement of
+    /// the frame writes: its value is what the caller bound, in every statement.
+    /// An aliasing frame shows nothing, and a write of any kind (an assignment,
+    /// `++`, a `foreach` binding, `unset`) rules the name out.
+    pub(crate) fn unrebound_param(&self, name: &str) -> bool {
+        !self.opaque && self.params.contains(name) && self.stores.get(name).is_none()
+    }
+
     /// The shape of a bare `$name` argument.
     fn shape(&self, name: &str) -> ArgShape {
         let foreign = name == "this" || SUPERGLOBALS.contains(&name);

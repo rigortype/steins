@@ -210,6 +210,46 @@ impl GapKind {
             Self::OperatorClone => "operator-clone",
         }
     }
+
+    /// What the kind means at a site, as a clause a finding can quote after the
+    /// kind's spelling (ADR-0100 §3): the `maybe-` siblings of the envelope checks
+    /// name the cause of each unbounded site, and a reader should not have to look
+    /// the spelling up. Message wording is not contract; the spelling is.
+    pub(crate) const fn reason(self) -> &'static str {
+        match self {
+            Self::DynamicCallee => "the callee is computed at run time",
+            Self::UnknownClass => "the class cannot be named",
+            Self::UnknownFunction => "the function resolves to no known declaration",
+            Self::OpenMethod | Self::NonFinalThis => "a subclass may replace the method",
+            Self::DeclaredReceiver => {
+                "the receiver is known only by its declared type, which carries no checked bound"
+            }
+            Self::InteropEnvelope => "only an unchecked interop envelope answers the call",
+            Self::UnresolvedCallback => "a callback passed here resolves to no known body",
+            Self::UnseenCode => "the code it runs (`eval` or an inclusion) is never analyzed",
+            Self::UserCodeReach => "an argument may reach user code the call does not rule out",
+            Self::StateConstruct => "a state construct whose label is not inferred yet",
+            Self::UnresolvedThrow => "the thrown class cannot be named",
+            Self::NoEffectRow => "the catalog has no effect row for it",
+            Self::NoThrowRow => "the catalog has no throw row for it",
+            Self::ArgumentList => {
+                "a named or spread argument list defeats the arity the catalog certifies"
+            }
+            Self::FlagDependentThrow => {
+                "the flags argument is not a constant that lacks the throwing flag"
+            }
+            Self::MethodNotFound => {
+                "no declaration in the class chain answers the method, so `__call` or an `Error` does"
+            }
+            Self::OperatorToString => {
+                "an operand may be an object whose `__toString` the site cannot pin"
+            }
+            Self::OperatorMagicProperty => "a property access may run `__get`, `__set` or a hook",
+            Self::OperatorArrayAccess => "an offset access may run `ArrayAccess` methods",
+            Self::OperatorIteration => "an iterated operand may run `Traversable` methods",
+            Self::OperatorClone => "a cloned operand may run `__clone`",
+        }
+    }
 }
 
 /// A set of [`GapKind`]s as a bit mask: what a propagated row carries, where the

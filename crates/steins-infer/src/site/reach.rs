@@ -78,6 +78,15 @@ impl<'a> Frame<'a> {
 }
 
 impl Frame<'_> {
+    /// Whether a named call of the frame may take the variable `name` by
+    /// reference, and so rebind it. The syntax layer counts every other write
+    /// ([`steins_syntax::DynamicSite::Call`]'s `var`); this is the half only
+    /// callee resolution answers, as for an [`ArgShape::Param`].
+    pub(crate) fn rebound_by_call(&self, cx: &Cx, name: &str) -> bool {
+        let by_ref = self.by_ref.get_or_init(|| passed_by_ref(cx, self.class_fqn, self.sites));
+        by_ref.contains(name)
+    }
+
     /// What a variable every write of the frame stores `stores` into holds,
     /// unless a named call of the frame may take it by reference.
     fn variable_held(&self, cx: &Cx, name: &str, stores: Stored) -> Held {

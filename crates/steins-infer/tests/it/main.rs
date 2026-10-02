@@ -168,6 +168,7 @@ mod stage2_facts;
 mod state_constructs;
 mod str_pred_transfer;
 mod stratum;
+mod strict_floor;
 mod string_context;
 mod sweep_carriage;
 mod ternary_value;

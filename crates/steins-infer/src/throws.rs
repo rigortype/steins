@@ -5,6 +5,8 @@
 //! diagnostics built on it. The escape sweep ([`crate::escapes`]) and the effects
 //! pass ([`crate::purity`]) consume the fixpoint through the `pub(crate)` items.
 
+mod floor;
+
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use steins_domain::Certainty;
@@ -568,6 +570,10 @@ pub(crate) fn throw_diagnostics(
     }
 
     let throws = fx.throws();
+    // The `@throws` declarations a caller's inherited gap is owed to (the strict
+    // floor's discharge 4, ADR-0100 §4): read before the loop, because a callee may
+    // live in a file the loop has not reached.
+    let enveloped = floor::enveloped_syms(fx);
     let mut out = Vec::new();
     for fi in 0..units.len() {
         // Everything below is gated on `declared_throws` being non-empty —
@@ -588,6 +594,8 @@ pub(crate) fn throw_diagnostics(
                 &mut out, &cx, index, units, &sym, &f.name, &declared, throws, &f.sites,
                 uncovered,
             );
+            let frame = Frame::new(None, &f.params, &f.sites);
+            floor::report_unit(&mut out, &cx, &frame, &f.name, &declared, (throws, &enveloped));
         }
         for c in cx.tree().classes() {
             for m in &c.methods {
@@ -599,6 +607,9 @@ pub(crate) fn throw_diagnostics(
                         &mut out, &cx, index, units, &sym, &display, &declared, throws,
                         &m.sites, uncovered,
                     );
+                    let frame = Frame::new(Some(&c.fqn), &m.params, &m.sites);
+                    let judged = (throws, &enveloped);
+                    floor::report_unit(&mut out, &cx, &frame, &display, &declared, judged);
                 }
                 // Liskov: an override/impl whose declared throws widen the parent's.
                 emit_liskov(&mut out, &cx, c, m, &declared);

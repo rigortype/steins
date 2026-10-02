@@ -214,6 +214,29 @@ pub const THROW_LISKOV_ID: &str = "throw.liskov-widened";
 /// stays silent — only the proven subset judges.
 pub const EFFECT_LISKOV_ID: &str = "effect.liskov-widened";
 
+/// The `maybe-` sibling of [`EFFECT_ID`] (ADR-0100 §2, issue #800): a declaration
+/// carrying an effect envelope (`#[\Steins\Pure]`, `#[\Steins\Effect(...)]`, or an
+/// interop tag that bounds something) whose body runs something the analyzer
+/// cannot see, so the envelope is **unverified** rather than exceeded. The
+/// definite id reads only the proven lane and stays silent on a gap; this one
+/// names each gap at the strict floor, the `offset.maybe-missing` precedent.
+///
+/// One finding per own site and gap kind (the kind's spelling, `GapKind::as_str`,
+/// is in the message), and one per call edge into a project body that is itself
+/// `…?` and carries no envelope of its own. Five discharges narrow it (ADR-0100
+/// §4); a ⊤ envelope is never a unit. `(Layer::Contract, Floor::Strict)`.
+pub const EFFECT_MAYBE_ENVELOPE_EXCEEDED_ID: &str = "effect.maybe-envelope-exceeded";
+
+/// The `maybe-` sibling of [`THROW_UNDECLARED_ID`] (ADR-0100 §2, issue #800): a
+/// function or method whose docblock declares `@throws`, and whose body may throw
+/// something nothing here names. [`THROW_UNDECLARED_ID`] reports a **proven**
+/// checked escape; this one reports the gaps behind a throw set marked `…?` — a
+/// callee the lane cannot resolve, a catalog name with no throw row, an operand
+/// that may reach user code. The same units, sites and edges as
+/// [`EFFECT_MAYBE_ENVELOPE_EXCEEDED_ID`], on the throw lane; a declared
+/// `@throws \Throwable` is ⊤ and never a unit. `(Layer::Contract, Floor::Strict)`.
+pub const THROW_MAYBE_UNDECLARED_ID: &str = "throw.maybe-undeclared";
+
 // ---------------------------------------------------------------------------
 // The finding-breadth family (ADR-0049): absence-proof ids. An id not yet wired to
 // an emitter lives in `REGISTERED_NOT_YET_EMITTED` rather than `ALL_EMITTABLE_IDS`;
@@ -1145,6 +1168,9 @@ pub const ALL_EMITTABLE_IDS: &[&str] = &[
     THROW_LISKOV_ID,
     EFFECT_ID,
     EFFECT_LISKOV_ID,
+    // the strict floor of the two envelope checks (ADR-0100, issue #800)
+    EFFECT_MAYBE_ENVELOPE_EXCEEDED_ID,
+    THROW_MAYBE_UNDECLARED_ID,
     UNKNOWN_LABEL_ID,
     // interop-label hygiene (ADR-0082 amendment, issue #311)
     INTEROP_UNKNOWN_LABEL_ID,

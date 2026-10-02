@@ -39,12 +39,17 @@ pub(super) fn function_call(fc: &FunctionCall<'_>, sx: &SiteScope<'_>, out: &mut
         site.const_args = const_args_of_call(fc);
         site.operands = arg_shapes_of(&fc.argument_list, &cx.bindings);
         out.push(site);
-    } else if let Some(cbref) = direct_var_callee(fc).and_then(|v| cx.locals.get(&v).cloned()) {
-        // `$fn()` resolved to a body-local single-assignment closure.
-        out.push(sx.site(to_span(fc.span()), SiteKind::Callback { cbref }));
     } else {
-        // A dynamic function call (`$f()`, `($cb)()`) — unprovable.
-        out.push(sx.site(to_span(fc.span()), SiteKind::Dynamic(DynamicSite::Call)));
+        let var = direct_var_callee(fc);
+        if let Some(cbref) = var.as_ref().and_then(|v| cx.locals.get(v).cloned()) {
+            // `$fn()` resolved to a body-local single-assignment closure.
+            out.push(sx.site(to_span(fc.span()), SiteKind::Callback { cbref }));
+        } else {
+            // A dynamic function call (`$f()`, `($cb)()`) — unprovable. The callee's
+            // name travels when it is a parameter nothing rebinds.
+            let var = var.filter(|v| cx.bindings.unrebound_param(v));
+            out.push(sx.site(to_span(fc.span()), SiteKind::Dynamic(DynamicSite::Call { var })));
+        }
     }
 }
 

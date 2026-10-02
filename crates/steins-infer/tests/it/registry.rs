@@ -39,6 +39,8 @@ use steins_infer::CONSTANT_UNDEFINED_ID;
 use steins_infer::UNTYPED_CLASS_CONSTANT_ID;
 // the hyphen reservation's diagnostic (ADR-0091 §6, issue #479)
 use steins_infer::PHPDOC_UNKNOWN_VOCABULARY_ID;
+// the strict floor of the two envelope checks (ADR-0100, issue #800)
+use steins_infer::{EFFECT_MAYBE_ENVELOPE_EXCEEDED_ID, THROW_MAYBE_UNDECLARED_ID};
 
 /// Totality, forward: every id an emitter can produce is registered *with* a layer.
 #[test]
@@ -297,6 +299,28 @@ fn the_variable_pair_splits_across_the_two_floors() {
     assert_eq!(VARIABLE_MAYBE_UNDEFINED_ID, "variable.maybe-undefined");
 }
 
+// the strict floor of the envelope checks (ADR-0100, issue #800)
+
+/// The two `maybe-` siblings are emitted, registered in the contract layer at the
+/// strict floor, spelled by the glossary's rule, and leave their definite twins'
+/// floors alone: a `contracts` run keeps its meaning.
+#[test]
+fn the_envelope_checks_have_a_strict_floor() {
+    let emittable: HashSet<&str> = ALL_EMITTABLE_IDS.iter().copied().collect();
+    for (id, definite) in [
+        (EFFECT_MAYBE_ENVELOPE_EXCEEDED_ID, EFFECT_ID),
+        (THROW_MAYBE_UNDECLARED_ID, THROW_UNDECLARED_ID),
+    ] {
+        assert!(emittable.contains(id), "`{id}` has an emitter");
+        assert_eq!(layer(id), Some(Layer::Contract));
+        assert_eq!(surface_floor(id), Some(Floor::Strict));
+        assert_eq!(surface_floor(definite), Some(Floor::Contracts), "the definite twin is unmoved");
+        assert!(id.contains(".maybe-"), "the glossary's maybe- sibling spelling");
+    }
+    assert_eq!(EFFECT_MAYBE_ENVELOPE_EXCEEDED_ID, "effect.maybe-envelope-exceeded");
+    assert_eq!(THROW_MAYBE_UNDECLARED_ID, "throw.maybe-undeclared");
+}
+
 // unset pseudo-type (ADR-0087 §4, issue #396)
 
 /// The declared possibly-undefined read is a **third** id beside the `variable.*`
@@ -490,6 +514,11 @@ fn floors_reproduce_the_pre_s6_layer_selection() {
     let promoted = [
         (OFFSET_UNDECLARED_ID, Layer::Contract, Floor::Contracts),
         (OFFSET_MAYBE_MISSING_ID, Layer::Contract, Floor::Strict),
+        // The `maybe-` siblings of the two envelope checks (ADR-0100, issue #800):
+        // contract layer like their definite twins, which keep `Contracts`, and
+        // `Strict` because the claim is a gap, never a proof.
+        (EFFECT_MAYBE_ENVELOPE_EXCEEDED_ID, Layer::Contract, Floor::Strict),
+        (THROW_MAYBE_UNDECLARED_ID, Layer::Contract, Floor::Strict),
         (PROPERTY_MAYBE_UNDEFINED_ID, Layer::Proof, Floor::Strict),
         (VARIABLE_MAYBE_UNDEFINED_ID, Layer::Proof, Floor::Strict),
         (TYPE_RETURN_MAYBE_MISSING_ID, Layer::Proof, Floor::Strict),

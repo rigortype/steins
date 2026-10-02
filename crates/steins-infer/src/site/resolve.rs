@@ -102,7 +102,7 @@ impl<'a> Resolver<'a, '_, '_> {
             SiteKind::Callback { cbref } => self.callback(cbref),
             // A `$f()` the scan cannot name, in either lane.
             SiteKind::Dynamic(
-                DynamicSite::Call | DynamicSite::MethodCall | DynamicSite::StaticCall,
+                DynamicSite::Call { .. } | DynamicSite::MethodCall | DynamicSite::StaticCall,
             ) => self.gap(GapKind::DynamicCallee),
             SiteKind::Dynamic(DynamicSite::New | DynamicSite::AnonymousClass) => {
                 self.gap(GapKind::UnknownClass);
