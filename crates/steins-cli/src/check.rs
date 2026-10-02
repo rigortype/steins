@@ -512,6 +512,21 @@ fn apply_fixes(
         }
     }
 
+    // A file that was not valid UTF-8 was analyzed through a lossy decoding; the fixes are
+    // spliced into that decoding and would be written over the file's own bytes (issue #927).
+    // Refused whole, by name, before the post-check and before a byte is written.
+    if let Some(detail) = crate::project::byte_lossy_refusal(plan.edited_paths()) {
+        return FixRun {
+            applied: false,
+            files_written: 0,
+            refusal: Some(FixRefusal {
+                reason: "byte-lossy-source",
+                detail,
+                new_diagnostics: Vec::new(),
+            }),
+        };
+    }
+
     // Post-check gate (ADR-0034 point 3a): refuses the write if any id's count
     // rises. Broad surface — a fix-it must not move the contract layer.
     let postcheck = post_check(db, project, &plan, texts, PostCheckSurface::Everything);

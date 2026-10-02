@@ -13,7 +13,9 @@ use steins_infer::{
 
 use crate::Format;
 use crate::config::{allow_list, effects_from_config, read_steins_config, runtime_from_config};
-use crate::project::{collect_sources, load_plugins, resolve_layout};
+use crate::project::{
+    collect_sources, load_plugins, read_source, resolve_layout, source_input,
+};
 
 /// `steins annotate [--no-php] [--format text|json] <file.php>` — reprint one
 /// file with a right-margin column of proven facts (ADR-0020), or (JSON) the
@@ -76,13 +78,23 @@ pub(crate) fn run_annotate(args: &[String]) -> ExitCode {
         errln!("steins: annotate expects a single file, not a directory: {}", path.display());
         return ExitCode::from(2);
     }
-    let text = match std::fs::read(path) {
-        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+    let (text, loss) = match read_source(path) {
+        Ok(read) => read,
         Err(e) => {
             errln!("steins: cannot read {}: {e}", path.display());
             return ExitCode::from(2);
         }
     };
+    // The margin is the file's own text with markers inserted, written to stdout: for a file
+    // that is not valid UTF-8 the text is a decoding that replaces each ill-formed byte, so
+    // the copy would not be the file (ADR-0080 §3.2 interim, issue #927).
+    if loss.is_some() {
+        errln!(
+            "steins: refusing to annotate {}: the file is not valid UTF-8, and the annotated copy would replace its original bytes (convert the file to UTF-8 first)",
+            path.display()
+        );
+        return ExitCode::from(2);
+    }
 
     // Same coverage posture as `check` (ADR-0004).
     if no_php {
@@ -166,15 +178,15 @@ fn load_annotate_project(
     let mut inputs: Vec<SourceFile> = Vec::new();
     let mut target: Option<SourceFile> = None;
     for fp in &project_files {
-        let content = if fp.canonicalize().map(|c| c == canon_target).unwrap_or(false) {
-            text.to_owned()
+        let (content, loss) = if fp.canonicalize().map(|c| c == canon_target).unwrap_or(false) {
+            (text.to_owned(), None)
         } else {
-            match std::fs::read(fp) {
-                Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+            match read_source(fp) {
+                Ok(read) => read,
                 Err(_) => continue,
             }
         };
-        let input = SourceFile::new(db, fp.to_string_lossy().into_owned(), content);
+        let input = source_input(db, fp.to_string_lossy().into_owned(), content, loss);
         if fp.canonicalize().map(|c| c == canon_target).unwrap_or(false) {
             target = Some(input);
         }

@@ -8,12 +8,15 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
 
 use steins_db::walk::{self, Sources};
 use steins_db::{
     EffectsPolicy, PluginFacts, Project, ProjectLayout, Resolve, SourceFile, SteinsDatabase,
     composer, project_index,
 };
+
+use steins_syntax::{Utf8Loss, decode_source};
 
 use crate::config::vendor_dirs_from_disk;
 
@@ -60,6 +63,46 @@ pub(crate) fn collect_sources(roots: &[PathBuf]) -> Sources {
     walk::php_files(roots)
 }
 
+/// A source file's bytes as the text the analysis reads, and what the decode replaced when
+/// they are not valid UTF-8 (issue #927, ADR-0080 §3.2 interim). The single reading every
+/// loader goes through, so a file is decoded the one way wherever it is read.
+pub(crate) fn read_source(
+    path: &Path,
+) -> std::io::Result<(String, Option<Arc<Utf8Loss>>)> {
+    let (text, loss) = decode_source(std::fs::read(path)?);
+    Ok((text, loss.map(Arc::new)))
+}
+
+/// The salsa input for one source file read through [`read_source`]: the loss map rides on
+/// the input, so the parse that reads it knows which bytes the text stands in for.
+pub(crate) fn source_input(
+    db: &SteinsDatabase,
+    path: String,
+    text: String,
+    loss: Option<Arc<Utf8Loss>>,
+) -> SourceFile {
+    SourceFile::builder(path, text).loss(loss).new(db)
+}
+
+/// Refusal text for the first of `paths` whose bytes on disk are not valid UTF-8, or `None`
+/// when every one is.
+///
+/// The writers (`check --fix`, `transform`, MCP apply) splice into the text the analysis
+/// read, and for such a file that text is a decode with U+FFFD for each ill-formed
+/// sequence: writing it back would replace the file's own bytes. Moving the source to bytes
+/// (ADR-0080 §3.2) is what lets a writer touch such a file; until then it refuses, by
+/// name, before it writes anything.
+pub(crate) fn byte_lossy_refusal<'a>(paths: impl IntoIterator<Item = &'a str>) -> Option<String> {
+    paths.into_iter().find_map(|path| {
+        let bytes = std::fs::read(path).ok()?;
+        std::str::from_utf8(&bytes).is_err().then(|| {
+            format!(
+                "refusing to rewrite {path}: the file is not valid UTF-8, so it was analyzed through a decoding that replaces each ill-formed byte, and writing that back would destroy the original bytes (convert the file to UTF-8, or make the edit by hand)"
+            )
+        })
+    })
+}
+
 /// One analyzed project: salsa database, [`Project`] input, parsed file
 /// handles, each file's text keyed by diagnostic path. `db` owns everything
 /// salsa ids point into — hand out `&loaded.db`, not moved out.
@@ -85,8 +128,8 @@ pub(crate) fn load_project(
     let mut inputs: Vec<SourceFile> = Vec::new();
     let mut texts: HashMap<String, String> = HashMap::new();
     for file_path in files {
-        let text = match std::fs::read(file_path) {
-            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        let (text, loss) = match read_source(file_path) {
+            Ok(read) => read,
             Err(e) => {
                 errln!("steins: cannot read {}: {e}", file_path.display());
                 continue;
@@ -94,7 +137,7 @@ pub(crate) fn load_project(
         };
         let path = file_path.to_string_lossy().into_owned();
         texts.insert(path.clone(), text.clone());
-        inputs.push(SourceFile::new(&db, path, text));
+        inputs.push(source_input(&db, path, text, loss));
     }
     let layout = resolve_layout(paths);
     // The plugin channel (ADR-0068), read once at the boundary like the layout.
@@ -125,7 +168,7 @@ pub(crate) fn load_project(
 /// `entries` must be in the orchestrator's universe-slot order, so the salsa
 /// project and the generation analysis agree on file identity.
 pub(crate) fn assemble_loaded(
-    entries: Vec<(String, String)>,
+    entries: Vec<(String, String, Option<Arc<Utf8Loss>>)>,
     layout: ProjectLayout,
     plugins: PluginFacts,
     effects: EffectsPolicy,
@@ -133,9 +176,9 @@ pub(crate) fn assemble_loaded(
     let db = SteinsDatabase::default();
     let mut inputs: Vec<SourceFile> = Vec::with_capacity(entries.len());
     let mut texts: HashMap<String, String> = HashMap::with_capacity(entries.len());
-    for (path, text) in entries {
+    for (path, text, loss) in entries {
         texts.insert(path.clone(), text.clone());
-        inputs.push(SourceFile::new(&db, path, text));
+        inputs.push(source_input(&db, path, text, loss));
     }
     let project =
         Project::builder(inputs.clone(), layout.clone(), plugins).effects(effects).new(&db);

@@ -19,7 +19,9 @@ use steins_edit::{
 use steins_infer::{Diagnostic, INTERNAL_PANIC_ID, NoFold, check_project};
 
 use crate::config::{allow_list_from_disk, effects_policy_from_disk, load_partitions, load_vouches};
-use crate::project::{collect_files, load_project, reject_missing_paths};
+use crate::project::{
+    byte_lossy_refusal, collect_files, load_project, reject_missing_paths, source_input,
+};
 use crate::{Format, profile};
 
 /// `steins transform <phpdoc-to-native|phpdoc-honesty|throws-envelope|effects-envelope|loop-to-array-map>
@@ -319,6 +321,14 @@ pub(crate) fn plan_transform_run(
         }
     }
 
+    // A file that was not valid UTF-8 is analyzed through a lossy decoding, and an edit would
+    // be spliced into that decoding and written over the file's own bytes (issue #927). The
+    // plan is refused whole, before it is shown or checked, so a dry run does not offer a
+    // diff that `--apply` would have to turn down.
+    if let Some(refusal) = byte_lossy_refusal(report.plan.edited_paths()) {
+        return Err(refusal);
+    }
+
     // Dual verification (ADR-0034 point 3a): zero NEW diagnostics, both dry-run and `--apply`.
     let postcheck =
         post_check(db, project, &report.plan, &loaded.texts, kind.post_check_surface());
@@ -419,10 +429,20 @@ pub(crate) fn post_check(
 
     // Fresh database avoids salsa mutation subtlety and keeps `before` intact.
     let edb = SteinsDatabase::default();
+    // A file that was not valid UTF-8 keeps its loss map into the `after` side (issue #927):
+    // `before` reads its literals as the bytes they are, and an `after` that read them as
+    // U+FFFD would report the collapse as a regression the edit did not cause. No plan edits
+    // such a file — the writers refuse it before they get here.
+    let losses: HashMap<&str, _> = project
+        .files(db)
+        .iter()
+        .filter_map(|f| Some((f.path(db), f.loss(db).clone()?)))
+        .collect();
     let mut einputs: Vec<SourceFile> = Vec::new();
     for (path, original) in texts {
         let updated = plan.apply_file(path, original);
-        einputs.push(SourceFile::new(&edb, path.clone(), updated));
+        let loss = losses.get(path.as_str()).cloned();
+        einputs.push(source_input(&edb, path.clone(), updated, loss));
     }
     // Must classify vendor the same way, or before/after measures layout, not the edit.
     let eproject =

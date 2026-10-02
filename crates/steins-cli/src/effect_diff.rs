@@ -10,7 +10,9 @@ use steins_db::{Project, ProjectLayout, SourceFile, SteinsDatabase};
 use steins_infer::effect_summaries_project_files;
 
 use crate::config::allow_list_from_disk;
-use crate::project::{collect_files, load_plugins, reject_missing_paths, resolve_layout};
+use crate::project::{
+    collect_files, load_plugins, read_source, reject_missing_paths, resolve_layout, source_input,
+};
 use crate::{Format, baseline, effect_baseline};
 
 /// `steins effect-diff [--baseline <path>] [--set-baseline] [--format text|json]
@@ -78,14 +80,14 @@ pub(crate) fn run_effect_diff(args: &[String]) -> ExitCode {
     let db = SteinsDatabase::default();
     let mut inputs: Vec<SourceFile> = Vec::new();
     for file_path in &files {
-        let text = match std::fs::read(file_path) {
-            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        let (text, loss) = match read_source(file_path) {
+            Ok(read) => read,
             Err(e) => {
                 errln!("steins: cannot read {}: {e}", file_path.display());
                 continue;
             }
         };
-        inputs.push(SourceFile::new(&db, file_path.to_string_lossy().into_owned(), text));
+        inputs.push(source_input(&db, file_path.to_string_lossy().into_owned(), text, loss));
     }
     let layout = resolve_layout(&paths);
     let plugins = load_plugins(&layout, allow_list_from_disk().as_deref());
