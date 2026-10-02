@@ -689,15 +689,24 @@ are missing from the run; every other file was analyzed as usual, and its
 findings in the report are real. The run exits `2` because an incomplete
 report is no verdict on your code.
 
+**A side effect: no warm runs.** A run that reports `internal.panic`
+publishes nothing to the warm cache (`.steins/`), so no later run replays
+the panic. The panic reproduces on every run, so while it persists no run
+publishes either: each one starts from the last generation published
+before the panic began, or analyzes the whole project cold when there is
+none, as on a fresh CI checkout. Expect slow runs until it is fixed.
+
 **Fix.** Report it, with the finding's message (it names the panic and the
 place in the analyzer that raised it), the Steins version, and the smallest
 file that still reproduces it. Rerunning with `RUST_BACKTRACE=1` prints the
 full panic report and backtrace on stderr, which makes the report much
 more useful. There is no switch to silence it: a profile, an ignore, the
-vendor filter and the baseline all pass it through, and `--set-baseline`
-refuses to write from such a run. Until a fix ships, the only way around is
-to leave the file out of the paths you pass. That hides its findings
-openly, where a silenced panic would hide them without saying so.
+vendor filter and the baseline all pass it through, and `--set-baseline`,
+`check --fix` and `transform --apply` refuse to write from such a run.
+Until a fix ships, the only way around is to leave the file out of the
+paths you pass, which also lets runs publish to the cache again. That
+hides its findings openly, where a silenced panic would hide them without
+saying so.
 
 ## Where to go next
 

@@ -4,8 +4,9 @@
 # PATH matching the project's floor, installs Steins through the Composer
 # channel (pinned in composer.lock, so this step never silently moves the
 # analyzer version — see docs/user-manual/01-installation-and-quickstart.md),
-# and runs `check`. Exit 1 (findings) and exit 2 (usage/config error, e.g. a
-# renamed path) both fail the job; only exit 0 is green. See
+# and runs `check`. Exit 1 (findings) and exit 2 (no verdict: a usage/config
+# error such as a renamed path, or an internal.panic in Steins itself) both
+# fail the job; only exit 0 is green. See
 # docs/user-manual/06-ci.md for the exit-code contract and the baseline loop
 # this template assumes is already committed as .steins-baseline.jsonl.
 #

@@ -428,7 +428,8 @@ it. A profile's `warn = [...]` demotes matching ids to report-without-fail.
   what `warn` means.
 - `1` — a fail-level finding was displayed.
 - `2` — usage or config error: an unknown profile, an `extends` cycle, a
-  pattern naming no registered id, a path that does not exist.
+  pattern naming no registered id, a path that does not exist. Or an
+  `internal.panic`, which no profile, `warn` included, can demote.
 
 `warn` is how you introduce a stage to a noisy repo without a baseline at all.
 The findings print in every CI log, the build stays green, and you delete the

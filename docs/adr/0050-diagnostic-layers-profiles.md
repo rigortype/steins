@@ -376,9 +376,12 @@ finding instead.
 1. **A new mechanics id, `internal.panic`.** A file whose walk panics
    gets exactly one `internal.panic` finding, at its line 1, column 1,
    carrying the panic message and where in the analyzer it was raised.
-   The file's other findings are dropped (the walk never finished its
-   block), and every other file is analyzed as if nothing happened.
-   Point 1's mechanics list gains it.
+   The findings of the file's own walk are dropped (the walk never
+   finished its block), and every other file is analyzed as if nothing
+   happened. Findings the project-wide passes attribute to the file (a
+   `throw.undeclared` from the throw fixpoint, an effect finding) do not
+   come from the walk and can still appear beside it. Point 1's
+   mechanics list gains it.
 2. **It rides outside every channel, not only the suppression ones.**
    The existing mechanics ids are claims about the code's apparatus;
    this one is a claim about the tool. So it goes one step past point 1:
@@ -400,17 +403,34 @@ finding instead.
    every format, because the other files' findings are real. A
    consumer that reads `2` as "no verdict" stays correct: `triage`
    forwards the `2` and drops the stream, the right answer for a
-   measurement that would be partial. Only `check` maps the id to an
-   exit code; the MCP `check` tool carries it as a finding.
+   measurement that would be partial. `check` exits `2` on the id, and
+   so do the commands that read the walk to decide something: `annotate`
+   when its margin carries one (its `✗` markers come from the walk), and
+   every write path. A post-check (`transform`, MCP `apply_plan`,
+   `check --fix`) with an `internal.panic` on either side fails by name
+   and writes nothing, since a side missing a file's findings cannot
+   vouch that the edit added none; `check --fix` refuses outright when
+   the run itself panicked, as `--set-baseline` does. The MCP `check`
+   tool carries the id as a finding.
+   A panicked file's own `@steins-ignore`s are not reported
+   `suppress.unmatched` and its baseline entries are not counted stale:
+   they matched nothing because the walk produced nothing, which is not
+   rot. A misspelled id (`suppress.unknown-id`) is read off the comment
+   alone and still reports.
 4. **What is isolated: the per-file walk, only.** The scope walk and the
    file's own passes run under `catch_unwind` on every path that walks:
    the cold pipeline, the generation orchestrator's fan-out, the
-   single-file entry points. The parse and the index (salsa queries on
-   the cold path, the load on the warm one), the whole-universe facts,
-   the two fixpoints and the reporting passes over them are not isolated.
-   None of them is one file's work, so a panic there has no file to name,
-   and it still unwinds the process. A salsa cancellation unwinds
-   through the guard untouched: it is control flow, not a fault.
+   single-file entry points, and `annotate`'s findings step. The parse
+   and the index (salsa queries on the cold path, the load on the warm
+   one), the whole-universe facts, the two fixpoints and the reporting
+   passes over them are not isolated; nor is `annotate`'s value-fact
+   walk of its target file, which runs outside the guarded walk. None of
+   the whole-project phases is one file's work, so a panic there has no
+   file to name, and it still unwinds the process. A salsa cancellation
+   (a local cancellation, a pending write) unwinds through the guard
+   untouched: it is control flow, not a fault. A `PropagatedPanic` (a
+   query this walk waited on panicked on another thread) is reported as
+   the file's panic.
 5. **Isolation is the binary's choice, not the library's.** The `steins`
    binary turns it on for every subcommand (a resident `mcp` server
    survives a panic too). A library caller, the in-process test suites
@@ -420,7 +440,9 @@ finding instead.
    hook the binary installs keeps the message off stderr while a walk is
    guarded and prints the standard report when `RUST_BACKTRACE` is set.
 6. **The cache never keeps one** (ADR-0092's 2026-10-02 amendment): a run
-   that reports `internal.panic` publishes no generation.
+   that reports `internal.panic` publishes no generation, so while a
+   panic reproduces no run publishes, and a run with no earlier
+   generation to start from is cold.
 7. **Refusals.**
    - **A switch to turn isolation off, or the id into a warning.** A
      tool failure that can be quieted is the false all-clear of the

@@ -777,8 +777,9 @@ pub(crate) fn run_triage(args: &[String]) -> ExitCode {
 /// Run this binary's own `check --format json` over `paths` and return its
 /// stdout. `check`'s stderr passes through (the sound-subset notice, runtime
 /// warnings) so nothing a user would have seen is lost. Its exit `0`/`1` are
-/// both a stream (findings or none); `2` is a usage or config error and is
-/// forwarded as this command's exit.
+/// both a stream (findings or none); `2` is no verdict — a usage or config
+/// error, or an `internal.panic` (whose stream is partial, so measuring it
+/// would mislead) — and is forwarded as this command's exit.
 fn check_stream(passthrough: &[String], paths: &[String]) -> Result<String, ExitCode> {
     let exe = std::env::current_exe().map_err(|e| {
         errln!("steins: cannot locate the steins binary to run check: {e}");
