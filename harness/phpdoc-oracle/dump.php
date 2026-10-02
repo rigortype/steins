@@ -17,9 +17,18 @@
  * <canonical> is the node's `__toString()` — phpdoc-parser's own canonical form,
  * with literal newlines/tabs escaped so the result stays single-line.
  *
+ * Tag mode (`--tags`, issue #932): each input line is one docblock tag
+ * (`@var Foo $x the result`), run through the full PhpDocParser, and the verdict
+ * is where the tag put its type and its variable:
+ *   TAG\t<type>\t<variable>   a typed tag; <variable> is empty when it names none
+ *   INVALID                  the tag value did not parse (an InvalidTagValueNode)
+ *   OTHER\t<class>            a tag value this mode does not read
+ * A typeless `@param $x` reads as `TAG` with an empty type.
+ *
  * Usage:
  *   php dump.php < inputs.txt
  *   php dump.php inputs.txt
+ *   php dump.php --tags inputs.txt
  */
 
 require __DIR__ . '/vendor/autoload.php';
@@ -28,13 +37,22 @@ use PHPStan\PhpDocParser\Lexer\Lexer;
 use PHPStan\PhpDocParser\Parser\ConstExprParser;
 use PHPStan\PhpDocParser\Parser\TokenIterator;
 use PHPStan\PhpDocParser\Parser\TypeParser;
+use PHPStan\PhpDocParser\Parser\PhpDocParser;
 use PHPStan\PhpDocParser\ParserConfig;
+use PHPStan\PhpDocParser\Ast\PhpDoc;
 
 $config = new ParserConfig([]);
 $lexer = new Lexer($config);
 $typeParser = new TypeParser($config, new ConstExprParser($config));
 
-$argvFile = $argv[1] ?? null;
+$args = array_slice($argv, 1);
+$tagMode = in_array('--tags', $args, true);
+$args = array_values(array_filter($args, static fn (string $a): bool => $a !== '--tags'));
+$phpDocParser = $tagMode
+    ? new PhpDocParser($config, $typeParser, new ConstExprParser($config))
+    : null;
+
+$argvFile = $args[0] ?? null;
 $handle = $argvFile !== null ? fopen($argvFile, 'r') : STDIN;
 if ($handle === false) {
     fwrite(STDERR, "cannot open input: {$argvFile}\n");
@@ -50,7 +68,35 @@ while (($line = fgets($handle)) !== false) {
         continue;
     }
     $input = cunescape($line);
-    echo dumpOne($lexer, $typeParser, $input), "\n";
+    echo $phpDocParser !== null
+        ? dumpTag($lexer, $phpDocParser, $input)
+        : dumpOne($lexer, $typeParser, $input), "\n";
+}
+
+/** Tag mode: one `@tag value` line through the full docblock parser. */
+function dumpTag(Lexer $lexer, PhpDocParser $parser, string $input): string
+{
+    $node = $parser->parse(new TokenIterator($lexer->tokenize('/** ' . $input . ' */')));
+    $tags = $node->getTags();
+    if (count($tags) !== 1) {
+        return 'OTHER' . "\t" . 'tags=' . count($tags);
+    }
+    $v = $tags[0]->value;
+    if ($v instanceof PhpDoc\InvalidTagValueNode) {
+        return 'INVALID';
+    }
+    [$type, $variable] = match (true) {
+        $v instanceof PhpDoc\VarTagValueNode => [(string) $v->type, $v->variableName],
+        $v instanceof PhpDoc\ParamTagValueNode => [(string) $v->type, $v->parameterName],
+        $v instanceof PhpDoc\TypelessParamTagValueNode => ['', $v->parameterName],
+        $v instanceof PhpDoc\PropertyTagValueNode => [(string) $v->type, $v->propertyName],
+        $v instanceof PhpDoc\AssertTagValueNode => [(string) $v->type, $v->parameter],
+        default => [null, null],
+    };
+    if ($type === null) {
+        return "OTHER\t" . get_class($v);
+    }
+    return "TAG\t" . escapeControls($type) . "\t" . $variable;
 }
 
 function dumpOne(Lexer $lexer, TypeParser $typeParser, string $input): string

@@ -1,0 +1,40 @@
+# One docblock tag per line: the tag name and its payload, as written after the gutter.
+# Pins where `steins-phpdoc`'s tag scanners split the type from the variable (issue #932).
+@var Foo the result, unlike $other
+@var int counts rows; see $total
+@var Foo $x the result
+@var Foo|null $y
+@var Foo
+@var Foo some description
+@var array<int, string> $items the items
+@var $x Foo
+@var Foo $this
+@var Foo $this->prop
+@var int|string $v, $w
+@var callable(int $a): void $cb
+@var Foo|Bar the thing called $x
+@var ?int the id $x
+@param int $n the count
+@param int the count $n
+@param int ...$rest
+@param int &$ref
+@param int &...$both
+@param int & ... $spaced
+@param int the count of $items
+@param callable(int $a): void $cb
+@param callable(int $a): void the callback $cb
+@param array{a: int} $shape description
+@param $x Foo
+@param $x
+@param int
+@param int the count, see $n
+@param Foo|null the value $n description with $other
+@phpstan-param int the count $n
+@phpstan-assert Foo $x
+@phpstan-assert Foo the value $x
+@phpstan-assert !Foo $x
+@property Foo $bar
+@property Foo $bar the thing
+@property Foo the thing $bar
+@property-read int the count, unlike $other
+@property-write Foo|null $bar description

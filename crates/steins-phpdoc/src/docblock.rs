@@ -8,14 +8,16 @@
 //! them back into a file.
 
 use crate::ast::Span;
+use crate::parser::parse_type;
 
 /// A typed tag recovered from a docblock.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DocTag {
     pub kind: TagKind,
     /// Candidate type-expression text, trimmed. May still carry a trailing
-    /// description for `@return`/`@throws`/`@var`; [`crate::parse_type`] reads
-    /// only the type prefix.
+    /// description for `@return`/`@throws`; [`crate::parse_type`] reads only the
+    /// type prefix. For `@param`/`@var`/assert tags it is already that prefix,
+    /// cut where the parse ends, or the whole payload when it does not parse.
     pub type_text: String,
     /// Span of `type_text` within the scanned text.
     pub type_span: Span,
@@ -389,7 +391,10 @@ fn scan_line(text: &str, line_start: usize, line_end: usize, tags: &mut Vec<DocT
         }
         (rest_start, rest_start, Some(var_name)) // zero-width: the family declares no type
     } else if kind.carries_var_name() {
-        match find_variable(bytes, rest_start, rest_end) {
+        let Some(split) = split_type_and_variable(text, bytes, kind, rest_start, rest_end) else {
+            return; // nothing to offer: no type, or an assert with no target
+        };
+        match split.var_pos {
             Some(var_pos) => {
                 let var_name = read_variable(text, bytes, var_pos, rest_end);
                 // `$this->prop`/`$obj->prop`/`$this::$static` is a property target,
@@ -403,17 +408,9 @@ fn scan_line(text: &str, line_start: usize, line_end: usize, tags: &mut Vec<DocT
                 {
                     property_target = true;
                 }
-                let mut te = var_pos; // type is everything before the variable, trimmed
-                while te > rest_start && (bytes[te - 1] == b' ' || bytes[te - 1] == b'\t') {
-                    te -= 1;
-                }
-                if te <= rest_start {
-                    return; // `@param $x` with no type — nothing to offer
-                }
-                (rest_start, te, Some(var_name))
+                (rest_start, split.type_end, Some(var_name))
             }
-            None if kind.is_assert() => return, // malformed: assert with no target
-            None => (rest_start, rest_end, None),
+            None => (rest_start, split.type_end, None),
         }
     } else {
         (rest_start, rest_end, None)
@@ -873,7 +870,8 @@ fn scan_magic_line(text: &str, line_start: usize, line_end: usize) -> Option<Mag
     let subject = match kind {
         MagicTagKind::Method => magic_method_name(text, bytes, rest_start, rest_end),
         MagicTagKind::Property | MagicTagKind::PropertyRead | MagicTagKind::PropertyWrite => {
-            find_variable(bytes, rest_start, rest_end)
+            variable_after_type(text, bytes, rest_start, rest_end, false)
+                .1
                 .map(|p| read_variable(text, bytes, p, rest_end)[1..].to_owned())
                 .unwrap_or_default()
         }
@@ -1248,20 +1246,74 @@ fn read_identifier(text: &str, bytes: &[u8], start: usize, end: usize) -> String
     text[start..j].to_owned()
 }
 
-/// Find the byte offset of the first `$name` variable in `[start, end)`: the
-/// first `$` followed by an identifier char — good enough for `@param T $x`.
-fn find_variable(bytes: &[u8], start: usize, end: usize) -> Option<usize> {
-    let mut i = start;
-    while i < end {
-        if bytes[i] == b'$'
-            && i + 1 < end
-            && (bytes[i + 1].is_ascii_alphabetic() || bytes[i + 1] == b'_' || bytes[i + 1] >= 0x80)
-        {
-            return Some(i);
-        }
-        i += 1;
+/// Where a `@param`/`@var`/assert tag's type ends and its variable, if any, begins.
+struct TypeSplit {
+    /// End of the type: the parsed prefix, or the whole payload when it does not parse.
+    type_end: usize,
+    /// Offset of the `$` of the variable the tag declares.
+    var_pos: Option<usize>,
+}
+
+/// Split the payload `[start, end)` of a variable-carrying tag the way the reference
+/// parser does (issue #932): parse the type, and the tag declares a variable only if the
+/// token right after the type is `$name`. A `$name` inside the description is prose, so
+/// `@var Foo the result, unlike $other` declares none; `@param` also reads the `&` and
+/// `...` that may precede its variable.
+///
+/// `None` drops the tag: a payload that opens with the variable has no type to offer,
+/// and an assert whose payload does not parse or names no target declares nothing. A
+/// payload that does not parse declares no variable, which is the quiet direction: the
+/// reference reads an invalid tag.
+fn split_type_and_variable(
+    text: &str,
+    bytes: &[u8],
+    kind: TagKind,
+    start: usize,
+    end: usize,
+) -> Option<TypeSplit> {
+    let is_param = matches!(kind, TagKind::Param);
+    if bytes[start] == b'$' || (is_param && matches!(bytes[start], b'&' | b'.')) {
+        return None; // `@param $x` with no type — nothing to offer
     }
-    None
+    let (type_end, var_pos) = variable_after_type(text, bytes, start, end, is_param);
+    if kind.is_assert() && var_pos.is_none() {
+        return None; // malformed: assert with no target
+    }
+    Some(TypeSplit { type_end, var_pos })
+}
+
+/// The type of the payload `[start, end)` and the variable that follows it: the end of the
+/// parsed type prefix, and the offset of the `$` of the next token when that token is a
+/// variable (after an optional `&` and `...` when `by_ref_variadic`). A payload that does
+/// not parse ends its "type" at `end` and has no variable.
+fn variable_after_type(
+    text: &str,
+    bytes: &[u8],
+    start: usize,
+    end: usize,
+    by_ref_variadic: bool,
+) -> (usize, Option<usize>) {
+    let Ok(parsed) = parse_type(&text[start..end]) else { return (end, None) };
+    let type_end = start + parsed.consumed as usize;
+    let skip_blanks = |mut i: usize| {
+        while i < end && (bytes[i] == b' ' || bytes[i] == b'\t') {
+            i += 1;
+        }
+        i
+    };
+    let mut i = skip_blanks(type_end);
+    if by_ref_variadic {
+        if i < end && bytes[i] == b'&' {
+            i = skip_blanks(i + 1);
+        }
+        if bytes[i..end].starts_with(b"...") {
+            i = skip_blanks(i + 3);
+        }
+    }
+    let at_variable = i + 1 < end
+        && bytes[i] == b'$'
+        && (bytes[i + 1].is_ascii_alphabetic() || bytes[i + 1] == b'_' || bytes[i + 1] >= 0x80);
+    (type_end, at_variable.then_some(i))
 }
 
 fn read_variable(text: &str, bytes: &[u8], pos: usize, end: usize) -> String {
