@@ -25,8 +25,8 @@ use std::process::ExitCode;
 use steins_db::{Project, SteinsDatabase, parse as parse_tree};
 use steins_edit::{ByteSpan, Edit, EditPlan};
 use steins_infer::{
-    Diagnostic, INTERNAL_PANIC_ID, InlineOutcome, Progress, SOUND_SUBSET_NOTICE, SidecarFolder,
-    apply_inline_ignores, check_project_reporting,
+    Diagnostic, INTERNAL_PANIC_ID, InlineOutcome, Progress, SOUND_SUBSET_NOTICE,
+    SUPPRESS_UNMATCHED_ID, SidecarFolder, apply_inline_ignores, check_project_reporting,
 };
 use steins_syntax::SourceTree;
 
@@ -192,7 +192,8 @@ pub(crate) fn run_check(args: &[String]) -> ExitCode {
 
     // Files whose walk panicked (issue #895 D3). Their findings are missing, so
     // the run's verdict is the tool's failure rather than the code's.
-    let panicked = inline.meta.iter().filter(|d| d.id == INTERNAL_PANIC_ID).count();
+    let panicked_paths = panicked_paths(&inline.meta);
+    let panicked = panicked_paths.len();
 
     let baseline_file = args.baseline_file();
     if args.set_baseline {
@@ -209,7 +210,7 @@ pub(crate) fn run_check(args: &[String]) -> ExitCode {
     }
 
     let (reported, baselined, stale, surface_notice) =
-        baseline_channel(baseline_file.as_deref(), inline.kept, texts, &surface);
+        baseline_channel(baseline_file.as_deref(), inline.kept, texts, &surface, &panicked_paths);
 
     // Displayed = survivors + meta-diagnostics (exempt from both channels), sorted.
     let mut displayed = reported;
@@ -218,7 +219,11 @@ pub(crate) fn run_check(args: &[String]) -> ExitCode {
 
     // `check --fix` (ADR-0010): applies fix payloads under ADR-0034's
     // transformed-or-refused discipline. Without the flag, `None` — unchanged.
-    let fix_run = args.fix.then(|| apply_fixes(db, project, &displayed, texts));
+    // A panicked run writes nothing, as `--set-baseline` does not (issue #895 D3).
+    let fix_run = args.fix.then(|| match panicked {
+        0 => apply_fixes(db, project, &displayed, texts),
+        n => FixRun::refused(PANICKED_REASON, format!("{n} file(s) panicked in analysis")),
+    });
 
     // A fixed finding leaves both display and exit; the plan is atomic, so
     // payload presence is the partition key.
@@ -255,9 +260,11 @@ pub(crate) fn run_check(args: &[String]) -> ExitCode {
     // iff any fail-level finding is displayed, else 0 (warn-only); fixed
     // findings are already gone from `displayed`.
     if panicked > 0 {
-        errln!(
-            "steins: {panicked} file(s) panicked in analysis ({INTERNAL_PANIC_ID}); their findings are missing, so this run exits 2 — this is a bug in Steins, please report it"
-        );
+        errln!("steins: {}", panic_notice(panicked));
+        return ExitCode::from(2);
+    }
+    // The fix post-check's own analysis panicked: no verdict either.
+    if fix_run.as_ref().is_some_and(FixRun::panicked) {
         return ExitCode::from(2);
     }
     let any_fail = displayed.iter().any(|d| surface.level(d.id) == profile::Level::Fail);
@@ -404,11 +411,46 @@ pub(crate) fn sort_displayed(displayed: &mut [Diagnostic]) {
 }
 
 /// Outcome of a `check --fix` run. `applied` is true iff edits were written; a
-/// refusal (four named reasons) leaves findings as a plain run reports them.
+/// refusal (five named reasons) leaves findings as a plain run reports them.
 pub(crate) struct FixRun {
     pub(crate) applied: bool,
     files_written: usize,
     pub(crate) refusal: Option<FixRefusal>,
+}
+
+/// The fix refusal for a run, or a post-check, in which a file's analysis
+/// panicked (issue #895 D3): a side missing a file's findings vouches for
+/// nothing, so nothing is written.
+const PANICKED_REASON: &str = "analysis-panicked";
+
+impl FixRun {
+    /// Nothing written, for `reason`.
+    fn refused(reason: &'static str, detail: String) -> Self {
+        FixRun {
+            applied: false,
+            files_written: 0,
+            refusal: Some(FixRefusal { reason, detail, new_diagnostics: Vec::new() }),
+        }
+    }
+
+    /// Whether the fixes were refused because an analysis panicked.
+    fn panicked(&self) -> bool {
+        self.refusal.as_ref().is_some_and(|r| r.reason == PANICKED_REASON)
+    }
+}
+
+/// What a run in which `n` files panicked says on stderr as it exits 2 —
+/// `check` and `annotate` alike (issue #895 D3).
+pub(crate) fn panic_notice(n: usize) -> String {
+    format!(
+        "{n} file(s) panicked in analysis ({INTERNAL_PANIC_ID}); their findings are missing, so this run exits 2 — this is a bug in Steins, please report it"
+    )
+}
+
+/// The paths with an `internal.panic` among `meta`, where the suppression
+/// pipeline put them.
+fn panicked_paths(meta: &[Diagnostic]) -> Vec<String> {
+    meta.iter().filter(|d| d.id == INTERNAL_PANIC_ID).map(|d| d.path.clone()).collect()
 }
 
 /// A named fix refusal (ADR-0034 Refusal discipline): machine `reason`, human
@@ -473,6 +515,9 @@ fn apply_fixes(
     // Post-check gate (ADR-0034 point 3a): refuses the write if any id's count
     // rises. Broad surface — a fix-it must not move the contract layer.
     let postcheck = post_check(db, project, &plan, texts, PostCheckSurface::Everything);
+    if !postcheck.panicked.is_empty() {
+        return FixRun::refused(PANICKED_REASON, postcheck.panic_notice());
+    }
     if !postcheck.ok {
         let n = postcheck.new_diagnostics.len();
         return FixRun {
@@ -580,10 +625,11 @@ fn baseline_channel(
     kept: Vec<Diagnostic>,
     texts: &HashMap<String, String>,
     surface: &profile::Surface,
+    panicked: &[String],
 ) -> (Vec<Diagnostic>, usize, usize, Option<String>) {
     match file {
         Some(file) => match std::fs::read_to_string(file) {
-            Ok(text) => match_baseline(file, &text, kept, texts, surface),
+            Ok(text) => match_baseline(file, &text, kept, texts, surface, panicked),
             Err(_) => (kept, 0, 0, None),
         },
         None => (kept, 0, 0, None),
@@ -592,12 +638,15 @@ fn baseline_channel(
 
 /// Match inline-surviving `findings` against a baseline's entries. Returns
 /// `(reported, baselined, stale, surface_notice)`; surface-aware (ADR-0050 §8).
+/// A `panicked` file's entries are never stale: its findings are missing from
+/// the run, not gone from the code (issue #895 D3).
 fn match_baseline(
     file: &Path,
     text: &str,
     findings: Vec<Diagnostic>,
     texts: &HashMap<String, String>,
     surface: &profile::Surface,
+    panicked: &[String],
 ) -> (Vec<Diagnostic>, usize, usize, Option<String>) {
     let entries = baseline::parse(text);
     let dir = baseline::base_dir(file);
@@ -622,6 +671,8 @@ fn match_baseline(
     }
     // Debug carve-out (§8): a leftover debug entry surfaces stale on EVERY run,
     // ignoring `captured` (#108), since `surfaces_id` excludes debug ids.
+    let unjudged: Vec<String> = panicked.iter().map(|p| baseline::relativize(&dir, p)).collect();
+    matcher.drop_paths(|path| unjudged.iter().any(|p| p == path));
     let stale = matcher.stale_count_within(|id, captured| {
         if matches!(steins_infer::layer(id), Some(steins_infer::Layer::Debug)) {
             true
@@ -704,6 +755,12 @@ pub(crate) fn suppression_over(
 
     // Inline `@steins-ignore` next (ADR-0023): suppressed findings skip the baseline.
     let mut inline = apply_inline_ignores(findings, &file_pairs);
+    // A panicked file's ignores matched nothing because its walk produced
+    // nothing: not rot, so no `suppress.unmatched` for them. A misspelled id
+    // (`suppress.unknown-id`) is read off the comment alone and still reports.
+    inline.meta.retain(|d| {
+        d.id != SUPPRESS_UNMATCHED_ID || !panics.iter().any(|p| p.path == d.path)
+    });
     inline.meta.extend(panics);
     (inline, vendor_suppressed)
 }

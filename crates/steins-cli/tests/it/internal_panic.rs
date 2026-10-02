@@ -153,7 +153,8 @@ fn json_carries_it_like_any_finding() {
 }
 
 /// No channel a user configures reaches it: not a profile's `disable` or
-/// `warn`, not an inline ignore, not the vendor filter. A baseline cannot hold
+/// `warn`, not an inline ignore (which, sitting in the panicked file, is not
+/// judged either way), not the vendor filter. A baseline cannot hold
 /// it, and a run that reports one refuses to write a baseline at all.
 #[test]
 #[cfg_attr(not(debug_assertions), ignore = "the panic test hook is debug-only")]
@@ -191,8 +192,8 @@ fn no_configured_channel_reaches_it() {
         r.stdout
     );
     assert!(
-        r.stdout.contains("error[suppress.unmatched]"),
-        "the ignore aimed at it matched nothing, and says so, got:\n{}",
+        !r.stdout.contains("suppress.unmatched"),
+        "a panicked file's ignores are not judged, got:\n{}",
         r.stdout
     );
 
@@ -237,4 +238,95 @@ fn a_run_that_panicked_publishes_no_generation() {
     let real = "src/app.php:4:7: error[type.argument-mismatch]";
     assert!(again.stdout.contains(real), "{}", again.stdout);
     assert!(!again.stdout.contains("internal.panic"), "{}", again.stdout);
+}
+
+/// A panicked file's valid ignores and baseline entries are not rot: they
+/// matched nothing because the file's walk produced nothing, so neither
+/// `suppress.unmatched` nor a stale-entry count may tell the user to delete
+/// them.
+#[test]
+#[cfg_attr(not(debug_assertions), ignore = "the panic test hook is debug-only")]
+fn a_panicked_files_ignores_and_baseline_entries_are_not_rot() {
+    let dir = TempDir::new("rot");
+    let ignored = "<?php\nfunction width(int $w): int { return $w; }\n\
+                   width(\"abc\"); // @steins-ignore type.argument-mismatch\nwidth(\"x\");\n";
+    dir.write("src/app.php", ignored);
+    dir.write("src/helper.php", HELPER);
+    let set = run_in(&dir.0, &["check", "--no-php", "--no-cache", "--set-baseline", "src"], None);
+    assert_eq!(set.code, 0, "stderr:\n{}", set.stderr);
+
+    let r = run_in(&dir.0, &["check", "--no-php", "--no-cache", "src"], Some("src/app.php"));
+    assert_eq!(r.code, 2, "stdout:\n{}\nstderr:\n{}", r.stdout, r.stderr);
+    assert!(r.stdout.contains("src/app.php:1:1: error[internal.panic]"), "{}", r.stdout);
+    assert!(!r.stdout.contains("suppress.unmatched"), "the ignore is not rot:\n{}", r.stdout);
+    assert!(!r.stdout.contains("stale"), "its baseline entry is not stale:\n{}", r.stdout);
+    assert!(
+        r.stdout.contains("1 findings in baseline"),
+        "helper's entry still matches:\n{}",
+        r.stdout
+    );
+}
+
+/// `check --fix` writes nothing from a panicked run: the fixes are refused by
+/// name, and the run exits 2.
+#[test]
+#[cfg_attr(not(debug_assertions), ignore = "the panic test hook is debug-only")]
+fn check_fix_writes_nothing_from_a_panicked_run() {
+    let dir = TempDir::new("fix");
+    dir.write("src/app.php", APP);
+    let dump = "<?php\n$x = 5;\n\\PHPStan\\dumpType($x);\n";
+    dir.write("src/dump.php", dump);
+    let fix = ["check", "--no-php", "--no-cache", "--fix", "src"];
+
+    let r = run_in(&dir.0, &fix, Some("src/app.php"));
+    assert_eq!(r.code, 2, "stdout:\n{}\nstderr:\n{}", r.stdout, r.stderr);
+    assert!(r.stderr.contains("fix refused (analysis-panicked)"), "stderr:\n{}", r.stderr);
+    let after = std::fs::read_to_string(dir.0.join("src/dump.php")).unwrap();
+    assert_eq!(after, dump, "nothing is written");
+
+    // The control: without the panic, the same fix is written.
+    let fixed = run_in(&dir.0, &fix, None);
+    assert!(fixed.stderr.contains("steins: fixed"), "stderr:\n{}", fixed.stderr);
+    assert_ne!(std::fs::read_to_string(dir.0.join("src/dump.php")).unwrap(), dump);
+}
+
+/// `transform --apply` writes nothing when a file panics in the post-check's
+/// analysis: the post-check fails by name, and the run exits 2.
+#[test]
+#[cfg_attr(not(debug_assertions), ignore = "the panic test hook is debug-only")]
+fn transform_writes_nothing_on_a_panicked_post_check() {
+    let dir = TempDir::new("transform");
+    let lib = "<?php\n/**\n * @param int $w\n * @return int\n */\n\
+               function pad($w)\n{\n    return $w;\n}\n";
+    dir.write("src/lib.php", lib);
+    dir.write("src/caller.php", "<?php\npad(42);\n");
+    let apply = ["transform", "phpdoc-to-native", "--apply", "src"];
+
+    let r = run_in(&dir.0, &apply, Some("src/caller.php"));
+    assert_eq!(r.code, 2, "stdout:\n{}\nstderr:\n{}", r.stdout, r.stderr);
+    assert!(r.stdout.contains("Post-check FAILED — 1 file(s) panicked"), "{}", r.stdout);
+    assert!(!r.stdout.contains("Post-check OK"), "{}", r.stdout);
+    assert!(r.stderr.contains("nothing was written"), "stderr:\n{}", r.stderr);
+    assert_eq!(std::fs::read_to_string(dir.0.join("src/lib.php")).unwrap(), lib);
+
+    // The control: without the panic, the same plan is written.
+    let applied = run_in(&dir.0, &apply, None);
+    assert_eq!(applied.code, 0, "stdout:\n{}\nstderr:\n{}", applied.stdout, applied.stderr);
+    assert_ne!(std::fs::read_to_string(dir.0.join("src/lib.php")).unwrap(), lib);
+}
+
+/// `annotate`'s findings come from the isolated walk: a panic there leaves the
+/// margin's markers missing, so it exits 2 with the same notice as `check`.
+#[test]
+#[cfg_attr(not(debug_assertions), ignore = "the panic test hook is debug-only")]
+fn annotate_exits_2_when_its_margin_panicked() {
+    let dir = TempDir::new("annotate");
+    dir.write("src/app.php", APP);
+    let r = run_in(&dir.0, &["annotate", "--no-php", "src/app.php"], Some("src/app.php"));
+    assert_eq!(r.code, 2, "stdout:\n{}\nstderr:\n{}", r.stdout, r.stderr);
+    assert!(r.stdout.contains("✗ internal.panic"), "{}", r.stdout);
+    assert!(r.stderr.contains("1 file(s) panicked in analysis"), "stderr:\n{}", r.stderr);
+
+    let clean = run_in(&dir.0, &["annotate", "--no-php", "src/app.php"], None);
+    assert_eq!(clean.code, 0, "stderr:\n{}", clean.stderr);
 }

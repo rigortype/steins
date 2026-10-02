@@ -650,6 +650,12 @@ fn tool_apply_plan(session: &mut Session, args: &Value) -> Result<Reply, ToolErr
         &loaded.texts,
         stored.kind.post_check_surface(),
     );
+    // A panicked analysis on either side (issue #895 D3) vouches for nothing.
+    if !postcheck.panicked.is_empty() {
+        let panicked: Vec<Value> = postcheck.panicked.iter().map(diagnostic_json).collect();
+        return Err(ToolError::new("postcheck-panicked", postcheck.panic_notice())
+            .with(json!({ "panicked": panicked })));
+    }
     if !postcheck.ok {
         let new_diagnostics: Vec<Value> =
             postcheck.new_diagnostics.iter().map(diagnostic_json).collect();

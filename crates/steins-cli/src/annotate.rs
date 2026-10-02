@@ -7,8 +7,8 @@ use std::process::ExitCode;
 
 use steins_db::{EffectsPolicy, PluginFacts, Project, ProjectLayout, SourceFile, SteinsDatabase};
 use steins_infer::{
-    EffectSummary, LineFact, SOUND_SUBSET_NOTICE, SidecarFolder, annotate_project_under,
-    effect_summaries_project,
+    EffectSummary, FactKind, INTERNAL_PANIC_ID, LineFact, SOUND_SUBSET_NOTICE, SidecarFolder,
+    annotate_project_under, effect_summaries_project,
 };
 
 use crate::Format;
@@ -18,7 +18,7 @@ use crate::project::{collect_sources, load_plugins, resolve_layout};
 /// `steins annotate [--no-php] [--format text|json] <file.php>` — reprint one
 /// file with a right-margin column of proven facts (ADR-0020), or (JSON) the
 /// same effect summaries (issue #65). Never modifies the file; exit 2 on usage or
-/// config error.
+/// config error, or when the margin carries an `internal.panic`.
 pub(crate) fn run_annotate(args: &[String]) -> ExitCode {
     let mut no_php = false;
     let mut format = Format::Text;
@@ -123,6 +123,16 @@ pub(crate) fn run_annotate(args: &[String]) -> ExitCode {
         Format::Text => {
             let facts = annotate_project_under(&db, project, target_file, &mut folder, postures);
             out!("{}", render_annotation(&text, &facts));
+            // The margin's findings come from the isolated walk (issue #895
+            // D3): a panic there leaves the file's `✗` markers missing, so the
+            // margin is no verdict and the run exits 2, as `check` does.
+            let panicked = facts
+                .iter()
+                .any(|f| matches!(f.kind, FactKind::Finding { id } if id == INTERNAL_PANIC_ID));
+            if panicked {
+                errln!("steins: {}", crate::check::panic_notice(1));
+                return ExitCode::from(2);
+            }
         }
         Format::Json => print_annotate_json(&effect_summaries_project(&db, project, target_file)),
     }
