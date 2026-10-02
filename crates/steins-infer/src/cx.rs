@@ -813,9 +813,16 @@ impl<'a> Cx<'a> {
     /// Matched on the FQN, since a file of several namespaces may declare one simple
     /// name more than once (issue #925); two scopes of one FQN (a conditional
     /// redeclaration) still decline.
+    ///
+    /// `None` for a body in a file whose names the UTF-8 decode collapsed (issue #927): the
+    /// variables it binds are keyed by names it cannot tell apart, so no caller descends
+    /// into it, the way a body that is not unique is not descended into.
     pub(crate) fn fn_scope(&self, site: Site) -> Option<(usize, &'a Scope)> {
         let fqn = &self.fn_decl(site).fqn;
         let tree = self.units[site.file].tree;
+        if tree.names_lossy() {
+            return None;
+        }
         let mut it = tree
             .scopes()
             .iter()
@@ -824,9 +831,13 @@ impl<'a> Cx<'a> {
         if it.next().is_some() { None } else { Some((site.file, scope)) }
     }
 
-    /// The unique method body scope for `class_fqn::method` in `file`.
+    /// The unique method body scope for `class_fqn::method` in `file` — `None` for a file
+    /// whose names the UTF-8 decode collapsed, as [`Self::fn_scope`].
     pub(crate) fn method_scope(&self, file: usize, class_fqn: &str, method: &str) -> Option<&'a Scope> {
         let tree = self.units[file].tree;
+        if tree.names_lossy() {
+            return None;
+        }
         let mut it = tree.scopes().iter().filter(|s| {
             matches!(&s.owner, ScopeOwner::Method { class: c, method: m }
                 if c.eq_ignore_ascii_case(class_fqn) && m.eq_ignore_ascii_case(method))

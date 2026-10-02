@@ -150,6 +150,7 @@ use std::time::Instant;
 
 use steins_db::{EffectsPolicy, PackagePartition, PluginFacts, ProjectLayout, merge_shards};
 use steins_gen::{Fingerprint, Generation, SectionName, SourceDrift, SourceError, Store};
+use steins_syntax::Utf8Loss;
 pub use steins_gen::PackageKind;
 
 use crate::affected::{AffectedInputs, affected_files};
@@ -259,6 +260,10 @@ pub struct GenerationOutcome {
     /// hashed it (issue #521), so "what was analyzed" and "what was
     /// fingerprinted" are the same bytes by construction.
     pub texts: HashMap<String, String>,
+    /// Diagnostic path → what the decode replaced, for the files whose bytes were **not
+    /// valid UTF-8** (issue #927) and only those: `texts` holds their U+FFFD decode, and
+    /// the salsa view over it needs this to read their real bytes.
+    pub losses: HashMap<String, Arc<Utf8Loss>>,
     /// `(diagnostic path, tree handle)` in universe-slot order. A handle, not
     /// a tree, since issue #516: a warm run decodes a file's tree only where
     /// something reaches it, and forcing all of them to hand the caller owned
@@ -833,7 +838,7 @@ fn report(
     analysis: Analysis,
     run: RunRecord,
 ) -> GenerationOutcome {
-    let Captured { diag, plans, texts, .. } = captured;
+    let Captured { diag, plans, texts, losses, .. } = captured;
     let lazy = loaded.lazy;
     let packages = plans
         .iter()
@@ -860,6 +865,7 @@ fn report(
                 (path, Arc::try_unwrap(text).unwrap_or_else(|shared| (*shared).clone()))
             })
             .collect(),
+        losses,
         trees: diag.into_iter().zip(lazy).collect(),
         attribution_notices,
         report: GenerationReport {

@@ -169,6 +169,9 @@ pub(crate) struct FileFacts {
     pub(crate) never_returning: Vec<String>,
     /// Whether the file declares a userland `PHP_VERSION_ID` (issue #29).
     pub(crate) version_id_declared: bool,
+    /// Whether a name in the file sits over a byte the UTF-8 decode replaced (issue #927,
+    /// ADR-0080 §3.2 interim): its own passes make no claim.
+    pub(crate) names_lossy: bool,
     /// Whether any declaration's docblock spells `@throws` — the exact gate on
     /// whether `throw_diagnostics` can emit anything for this file.
     pub(crate) spells_throws: bool,
@@ -297,6 +300,7 @@ impl FileFacts {
             dynamism: dam_candidates_of(path, tree),
             never_returning: never_returning_of(tree),
             version_id_declared: tree.php_version_id_declared(),
+            names_lossy: tree.names_lossy(),
             spells_throws,
             spells_envelope,
             spells_purity,
@@ -521,6 +525,7 @@ struct StoredFacts {
     dynamism: Vec<DamCandidate>,
     never_returning: Vec<String>,
     version_id_declared: bool,
+    names_lossy: bool,
     spells_throws: bool,
     spells_envelope: bool,
     spells_purity: bool,
@@ -659,6 +664,7 @@ pub(crate) fn facts_payload(facts: &FileFacts) -> Vec<u8> {
         dynamism: facts.dynamism.clone(),
         never_returning: facts.never_returning.clone(),
         version_id_declared: facts.version_id_declared,
+        names_lossy: facts.names_lossy,
         spells_throws: facts.spells_throws,
         spells_envelope: facts.spells_envelope,
         spells_purity: facts.spells_purity,
@@ -738,6 +744,7 @@ pub(crate) fn read_facts(bytes: &[u8]) -> Result<FileFacts, Miss> {
         dynamism: stored.dynamism,
         never_returning: stored.never_returning,
         version_id_declared: stored.version_id_declared,
+        names_lossy: stored.names_lossy,
         spells_throws: stored.spells_throws,
         spells_envelope: stored.spells_envelope,
         spells_purity: stored.spells_purity,

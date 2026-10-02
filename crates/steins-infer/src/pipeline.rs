@@ -177,7 +177,9 @@ struct Universe<'u> {
     catalog_skew: bool,
     /// The `PHP_VERSION_ID` interval for the version-guard fold (issue #29).
     version_id: Option<(u32, Option<u32>)>,
-    /// The files that did not parse (ADR-0079): none of their own passes run.
+    /// The files whose own passes do not run: the ones that did not parse (ADR-0079), which
+    /// also give the one finding, and the ones whose names the UTF-8 decode collapsed
+    /// (issue #927), which give none — the source is fine, the text it was read as is not.
     unparsable: HashSet<&'u str>,
     /// The whole-run `type.return-missing` veto set (ADR-0078).
     never_returning: HashSet<String>,
@@ -229,10 +231,19 @@ fn read_universe<'u>(
 
     // parse failure (ADR-0079, issue #180): the broken files, whose findings stop
     // at the one `emit_parse_failures` gives each.
+    //
+    // byte-lossy source (issue #927): and the files with a name over a replaced byte. Two
+    // names that differ only in those bytes read alike, so the file's own walk would draw
+    // claims from names it cannot tell apart. They stop the same way, silently: the walk
+    // is skipped and the project-wide passes' findings in the file are dropped, while the
+    // declarations stay in the index, where they can only silence an absence claim.
     let unparsable: HashSet<&str> = units
         .iter()
         .enumerate()
-        .filter(|(fi, _)| dam_rows[*fi].0.is_some())
+        .filter(|(fi, u)| {
+            dam_rows[*fi].0.is_some()
+                || facts.get(*fi).map_or_else(|| u.tree.names_lossy(), |f| f.names_lossy)
+        })
         .map(|(_, u)| u.path)
         .collect();
 
