@@ -85,7 +85,7 @@ pub(crate) enum NewTarget {
     /// No constructor anywhere on a chain the project holds end to end:
     /// nothing runs, so nothing is contributed.
     Absent,
-    /// The chain leaves the project at this global engine class, with no
+    /// The chain leaves the project at this engine class (named by its FQN), with no
     /// project class on the way able to hold a constructor: a lane answers
     /// from its own `__construct` row for it, and taints without one.
     Engine(String),
@@ -141,8 +141,10 @@ pub(crate) fn resolve_new(cx: &Cx, enclosing: Option<&str>, class: &StaticClass)
 /// The engine class `start`'s chain leaves the project at, when no project
 /// class on the way can hold `method`: none declares it, and none uses a trait
 /// that could supply it. The exit class must be absent from the project and
-/// global, the gates [`engine_method`] holds a catalogued method to, for its
-/// reasons. `start` itself is the exit when no project file declares it.
+/// declared by the mined engine hierarchy under that FQN
+/// ([`engine::declares_engine_class`]), the gates [`engine_method`] holds a
+/// catalogued method to, for its reasons. `start` itself is the exit when no
+/// project file declares it.
 pub(crate) fn engine_exit(cx: &Cx, start: &str, method: &str) -> Option<String> {
     let mut cur = start.to_owned();
     let mut seen: HashSet<String> = HashSet::new();
@@ -156,7 +158,7 @@ pub(crate) fn engine_exit(cx: &Cx, start: &str, method: &str) -> Option<String> 
         }
         cur = cx.units[file].tree.resolve_class_fqn(cd.parent.as_ref()?);
     }
-    (!cur.contains('\\') && cx.class_absent(&cur)).then_some(cur)
+    (engine::declares_engine_class(&cur) && cx.class_absent(&cur)).then_some(cur)
 }
 
 /// How a `new` expression's class reads in a finding: `new Clock`, `new static`.
@@ -199,10 +201,12 @@ pub(super) enum EngineMethod {
 ///   by, with no project class on the way declaring the method or using a trait
 ///   that could ([`engine_exit`]). A project `PDO` shadows the catalog, because
 ///   its body is the truth and [`method_edge`] already drew that edge;
-/// * the exit FQN must be **global** — the engine's classes are unnamespaced,
-///   so an unimported `PDO` inside `namespace App;` is `App\PDO`, some class of
-///   the user's that Steins simply has not indexed, and coloring it `io.db` would
-///   be the guess this analyzer does not make.
+/// * the exit FQN must be **an engine class by that name** — the mined hierarchy
+///   keys every engine class by its FQN (`PDO`, `Random\RandomException`), so an
+///   unimported `PDO` inside `namespace App;` is `App\PDO`, which the hierarchy
+///   does not declare: some class of the user's that Steins simply has not
+///   indexed, and coloring it `io.db` would be the guess this analyzer does not
+///   make.
 ///
 /// A bound receiver reaches only a row whose method the engine declares final
 /// ([`engine::method_effects`], issue #847): `$this->getTrace()` in a project
