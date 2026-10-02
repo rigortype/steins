@@ -863,7 +863,7 @@ src/Gap.php:25:9: error[throw.maybe-undeclared]: what can be thrown at this site
 ```
 
 It is deliberately loud on real code: on the public corpus about four in five
-declarations that spell `@throws` have a `…?` throw set. Five things quiet it,
+declarations that spell `@throws` have a `…?` throw set. Three things quiet it,
 and nothing else does. A declared `@throws \Throwable` is the top envelope and
 is never judged. A call to an enveloped function is owed to that function's own
 finding, not repeated at every caller. A site under a `catch (\Throwable)` is
@@ -968,7 +968,7 @@ function apply(callable $f, string $line): string
 }
 
 /**
- * @param pure-callable $f
+ * @pure-unless-callable-is-impure $f
  */
 #[\Steins\Pure]
 function applyChecked(callable $f, string $line): string
@@ -982,14 +982,21 @@ $ steins check --profile strict src/Gap.php
 src/Gap.php:8:12: error[effect.maybe-envelope-exceeded]: effects at this site are unbounded (dynamic-callee: the callee is computed at run time), but apply() is declared #[\Steins\Pure]
 ```
 
-`applyChecked()` is silent: a `$f()` on a parameter typed `pure-callable`,
-`pure-closure` or `static-pure-closure`, or flagged
-`@pure-unless-callable-is-impure`, is answered at the call sites that bind the
-argument. The other discharges are an interop envelope whose imported bound fits
-the declaration's, and a call to a function with an envelope of its own. A
-missing catalog row (`no-effect-row`) is *not* discharged: it is the analyzer's
-own coverage hole. The ids add findings at `strict` and change no
-exhaustiveness bit, no tag `effects-envelope` writes, and no other id.
+`applyChecked()` is silent: the tag says the function is pure unless the
+callable bound to `$f` is impure, and the call sites decide that. It holds only
+on a free function, for a by-value parameter with no default that nothing
+rebinds; a caller that passes its own `callable` through (`applyChecked($c)`)
+does not decide it, and is named at the call. The typed spelling
+`@param pure-callable $f` is **not** a discharge: the check that guards its call
+sites proves a closure impure, and says nothing about a string or an array
+callable that would run the same code. The other discharges are an interop
+envelope whose imported bound fits the declaration's, a call to a function with an
+envelope of its own that fits this one's, and a call or receiver the project's
+tolerated-effects policy attributes to a tolerated label. A missing catalog row
+(`no-effect-row`) is *not* discharged: it is the analyzer's own coverage hole.
+The ids add findings at `strict` and change no exhaustiveness bit, no tag
+`effects-envelope` writes, and no other id; `steins annotate` lists them beside the
+other strict ids, with its `…?` marker and gap kinds unchanged.
 
 **`effect.unknown-label`** is mechanics, and prints in every profile
 including a bare `check`. A typo'd label silently disables the envelope that

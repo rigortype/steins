@@ -223,7 +223,7 @@ pub const EFFECT_LISKOV_ID: &str = "effect.liskov-widened";
 ///
 /// One finding per own site and gap kind (the kind's spelling, `GapKind::as_str`,
 /// is in the message), and one per call edge into a project body that is itself
-/// `…?` and carries no envelope of its own. Five discharges narrow it (ADR-0100
+/// `…?` and carries no envelope of its own. Six discharges narrow it (ADR-0100
 /// §4); a ⊤ envelope is never a unit. `(Layer::Contract, Floor::Strict)`.
 pub const EFFECT_MAYBE_ENVELOPE_EXCEEDED_ID: &str = "effect.maybe-envelope-exceeded";
 

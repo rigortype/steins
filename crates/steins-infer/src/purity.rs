@@ -1081,7 +1081,7 @@ pub(crate) fn effect_diagnostics(fx: &Fixpoints<'_>) -> Vec<Diagnostic> {
                 continue;
             };
             let frame = Frame::new(None, &f.params, &f.sites);
-            let floor = Floor::new(&enveloped, f.docblock.as_ref());
+            let floor = Floor::new(&enveloped, f.docblock.as_ref(), &f.params, true);
             report_unit(&mut out, &cx, &frame, plugins, &f.name, bound, (effects, registry, &floor));
         }
         for c in cx.tree().classes() {
@@ -1124,7 +1124,7 @@ pub(crate) fn effect_diagnostics(fx: &Fixpoints<'_>) -> Vec<Diagnostic> {
                 {
                     let display = format!("{}::{}", c.name, m.name);
                     let frame = Frame::new(Some(&c.fqn), &m.params, &m.sites);
-                    let floor = Floor::new(&enveloped, m.docblock.as_ref());
+                    let floor = Floor::new(&enveloped, m.docblock.as_ref(), &m.params, false);
                     let judged = (effects, registry, &floor);
                     report_unit(&mut out, &cx, &frame, plugins, &display, bound, judged);
                 }

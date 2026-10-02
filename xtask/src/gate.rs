@@ -337,13 +337,20 @@ enum GateBucket {
 /// conservatively red-on-sight.
 fn gate_bucket(id: &str) -> GateBucket {
     match layer(id) {
-        Some(Layer::Contract) => GateBucket::Measurement,
-        Some(Layer::Debug) => GateBucket::Excluded,
-        // Possibly-grade (ADR-0078 §1.3's `maybe-` convention): derived from the
-        // registry so a new sibling takes the right posture on registration.
-        Some(Layer::Proof) if surface_floor(id) == Some(Floor::Strict) => {
+        // Possibly-grade (ADR-0078 §1.3's `maybe-` convention): routed by the
+        // registry's floor, not by an id's name or prefix, so a new sibling takes the
+        // right posture on registration, whichever layer it sits in: the proof-layer
+        // ids of ADR-0081 and the contract-layer ones (`phpdoc.maybe-*`,
+        // `offset.maybe-missing`, and since ADR-0100 `effect.maybe-envelope-exceeded`
+        // and `throw.maybe-undeclared`). The strict floor is where an id's yield is a
+        // gap or a some-paths claim rather than a defect, so the family tables
+        // (`phpdoc.*`, `throw.*`, `effect.*`) count the definite ids only. One table
+        // still holds every such id; splitting it per id is issue #922's remainder.
+        Some(Layer::Contract | Layer::Proof) if surface_floor(id) == Some(Floor::Strict) => {
             GateBucket::Tripwire
         }
+        Some(Layer::Contract) => GateBucket::Measurement,
+        Some(Layer::Debug) => GateBucket::Excluded,
         Some(Layer::Proof | Layer::Mechanics) | None => GateBucket::RedOnSight,
     }
 }
@@ -376,9 +383,11 @@ fn is_phpdoc(d: &Diagnostic) -> bool {
 }
 
 /// Whether a diagnostic is a measurement-mode `throw.*` contract id
-/// (ADR-0040) — the prefix keys its own count table (all `throw.*` are contract).
+/// (ADR-0040) — the prefix keys its own count table. Selected by layer AND prefix
+/// (the [`is_effect_contract`] shape): the strict-floor sibling `throw.maybe-undeclared`
+/// routes to the possibly-grade table ([`gate_bucket`]).
 fn is_throw(d: &Diagnostic) -> bool {
-    d.id.starts_with("throw.")
+    d.id.starts_with("throw.") && is_contract(d)
 }
 
 /// Whether a diagnostic is an `effect.*` contract id (`effect.envelope-exceeded`
@@ -1292,12 +1301,16 @@ fn print_report(
             }
             std::cmp::Ordering::Equal => "",
         };
-        let by_id = |want: &str| r.possibly.iter().filter(|d| d.id == want).count();
+        // The breakdown is read off the ids present, so a new strict-floor id needs no
+        // change here.
+        let mut by_id: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+        for d in &r.possibly {
+            *by_id.entry(d.id).or_default() += 1;
+        }
+        let breakdown: Vec<String> = by_id.iter().map(|(id, n)| format!("{n} {id}")).collect();
         println!(
-            "{label} — {actual} possibly-grade ({} variable, {} property, {} return) [expected {expected}]{marker}",
-            by_id("variable.maybe-undefined"),
-            by_id("property.maybe-undefined"),
-            by_id("type.return-maybe-missing"),
+            "{label} — {actual} possibly-grade ({}) [expected {expected}]{marker}",
+            breakdown.join(", ")
         );
         for d in &r.possibly {
             println!("    POSSIBLY {}:{}:{} [{}] {}", d.path, d.line, d.column, d.id, d.message);

@@ -59,9 +59,12 @@ declarations, 1,058 (81%) are throw-non-exhaustive.
    Closures are never units (no envelope); a gap in one surfaces at the edge
    that reaches it (§3.2).
 4. **Nothing is fed back.** The exhaustiveness bit, the fixpoints, the writers
-   (`effects-envelope`, `throws-envelope`, `loop-to-array-map`), `annotate` and
-   `effect-diff` read the same gaps as before and do not move. The floor is two
-   reporting loops over the resolution those lanes already compute.
+   (`effects-envelope`, `throws-envelope`, `loop-to-array-map`) and
+   `effect-diff` read the same gaps as before and do not move. `annotate`'s `…?`
+   marker and gap kinds are unchanged too; its margin and JSON list every emitted
+   id regardless of profile, so the two ids appear there as the other strict ids
+   do. The floor is two reporting loops over the resolution those lanes already
+   compute.
 
 ## 3. Decision: granularity
 
@@ -75,38 +78,46 @@ declarations, 1,058 (81%) are throw-non-exhaustive.
    kind are two findings. This is the granularity a reader can act on: the
    finding names the line to fix or to declare.
 2. **Inherited: one finding per call edge.** For each edge a site draws into a
-   project body whose own set is `…?` (`EffectSet.gaps`, `ThrowSet.gaps`) and
-   that has no envelope of its own on that lane (discharge 4), one finding at
-   the site, naming the callee and the callee's gap kinds (the inherited mask).
-   An untainting edge (ADR-0063: a conditional-purity contract decided in full
-   at the call site) draws none, because its `…?` does not propagate. A
-   closure reached as a callback is a project body with no envelope, so it is
-   reported at its edge.
-3. **Why not one per unit.** One finding per unit would hide the site, and a
-   `@steins-ignore` placed on the declaration would silence sites added later.
-   **Why not one per transitive origin.** The volume is where the fixpoint
-   multiplies one cause across every caller; the per-edge form reports each
-   cause once, at the nearest unit that owes it.
+   project body whose own set is `…?` (`EffectSet.gaps`, `ThrowSet.gaps`),
+   unless discharge 4 or 6 answers it, one finding at the site, naming the callee
+   and the callee's gap kinds (the inherited mask). An untainting edge (ADR-0063:
+   a conditional-purity contract decided in full at the call site) draws none,
+   because its `…?` does not propagate. A closure reached as a callback is a
+   project body with no envelope, so it is reported at its edge.
+3. **What is reported where.** One finding per (unit, own site, kind) and per
+   (unit, edge). A cause behind an enveloped callee is reported there and at no
+   caller (§4.4). A cause behind unenveloped bodies is reported at every unit
+   that reaches it through them, once per unit. A unit in a recursion with an
+   unenveloped helper reports its own site and the edge. One finding per unit
+   would hide the site, and a `@steins-ignore` placed on the declaration would
+   silence sites added later; one per transitive origin would multiply one cause
+   across every caller, where this form reports it once per unit.
 
-## 4. Decision: five discharges, and what is deliberately not discharged
+## 4. Decision: six discharges, and what is deliberately not discharged
 
 A finding is not reported when:
 
 1. **A ⊤ envelope.** Not a unit (§2.3).
-2. **A call through a parameter whose purity the call sites enforce** (effect
-   lane only). `$f()` where `$f` is a parameter of the frame typed
-   `pure-callable`, `pure-closure` or `static-pure-closure`, or flagged
-   `@pure-unless-callable-is-impure`: the argument is held to purity at every
-   call site the analyzer sees (ADR-0063), so the call is answered there. This
-   discharges only the `dynamic-callee` gap of that site, and only when the
-   parameter is by-value, non-variadic, and never rebound in the frame: no
-   statement writes it, and no named call of the frame may take it by
-   reference. The syntax layer decides the first half and carries the name on
-   the site (`DynamicSite::Call { var }`, set only for such a parameter; it is in
-   the trace payload, past the analyzer gate, so there is no `SCHEMA_VERSION`
-   bump); the resolver's `Frame::rebound_by_call` decides the second. A purity
-   contract says nothing about what is thrown, so the throw lane takes no
-   discharge from it.
+2. **A call through a parameter flagged `@pure-unless-callable-is-impure`**
+   (effect lane only). `$f()` where `$f` is flagged by that tag (or its
+   `@phpstan-` spelling): the contract says the function is pure unless the
+   bound callable is impure, and the call sites decide it (ADR-0063's
+   untainting edge). All of these hold: (a) the parameter is flagged; (b) the
+   unit is a free function (the tag is honoured on free functions only, per
+   ADR-0063's amendment, so a method is a unit with no discharge 2); (c) the
+   parameter is by-value, non-variadic, never written in the frame and never
+   taken by reference by a named call of it; (d) it has no default
+   (`function f($f = 'impure_fn')` with `f()` fills the slot with a callable no
+   call site decided). The syntax layer decides (c)'s first half and carries the
+   name on the site (`DynamicSite::Call { var }`; trace payload, past the
+   analyzer gate, so there is no `SCHEMA_VERSION` bump); `Frame::rebound_by_call`
+   decides the second. The typed spellings `pure-callable`, `pure-closure` and
+   `static-pure-closure` are **not** discharged: the call-site obligation check
+   for them proves impurity only of a closure or a first-class callable, so a
+   string or array callable bound to the parameter is never decided by the type
+   (follow-up #957). A purity contract says nothing about what is thrown, so the
+   throw lane takes no discharge from it. The discharge answers the unit's own
+   `$f()` site only; a caller reaches it through discharge 4's conditions.
 3. **An interop envelope whose imported bound fits** (effect lane). An interop
    envelope (ADR-0082) answered a declared-receiver call: its labels entered the
    declared lane and the answer stayed open, as an unchecked claim must
@@ -115,10 +126,22 @@ A finding is not reported when:
    policy), or the import is empty (`@phpstan-pure`), the claim cannot break
    this envelope and the finding is discharged. A bound that does not fit stays a
    finding of kind `interop-envelope`.
-4. **An edge to an enveloped callee.** The callee is itself a unit and reports
-   its gaps once, itself. "Enveloped" means a non-⊤ envelope on that lane: a
-   `@phpstan-impure` callee, or one declaring `@throws \Throwable`, bounds
-   nothing and is still reported at its callers' edges.
+4. **An edge to an enveloped callee** (a callee's discharges are relative to its
+   envelope; the caller inherits them only through an envelope that fits). The
+   callee is itself a unit and reports its gaps once, itself. "Enveloped" means a
+   non-⊤ envelope on that lane: a `@phpstan-impure` callee, or one declaring
+   `@throws \Throwable`, bounds nothing and is still reported at its callers'
+   edges. In the effect lane two more conditions hold: (f) every label of the
+   callee's operative bound fits the caller's (`!exceeds`); otherwise the finding
+   lands at the call, naming the envelope it does not admit (a callee bounded by
+   `#[\Steins\Effect('io.db')]` under a caller declared `#[\Steins\Pure]`); and
+   (g) the edge is not a tainting edge into a tag-flagged free function: the
+   function's purity is conditional on the callable bound at the call, and a call
+   that does not decide it (`f($c)` with `$c` the caller's own parameter) leaves
+   the contract undecided, so the finding lands at the caller's call site and
+   names it. An untainting edge (a visible callback decides the contract) draws
+   nothing, as for any callee. The throw lane has no fit relation: whether a
+   callee's `@throws` fits a caller's is #958, not a floor discharge.
 5. **A site guarded by a catch that absorbs `Throwable`** (throw lane). Some
    clause of some enclosing guard names `\Throwable` itself (resolved to its
    FQN, so `catch (Throwable)` in a namespace with no import is a different
@@ -130,18 +153,27 @@ A finding is not reported when:
    (\Throwable)` is not dammed yet" for the reporting side only; the throw
    set's exhaustiveness bit is unchanged.)
 
+6. **The project's tolerance policy** (effect lane; ADR-0084 §3's attribution,
+   read as the definite check reads it). An edge into a callee whose
+   `EffectSet.attribution` holds a label the policy tolerates is discharged (the
+   predicate `finding_groups` uses), and so are the `declared-receiver` and
+   `interop-envelope` gaps of a method call whose declared receiver's class
+   (`declared_receiver_fqn`) the policy attributes, for that method, to a
+   tolerated label. A tolerance is the project's calibrated floor; reporting
+   beneath it would make the strict id a second, uncalibrated policy surface.
+
 **Deliberately not discharged:** every other kind, `NoEffectRow` and
 `NoThrowRow` included. A catalog name with no row is the analyzer's own
 coverage hole; reading it as covered is the unsafe default ADR-0099 §3 removed,
 and it is exactly the finding a strict reader wants to see, because it is
 fixable (a row, an audit, #881).
 
-A known imprecision, recorded: discharge 2 applies to the unit's own sites, not
-through edges. A callee with a `pure-callable` parameter and no envelope of its
-own is `…?` for its `$f()`, so an enveloped caller is reported at the edge
-unless the call decides the contract (ADR-0063's untainting edge). Moving the
-discharge into the propagation would change the exhaustiveness bit, which this
-ADR does not touch.
+Known gap, recorded and not masked (witness `t7_absorbing_callee`): an inherited
+throw edge is reported into a callee whose only gaps lie under that callee's own
+`catch (\Throwable)`. Discharge 5 reads the guards at the *unit's* sites, not the
+gaps the callee already dammed, because the callee's throw set carries the gap
+mask without the guard that absorbed it. Measured over the public corpus, 0 of
+880 inherited findings are of this form; the fix is #956.
 
 ## 5. Decision O1: emit `throw.maybe-undeclared` now
 
@@ -169,13 +201,15 @@ baseline. The fp-gate's `THROW_EXPECTED` is reseeded to the measured counts
 
 The slice's stated acceptance, "zero sibling findings on written tags", holds for `effects-envelope` and was wrong for `throws-envelope`, for the reason above.
 
-**Known gaps.** #922: the fp-gate's throw table conflates the definite and the sibling counts in one number. #923: a `Maybe`-certainty escape that carries no gap kind is not reported by the floor.
+**Known gaps.** #922: the fp-gate now routes by posture (every strict-floor id leaves its family table for the possibly-grade table, `xtask/src/gate.rs`), and the remainder is a per-id split of that one table. #923: a `Maybe`-certainty escape that carries no gap kind is not reported by the floor. #956: an inherited edge into a body whose only gaps are under its own `catch (\Throwable)` (§4). #957: typed `pure-callable` spellings. #958: the throw lane's fit question.
 
 ## 6. What this does not change
 
 The `effect.liskov-widened`, `throw.liskov-widened` and every proof-layer id;
-the exhaustiveness bit and the gap kinds' codec numbering; `annotate`'s margin
-and JSON; the effect baseline and `effect-diff`; the three transforms' plans;
+the exhaustiveness bit and the gap kinds' codec numbering; `annotate`'s `…?`
+marker and gap kinds (its margin and JSON list every emitted id regardless of
+profile, so the two ids appear there as the other strict ids do); the effect
+baseline and `effect-diff`; the three transforms' plans;
 `SCHEMA_VERSION`. `vendor_suppressed` in `check`'s summary moves: the count is tallied before the profile surface (ADR-0015 order, `crates/steins-cli/src/check.rs`), a pre-existing overstatement every strict-only id already causes; #920.
 
 ## 7. Destructors: decided here, lands in S6

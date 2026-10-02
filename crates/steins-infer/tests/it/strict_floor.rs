@@ -3,8 +3,10 @@
 //! discharges and what they deliberately leave. The per-gap-kind fixtures live
 //! beside the emitter, with the totality check over `GapKind::ALL`.
 
+use steins_db::{EffectsPolicy, PluginFacts, Project, ProjectLayout, SourceFile, SteinsDatabase};
 use steins_infer::{
-    Diagnostic, EFFECT_MAYBE_ENVELOPE_EXCEEDED_ID, EFFECT_ID, THROW_MAYBE_UNDECLARED_ID, check,
+    Diagnostic, EFFECT_MAYBE_ENVELOPE_EXCEEDED_ID, EFFECT_ID, NoFold, THROW_MAYBE_UNDECLARED_ID,
+    check, check_project,
 };
 use steins_syntax::SourceTree;
 
@@ -106,28 +108,42 @@ fn a_class_level_pure_tag_makes_each_method_a_unit() {
     assert_eq!(effect(src).len(), 1);
 }
 
-// ---- discharge 2: a call through a parameter with a purity contract --------
+// ---- discharge 2: a call through a flagged parameter of a free function ----
+
+/// A free function flagged `@pure-unless-callable-is-impure $f`, whose `$f()` the
+/// call sites decide (ADR-0063).
+fn flagged(doc: &str, sig: &str, body: &str) -> String {
+    format!("<?php\n/**\n * {doc}\n */\n#[\\Steins\\Pure]\nfunction f({sig}): mixed {{ {body} }}\n")
+}
 
 #[test]
-fn a_call_through_a_pure_callable_parameter_is_discharged() {
-    for doc in [
-        "@param pure-callable $f",
-        "@param pure-closure $f",
-        "@param static-pure-closure $f",
-        "@pure-unless-callable-is-impure $f",
-        "@phpstan-pure-unless-callable-is-impure $f",
-    ] {
-        let src = format!(
-            "<?php\n/**\n * {doc}\n */\n#[\\Steins\\Pure]\nfunction f(callable $f): mixed {{ return $f(); }}\n"
-        );
+fn a_call_through_a_flagged_parameter_is_discharged() {
+    for doc in ["@pure-unless-callable-is-impure $f", "@phpstan-pure-unless-callable-is-impure $f"] {
+        let src = flagged(doc, "callable $f", "return $f();");
         assert!(effect(&src).is_empty(), "{doc}: {:#?}", effect(&src));
     }
 }
 
 #[test]
+fn the_typed_spellings_are_not_discharged() {
+    // The call-site obligation check proves impurity of a closure or a first-class
+    // callable only, so a string or array callable is never decided by the type.
+    for doc in ["@param pure-callable $f", "@param pure-closure $f", "@param static-pure-closure $f"] {
+        let src = flagged(doc, "callable $f", "return $f();");
+        let ds = effect(&src);
+        assert_eq!(ds.len(), 1, "{doc}: {ds:#?}");
+        assert!(ds[0].message.contains("(dynamic-callee:"));
+    }
+}
+
+#[test]
 fn only_the_flagged_parameter_is_discharged() {
-    let src = "<?php\n/**\n * @param pure-callable $f\n * @param callable $g\n */\n#[\\Steins\\Pure]\nfunction f(callable $f, callable $g): mixed { $f(); return $g(); }\n";
-    let ds = effect(src);
+    let src = flagged(
+        "@pure-unless-callable-is-impure $f",
+        "callable $f, callable $g",
+        "$f(); return $g();",
+    );
+    let ds = effect(&src);
     assert_eq!(ds.len(), 1, "{ds:#?}");
     // A plain `callable` is no contract, and neither is no docblock.
     let plain = "<?php\n/** @param callable $f */\n#[\\Steins\\Pure]\nfunction f(callable $f): mixed { return $f(); }\n";
@@ -135,16 +151,37 @@ fn only_the_flagged_parameter_is_discharged() {
 }
 
 #[test]
-fn a_rebound_parameter_is_not_discharged() {
-    let src = "<?php\n/**\n * @param pure-callable $f\n */\n#[\\Steins\\Pure]\nfunction f(callable $f, callable $g): mixed { $f = $g; return $f(); }\n";
-    assert_eq!(effect(src).len(), 1);
-    let by_ref = "<?php\nfunction swap(callable &$x): void {}\n/**\n * @param pure-callable $f\n */\n#[\\Steins\\Pure]\nfunction f(callable $f): mixed { swap($f); return $f(); }\n";
-    assert_eq!(effect(by_ref).iter().filter(|d| d.message.contains("(dynamic-callee:")).count(), 1);
+fn a_rebound_flagged_parameter_is_not_discharged() {
+    let tag = "@pure-unless-callable-is-impure $f";
+    let src = flagged(tag, "callable $f, callable $g", "$f = $g; return $f();");
+    assert_eq!(effect(&src).len(), 1);
+    let by_ref = format!(
+        "<?php\nfunction swap(callable &$x): void {{}}\n{}",
+        flagged(tag, "callable $f", "swap($f); return $f();").trim_start_matches("<?php\n")
+    );
+    assert_eq!(effect(&by_ref).iter().filter(|d| d.message.contains("(dynamic-callee:")).count(), 1);
+}
+
+#[test]
+fn a_flagged_parameter_with_a_default_is_not_discharged() {
+    // `f()` fills the slot with the declaration's own default, which no call site decides.
+    let src = flagged(
+        "@pure-unless-callable-is-impure $f",
+        "callable $f = 'impure_fn'",
+        "return $f();",
+    );
+    assert_eq!(effect(&src).len(), 1);
+}
+
+#[test]
+fn the_tag_is_honoured_on_free_functions_only() {
+    let src = "<?php\nclass K {\n    /**\n     * @pure-unless-callable-is-impure $f\n     */\n    #[\\Steins\\Pure]\n    public function f(callable $f): mixed { return $f(); }\n}\n";
+    assert_eq!(effect(src).len(), 1, "a method is a unit with no discharge 2");
 }
 
 #[test]
 fn the_purity_contract_says_nothing_about_throws() {
-    let src = "<?php\n/**\n * @param pure-callable $f\n * @throws \\RuntimeException\n */\nfunction f(callable $f): mixed { return $f(); }\n";
+    let src = "<?php\n/**\n * @pure-unless-callable-is-impure $f\n * @throws \\RuntimeException\n */\nfunction f(callable $f): mixed { return $f(); }\n";
     assert_eq!(throw(src).len(), 1, "a pure callable may still throw");
 }
 
@@ -229,6 +266,105 @@ fn a_callee_with_no_gap_reports_nothing() {
     let src = "<?php\nfunction callee(int $a): int { return $a + 1; }\n#[\\Steins\\Pure]\nfunction caller(int $a): int { return callee($a); }\n/** @throws \\RuntimeException */\nfunction t(int $a): int { return callee($a); }\n";
     assert!(effect(src).is_empty());
     assert!(throw(src).is_empty());
+}
+
+// ---- discharge 4, relative to the callee's envelope --------------------------
+
+const IO_GATE: &str =
+    "<?php\ninterface Gate { /** @phpstan-impure io.db */ public function open(): int; }\n";
+
+#[test]
+fn an_enveloped_callee_is_trusted_only_through_an_envelope_that_fits() {
+    // `k` is bounded by `io.db` (discharge 3 at its own site), so its gap is not its caller's
+    // when the caller admits `io.db`, and is named at the call when the caller does not.
+    let k = "#[\\Steins\\Effect('io.db')]\nfunction k(Gate $g): int { return $g->open(); }\n";
+    let wide = format!("{IO_GATE}{k}#[\\Steins\\Effect('io.db')]\nfunction f(Gate $g): int {{ return k($g); }}\n");
+    assert!(effect(&wide).is_empty(), "{:#?}", effect(&wide));
+    let narrow = format!("{IO_GATE}{k}#[\\Steins\\Pure]\nfunction f(Gate $g): int {{ return k($g); }}\n");
+    let ds = effect(&narrow);
+    assert_eq!(ds.len(), 1, "{ds:#?}");
+    assert!(ds[0].message.starts_with("k() bounds its effects"), "{}", ds[0].message);
+    assert!(ds[0].message.contains("allowing io.db"), "{}", ds[0].message);
+    assert_eq!(ds[0].line, 6, "at the call, not at k");
+    // Without k's envelope the generic inherited finding names it.
+    let bare = format!("{IO_GATE}function k(Gate $g): int {{ return $g->open(); }}\n#[\\Steins\\Pure]\nfunction f(Gate $g): int {{ return k($g); }}\n");
+    assert!(effect(&bare)[0].message.contains("declares no envelope of its own"));
+}
+
+#[test]
+fn a_tainting_edge_into_a_flagged_function_is_named_at_the_call() {
+    let callee = "<?php\n/**\n * @pure-unless-callable-is-impure $f\n */\n#[\\Steins\\Pure]\nfunction f(callable $f): mixed { return $f(); }\n";
+    // The callable is whatever the caller was handed: the call does not decide the contract.
+    let tainting = format!("{callee}#[\\Steins\\Pure]\nfunction g(callable $c): mixed {{ return f($c); }}\n");
+    let ds = effect(&tainting);
+    assert_eq!(ds.len(), 1, "{ds:#?}");
+    assert!(ds[0].message.starts_with("f() is pure only if the callable bound to its parameter is"));
+    assert_eq!(ds[0].line, 8);
+    // A visible callback decides it: an untainting edge, nothing at the call.
+    let decided = format!("{callee}#[\\Steins\\Pure]\nfunction g(): mixed {{ return f(fn() => 1); }}\n");
+    assert!(effect(&decided).is_empty(), "{:#?}", effect(&decided));
+}
+
+// ---- discharge 6: the project's tolerance policy (ADR-0084) ------------------
+
+/// Every `effect.maybe-envelope-exceeded` finding of a one-file project under a policy
+/// tolerating `telemetry` and attributing it to `Trace` and `Logger`.
+fn effect_under_telemetry(src: &str) -> Vec<Diagnostic> {
+    let attribution: Vec<(String, Vec<String>)> = ["Trace", "Logger"]
+        .iter()
+        .map(|k| ((*k).to_owned(), vec!["telemetry".to_owned()]))
+        .collect();
+    let policy = EffectsPolicy::new(vec!["telemetry".to_owned()], attribution);
+    let db = SteinsDatabase::default();
+    let file = SourceFile::new(&db, "test.php".to_owned(), src.to_owned());
+    let project = Project::builder(vec![file], ProjectLayout::fallback(), PluginFacts::none())
+        .effects(policy)
+        .new(&db);
+    check_project(&db, project, &mut NoFold)
+        .into_iter()
+        .filter(|d| d.id == EFFECT_MAYBE_ENVELOPE_EXCEEDED_ID)
+        .collect()
+}
+
+#[test]
+fn an_edge_into_an_attributed_callee_is_discharged_by_the_policy() {
+    let src = "<?php\nfinal class Trace { public static function debug(mixed $line): void { error_log('x' . $line); } }\n#[\\Steins\\Pure]\nfunction f(int $a): int { Trace::debug($a); return $a + 1; }\n";
+    assert_eq!(effect(src).len(), 1, "with no policy the edge is named");
+    assert!(effect_under_telemetry(src).is_empty(), "{:#?}", effect_under_telemetry(src));
+}
+
+#[test]
+fn a_call_on_an_attributed_declared_receiver_is_discharged_by_the_policy() {
+    let src = "<?php\ninterface Logger { public function info(string $m): void; }\n#[\\Steins\\Pure]\nfunction f(Logger $l, int $a): int { $l->info('x'); return $a + 1; }\n";
+    assert_eq!(effect(src).len(), 1);
+    assert!(effect_under_telemetry(src).is_empty(), "{:#?}", effect_under_telemetry(src));
+    // A receiver the policy does not attribute stays a gap.
+    let other = src.replace("Logger", "Mailer");
+    assert_eq!(effect_under_telemetry(&other).len(), 1);
+}
+
+#[test]
+fn an_interop_bound_the_policy_tolerates_is_discharged() {
+    // The imported label is tolerated, so the claim cannot break the envelope.
+    let src = format!("{IO_GATE}#[\\Steins\\Pure]\nfunction f(Gate $g): int {{ return $g->open(); }}\n");
+    assert_eq!(effect(&src).len(), 1, "with no policy the bound exceeds Pure");
+    let policy = EffectsPolicy::new(vec!["io.db".to_owned()], Vec::new());
+    let db = SteinsDatabase::default();
+    let file = SourceFile::new(&db, "test.php".to_owned(), src);
+    let project = Project::builder(vec![file], ProjectLayout::fallback(), PluginFacts::none())
+        .effects(policy)
+        .new(&db);
+    let found: Vec<_> = check_project(&db, project, &mut NoFold)
+        .into_iter()
+        .filter(|d| d.id == EFFECT_MAYBE_ENVELOPE_EXCEEDED_ID)
+        .collect();
+    assert!(found.is_empty(), "{found:#?}");
+    // An interop tag naming a label the registry does not know is ⊤, and its receiver is
+    // a declared receiver the policy attributes (or not) like any other.
+    let unknown = "<?php\ninterface Gate { /** @phpstan-impure telemetry */ public function open(): int; }\n#[\\Steins\\Pure]\nfunction f(Gate $g): int { return $g->open(); }\n";
+    assert_eq!(effect_under_telemetry(unknown).len(), 1, "Gate is not attributed");
+    let attributed = unknown.replace("Gate", "Logger");
+    assert!(effect_under_telemetry(&attributed).is_empty());
 }
 
 // ---- discharge 5: a catch that absorbs Throwable ---------------------------
