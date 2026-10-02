@@ -42,6 +42,8 @@ eval
 exit
 ffi
 global.read   global.write
+     global.read.setting   global.read.setting.locale
+     global.write.setting  global.write.setting.locale
 io   io.db   io.fs   io.fs.read   io.fs.write   io.input   io.ipc
      io.net  io.net.http   io.process   io.signal
      io.output   io.output.buffer   io.output.header
@@ -100,6 +102,45 @@ caught. "Does io, but does not output" is spelled by enumerating the children.
 it is the narrowing below that produces it — `file_get_contents('php://input')`
 — and no argument-blind row carries it. `$_GET`-style reads of parsed request
 memory stay `global.read`; they are memory, not a stream.
+
+The `global.*.setting` family (ADR-0101) is the **ambient settings**: process-owned
+cells the script is born holding, that only the script's own calls rewrite, and that a
+builtin reads implicitly rather than through an argument. A repeat read with no write
+between returns the same value, which separates a setting from `nondet.*`, and nothing
+outside the process writes it, which separates it from `io.*`. A setting read is the
+effect of reading a cell and a setting write the effect of rewriting one.
+
+| Label | Meaning | Origins |
+| --- | --- | --- |
+| `global.read.setting` | a read of some setting; the parent of every cell's read | — (no row; the roster's later cells and a dynamic ini name hang here) |
+| `global.read.setting.locale` | a read of `LC_*` as `setlocale` leaves it | `sprintf`, `vsprintf`, `printf`, `vprintf` (`%f`, `%g`, `%G` render the locale's decimal point), `localeconv`, `nl_langinfo`, `strcoll` |
+| `global.write.setting` | a rewrite of some setting | — |
+| `global.write.setting.locale` | a rewrite of the locale cell | `setlocale` |
+
+The four are `global.read` and `global.write` children, so prefix subsumption carries
+every existing consumer: a declared `global.read` or `global` envelope admits a setting
+read, a declared `global.write` admits `setlocale`, and a discarded locale read is still a
+discardable read (ADR-0096). `global.read` without a child stays the row for a read the
+catalog cannot place in a cell. A cell's label is registered in the slice that colours its
+first row and never ahead of one, so the timezone, environment, encoding, `precision` and
+ini cells the ADR names are not in the registry yet.
+
+The printf family's row is argument-blind and keeps the read at every call. A **literal**
+format settles it lexically once a call site reads the format: the read is kept iff some
+conversion ends in `f`, `g` or `G`, and `F`, `e`, `E`, `h`, `H`, every integer and
+character conversion, `s` and `%%` never read it. A format the parser cannot read as the
+engine does, and a non-literal format, keep the read. Until the call site reads the
+literal, `sprintf('%d', $x)` carries the row's label too, which is the sound side. The
+fold seam applies the same verdict: a printf-family call whose literal format keeps the
+read is not folded, because the sidecar runs under `LC_NUMERIC=C` and a fold is a claim
+about the project's own runtime. `sprintf('%d-%s', 1, 'a')` still folds.
+
+An envelope that does not admit the read is exceeded at the call: a `#[\Steins\Pure]` body
+that keeps a locale read is `effect.envelope-exceeded`, and so is an interop
+`@phpstan-pure` body. PHPStan has no locale concept and accepts `sprintf` under its purity
+model, so this is a finding Steins can make and PHPStan cannot. A project that wants the
+old silence has the project's `tolerated = ["global.read.setting"]` (ADR-0084), which
+discharges the read at judgment, and `--no-tolerated-effects` shows it again.
 
 `mutate.local` is the degenerate member of the `mutate` family and the one label
 **every** envelope tolerates, `#[\Steins\Pure]` included (ADR-0063 §2.3). It

@@ -4,6 +4,12 @@
 > ambient channel under `io` (`io.output` and its ob-capturability split),
 > and `io.input` joins it.
 >
+> Amended by ADR-0101: a locale read is an effect, `global.read.setting.locale`,
+> and the printf family carries it (`%f`, `%g` and `%G` render `LC_NUMERIC`'s
+> decimal point). The "Pseudo-constant settings" paragraph below now describes
+> an opt-in that would drop a *setting-read label* from the folding gate, and
+> it remains unbuilt.
+>
 > Amended by ADR-0021's 2026-10-01 amendment: the folding gate below needs a
 > name to be pure, but a pure name need not fold. A builtin can be catalogued
 > pure from a certified list without joining the allowlist.
