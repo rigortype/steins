@@ -1618,9 +1618,9 @@ fn val_contract(v: &Val) -> ContractTy {
     }
 }
 
-/// Normalized class-name equality (leading `\` stripped, ASCII-case-folded) —
-/// the normalization [`ContractTy::Class`] arms already carry, applied to the
-/// (possibly raw) subtrahend FQN too.
+/// Normalized class-name equality (leading `\` stripped, ASCII-case-folded):
+/// an unresolved fully-qualified [`ContractTy::Class`] arm keeps its `\`
+/// (issue #699), and a subtrahend FQN may be raw, so both sides are trimmed.
 fn class_eq(a: &str, b: &str) -> bool {
     a.trim_start_matches('\\').eq_ignore_ascii_case(b.trim_start_matches('\\'))
 }

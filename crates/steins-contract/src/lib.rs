@@ -249,11 +249,21 @@ pub enum ContractTy {
         /// given a type.
         unsealed: Option<(Option<Box<ContractTy>>, Box<ContractTy>)>,
     },
-    /// A class or interface name (normalized: lowercased, leading `\`
-    /// stripped). Scalars/arrays/null are never instances.
+    /// A class or interface name, lowercased. Scalars/arrays/null are never
+    /// instances.
+    ///
+    /// **A leading `\` is kept** when the docblock wrote the name fully
+    /// qualified (issue #699). Lowering has no namespace to resolve against,
+    /// so a name leaves this crate as written; the `\` is the bit that tells
+    /// the caller's namespace resolver that `\Foo` names the global `Foo`
+    /// rather than `Foo` relative to the docblock's namespace. Dropping it
+    /// made `@param \Foo` in `namespace App` read as `App\Foo`. A resolved
+    /// name (every arm a lane carries) has no `\`: the resolver strips it.
+    /// Name comparisons in this crate ([`normalize`]) ignore the `\`, so
+    /// both spellings of one name still meet.
     Class(String),
-    /// **One enum case** — `Suit::Hearts` (issue #429). The enum FQN carries
-    /// [`Self::Class`]'s normalization (lowercased, leading `\` stripped); the
+    /// **One enum case** — `Suit::Hearts` (issue #429). The enum FQN is a
+    /// resolved [`Self::Class`] name (lowercased, no leading `\`); the
     /// case name is stored as declared, because PHP compares case names
     /// case-sensitively.
     ///
@@ -359,6 +369,63 @@ impl ContractTy {
     #[must_use]
     pub fn is_unset(&self) -> bool {
         matches!(self, ContractTy::Unset)
+    }
+
+    /// Rewrite every [`ContractTy::Class`] name in this type through `f`, at
+    /// every depth a class can stand: union and intersection members, array
+    /// element, key and value, `iterable` key and value, shape fields and the
+    /// unsealed tail, and a callable signature's parameters and return.
+    ///
+    /// The one walk a caller uses to namespace-resolve a lowered docblock type
+    /// (issue #699: a resolver that stopped at the top level left the `User` of
+    /// `list<User>` naming the global class). An [`ContractTy::EnumCase`] is
+    /// left alone: lowering never produces one, so its enum name is already a
+    /// resolved FQN, and resolving it again would re-namespace it.
+    #[must_use]
+    pub fn map_class_names(self, f: &mut dyn FnMut(&str) -> String) -> ContractTy {
+        // In place, keeping the allocation.
+        fn map(mut t: Box<ContractTy>, f: &mut dyn FnMut(&str) -> String) -> Box<ContractTy> {
+            *t = std::mem::replace(&mut *t, ContractTy::Opaque).map_class_names(f);
+            t
+        }
+        match self {
+            ContractTy::Class(n) => ContractTy::Class(f(&n)),
+            ContractTy::Union(ms) => {
+                ContractTy::Union(ms.into_iter().map(|m| m.map_class_names(f)).collect())
+            }
+            ContractTy::Inter(ms) => {
+                ContractTy::Inter(ms.into_iter().map(|m| m.map_class_names(f)).collect())
+            }
+            ContractTy::ListOf { elem, non_empty } => {
+                ContractTy::ListOf { elem: map(elem, f), non_empty }
+            }
+            ContractTy::MapOf { key, val, non_empty, not_list } => {
+                ContractTy::MapOf { key: map(key, f), val: map(val, f), non_empty, not_list }
+            }
+            ContractTy::IterableOf { key, val } => {
+                ContractTy::IterableOf { key: map(key, f), val: map(val, f) }
+            }
+            ContractTy::Shape { list, fields, sealed, non_empty, unsealed } => ContractTy::Shape {
+                list,
+                fields: fields
+                    .into_iter()
+                    .map(|c| CField { ty: c.ty.map_class_names(f), ..c })
+                    .collect(),
+                sealed,
+                non_empty,
+                unsealed: unsealed.map(|(k, v)| (k.map(|k| map(k, f)), map(v, f))),
+            },
+            ContractTy::CallableTy { sig: Some(sig), obl } => {
+                let CallableSig { params, ret } = *sig;
+                let params = params
+                    .into_iter()
+                    .map(|p| CallableParamTy { ty: p.ty.map_class_names(f), ..p })
+                    .collect();
+                let ret = ret.map_class_names(f);
+                ContractTy::CallableTy { sig: Some(Box::new(CallableSig { params, ret })), obl }
+            }
+            other => other,
+        }
     }
 }
 
@@ -738,8 +805,21 @@ pub fn lower_identifier(name: &str) -> ContractTy {
             // denotes a class, so the class reading would answer a definite
             // `No` to every value the contract was written to accept.
             None if other.contains('-') => ContractTy::Opaque,
-            None => ContractTy::Class(norm),
+            None => class_arm(name, norm),
         },
+    }
+}
+
+/// The [`ContractTy::Class`] a name that is not vocabulary lowers to: `norm`
+/// (lowercased, `\` stripped), with the leading `\` put back when `written`
+/// was fully qualified. Keyword matching runs on `norm`, so `\int` is still
+/// `int`; only the class reading keeps the bit, for the caller's namespace
+/// resolver to read (issue #699).
+fn class_arm(written: &str, norm: String) -> ContractTy {
+    if written.starts_with('\\') {
+        ContractTy::Class(format!("\\{norm}"))
+    } else {
+        ContractTy::Class(norm)
     }
 }
 
@@ -988,7 +1068,7 @@ pub fn lower_generic(base: &str, args: &[steins_phpdoc::ast::GenericArg]) -> Con
         // The hyphen reservation (ADR-0091 §3) for a generic's base name: no
         // class can carry it, so there is no class-generic to hand on.
         (other, _) if other.contains('-') => ContractTy::Opaque,
-        _ => ContractTy::Class(norm),
+        _ => class_arm(base, norm),
     }
 }
 
@@ -2024,6 +2104,45 @@ mod known_unenforced_tests {
             ContractTy::Class(name) if name == "someunknowngeneric"
         ));
     }
+
+    /// Issue #699: a fully-qualified class keeps its `\` for the caller's
+    /// namespace resolver, in the identifier and the generic table alike; a
+    /// keyword written with one is still the keyword.
+    #[test]
+    fn a_fully_qualified_class_keeps_its_leading_backslash() {
+        assert_eq!(lower_identifier(r"\Foo"), ContractTy::Class(r"\foo".to_owned()));
+        assert_eq!(lower_identifier(r"\App\Foo"), ContractTy::Class(r"\app\foo".to_owned()));
+        assert_eq!(lower_identifier("Foo"), ContractTy::Class("foo".to_owned()));
+        assert!(matches!(lower_generic(r"\Coll", &[]), ContractTy::Class(n) if n == r"\coll"));
+        assert_eq!(lower_identifier(r"\int"), ContractTy::Base(Base::Int));
+    }
+
+    /// The walk a namespace resolver runs: every class position, nothing else.
+    #[test]
+    fn map_class_names_reaches_every_nested_class() {
+        let ty = lower_str(
+            r"list<User>|array<Key, \Val>|iterable<It>|array{a: Shp, ...<Tail>}|(A&B)|callable(P): R|int",
+        )
+        .expect("lowers");
+        let mut seen = Vec::new();
+        let mapped = ty.map_class_names(&mut |n| {
+            seen.push(n.to_owned());
+            format!("ns\\{}", n.trim_start_matches('\\'))
+        });
+        assert_eq!(
+            seen,
+            ["user", "key", r"\val", "it", "shp", "tail", "a", "b", "p", "r"],
+        );
+        assert_eq!(
+            spell::spell_nested_for_test(&mapped),
+            spell::spell_nested_for_test(
+                &lower_str(
+                    r"list<ns\user>|array<ns\key, ns\val>|iterable<ns\it>|array{a: ns\shp, ...<ns\tail>}|(ns\a&ns\b)|callable(ns\p): ns\r|int",
+                )
+                .expect("lowers")
+            ),
+        );
+    }
 }
 
 /// `int-mask<…>` / `int-mask-of<…>` — PHPStan's `expandIntMaskToType`.
@@ -2107,7 +2226,8 @@ mod object_intersection_tests {
     }
 
     /// Representable: lowers to a conjunction of class arms, intact and in
-    /// order, normalized as a lone class arm is (lowercased, `\` stripped).
+    /// order, normalized as a lone class arm is (lowercased, a fully-qualified
+    /// member's leading `\` kept, issue #699).
     #[test]
     fn an_object_intersection_is_representable() {
         let ty = inter("ArrayAccess&stdClass");
@@ -2118,7 +2238,8 @@ mod object_intersection_tests {
                 ContractTy::Class("stdclass".to_owned()),
             ])
         );
-        assert_eq!(inter(r"\Foo\Bar&Baz"), inter(r"foo\bar&baz"));
+        assert_eq!(inter(r"\Foo\Bar&Baz"), inter(r"\foo\bar&baz"));
+        assert_ne!(inter(r"\Foo\Bar&Baz"), inter(r"foo\bar&baz"), "the `\\` is kept");
     }
 
     /// Spellable: `spell_nested` joins arms with `&`, round-tripping the same
@@ -2854,7 +2975,8 @@ mod unset_pseudo_type_tests {
     #[test]
     fn the_spelling_round_trips() {
         for (src, spelled) in [
-            ("\\DateTime|unset", "datetime|unset"),
+            // A fully-qualified class keeps its `\` through lowering (issue #699).
+            ("\\DateTime|unset", "\\datetime|unset"),
             ("int|unset", "int|unset"),
             ("unset", "unset"),
         ] {
