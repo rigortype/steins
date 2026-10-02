@@ -72,6 +72,11 @@ const WORKER_STACK_SIZE: usize = 256 * 1024 * 1024;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // Per-file fault isolation (issue #895 D3): a panic in one file's walk is
+    // that file's `internal.panic` finding, and the run goes on. On for every
+    // subcommand, so a resident `mcp` server survives one too; a panic outside
+    // the walk still unwinds to the join below.
+    steins_infer::isolate_file_panics();
     // Output seam (issue #44): `out::finish` flushes stdout, maps write failure
     // to exit code. Worker thread sized per `WORKER_STACK_SIZE` (see its doc).
     let code = std::thread::Builder::new()
