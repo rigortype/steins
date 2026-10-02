@@ -38,9 +38,10 @@
 //       3    declare a type naming no class
 //
 // Each row: (lowercased class name, the engine's own casing). The lookup is
-// case-insensitive with the leading `\` stripped — the normalization
-// `ContractTy::Class` applies — and compares the whole FQN, so a project
-// `App\CurlHandle` is not `CurlHandle`. Sorted by key for binary search.
+// case-insensitive with the leading `\` stripped — the normalization a
+// resolved `ContractTy::Class` name carries — and compares the whole FQN, so
+// a project `App\CurlHandle` is not `CurlHandle`. Sorted by key for binary
+// search.
 
 pub(crate) static MIGRATED_RESOURCE_CLASSES: &[(&str, &str)] = &[
     ("curlhandle", "CurlHandle"),

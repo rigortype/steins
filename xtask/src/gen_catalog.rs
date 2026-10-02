@@ -279,9 +279,10 @@ fn render_migrated_resource_classes(
     s.push_str(
         "//\n\
          // Each row: (lowercased class name, the engine's own casing). The lookup is\n\
-         // case-insensitive with the leading `\\` stripped — the normalization\n\
-         // `ContractTy::Class` applies — and compares the whole FQN, so a project\n\
-         // `App\\CurlHandle` is not `CurlHandle`. Sorted by key for binary search.\n\n",
+         // case-insensitive with the leading `\\` stripped — the normalization a\n\
+         // resolved `ContractTy::Class` name carries — and compares the whole FQN, so\n\
+         // a project `App\\CurlHandle` is not `CurlHandle`. Sorted by key for binary\n\
+         // search.\n\n",
     );
     s.push_str("pub(crate) static MIGRATED_RESOURCE_CLASSES: &[(&str, &str)] = &[\n");
     for (key, name) in table {

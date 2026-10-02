@@ -550,9 +550,9 @@ pub fn resource_param(name: &str, index: usize) -> Option<ResourceParam> {
 /// rather than per row; it grows with each migration and shrinks when PHPStan
 /// drops the PHP that returned the resource. Never hand-listed.
 ///
-/// Case-insensitive, leading `\` stripped — the normalization `ContractTy::Class`
-/// applies — and the whole FQN compares, so a project `App\CurlHandle` is not
-/// `CurlHandle`.
+/// Case-insensitive, leading `\` stripped — the normalization a resolved
+/// `ContractTy::Class` name carries — and the whole FQN compares, so a project
+/// `App\CurlHandle` is not `CurlHandle`.
 #[must_use]
 pub fn is_migrated_resource_class(fqn: &str) -> bool {
     let key = fqn.trim_start_matches('\\').to_ascii_lowercase();
