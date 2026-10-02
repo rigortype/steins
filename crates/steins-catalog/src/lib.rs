@@ -141,6 +141,7 @@ pub use knowledge::{
     FlagGatedThrow,
     flag_gated_throw,
     knows,
+    throws_at_arity,
     throws_of,
     throws_of_literals,
 };

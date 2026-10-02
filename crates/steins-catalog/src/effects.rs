@@ -752,8 +752,10 @@ fn scheme_of(target: &str) -> Option<&str> {
 /// (issue #870). `PDO::setAttribute` is `io.db` like its siblings: a driver
 /// attribute can be a statement sent to the server (`ATTR_AUTOCOMMIT` on a
 /// driver that implements it that way), so it takes the upper bound as
-/// `prepare` does. `PDOStatement::setFetchMode` only stores a mode, a
-/// class name or an object, and is pure. Both are held to a reach row
+/// `prepare` does. `PDOStatement::setFetchMode` stores a mode, a class name
+/// or an object on the statement, which the next fetch observes: a self-mutation
+/// (ADR-0055), with the coarse label `mutate` that a by-reference write to
+/// escaping state takes (`by_ref_label`). Both are held to a reach row
 /// ([`method_arg_reach`](crate::method_arg_reach)) that charges the class or
 /// object they register, because the later `fetch` and `fetchAll` are attributed
 /// to the registration (ADR-0099 §4.5) and carry no reach of their own for it.
@@ -783,11 +785,12 @@ pub fn method_effect_labels(class: &str, method: &str) -> Option<&'static [&'sta
     const EMPTY: &[&str] = &[];
     const IO_DB: &[&str] = &["io.db"];
     const NONDET_TIME: &[&str] = &["nondet.time"];
+    const MUTATE: &[&str] = &["mutate"];
 
     match (class.to_ascii_lowercase().as_str(), method.to_ascii_lowercase().as_str()) {
         ("pdo", "query" | "exec" | "prepare" | "__construct" | "setattribute") => Some(IO_DB),
         ("pdostatement", "execute" | "fetch" | "fetchall") => Some(IO_DB),
-        ("pdostatement", "setfetchmode") => Some(EMPTY),
+        ("pdostatement", "setfetchmode") => Some(MUTATE),
         ("datetime" | "datetimeimmutable", "__construct" | "createfromformat") => {
             Some(NONDET_TIME)
         }
@@ -1885,12 +1888,13 @@ mod tests {
         }
     }
 
-    /// `setFetchMode` stores a mode, a class name or an object and runs nothing
-    /// itself: pure, with the class it registers charged by its reach row.
+    /// `setFetchMode` stores a mode, a class name or an object on the statement and
+    /// runs nothing itself, but the next fetch observes the store: `mutate`, with
+    /// the class it registers charged by its reach row.
     #[test]
-    fn registering_a_fetch_mode_is_pure_and_registering_an_attribute_is_io_db() {
-        assert_eq!(method_effect_labels("PDOStatement", "setFetchMode"), Some(&[][..]));
-        assert_eq!(method_effect_labels("pdostatement", "SETFETCHMODE"), Some(&[][..]));
+    fn registering_a_fetch_mode_mutates_and_registering_an_attribute_is_io_db() {
+        assert_eq!(method_effect_labels("PDOStatement", "setFetchMode"), Some(&["mutate"][..]));
+        assert_eq!(method_effect_labels("pdostatement", "SETFETCHMODE"), Some(&["mutate"][..]));
         assert_eq!(method_effect_labels("PDO", "setFetchMode"), None, "a PDOStatement method");
         assert_eq!(method_effect_labels("PDOStatement", "setAttribute"), None, "a PDO method");
         // A subclass can override either, so neither is final.

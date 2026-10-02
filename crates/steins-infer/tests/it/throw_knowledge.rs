@@ -108,8 +108,8 @@ fn a_name_that_compares_its_elements_carries_the_error_of_a_recursive_array() {
         "return array_search(1, [1, 2]);",
         "return array_unique([1, 1]);",
         "return array_replace_recursive([1], [2]);",
-        "return date_create('now');",
-        "return date_create_immutable('now');",
+        "return boolval(1);",
+        "return array_filter([1, 0]);",
     ] {
         let s = summary(&file(true, "", body), "f");
         assert!(s.throws_exhaustive, "{body}: {s:?}");
@@ -120,6 +120,22 @@ fn a_name_that_compares_its_elements_carries_the_error_of_a_recursive_array() {
     for sort in ["sort", "rsort", "asort", "arsort"] {
         let s = summary(&file(true, "", &format!("$a = [2, 1]; {sort}($a); return $a;")), "f");
         assert_eq!(s.throws, ["Error"], "{sort}: {s:?}");
+    }
+    // The `Error` of `date_create` is an uninitialised `DateTimeZone` passed as its
+    // second argument: with one argument, nothing is read and nothing is raised.
+    let no_throws: &[&str] = &[];
+    for (call, throws) in [
+        ("date_create('now')", no_throws),
+        ("date_create_immutable('now')", no_throws),
+        ("date_create('now', $z)", &["Error"][..]),
+        ("date_create_immutable('now', $z)", &["Error"][..]),
+        ("date_create_from_format('Y', '2020')", &["ValueError"][..]),
+        ("date_create_from_format('Y', '2020', $z)", &["Error", "ValueError"][..]),
+    ] {
+        // A `DateTimeZone` operand is an object, a reach of its own: the gap says so,
+        // and the set is what the row says.
+        let s = summary(&file(true, "\\DateTimeZone $z", &format!("return {call};")), "f");
+        assert_eq!(s.throws, throws, "{call}");
     }
     // `ksort` compares keys, which are never arrays: still on the table.
     let s = summary(&file(true, "", "$a = [2, 1]; ksort($a); return $a;"), "f");

@@ -250,15 +250,20 @@ mod registration {
         assert!(reaches(&wrapper(false, "", call, ""), "St::run"));
     }
 
+    /// `setFetchMode(FETCH_CLASS | FETCH_CLASSTYPE)` names no class: a column names
+    /// it at every later fetch. The rule reads no constants, so the mode is
+    /// `Autoload` too and no `setFetchMode` call is complete, whatever mode it names.
     #[test]
-    fn a_fetch_mode_with_no_class_registers_nothing() {
-        let call = "return parent::setFetchMode(\\PDO::FETCH_ASSOC);";
-        for strict in [false, true] {
-            let src = wrapper(strict, "", call, "");
-            assert!(!reaches(&src, "St::run"), "strict={strict}");
-            let s = summary(&src, "St::run");
-            assert!(s.exhaustive && s.gaps.is_empty(), "strict={strict}: {s:?}");
-            assert!(s.labels.is_empty(), "setFetchMode is pure: {s:?}");
+    fn every_fetch_mode_registration_is_a_gap() {
+        for mode in ["\\PDO::FETCH_CLASS | \\PDO::FETCH_CLASSTYPE", "\\PDO::FETCH_ASSOC", "$m"] {
+            let call = format!("return parent::setFetchMode({mode});");
+            for strict in [false, true] {
+                let src = wrapper(strict, "int $m", &call, "");
+                assert!(reaches(&src, "St::run"), "{mode}, strict={strict}");
+                let s = summary(&src, "St::run");
+                assert!(!s.exhaustive, "{mode}, strict={strict}: {s:?}");
+                assert_eq!(s.labels, ["mutate"], "the row is kept: {s:?}");
+            }
         }
     }
 
