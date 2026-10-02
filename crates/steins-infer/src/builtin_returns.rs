@@ -232,8 +232,8 @@ pub(crate) fn builtin_return_floor(cx: &Cx, name: &str) -> Option<Vec<ContractAr
     }
     let declared = steins_catalog::declared_return(name)?;
     let arms = flatten_arms(steins_contract::lower_str(declared)?);
-    // The resolver is the **identity**, a claim worth stating now that mining
-    // admits class rows (`imageloadfont` = `GdFont`).
+    // The resolver is the **identity** ([`catalog_class`]), a claim worth stating
+    // now that mining admits class rows (`imageloadfont` = `GdFont`).
     //
     // `refine_declared_arms`' resolver exists to turn a *relative* class name in a
     // project docblock into an FQN against the declaring namespace. A functionMap
@@ -241,11 +241,16 @@ pub(crate) fn builtin_return_floor(cx: &Cx, name: &str) -> Option<Vec<ContractAr
     // as PHP resolves it (`GdFont`, `CurlHandle`, already-qualified `ast\Node`).
     // Running a project namespace resolver over those would MANGLE them (`GdFont`
     // inside `namespace App;` would become `App\GdFont`), so identity is the only
-    // correct resolver — and it preserves `ContractTy::Class`'s own normalization
-    // (`lower_identifier` strips a leading `\`, case-folds), matching the
-    // generation-time countersign. Same argument for a class inside an array row's
-    // element type.
-    refine_declared_arms(&[], arms, &|n: &str| n.to_owned())
+    // correct resolver, matching the generation-time countersign. Same argument
+    // for a class inside an array row's element type.
+    refine_declared_arms(&[], arms, &catalog_class)
+}
+
+/// The resolver a catalog row's class names take: the identity, less the leading
+/// `\` a row may spell, which lowering keeps for a namespace resolver to read
+/// (issue #699) and a resolved arm never carries.
+fn catalog_class(name: &str) -> String {
+    name.trim_start_matches('\\').to_owned()
 }
 
 /// The declared-return floor's **method** half (issue #673): the contract arms a
@@ -303,7 +308,7 @@ pub(crate) fn builtin_method_return_floor(
         return None;
     }
     let arms = flatten_arms(steins_contract::lower_str(declared)?);
-    refine_declared_arms(&[], arms, &|n: &str| n.to_owned())
+    refine_declared_arms(&[], arms, &catalog_class)
 }
 
 /// The row a builtin `class::method` resolves to, walking the builtin hierarchy

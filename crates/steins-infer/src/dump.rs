@@ -527,12 +527,9 @@ fn int_range_keyword(r: IntRange) -> String {
 /// index: the whole-enum collapse below, and **source casing** — a class arm
 /// stores a normalized (lowercased) FQN, and PHPStan prints what the declaration
 /// wrote, so each class-shaped arm is re-cased through [`Cx::class_display_fqn`]
-/// on the way in. A class nested inside an array arm (`array<DateTime>`) is not
-/// re-cased, and — the larger caveat — not **resolved** either: `resolve_class_arms`
-/// walks `Class` and `Inter`, not the element of a `ListOf`/`MapOf`, so the
-/// nested name is the docblock's own spelling lowercased, unqualified in its
-/// namespace. That was so before mixed lists spelled (issue #699 tracks it); this
-/// side only stops hiding it behind `None`.
+/// on the way in, at every depth: a class nested inside an array arm
+/// (`array<DateTime>`) is re-cased as a top-level one is, since issue #699 made
+/// `resolve_class_arms` resolve it in the first place.
 ///
 /// An enum whose cases are ALL still present collapses back to the enum's own
 /// name first (issue #429): the expanded case set and the declaration denote the
@@ -550,13 +547,12 @@ pub(crate) fn render_contract_arms(cx: &Cx, arms: &[ContractArm]) -> Option<Stri
 /// speller that has no class index. Everything else passes through untouched.
 fn source_cased(cx: &Cx, ty: ContractTy) -> ContractTy {
     match ty {
-        ContractTy::Class(n) => ContractTy::Class(cx.class_display_fqn(&n)),
         // `Suit::Hearts`, PHPStan's own spelling, with the enum's declared casing
         // recovered the way a class arm's is (issue #429).
         ContractTy::EnumCase { enum_fqn, case } => {
             ContractTy::EnumCase { enum_fqn: cx.class_display_fqn(&enum_fqn), case }
         }
-        other => other,
+        other => other.map_class_names(&mut |n| cx.class_display_fqn(n)),
     }
 }
 
