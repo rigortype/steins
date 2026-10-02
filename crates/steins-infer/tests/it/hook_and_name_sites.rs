@@ -373,3 +373,15 @@ fn a_get_only_hook_on_a_promoted_parameter_runs_nothing_at_promotion() {
     exhaustive(get, "PGet::__construct");
     exhaustive(&format!("{get}\nfunction f() {{ return new PGet('x'); }}"), "f");
 }
+
+#[test]
+fn an_interface_hook_declaration_has_no_body_and_charges_nothing() {
+    // `{ get; }` states a requirement; the implementing class carries its own hook (or
+    // none), so neither an implementer's creation nor a `Throwable` accessor is charged.
+    let src = "<?php\ninterface HI { public string $x { get; } }\n\
+        final class Ex extends RuntimeException implements HI { public string $x = 'a'; }\n\
+        function a() { return new Ex('m'); }\n\
+        function b(Throwable $e) { return $e->getMessage(); }\n";
+    assert!(summary(src, "a").exhaustive, "{:?}", summary(src, "a"));
+    assert!(summary(src, "b").exhaustive, "{:?}", summary(src, "b"));
+}
