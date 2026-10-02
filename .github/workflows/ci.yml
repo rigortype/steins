@@ -363,7 +363,10 @@ jobs:
         run: cargo run -p xtask -- corpus-sync
 
       - name: Run FP gate
-        run: cargo run -p xtask -- fp-gate
+        # A project that outlives 300 s fails the gate, naming it and the files
+        # in flight (issue #658), instead of the job timeout killing a stall
+        # silently. The public projects take about 20 s each.
+        run: cargo run -p xtask -- fp-gate --deadline 300
 
   # Not a gate — a MINING job, and the only reason it lives in CI is that the
   # thing it mines cannot be reached from the machines the table is maintained

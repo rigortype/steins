@@ -36,16 +36,22 @@ stderr, and do not add to stdout for the sake of progress.
   cold and warm pass together; `0` disables) ends the gate with **exit 3**,
   apart from a red verdict (1) and a command that could not run (2). Nothing
   ran to a verdict, so it says nothing about findings.
-- **Reading a deadline failure.** The stderr report names the project, its
-  elapsed time, the pass (`cold`, `warm`, or `setup` before the first), the
-  last phase the analyzer *finished* (a phase is named as it ends, so the
-  running phase is the next one) and every file whose walk had begun and not
-  ended, longest first. Files in flight is the actionable part: re-run
-  `steins check --progress --no-cache --profile strict <file>` on the longest
-  one (paths are project-relative) and read its slow-file and phase lines. If
-  no file is in flight, the stall is outside the per-file walk, so the phase
-  names where to look: universe and purity-oracle fixpoints and the parse are
-  whole-project work.
+- **Reading a deadline failure.** The headline names the oldest project past
+  the deadline and its elapsed time. Below it, **every project still running**
+  is listed, oldest first and starred when past the deadline, each with its
+  pass (`cold`, `warm`, or `setup` before the first), the last phase the
+  analyzer *finished* (a phase is named as it ends, so the running phase is the
+  next one) and every file of that project whose walk had begun and not ended,
+  longest first. The oldest project is not always the one running: projects
+  share the walk pool, and a thread that waits on the pool can run another
+  project's jobs, so read the whole list. Files in flight is the actionable
+  part: re-run `steins check --progress --no-cache --profile strict <file>` on
+  the longest one and read its slow-file and phase lines. A pinned corpus
+  package's paths are relative to the repository root (`corpus/<package>/...`)
+  and a local project's to its own root. "No file of this project is walking"
+  means it may be waiting on the shared walk pool or on another project: look at
+  the projects below it, and at the phase, since the universe and purity-oracle
+  fixpoints and the parse are whole-project work outside the per-file walk.
 - **The watchdog cannot unwind the run.** The analysis is in-process on rayon
   workers, and a worker in a CPU loop cannot be interrupted, so the watchdog
   thread flushes stdout and calls `std::process::exit(3)`. The scratch stores
