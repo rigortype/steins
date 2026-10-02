@@ -36,6 +36,7 @@ use steins_infer::escapes::{DeclEscapes, EscapeSweep, sweep_escapes};
 use steins_phpdoc::{TagKind, scan_docblock};
 use steins_syntax::{Span, SourceTree};
 
+use crate::common::byte_lossy_refusal;
 use crate::plan::{ByteSpan, Edit, EditPlan};
 use crate::transform::{CompletenessOracle, Refusal, SiteRef, Transform, TransformReport};
 
@@ -68,12 +69,15 @@ pub(crate) struct FileCtx<'a> {
     pub(crate) path: &'a str,
     pub(crate) text: &'a str,
     pub(crate) nl: &'static str,
+    /// Whether the file was not valid UTF-8, so `text` is its lossy decoding and no edit to
+    /// it may be written (issue #927): every candidate in it refuses.
+    pub(crate) lossy: bool,
 }
 
 impl<'a> FileCtx<'a> {
-    pub(crate) fn new(path: &'a str, text: &'a str) -> Self {
+    pub(crate) fn new(path: &'a str, text: &'a str, lossy: bool) -> Self {
         let nl = if text.contains("\r\n") { "\r\n" } else { "\n" };
-        Self { path, text, nl }
+        Self { path, text, nl, lossy }
     }
 }
 
@@ -124,7 +128,7 @@ pub fn plan_throws_envelope(
             continue;
         }
         let tree = parse(db, file);
-        let fcx = FileCtx::new(path, file.text(db));
+        let fcx = FileCtx::new(path, file.text(db), file.loss(db).is_some());
 
         let mut staged: Vec<Staged> = Vec::new();
         for func in tree.functions() {
@@ -186,6 +190,13 @@ fn decide(
     oracle: &mut CompletenessOracle,
 ) {
     oracle.enumerated += 1;
+
+    if fcx.lossy {
+        let (reason, detail) = byte_lossy_refusal();
+        oracle.refused += 1;
+        refusals.push(Refusal::new(site, reason, detail));
+        return;
+    }
 
     let writable: Vec<String> = esc.writable().into_iter().map(|c| c.class.clone()).collect();
     if writable.is_empty() {

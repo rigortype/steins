@@ -16,7 +16,7 @@ use steins_db::{
     composer, project_index,
 };
 
-use steins_edit::EditPlan;
+use steins_edit::{EditPlan, Refusal};
 use steins_syntax::{Utf8Loss, decode_source};
 
 use crate::config::vendor_dirs_from_disk;
@@ -87,7 +87,7 @@ pub(crate) fn source_input(
 
 /// The reason a writer names for a file it leaves alone because the analysis read it through
 /// a lossy decoding.
-pub(crate) const BYTE_LOSSY_REASON: &str = "byte-lossy-source";
+pub(crate) const BYTE_LOSSY_REASON: &str = steins_edit::common::REASON_BYTE_LOSSY_SOURCE;
 
 /// The files of `project` that were analyzed through a lossy decoding: their bytes were not
 /// valid UTF-8, so the text the analysis read has U+FFFD where each ill-formed sequence was.
@@ -124,10 +124,37 @@ pub(crate) fn drop_byte_lossy_edits(
     skipped
         .into_iter()
         .map(|(path, n)| {
-            let notice = format!(
-                "left {path} alone ({BYTE_LOSSY_REASON}): the file is not valid UTF-8, so it was analyzed through a decoding that replaces each ill-formed byte, and writing {n} edit(s) back would destroy the original bytes (convert the file to UTF-8, or make the edit by hand)"
-            );
+            let notice = byte_lossy_notice(&path, &format!("writing {n} edit(s) back"));
             (path, notice)
+        })
+        .collect()
+}
+
+/// The notice for a file left alone because it is byte-lossy; `writing` says what the file
+/// would have been written with.
+fn byte_lossy_notice(path: &str, writing: &str) -> String {
+    format!(
+        "left {path} alone ({BYTE_LOSSY_REASON}): the file is not valid UTF-8, so it was analyzed through a decoding that replaces each ill-formed byte, and {writing} would destroy the original bytes (convert the file to UTF-8, or make the edit by hand)"
+    )
+}
+
+/// One notice per file in which a transform refused sites as byte-lossy
+/// ([`BYTE_LOSSY_REASON`]), in first-refusal order, each with the count of sites it left.
+///
+/// The planners refuse such a site themselves, so it is counted in the report's refusals
+/// and the oracle and no edit for it ever reaches the plan; this only says so.
+pub(crate) fn byte_lossy_refusal_notices(refusals: &[Refusal]) -> Vec<String> {
+    let mut per_file: Vec<(&str, usize)> = Vec::new();
+    for r in refusals.iter().filter(|r| r.reason == BYTE_LOSSY_REASON) {
+        match per_file.iter_mut().find(|(path, _)| *path == r.site.path) {
+            Some((_, n)) => *n += 1,
+            None => per_file.push((&r.site.path, 1)),
+        }
+    }
+    per_file
+        .into_iter()
+        .map(|(path, n)| {
+            byte_lossy_notice(path, &format!("writing the edits for {n} site(s) back"))
         })
         .collect()
 }

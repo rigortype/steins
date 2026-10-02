@@ -332,10 +332,24 @@ fn json(report: &CheckReport<'_>) -> String {
                 "new_diagnostics": new_ds,
             })
         });
+        // The files whose fixes were left out (issue #927): their findings stay in
+        // `findings` with the `fix` payload that was not applied, and this says why.
+        let skipped: Vec<serde_json::Value> = run
+            .skipped
+            .iter()
+            .map(|(path, detail)| {
+                serde_json::json!({
+                    "path": path,
+                    "reason": crate::project::BYTE_LOSSY_REASON,
+                    "detail": detail,
+                })
+            })
+            .collect();
         doc["fix"] = serde_json::json!({
             "applied": run.applied,
             "fixed": fixed_arr,
             "refusal": refusal,
+            "skipped": skipped,
         });
     }
     match serde_json::to_string_pretty(&doc) {

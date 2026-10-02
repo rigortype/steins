@@ -67,6 +67,7 @@ use steins_phpdoc::ast::Span as DocSpan;
 use steins_phpdoc::{DocTag, EnvelopeTag, TagKind, scan_docblock};
 use steins_syntax::{ClassDecl, MethodDecl, Span, SourceTree};
 
+use crate::common::byte_lossy_refusal;
 use crate::envelope::{FileCtx, HeadKind, create_docblock, extend_docblock};
 use crate::plan::{ByteSpan, Edit, EditPlan};
 use crate::transform::{CompletenessOracle, Refusal, SiteRef, Transform, TransformReport};
@@ -175,7 +176,7 @@ pub fn plan_effects_envelope(
             continue;
         }
         let tree = parse(db, file);
-        let fcx = FileCtx::new(path, file.text(db));
+        let fcx = FileCtx::new(path, file.text(db), file.loss(db).is_some());
         let mut em = Emission {
             plugins,
             fcx: &fcx,
@@ -272,6 +273,16 @@ impl Emission<'_> {
         self.oracle.refused += 1;
         self.refusals.push(Refusal::new(site, reason, detail));
     }
+
+    /// Refuse `site` as byte-lossy when the file is (issue #927), and say whether it did.
+    fn refuse_byte_lossy(&mut self, site: &SiteRef) -> bool {
+        if !self.fcx.lossy {
+            return false;
+        }
+        let (reason, detail) = byte_lossy_refusal();
+        self.refuse(site.clone(), reason, detail);
+        true
+    }
 }
 
 /// The facets of a declaration an emission decision reads — same four for a
@@ -310,6 +321,9 @@ fn decide_decl(
     }
     em.oracle.enumerated += 1;
 
+    if em.refuse_byte_lossy(&site) {
+        return;
+    }
     if shape.has_attribute {
         em.refuse(
             site,
@@ -399,6 +413,9 @@ fn decide_class(em: &mut Emission, class: &ClassDecl, tree: &SourceTree, sweep: 
     );
     em.oracle.enumerated += 1;
 
+    if em.refuse_byte_lossy(&site) {
+        return;
+    }
     if class.methods.iter().any(|m| m.effect_envelope.is_some()) {
         em.refuse(
             site,

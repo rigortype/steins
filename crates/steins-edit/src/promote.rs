@@ -45,7 +45,7 @@ use steins_syntax::{ClassDecl, FunctionDecl, MethodDecl, NativeType, Param, Scal
 
 use crate::common::{
     arg_to_val, check_caller_enumerability, check_method_caller_enumerability, count_fqns,
-    has_source_hint, method_param_site, native_contract, param_site,
+    byte_lossy_refusal, has_source_hint, method_param_site, native_contract, param_site,
 };
 use crate::obstacles::{self, VouchSet};
 use crate::plan::{ByteSpan, Edit, EditPlan};
@@ -131,6 +131,10 @@ pub fn plan_phpdoc_to_native(
         }
         let tree = parse(db, file);
         let source = file.text(db);
+        // A file that was not valid UTF-8 refuses every candidate in it (issue #927), unless
+        // a project-global obstacle already does.
+        let lossy = file.loss(db).is_some();
+        let blocking = blocking.clone().or_else(|| lossy.then(byte_lossy_refusal));
         for func in tree.functions() {
             plan_function(
                 func, path, source, tree, &sweep, &fqn_counts, blocking.as_ref(), &mut plan,

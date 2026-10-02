@@ -54,6 +54,7 @@ use steins_db::{Db, Project, SourceFile, parse};
 use steins_infer::{RegionPurity, SubjectFact, probe_subjects, region_purity_project};
 use steins_syntax::{ForeachSite, SourceTree, Span};
 
+use crate::common::byte_lossy_refusal;
 use crate::obstacles::VouchSet;
 use crate::plan::{ByteSpan, Edit, EditPlan};
 use crate::transform::{
@@ -180,8 +181,9 @@ pub fn plan_loop_to_array_map(
         let path = file.path(db).to_owned();
         let tree = parse(db, file);
         let source = file.text(db);
+        let lossy = file.loss(db).is_some();
         for site in tree.foreach_sites() {
-            candidates.push(Candidate { path: path.clone(), tree, source, site });
+            candidates.push(Candidate { path: path.clone(), tree, source, site, lossy });
         }
     }
 
@@ -205,6 +207,14 @@ pub fn plan_loop_to_array_map(
     for (i, c) in candidates.iter().enumerate() {
         oracle.enumerated += 1;
         let site = c.site_ref();
+        // A file that was not valid UTF-8 is analyzed through a lossy decoding and no edit to
+        // it may be written (issue #927).
+        if c.lossy {
+            let (reason, detail) = byte_lossy_refusal();
+            oracle.refused += 1;
+            refusals.push(Refusal::new(site, reason, detail));
+            continue;
+        }
         let subject = c
             .site
             .subject
@@ -257,6 +267,8 @@ struct Candidate<'a> {
     tree: &'a SourceTree,
     source: &'a str,
     site: &'a ForeachSite,
+    /// Whether the file was not valid UTF-8, so `source` is its lossy decoding (issue #927).
+    lossy: bool,
 }
 
 impl Candidate<'_> {

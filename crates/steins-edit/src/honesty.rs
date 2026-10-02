@@ -47,8 +47,8 @@ use steins_syntax::{
 
 use crate::common::{
     admits_all, arg_to_val, check_caller_enumerability, check_method_caller_enumerability,
-    count_fqns, method_param_site, method_return_site, native_contract, param_site,
-    render_value_domain, return_site, REASON_ARG_NOT_PROVEN,
+    byte_lossy_refusal, count_fqns, method_param_site, method_return_site, native_contract,
+    param_site, render_value_domain, return_site, REASON_ARG_NOT_PROVEN,
 };
 use crate::obstacles::{self, VouchSet};
 use crate::plan::{ByteSpan, Edit, EditPlan};
@@ -119,6 +119,10 @@ pub fn plan_phpdoc_honesty(
             continue;
         }
         let tree = parse(db, file);
+        // A file that was not valid UTF-8 refuses every candidate in it (issue #927), unless
+        // a project-global obstacle already does.
+        let lossy = file.loss(db).is_some();
+        let blocking = blocking.clone().or_else(|| lossy.then(byte_lossy_refusal));
         let scopes = scopes_by_function(tree);
         for func in tree.functions() {
             let tags = func.docblock.as_deref().map(scan_docblock).unwrap_or_default();
