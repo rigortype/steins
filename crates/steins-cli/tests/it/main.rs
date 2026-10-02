@@ -19,6 +19,7 @@ mod profile;
 mod progress;
 mod runtime_final_keyword;
 mod sidecar_handshake;
+mod straight_line_arrays;
 mod suppress;
 mod symlink_dedup;
 mod symlink_walk;

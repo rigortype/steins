@@ -156,6 +156,7 @@ mod shape_guards;
 mod shape_projections;
 mod shape_reads;
 mod shape_strict_leg;
+mod shape_width_bound;
 mod short_circuit;
 mod short_circuit_dead_operands;
 mod sidecar_recovery;
