@@ -537,8 +537,14 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
     // death anywhere in the run is counted here.
     let losses = fold.folder.posture().losses;
     let withheld = Withheld { fold_losses: losses, panics: panicked_files(&analysis.findings) };
-    let (generation, shared_artifacts) =
-        publish_or_reuse(&store, current.as_ref(), publishable, fold.degraded, withheld, &mut notes);
+    let (generation, shared_artifacts) = publish_or_reuse(
+        &store,
+        current.as_ref(),
+        publishable,
+        fold.degraded,
+        withheld,
+        &mut notes,
+    );
     let persist_ms = ms(t_persist.elapsed());
     progress.phase("persist");
 

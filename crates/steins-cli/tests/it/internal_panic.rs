@@ -29,8 +29,8 @@ impl TempDir {
     fn new(tag: &str) -> Self {
         static COUNTER: AtomicU32 = AtomicU32::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir =
-            std::env::temp_dir().join(format!("steins-internal-panic-{tag}-{}-{n}", std::process::id()));
+        let name = format!("steins-internal-panic-{tag}-{}-{n}", std::process::id());
+        let dir = std::env::temp_dir().join(name);
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("src")).expect("create workdir");
         Self(dir)
@@ -87,11 +87,21 @@ fn two_file_project(tag: &str) -> TempDir {
 fn the_panicking_file_is_named_and_the_run_goes_on() {
     let dir = two_file_project("cold");
     let r = run_in(&dir.0, &["check", "--no-php", "--no-cache", "src"], Some("src/app.php"));
-    assert_eq!(r.code, 2, "a panic is the tool failing; stdout:\n{}\nstderr:\n{}", r.stdout, r.stderr);
+    assert_eq!(
+        r.code,
+        2,
+        "a panic is the tool failing; stdout:\n{}\nstderr:\n{}",
+        r.stdout,
+        r.stderr
+    );
     let lines: Vec<&str> = r.stdout.lines().collect();
     assert_eq!(lines.len(), 2, "one line per file, got:\n{}", r.stdout);
     assert!(lines[0].starts_with("src/app.php:1:1: error[internal.panic]: "), "{}", lines[0]);
-    assert!(lines[0].contains("STEINS_TEST_PANIC_ON names this file"), "the message is carried: {}", lines[0]);
+    assert!(
+        lines[0].contains("STEINS_TEST_PANIC_ON names this file"),
+        "the message is carried: {}",
+        lines[0]
+    );
     assert!(
         !r.stdout.contains("width()"),
         "the panicked file's own findings are withheld, got:\n{}",
@@ -102,8 +112,16 @@ fn the_panicking_file_is_named_and_the_run_goes_on() {
         "the other file is analyzed as ever: {}",
         lines[1]
     );
-    assert!(r.stderr.contains("1 file(s) panicked in analysis"), "stderr says why it exits 2:\n{}", r.stderr);
-    assert!(!r.stderr.contains("panicked at"), "the default panic report is captured:\n{}", r.stderr);
+    assert!(
+        r.stderr.contains("1 file(s) panicked in analysis"),
+        "stderr says why it exits 2:\n{}",
+        r.stderr
+    );
+    assert!(
+        !r.stderr.contains("panicked at"),
+        "the default panic report is captured:\n{}",
+        r.stderr
+    );
 }
 
 /// `--format json` carries the finding like any other: its id, layer and level.
@@ -147,7 +165,8 @@ fn no_configured_channel_reaches_it() {
          disable = [\"internal.panic\", \"internal.*\"]\nwarn = [\"internal.*\"]\n",
     );
     // The ignore sits on line 1, where the finding is reported.
-    dir.write("src/app.php", &APP.replacen("<?php\n", "<?php // @steins-ignore internal.panic\n", 1));
+    let ignored = APP.replacen("<?php\n", "<?php // @steins-ignore internal.panic\n", 1);
+    dir.write("src/app.php", &ignored);
     dir.write("vendor/acme/lib/Lib.php", HELPER);
 
     let plain = run_in(&dir.0, &["check", "--no-php", "--no-cache", "src", "vendor"], None);
@@ -177,7 +196,8 @@ fn no_configured_channel_reaches_it() {
         r.stdout
     );
 
-    let r = run_in(&dir.0, &["check", "--no-php", "--no-cache", "--set-baseline", "src"], Some("src/app.php"));
+    let set = ["check", "--no-php", "--no-cache", "--set-baseline", "src"];
+    let r = run_in(&dir.0, &set, Some("src/app.php"));
     assert_eq!(r.code, 2, "stderr:\n{}", r.stderr);
     assert!(r.stderr.contains("not writing the baseline"), "stderr:\n{}", r.stderr);
     assert!(!dir.0.join(".steins-baseline.jsonl").exists(), "no baseline is written");
@@ -200,7 +220,8 @@ fn a_run_that_panicked_publishes_no_generation() {
     let clean = run_in(&dir.0, &["check", "--no-php", "src"], None);
     assert_eq!(clean.code, 1, "stdout:\n{}\nstderr:\n{}", clean.stdout, clean.stderr);
     assert!(!clean.stdout.contains("internal.panic"), "nothing replays it, got:\n{}", clean.stdout);
-    assert!(clean.stdout.contains("src/app.php:3:7: error[type.argument-mismatch]"), "{}", clean.stdout);
+    let real = "src/app.php:3:7: error[type.argument-mismatch]";
+    assert!(clean.stdout.contains(real), "{}", clean.stdout);
     let published = std::fs::read(&current).expect("the clean run published");
 
     // Warm store: the edited file walks, panics, and `CURRENT` is untouched.
@@ -208,10 +229,12 @@ fn a_run_that_panicked_publishes_no_generation() {
     let r = run_in(&dir.0, &["check", "--no-php", "src"], Some("src/app.php"));
     assert_eq!(r.code, 2, "stdout:\n{}\nstderr:\n{}", r.stdout, r.stderr);
     assert!(r.stdout.contains("src/app.php:1:1: error[internal.panic]"), "{}", r.stdout);
-    assert_eq!(std::fs::read(&current).unwrap(), published, "a panicked warm run leaves CURRENT as it was");
+    let after = std::fs::read(&current).unwrap();
+    assert_eq!(after, published, "a panicked warm run leaves CURRENT as it was");
 
     let again = run_in(&dir.0, &["check", "--no-php", "src"], None);
     assert_eq!(again.code, 1, "stdout:\n{}\nstderr:\n{}", again.stdout, again.stderr);
-    assert!(again.stdout.contains("src/app.php:4:7: error[type.argument-mismatch]"), "{}", again.stdout);
+    let real = "src/app.php:4:7: error[type.argument-mismatch]";
+    assert!(again.stdout.contains(real), "{}", again.stdout);
     assert!(!again.stdout.contains("internal.panic"), "{}", again.stdout);
 }

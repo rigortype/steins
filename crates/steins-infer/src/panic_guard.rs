@@ -228,7 +228,8 @@ mod tests {
 
     #[test]
     fn the_message_is_one_bounded_line() {
-        assert_eq!(one_line("assertion failed\n  left: 1\n right: 2"), "assertion failed left: 1 right: 2");
+        let joined = one_line("assertion failed\n  left: 1\n right: 2");
+        assert_eq!(joined, "assertion failed left: 1 right: 2");
         let long = "x".repeat(MESSAGE_LIMIT + 10);
         let cut = one_line(&long);
         assert_eq!(cut.chars().count(), MESSAGE_LIMIT + 1);
@@ -238,7 +239,8 @@ mod tests {
     #[test]
     fn the_finding_names_the_file_at_its_top() {
         let d = internal_panic("src/Broken.php", "boom (at src/x.rs:1)");
-        assert_eq!((d.id, d.path.as_str(), d.line, d.column), (INTERNAL_PANIC_ID, "src/Broken.php", 1, 1));
+        let at = (d.id, d.path.as_str(), d.line, d.column);
+        assert_eq!(at, (INTERNAL_PANIC_ID, "src/Broken.php", 1, 1));
         assert!(d.message.contains("boom (at src/x.rs:1)"), "{}", d.message);
     }
 }
