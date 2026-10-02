@@ -255,7 +255,9 @@ fn subclass_hooks_property(cx: &Cx, class: &str) -> bool {
         walk.verdict != IsA::No || (walk.catalog && cx.a11_demote_catalog())
     };
     cx.index.magic_property_classes().iter().any(|sub| match cx.find_class(sub) {
-        None => may_be(sub),
+        // A class the index holds under more than one declaration cannot be asked whether it
+        // hooks anything: it counts only when shown to be the bound.
+        None => is(sub),
         Some((_, cd)) => {
             (!cd.is_interface && hooks(cd, None) && may_be(sub)) || (cd.uses_traits && is(sub))
         }
