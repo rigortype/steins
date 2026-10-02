@@ -3,6 +3,7 @@
 mod arg_shapes;
 mod array_lowering;
 mod binding_presence;
+mod byte_lossy_source;
 mod cast_value;
 mod closures;
 mod deep_nesting;

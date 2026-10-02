@@ -27,6 +27,7 @@ use crate::lower_expr::{
 use crate::lower_guards::guard_regions_of;
 use crate::memo;
 use crate::names::name_ref;
+use crate::utf8_loss;
 use crate::{bytes_to_string, children, strip_dollar, to_span};
 
 /// Append the lowered [`Stmt`] for one source statement (or nothing, for benign
@@ -279,7 +280,7 @@ fn run_arg(e: &Expression<'_>) -> RunArg {
     match e.unparenthesized() {
         Expression::Literal(mago_syntax::cst::Literal::Null(_)) => RunArg::Null,
         Expression::Literal(mago_syntax::cst::Literal::String(ls)) => {
-            match ls.value.map(bytes_to_string) {
+            match ls.value.map(utf8_loss::string_name) {
                 Some(name) if spells_function_name(&name) => RunArg::Name(name),
                 _ => RunArg::Other,
             }

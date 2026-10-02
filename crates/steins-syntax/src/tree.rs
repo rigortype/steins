@@ -21,6 +21,7 @@ use crate::lower_scope::{flatten_top_level, lower_scopes};
 use crate::lower_stmt::{collect_array_literal_sites, collect_foreach_sites, collect_operand_sites};
 use crate::names::{RefResolver, build_contexts, ctx_of, fqn_of, resolve_class_ref};
 use crate::stack_guard;
+use crate::utf8_loss::{self, Utf8Loss};
 use crate::{line_starts, lower_comment, to_span};
 
 /// An owned, Mago-free lowering of one parsed PHP file.
@@ -108,6 +109,11 @@ pub struct SourceTree {
     regions: Vec<(u32, u32, usize)>,
     /// Byte offset of the start of each line (index 0 == line 1).
     line_starts: Vec<u32>,
+    // byte-lossy source (issue #927, ADR-0080 §3.2 interim)
+    /// Whether a name token of the file spans a byte the UTF-8 decode replaced, or a string
+    /// read as a name does. See [`SourceTree::names_lossy`].
+    names_lossy: bool,
+    // end byte-lossy source (issue #927, ADR-0080 §3.2 interim)
     text: String,
 }
 
@@ -116,6 +122,18 @@ impl SourceTree {
     /// recovered and reported via [`SourceTree::parse_errors`].
     #[must_use]
     pub fn parse(source: &str) -> Self {
+        Self::parse_with_loss(source, None)
+    }
+
+    /// [`SourceTree::parse`] for a file that was not valid UTF-8: `source` is its decode and
+    /// `loss` is what [`decode_source`](crate::decode_source) recorded of it (issue #927).
+    ///
+    /// Spans and offsets are the decoded text's, as for every parse. The difference is that a
+    /// string literal over a replaced byte lowers to the bytes the file spells, and a name
+    /// over one marks the tree [`names_lossy`](SourceTree::names_lossy). `None` is
+    /// [`SourceTree::parse`].
+    #[must_use]
+    pub fn parse_with_loss(source: &str, loss: Option<&Utf8Loss>) -> Self {
         // The lowering walkers recurse once per CST node, so expression depth is a stack
         // cost. Headroom is bought at the entry point where possible (issue #246, guard off);
         // the wasm playground (fixed-size shadow stack) keeps the guard, appending a refusal
@@ -125,6 +143,8 @@ impl SourceTree {
         // the stack guard so it can see whether a floor is installed, dropped —
         // and with it every cached entry — when this function returns.
         let _memo = crate::memo::Scope::enter();
+        // The file's loss map (issue #927), active for the lowering below.
+        let lossy = utf8_loss::Scope::enter(loss);
         let arena = LocalArena::new();
         let file_id = FileId::new(b"<steins>");
         let program = mago_syntax::parser::parse_file_content(&arena, file_id, source.as_bytes());
@@ -246,6 +266,11 @@ impl SourceTree {
         }
         drop(guard);
 
+        // A name token over a replaced byte, or a string read as a name, was seen by the
+        // walk above; the token pass catches the names no string-reading site passed through.
+        let names_lossy = lossy.is_lossy()
+            && (lossy.names_lossy() || utf8_loss::names_touch_a_loss(program));
+
         Self {
             strict_types: lowered.strict_types,
             functions: lowered.functions,
@@ -275,6 +300,7 @@ impl SourceTree {
             contexts,
             regions,
             line_starts: line_starts(source),
+            names_lossy,
             text: source.to_owned(),
         }
     }
@@ -447,6 +473,19 @@ impl SourceTree {
     #[must_use]
     pub fn parse_errors(&self) -> &[ParseError] {
         &self.parse_errors
+    }
+
+    /// Whether a name in this file — a class, function, method, property, constant or
+    /// variable token, or a string literal read as one — sits over a byte the UTF-8 decode
+    /// replaced (issue #927, ADR-0080 §3.2 interim).
+    ///
+    /// Two such names that differ only in the replaced bytes are spelled alike in the decoded
+    /// text, so every claim the file's own walk would make from a name is unearned: the
+    /// analyzer reads this as "make none from this file" (ADR-0080 §2.5). Always `false` for
+    /// a file that was valid UTF-8, a genuine `U+FFFD` in a name included.
+    #[must_use]
+    pub const fn names_lossy(&self) -> bool {
+        self.names_lossy
     }
 
     /// Whether this file declares a userland constant named `PHP_VERSION_ID`

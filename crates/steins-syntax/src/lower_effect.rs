@@ -30,6 +30,7 @@ use crate::lower_stmt::{
     collect_assign_writes, collect_call_vars, collect_direct_vars, node_poisons,
 };
 use crate::names::name_ref;
+use crate::utf8_loss;
 use crate::{bytes_to_string, children, strip_dollar, to_span};
 
 /// A resolvable [`CallbackRef`] for a callback argument expression (ADR-0033): an
@@ -48,14 +49,14 @@ fn callback_ref_of_arg(expr: &Expression<'_>) -> Option<CallbackRef> {
             }
         }
         Expression::Literal(Literal::String(ls)) => {
-            let raw = bytes_to_string(ls.value?);
+            let raw = utf8_loss::string_name(ls.value?);
             // Method string callables (`Foo::m`) are not resolved.
             if raw.contains("::") || raw.is_empty() {
                 return None;
             }
             Some(CallbackRef::Named(NameRef {
                 raw: raw.trim_start_matches('\\').to_owned(),
-                kind: if bytes_to_string(ls.value?).starts_with('\\') {
+                kind: if raw.starts_with('\\') {
                     RefKind::FullyQualified
                 } else {
                     RefKind::Unqualified

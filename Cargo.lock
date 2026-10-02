@@ -1136,6 +1136,7 @@ dependencies = [
  "mago-database",
  "mago-span",
  "mago-syntax",
+ "mago-syntax-core",
  "serde",
  "steins-domain",
 ]

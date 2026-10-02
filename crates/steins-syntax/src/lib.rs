@@ -26,11 +26,13 @@ mod names;
 mod persist;
 pub mod stack_guard;
 mod tree;
+mod utf8_loss;
 
 pub use ast::*;
 pub use lower_expr::php_canonical_int_string;
 pub use lower_site::{derive_effect_origins, derive_throw_origins};
 pub use tree::SourceTree;
+pub use utf8_loss::{Utf8Loss, decode_source};
 
 // ---------------------------------------------------------------------------
 // Small helpers.

@@ -2,6 +2,8 @@
 //! static classes, literals and array literals, and the condition grammar
 //! ([`CondExpr`], ADR-0031) the linear-trace statements carry.
 
+use std::borrow::Cow;
+
 use mago_span::HasSpan;
 use mago_syntax::cst::{
     Access, Argument, ArrayElement, Binary, BinaryOperator, Call, ClassLikeConstantSelector,
@@ -27,6 +29,7 @@ use crate::lower_stmt::{
 };
 use crate::names::name_ref;
 use crate::stack_guard;
+use crate::utf8_loss;
 use crate::{bytes_to_string, children, strip_dollar, to_span};
 
 pub(crate) fn lower_call(c: &FunctionCall<'_>) -> CallExpr {
@@ -1002,8 +1005,8 @@ fn lower_interpolation(parts: &Sequence<'_, StringPart<'_>>) -> ArgValue {
     let mut acc = ArgValue::Str(PhpStr::new());
     for part in parts.iter() {
         let part = match part {
-            StringPart::Literal(l) => match l.value {
-                Some(bytes) => ArgValue::Str(PhpStr::from_bytes(bytes)),
+            StringPart::Literal(l) => match utf8_loss::restore_part(l) {
+                Some(bytes) => ArgValue::Str(php_str_of(bytes)),
                 None => return ArgValue::Other,
             },
             StringPart::Expression(e) => lower_arg_value(e),
@@ -1012,6 +1015,14 @@ fn lower_interpolation(parts: &Sequence<'_, StringPart<'_>>) -> ArgValue {
         acc = ArgValue::Concat(Box::new(acc), Box::new(part));
     }
     acc
+}
+
+/// A literal's bytes as a [`PhpStr`], taking an owned buffer without a copy.
+fn php_str_of(bytes: Cow<'_, [u8]>) -> PhpStr {
+    match bytes {
+        Cow::Borrowed(b) => PhpStr::from_bytes(b),
+        Cow::Owned(v) => PhpStr::from_vec(v),
+    }
 }
 
 fn lower_literal(lit: &Literal<'_>) -> ArgValue {
@@ -1032,8 +1043,13 @@ fn lower_literal(lit: &Literal<'_>) -> ArgValue {
         // `[0xC0]`), and a PHP string is a byte string, so they carry through
         // unchanged. Decoding them lossily here was issue #208: it made `"\xC0"`
         // and `"\xD0"` the same value everywhere downstream.
+        //
+        // A file that was not valid UTF-8 (issue #927) is decoded with U+FFFD for each
+        // ill-formed sequence before the parser sees it; `restore_literal` puts the bytes the
+        // file actually spells back, so the literal is a byte string of its own rather than
+        // the same `"\u{FFFD}"` as every other.
         Literal::String(ls) => {
-            ls.value.map_or(ArgValue::Other, |bytes| ArgValue::Str(PhpStr::from_bytes(bytes)))
+            utf8_loss::restore_literal(ls).map_or(ArgValue::Other, |bytes| ArgValue::Str(php_str_of(bytes)))
         }
         Literal::True(_) => ArgValue::Bool(true),
         Literal::False(_) => ArgValue::Bool(false),

@@ -37,6 +37,7 @@ use crate::names::{
 };
 use crate::stack_guard;
 use crate::tree::Lowered;
+use crate::utf8_loss;
 use crate::{bytes_to_string, children, strip_dollar, to_span};
 
 // ---------------------------------------------------------------------------
@@ -443,11 +444,12 @@ fn lower_concat(expr: &Expression<'_>) -> ConcatVal {
     match expr.unparenthesized() {
         // A name lane (include paths, `class_alias` args), not a value lane: looked up
         // in a `String`-keyed universe, so non-UTF-8 bytes are unproven, never lossily
-        // decoded (ADR-0080 §2.5).
-        Expression::Literal(Literal::String(ls)) => ls
-            .value
-            .and_then(|bytes| std::str::from_utf8(bytes).ok())
-            .map_or(ConcatVal::Unproven, |s| ConcatVal::Str(s.to_owned())),
+        // decoded (ADR-0080 §2.5). That includes the bytes a file that was not valid UTF-8
+        // spells (issue #927): `restore_literal` gives the file's own, so they are
+        // non-UTF-8 here too rather than a U+FFFD that spells the same as another path.
+        Expression::Literal(Literal::String(ls)) => utf8_loss::restore_literal(ls)
+            .and_then(|bytes| std::str::from_utf8(&bytes).ok().map(str::to_owned))
+            .map_or(ConcatVal::Unproven, ConcatVal::Str),
         Expression::MagicConstant(MagicConstant::Directory(_)) => ConcatVal::DirRel(String::new()),
         Expression::Binary(b) if b.operator.is_concatenation() => {
             match (lower_concat(b.lhs), lower_concat(b.rhs)) {
@@ -1356,7 +1358,7 @@ fn effect_attr_labels(attr: &Attribute<'_>) -> Option<Vec<String>> {
         }
         match p.value.unparenthesized() {
             // `?` widens an undecodable literal to unrecognized, like a non-string arg.
-            Expression::Literal(Literal::String(ls)) => labels.push(bytes_to_string(ls.value?)),
+            Expression::Literal(Literal::String(ls)) => labels.push(utf8_loss::string_name(ls.value?)),
             _ => return None, // constant / concatenation / non-string literal → unrecognized
         }
     }
