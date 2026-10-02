@@ -22,7 +22,7 @@
 //!   throughout, so no address is reused for another body. An empty body is never
 //!   cached: its slice is a dangling pointer shared by every empty body, and it is
 //!   too cheap to be worth an entry;
-//! * **the entry state**, in the canonical sorted form of [`StateKey`];
+//! * **the entry state**;
 //! * **the `unset` run's `seeded_at` map** at entry (empty on the ADR-0081 run): the
 //!   walk rewrites it on the way, and what a later statement reads from it depends on
 //!   it.
@@ -31,6 +31,11 @@
 //! is saved, cleared and restored around the body (`breaks`, `continues`, `silent`).
 //! `seen` is consulted only by a recording walk, so it is not an input. A hit replays
 //! the exits and the rewritten `seeded_at` entries.
+//!
+//! The table is looked up by the body and an order-independent hash of the two maps,
+//! which costs one pass and no allocation; a candidate record is then compared with
+//! the real entry state and `seeded_at` map, so a hash collision costs a comparison,
+//! never a wrong answer.
 //!
 //! # How long it lives
 //!
@@ -50,42 +55,41 @@
 //! [`crate::memo`].
 
 use std::collections::HashMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::rc::Rc;
 
 use mago_syntax::cst::Statement;
 
-use super::{BindingPresence, LoopExits, PresenceCx, PresenceState, presence_loop_walk};
+use super::{LoopExits, PresenceCx, PresenceState, presence_loop_walk};
 use crate::stack_guard;
 
-/// A presence state in canonical form: its entries sorted by name, so two equal maps
-/// key alike whatever their iteration order.
-type StateKey = Vec<(String, BindingPresence)>;
-
-/// A `seeded_at` map in canonical form.
-type SeedKey = Vec<(String, u32)>;
-
-fn state_key(state: &PresenceState) -> StateKey {
-    let mut key: StateKey = state.iter().map(|(name, p)| (name.clone(), *p)).collect();
-    key.sort_unstable();
-    key
+/// An order-independent hash of a map's entries: each entry hashes on its own (with the
+/// fixed-key hasher, so it is deterministic) and the results are summed, so two equal
+/// maps hash alike whatever their iteration order, with no allocation and no sort.
+fn map_hash<V: Hash>(map: &HashMap<String, V>) -> u64 {
+    map.iter()
+        .map(|entry| {
+            let mut hasher = DefaultHasher::new();
+            entry.hash(&mut hasher);
+            hasher.finish()
+        })
+        .fold(0, u64::wrapping_add)
 }
 
-fn seed_key(seeded_at: &HashMap<String, u32>) -> SeedKey {
-    let mut key: SeedKey = seeded_at.iter().map(|(name, at)| (name.clone(), *at)).collect();
-    key.sort_unstable();
-    key
-}
-
+/// The cheap, lossy half of a lookup: records that agree here are then compared in
+/// full, so a hash collision costs a comparison and never a wrong answer.
 #[derive(PartialEq, Eq, Hash)]
 struct LoopKey {
     /// The body slice's address and length.
     body: (usize, usize),
-    entry: StateKey,
-    seeded: SeedKey,
+    entry: u64,
+    seeded: u64,
 }
 
-/// What one uncached silent walk produced.
+/// What one uncached silent walk produced, with the inputs it was keyed on.
 struct LoopRecord {
+    entry: PresenceState,
+    seeded: HashMap<String, u32>,
     exits: LoopExits,
     /// The `seeded_at` entries it left different from how it found them.
     reseeded: Vec<(String, u32)>,
@@ -94,7 +98,9 @@ struct LoopRecord {
 /// The per-run table of silently walked loop bodies.
 #[derive(Default)]
 pub(super) struct LoopMemo {
-    records: HashMap<LoopKey, Rc<LoopRecord>>,
+    records: HashMap<LoopKey, Vec<Rc<LoopRecord>>>,
+    /// How many records `records` holds in all.
+    len: usize,
     /// How many reporting loop walks are open: the table is cleared when the
     /// outermost one returns.
     depth: usize,
@@ -112,11 +118,27 @@ impl LoopMemo {
     }
 }
 
-/// Whether `seeded` (sorted by name) lacks `name` or holds a different statement for it.
-fn rewritten(seeded: &SeedKey, name: &str, at: u32) -> bool {
-    match seeded.binary_search_by(|(n, _)| n.as_str().cmp(name)) {
-        Ok(i) => seeded[i].1 != at,
-        Err(_) => true,
+impl LoopMemo {
+    fn lookup(
+        &self,
+        key: &LoopKey,
+        entry: &PresenceState,
+        seeded: &HashMap<String, u32>,
+    ) -> Option<Rc<LoopRecord>> {
+        let bucket = self.records.get(key)?;
+        bucket.iter().find(|r| r.entry == *entry && r.seeded == *seeded).map(Rc::clone)
+    }
+
+    fn store(&mut self, key: LoopKey, record: LoopRecord) {
+        self.records.entry(key).or_default().push(Rc::new(record));
+        self.len += 1;
+        #[cfg(test)]
+        tests::note_records(self.len);
+    }
+
+    fn clear(&mut self) {
+        self.records.clear();
+        self.len = 0;
     }
 }
 
@@ -135,10 +157,10 @@ pub(super) fn presence_loop_body(
     }
     let key = LoopKey {
         body: (body.as_ptr() as usize, body.len()),
-        entry: state_key(entry),
-        seeded: seed_key(&cx.seeded_at),
+        entry: map_hash(entry),
+        seeded: map_hash(&cx.seeded_at),
     };
-    let hit = cx.loop_memo.as_ref().and_then(|m| m.records.get(&key)).map(Rc::clone);
+    let hit = cx.loop_memo.as_ref().and_then(|m| m.lookup(&key, entry, &cx.seeded_at));
     if let Some(record) = hit {
         #[cfg(test)]
         tests::count_hit();
@@ -149,19 +171,18 @@ pub(super) fn presence_loop_body(
     }
 
     let pushed_from = cx.out.len();
+    let seeded = cx.seeded_at.clone();
     let exits = presence_loop_walk(body, entry, cx);
     debug_assert_eq!(cx.out.len(), pushed_from, "a silent walk records no read");
     let reseeded = cx
         .seeded_at
         .iter()
-        .filter(|(name, at)| rewritten(&key.seeded, name, **at))
+        .filter(|(name, at)| seeded.get(*name) != Some(*at))
         .map(|(name, at)| (name.clone(), *at))
         .collect();
-    let record = LoopRecord { exits: exits.clone(), reseeded };
+    let record = LoopRecord { entry: entry.clone(), seeded, exits: exits.clone(), reseeded };
     if let Some(memo) = cx.loop_memo.as_mut() {
-        memo.records.insert(key, Rc::new(record));
-        #[cfg(test)]
-        tests::note_records(memo.records.len());
+        memo.store(key, record);
     }
     exits
 }
@@ -180,7 +201,7 @@ fn reporting_walk(
     if let Some(memo) = cx.loop_memo.as_mut() {
         memo.depth -= 1;
         if memo.depth == 0 {
-            memo.records.clear();
+            memo.clear();
         }
     }
     exits
