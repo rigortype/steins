@@ -10,7 +10,7 @@ use steins_syntax::{
 
 use crate::contract::IsA;
 use crate::cx::Cx;
-use crate::dispatch::{Resolution, private_blocked, resolve_in_chain};
+use crate::dispatch::{Resolution, ResolvedMethod, private_blocked, resolve_in_chain};
 use crate::env::Store;
 use crate::project::Diagnostic;
 use crate::walk::WalkCx;
@@ -150,6 +150,43 @@ impl<'a> MemberChain<'a> {
     fn render(&self) -> String {
         self.nodes.iter().map(|(_, cd)| cd.name.as_str()).collect::<Vec<_>>().join(" → ")
     }
+}
+
+/// The class PHP judges a **protected** method or property against: the member's *root*,
+/// found by walking up the enumerated chain from the node `from` that declares the
+/// member the site reaches.
+///
+/// PHP checks a protected member against the class that first introduced it in the
+/// inheritance line (`zend_get_function_root_class`: the prototype's scope, else the
+/// function's own), not against the class that redeclares it. With
+/// `class Base { protected function h() {} } class A extends Base { protected function
+/// h() {} } class B extends Base {}`, `(new A)->h()` from `B` is legal: the root is
+/// `Base`, and `B` is in its hierarchy (witnessed at 8.4 and 8.5; the issue #942
+/// shape). Judging against `A` blamed `B` for a sibling relationship PHP never asks
+/// about.
+///
+/// `declares` answers, for one node, whether it declares the member at all, and when
+/// it does, whether that declaration is a prototype the nearer one inherits from. A
+/// **private** ancestor declaration is a different member that the nearer one does
+/// not override, so it ends the walk (`Some(false)`); so does a constructor that is
+/// not abstract, whose prototype link PHP only forms to an abstract parent
+/// constructor. A node declaring nothing is walked through. Class constants do not use
+/// this walk: PHP 8.4 and 8.5 fatal on a protected constant redeclared and fetched
+/// from a sibling scope (witnessed), so a constant keeps its declaring class.
+fn member_root<'a>(
+    chain: &MemberChain<'a>,
+    from: usize,
+    mut declares: impl FnMut(&'a ClassDecl) -> Option<bool>,
+) -> &'a ClassDecl {
+    let mut root = chain.nodes[from].1;
+    for (_, cd) in &chain.nodes[from + 1..] {
+        match declares(cd) {
+            Some(true) => root = cd,
+            Some(false) => break,
+            None => {}
+        }
+    }
+    root
 }
 
 /// Enumerate `start_fqn`'s ancestor chain for a member-visibility claim, refusing
@@ -302,6 +339,29 @@ fn inaccessible_call_subject(
     }
 }
 
+/// The root class of the resolved method `r` in `chain` (see [`member_root`]).
+///
+/// A constructor has no prototype link to an ordinary parent constructor, so its walk
+/// continues only through an `abstract` one.
+fn method_root<'a>(
+    chain: &MemberChain<'a>,
+    r: &ResolvedMethod<'a>,
+    kind: CallSiteKind,
+) -> &'a ClassDecl {
+    let Some(from) =
+        chain.nodes.iter().position(|(_, cd)| cd.fqn.eq_ignore_ascii_case(&r.declaring_class.fqn))
+    else {
+        return r.declaring_class;
+    };
+    member_root(chain, from, |cd| {
+        let m = cd.methods.iter().find(|m| m.name.eq_ignore_ascii_case(&r.method.name))?;
+        Some(
+            m.visibility != Visibility::Private
+                && (kind != CallSiteKind::Construct || m.is_abstract),
+        )
+    })
+}
+
 /// `call.inaccessible-method` (ADR-0078, issue #185): a call to a method whose
 /// declared visibility hides it from this site's scope — the fatal `Error` PHP
 /// raises before the body runs.
@@ -336,18 +396,25 @@ pub(crate) fn check_inaccessible_method(
         return;
     }
     let scope = w.enclosing_class;
-    // The `private` leg IS the resolver's predicate, called here for the finding
-    // instead of for the suppression; the `protected` leg is this check's own (the
-    // resolver deliberately keeps resolving protected members — a protected call is
-    // still a dispatch target for arity and effects).
-    let vis = match r.method.visibility {
-        Visibility::Private => private_blocked(&r, scope).then_some("private"),
-        v => member_inaccessible(cx, v, &r.declaring_class.fqn, scope),
-    };
-    let Some(vis) = vis else { return };
+    if r.method.visibility == Visibility::Public {
+        return;
+    }
     let Some(chain) = enumerate_member_chain(cx, &class_fqn, kind.magic()) else {
         return;
     };
+    // The `private` leg IS the resolver's predicate, called here for the finding
+    // instead of for the suppression; the `protected` leg is this check's own (the
+    // resolver deliberately keeps resolving protected members — a protected call is
+    // still a dispatch target for arity and effects), judged against the method's
+    // root class (`member_root`), which the redeclaring class is not.
+    let vis = match r.method.visibility {
+        Visibility::Private => private_blocked(&r, scope).then_some("private"),
+        v => {
+            let root = method_root(&chain, &r, kind);
+            member_inaccessible(cx, v, &root.fqn, scope)
+        }
+    };
+    let Some(vis) = vis else { return };
     // A class that cannot be instantiated at all raises its OWN fatal first, before
     // any visibility check: `Cannot instantiate abstract class A` / `… interface I` /
     // `… enum E` (all witnessed). Naming one of those sites with this id would
@@ -391,8 +458,8 @@ pub(crate) fn check_inaccessible_method(
     });
 }
 
-/// Find `member` in an enumerated chain, returning the node that declares it and
-/// whether that node is the receiver's own class.
+/// Find `member` in an enumerated chain, returning the node that declares it, what was
+/// found there, and the node's index in the chain (`0` is the receiver's own class).
 ///
 /// The second half separates inaccessibility from absence for the two
 /// *unmangled* member kinds. PHP stores a private property under its declaring
@@ -406,10 +473,10 @@ pub(crate) fn check_inaccessible_method(
 fn declared_in_chain<'a, T>(
     chain: &MemberChain<'a>,
     mut find: impl FnMut(&'a ClassDecl) -> Option<T>,
-) -> Option<(&'a ClassDecl, T, bool)> {
+) -> Option<(&'a ClassDecl, T, usize)> {
     for (i, (_, cd)) in chain.nodes.iter().enumerate() {
         if let Some(found) = find(cd) {
-            return Some((cd, found, i == 0));
+            return Some((cd, found, i));
         }
     }
     None
@@ -456,7 +523,7 @@ pub(crate) fn check_inaccessible_property(
     }
     // A static property is a different access form (`C::$p`) with a different lookup;
     // `$obj->p` never reaches one.
-    let Some((declaring, decl, on_own_class)) = declared_in_chain(&chain, |cd| {
+    let Some((declaring, decl, at)) = declared_in_chain(&chain, |cd| {
         cd.properties.iter().find(|p| !p.is_static && p.name == prop)
     }) else {
         return;
@@ -465,11 +532,16 @@ pub(crate) fn check_inaccessible_property(
     if decl.hooked {
         return;
     }
-    if decl.visibility == Visibility::Private && !on_own_class {
+    if decl.visibility == Visibility::Private && at != 0 {
         return; // absence, not inaccessibility — see `declared_in_chain`.
     }
-    let Some(vis) = member_inaccessible(cx, decl.visibility, &declaring.fqn, w.enclosing_class)
-    else {
+    // A protected property is judged against its root class (`member_root`), as a
+    // method is; a class constant below is not.
+    let root = member_root(&chain, at, |cd| {
+        let p = cd.properties.iter().find(|p| !p.is_static && p.name == prop)?;
+        Some(p.visibility != Visibility::Private)
+    });
+    let Some(vis) = member_inaccessible(cx, decl.visibility, &root.fqn, w.enclosing_class) else {
         return;
     };
     if chain.any_conditional && !cx.dam.is_clear() {
@@ -526,12 +598,12 @@ pub(crate) fn check_inaccessible_class_const(
     // Constant names are case-sensitive in PHP, so the match is exact. An enum case
     // is not a constant here — cases live in `enum_cases` and are always public — so
     // `Suit::Hearts` finds nothing and stays silent.
-    let Some((declaring, visibility, on_own_class)) = declared_in_chain(&chain, |cd| {
+    let Some((declaring, visibility, at)) = declared_in_chain(&chain, |cd| {
         cd.const_visibility.iter().find(|(n, _)| n == name).map(|(_, v)| *v)
     }) else {
         return;
     };
-    if visibility == Visibility::Private && !on_own_class {
+    if visibility == Visibility::Private && at != 0 {
         return; // `Undefined constant B::K` — absence, not inaccessibility.
     }
     let Some(vis) = member_inaccessible(cx, visibility, &declaring.fqn, w.enclosing_class) else {
