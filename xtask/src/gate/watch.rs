@@ -131,8 +131,8 @@ impl Expiry {
             |p| format!("last phase finished: `{p}`, {} ago", secs(snapshot.since_phase)),
         );
         out.push_str(&format!(
-            "\n  pass: {} ({} in); {phase} (phases are named as they end, so the running one \
-             is the next)",
+            "\n  pass: {} (running for {}); {phase} (phases are named as they end, so the \
+             running one is the next)",
             self.pass,
             secs(snapshot.elapsed),
         ));
