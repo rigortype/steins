@@ -234,6 +234,84 @@ fn a_case_name_comparison_claims_nothing_either() {
 }
 
 // ---------------------------------------------------------------------------
+// `instanceof` over the case domain (issue #700): a case IS an instance of its
+// enum, so a class guard judges each case arm by the enum it belongs to
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_positive_instanceof_of_the_enum_keeps_every_case() {
+    // The guard holds for every value the declaration admits; the domain is kept
+    // whole, not emptied (the arm used to read as a non-object and die).
+    assert_eq!(suit("if ($s instanceof Suit) { \\PHPStan\\dumpType($s); }"), ["Suit"]);
+}
+
+#[test]
+fn a_positive_instanceof_of_the_enum_drops_only_the_non_object_arms() {
+    assert_eq!(
+        types(&format!(
+            "<?php\n{SUIT}\nfunction f(Suit|string|null $s): void {{\
+             if ($s instanceof Suit) {{ \\PHPStan\\dumpType($s); }} }}\n\
+             function g(Suit|int $s): void {{\
+             if ($s instanceof Suit) {{ \\PHPStan\\dumpType($s); }} }}\n\
+             function h(Suit|string|null $s): void {{ if ($s instanceof Suit) {{\
+             if ($s === Suit::Hearts) {{ return; }} \\PHPStan\\dumpType($s); }} }}\n"
+        )),
+        ["Suit", "Suit", "Suit::Spades|Suit::Clubs"]
+    );
+}
+
+#[test]
+fn a_positive_instanceof_of_an_enum_supertype_keeps_every_case() {
+    // Every enum is a `UnitEnum`, a backed one a `BackedEnum`, and each is an
+    // instance of the interfaces it declares. The guard subtracts nothing from
+    // the lane, so the dump reads the guard's own class (the rung every class
+    // guard over an un-narrowed declaration takes); an identity guard after it
+    // shows the case domain it left behind is still whole.
+    assert_eq!(
+        types(&format!(
+            "<?php\ninterface HasColor {{}}\n\
+             enum Suit implements HasColor {{ case Hearts; case Spades; case Clubs; }}\n{LEVEL}\n\
+             function f(Suit $s): void {{ if ($s instanceof \\UnitEnum) {{\
+             \\PHPStan\\dumpType($s);\
+             if ($s === Suit::Hearts) {{ return; }} \\PHPStan\\dumpType($s); }} }}\n\
+             function g(Suit $s): void {{ if ($s instanceof HasColor) {{\
+             if ($s === Suit::Hearts) {{ return; }} \\PHPStan\\dumpType($s); }} }}\n\
+             function h(Level $l): void {{ if ($l instanceof \\BackedEnum) {{\
+             if ($l === Level::Low) {{ return; }} \\PHPStan\\dumpType($l); }} }}\n"
+        )),
+        ["UnitEnum", "Suit::Spades|Suit::Clubs", "Suit::Spades|Suit::Clubs", "Level::High"]
+    );
+}
+
+#[test]
+fn a_positive_instanceof_of_an_unrelated_class_keeps_no_case() {
+    // An enum is final, so a proven non-member can never hold: the cases go. A
+    // pure enum is not a `BackedEnum` either.
+    assert_eq!(
+        types(&format!(
+            "<?php\n{SUIT}\nclass Other {{}}\n\
+             function f(Suit|string $s): void {{\
+             if ($s instanceof Other) {{ \\PHPStan\\dumpType($s); }}\
+             if ($s instanceof \\BackedEnum) {{ \\PHPStan\\dumpType($s); }} }}\n"
+        )),
+        ["*NEVER*", "*NEVER*"]
+    );
+}
+
+#[test]
+fn a_negative_instanceof_of_the_enum_removes_every_case() {
+    assert_eq!(
+        types(&format!(
+            "<?php\n{SUIT}\nclass Other {{}}\n\
+             function f(Suit|string $s): void {{\
+             if (!($s instanceof Suit)) {{ \\PHPStan\\dumpType($s); }}\
+             if (!($s instanceof Other)) {{ \\PHPStan\\dumpType($s); }} }}\n"
+        )),
+        ["string", "Suit|string"]
+    );
+}
+
+// ---------------------------------------------------------------------------
 // The absence discipline: no complete case set, no finite domain
 // ---------------------------------------------------------------------------
 
