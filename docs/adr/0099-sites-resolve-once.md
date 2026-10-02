@@ -568,7 +568,7 @@ promoted parameter's hook. Left open, each witnessed:
 - **An abstract class's bodiless hook declaration** (`abstract public string $p { get; }`) counts
   as a hook though it runs nothing: conservative, a gap where PHP runs no user code.
 
-### What moves (public corpora, `check --profile strict`, `--no-cache --no-php`)
+### What moves (public corpora, `check --profile strict`, `--no-cache --no-php`; the strict counts also with `--vendor-diagnostics`)
 
 On the ten public packages (28,847 functions) no body loses exhaustiveness in either lane (the 366
 bodies that gain a kind were already `…?`), no proven label moves, `effect-diff` reports no event,
@@ -581,8 +581,10 @@ the body) and 159 inherit it through an edge. Five gain `operator-magic-property
 methods and `CarbonTimeZone::__construct` (an engine constructor or `createFromFormat` reached on a
 `$this` whose class imports a trait) and two `writeError` methods that call `getMessage()` on a
 declared `\Exception`, in a universe where a class importing a trait is an `Exception`. At `strict`,
-`throw.maybe-undeclared` gains 50 findings, one per new (site, kind), and rewords 18 whose kind list
-grew without a new site: 49 are `operator-to-string` (47 at an offset write, 2 at a dynamic name) and
+`throw.maybe-undeclared` gains 68 findings with `--vendor-diagnostics`, the fp-gate's posture (50 without it: the 18 more
+are vendored copies of composer's `ClassLoader.php`, 8 under composer's test fixtures and 10 in
+phpunit's tool directories), one per new (site, kind), and rewords 18 whose kind list
+grew without a new site: 67 are `operator-to-string` (65 at an offset write, 2 at a dynamic name) and
 1 is `operator-magic-property` (`parent::__construct` into `DateInterval`); the count rows of
 `possibly_expected.toml` are reseeded by that delta. The public corpora declare no property hook, so
 the hook rows move nothing there, and the one place a hook gap appears is the trait case above.
