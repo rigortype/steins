@@ -119,9 +119,13 @@ rules instead of a keyword zoo:
   return contracts. A template-bearing signature (`callable(T): T`) drops to
   `CallableTy(None)`, so every carried signature arm is a ground contract.
 - `A|B` → `Union`; `A&B` → `Inter`.
-- A class or interface name → `Class(fqn)`, normalized (lowercased, leading `\`
-  stripped). A generic class reference (`Collection<T>`) lowers to the same
-  `Class(fqn)` — the type *arguments* are not a `ContractTy` concern: proven
+- A class or interface name → `Class(name)`, lowercased and still unresolved:
+  lowering has no namespace, so the caller resolves every class name in the
+  lowered type, nested ones included. A name written fully qualified keeps its
+  leading `\`, which tells that resolver `\Foo` is the global `Foo` and not `Foo`
+  relative to the docblock's namespace (issue #699); a resolved name has no `\`.
+  A generic class reference (`Collection<T>`) lowers to the same
+  `Class(name)` — the type *arguments* are not a `ContractTy` concern: proven
   argument *values* ride the check-time value carrier and are judged at the
   direct-`new` argument position (ADR-0032 stage 1; see
   [object-model.md](object-model.md)).
