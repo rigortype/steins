@@ -41,3 +41,13 @@ transparent — crash tolerance for long LSP sessions from day one):
 Timeouts and the safe fallback to `widen` are part of the protocol spec:
 sidecar misbehavior must never surface as a wrong diagnostic — the zero-FP
 bulwark.
+
+## Amendment: the boot is not a request (issue #891)
+
+The per-request timeout is charged from the write, so on a fresh child it used
+to include PHP's own startup. On a loaded machine that cost the first answer,
+then up to three respawns, then (ADR-0092's #784 amendment) the generation. A
+child now has to answer an `env` handshake under its own boot timeout (20 s)
+before the first request is sent. A child that fails it is a failed spawn (the
+sound subset) or one respawn strike; real requests keep the 2 s budget, so
+hang detection on a running child is unchanged.
