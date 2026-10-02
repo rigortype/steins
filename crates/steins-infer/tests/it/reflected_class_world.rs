@@ -2,8 +2,9 @@
 //! resolve against the project's own PHP.
 //!
 //! A class an installed extension provides (`Redis`, `Random\Randomizer`,
-//! `Dom\Element`) has no source declaration and no builtin-catalog row, so both
-//! of Steins' static class worlds are silent about it. ADR-0049 §1: the running
+//! `Dom\Element`) has no source declaration, so the project world is silent about
+//! it, and the builtin catalog's hierarchy knows only the stubs' classes (#871 keys
+//! the namespaced ones by FQN) and rows few of their members. ADR-0049 §1: the running
 //! engine is the only honest source for it — no curated stub list, no bundled
 //! class inventory.
 //!
@@ -36,8 +37,8 @@ use steins_sidecar::{
 use steins_syntax::SourceTree;
 
 /// The always-available fixture class: ext-random is built into every PHP since
-/// 8.2, and `Random\Randomizer` carries no row in `steins-catalog`'s hierarchy
-/// table (verified: no namespaced `random\*` key at all).
+/// 8.2. The catalog's hierarchy declares it since #871, but the reflected
+/// declaration below is the engine's own and does not consult it.
 const EXTENSION_CLASS: &str = "Random\\Randomizer";
 
 /// The skip-if-absent optional-extension fixture. Nothing in CI loads ext-redis.
@@ -75,12 +76,6 @@ fn an_extension_class_resolves_off_the_projects_own_php() {
         eprintln!("SKIP an_extension_class_resolves_off_the_projects_own_php: ext-random absent");
         return;
     };
-
-    // The catalog genuinely has no row for this name — the premise of the slice.
-    assert!(
-        steins_catalog::builtin_class_supers("random\\randomizer").is_none(),
-        "the fixture class must be one the builtin catalog has no row for"
-    );
 
     assert_eq!(d.name, EXTENSION_CLASS);
     assert_eq!(d.kind, ReflectedClassKind::Class);

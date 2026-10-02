@@ -369,3 +369,52 @@ decided.
   a silence leg of a check family that a plugin may discharge. A coverage gap is a reason an effect or throw answer is
   incomplete; the two meet at `__get` and `__call`, which §4 models for the
   lanes and the absence family models for its own proofs.
+
+## Amendment (2026-10-02): Run 2 closes the holes §7 left open, and engine classes are keyed by FQN
+
+**Status: proposed 2026-10-02; pending ratification.** The slices of the run that follows the ratified
+design (tracking issue #915) append their parts here, one dated section for the run. This part is
+slice S2 (#871); the others (§4.2, §4.3, §5.2 and §7.1, §7.5, §7.6) add theirs when they land.
+
+### §3, a fourth item: an engine class is keyed and resolved by its FQN
+
+4. **An engine class is the hierarchy row its FQN names, and nothing else is.** The mined hierarchy
+   (`hierarchy.toml`, ADR-0043 §3) keys every class, interface and enum php-src's stubs declare by
+   its fully qualified name, lowercased: `pdo`, `random\randomexception`, `dom\element`. The catalog
+   rows (`method_effect_labels`, `method_throws`, `method_arg_reach`) are keyed by the same FQN, and
+   `engine_exit` (the class a method call's or `new`'s chain leaves the project at) is gated on
+   the hierarchy declaring that FQN, where it was gated on the name having no namespace.
+   - **Why the gate changed.** "No backslash" was a proxy for "an engine class", true while the
+     engine's classes were thought to be unnamespaced. They are not: PHP 8.5.11 declares 73
+     namespaced php-src classes (`Random\*`, `Uri\*`, `Dom\*`, `Pdo\*`, `FFI\*`, ...). The proxy
+     refused all of them, so `new Random\RandomException` was a gap however well its parent was
+     rowed. The new gate keeps what the old one protected: a name the user's namespace made up
+     (`App\PDO`, an unimported `PDO` inside `namespace App`) is no hierarchy row, so it is still no
+     engine class and still refuses.
+   - **The miner read the keys wrong.** `extract_hierarchy.py` recognised `namespace X {` and
+     `namespace X;` on one line. `ext/random/random.stub.php` and `ext/dom/php_dom.stub.php` put the
+     brace on the next line, so 41 classes were keyed in the global namespace
+     (`randomexception`, `engine`, `text`, `node`, `comment`, `number`, `secure`), and every
+     relative `extends` or `implements` inside a namespace was recorded unresolved. The miner now
+     reads a namespace statement across lines and resolves a parent the way PHP does: a leading
+     backslash is fully qualified, anything else is relative to the declaring namespace. One stub
+     line is the exception, `class OpensslException extends Exception` inside `namespace Openssl`,
+     where the engine registers the class on the global `Exception` (its arginfo passes
+     `zend_ce_exception`); the miner records that one as `Exception` and says so.
+   - **Consequences.** The 41 bare keys are gone from the table, so `class.undefined` no longer
+     treats `Text`, `Comment` or `Engine` as engine classes the engine may declare (the sidecar's
+     boot-surface leg decides those, as it does for any class the catalog does not know). Throwables
+     such as `Random\RandomException` take `Exception::__construct`'s effect, throw and reach rows,
+     so a body that builds or throws one is exhaustive in both lanes. A namespaced engine class with
+     no row (`Random\Randomizer`, `Dom\Element`) is a gap of the lane's missing-row kind, as a
+     global one is.
+   - **The table is held to the engine.** A test offers every hierarchy key to a live PHP
+     (`ReflectionClass`) and requires its `getName()` to lowercase to the key and carry the stored
+     casing; a class the engine lacks (an extension not loaded, or newer than that PHP) is not a
+     failure, and a floor on the resolved share and a set of namespaced rows every supported minor
+     has make a wrong key one. The converse, that every namespaced class the pinned PHP declares
+     from php-src is a row, is a static test in the catalog.
+   - **Left open.** `Dom\DOMException` is a class alias of the global `DOMException` (the stub's
+     `@alias`), not a class of its own: `ReflectionClass::getName()` answers `DOMException`. The
+     hierarchy has no row for it, so `new Dom\DOMException` is a gap. An alias row would have to
+     make `instanceof` agree between the two names, which this slice does not model.
