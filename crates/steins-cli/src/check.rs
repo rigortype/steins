@@ -25,8 +25,8 @@ use std::process::ExitCode;
 use steins_db::{Project, SteinsDatabase, parse as parse_tree};
 use steins_edit::{ByteSpan, Edit, EditPlan};
 use steins_infer::{
-    Diagnostic, InlineOutcome, Progress, SOUND_SUBSET_NOTICE, SidecarFolder, apply_inline_ignores,
-    check_project_reporting,
+    Diagnostic, INTERNAL_PANIC_ID, InlineOutcome, Progress, SOUND_SUBSET_NOTICE, SidecarFolder,
+    apply_inline_ignores, check_project_reporting,
 };
 use steins_syntax::SourceTree;
 
@@ -190,9 +190,21 @@ pub(crate) fn run_check(args: &[String]) -> ExitCode {
         };
     let (db, project, texts) = (&loaded.db, loaded.project, &loaded.texts);
 
+    // Files whose walk panicked (issue #895 D3). Their findings are missing, so
+    // the run's verdict is the tool's failure rather than the code's.
+    let panicked = inline.meta.iter().filter(|d| d.id == INTERNAL_PANIC_ID).count();
+
     let baseline_file = args.baseline_file();
     if args.set_baseline {
         let file = baseline_file.expect("set-baseline names a file");
+        if panicked > 0 {
+            // A baseline captured now would lack the panicked files' findings,
+            // and every one of them would surface as new once the panic is gone.
+            errln!(
+                "steins: not writing the baseline: {panicked} file(s) panicked in analysis, so their findings are missing from this run"
+            );
+            return ExitCode::from(2);
+        }
         return write_baseline(&file, &inline.kept, texts, &surface);
     }
 
@@ -238,8 +250,16 @@ pub(crate) fn run_check(args: &[String]) -> ExitCode {
         report_fix_run(run, fixed.len());
     }
 
-    // Exit level (ADR-0050 §7): 1 iff any fail-level finding is displayed, else
-    // 0 (warn-only); fixed findings are already gone from `displayed`.
+    // Exit level (ADR-0050 §7 and its 2026-10-02 amendment): 2 when a file's
+    // analysis panicked — the tool failed, whatever else is displayed — else 1
+    // iff any fail-level finding is displayed, else 0 (warn-only); fixed
+    // findings are already gone from `displayed`.
+    if panicked > 0 {
+        errln!(
+            "steins: {panicked} file(s) panicked in analysis ({INTERNAL_PANIC_ID}); their findings are missing, so this run exits 2 — this is a bug in Steins, please report it"
+        );
+        return ExitCode::from(2);
+    }
     let any_fail = displayed.iter().any(|d| surface.level(d.id) == profile::Level::Fail);
     if any_fail { ExitCode::FAILURE } else { ExitCode::SUCCESS }
 }
@@ -656,10 +676,16 @@ pub(crate) fn suppression_pipeline(
 pub(crate) fn suppression_over(
     layout: &steins_db::ProjectLayout,
     file_pairs: Vec<(String, &SourceTree)>,
-    mut findings: Vec<Diagnostic>,
+    findings: Vec<Diagnostic>,
     surface: &profile::Surface,
     vendor_diagnostics: bool,
 ) -> (steins_infer::InlineOutcome, usize) {
+    // `internal.panic` (issue #895 D3) is a claim about the tool, not the code:
+    // it rides outside every channel below — vendor, surface, policy, inline —
+    // and joins the meta-diagnostics, which the baseline never sees either.
+    let (panics, mut findings): (Vec<Diagnostic>, Vec<Diagnostic>) =
+        findings.into_iter().partition(|d| d.id == INTERNAL_PANIC_ID);
+
     // Vendor filtering FIRST (ADR-0015): suppressed by default, must not eat a
     // baseline entry. `--vendor-diagnostics` opts back in.
     let mut vendor_suppressed = 0usize;
@@ -677,7 +703,9 @@ pub(crate) fn suppression_over(
     let findings = apply_policy_stage(findings);
 
     // Inline `@steins-ignore` next (ADR-0023): suppressed findings skip the baseline.
-    (apply_inline_ignores(findings, &file_pairs), vendor_suppressed)
+    let mut inline = apply_inline_ignores(findings, &file_pairs);
+    inline.meta.extend(panics);
+    (inline, vendor_suppressed)
 }
 
 #[cfg(test)]
