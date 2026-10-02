@@ -213,6 +213,9 @@ message register.
    lane and are deferred-with-design: they need the sealed/unsealed
    marker surfaced through lowering and belong with the contract
    family's tripwire discipline, not this opening.
+   *Amended (2026-10-03, issue #931): the table above is the plain
+   read's.* A destructuring source is a different operation with its
+   own version-keyed rule — A24.
 
 8. **The declared-receiver lane: `phpdoc.undefined-method`** (contract
    layer — the paired-id precedent of `type.property-mismatch` /
@@ -1267,3 +1270,78 @@ one rule.
 The difference from PHPStan is registered as core entry 20 in
 `docs/type-specification/divergence-registry.md`, and
 `docs/type-specification/phpdoc-grammar.md` states the rule.
+
+## Amendment (2026-10-03): destructuring a scalar has its own rule (issue #931)
+
+Status: PENDING ratification (post-hoc-ratification mode, ADR-0077
+precedent). Source: the default-surface false-positive sweep (#963),
+decision D1: the rule reuses `offset.on-unsupported` rather than adding
+an id. Witnesses were taken 2026-10-03 with `error_reporting=-1` on PHP
+8.1.32, 8.2.33, 8.3.33, 8.4.25 and 8.5.11.
+
+### A24. A destructure source is judged by the destructure's rule, not the plain read's
+
+§7's severity table is the plain read `$v[0]`: on `null`, `int`,
+`float` and `bool` it is an `E_WARNING` reading `null`, on every
+supported minor. `check_destructure_source` (issue #288) forwarded the
+destructure source to the plain read, so `[$x] = $v;` reported
+`Trying to access array offset on null` on a `null` source and on every
+scalar one. PHP does not treat the two operations alike. A destructure
+fetches each element in list mode, and php-src warns there only for a
+non-null source (`zend_fetch_dimension_address_read`, `is_list &&
+Z_TYPE_P(container) > IS_NULL`: `Cannot use %s as array`), and only from
+8.5.
+
+| Source (all four spellings) | 8.1 – 8.4 | 8.5 |
+| --- | --- | --- |
+| `null` | silent | silent |
+| `int`, `float`, `bool` | silent | `Warning: Cannot use <type> as array` |
+| `string` | silent | `Warning: Cannot use string as array` |
+| object | `Error: Cannot use object of type C as array` | same |
+| `$v[0]` on `int`, `float`, `bool`, `null` (the plain read) | `Warning: Trying to access array offset on <type>` | same |
+
+The four spellings are `[$x] = $v`, `list($x) = $v`, a keyed pattern and
+a nested pattern. PHP warns once per element it fetches (`[$a, $b] =
+42;` twice, a hole skips its index, `[[$a], $b] = 42;` twice for the
+outer fetches), `<type>` is `bool` for both `true` and `false`, and the
+finding sits on the statement, so a statement is one finding.
+
+**The rule.** `check_destructure_read` judges each first-level read of
+the source, on a `Verified` `Singleton` source under A9's availability
+gate and the `warning-handler` posture, as before:
+
+- **`null`**: silent on every version.
+- **`int`, `float`, `bool`, `string`**: `offset.on-unsupported`, quoting
+  PHP's wording (`Cannot use <type> as array`), only where
+  `Cx::version_id` proves the whole analysed interval is at or above
+  `80500`. That interval is the declared target's floor when the project
+  declares a target (`config.platform.php` or `require.php`), else the
+  sidecar's minor, so a project declaring `^8.1` is silent on an 8.5
+  sidecar, `>=8.5` reports on any sidecar, and the answer is the same
+  `PhpView::version_id` the `PHP_VERSION_ID` guard fold reads (issue #29).
+- **A straddling or unknown interval is silent**: no sidecar minor and no
+  target, a range that admits any minor below 8.5, or a project that
+  declares its own `PHP_VERSION_ID` constant (which zeroes the interval).
+- **A container source** (`Singleton` array, `OneOf` of arrays) is Case 2
+  (`offset.missing`), unchanged, on every version: PHP warns
+  `Undefined array key` for a destructure exactly as for `$m[0]`.
+
+The finding's message says what the plain read's did not: `destructuring
+$v — provably int; from PHP 8.5 each target reads null with "Cannot use
+int as array"`. The id is the plain read's, so existing `ignore` and
+triage entries, the `contracts` rung and the documentation of
+`offset.on-unsupported` keep their meaning. Finding movement is only
+removal: `null` sources, and scalar sources whose interval is not proven
+8.5.
+
+**Not covered.**
+
+- An object source is a fatal `Error` on every version and was never
+  reported; the offset family has no object case (§7's deferred
+  `ArrayAccess` split).
+- `foreach ($xs as [$x])` destructures each element with the same
+  operation and the same rule, and is not judged at all.
+- A source that is a `OneOf` of scalars, or a refined type, stays silent
+  as at the plain read (value-domain evidence only).
+- 8.5.11 is the only 8.5 patch witnessed; the rule takes the minor's
+  floor, as every version-keyed rule here does.

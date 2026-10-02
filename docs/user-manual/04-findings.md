@@ -516,6 +516,15 @@ src/Offsets.php:9:12: error[offset.missing]: offset 'hostname' provably missing 
 src/Offsets.php:16:12: error[offset.on-unsupported]: offset read on $port — provably int; reads null with "Trying to access array offset on int"
 ```
 
+Destructuring is a different operation from a plain read, and
+`offset.on-unsupported` follows PHP's own rule for it. `[$x] = $port;`
+on a `null` is silent on every version. On an `int`, `float`, `bool` or
+`string` it warns `Cannot use int as array` from PHP 8.5 only, so Steins
+reports it only when the whole analysed PHP range is 8.5 or later: the
+`require.php` (or `config.platform.php`) floor when `composer.json`
+declares one, else the version of the PHP that Steins runs. A range that
+admits 8.4, such as `^8.1`, is silent.
+
 **`offset.undeclared`** and **`offset.maybe-missing`** are contract layer.
 The evidence is your docblock rather than a folded value, so the claim is
 conditional on the declaration being true — which is exactly why they are
