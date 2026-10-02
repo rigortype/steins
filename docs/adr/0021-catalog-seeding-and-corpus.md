@@ -359,8 +359,9 @@ is numeric (`d u c o x X b e E f F g G h H`). Witnessed on PHP 8.5.11, an
 object handed to a numeric conversion becomes a number with a warning and runs
 no `__toString`. Positional `n$` is honoured and leaves the in-order counter
 alone; a value several conversions name takes the strongest; a value no
-conversion names is never read; too few values is an `ArgumentCountError`,
-which is argument checking and not user code (ADR-0099 §3.3).
+conversion names is never read; too few values is an `ArgumentCountError` for
+`sprintf` and a `ValueError` for `vsprintf`, which is argument checking and not
+user code (ADR-0099 §3.3).
 
 The parser returns `None`, leaving the call to the row, for any format it
 cannot read as the engine does: an unknown or missing conversion, a padding
@@ -383,21 +384,24 @@ format sits at position 1) and are not named: a layout without a row would
 read a call the effect lane still cannot place, and a stream writer's row is
 its own issue.
 
-`vsprintf` and `array_search` joined the call-site certified list
-(`certified_at_call_site`), the names whose own effects are certified and
-whose call is pure only where the call site rules out every reaching argument.
-Before, both answered `no-effect-row` in the effect lane, which no call-site
-proof could ever discharge (they are not on the fold allowlist, which is how
-`sprintf` and `in_array` reached the reach rule). `vsprintf` reads
-`LC_NUMERIC` through `%f` and `%e` exactly as `sprintf`, already certified
-through the fold allowlist, does. Nothing reads the parser yet, so the only
-effect is the two names' gap kind: `no-effect-row` becomes `user-code-reach`
-unless the arguments are already shown object-free. On the ten public corpus packages `check` is byte-identical
-under `default` and `strict`, and no function's labels, exhaustiveness or throw
-lane move; 20 of 28,846 summaries change the kinds behind their `…?` (9 swap
-`no-effect-row` for `user-code-reach`, 7 lose `no-effect-row` beside an existing
-`user-code-reach`, 4 gain `user-code-reach` beside a `no-effect-row` another
-call keeps), every one an `array_search` call.
+`array_search` joined the call-site certified list (`certified_at_call_site`),
+the names whose own effects are certified and whose call is pure only where the
+call site rules out every reaching argument. Before, it answered
+`no-effect-row` in the effect lane, which no call-site proof could ever
+discharge (it is not on the fold allowlist, which is how `in_array` reached the
+reach rule). `vsprintf` does not join: `%f`, `%g` and `%G` read `LC_NUMERIC`
+(`%e` and `%E` do not), which contradicts Decision 2. `sprintf` has the same
+hole through the fold allowlist, which predates this note; both are issue #991.
+Its reach answer is unaffected, so `printf_family` and `format_reach` still
+cover `vsprintf` and `vprintf`. Nothing reads the parser yet, so the only
+effect is `array_search`'s gap kind: `no-effect-row` becomes `user-code-reach`
+unless the arguments are already shown object-free. On the ten public corpus
+packages `check` is byte-identical under `default` and `strict`, and no
+function's labels, exhaustiveness or throw lane move; 20 of 28,846 summaries
+change the kinds behind their `…?` (9 swap `no-effect-row` for
+`user-code-reach`, 7 lose `no-effect-row` beside an existing `user-code-reach`,
+4 gain `user-code-reach` beside a `no-effect-row` another call keeps), every
+one an `array_search` call.
 
 ## Amendment (2026-10-02): the call-site rule holds at every site — ratified 2026-10-02
 
