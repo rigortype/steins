@@ -326,12 +326,7 @@ pub(crate) fn certified_pure(name: &str) -> bool {
 ///   compares the needle with each element, by `fast_is_identical_function`
 ///   when the strict flag is true and by `fast_equal_check_function` when it is
 ///   not, and writes nothing. A loose comparison of an object with a string
-///   runs `__toString`, which is the reach the call-site rule holds it to;
-/// * `vsprintf`: `php_formatted_print` in `ext/standard/formatted_print.c`, the
-///   same formatter as `sprintf` (which the fold allowlist already certifies)
-///   over an array's elements. Only a `%s` renders an element, so an object
-///   reaches `__toString` there and nowhere else; `%f` and `%e` read
-///   `LC_NUMERIC`'s decimal point, as `sprintf`'s do.
+///   runs `__toString`, which is the reach the call-site rule holds it to.
 ///
 /// Deliberately absent, each reading the locale or an ini setting: `basename`
 /// and `pathinfo` (`php_basename` consults `ascii_compatible_locale` and
@@ -340,7 +335,9 @@ pub(crate) fn certified_pure(name: &str) -> bool {
 /// (C `isalpha`), `escapeshellarg` (`php_mblen`), `strip_tags` (C `isspace`),
 /// `number_format`, the `ctype_*` family, `htmlspecialchars` (`default_charset`)
 /// and the `mb_*` family (`mbstring` ini). `strtok` keeps its position in
-/// interpreter state.
+/// interpreter state. `vsprintf` (like `sprintf`, which the fold allowlist
+/// still certifies) stays out for the same reason: `%f`, `%g` and `%G` read
+/// `LC_NUMERIC`'s decimal point (issue #991).
 const CERTIFIED_AT_CALL_SITE: &[&str] = &[
     "strcmp",
     "strncmp",
@@ -356,7 +353,6 @@ const CERTIFIED_AT_CALL_SITE: &[&str] = &[
     "dirname",
     "unpack",
     "array_search",
-    "vsprintf",
 ];
 
 /// Whether `name` is certified pure at a call site that rules out its

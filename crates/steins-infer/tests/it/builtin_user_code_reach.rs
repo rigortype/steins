@@ -195,3 +195,24 @@ fn an_unresolved_callback_and_an_invokers_arguments_reach_user_code() {
         "f",
     );
 }
+
+/// `array_search` is certified at a call site (issue #860, row 7.12): pure where
+/// every reaching argument is shown object-free, `user-code-reach` where the
+/// haystack is an unknown array, and no longer `no-effect-row` either way.
+#[test]
+fn s7_array_search_is_held_to_the_reach_rule() {
+    let src = file(false, "", "return array_search(3, [1, 2, 3]);");
+    proven_pure(&src, "f");
+    let src = file(false, "string $s, array $h", "return array_search($s, $h);");
+    let s = summary(&src, "f");
+    assert!(!s.exhaustive && s.gaps == ["user-code-reach"], "{s:?}");
+}
+
+/// `vsprintf` stays uncertified (issue #991: `%f`, `%g` and `%G` read
+/// `LC_NUMERIC`), so even an object-free call keeps its `no-effect-row`.
+#[test]
+fn s7_vsprintf_keeps_its_missing_effect_row() {
+    let src = file(false, "", "return vsprintf('%s-%s', ['a', 'b']);");
+    let s = summary(&src, "f");
+    assert!(!s.exhaustive && s.gaps == ["no-effect-row"], "{s:?}");
+}

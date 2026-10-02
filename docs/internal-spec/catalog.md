@@ -241,10 +241,11 @@ The row's labels apply either way.
 The **string family** is certified under the same rule rather than
 argument-blind (`certified_at_call_site(name)`): `strcmp`, `strncmp`,
 `strcasecmp`, `strncasecmp`, `strspn`, `strcspn`, `substr_count`, `ord`, `chr`,
-`bin2hex`, `hex2bin`, `dirname` and `unpack`, joined by `array_search` and
-`vsprintf` (issue #860): neither is on the fold allowlist, so without a place
-here the effect lane answered `no-effect-row` for them, which no proof at the
-call site can discharge. They are not on
+`bin2hex`, `hex2bin`, `dirname` and `unpack`, joined by `array_search` (issue
+#860): it is not on the fold allowlist, so without a place here the effect lane
+answered `no-effect-row` for it, which no proof at the call site can
+discharge. `vsprintf` stays out because `%f`, `%g` and `%G` read `LC_NUMERIC`
+(issue #991, as `sprintf`'s do). They are not on
 `effect_labels`, so no other pass reads them as known builtins; the effects
 pass resolves an otherwise unresolved call against the list and answers pure
 only where the call site rules the reaching arguments out. Names that read the

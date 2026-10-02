@@ -660,9 +660,9 @@ mod tests {
     }
 
     /// A value count that does not match the format changes the outcome, never
-    /// the parse: too few values is an `ArgumentCountError` (row 7.11, argument
-    /// checking, not user code), and a value past the last conversion is never
-    /// read.
+    /// the parse: too few values is an `ArgumentCountError` (a `ValueError` for
+    /// `vsprintf`; row 7.11, argument checking, not user code), and a value past
+    /// the last conversion is never read.
     #[test]
     fn the_parse_does_not_depend_on_how_many_values_are_given() {
         assert_eq!(format_reach("%d %d").as_deref(), Some(&[I, I][..])); // 7.11
@@ -724,21 +724,28 @@ mod tests {
         assert_eq!(at("vsprintf", 1), ArgReach::Nested);
     }
 
-    // ---- the effect rows of `array_search` and `vsprintf` (rows 7.12, 7.15) --
+    // ---- the effect row of `array_search` (row 7.12) ----------------------
 
-    /// Both names answer `no-effect-row` on master: neither is foldable, and
-    /// the call-site certification is what the effect lane asks next. They are
-    /// certified at a call site and nowhere else, so no pass reads them as
-    /// pure argument-blind, and the reach rule holds every call.
+    /// `array_search` answers `no-effect-row` on master: it is not foldable, and
+    /// the call-site certification is what the effect lane asks next. It is
+    /// certified at a call site and nowhere else, so no pass reads it as pure
+    /// argument-blind, and the reach rule holds every call.
     #[test]
-    fn array_search_and_vsprintf_are_certified_at_the_call_site() {
-        for name in ["array_search", "vsprintf"] {
-            assert!(certified_at_call_site(name), "{name}");
-            assert!(knows(name), "{name}");
-            assert!(effect_labels(name).is_none() && !foldable(name), "{name} is not blind-pure");
-            assert!(arg_reach(name).expect(name).reaches_blind(true), "{name} may reach user code");
-        }
-        assert!(certified_at_call_site("ARRAY_SEARCH") && certified_at_call_site("VSprintf"));
+    fn array_search_is_certified_at_the_call_site() {
+        assert!(certified_at_call_site("array_search") && certified_at_call_site("ARRAY_SEARCH"));
+        assert!(knows("array_search"));
+        assert!(effect_labels("array_search").is_none() && !foldable("array_search"));
+        assert!(arg_reach("array_search").expect("row").reaches_blind(true));
+    }
+
+    /// `vsprintf` stays uncertified: `%f`, `%g` and `%G` read `LC_NUMERIC`
+    /// (issue #991, as `sprintf`'s do). Its reach answer is still right, and
+    /// `printf_family` still names it.
+    #[test]
+    fn vsprintf_is_not_certified_but_keeps_its_reach() {
+        assert!(!certified_at_call_site("vsprintf"));
+        assert!(knows("vsprintf") && effect_labels("vsprintf").is_none());
+        assert!(printf_family("vsprintf").is_some());
     }
 
     /// The by-value reach of `array_search` is `in_array`'s: needle and
