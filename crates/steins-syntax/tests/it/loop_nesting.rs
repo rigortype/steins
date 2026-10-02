@@ -89,8 +89,9 @@ fn lower_within_budget(src: String) -> (Vec<String>, Duration) {
             let _ = tx.send((names, elapsed));
         })
         .expect("spawn the lowering worker");
-    rx.recv_timeout(BUDGET)
-        .unwrap_or_else(|_| panic!("lowering the nest overran {BUDGET:?}: the loop-body cache is not answering"))
+    rx.recv_timeout(BUDGET).unwrap_or_else(|_| {
+        panic!("lowering the nest overran {BUDGET:?}: the loop-body cache is not answering")
+    })
 }
 
 fn assert_flat(kinds: &[&str], depth: usize) {

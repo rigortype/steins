@@ -35,7 +35,8 @@ struct Answer {
 
 fn lower(src: &str) -> Answer {
     let tree = SourceTree::parse(src);
-    assert!(tree.parse_errors().is_empty(), "the fixture must parse: {:?}\n{src}", tree.parse_errors());
+    let errors = tree.parse_errors();
+    assert!(errors.is_empty(), "the fixture must parse: {errors:?}\n{src}");
     let mut maybe_undefined: Vec<(String, u32)> = tree
         .scopes()
         .iter()
@@ -73,7 +74,7 @@ fn the_cache_is_off_when_forced_and_answers_otherwise() {
     );
     let (on, _, hits) = both(&src);
     assert!(hits > 0, "a three-deep nest repeats its inner bodies and must hit");
-    assert_eq!(on.maybe_undefined.len(), 1, "the read before the bind is `Maybe` on re-entry: {on:?}");
+    assert_eq!(on.maybe_undefined.len(), 1, "the read before the bind is `Maybe`: {on:?}");
 }
 
 #[test]
@@ -205,7 +206,10 @@ impl Gen {
                 self.block(depth - 1, in_loop),
                 self.block(depth - 1, in_loop)
             ),
-            _ => format!("foreach ($a as $k => {}) {{\n{}\n}}", self.var(), self.block(depth - 1, true)),
+            _ => {
+                let (value, block) = (self.var(), self.block(depth - 1, true));
+                format!("foreach ($a as $k => {value}) {{\n{block}\n}}")
+            }
         }
     }
 }
