@@ -551,6 +551,26 @@ function f(): int {
 }
 
 #[test]
+fn silent_on_a_do_while_whose_body_end_is_undecided() {
+    // The body is the only way to the condition, so a body whose end the judgment
+    // cannot decide (a `try`) leaves the loop undecided too, not falling through.
+    assert_silent(
+        "<?php
+function l(int $c): int {
+    do {
+        try {
+            return 1;
+        } finally {
+            echo 1;
+        }
+    } while ($c);
+}
+",
+        "undecided: the `try` body's end is not decided",
+    );
+}
+
+#[test]
 fn a_do_while_whose_body_can_continue_still_reports() {
     // The negative control: a `continue` of this loop re-tests the condition, which
     // may fail and run off the end of the function.

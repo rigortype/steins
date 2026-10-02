@@ -191,6 +191,23 @@ fn a_binding_inside_a_loop_reaches_the_exit_as_maybe() {
 }
 
 #[test]
+fn a_do_while_whose_body_terminates_terminates_its_arm() {
+    // Issue #679: the `else { return; }` twin is silent, and so is a `do`-`while`
+    // whose body returns on every path, since the arm reaches no successor.
+    let else_arm = |arm: &str| maybe(&format!("if ($c) {{ $y = 1; }} else {{ {arm} }} echo $y;"));
+    assert_eq!(else_arm("return;"), none());
+    assert_eq!(else_arm("do { return; } while (false);"), none());
+    // The read after a terminating loop is dead, and neither leg reports it.
+    assert_eq!(maybe("do { $y = 1; return; } while ($c); echo $y;"), none());
+    assert_eq!(definite("do { $y = 1; return; } while ($c); echo $y;"), none());
+    // A `continue` of the loop reaches the condition, and `break 2` out of a nested
+    // loop reaches the successor. This pass credits that `break` to the inner loop,
+    // so the lowering's level-counting gate is what catches it.
+    assert_eq!(else_arm("do { if ($d) { continue; } return; } while ($d);"), one("y"));
+    assert_eq!(else_arm("do { while ($d) { break 2; } return; } while ($d);"), one("y"));
+}
+
+#[test]
 fn a_do_while_body_runs_at_least_once() {
     assert_eq!(maybe("do { $x = 1; } while ($c); echo $x;"), none());
     // …and a `while (true)` has no false-condition exit edge.
