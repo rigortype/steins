@@ -307,9 +307,8 @@ fn spells_function_name(s: &str) -> bool {
 /// | `switch` | join of every case body, with a missing `default` joined in as `FallsThrough`; `Unknown` when the subtree holds any `break`/`continue`/`goto`, or when a case body runs into the next | a `break` exits the *switch* rather than the list it sits in, and resolving which is which is not this judgment's job; case-to-case fall-through is a real edge it does not model |
 /// | `foreach` | `FallsThrough` | the iteration exhausts; see the recorded obstacle below |
 /// | `while` / `for` / `do-while` with a provably-true condition and no `break`/`goto` in the subtree | `Terminates` | there is no exit edge to take |
-/// | `do-while` whose body terminates, with no `break` or `continue` of this loop and no `goto` in it | `Terminates` | the body runs at least once and no path through it reaches the condition or the successor (issue #679) |
-/// | the same with an undecided body, unless the condition is provably true with no `break`/`goto` | `Unknown` | the body is the only way to the condition, and whether it reaches its end is undecided |
 /// | the same with a `break`/`goto` somewhere inside | `Unknown` | the jump's target is not resolved here, so whether *this* loop has an exit edge is undecided |
+/// | `do-while` whose body terminates, with every `break`/`continue` in it a single-level jump of a nested construct and no `goto` | `Terminates` | the body runs at least once and no path through it reaches the condition or the successor (issue #679) |
 /// | every other loop | `FallsThrough` | the condition can be false, which is an exit edge |
 /// | `try` | `Unknown` | recorded exclusion — see below |
 /// | `goto`, a `label:` | `Unknown` | an unbounded jump; a label is an unbounded *incoming* edge, so the tail may be re-entered |
@@ -530,27 +529,18 @@ fn loop_end(infinite: bool, node: &Node<'_, '_>) -> BodyEnd {
 /// only this loop has (issue #679). Its body runs at least once, so a body that
 /// terminates on every path leaves no edge to the successor — unless one of those
 /// "terminating" paths is a jump that comes back: a `break` of this loop lands on
-/// the successor and a `continue` of it on the condition, which may fail. With
-/// neither in the body (the lowering's `break_free` and `continue_free`, the same
-/// scans), every `break`/`continue` [`block_end`] counts as terminating belongs to a
-/// nested construct, whose own row has already judged it.
-///
-/// Under the same gates an **undecided** body leaves the construct undecided: the
-/// body is the only way to the condition, so when [`block_end`] cannot say whether
-/// it reaches its end (a `try` in it, say), neither can this row — `loop_end`'s
-/// `FallsThrough` would claim an edge nothing has shown. An infinite loop with no
-/// exit jump keeps `loop_end`'s `Terminates`, which holds whatever the body does.
+/// the successor and a `continue` of it on the condition, which may fail. The gate
+/// is the lowering's `nested_jumps_only` (the same scan, see
+/// [`body_has_nested_jumps_only`]): with it, every `break`/`continue` [`block_end`]
+/// counts as terminating belongs to a nested construct, whose own row has already
+/// judged it.
 fn do_while_end(s: &Statement<'_>, d: &mago_syntax::cst::DoWhile<'_>) -> BodyEnd {
     let body = std::slice::from_ref(d.statement);
     let by_condition = loop_end(expr_is_true(d.condition), &Node::Statement(s));
-    if !(body_is_break_free(body) && body_is_continue_free(body)) {
+    if !body_has_nested_jumps_only(body) {
         return by_condition;
     }
-    match block_end(body) {
-        BodyEnd::Terminates => BodyEnd::Terminates,
-        BodyEnd::Unknown if by_condition != BodyEnd::Terminates => BodyEnd::Unknown,
-        _ => by_condition,
-    }
+    if block_end(body) == BodyEnd::Terminates { BodyEnd::Terminates } else { by_condition }
 }
 
 /// Whether `node`'s subtree contains a **function exit** — a `return`, a `throw`
@@ -941,13 +931,13 @@ fn lower_do_while(s: &Statement<'_>, d: &mago_syntax::cst::DoWhile<'_>) -> Stmt 
     let cond = lower_cond(d.condition);
     let body = lower_trace(std::slice::from_ref(d.statement));
     let break_free = body_is_break_free(std::slice::from_ref(d.statement));
-    let continue_free = body_is_continue_free(std::slice::from_ref(d.statement));
+    let nested_jumps_only = body_has_nested_jumps_only(std::slice::from_ref(d.statement));
     Stmt::lowered(
         StmtKind::DoWhile {
             cond,
             body,
             break_free,
-            continue_free,
+            nested_jumps_only,
             writes,
             reads,
             poisons,
@@ -981,20 +971,38 @@ fn lower_do_while(s: &Statement<'_>, d: &mago_syntax::cst::DoWhile<'_>) -> Stmt 
 /// `return`, `throw` and `exit` are not jumps out of the loop in the sense that
 /// matters: they do not reach the fall-through at all, so what holds there is not
 /// their business. Nested function-likes are separate scopes and are not descended.
-pub(crate) fn body_is_break_free(body: &[Statement<'_>]) -> bool {
+fn body_is_break_free(body: &[Statement<'_>]) -> bool {
     !body.iter().any(|s| body_has_jump(&Node::Statement(s), 0, &jump_escapes_loop))
 }
 
-/// Whether no `continue` in a loop body targets the loop itself (issue #679) — the
-/// half of "every path ends the construct" that [`body_is_break_free`] leaves open.
+/// Whether every jump in a `do`-`while` body belongs to a construct nested in it
+/// (issue #679) — the gate on letting the body's own end decide the loop's.
 ///
-/// `continue N` targets this loop at `N == depth + 1`, with `depth` counted as there:
-/// a bare `continue` inside a nested `switch` acts on the switch (PHP treats a
-/// `switch` as a loop for `continue`, and the jump lands after it), while
-/// `continue 2` in the same place is this loop's. A non-literal level is read as the
-/// worst case. `break` and `goto` are not this scan's business.
-pub(crate) fn body_is_continue_free(body: &[Statement<'_>]) -> bool {
-    !body.iter().any(|s| body_has_jump(&Node::Statement(s), 0, &jump_continues_loop))
+/// `true` when the body holds no `goto` and every `break`/`continue` in it has the
+/// literal level 1 and sits inside a nested loop or `switch` (`depth >= 1`, counted as
+/// [`body_is_break_free`] counts it). Nested function-likes are not descended. It
+/// implies `break_free`.
+///
+/// Stricter than the truth on purpose. A jump of this loop comes back (a `break`
+/// lands on the successor, a `continue` on the condition), so `break_free` plus "no
+/// `continue` of this loop" would be the exact question. But the walker's
+/// structured `switch` and the presence pass credit a jump to the INNERMOST
+/// breakable, so a multi-level jump out of a nested loop is mis-credited by both
+/// (#904), and a body that holds one cannot have its end trusted. It is refused here
+/// until they count levels, when this relaxes to `break_free && continue_free`.
+pub(crate) fn body_has_nested_jumps_only(body: &[Statement<'_>]) -> bool {
+    !body.iter().any(|s| body_has_jump(&Node::Statement(s), 0, &jump_not_innermost))
+}
+
+/// [`body_has_nested_jumps_only`]'s question about one jump node `depth` breakable
+/// structures below the body's top level: a jump of this loop, a multi-level one
+/// (or one whose level is not a literal), or a `goto`.
+fn jump_not_innermost(jump: &Node<'_, '_>, depth: u32) -> bool {
+    match jump {
+        Node::Break(b) => depth == 0 || jump_level(b.level) != Some(1),
+        Node::Continue(c) => depth == 0 || jump_level(c.level) != Some(1),
+        _ => true,
+    }
 }
 
 /// [`body_is_break_free`]'s question about one jump node `depth` breakable
@@ -1007,15 +1015,7 @@ fn jump_escapes_loop(jump: &Node<'_, '_>, depth: u32) -> bool {
     }
 }
 
-/// [`body_is_continue_free`]'s question about one jump node, on the same terms.
-fn jump_continues_loop(jump: &Node<'_, '_>, depth: u32) -> bool {
-    match jump {
-        Node::Continue(c) => jump_level(c.level).is_none_or(|n| n == depth + 1),
-        _ => false,
-    }
-}
-
-/// The scan behind [`body_is_break_free`] and [`body_is_continue_free`]: whether any
+/// The scan behind [`body_is_break_free`] and [`body_has_nested_jumps_only`]: whether any
 /// `break`, `continue` or `goto` under `node` answers `hit`. `depth` is the number
 /// of breakable structures (loops and `switch`es) between this node and the body's
 /// top level.
@@ -1528,28 +1528,47 @@ fn break_is_plain(b: &mago_syntax::cst::Break<'_>) -> bool {
 }
 
 /// Whether a switch-case body contains a `break`/`continue`/`goto` that would
-/// target the switch from inside the case (making arm modeling unsound). Any `goto`
-/// at all disqualifies (its target is unbounded); nested function-likes are separate
-/// scopes.
-///
-/// Levels are counted, as [`body_is_break_free`] counts them: with `depth` the
-/// breakable structures between the jump and the case body, `break N` and
-/// `continue N` reach the switch (or past it) when `N > depth` — `continue` acts on a
-/// `switch` like `break` does. So a nested loop's own `break;` is its own, while a
-/// `break 2;` inside it leaves the switch and lands after it, and is stray (issue
-/// #679's review: the scan used to stop at a nested loop and missed it).
+/// target the switch from inside the case (making arm modeling unsound). Nested
+/// loops and switches consume their own `break`/`continue`, so the scan does not
+/// descend into them; nested function-likes are separate scopes. Any `goto` at
+/// all disqualifies (its target is unbounded).
 fn case_has_stray_jump(body: &[Statement<'_>]) -> bool {
-    body.iter().any(|s| body_has_jump(&Node::Statement(s), 0, &jump_reaches_switch))
+    body.iter().any(|s| stmt_has_stray_jump(s))
 }
 
-/// [`case_has_stray_jump`]'s question about one jump node `depth` breakable
-/// structures below the case body.
-fn jump_reaches_switch(jump: &Node<'_, '_>, depth: u32) -> bool {
-    match jump {
-        Node::Break(b) => jump_level(b.level).is_none_or(|n| n > depth),
-        Node::Continue(c) => jump_level(c.level).is_none_or(|n| n > depth),
-        _ => true,
+fn stmt_has_stray_jump(s: &Statement<'_>) -> bool {
+    match s {
+        Statement::Break(_) | Statement::Continue(_) | Statement::Goto(_) => true,
+        // Nested loops/switch absorb their own break/continue — do not descend.
+        Statement::While(_)
+        | Statement::For(_)
+        | Statement::Foreach(_)
+        | Statement::DoWhile(_)
+        | Statement::Switch(_) => false,
+        _ => node_has_stray_jump(&Node::Statement(s)),
     }
+}
+
+/// Recurse through a node's children looking for a stray jump, stopping at nested
+/// loops/switches (which consume their own) and nested function-like scopes.
+fn node_has_stray_jump(node: &Node<'_, '_>) -> bool {
+    children(node).iter().any(|child| match child {
+        Node::Break(_) | Node::Continue(_) | Node::Goto(_) => true,
+        Node::While(_)
+        | Node::For(_)
+        | Node::Foreach(_)
+        | Node::DoWhile(_)
+        | Node::Switch(_)
+        | Node::Function(_)
+        | Node::Closure(_)
+        | Node::ArrowFunction(_)
+        | Node::AnonymousClass(_)
+        | Node::Class(_)
+        | Node::Interface(_)
+        | Node::Trait(_)
+        | Node::Enum(_) => false,
+        other => node_has_stray_jump(other),
+    })
 }
 
 /// What an offset write or append invalidates besides its base (issue #641). The

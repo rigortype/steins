@@ -128,7 +128,7 @@ pub(crate) fn walk_loop(
             cond,
             body,
             break_free,
-            continue_free,
+            nested_jumps_only,
             writes,
             reads,
             poisons,
@@ -140,7 +140,7 @@ pub(crate) fn walk_loop(
             loop_fallthrough_forget(w, writes, reads, *poisons, *may_return, env, store);
             apply_loop_exit_negation(w, folder, cond, *break_free, env, store);
             let body_flow = walk_loop_body(w, folder, body, benv, bstore, descent, facts, out);
-            do_while_flow(*break_free, *continue_free, body_flow)
+            do_while_flow(*nested_jumps_only, body_flow)
         }
         _ => unreachable!("walk_trace hands walk_loop the four loop kinds only"),
     }
@@ -166,17 +166,21 @@ fn loop_flow(break_free: bool, verdict: Certainty) -> Flow {
 /// reach a tested name through an alias the sets do not name (`$GLOBALS['go']` at
 /// file scope), so a `Yes` on it would silence a successor PHP does reach.
 ///
-/// The body needs both jump gates. `body_flow` counts a `break` or
-/// `continue` as terminating its path — it leaves the block it is written in — but
-/// a `break` of this loop lands on the successor and a `continue` of it lands on the
-/// condition, which may fail. `break_free` rules out the first (and any jump out of
-/// the body past this loop), `continue_free` the second, and with both every jump
-/// the body walk stopped at belongs to a nested construct whose own walk already
-/// answered for it. What is left is `return`, `throw`, `exit` and a `never` call,
-/// none of which comes back.
-fn do_while_flow(break_free: bool, continue_free: bool, body_flow: Flow) -> Flow {
-    let body_decides = break_free && continue_free && body_flow == Flow::Terminated;
-    if body_decides { Flow::Terminated } else { Flow::FellThrough }
+/// The body needs a jump gate. `body_flow` counts a `break` or `continue` as
+/// terminating its path — it leaves the block it is written in — but a `break` of
+/// this loop lands on the successor and a `continue` of it lands on the condition,
+/// which may fail. `nested_jumps_only` admits only single-level jumps inside a
+/// nested loop or `switch`, so every jump the body walk stopped at belongs to a
+/// nested construct whose own walk already answered for it. What is left is
+/// `return`, `throw`, `exit` and a `never` call, none of which comes back. It also
+/// refuses a multi-level jump out of a nested loop, which the walker's structured
+/// `switch` credits to the innermost breakable (#904); see the field's docs.
+fn do_while_flow(nested_jumps_only: bool, body_flow: Flow) -> Flow {
+    if nested_jumps_only && body_flow == Flow::Terminated {
+        Flow::Terminated
+    } else {
+        Flow::FellThrough
+    }
 }
 
 /// The env a **structured loop's fall-through** starts in (issue #651) — the same

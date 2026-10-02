@@ -336,17 +336,17 @@ $x->bar();
 }
 
 #[test]
-fn a_jump_out_of_a_loop_nested_in_a_switch_case_reaches_the_switch_successor() {
+fn a_multi_level_jump_in_the_body_keeps_the_do_while_successor_live() {
     // `break 2` / `continue 2` inside a loop inside a case leave the SWITCH and land
-    // after it, so that case does not end in its `return`. The switch must not be
-    // structured as if it did, which under a `do`-`while` would read the whole
-    // body as terminating.
+    // after it, so that case does not end in its `return` — but the walker's
+    // structured `switch` credits the jump to the innermost loop and reads the case
+    // as returning (#904). The `nested_jumps_only` gate refuses any multi-level jump,
+    // so the `do`-`while` does not trust that answer and its successor stays live.
     for jump in ["break 2;", "continue 2;"] {
-        let body = format!(
-            "switch ($k) {{ case 1: foreach ([1] as $v) {{ {jump} }} return; default: return; }}"
+        let looped = format!(
+            "do {{ switch ($k) {{ case 1: foreach ([1] as $v) {{ {jump} }} return; \
+             default: return; }} }} while (rand() > 0);"
         );
-        assert_eq!(on_null_after(&body), 1, "straight-line `{jump}`");
-        let looped = format!("do {{ {body} }} while (rand() > 0);");
         assert_eq!(on_null_after(&looped), 1, "`{jump}` under a `do`-`while`");
     }
     // The jump one level further out re-tests the `do`-`while` itself.
@@ -357,6 +357,12 @@ fn a_jump_out_of_a_loop_nested_in_a_switch_case_reaches_the_switch_successor() {
     let own = "do { switch ($k) { case 1: foreach ([1] as $v) { break; } return; \
                default: return; } } while (rand() > 0);";
     assert_eq!(on_null_after(own), 0, "the `foreach` owns its `break`");
+    // The documented precision cost: this `break 2` leaves only the outer `foreach`,
+    // still inside the body, and the body does end in `return` — but the gate
+    // refuses every multi-level jump until the passes it trusts count levels.
+    let nested = "do { foreach ([1] as $v) { foreach ([1] as $w) { break 2; } } return; } \
+                  while (rand() > 0);";
+    assert_eq!(on_null_after(nested), 1, "refused by the gate, a precision cost");
 }
 
 #[test]

@@ -551,22 +551,37 @@ function f(): int {
 }
 
 #[test]
-fn silent_on_a_do_while_whose_body_end_is_undecided() {
-    // The body is the only way to the condition, so a body whose end the judgment
-    // cannot decide (a `try`) leaves the loop undecided too, not falling through.
-    assert_silent(
+fn a_do_while_whose_body_can_reach_its_end_through_a_switch_still_reports() {
+    // Regression pins against master: a `switch` whose `break` lands after it lets
+    // the body reach its end, so the condition can fail and the function falls off
+    // its end. The `do`-`while` row must not read the body as terminating.
+    definite(
         "<?php
-function l(int $c): int {
+function rm1(int $c): int {
     do {
-        try {
-            return 1;
-        } finally {
-            echo 1;
+        switch ($c) {
+            case 1:
+                echo 1;
+                break;
         }
     } while ($c);
 }
 ",
-        "undecided: the `try` body's end is not decided",
+    );
+    maybe(
+        "<?php
+function rm2(int $c): int {
+    do {
+        switch ($c) {
+            case 1:
+                return 1;
+            default:
+                echo 1;
+                break;
+        }
+    } while ($c);
+}
+",
     );
 }
 

@@ -66,35 +66,39 @@ fn a_do_while_keeps_its_body() {
 }
 
 #[test]
-fn a_do_while_records_whether_a_continue_targets_it() {
-    // Issue #679: `continue_free` is read off the CST body with levels counted, as
-    // `break_free` is. A bare `continue` inside a nested `switch` is the switch's;
-    // `continue 2` there, or inside a nested loop, is this loop's.
-    let continue_free = |body: &str| {
+fn a_do_while_records_whether_every_jump_in_it_is_a_nested_constructs() {
+    // Issue #679: `nested_jumps_only` is read off the CST body. Every `break` and
+    // `continue` must have level 1 and sit inside a nested loop or `switch`, and no
+    // `goto` may appear; nested function-likes are not descended. A multi-level jump
+    // is refused even where it stays inside the body (#904).
+    let nested_jumps_only = |body: &str| {
         let got = stmts("int $n", &format!("do {{ {body} }} while ($n > 0);"));
         match &got[..] {
-            [Stmt { kind: StmtKind::DoWhile { continue_free, .. }, .. }] => *continue_free,
+            [Stmt { kind: StmtKind::DoWhile { nested_jumps_only, .. }, .. }] => *nested_jumps_only,
             other => panic!("the `do`-`while` lowered to {other:?}"),
         }
     };
     for body in [
         "return;",
-        "break;",
         "while ($n) { continue; }",
         "foreach ([1] as $v) { if ($v) { continue; } }",
         "switch ($n) { case 1: continue; }",
+        "switch ($n) { case 1: break; }",
         "$f = function () { foreach ([1] as $v) { continue; } };",
     ] {
-        assert!(continue_free(body), "`{body}` has no `continue` of this loop");
+        assert!(nested_jumps_only(body), "every jump in `{body}` is a nested construct's");
     }
     for body in [
         "continue;",
+        "break;",
         "if ($n) { continue; }",
         "while ($n) { continue 2; }",
+        "while ($n) { break 2; }",
         "switch ($n) { case 1: continue 2; }",
         "foreach ([1] as $v) { switch ($v) { case 1: continue 3; } }",
+        "goto done; done: return;",
     ] {
-        assert!(!continue_free(body), "`{body}` continues this loop");
+        assert!(!nested_jumps_only(body), "`{body}` holds a jump this gate refuses");
     }
 }
 
