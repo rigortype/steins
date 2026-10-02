@@ -5,7 +5,7 @@
 //! through which `check`, `transform` and MCP (issue #117) build ONE salsa
 //! project (ADR-0009/0015) so cross-file calls, class chains and effects resolve.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -16,6 +16,7 @@ use steins_db::{
     composer, project_index,
 };
 
+use steins_edit::EditPlan;
 use steins_syntax::{Utf8Loss, decode_source};
 
 use crate::config::vendor_dirs_from_disk;
@@ -84,23 +85,51 @@ pub(crate) fn source_input(
     SourceFile::builder(path, text).loss(loss).new(db)
 }
 
-/// Refusal text for the first of `paths` whose bytes on disk are not valid UTF-8, or `None`
-/// when every one is.
+/// The reason a writer names for a file it leaves alone because the analysis read it through
+/// a lossy decoding.
+pub(crate) const BYTE_LOSSY_REASON: &str = "byte-lossy-source";
+
+/// The files of `project` that were analyzed through a lossy decoding: their bytes were not
+/// valid UTF-8, so the text the analysis read has U+FFFD where each ill-formed sequence was.
 ///
-/// The writers (`check --fix`, `transform`, MCP apply) splice into the text the analysis
-/// read, and for such a file that text is a decode with U+FFFD for each ill-formed
-/// sequence: writing it back would replace the file's own bytes. Moving the source to bytes
-/// (ADR-0080 §3.2) is what lets a writer touch such a file; until then it refuses, by
-/// name, before it writes anything.
-pub(crate) fn byte_lossy_refusal<'a>(paths: impl IntoIterator<Item = &'a str>) -> Option<String> {
-    paths.into_iter().find_map(|path| {
-        let bytes = std::fs::read(path).ok()?;
-        std::str::from_utf8(&bytes).is_err().then(|| {
-            format!(
-                "refusing to rewrite {path}: the file is not valid UTF-8, so it was analyzed through a decoding that replaces each ill-formed byte, and writing that back would destroy the original bytes (convert the file to UTF-8, or make the edit by hand)"
-            )
+/// Read off the analyzed inputs' loss maps, not re-read from disk, so it is the answer for
+/// the very text an edit would be spliced into.
+pub(crate) fn byte_lossy_paths(db: &SteinsDatabase, project: Project) -> HashSet<String> {
+    project
+        .files(db)
+        .iter()
+        .filter(|f| f.loss(db).is_some())
+        .map(|f| f.path(db).to_owned())
+        .collect()
+}
+
+/// Drop from `plan` every edit to a file in `lossy`, and say so: one `(path, notice)` per
+/// file, in plan order, each notice naming [`BYTE_LOSSY_REASON`].
+///
+/// The writers splice into the decoded text, and writing it back over a file that was not
+/// valid UTF-8 would replace its own bytes with U+FFFD. Moving the source to bytes
+/// (ADR-0080 §3.2) is what lets a writer touch such a file; until then its edits are left
+/// out and the rest of the plan stands, judged and written as the edits that remain.
+pub(crate) fn drop_byte_lossy_edits(
+    plan: &mut EditPlan,
+    lossy: &HashSet<String>,
+) -> Vec<(String, String)> {
+    let skipped: Vec<(String, usize)> = plan
+        .edited_paths()
+        .into_iter()
+        .filter(|p| lossy.contains(*p))
+        .map(|p| (p.to_owned(), plan.edits.iter().filter(|e| e.path == p).count()))
+        .collect();
+    plan.edits.retain(|e| !lossy.contains(&e.path));
+    skipped
+        .into_iter()
+        .map(|(path, n)| {
+            let notice = format!(
+                "left {path} alone ({BYTE_LOSSY_REASON}): the file is not valid UTF-8, so it was analyzed through a decoding that replaces each ill-formed byte, and writing {n} edit(s) back would destroy the original bytes (convert the file to UTF-8, or make the edit by hand)"
+            );
+            (path, notice)
         })
-    })
+        .collect()
 }
 
 /// One analyzed project: salsa database, [`Project`] input, parsed file

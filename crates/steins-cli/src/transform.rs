@@ -20,7 +20,8 @@ use steins_infer::{Diagnostic, INTERNAL_PANIC_ID, NoFold, check_project};
 
 use crate::config::{allow_list_from_disk, effects_policy_from_disk, load_partitions, load_vouches};
 use crate::project::{
-    byte_lossy_refusal, collect_files, load_project, reject_missing_paths, source_input,
+    byte_lossy_paths, collect_files, drop_byte_lossy_edits, load_project, reject_missing_paths,
+    source_input,
 };
 use crate::{Format, profile};
 
@@ -299,7 +300,7 @@ pub(crate) fn plan_transform_run(
     let (db, project) = (&loaded.db, loaded.project);
 
     // Plan the transform (pure — no writes, no re-check).
-    let report = match kind {
+    let mut report = match kind {
         TransformKind::Promote => plan_phpdoc_to_native(db, project, &vouches, partitions.as_ref()),
         TransformKind::Honesty => plan_phpdoc_honesty(db, project, &vouches, partitions.as_ref()),
         // No vouch set: proven escapes are forward facts (ADR-0046 §2 doesn't apply).
@@ -322,11 +323,11 @@ pub(crate) fn plan_transform_run(
     }
 
     // A file that was not valid UTF-8 is analyzed through a lossy decoding, and an edit would
-    // be spliced into that decoding and written over the file's own bytes (issue #927). The
-    // plan is refused whole, before it is shown or checked, so a dry run does not offer a
-    // diff that `--apply` would have to turn down.
-    if let Some(refusal) = byte_lossy_refusal(report.plan.edited_paths()) {
-        return Err(refusal);
+    // be spliced into that decoding and written over the file's own bytes (issue #927). Its
+    // edits are dropped, named, before the plan is shown or checked, so a dry run does not
+    // offer a diff that `--apply` would have to turn down; the rest of the plan stands.
+    for (_, notice) in drop_byte_lossy_edits(&mut report.plan, &byte_lossy_paths(db, project)) {
+        notices.push(notice);
     }
 
     // Dual verification (ADR-0034 point 3a): zero NEW diagnostics, both dry-run and `--apply`.

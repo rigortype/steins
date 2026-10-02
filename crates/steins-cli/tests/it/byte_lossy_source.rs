@@ -193,6 +193,59 @@ fn check_fix_refuses_a_byte_lossy_file_and_leaves_its_bytes() {
 }
 
 #[test]
+fn check_fix_writes_the_clean_files_and_leaves_a_byte_lossy_one_with_a_notice() {
+    let proj = TempProject::new("fixmixed");
+    proj.write("app.php", b"<?php\n$x = 5;\n\\PHPStan\\dumpType($x);\n");
+    let legacy = b"<?php\n$s = \"\x82\xA0\";\n$y = 6;\n\\PHPStan\\dumpType($y);\n";
+    proj.write("legacy.php", legacy);
+    let r = run(&["check", "--fix", proj.path()]);
+    assert!(r.stderr.contains("(byte-lossy-source)"), "the notice names it:\n{}", r.stderr);
+    assert!(r.stderr.contains("legacy.php"), "and the file:\n{}", r.stderr);
+    assert!(r.stderr.contains("fixed 1 finding(s) (1 file(s) written)"), "{}", r.stderr);
+    assert_eq!(proj.read("app.php"), b"<?php\n$x = 5;\n");
+    assert_eq!(proj.read("legacy.php"), legacy, "not one byte written");
+    // The lossy file's dump is still a finding, not reported as fixed.
+    let of_legacy = |l: &&str| l.contains("legacy.php");
+    let (unfixed, fixed) = ("error[debug.type]", "fixed[");
+    assert!(r.stdout.lines().filter(of_legacy).any(|l| l.contains(unfixed)), "{}", r.stdout);
+    assert!(!r.stdout.lines().filter(of_legacy).any(|l| l.contains(fixed)), "{}", r.stdout);
+    assert_eq!(r.code, 1, "the unfixed finding still fails the run:\n{}", r.stdout);
+}
+
+#[test]
+fn a_lossy_string_that_nothing_reads_as_a_name_leaves_the_file_analysed() {
+    // Each file spells a lossy string where a callable, an argument of a named call or an
+    // effect-label position could read it, then a mistake the analysis proves. The base
+    // reports the mistake, and so must this: no name token is over a replaced byte.
+    let proj = TempProject::new("argmark");
+    let tail = |n: &str| format!("function g_{n}(int $i): void {{}}\ng_{n}(\"x\");\n");
+    let heads: [(&str, &[u8]); 4] = [
+        ("m1.php", b"<?php\nvar_dump(strlen(\"\x82\"));\n"),
+        ("m3.php", b"<?php\necho htmlspecialchars(\"\x82\xA0\");\n"),
+        ("n1.php", b"<?php\nfunction f(): void { $s = \"\x82\"; echo $s; }\n"),
+        (
+            "p1.php",
+            b"<?php\nclass UC { public function index(): void { $t = \"\x83\x86\"; echo $t; } }\n",
+        ),
+    ];
+    for (name, head) in heads {
+        let stem = name.trim_end_matches(".php");
+        proj.write(name, &[head, tail(stem).as_bytes()].concat());
+    }
+    let r = run(&["check", "--no-cache", proj.path()]);
+    for name in ["m1", "m3", "n1", "p1"] {
+        let file = format!("{name}.php:");
+        assert!(
+            r.stdout
+                .lines()
+                .any(|l| l.contains(&file) && l.contains("error[type.argument-mismatch]")),
+            "{name}.php stays analysed:\n{}",
+            r.stdout
+        );
+    }
+}
+
+#[test]
 fn check_fix_in_a_clean_file_is_not_disturbed_by_a_byte_lossy_neighbour() {
     // The post-check re-analyzes every file; the neighbour must keep its loss map there, or
     // its collapsed duplicate would look like a regression the edit caused.
@@ -208,7 +261,7 @@ fn check_fix_in_a_clean_file_is_not_disturbed_by_a_byte_lossy_neighbour() {
 }
 
 #[test]
-fn transform_refuses_a_byte_lossy_file_before_planning_it() {
+fn transform_leaves_a_byte_lossy_file_out_of_the_plan_and_says_so() {
     let proj = TempProject::new("transform");
     let lib = b"<?php\n// \x82\xA0\n/** @param int $x */\nfunction f($x) { return $x; }\n";
     proj.write("lib.php", lib);
@@ -218,10 +271,27 @@ fn transform_refuses_a_byte_lossy_file_before_planning_it() {
         args.extend_from_slice(flags);
         args.push(proj.path());
         let r = run(&args);
-        assert_eq!(r.code, 2, "{args:?}: stderr:\n{}", r.stderr);
+        assert_eq!(r.code, 0, "{args:?}: stderr:\n{}", r.stderr);
+        assert!(r.stderr.contains("(byte-lossy-source)"), "{args:?}: stderr:\n{}", r.stderr);
         assert!(r.stderr.contains("not valid UTF-8"), "{args:?}: stderr:\n{}", r.stderr);
+        assert!(!r.stdout.contains("+function"), "{args:?}: no diff for it:\n{}", r.stdout);
         assert_eq!(proj.read("lib.php"), lib, "{args:?}: not one byte written");
     }
+}
+
+#[test]
+fn transform_still_writes_the_other_files_of_a_plan_with_a_byte_lossy_one() {
+    let proj = TempProject::new("transformmixed");
+    let lossy = b"<?php\n// \x82\xA0\n/** @param int $x */\nfunction f($x) { return $x; }\n";
+    proj.write("lossy.php", lossy);
+    proj.write("clean.php", b"<?php\n/** @param int $y */\nfunction h($y) { return $y; }\n");
+    proj.write("main.php", b"<?php\nf(1);\nh(2);\n");
+    let r = run(&["transform", "phpdoc-to-native", "--apply", proj.path()]);
+    assert_eq!(r.code, 0, "stderr:\n{}", r.stderr);
+    assert!(r.stderr.contains("(byte-lossy-source)"), "{}", r.stderr);
+    let clean = String::from_utf8(proj.read("clean.php")).unwrap();
+    assert!(clean.contains("function h(int $y)"), "the clean file is promoted:\n{clean}");
+    assert_eq!(proj.read("lossy.php"), lossy, "the lossy file is not one byte different");
 }
 
 #[test]

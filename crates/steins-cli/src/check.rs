@@ -35,7 +35,10 @@ use crate::config::{
 };
 use crate::generation::{consume_cached_run, try_generation_check};
 use crate::progress::progress_for;
-use crate::project::{LoadedProject, collect_files, load_project, reject_missing_paths};
+use crate::project::{
+    BYTE_LOSSY_REASON, LoadedProject, byte_lossy_paths, collect_files, drop_byte_lossy_edits,
+    load_project, reject_missing_paths,
+};
 use crate::transform::{PostCheckSurface, post_check};
 use crate::{baseline, profile, render};
 
@@ -228,7 +231,7 @@ pub(crate) fn run_check(args: &[String]) -> ExitCode {
     // A fixed finding leaves both display and exit; the plan is atomic, so
     // payload presence is the partition key.
     let (displayed, fixed): (Vec<Diagnostic>, Vec<Diagnostic>) = match &fix_run {
-        Some(run) if run.applied => displayed.into_iter().partition(|d| d.fix.is_none()),
+        Some(run) if run.applied => displayed.into_iter().partition(|d| !run.fixed(d)),
         _ => (displayed, Vec::new()),
     };
 
@@ -416,6 +419,9 @@ pub(crate) struct FixRun {
     pub(crate) applied: bool,
     files_written: usize,
     pub(crate) refusal: Option<FixRefusal>,
+    /// The files whose fixes were left out because the analysis read them through a lossy
+    /// decoding (issue #927), each with its notice. Their findings stay displayed as unfixed.
+    skipped: Vec<(String, String)>,
 }
 
 /// The fix refusal for a run, or a post-check, in which a file's analysis
@@ -429,8 +435,17 @@ impl FixRun {
         FixRun {
             applied: false,
             files_written: 0,
+            skipped: Vec::new(),
             refusal: Some(FixRefusal { reason, detail, new_diagnostics: Vec::new() }),
         }
+    }
+
+    /// Whether `d`'s fix was written: it has one, and none of its edits is to a file that was
+    /// left alone as byte-lossy. Only meaningful for a run that [`applied`](Self::applied).
+    fn fixed(&self, d: &Diagnostic) -> bool {
+        d.fix.as_ref().is_some_and(|f| {
+            !f.edits.iter().any(|e| self.skipped.iter().any(|(path, _)| *path == e.path))
+        })
     }
 
     /// Whether the fixes were refused because an analysis panicked.
@@ -463,6 +478,9 @@ pub(crate) struct FixRefusal {
 
 /// Fix-run accounting, after the report like other maintenance confirmations.
 fn report_fix_run(run: &FixRun, fixed: usize) {
+    for (_, notice) in &run.skipped {
+        errln!("steins: {notice}");
+    }
     if run.applied {
         errln!("steins: fixed {fixed} finding(s) ({} file(s) written)", run.files_written);
     } else if let Some(r) = &run.refusal {
@@ -480,7 +498,7 @@ fn apply_fixes(
     displayed: &[Diagnostic],
     texts: &HashMap<String, String>,
 ) -> FixRun {
-    let none = FixRun { applied: false, files_written: 0, refusal: None };
+    let none = FixRun { applied: false, files_written: 0, refusal: None, skipped: Vec::new() };
     let fixes: Vec<&steins_infer::Fix> = displayed.iter().filter_map(|d| d.fix.as_ref()).collect();
     if fixes.is_empty() {
         return none;
@@ -502,6 +520,7 @@ fn apply_fixes(
                 return FixRun {
                     applied: false,
                     files_written: 0,
+                    skipped: Vec::new(),
                     refusal: Some(FixRefusal {
                         reason: "overlapping-fix-edits",
                         detail: format!("cannot combine this run's fixes into one plan: {err}"),
@@ -512,24 +531,30 @@ fn apply_fixes(
         }
     }
 
-    // A file that was not valid UTF-8 was analyzed through a lossy decoding; the fixes are
-    // spliced into that decoding and would be written over the file's own bytes (issue #927).
-    // Refused whole, by name, before the post-check and before a byte is written.
-    if let Some(detail) = crate::project::byte_lossy_refusal(plan.edited_paths()) {
-        return FixRun {
-            applied: false,
-            files_written: 0,
-            refusal: Some(FixRefusal {
-                reason: "byte-lossy-source",
-                detail,
-                new_diagnostics: Vec::new(),
-            }),
-        };
-    }
+    // A file that was not valid UTF-8 was analyzed through a lossy decoding; its fixes would
+    // be spliced into that decoding and written over the file's own bytes (issue #927). They
+    // are left out, by name, and the rest of the plan is judged and written as it stands.
+    let skipped = drop_byte_lossy_edits(&mut plan, &byte_lossy_paths(db, project));
+    let mut run = if plan.is_empty() && !skipped.is_empty() {
+        let detail = "every fix is to a file that is not valid UTF-8, and each is named above";
+        FixRun::refused(BYTE_LOSSY_REASON, detail.to_owned())
+    } else {
+        write_fixes(db, project, &plan, texts)
+    };
+    run.skipped = skipped;
+    run
+}
 
+/// The post-check and the write of an assembled plan (ADR-0034 point 3a).
+fn write_fixes(
+    db: &SteinsDatabase,
+    project: Project,
+    plan: &EditPlan,
+    texts: &HashMap<String, String>,
+) -> FixRun {
     // Post-check gate (ADR-0034 point 3a): refuses the write if any id's count
     // rises. Broad surface — a fix-it must not move the contract layer.
-    let postcheck = post_check(db, project, &plan, texts, PostCheckSurface::Everything);
+    let postcheck = post_check(db, project, plan, texts, PostCheckSurface::Everything);
     if !postcheck.panicked.is_empty() {
         return FixRun::refused(PANICKED_REASON, postcheck.panic_notice());
     }
@@ -538,6 +563,7 @@ fn apply_fixes(
         return FixRun {
             applied: false,
             files_written: 0,
+            skipped: Vec::new(),
             refusal: Some(FixRefusal {
                 reason: "postcheck-new-diagnostics",
                 detail: format!("applying the fixes would surface {n} new diagnostic(s)"),
@@ -554,6 +580,7 @@ fn apply_fixes(
             return FixRun {
                 applied: false,
                 files_written: written,
+                skipped: Vec::new(),
                 refusal: Some(FixRefusal {
                     reason: "fix-target-unread",
                     detail: format!(
@@ -568,6 +595,7 @@ fn apply_fixes(
             return FixRun {
                 applied: false,
                 files_written: written,
+                skipped: Vec::new(),
                 refusal: Some(FixRefusal {
                     reason: "write-failed",
                     detail: format!("cannot write {path}: {e} ({written} file(s) already written)"),
@@ -577,7 +605,7 @@ fn apply_fixes(
         }
         written += 1;
     }
-    FixRun { applied: true, files_written: written, refusal: None }
+    FixRun { applied: true, files_written: written, refusal: None, skipped: Vec::new() }
 }
 
 /// The `[[policy]]` scoped enable/disable stage (ADR-0050 §6): currently an
