@@ -38,6 +38,8 @@ const STUB_ONLY: &[&str] = &["pdo_pgsql_ext", "pdo_sqlite_ext"];
 struct Row {
     name: String,
     source: String,
+    /// The stub's class-level `@alias` names (issue #917).
+    aliases: Vec<String>,
 }
 
 /// The committed hierarchy's rows. The file is the generator's input, written in one
@@ -51,12 +53,18 @@ fn rows() -> Vec<Row> {
     let mut rows: Vec<Row> = Vec::new();
     for line in text.lines() {
         if line == "[[class]]" {
-            rows.push(Row { name: String::new(), source: String::new() });
+            rows.push(Row { name: String::new(), source: String::new(), aliases: Vec::new() });
         } else if let Some(row) = rows.last_mut() {
             if let Some(v) = line.strip_prefix("name = '") {
                 row.name = v.trim_end_matches('\'').to_owned();
             } else if let Some(v) = line.strip_prefix("source = '") {
                 row.source = v.trim_end_matches('\'').to_owned();
+            } else if let Some(v) = line.strip_prefix("aliases = [") {
+                row.aliases = v
+                    .trim_end_matches(']')
+                    .split(", ")
+                    .map(|a| a.trim_matches('\'').to_owned())
+                    .collect();
             }
         }
     }
@@ -126,6 +134,46 @@ fn every_hierarchy_key_resolves_under_the_key_it_is_stored_as() {
         rows.len()
     );
     assert!(resolved > 0, "no row resolved");
+}
+
+/// Issue #917: a stub's class-level `@alias` is a second name of the same class, so the
+/// engine answers the **declared** name for either spelling, and the catalog's table says
+/// exactly that. The pin lists one (`Dom\DOMException`); a PHP without `ext/dom`, or older
+/// than the pin, has no class to compare and the engine half is skipped.
+#[test]
+fn a_mined_second_name_resolves_to_the_declared_class() {
+    let with_second_names: Vec<Row> =
+        rows().into_iter().filter(|row| !row.aliases.is_empty()).collect();
+    assert!(!with_second_names.is_empty(), "the pin mines at least one class-level alias");
+    for row in &with_second_names {
+        for second in &row.aliases {
+            assert_eq!(
+                steins_catalog::builtin_class_alias(second),
+                Some(row.name.as_str()),
+                "`{second}`: the catalog's table disagrees with the mined row"
+            );
+        }
+    }
+    let Ok(mut sidecar) = Sidecar::spawn() else {
+        eprintln!("SKIP a_mined_second_name_resolves… (engine half): no PHP engine");
+        return;
+    };
+    let env = sidecar.env().expect("a live engine answers `env`");
+    let loaded: Vec<String> = env.extensions.iter().map(|e| e.to_ascii_lowercase()).collect();
+    let (major, minor) = minor_of(&env.php_version);
+    if (major as u16, minor as u16) < steins_catalog::PINNED_PHP {
+        return;
+    }
+    for row in &with_second_names {
+        if !loaded.contains(&extension_of(&row.source)) {
+            continue;
+        }
+        for second in &row.aliases {
+            let answer = sidecar.reflect_class(&second.to_ascii_lowercase()).expect("answers");
+            let class = answer.declaration.expect("a second name of a loaded class resolves");
+            assert_eq!(class.name, row.name, "`{second}` is a second name of `{}`", row.name);
+        }
+    }
 }
 
 /// Namespaced classes every supported PHP has (`ext/random` is built in since 8.2):

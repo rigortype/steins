@@ -14,7 +14,7 @@
 //! only from here.
 
 use crate::{
-    declared_method_returns_generated, declared_returns_generated, display_names_generated,
+    class_aliases_generated, declared_method_returns_generated, declared_returns_generated, display_names_generated,
     hierarchy_generated, migrated_resource_classes_generated, param_facts_generated,
     resource_params_generated, resource_returns_generated, return_facts_generated,
 };
@@ -31,16 +31,43 @@ use crate::{
 /// enum interface roots.
 ///
 /// Matching is case-insensitive; namespaced builtins (`Random\…`, `FFI\…`)
-/// **are** resolved. **Builtin enums are deliberately absent** (→ `Unknown`):
+/// **are** resolved, and a class's second name answers as the class does
+/// ([`builtin_class_alias`]: `Dom\DOMException` is `DOMException`).
+/// **Builtin enums are deliberately absent** (→ `Unknown`):
 /// the mining data omits an enum's implicit `UnitEnum`/`BackedEnum`
 /// interfaces, so a `No` verdict would be unsound (ADR-0043 §3).
 #[must_use]
 pub fn builtin_class_supers(name: &str) -> Option<Vec<&'static str>> {
-    let key = name.trim_start_matches('\\').to_ascii_lowercase();
+    let key = canonical_key(name);
     hierarchy_generated::HIERARCHY
         .binary_search_by(|(n, _)| (*n).cmp(key.as_str()))
         .ok()
         .map(|i| hierarchy_generated::HIERARCHY[i].1.to_vec())
+}
+
+/// The class a builtin's **second name** denotes, in the casing php-src declares it
+/// (`Dom\DOMException` → `DOMException`), or `None` when `name` is no second name.
+///
+/// A stub's class-level `@alias` gives one class entry two names, so
+/// `ReflectionClass::getName()` of either answers the declared one, and an instance of
+/// the class satisfies a type or a `catch` spelled with either (issue #917). The mined
+/// set at the pinned tag is that one pair; every other builtin class answers `None`,
+/// the declared name itself included. Matching is case-insensitive, backslash stripped,
+/// as in the other lookups. This is identity, not display: a consumer that compares two
+/// class names resolves both through it before it decides.
+#[must_use]
+pub fn builtin_class_alias(name: &str) -> Option<&'static str> {
+    let key = name.trim_start_matches('\\').to_ascii_lowercase();
+    class_aliases_generated::CLASS_ALIASES
+        .binary_search_by(|(n, _)| (*n).cmp(key.as_str()))
+        .ok()
+        .map(|i| class_aliases_generated::CLASS_ALIASES[i].1)
+}
+
+/// The lowercase table key `name` is answered under: the declared class's when `name`
+/// is a second name ([`builtin_class_alias`]), else its own.
+fn canonical_key(name: &str) -> String {
+    builtin_class_alias(name).unwrap_or_else(|| name.trim_start_matches('\\')).to_ascii_lowercase()
 }
 
 /// The number of rows in the generated hierarchy table (ADR-0054 §9.6
@@ -60,12 +87,14 @@ pub fn hierarchy_entry_count() -> usize {
 /// consult it — everything downstream compares case-insensitively.
 ///
 /// Matching is case-insensitive, backslash stripped, namespaced builtins
-/// resolved as in [`builtin_class_supers`]. **Enums are present here** even
+/// resolved as in [`builtin_class_supers`]; a second name answers the declared class's
+/// casing ([`builtin_class_alias`]: `Dom\DOMException` → `DOMException`, the name
+/// `ReflectionClass::getName()` reports). **Enums are present here** even
 /// though the hierarchy table skips them, since a display name has no
 /// soundness gate to guard.
 #[must_use]
 pub fn builtin_class_display(name: &str) -> Option<&'static str> {
-    let key = name.trim_start_matches('\\').to_ascii_lowercase();
+    let key = canonical_key(name);
     display_names_generated::DISPLAY_NAMES
         .binary_search_by(|(n, _)| (*n).cmp(key.as_str()))
         .ok()
@@ -1390,9 +1419,52 @@ mod tests {
             let key = class.to_ascii_lowercase();
             assert_eq!(super::builtin_class_display(&key), Some(*class), "{class}");
         }
-        // Not an engine class: an alias is the global class's, and PECL is not php-src.
-        assert_eq!(super::builtin_class_display("dom\\domexception"), None);
+        // Not a row of its own: the second name is the global class's (it answers that
+        // class's casing, not a `Dom\DOMException` of its own), and PECL is not php-src.
+        assert_eq!(super::builtin_class_display("dom\\domexception"), Some("DOMException"));
         assert_eq!(super::builtin_class_display("ast\\node"), None);
+    }
+
+    /// Issue #917: php-src's one class-level `@alias` is a second name of the same
+    /// class, and the lookups answer through it rather than as an unknown external.
+    #[test]
+    fn a_stub_alias_is_the_same_class() {
+        use super::{builtin_class_alias as alias, builtin_class_supers as supers};
+        assert_eq!(alias("Dom\\DOMException"), Some("DOMException"));
+        assert_eq!(alias("\\dom\\domexception"), Some("DOMException"));
+        // The declared name is not its own alias, nor is any other class.
+        assert_eq!(alias("DOMException"), None);
+        assert_eq!(alias("Dom\\Element"), None);
+        assert_eq!(alias("Exception"), None);
+        assert_eq!(supers("Dom\\DOMException"), supers("DOMException"));
+        assert_eq!(supers("Dom\\DOMException"), Some(vec!["Exception"]));
+        assert_eq!(
+            super::builtin_class_display("\\DOM\\domexception"),
+            super::builtin_class_display("domexception")
+        );
+    }
+
+    /// The alias table is sorted for its binary search, and a second name is no row of
+    /// the tables it answers through: the pair would have two identities.
+    #[test]
+    fn the_alias_table_is_sorted_and_names_declared_classes() {
+        let t = super::class_aliases_generated::CLASS_ALIASES;
+        assert!(t.windows(2).all(|w| w[0].0 < w[1].0), "CLASS_ALIASES must be strictly sorted");
+        for &(second, declared) in t {
+            assert_eq!(second, second.to_ascii_lowercase(), "key must be lowercase");
+            let declared_key = declared.to_ascii_lowercase();
+            assert!(
+                super::hierarchy_generated::HIERARCHY.iter().any(|(k, _)| *k == declared_key)
+                    || super::display_names_generated::DISPLAY_NAMES
+                        .iter()
+                        .any(|(k, _)| *k == declared_key),
+                "`{second}` names `{declared}`, which is no declared class"
+            );
+            assert!(
+                !super::display_names_generated::DISPLAY_NAMES.iter().any(|(k, _)| *k == second),
+                "`{second}` is both a second name and a declared class"
+            );
+        }
     }
 
     #[test]
