@@ -388,10 +388,19 @@ constant. Restoring the exact fold needs a lossless encoding on the ADR-0024
 protocol and is ADR-0080 §3.1. The name lanes decline in the same direction —
 a byte string never resolves as a class, function, method, effect label,
 include path or preg pattern — and the phpdoc spelling lane widens rather than
-inventing an escape the grammar does not have. Separately, *source files* are
-still read UTF-8-lossily, so a file that is not itself valid UTF-8 collapses
-before parsing (ADR-0080 §3.2), which also leaves the salsa backdating in §3.3
-open.
+inventing an escape the grammar does not have. A *source file* that is not
+itself valid UTF-8 (a legacy Shift-JIS or EUC-JP file) is still decoded with
+U+FFFD for each ill-formed sequence before parsing, and spans and offsets are
+the decoding's (ADR-0080 §3.2). The value and name lanes no longer read that
+collapse (issue #927, ADR-0080 §3.2's interim): a string literal over a replaced
+byte is the bytes the file spells, so it compares and keys as a byte string and
+does not fold, and a file with a class, function, method, property, constant or
+variable name over a replaced byte makes no claim at all, nor is its code
+descended into from other files. `check --fix`, `transform`, MCP apply and
+`annotate` refuse such a file, since writing the decoding back would replace its
+original bytes. What stays open is the byte-source move itself: the text is
+still the decoding, so the writers cannot touch these files, and the salsa
+backdating in §3.3 is closed only for what the value lane reads.
 
 **Builtin parameter types reach only what the engine can be asked and the
 native relation can spell** (issue #423, ADR-0056 §9; the whole-surface gap of
