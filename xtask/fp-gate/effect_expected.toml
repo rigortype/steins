@@ -22,3 +22,14 @@
 # upstream's spellings too — `@phpstan-impure` since #311, and the envelope pair
 # since #303 taught the scanner `@phpstan-all-methods-pure` — so "no envelopes in
 # the corpus" stopped being true the day it was read for upstream's vocabulary.
+
+# Registered 2026-10-02 (issue #915, ADR-0100): `effect.maybe-envelope-exceeded`, the
+# strict-floor sibling of `effect.envelope-exceeded`, joins the family. It is 0 on every
+# public package. PHPStan's own `src/` has one, measured locally under PHP 8.5 with the
+# `src` + `vendor` scoping (CI does not measure this project): `return $this->unsealed;` in
+# `@phpstan-pure` `ConstantArrayType::getUnsealedTypes()`
+# (`src/Type/Constant/ConstantArrayType.php:225:10`), kind `operator-magic-property`. A
+# property read through a non-final `$this` is a MagicProp gap in the exhaustiveness bit
+# (ADR-0099 §4.4), and the floor reports it as it should; whether a declared property read
+# on `$this` ought to stay a gap is a separate precision question.
+"phpstan/phpstan-src" = 1
