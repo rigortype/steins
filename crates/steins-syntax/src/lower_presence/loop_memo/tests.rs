@@ -86,7 +86,7 @@ fn the_cache_is_off_when_forced_and_answers_otherwise() {
 /// The table is dropped when the outermost loop's reporting walk returns, so it holds
 /// one top-level loop's silent walks and not every loop in the function: 2,000
 /// sequential `while { for { } }` pairs once held a record each for the whole run,
-/// 2.1 GB where the function itself is 61 MB.
+/// peaking at 2.1 GB where the run without the cache peaks at 61 MB.
 #[test]
 fn sequential_loops_do_not_accumulate_records() {
     let peak_for = |pairs: usize| {
