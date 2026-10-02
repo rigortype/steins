@@ -334,13 +334,29 @@ fn an_edge_into_an_attributed_callee_is_discharged_by_the_policy() {
 }
 
 #[test]
-fn a_call_on_an_attributed_declared_receiver_is_discharged_by_the_policy() {
-    let src = "<?php\ninterface Logger { public function info(string $m): void; }\n#[\\Steins\\Pure]\nfunction f(Logger $l, int $a): int { $l->info('x'); return $a + 1; }\n";
-    assert_eq!(effect(src).len(), 1);
+fn a_call_on_an_attributed_exact_declared_receiver_is_discharged_by_the_policy() {
+    // The declared class is final, so the body that runs is the attributed one.
+    let src = "<?php\nfinal class Logger { public function info(string $m): void { error_log($m); } }\n#[\\Steins\\Pure]\nfunction f(Logger $l, int $a): int { $l->info('x'); return $a + 1; }\n";
+    assert_eq!(effect(src).len(), 1, "with no policy the receiver is a gap");
     assert!(effect_under_telemetry(src).is_empty(), "{:#?}", effect_under_telemetry(src));
+    // A final method of a non-final class is exact too.
+    let final_method = src.replace("final class Logger { public function", "class Logger { final public function");
+    assert!(effect_under_telemetry(&final_method).is_empty());
     // A receiver the policy does not attribute stays a gap.
     let other = src.replace("Logger", "Mailer");
     assert_eq!(effect_under_telemetry(&other).len(), 1);
+}
+
+#[test]
+fn a_declared_receiver_whose_dispatch_is_open_keeps_its_gap_under_the_policy() {
+    // `Logger` is attributed, but a subclass or an implementation runs its own body: the
+    // definite lane would attribute `LoudLogger::info`, which the policy does not name.
+    let non_final = "<?php\nclass Logger { public function info(string $m): void { error_log($m); } }\nclass LoudLogger extends Logger { public function info(string $m): void { echo $m; } }\n#[\\Steins\\Pure]\nfunction f(Logger $l, int $a): int { $l->info('x'); return $a + 1; }\n";
+    assert_eq!(effect_under_telemetry(non_final).len(), 1, "a non-final class");
+    let interface = "<?php\ninterface Logger { public function info(string $m): void; }\nfinal class LoudLogger implements Logger { public function info(string $m): void { echo $m; } }\n#[\\Steins\\Pure]\nfunction f(Logger $l, int $a): int { $l->info('x'); return $a + 1; }\n";
+    assert_eq!(effect_under_telemetry(interface).len(), 1, "an interface");
+    let promoted = "<?php\ninterface Logger { public function info(string $m): void; }\nfinal class Svc { public function __construct(private Logger $log) {} #[\\Steins\\Pure] public function run(int $a): int { $this->log->info('x'); return $a; } }\n";
+    assert_eq!(effect_under_telemetry(promoted).len(), 1, "a promoted property typed to an interface");
 }
 
 #[test]
@@ -359,12 +375,10 @@ fn an_interop_bound_the_policy_tolerates_is_discharged() {
         .filter(|d| d.id == EFFECT_MAYBE_ENVELOPE_EXCEEDED_ID)
         .collect();
     assert!(found.is_empty(), "{found:#?}");
-    // An interop tag naming a label the registry does not know is ⊤, and its receiver is
-    // a declared receiver the policy attributes (or not) like any other.
+    // An interop tag naming a label the registry does not know is ⊤: its receiver is a
+    // declared receiver like any other, and the policy does not attribute `Gate`.
     let unknown = "<?php\ninterface Gate { /** @phpstan-impure telemetry */ public function open(): int; }\n#[\\Steins\\Pure]\nfunction f(Gate $g): int { return $g->open(); }\n";
     assert_eq!(effect_under_telemetry(unknown).len(), 1, "Gate is not attributed");
-    let attributed = unknown.replace("Gate", "Logger");
-    assert!(effect_under_telemetry(&attributed).is_empty());
 }
 
 // ---- discharge 5: a catch that absorbs Throwable ---------------------------

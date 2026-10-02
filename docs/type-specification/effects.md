@@ -377,8 +377,9 @@ call; the project's tolerance policy (an attributed callee or declared
 receiver); and, in the throw lane, a site under a `catch (\Throwable)`. Every
 other gap kind, `no-effect-row` included, is reported. Exhaustiveness and
 `effect-diff` read the same gaps and are unchanged, and so are `annotate`'s `…?`
-marker and gap kinds; its margin and JSON list every emitted id regardless of
-profile, so the new ids appear there as the other strict ids do.
+marker and gap kinds; its text margin lists every emitted id regardless of
+profile, so the new ids appear there as the other strict ids do (its JSON carries
+no finding ids).
 
 ## The declared lane
 
