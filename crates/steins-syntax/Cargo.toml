@@ -18,6 +18,7 @@ workspace = true
 # acyclic and adds no build surface.
 steins-domain = { path = "../steins-domain" }
 mago-syntax.workspace = true
+mago-syntax-core.workspace = true
 mago-allocator.workspace = true
 mago-span.workspace = true
 mago-database.workspace = true
