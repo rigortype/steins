@@ -30,6 +30,17 @@
 //! Each run is cold by construction: a fresh salsa DB and a fresh sidecar per
 //! run. The OS file cache is the one warmth the harness does not control,
 //! which is part of why timing never gates.
+//!
+//! Each cold run is also a **child process** (issue #913): the xtask re-invokes
+//! itself as the hidden `perf-child` command, so the parent can read that run's
+//! peak resident set from `wait4` — a lifetime high-water mark in one process
+//! stops moving after run 1 and includes the harness. See [`child`]. Peak RSS,
+//! unlike timing, can gate: `--check-rss` fails above the blessed value times
+//! [`RSS_CEILING_FRACTION`] headroom.
+
+mod child;
+
+pub use child::{CHILD_COMMAND, run_child};
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -66,12 +77,23 @@ const BASELINE_FILE: &str = "perf.local.toml";
 /// crossed budget prints a note, timing never fails.
 const COLD_BUDGET_FRACTION: f64 = 0.10;
 
+/// Headroom over the blessed peak RSS that `--check-rss` allows (issue #913).
+/// Resident-set peaks are far steadier than wall clock — the same tree in the
+/// same build moves by a couple of percent — so, unlike timing, this one gates;
+/// the headroom is what an allocator's run-to-run noise and a small legitimate
+/// addition cost, and a reduction ratchets by re-blessing lower.
+const RSS_CEILING_FRACTION: f64 = 0.10;
+
 /// Entry point for `cargo xtask perf <target-dir>... [--runs N] [--bless]
-/// [--no-php] [--warm] [--paranoid]`. Returns `Ok(true)` when green;
-/// `Ok(false)` on a determinism, baseline-hash, warm ≡ cold, or paranoid
-/// divergence failure; `Err` for operator mistakes (bad args, unreadable
-/// baseline, posture mismatch — a compare across postures is an error, not a
-/// number).
+/// [--no-php] [--warm] [--paranoid] [--check-rss] [--baseline PATH]`. Returns
+/// `Ok(true)` when green; `Ok(false)` on a determinism, baseline-hash, peak-RSS
+/// ceiling, warm ≡ cold, or paranoid divergence failure; `Err` for operator
+/// mistakes (bad args, unreadable baseline, posture mismatch — a compare across
+/// postures is an error, not a number — or `--check-rss` with no blessed peak
+/// to check against).
+///
+/// Each cold run executes in a child process and reports its peak RSS (issue
+/// #913); `--warm` stays in-process and records none.
 ///
 /// `--warm` (issue #489, the warm half of ADR-0092 §5's oracle): per target,
 /// cold-build + publish a generation into a scratch store, then measure warm
@@ -104,7 +126,11 @@ pub fn run(args: &[String]) -> Result<bool, String> {
     };
     let posture = if parsed.no_php { Posture::NoPhp } else { Posture::Php };
 
-    let baseline_path = repo_root().join(BASELINE_FILE);
+    let baseline_path = repo_root().join(parsed.baseline.as_deref().unwrap_or(BASELINE_FILE));
+    let baseline_label = baseline_path.file_name().map_or_else(
+        || BASELINE_FILE.to_owned(),
+        |n| n.to_string_lossy().into_owned(),
+    );
     let mut baseline = read_baseline(&baseline_path)?;
 
     let mut green = true;
@@ -154,33 +180,14 @@ pub fn run(args: &[String]) -> Result<bool, String> {
         if parsed.bless {
             blessed.push(entry_from(target, posture, &m));
         } else {
-            match verdict(baseline.get(target), &m, posture) {
-                BaselineVerdict::NoBaseline => println!(
-                    "    baseline: none recorded for this target on this machine — `--bless` to pin one"
-                ),
-                BaselineVerdict::PostureMismatch { recorded } => {
-                    return Err(format!(
-                        "target `{target}`: baseline was blessed under posture `{recorded}` but this run is `{}` — a cross-posture compare is an error, not a number; re-run under the blessed posture or re-bless",
-                        posture.as_str()
-                    ));
-                }
-                BaselineVerdict::HashMismatch { recorded } => {
-                    green = false;
-                    println!(
-                        "    baseline: FINDINGS HASH MISMATCH — recorded {} findings over {} files (sha256 {}…), measured {} findings over {} files (sha256 {}…). The target tree moved or the analyzer changed what it finds; triage, then re-bless consciously.",
-                        recorded.findings,
-                        recorded.files,
-                        &recorded.findings_sha256[..12.min(recorded.findings_sha256.len())],
-                        m.findings,
-                        m.files,
-                        &m.findings_sha256[..12]
-                    );
-                }
-                BaselineVerdict::Match { recorded } => {
-                    println!("    baseline: findings hash matches ({BASELINE_FILE})");
-                    print_timing_delta(&recorded, &m.median);
-                }
-            }
+            green &= check_baseline(&BaselineCheck {
+                target,
+                entry: baseline.get(target),
+                m: &m,
+                posture,
+                check_rss: parsed.check_rss,
+                label: &baseline_label,
+            })?;
         }
     }
 
@@ -199,6 +206,119 @@ pub fn run(args: &[String]) -> Result<bool, String> {
     Ok(green)
 }
 
+/// What [`check_baseline`] judges: one target's measurement and its blessed entry.
+struct BaselineCheck<'a> {
+    target: &'a str,
+    entry: Option<&'a BaselineEntry>,
+    m: &'a Measurement,
+    posture: Posture,
+    /// `--check-rss`: a peak over the ceiling is red, and a missing one an error.
+    check_rss: bool,
+    /// The baseline file's name, for the messages.
+    label: &'a str,
+}
+
+/// Judge a measurement against the target's blessed entry and print what it
+/// finds. `Ok(false)` is red (findings hash moved, or `--check-rss` and the
+/// peak is over its ceiling); `Err` is an operator mistake.
+fn check_baseline(c: &BaselineCheck) -> Result<bool, String> {
+    let (target, m, label) = (c.target, c.m, c.label);
+    match verdict(c.entry, m, c.posture) {
+        BaselineVerdict::NoBaseline if c.check_rss => Err(format!(
+            "target `{target}`: --check-rss compares against a blessed peak, and {label} has no entry for this target; `--bless` one first"
+        )),
+        BaselineVerdict::NoBaseline => {
+            println!(
+                "    baseline: none recorded for this target on this machine — `--bless` to pin one"
+            );
+            Ok(true)
+        }
+        BaselineVerdict::PostureMismatch { recorded } => Err(format!(
+            "target `{target}`: baseline was blessed under posture `{recorded}` but this run is `{}` — a cross-posture compare is an error, not a number; re-run under the blessed posture or re-bless",
+            c.posture.as_str()
+        )),
+        BaselineVerdict::HashMismatch { recorded } => {
+            println!(
+                "    baseline: FINDINGS HASH MISMATCH — recorded {} findings over {} files (sha256 {}…), measured {} findings over {} files (sha256 {}…). The target tree moved or the analyzer changed what it finds; triage, then re-bless consciously.",
+                recorded.findings,
+                recorded.files,
+                &recorded.findings_sha256[..12.min(recorded.findings_sha256.len())],
+                m.findings,
+                m.files,
+                &m.findings_sha256[..12]
+            );
+            Ok(false)
+        }
+        BaselineVerdict::Match { recorded } => {
+            println!("    baseline: findings hash matches ({label})");
+            print_timing_delta(&recorded, &m.median);
+            report_peak_rss(c, &recorded)
+        }
+    }
+}
+
+/// Print the peak-RSS movement against the blessed value and, under
+/// `--check-rss`, turn a peak over the ceiling into red. Without the flag it
+/// is advisory, like the timing line above it.
+fn report_peak_rss(c: &BaselineCheck, recorded: &BaselineEntry) -> Result<bool, String> {
+    let target = c.target;
+    match rss_verdict(recorded.peak_rss_mb, c.m.median_peak_rss_mb) {
+        RssVerdict::NotMeasured if c.check_rss => Err(format!(
+            "target `{target}`: --check-rss, but this platform reports no peak RSS for a child process"
+        )),
+        RssVerdict::NotMeasured => Ok(true),
+        RssVerdict::NotBlessed if c.check_rss => Err(format!(
+            "target `{target}`: --check-rss, but the blessed entry in {} predates peak RSS recording; re-bless it",
+            c.label
+        )),
+        RssVerdict::NotBlessed => {
+            println!(
+                "    peak RSS vs baseline: none blessed (the entry predates it) — `--bless` to record"
+            );
+            Ok(true)
+        }
+        RssVerdict::Judged { blessed, measured, ceiling } => {
+            let pct = (measured - blessed) / blessed * 100.0;
+            let over = measured > ceiling;
+            let verdict = match (over, c.check_rss) {
+                (false, _) => "within the ceiling",
+                (true, true) => "OVER THE CEILING",
+                (true, false) => "over the ceiling (advisory; --check-rss gates on it)",
+            };
+            println!(
+                "    peak RSS vs baseline: {blessed:.1} → {measured:.1} MB ({pct:+.1}%), ceiling {ceiling:.1} MB (blessed +{:.0}%) — {verdict}",
+                RSS_CEILING_FRACTION * 100.0
+            );
+            Ok(!(over && c.check_rss))
+        }
+    }
+}
+
+/// How a peak-RSS measurement relates to the blessed one.
+#[derive(Debug, PartialEq)]
+enum RssVerdict {
+    /// This run has no peak (a platform without `wait4`).
+    NotMeasured,
+    /// The blessed entry predates the field.
+    NotBlessed,
+    /// Both exist; `ceiling` is `blessed × (1 + RSS_CEILING_FRACTION)`.
+    Judged { blessed: f64, measured: f64, ceiling: f64 },
+}
+
+/// Compare a measured peak (MB) to the blessed one. Over the ceiling is
+/// strictly greater: a peak exactly at it holds.
+fn rss_verdict(blessed: Option<f64>, measured: Option<f64>) -> RssVerdict {
+    match (blessed, measured) {
+        (_, None) => RssVerdict::NotMeasured,
+        (None, Some(_)) => RssVerdict::NotBlessed,
+        (Some(blessed), Some(measured)) => RssVerdict::Judged {
+            blessed,
+            measured,
+            ceiling: blessed * (1.0 + RSS_CEILING_FRACTION),
+        },
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Arguments
 // ---------------------------------------------------------------------------
@@ -213,7 +333,15 @@ struct PerfArgs {
     warm: bool,
     paranoid: bool,
     edits: bool,
+    /// `--check-rss` (issue #913): gate on the blessed peak-RSS ceiling.
+    check_rss: bool,
+    /// `--baseline PATH`: the baseline file, relative to the repo root; a CI job
+    /// keeps its tracked ceilings in one, since `perf.local.toml` is untracked.
+    baseline: Option<String>,
 }
+
+/// The arguments as the error messages spell them.
+const USAGE: &str = "<target-dir>... [--runs N] [--bless] [--no-php] [--warm] [--paranoid] [--edits] [--check-rss] [--baseline PATH]";
 
 fn parse_args(args: &[String]) -> Result<PerfArgs, String> {
     let mut targets = Vec::new();
@@ -223,6 +351,8 @@ fn parse_args(args: &[String]) -> Result<PerfArgs, String> {
     let mut warm = false;
     let mut paranoid = false;
     let mut edits = false;
+    let mut check_rss = false;
+    let mut baseline = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -236,6 +366,10 @@ fn parse_args(args: &[String]) -> Result<PerfArgs, String> {
             }
             "--bless" => bless = true,
             "--no-php" => no_php = true,
+            "--check-rss" => check_rss = true,
+            "--baseline" => {
+                baseline = Some(it.next().ok_or("--baseline needs a path")?.to_owned());
+            }
             "--warm" => warm = true,
             // Verifying skips only means something over a published
             // generation, so the flag implies the warm half rather than
@@ -252,15 +386,21 @@ fn parse_args(args: &[String]) -> Result<PerfArgs, String> {
                 warm = true;
             }
             other if other.starts_with("--") => {
-                return Err(format!("unknown flag `{other}` (perf <target-dir>... [--runs N] [--bless] [--no-php] [--warm] [--paranoid] [--edits])"));
+                return Err(format!("unknown flag `{other}` ({USAGE})"));
             }
             dir => targets.push(dir.to_owned()),
         }
     }
     if targets.is_empty() {
-        return Err("usage: cargo xtask perf <target-dir>... [--runs N] [--bless] [--no-php] [--warm] [--paranoid] [--edits]".to_owned());
+        return Err(format!("usage: cargo xtask perf {USAGE}"));
     }
-    Ok(PerfArgs { targets, runs, bless, no_php, warm, paranoid, edits })
+    if check_rss && bless {
+        return Err(
+            "--check-rss and --bless are exclusive: blessing records the peak, it does not check it"
+                .to_owned(),
+        );
+    }
+    Ok(PerfArgs { targets, runs, bless, no_php, warm, paranoid, edits, check_rss, baseline })
 }
 
 /// The engine posture a measurement ran under (recorded in the baseline; the
@@ -314,6 +454,11 @@ pub struct Measurement {
     pub findings_sha256: String,
     pub timings: Vec<RunTiming>,
     pub median: RunTiming,
+    /// Each cold run's peak resident set, MB, in run order (issue #913). `None`
+    /// where the platform reports none.
+    pub peak_rss_mb: Vec<Option<f64>>,
+    /// The median of [`Self::peak_rss_mb`]; `None` unless every run reported one.
+    pub median_peak_rss_mb: Option<f64>,
     pub determinism: Determinism,
 }
 
@@ -330,34 +475,57 @@ pub enum Determinism {
 }
 
 /// One cold run's full result, kept only long enough to compare runs.
+#[derive(Debug)]
 struct ColdRun {
     files: usize,
     skipped_links: usize,
     timing: RunTiming,
     serialized: String,
-    id_counts: BTreeMap<&'static str, usize>,
+    id_counts: BTreeMap<String, usize>,
+    /// The run's peak resident set in bytes, as its parent read it from `wait4`
+    /// (see [`child`]); `None` for a run made in this process, which has no
+    /// such number of its own, and on a platform that reports none.
+    peak_rss_bytes: Option<u64>,
 }
 
-/// Measure `dir` over `runs` cold runs on a worker thread sized per
-/// [`WORKER_STACK_SIZE`] (the analysis recursion must not overflow `main`'s
-/// default stack — same shape as `nsrt`).
+/// Measure `dir` over `runs` cold runs, each in a child process so each has a
+/// peak RSS of its own (issue #913). The runs are driven from a worker thread
+/// sized per [`WORKER_STACK_SIZE`]; the stack matters for the child, which
+/// does the analysis, and for [`measure_target_with`]'s in-process runner.
 pub fn measure_target(dir: &Path, runs: usize, posture: Posture) -> Result<Measurement, String> {
+    measure_target_with(dir, runs, posture, child::spawn_cold)
+}
+
+/// [`measure_target`] with the cold-run strategy named: the child process in
+/// production, [`cold_run`] itself in the unit tests (a test binary is not the
+/// xtask, so it cannot re-invoke itself as `perf-child`).
+fn measure_target_with(
+    dir: &Path,
+    runs: usize,
+    posture: Posture,
+    runner: impl Fn(&Path, Posture) -> Result<ColdRun, String> + Send + 'static,
+) -> Result<Measurement, String> {
     let dir = dir.to_path_buf();
     std::thread::Builder::new()
         .stack_size(WORKER_STACK_SIZE)
-        .spawn(move || measure_on_worker(&dir, runs, posture))
+        .spawn(move || measure_on_worker(&dir, runs, posture, &runner))
         .expect("failed to spawn the perf worker thread")
         .join()
         .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
 }
 
-fn measure_on_worker(dir: &Path, runs: usize, posture: Posture) -> Result<Measurement, String> {
+fn measure_on_worker(
+    dir: &Path,
+    runs: usize,
+    posture: Posture,
+    runner: &impl Fn(&Path, Posture) -> Result<ColdRun, String>,
+) -> Result<Measurement, String> {
     if !dir.is_dir() {
         return Err(format!("target `{}` is not a directory", dir.display()));
     }
     let mut cold: Vec<ColdRun> = Vec::with_capacity(runs);
     for _ in 0..runs {
-        cold.push(cold_run(dir, posture)?);
+        cold.push(runner(dir, posture)?);
     }
 
     // Inputs must hold still for the oracle to mean anything: a tree that
@@ -386,6 +554,13 @@ fn measure_on_worker(dir: &Path, runs: usize, posture: Posture) -> Result<Measur
         analyze_ms: median(timings.iter().map(|t| t.analyze_ms)),
         total_ms: median(timings.iter().map(|t| t.total_ms)),
     };
+    let peak_rss_mb: Vec<Option<f64>> =
+        cold.iter().map(|r| r.peak_rss_bytes.map(child::bytes_to_mb)).collect();
+    let median_peak_rss_mb = peak_rss_mb
+        .iter()
+        .copied()
+        .collect::<Option<Vec<f64>>>()
+        .map(|all| self::median(all.into_iter()));
     let findings = cold[0].id_counts.values().sum();
     let findings_sha256 = sha256::hex(cold[0].serialized.as_bytes());
     Ok(Measurement {
@@ -395,6 +570,8 @@ fn measure_on_worker(dir: &Path, runs: usize, posture: Posture) -> Result<Measur
         findings_sha256,
         timings,
         median,
+        peak_rss_mb,
+        median_peak_rss_mb,
         determinism,
     })
 }
@@ -447,9 +624,9 @@ fn cold_run(dir: &Path, posture: Posture) -> Result<ColdRun, String> {
     let diags = check_project(&db, project, &mut folder);
     let analyze_ms = ms(t_analyze.elapsed());
 
-    let mut id_counts: BTreeMap<&'static str, usize> = BTreeMap::new();
+    let mut id_counts: BTreeMap<String, usize> = BTreeMap::new();
     for d in &diags {
-        *id_counts.entry(d.id).or_insert(0) += 1;
+        *id_counts.entry(d.id.to_owned()).or_insert(0) += 1;
     }
     Ok(ColdRun {
         files: files.len(),
@@ -457,6 +634,7 @@ fn cold_run(dir: &Path, posture: Posture) -> Result<ColdRun, String> {
         timing: RunTiming { load_ms, analyze_ms, total_ms: load_ms + analyze_ms },
         serialized: canonical_serialization(diags),
         id_counts,
+        peak_rss_bytes: None,
     })
 }
 
@@ -860,11 +1038,11 @@ fn determinism_diff(first: &ColdRun, other: &ColdRun) -> String {
 
 /// The ids whose counts differ between two runs, as `(id, count_a, count_b)`,
 /// sorted by id. An id absent from a run counts 0.
-fn id_count_diff(
-    a: &BTreeMap<&'static str, usize>,
-    b: &BTreeMap<&'static str, usize>,
-) -> Vec<(&'static str, usize, usize)> {
-    let mut ids: Vec<&'static str> = a.keys().chain(b.keys()).copied().collect();
+fn id_count_diff<'a>(
+    a: &'a BTreeMap<String, usize>,
+    b: &'a BTreeMap<String, usize>,
+) -> Vec<(&'a str, usize, usize)> {
+    let mut ids: Vec<&str> = a.keys().chain(b.keys()).map(String::as_str).collect();
     ids.sort_unstable();
     ids.dedup();
     ids.into_iter()
@@ -900,6 +1078,11 @@ pub struct BaselineEntry {
     pub load_ms: f64,
     pub analyze_ms: f64,
     pub total_ms: f64,
+    /// Median peak resident set over the blessed cold runs, MB (10⁶ bytes;
+    /// issue #913). Absent in an entry blessed before peak RSS was recorded —
+    /// such a file still loads, and `--check-rss` asks for a re-bless.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peak_rss_mb: Option<f64>,
 }
 
 impl Baseline {
@@ -955,6 +1138,7 @@ fn entry_from(target: &str, posture: Posture, m: &Measurement) -> BaselineEntry 
         load_ms: round(m.median.load_ms),
         analyze_ms: round(m.median.analyze_ms),
         total_ms: round(m.median.total_ms),
+        peak_rss_mb: m.median_peak_rss_mb.map(round),
     }
 }
 
@@ -1003,21 +1187,37 @@ fn print_measurement(target: &str, posture: Posture, m: &Measurement) {
         );
     }
     for (i, t) in m.timings.iter().enumerate() {
+        let rss = m.peak_rss_mb.get(i).copied().flatten();
         println!(
-            "    run {}: load+parse {:.1} ms, analyze {:.1} ms, total {:.1} ms",
+            "    run {}: load+parse {:.1} ms, analyze {:.1} ms, total {:.1} ms{}",
             i + 1,
             t.load_ms,
             t.analyze_ms,
-            t.total_ms
+            t.total_ms,
+            rss.map_or_else(String::new, |mb| format!(", peak RSS {mb:.1} MB"))
         );
     }
     println!(
-        "    median: load+parse {:.1} ms, analyze {:.1} ms, total {:.1} ms  (findings sha256 {}…)",
+        "    median: load+parse {:.1} ms, analyze {:.1} ms, total {:.1} ms{}  (findings sha256 {}…)",
         m.median.load_ms,
         m.median.analyze_ms,
         m.median.total_ms,
+        m.median_peak_rss_mb.map_or_else(String::new, |mb| {
+            format!(", peak RSS {mb:.1} MB{}", rss_spread(&m.peak_rss_mb))
+        }),
         &m.findings_sha256[..12]
     );
+}
+
+/// ` (range lo–hi)` over the runs' peaks, for the median line; empty when a
+/// run reported none or there is nothing to range over.
+fn rss_spread(peaks: &[Option<f64>]) -> String {
+    let all: Option<Vec<f64>> = peaks.iter().copied().collect();
+    let Some(all) = all.filter(|v| v.len() > 1) else { return String::new() };
+    let lo = all.iter().copied().fold(f64::INFINITY, f64::min);
+    let hi = all.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let half_range_pct = (hi - lo) / 2.0 / median(all.into_iter()) * 100.0;
+    format!(" (range {lo:.1}–{hi:.1}, ±{half_range_pct:.1}%)")
 }
 
 /// Print the timing movement against the blessed medians. Never gates: this
@@ -1435,12 +1635,12 @@ mod tests {
     #[test]
     fn id_count_diff_reports_only_moved_ids() {
         let mut a = BTreeMap::new();
-        a.insert("type.mismatch", 5);
-        a.insert("variable.undefined", 2);
+        a.insert("type.mismatch".to_owned(), 5);
+        a.insert("variable.undefined".to_owned(), 2);
         let mut b = BTreeMap::new();
-        b.insert("type.mismatch", 6);
-        b.insert("variable.undefined", 2);
-        b.insert("throw.undeclared", 1);
+        b.insert("type.mismatch".to_owned(), 6);
+        b.insert("variable.undefined".to_owned(), 2);
+        b.insert("throw.undeclared".to_owned(), 1);
         let diff = id_count_diff(&a, &b);
         assert_eq!(diff, vec![("throw.undeclared", 0, 1), ("type.mismatch", 5, 6)]);
     }
@@ -1464,6 +1664,7 @@ mod tests {
             load_ms: 12.5,
             analyze_ms: 100.0,
             total_ms: 112.5,
+            peak_rss_mb: Some(150.5),
         });
         baseline.upsert(BaselineEntry {
             path: "corpus/a".to_owned(),
@@ -1474,6 +1675,7 @@ mod tests {
             load_ms: 1.0,
             analyze_ms: 2.0,
             total_ms: 3.0,
+            peak_rss_mb: None,
         });
         // Sorted by path for a stable file.
         assert_eq!(baseline.targets[0].path, "corpus/a");
@@ -1500,6 +1702,7 @@ mod tests {
             load_ms: 1.0,
             analyze_ms: 1.0,
             total_ms: 2.0,
+            peak_rss_mb: None,
         };
         let m = Measurement {
             files: 1,
@@ -1508,6 +1711,8 @@ mod tests {
             findings_sha256: "dd".repeat(32),
             timings: vec![],
             median: RunTiming { load_ms: 1.0, analyze_ms: 1.0, total_ms: 2.0 },
+            peak_rss_mb: vec![],
+            median_peak_rss_mb: None,
             determinism: Determinism::Ok,
         };
         // Same posture, different hash → the hash mismatch reds.
@@ -1522,6 +1727,105 @@ mod tests {
         ));
         // No entry → no baseline, never a failure.
         assert!(matches!(verdict(None, &m, Posture::Php), BaselineVerdict::NoBaseline));
+    }
+
+    #[test]
+    fn a_baseline_blessed_before_peak_rss_still_loads_and_stays_without_it() {
+        let old = "[[target]]\npath = \"corpus/a\"\nposture = \"php\"\nfiles = 3\nfindings = 0\n\
+                   findings_sha256 = \"bb\"\nload_ms = 1.0\nanalyze_ms = 2.0\ntotal_ms = 3.0\n";
+        let baseline: Baseline = toml::from_str(old).expect("an entry without the field loads");
+        assert_eq!(baseline.targets[0].peak_rss_mb, None);
+        // Re-serializing does not invent the field (TOML has no null).
+        let text = toml::to_string_pretty(&baseline).expect("serializes");
+        assert!(!text.contains("peak_rss_mb"), "{text}");
+        // One that has it keeps it.
+        let with = format!("{old}peak_rss_mb = 123.4\n");
+        let baseline: Baseline = toml::from_str(&with).expect("loads");
+        assert_eq!(baseline.targets[0].peak_rss_mb, Some(123.4));
+    }
+
+    #[test]
+    fn the_rss_ceiling_is_blessed_plus_ten_percent_and_strict() {
+        let judged = |blessed, measured| match rss_verdict(Some(blessed), Some(measured)) {
+            RssVerdict::Judged { measured, ceiling, .. } => measured > ceiling,
+            other => panic!("expected a judgement, got {other:?}"),
+        };
+        assert!(!judged(100.0, 100.0));
+        assert!(!judged(100.0, 110.0), "exactly at the ceiling holds");
+        assert!(judged(100.0, 110.1));
+        assert!(!judged(100.0, 60.0), "a reduction never fails");
+        assert_eq!(rss_verdict(Some(100.0), None), RssVerdict::NotMeasured);
+        assert_eq!(rss_verdict(None, Some(100.0)), RssVerdict::NotBlessed);
+        assert_eq!(rss_verdict(None, None), RssVerdict::NotMeasured);
+    }
+
+    /// `--check-rss` turns the ceiling into red, a missing blessed value into an
+    /// operator error, and without the flag the same numbers only print.
+    #[test]
+    fn check_rss_gates_on_the_ceiling_only_when_asked() {
+        let entry = |peak| BaselineEntry {
+            path: "t".to_owned(),
+            posture: "php".to_owned(),
+            files: 1,
+            findings: 1,
+            findings_sha256: "cc".repeat(32),
+            load_ms: 1.0,
+            analyze_ms: 1.0,
+            total_ms: 2.0,
+            peak_rss_mb: peak,
+        };
+        let m = |rss| Measurement {
+            files: 1,
+            skipped_links: 0,
+            findings: 1,
+            findings_sha256: "cc".repeat(32),
+            timings: vec![],
+            median: RunTiming { load_ms: 1.0, analyze_ms: 1.0, total_ms: 2.0 },
+            peak_rss_mb: vec![rss],
+            median_peak_rss_mb: rss,
+            determinism: Determinism::Ok,
+        };
+        let check = |e: Option<&BaselineEntry>, m: &Measurement, check_rss| {
+            check_baseline(&BaselineCheck {
+                target: "t",
+                entry: e,
+                m,
+                posture: Posture::Php,
+                check_rss,
+                label: "perf.ci.toml",
+            })
+        };
+        let blessed = entry(Some(100.0));
+        assert_eq!(check(Some(&blessed), &m(Some(105.0)), true), Ok(true));
+        assert_eq!(check(Some(&blessed), &m(Some(111.0)), true), Ok(false));
+        // Advisory without the flag.
+        assert_eq!(check(Some(&blessed), &m(Some(111.0)), false), Ok(true));
+        // Nothing to compare against: an error under the flag, quiet without it.
+        assert!(check(None, &m(Some(105.0)), true).is_err());
+        assert_eq!(check(None, &m(Some(105.0)), false), Ok(true));
+        let old = entry(None);
+        assert!(check(Some(&old), &m(Some(105.0)), true).unwrap_err().contains("re-bless"));
+        assert_eq!(check(Some(&old), &m(Some(105.0)), false), Ok(true));
+        assert!(check(Some(&blessed), &m(None), true).is_err());
+    }
+
+    #[test]
+    fn check_rss_and_bless_are_exclusive_and_baseline_takes_a_path() {
+        let args = |a: &[&str]| parse_args(&a.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>());
+        assert!(args(&["t", "--check-rss", "--bless"]).is_err());
+        let ok = args(&["t", "--check-rss", "--baseline", "perf.ci.toml"]).expect("parses");
+        assert!(ok.check_rss);
+        assert_eq!(ok.baseline.as_deref(), Some("perf.ci.toml"));
+        assert!(args(&["t", "--baseline"]).is_err());
+        assert!(!args(&["t"]).expect("parses").check_rss);
+    }
+
+    #[test]
+    fn the_rss_spread_reads_off_the_runs() {
+        assert_eq!(rss_spread(&[Some(100.0)]), "");
+        assert_eq!(rss_spread(&[Some(100.0), None]), "");
+        let spread = rss_spread(&[Some(98.0), Some(100.0), Some(102.0)]);
+        assert_eq!(spread, " (range 98.0–102.0, ±2.0%)");
     }
 
     /// Integration smoke: a tiny self-contained PHP tree (the temp-dir fixture
@@ -1551,15 +1855,21 @@ mod tests {
         )
         .expect("write broken.php");
 
-        let m = measure_target(&dir, 2, Posture::NoPhp).expect("measure the fixture tree");
+        // In-process: a test binary is not the xtask, so it cannot be the child.
+        let m = measure_target_with(&dir, 2, Posture::NoPhp, cold_run)
+            .expect("measure the fixture tree");
         assert_eq!(m.files, 3);
         assert!(matches!(m.determinism, Determinism::Ok), "the oracle must hold on a fixed tree");
         assert!(m.findings >= 1, "the unbound read in broken.php should be found");
         assert_eq!(m.timings.len(), 2);
+        // A run made in this process has no peak of its own to report.
+        assert_eq!(m.peak_rss_mb, vec![None, None]);
+        assert_eq!(m.median_peak_rss_mb, None);
 
         // A second, independent invocation reproduces the hash — what makes a
         // blessed baseline comparable at all.
-        let again = measure_target(&dir, 2, Posture::NoPhp).expect("measure again");
+        let again =
+            measure_target_with(&dir, 2, Posture::NoPhp, cold_run).expect("measure again");
         assert_eq!(again.findings_sha256, m.findings_sha256);
         assert_eq!(again.findings, m.findings);
 

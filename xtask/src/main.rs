@@ -25,8 +25,8 @@
 //!   mine-resource-params [--php-src DIR]
 //!                            scan php-src's stubs for `@param resource` positions into the resource-params TOML
 //!   nsrt [DIR]               assertType harness (oracle idea B) over phpstan-src nsrt
-//!   perf <DIR>… [--runs N] [--bless] [--no-php] [--warm] [--paranoid]
-//!                            cold perf baseline + the determinism half of warm ≡ cold (ADR-0092 §5)
+//!   perf <DIR>… [--runs N] [--bless] [--no-php] [--warm] [--paranoid] [--check-rss]
+//!                            cold perf baseline, peak RSS per run + its ceiling, and the determinism half of warm ≡ cold (ADR-0092 §5)
 //!   phpdoc-oracle [--check]  diff steins-phpdoc against the real phpstan/phpdoc-parser
 //! ```
 //!
@@ -209,7 +209,7 @@ const COMMANDS: &[Command] = &[
     // ADR-0092 §5: a determinism or blessed-findings break blocks; timing never does.
     Command {
         name: "perf",
-        usage: "<DIR>… [--runs N] [--bless] [--no-php] [--warm] [--paranoid]",
+        usage: "<DIR>… [--runs N] [--bless] [--no-php] [--warm] [--paranoid] [--check-rss]",
         run: |args| verdict(perf::run(args)),
     },
     Command {
@@ -230,6 +230,12 @@ fn main() -> ExitCode {
         eprintln!("{}", usage());
         return ExitCode::from(2);
     };
+    // `perf`'s own re-invocation, one cold run per process (issue #913). Not in
+    // `COMMANDS`: it is a protocol with its parent, not a command anyone types,
+    // so the usage text and the unknown-command list leave it out.
+    if name == perf::CHILD_COMMAND {
+        return outcome(perf::run_child(&args[1..]));
+    }
     match COMMANDS.iter().find(|c| c.name == name) {
         Some(command) => (command.run)(&args[1..]),
         None => {
