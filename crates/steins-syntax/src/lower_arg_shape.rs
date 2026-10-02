@@ -13,25 +13,30 @@ use std::ops::{Deref, DerefMut};
 
 use mago_syntax::cst::{
     Access, Argument, ArgumentList, ArrayElement, Assignment, AssignmentOperator, BinaryOperator,
-    Construct, Expression, FunctionLikeParameterList, Hint, Literal, Node, UnaryPrefixOperator,
-    Variable,
+    Call, Construct, Expression, FunctionLikeParameterList, Hint, Literal, Node,
+    UnaryPrefixOperator, Variable,
 };
 
 use crate::ast::{ArgShape, SUPERGLOBALS, Stored};
-use crate::lower_expr::{method_name_of, prop_fetch_of, trace_static_class};
+use crate::lower_effect::EffectScanCx;
+use crate::lower_expr::{
+    effect_recv_of_class, effect_recv_of_object_declared, method_name_of, prop_fetch_of,
+    trace_static_class,
+};
+use crate::names::name_ref;
 use crate::{bytes_to_string, children, strip_dollar};
 
 /// The per-position [`ArgShape`] of a call's arguments, or `None` for a named
 /// or spread argument list, whose positions cannot be read.
 pub(crate) fn arg_shapes_of(
     list: &ArgumentList<'_>,
-    frame: &FrameBindings,
+    cx: &EffectScanCx,
 ) -> Option<Vec<ArgShape>> {
     let mut shapes = Vec::new();
     for arg in list.arguments.iter() {
         match arg {
             Argument::Positional(p) if p.ellipsis.is_none() => {
-                shapes.push(arg_shape(p.value, frame));
+                shapes.push(arg_shape(p.value, cx));
             }
             _ => return None,
         }
@@ -45,12 +50,12 @@ pub(crate) fn arg_shapes_of(
 pub(crate) fn method_call_shapes(
     receiver: &Expression<'_>,
     list: &ArgumentList<'_>,
-    frame: &FrameBindings,
+    cx: &EffectScanCx,
 ) -> Option<Vec<ArgShape>> {
     if !method_callee_resolvable(receiver) {
         return None;
     }
-    arg_shapes_of(list, frame)
+    arg_shapes_of(list, cx)
 }
 
 /// Whether a method or static call's receiver names its callee to the effects
@@ -67,11 +72,12 @@ fn method_callee_resolvable(receiver: &Expression<'_>) -> bool {
 }
 
 /// One argument expression's [`ArgShape`].
-pub(crate) fn arg_shape(expr: &Expression<'_>, frame: &FrameBindings) -> ArgShape {
+pub(crate) fn arg_shape(expr: &Expression<'_>, cx: &EffectScanCx) -> ArgShape {
     match expr.unparenthesized() {
         Expression::Variable(Variable::Direct(dv)) => {
-            frame.shape(&strip_dollar(bytes_to_string(dv.name)))
+            cx.bindings.shape(&strip_dollar(bytes_to_string(dv.name)))
         }
+        Expression::Call(call) => call_shape(call, cx),
         Expression::Access(Access::Property(pa)) => match prop_fetch_of(pa.object, &pa.property) {
             Some((var, prop)) if var == "this" => ArgShape::ThisProperty(prop),
             _ => ArgShape::Unknown,
@@ -81,6 +87,26 @@ pub(crate) fn arg_shape(expr: &Expression<'_>, frame: &FrameBindings) -> ArgShap
             Some(Stored::Array) => ArgShape::Array,
             None => ArgShape::Unknown,
         },
+    }
+}
+
+/// The shape of a call's result: the callee, for the engine to read what its
+/// declared return holds ([`ArgShape::Call`], [`ArgShape::MethodCall`]). A call the
+/// scan cannot name (`$f()`, `$o->$m()`, `?->`) is [`ArgShape::Unknown`]. The callee's
+/// arguments are not read: the declared return holds whatever they are.
+fn call_shape(call: &Call<'_>, cx: &EffectScanCx) -> ArgShape {
+    let method = |receiver, selector| match (receiver, method_name_of(selector)) {
+        (Some(receiver), Some(method)) => ArgShape::MethodCall { receiver, method },
+        _ => ArgShape::Unknown,
+    };
+    match call {
+        Call::Function(fc) => match fc.function {
+            Expression::Identifier(id) => ArgShape::Call(name_ref(id)),
+            _ => ArgShape::Unknown,
+        },
+        Call::Method(mc) => method(effect_recv_of_object_declared(mc.object, cx), &mc.method),
+        Call::StaticMethod(sc) => method(effect_recv_of_class(sc.class), &sc.method),
+        Call::NullSafeMethod(_) => ArgShape::Unknown,
     }
 }
 

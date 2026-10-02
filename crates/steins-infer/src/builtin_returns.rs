@@ -331,7 +331,7 @@ pub(crate) fn builtin_method_return_floor(
 ///
 /// [`builtin_class_supers`]: steins_catalog::builtin_class_supers
 /// [`declared_method_return_blocked`]: steins_catalog::declared_method_return_blocked
-fn builtin_method_row(
+pub(crate) fn builtin_method_row(
     class: &str,
     method: &str,
     target: Option<&steins_db::PhpTarget>,

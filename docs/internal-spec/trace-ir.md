@@ -172,6 +172,14 @@ method or a `new` is left for the effects pass to check against the callee's
 by-reference flags; handed to anything else, it counts as written. `$this->p`
 reads the property's declared type.
 
+A call result is a shape too (issue #877): `ArgShape::Call` names a plain call's
+function and `ArgShape::MethodCall` a method or static call's receiver and
+method, the receiver spelled as a method-call site's is. The syntax crate cannot
+consult the catalog or the project, so the shape carries the callee only and the
+engine reads what its declared return holds: a builtin's mined row, a project
+function's or method's native hint, an engine method's mined row. Both variants
+are appended after `Unknown`, so no persisted variant index moves.
+
 ## Not implemented
 
 - **Loop bodies as traces.** Loops are `Opaque`.

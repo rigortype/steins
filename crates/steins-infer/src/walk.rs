@@ -331,7 +331,7 @@ fn declares_never(cx: &Cx, file: usize, ret_span: Option<Span>) -> bool {
 /// namespace, not covered by a `use function` import, that the project index matched
 /// only in the global namespace. `resolved_fqn` is the resolved declaration's own
 /// lowercase FQN, so the comparison is against what PHP would have preferred.
-fn namespace_binding_is_settled(cx: &Cx, r: &NameRef, resolved_fqn: &str) -> bool {
+pub(crate) fn namespace_binding_is_settled(cx: &Cx, r: &NameRef, resolved_fqn: &str) -> bool {
     if r.kind != RefKind::Unqualified {
         return true;
     }

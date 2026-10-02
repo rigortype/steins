@@ -37,7 +37,7 @@ pub(super) fn function_call(fc: &FunctionCall<'_>, sx: &SiteScope<'_>, out: &mut
         let mut site = sx.site(span, SiteKind::Call { name: name_ref(id), callbacks });
         site.ref_targets = ref_targets;
         site.const_args = const_args_of_call(fc);
-        site.operands = arg_shapes_of(&fc.argument_list, &cx.bindings);
+        site.operands = arg_shapes_of(&fc.argument_list, cx);
         out.push(site);
     } else {
         let var = direct_var_callee(fc);
@@ -75,7 +75,7 @@ fn instance_call(
 
 /// A `$o->m(...)` call.
 pub(super) fn method_call(mc: &MethodCall<'_>, sx: &SiteScope<'_>, out: &mut Vec<SiteOrigin>) {
-    let shapes = || method_call_shapes(mc.object, &mc.argument_list, &sx.cx.bindings);
+    let shapes = || method_call_shapes(mc.object, &mc.argument_list, sx.cx);
     out.push(instance_call(mc.object, &mc.method, to_span(mc.span()), sx, shapes));
 }
 
@@ -99,7 +99,7 @@ pub(super) fn static_method_call(
         (effect_recv_of_class(sc.class), method_name_of(&sc.method))
     {
         let mut site = sx.site(span, SiteKind::MethodCall { receiver, method });
-        site.operands = method_call_shapes(sc.class, &sc.argument_list, &sx.cx.bindings);
+        site.operands = method_call_shapes(sc.class, &sc.argument_list, sx.cx);
         out.push(site);
     } else {
         // `$var::m()` / `static::m()` / `Foo::$m()` — unresolvable.
@@ -118,7 +118,7 @@ pub(super) fn instantiation(
         Some(class) => {
             let mut site = sx.site(span, SiteKind::New { class });
             site.operands = match &inst.argument_list {
-                Some(list) => arg_shapes_of(list, &sx.cx.bindings),
+                Some(list) => arg_shapes_of(list, sx.cx),
                 None => Some(Vec::new()),
             };
             out.push(site);
