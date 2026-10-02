@@ -475,3 +475,21 @@ pins the gate order, because output equality cannot see a decode that runs
 before the gate and is then thrown away. The record of every bump, and of
 which the narrowed rule would still require, is
 `docs/internal-spec/generation-schema.md`.
+
+## Amendment (2026-10-02): a run whose walk panicked publishes nothing (issue #895 D3) — PENDING ratification
+
+Since ADR-0050's 2026-10-02 amendment, a panic in one file's walk is that
+file's `internal.panic` finding, and the run goes on. The walk block such a
+file leaves behind is that one finding. Published, it would replay on every
+later run whose stamp and universe verdict still license it: the panic
+reported forever, and the file never walked again, after whatever caused it
+is fixed.
+
+So the 2026-09-27 rule for a lost fold answer extends to it: a run that
+reports any `internal.panic` publishes **nothing** and leaves `CURRENT`
+where it was. The next run walks the file again, from a generation built by
+a run that neither lost an answer nor panicked, or cold. The cost is a
+rebuild; the panic stays a property of the run that hit it. The narrower
+shape, publishing everything but the panicked file's block, would need a
+"walk, never replay" marker in the summaries section for one exceptional
+case, and a panicked run is already exceptional and already exits `2`.
