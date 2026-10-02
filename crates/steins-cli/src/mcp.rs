@@ -737,6 +737,7 @@ fn tool_check(_session: &Session, args: &Value) -> Result<Reply, ToolError> {
         no_cache: false,
         vendor_diagnostics,
         runtime_warnings_on_stderr: false,
+        progress: steins_infer::Progress::off(),
     })
     .map_err(|e| match e {
         SetupError::Config(e) => ToolError::new("config-error", e),

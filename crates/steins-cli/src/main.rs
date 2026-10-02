@@ -23,6 +23,7 @@ mod effect_baseline;
 mod effect_diff;
 mod generation;
 mod mcp;
+mod progress;
 mod project;
 mod render;
 mod sarif;
@@ -103,7 +104,7 @@ fn dispatch(args: &[String]) -> ExitCode {
         }
         None => {
             errln!(
-                "usage: steins check [--format text|json|github|sarif] [--profile <name>] [--no-php] [--no-cache] [--no-tolerated-effects] [--vendor-diagnostics] [--fix] [--set-baseline] [--baseline <path>] [--ignore-baseline] <paths...>"
+                "usage: steins check [--format text|json|github|sarif] [--profile <name>] [--no-php] [--no-cache] [--no-tolerated-effects] [--vendor-diagnostics] [--progress] [--fix] [--set-baseline] [--baseline <path>] [--ignore-baseline] <paths...>"
             );
             errln!("       steins annotate [--no-php] [--format text|json] <file.php>");
             errln!(

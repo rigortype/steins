@@ -24,6 +24,7 @@ use crate::fold::Folder;
 use crate::generics::{check_callable_arg, check_phpdoc_param};
 use crate::mechanics::check_array_duplicate_keys;
 use crate::overrides::check_declaration_fatals;
+use crate::progress::Progress;
 use crate::project::{Diagnostic, FileUnit, Index, LazyTree};
 use crate::purity::PurityOracle;
 use crate::return_missing::check_return_missing;
@@ -72,13 +73,17 @@ pub(crate) struct WalkInputs<'a> {
     /// assembled after plugin load.
     pub(crate) plugins: &'a PluginFacts,
     pub(crate) never_returning: &'a HashSet<String>,
+    /// Where a slow file is named (issue #885). Off unless the caller asked.
+    pub(crate) progress: &'a Progress,
 }
 
 impl WalkInputs<'_> {
     /// Walk unit `fi` on `folder`, into a sink of its own.
     pub(crate) fn walk(&self, folder: &mut dyn Folder, fi: usize) -> FileSink {
         let mut diagnostics = Vec::new();
+        let started = self.progress.file_clock();
         let uncovered = walk_one_file(self, folder, fi, &mut diagnostics);
+        self.progress.file_done(self.units[fi].path, started);
         FileSink { diagnostics, uncovered }
     }
 }
@@ -97,6 +102,7 @@ const _: () = {
     sync::<[FileUnit<'_>]>();
     sync::<PurityOracle<'_>>();
     sync::<PluginFacts>();
+    sync::<Progress>();
     sync::<WalkInputs<'_>>();
 };
 

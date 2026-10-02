@@ -77,6 +77,7 @@ mod out_params;
 mod overrides;
 mod predicates;
 pub mod profile;
+mod progress;
 mod project;
 pub mod promote;
 mod purity;
@@ -124,6 +125,7 @@ pub use project::{
 };
 
 use project::Index;
+pub use progress::{DEFAULT_SLOW_FILE, Progress};
 pub use walk_fleet::WALK_WORKERS_ENV;
 pub use walk_plan::Divergence;
 
@@ -132,7 +134,7 @@ pub(crate) use fact_util::{
     is_pure_class_contract, join_into, phpdoc_object_guard_blind, rendered_cval, val_of_key,
 };
 pub(crate) use fixpoints::{Fixpoints, Gate, Sym};
-pub(crate) use pipeline::{check_units, check_units_controlled};
+pub(crate) use pipeline::{check_units, check_units_controlled, check_units_reporting};
 
 /// The `[runtime] final-keyword` posture (issue #234), re-exported so the CLI can
 /// resolve `steins.toml` into [`RuntimePostures`] without depending on
@@ -227,7 +229,7 @@ pub use fold_process::{ProcessEngine, SidecarFolder};
 pub use generation::{
     FoldReport, GenerationError, GenerationMode, GenerationOutcome, GenerationParams,
     GenerationReport, PARANOID_ENV, PackageKind, PackageReport, PhaseTimings, SOURCES_SECTION,
-    WalkReport, generation_check,
+    WalkReport, generation_check, generation_check_reporting,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use summaries::SUMMARIES_SECTION;
@@ -298,6 +300,20 @@ pub fn check_project_under(
     folder: &mut dyn Folder,
     postures: RuntimePostures,
 ) -> Vec<Diagnostic> {
+    check_project_reporting(db, project, folder, postures, &Progress::off())
+}
+
+/// [`check_project_under`] reporting its phases and slow files through
+/// `progress` as it goes (issue #885). The findings are the same whatever the
+/// handle: it is cost reporting and nothing else.
+#[must_use]
+pub fn check_project_reporting(
+    db: &dyn Db,
+    project: Project,
+    folder: &mut dyn Folder,
+    postures: RuntimePostures,
+    progress: &Progress,
+) -> Vec<Diagnostic> {
     let handles: Vec<SourceFile> = project.files(db).to_vec();
     // One `LazyTree` per file, borrowing the database's own parse: the salsa
     // path holds every tree already, so nothing here is ever deferred.
@@ -312,7 +328,10 @@ pub fn check_project_under(
     let pos: HashMap<SourceFile, usize> =
         handles.iter().enumerate().map(|(i, &f)| (f, i)).collect();
     let index = Index::from_db(db_index, &pos, &units);
-    check_units(
+    // The salsa path parses lazily, so the parse and the index are paid by the
+    // lines above: this is where they have been.
+    progress.phase("parse");
+    check_units_reporting(
         &units,
         &index,
         folder,
@@ -320,6 +339,7 @@ pub fn check_project_under(
         project.layout(db),
         project.plugins(db),
         project.effects(db),
+        progress,
     )
 }
 

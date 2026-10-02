@@ -24,6 +24,7 @@ use crate::fold_args::effective_php_view;
 use crate::mechanics::emit_parse_failure;
 use crate::project::{Diagnostic, FileUnit, Index};
 use crate::purity::{PurityOracle, effect_diagnostics};
+use crate::progress::Progress;
 use crate::throws::throw_diagnostics;
 use crate::walk_plan::{FilePlan, FileWalk, PassTimings, UniverseVerdict, WalkControl};
 use crate::{Fixpoints, RuntimePostures, SYNTAX_UNPARSABLE_ID, facts};
@@ -39,7 +40,31 @@ pub(crate) fn check_units(
     plugins: &PluginFacts,
     policy: &EffectsPolicy,
 ) -> Vec<Diagnostic> {
-    check_units_controlled(units, index, folder, postures, layout, plugins, policy, None)
+    check_units_reporting(
+        units,
+        index,
+        folder,
+        postures,
+        layout,
+        plugins,
+        policy,
+        &Progress::off(),
+    )
+}
+
+/// [`check_units`] reporting through `progress` (issue #885).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn check_units_reporting(
+    units: &[FileUnit],
+    index: &Index,
+    folder: &mut dyn Folder,
+    postures: RuntimePostures,
+    layout: &ProjectLayout,
+    plugins: &PluginFacts,
+    policy: &EffectsPolicy,
+    progress: &Progress,
+) -> Vec<Diagnostic> {
+    check_units_controlled(units, index, folder, postures, layout, plugins, policy, None, progress)
 }
 
 /// [`check_units`] with the walk plan seam of issue #489 slice B open.
@@ -69,6 +94,7 @@ pub(crate) fn check_units_controlled(
     plugins: &PluginFacts,
     policy: &EffectsPolicy,
     mut control: Option<&mut WalkControl<'_>>,
+    progress: &Progress,
 ) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     // Issue #516: the analysis phase was one number, and the whole first move
@@ -95,6 +121,7 @@ pub(crate) fn check_units_controlled(
     // project spelling none of the triggering constructs still pays nothing.
     let fixpoints = Fixpoints::new(units, index, plugins, policy, facts);
     passes.facts_ms = ms(t_facts);
+    progress.phase("universe");
 
     // The callable-purity oracle (ADR-0063 P3): the shared whole-project effect
     // fixpoint, consulted by every file's context, and built only when some
@@ -102,6 +129,7 @@ pub(crate) fn check_units_controlled(
     let t_oracle = clock();
     let purity = PurityOracle::build(&fixpoints);
     let oracle_ms = ms(t_oracle);
+    progress.phase("purity oracle");
 
     let plan = plan_files(control.as_deref_mut(), units.len(), index, &universe, purity.as_ref());
     let inputs = WalkInputs {
@@ -117,12 +145,15 @@ pub(crate) fn check_units_controlled(
         layout,
         plugins,
         never_returning: &universe.never_returning,
+        progress,
     };
 
     let t_walk = clock();
     let sinks = walk_files(&inputs, folder, &plan, control.as_deref_mut());
+    let walked = sinks.iter().flatten().count();
     let uncovered_matches = merge_blocks(units, &plan, sinks, control.as_deref_mut(), &mut out);
     passes.walk_ms = ms(t_walk);
+    progress.phase_with("walk", &format!("{walked} of {} file(s) walked", units.len()));
 
     let t_report = clock();
     report(&fixpoints, &uncovered_matches, &universe.unparsable, &mut out);
@@ -130,6 +161,10 @@ pub(crate) fn check_units_controlled(
     // above, and each reporting pass in `report`), so their own cost is
     // subtracted out of whichever span forced them rather than attributed to it.
     let (effects_ms, throws_ms) = fixpoints.spent();
+    progress.phase_with(
+        "report",
+        &format!("fixpoints in all: effects {effects_ms:.1} ms, throws {throws_ms:.1} ms"),
+    );
     passes.effects_ms = effects_ms;
     passes.throws_ms = throws_ms;
     passes.report_ms = (oracle_ms + ms(t_report) - effects_ms - throws_ms).max(0.0);
