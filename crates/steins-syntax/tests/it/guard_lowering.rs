@@ -171,6 +171,50 @@ fn switch_true_reads_trailing_empty_labels_as_no_ops() {
 }
 
 #[test]
+fn a_default_sharing_a_body_before_a_later_case_is_opaque() {
+    // `case A: default:` and `default: case A:` share one body; a later case could match
+    // the shared label first, so the shared body is not the `else`: not modelled.
+    for body in [
+        "switch (true) { case defined('A'): default: take(1); break; case defined('B'): take(2); }",
+        "switch (true) { default: case defined('A'): take(1); break; case defined('B'): take(2); }",
+    ] {
+        let (got, _) = lowered("", body);
+        let opaque = matches!(&got[..], [Stmt { kind: StmtKind::Opaque { .. }, .. }]);
+        assert!(opaque, "`{body}`: {got:?}");
+    }
+    for body in [
+        "switch ($x) { case 1: default: take(1); break; case 2: take(2); break; }",
+        "switch ($x) { default: case 1: take(1); break; case 2: take(2); break; }",
+    ] {
+        let (got, _) = lowered("int $x", body);
+        let opaque = matches!(&got[..], [Stmt { kind: StmtKind::Opaque { .. }, .. }]);
+        assert!(opaque, "`{body}`: {got:?}");
+    }
+}
+
+#[test]
+fn a_default_sharing_the_last_body_is_the_else() {
+    for body in [
+        "switch (true) { case defined('B'): take(2); break; case defined('A'): default: take(1); }",
+        "switch (true) { case defined('B'): take(2); break; default: case defined('A'): take(1); }",
+    ] {
+        let (got, _) = lowered("", body);
+        let [Stmt { kind: StmtKind::If { elseifs, else_trace, .. }, .. }] = &got[..] else {
+            panic!("`{body}`: {got:?}");
+        };
+        assert!(elseifs.is_empty(), "`{body}`: {elseifs:?}");
+        assert_eq!(else_trace.as_ref().map(Vec::len), Some(1), "`{body}`");
+    }
+    let (got, _) = lowered(
+        "int $x",
+        "switch ($x) { case 2: take(2); break; case 1: default: take(1); break; }",
+    );
+    let by_value =
+        matches!(&got[..], [Stmt { kind: StmtKind::Match { default: Some(_), .. }, .. }]);
+    assert!(by_value, "{got:?}");
+}
+
+#[test]
 fn a_by_value_switch_keeps_its_old_shape() {
     // The relaxation is the chain's alone: a `switch ($x)` whose last case runs off
     // its end stays `Opaque`, as it was.
@@ -184,7 +228,7 @@ fn a_by_value_switch_keeps_its_old_shape() {
 
 #[test]
 fn a_dl_call_is_a_dynamism_site() {
-    let src = "<?php\nfunction f() { dl('redis.so'); \\dl('x'); Ns\\dl('y'); }\n";
+    let src = "<?php\nfunction f() { dl('redis.so'); \\dl('x'); Ns\\dl('y'); \\Ns\\dl('z'); }\n";
     let tree = SourceTree::parse(src);
     let kinds: Vec<_> = tree.dynamism_sites().iter().map(|s| s.kind.clone()).collect();
     assert_eq!(kinds, [DynamismKind::ExtensionLoad, DynamismKind::ExtensionLoad], "{kinds:?}");

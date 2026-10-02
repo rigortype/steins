@@ -573,17 +573,6 @@ fn undefined_property_receiver(cx: &Cx, store: &Store, var: &str) -> Option<Prop
     Some(PropertyReceiver::Declared(declared_receiver_conjuncts(cx, arms)?))
 }
 
-/// Whether a positive `property_exists` guard on this path vouched `prop` on the
-/// receiver's class, or on any class of its declared arms (issue #930).
-fn receiver_is_vouched(store: &Store, receiver: &PropertyReceiver, prop: &str) -> bool {
-    match receiver {
-        PropertyReceiver::Exact(class) => store.vouches_property(class, prop),
-        PropertyReceiver::Declared(arms) => {
-            arms.iter().flatten().any(|class| store.vouches_property(class, prop))
-        }
-    }
-}
-
 /// Whether a descendant declaration could **introduce** `prop` (or an obstacle
 /// that hides one) below an arm whose own chain already lacks it (ADR-0049 §8
 /// applied to properties). The property twin of [`descendant_introduces_method`],
@@ -691,10 +680,10 @@ pub(crate) fn check_undefined_property(
         return;
     };
     // Guard-respect leg (ADR-0049 §4, issue #930): a positive `property_exists($var,
-    // 'p')` dominating this read vouched the property on every class the receiver can
-    // be, so the read is on the guard's true path — which a closed world proves
-    // unreachable, and the finding claims a warning on a path the program cannot take.
-    if receiver_is_vouched(store, &receiver, prop) {
+    // 'p')` dominating this read vouched `$var->p` for this binding — `property_exists`
+    // is also true for a dynamic property, so it says nothing of the class's other
+    // instances, and the vouch is dropped with the binding.
+    if store.vouches_var_property(var, prop) {
         return;
     }
     // A9 (monkey-patch) + A2ii's honest consequence: without a live sidecar, or with

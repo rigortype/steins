@@ -63,20 +63,30 @@ pub enum DamKind {
     /// Narrower blast radius: dams `constant.undefined` only
     /// ([`DamKind::dams_names`] spells the asymmetry).
     DefineDynamic,
-    /// A `dl(...)` call (issue #928): an extension loaded at run time brings functions,
-    /// classes and constants the boot surface never listed, and changes what
-    /// `extension_loaded()` answers. Dams every valve, including in vendor code.
+    /// A `dl(...)` call (issue #928): an extension loaded at run time changes what
+    /// `extension_loaded()` answers, in vendor code too. A dam site that closes only
+    /// that one valve: neither the name valve ([`DamKind::dams_names`]) nor the
+    /// constant valve ([`DamKind::dams_constants`]) reads it, which is the ruling
+    /// that keeps a project's unrelated existence findings standing (issue #979 asks
+    /// whether a loaded extension should close them).
     ExtensionLoad,
 }
 
 impl DamKind {
     /// Whether the site can mint a **function or class-like name** — the question
-    /// [`DamFacts::is_clear`] asks. True for every kind but [`Self::DefineDynamic`].
-    /// No converse method: every kind can plausibly mint a *constant* too, so
-    /// that question is just "any site at all" — [`DamFacts::constants_are_clear`].
+    /// [`DamFacts::is_clear`] asks. True for every kind but [`Self::DefineDynamic`]
+    /// and [`Self::ExtensionLoad`].
     #[must_use]
     pub const fn dams_names(self) -> bool {
-        !matches!(self, Self::DefineDynamic)
+        !matches!(self, Self::DefineDynamic | Self::ExtensionLoad)
+    }
+
+    /// Whether the site can mint a **constant** — the question
+    /// [`DamFacts::constants_are_clear`] asks. True for every kind but
+    /// [`Self::ExtensionLoad`].
+    #[must_use]
+    pub const fn dams_constants(self) -> bool {
+        !matches!(self, Self::ExtensionLoad)
     }
 }
 
@@ -115,12 +125,12 @@ impl DamFacts {
     }
 
     // global constants (ADR-0078, issue #198)
-    /// Whether the universe is dam-clear for **constant** existence: *any* site at
-    /// all closes this valve, since every dam kind can mint a constant name.
-    /// Strictly stronger than [`Self::is_clear`].
+    /// Whether the universe is dam-clear for **constant** existence: any site that
+    /// can mint a constant name closes this valve, which is every kind but
+    /// [`DamKind::ExtensionLoad`]. Strictly stronger than [`Self::is_clear`].
     #[must_use]
     pub fn constants_are_clear(&self) -> bool {
-        self.sites.is_empty()
+        !self.sites.iter().any(|s| s.kind.dams_constants())
     }
 
     /// The number of dam sites (the report/doctor posture's "N dammed sites").
@@ -130,8 +140,8 @@ impl DamFacts {
     }
 
     /// Whether there are no dam sites at all (clippy-required `len() == 0` twin;
-    /// identical to [`Self::constants_are_clear`], unlike kind-filtered
-    /// [`Self::is_clear`]).
+    /// unlike the kind-filtered [`Self::is_clear`] and [`Self::constants_are_clear`],
+    /// a lone [`DamKind::ExtensionLoad`] site makes it `false`).
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.sites.is_empty()

@@ -557,15 +557,16 @@ fn classify_define(c: &FunctionCall<'_>, conditional: bool, out: &mut Lowered) {
 }
 
 /// Classify a `dl(...)` call (issue #928): any call of the global `dl` is an
-/// [`DynamismKind::ExtensionLoad`] site. Callee recognition matches `class_alias`'s
-/// (unqualified/fully-qualified only); the arguments are irrelevant, since which
-/// extension loads is a run-time value.
+/// [`DynamismKind::ExtensionLoad`] site. Callee recognition is `\dl` or an unqualified
+/// `dl` (a qualified twin is another function); the arguments are irrelevant, since
+/// which extension loads is a run-time value.
 fn classify_dl(c: &FunctionCall<'_>, out: &mut Lowered) {
     let Expression::Identifier(id) = c.function else { return };
     if !matches!(id, Identifier::Local(_) | Identifier::FullyQualified(_)) {
         return;
     }
-    if bytes_to_string(id.last_segment()).eq_ignore_ascii_case("dl") {
+    // The whole name, not its last segment: `\Other\dl()` is another function.
+    if bytes_to_string(id.value()).trim_start_matches('\\').eq_ignore_ascii_case("dl") {
         out.dynamism
             .push(DynamismSite { kind: DynamismKind::ExtensionLoad, span: to_span(c.span()) });
     }

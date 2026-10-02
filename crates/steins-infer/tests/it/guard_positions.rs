@@ -41,11 +41,11 @@ impl Folder for Boot {
     fn boot_surface_class_like(&mut self, _: &str) -> Option<bool> {
         Some(false)
     }
-    fn boot_surface_function(&mut self, _: &str) -> Option<bool> {
-        Some(false)
+    fn boot_surface_function(&mut self, name: &str) -> Option<bool> {
+        Some(name == "dl")
     }
-    fn boot_surface_constant(&mut self, _: &str) -> Option<bool> {
-        Some(false)
+    fn boot_surface_constant(&mut self, name: &str) -> Option<bool> {
+        Some(name == "PHP_VERSION_ID")
     }
     fn boot_surface_extension(&mut self, name: &str) -> Option<bool> {
         let loaded = self.extensions.as_ref()?;
@@ -285,13 +285,14 @@ fn a_guard_on_an_existing_symbol_keeps_its_body_live() {
     }
 }
 
-/// A member guard on a **different** member vouches nothing about this one. The receiver
-/// is a native parameter type, so the claim is the proof layer's.
+/// A member guard on a **different** member decides nothing about this one: `N` has
+/// `real` (so that guard is live, not dead) and has neither `other` nor `go`. The
+/// receiver is a native parameter type, so the claim is the proof layer's.
 #[test]
 fn a_member_guard_on_another_member_does_not_vouch() {
     for (name, body, id) in [
-        ("method", "if (method_exists($n, 'other')) { $n->go(); }", CALL_UNDEFINED_METHOD_ID),
-        ("callable", "if (is_callable([$n, 'other'])) { $n->go(); }", CALL_UNDEFINED_METHOD_ID),
+        ("method", "if (method_exists($n, 'real')) { $n->go(); }", CALL_UNDEFINED_METHOD_ID),
+        ("callable", "if (is_callable([$n, 'real'])) { $n->go(); }", CALL_UNDEFINED_METHOD_ID),
         ("property", "if (property_exists($n, 'q')) { return $n->p; }", PROPERTY_UNDEFINED_ID),
         ("after the guard", "if (method_exists($n, 'go')) {} $n->go();", CALL_UNDEFINED_METHOD_ID),
     ] {
@@ -359,16 +360,82 @@ fn extension_loaded_with_a_computed_name_is_undecided() {
 // Member vouches through declared receivers (#930).
 // ---------------------------------------------------------------------------
 
+/// `method_exists($v, 'm')` over a declared union folds to false only when **every** arm
+/// provably lacks `m`, so the guarded body is dead exactly where the declared-receiver
+/// lane would have reported inside it. An arm that has `m` leaves the guard undecided and
+/// the body live.
 #[test]
-fn member_vouches_cover_every_arm_of_a_declared_union() {
+fn a_method_guard_over_a_declared_union_folds_only_when_every_arm_lacks_the_method() {
     let src = "<?php\nclass A {}\nclass B {}\n\
                function g(A|B $v): void { if (method_exists($v, 'go')) { $v->go(); } }\n\
-               function h(A|B $v): void { if (property_exists($v, 'p')) { echo $v->p; } }\n";
+               function h(A|B $v): void { if (is_callable([$v, 'go'])) { $v->go(); } }\n";
     let found = run(src);
     assert!(found.is_empty(), "{}", render(&found));
     let src = "<?php\nclass A {}\nclass B {}\n\
                function g(A|B $v): void { $v->go(); }\n";
     assert_eq!(run(src).len(), 1, "unguarded, the union receiver still reports");
+}
+
+/// `property_exists` cannot fold (it is true for a dynamic property too): it vouches
+/// `$v->p` for this binding, and for a union that is the binding, not either class.
+#[test]
+fn a_property_guard_vouches_the_binding() {
+    let src = "<?php\nclass A {}\nclass B {}\n\
+               function h(A|B $v): void { if (property_exists($v, 'p')) { echo $v->p; } }\n";
+    let found = run(src);
+    assert!(found.is_empty(), "{}", render(&found));
+}
+
+/// The leaks a class-keyed vouch had, each now reporting: a guard on one binding says
+/// nothing of another receiver of the class, and nothing of the same name after a rebind.
+#[test]
+fn a_member_guard_vouches_neither_another_receiver_nor_a_rebound_one() {
+    let n = "class N { public function real(): int { return 1; } }\n";
+    for (name, src, id) in [
+        (
+            "union: B has no go, guard only decides A",
+            "final class A { public function go(): int { return 1; } }\nfinal class B {}\n\
+             function u(A|B $x, B $y): mixed {\n\
+             if (method_exists($x, 'go')) { return $y->go(); } return null; }\n",
+            CALL_UNDEFINED_METHOD_ID,
+        ),
+        (
+            "method guard, then a rebind to a class without it",
+            "final class A { public function go(): int { return 1; } }\nfinal class B {}\n\
+             function w(A|B $x): mixed {\n\
+             if (method_exists($x, 'go')) { $x = new B(); return $x->go(); } return null; }\n",
+            CALL_UNDEFINED_METHOD_ID,
+        ),
+        (
+            "property guard on one binding, read through another",
+            &format!(
+                "{n}function f(N $a, N $b): mixed {{\n\
+                 if (property_exists($a, 'p')) {{ return $b->p; }} return null; }}\n"
+            ),
+            PROPERTY_UNDEFINED_ID,
+        ),
+        (
+            "property guard, then a rebind",
+            &format!(
+                "{n}function p3(N $n): mixed {{\n\
+                 if (property_exists($n, 'p')) {{ $n = new N(); return $n->p; }} return null; }}\n"
+            ),
+            PROPERTY_UNDEFINED_ID,
+        ),
+    ] {
+        let src = format!("<?php\n{src}");
+        let found = run(&src);
+        assert_eq!(found.len(), 1, "{name}: {}\n{src}", render(&found));
+        assert_eq!(found[0].id, id, "{name}");
+    }
+    // A guard on `$n` that is provably false kills the body, whichever receiver it reads:
+    // dead, not vouched — `N` has no `go`, so the guard cannot hold.
+    let src = format!(
+        "<?php\n{n}function m5(N $n, N $o): void {{\n\
+         if (method_exists($n, 'go')) {{ $o->go(); }} }}\n"
+    );
+    let found = run(&src);
+    assert!(found.is_empty(), "{}", render(&found));
 }
 
 #[test]
@@ -377,6 +444,130 @@ fn a_member_vouch_survives_the_early_return_only_on_its_own_path() {
                if ($f) { if (!method_exists($n, 'go')) { return; } }\n\
                $n->go();\n}\n";
     assert_eq!(run(src).len(), 1, "the other path reaches the call unguarded");
+}
+
+// ---------------------------------------------------------------------------
+// Conditional declarations, `$autoload`, `dl()`, shared switch defaults.
+// ---------------------------------------------------------------------------
+
+/// `class_exists` of a declaration the program may not have run is undecided: a class
+/// declared under a condition (a polyfill, an environment switch) and a project class
+/// asked about with `$autoload` other than `true` (declared is not loaded).
+#[test]
+fn class_exists_of_a_declaration_that_may_not_have_run_is_undecided() {
+    for (name, src) in [
+        (
+            "autoload false, ternary",
+            "class ProjLater {}\nfunction r1(): mixed {\n\
+             return class_exists('ProjLater', false) ? 1 : new NopeP1(); }\n",
+        ),
+        (
+            "autoload false, if",
+            "class ProjLater {}\nfunction r2(): mixed {\n\
+             if (class_exists('ProjLater', false)) { return 1; } return new NopeP2(); }\n",
+        ),
+        (
+            "conditional polyfill, ternary",
+            "if (PHP_VERSION_ID < 50000) { class PolyOld {} }\n\
+             function r3(): mixed { return class_exists('PolyOld') ? 1 : new NopeP3(); }\n",
+        ),
+        (
+            "conditional polyfill, if",
+            "if (PHP_VERSION_ID < 50000) { class PolyOld {} }\n\
+             function r4(): mixed {\n\
+             if (class_exists('PolyOld')) { return 1; } return new NopeP4(); }\n",
+        ),
+        (
+            "environment switch, or",
+            "if (getenv('X') === 'yes') { class PolyEnv {} }\n\
+             function r7(): void { class_exists('PolyEnv') || new NopeP7(); }\n",
+        ),
+    ] {
+        let found = run(&format!("<?php\n{src}"));
+        assert_eq!(found.len(), 1, "{name}: {}", render(&found));
+        assert_eq!(found[0].id, CLASS_UNDEFINED_ID, "{name}");
+    }
+}
+
+/// The same project class under `$autoload` absent or literally `true` is present, so
+/// the `else` that says it is missing is dead.
+#[test]
+fn class_exists_of_an_unconditional_declaration_with_autoload_is_decided() {
+    for call in ["class_exists('Declared')", "class_exists('Declared', true)"] {
+        let src = format!(
+            "<?php\nclass Declared {{}}\n\
+             function r(): mixed {{ return {call} ? 1 : new Nope(); }}\n"
+        );
+        let found = run(&src);
+        assert!(found.is_empty(), "{call}: {}", render(&found));
+    }
+}
+
+/// The trade-off #978 tracks, pinned as it stands: `function_exists` of a conditional
+/// polyfill still answers `Yes` with the dam clear, which kills the `else`.
+#[test]
+fn function_exists_of_a_conditional_function_still_answers_yes() {
+    let polyfill = "if (PHP_VERSION_ID < 50000) { function poly_old(): int { return 1; } }\n";
+    let guarded = format!(
+        "<?php\n{polyfill}function r(): mixed {{\n\
+         return function_exists('poly_old') ? 1 : nope_p6(); }}\n"
+    );
+    assert!(run(&guarded).is_empty(), "{}", render(&run(&guarded)));
+    let bare = "<?php\nfunction r(): mixed { return nope_p6(); }\n";
+    assert_eq!(run(bare).len(), 1, "the control: the call reports unguarded");
+}
+
+/// `dl()` leaves `extension_loaded()` undecided and closes no other valve: an unrelated
+/// undefined function, class and constant still report.
+#[test]
+fn dl_closes_no_name_or_constant_valve() {
+    let src = "<?php\nfunction load(): void { @dl('x.so'); }\n\
+               function q(): void { nope_fn_dl3(); new NopeClsDl3(); echo NOPE_CONST_DL3; }\n";
+    let found = run(src);
+    let ids: Vec<&str> = found.iter().map(|d| d.id).collect();
+    assert_eq!(
+        ids,
+        [CALL_UNDEFINED_FUNCTION_ID, CLASS_UNDEFINED_ID, CONSTANT_UNDEFINED_ID],
+        "{}",
+        render(&found)
+    );
+}
+
+/// A default that shares its body with case labels is the `else` only as the last body.
+/// Before the last, a later case could match the shared labels first, so the construct
+/// stays unstructured and the shared body is reported as live.
+#[test]
+fn a_default_sharing_a_body_before_a_later_case_stays_live() {
+    for (name, src) in [
+        (
+            "switch (true), case then default",
+            "function s1(): void { switch (true) {\n\
+             case strlen('a') === 1: default: new NopeSw(); break;\n\
+             case !defined('NOPE_SW_CONST'): echo 1; break; } }\n",
+        ),
+        (
+            "switch (true), default then case",
+            "function s2(): void { switch (true) {\n\
+             default: case strlen('a') === 1: new NopeSw2(); break;\n\
+             case !defined('NOPE_SW2_CONST'): echo 1; break; } }\n",
+        ),
+        (
+            "by value, case then default",
+            "function s3(): void { $x = null; switch ($x) {\n\
+             case null: default: new NopeSw3(); break;\n\
+             case false: echo 1; break; } }\n",
+        ),
+        (
+            "by value, default then case",
+            "function s4(): void { $x = null; switch ($x) {\n\
+             default: case null: new NopeSw4(); break;\n\
+             case false: echo 1; break; } }\n",
+        ),
+    ] {
+        let found = run(&format!("<?php\n{src}"));
+        assert_eq!(found.len(), 1, "{name}: {}", render(&found));
+        assert_eq!(found[0].id, CLASS_UNDEFINED_ID, "{name}");
+    }
 }
 
 // ---------------------------------------------------------------------------

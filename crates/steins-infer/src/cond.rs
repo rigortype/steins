@@ -225,7 +225,7 @@ pub(crate) fn eval_cond(
         // A foldable existence predicate in guard position folds to a Yes/No/Maybe
         // verdict against the closed world (ADR-0049 §4 / N3); an opaque condition or
         // any other guard call stays undecided.
-        CondExpr::Call { call, .. } => eval_existence_call(w, folder, call),
+        CondExpr::Call { call, .. } => eval_existence_call(w, folder, store, call),
         // `isset($x[k])` decides NOTHING (ADR-0062 S4). The only evidence that
         // could decide it is a shape fact, which is `Asserted` — deciding here
         // would let a docblock claim silence the env-free pass on a live path.

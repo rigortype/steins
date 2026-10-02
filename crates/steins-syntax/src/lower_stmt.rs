@@ -1513,10 +1513,15 @@ fn collect_switch_arms<C>(
                 conditions.push(c);
                 arms.push((conditions, trace));
             }
-            // This body is (or is reached by fall-through from) `default:`; a
-            // default subsumes any stacked case conditions (it catches all).
+            // This body is (or is reached by fall-through from) `default:`. A default
+            // that shares its body with case labels is the `else` only when it is the
+            // last body: a later case could also match the shared labels first and
+            // would then own a body this arm cannot give it, and treating the shared
+            // body as the `else` would run it for a case the later label decides.
             _ => {
-                if default.is_some() {
+                if default.is_some()
+                    || ((cond.is_some() || !pending.is_empty()) && Some(position) != last)
+                {
                     return None;
                 }
                 default = Some(trace);
