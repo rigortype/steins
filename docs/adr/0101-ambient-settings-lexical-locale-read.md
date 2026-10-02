@@ -15,9 +15,10 @@ scopes is ADR-0102 (§5).
 `global.write.setting.<cell>`, grouped under `setting`; D2 `transform effects-envelope`
 writes a function whose only effect is a setting read as `@phpstan-impure
 global.read.setting.locale`, like any other label; D3 the `%F` remedy is a fix-it on the
-envelope findings only, with no bulk transform; D4 the `precision` cell is registered and
-only builtin readers are coloured, operator sites waiting for ADR-0008's opt-in (recorded
-in `not-implemented.md`); D5 ADR-0102 follows slices S1–S2 and is independent of S4–S6;
+envelope findings only, with no bulk transform; D4 the `precision` cell is in the roster; its
+label `global.read.setting.precision` is registered with its first coloured builtin row,
+which is S3's `%s` of a value that may be a float, and float-to-string operator sites
+wait for ADR-0008's opt-in (recorded in `not-implemented.md`); D5 ADR-0102 follows slices S1–S2 and is independent of S4–S6;
 D6 `setlocale($c, '0')` narrows to the read in S4 with the other call-site narrowings.
 
 ADR-0021 Decision 2 certifies a builtin pure only when php-src shows it "reads
@@ -205,7 +206,12 @@ is cheap and is listed as D6; the argument-blind row is the write. A locale of
 (`putenv("LC_ALL=fr_FR.ISO8859-1"); setlocale(LC_ALL, "")` answers `fr_FR`,
 witnessed in review), which is a read; with no environment cell registered yet
 the row carries the coarse `global.read` beside the write, and that read narrows
-to the env cell's label when it lands (S6).
+to the env cell's label when it lands (S6). A call whose only locale is a
+written non-empty string literal other than `'0'` reads no environment, and S1
+narrows it at the call site to the write alone (`narrowed_setlocale_labels`,
+exactly two positional arguments: a third is a fallback locale that may be
+`''`); `setlocale(LC_ALL, 'C')` therefore stays admitted by a `global.write`
+envelope. An array of locales is left on the row.
 
 ## 3. Decision: the printf family is decided lexically
 
@@ -243,10 +249,11 @@ exists, the row's label stands at every printf call, which is the sound side
 the *locale* label is not the claim that the call reads no setting: a `%s` of a
 value that may be a float renders it through `precision`, and no other
 conversion does (witnessed with variable arguments, since 8.4 folds a literal
-`sprintf('%s', 1.5)` at compile time). Under D4, where builtin readers are
-coloured, that read is the `precision` cell's and the label is registered in
-the slice that colours its first row (§2.2), so S1 and S3 do not carry it and
-S3 must not treat `!reads_locale` as purity of the call.
+`sprintf('%s', 1.5)` at compile time). Under D4 that read is the `precision` cell's, and S3, which reads the
+literal format, carries `global.read.setting.precision` on a `%s` of a value
+that may be a float, registering the label with that row (§2.2). S1 registers
+no precision label and its rows do not carry the read, so S3 must not treat
+`!reads_locale` as purity of the call.
 
 ### 3.3 The fold
 

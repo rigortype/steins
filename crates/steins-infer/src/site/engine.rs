@@ -117,12 +117,26 @@ pub(crate) fn function_effects(
     let colored: &[&str] = match narrowed.as_deref() {
         Some(labels) => labels,
         None => steins_catalog::narrowed_output_labels(name, return_mode)
+            .or_else(|| narrowed_setlocale(name, arg_targets, const_args))
             .or_else(|| steins_catalog::effect_labels(name))
             .unwrap_or(&[]),
     };
     let mut labels: Vec<&'static str> = colored.to_vec();
     labels.extend(out_param_labels(name, arg_targets));
     labels
+}
+
+/// A `setlocale` call's narrowed labels (ADR-0101): the locale write alone when
+/// the call's one locale is a written non-empty string, which reads no
+/// environment block. Needs the call's positional arity and its second argument,
+/// so it answers `None` where either is unreadable.
+fn narrowed_setlocale(
+    name: &str,
+    arg_targets: Option<&[RefTarget]>,
+    const_args: Option<&ConstArgs>,
+) -> Option<&'static [&'static str]> {
+    let Some(CallTarget::Literal(locale)) = const_args?.second.as_ref() else { return None };
+    steins_catalog::narrowed_setlocale_labels(name, locale, arg_targets?.len())
 }
 
 /// The classes a call to the builtin `name` raises, on the throw axis

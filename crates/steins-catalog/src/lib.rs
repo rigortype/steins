@@ -135,6 +135,7 @@ pub use effects::{
     final_method_effect_labels,
     method_effect_labels,
     narrowed_output_labels,
+    narrowed_setlocale_labels,
     narrowed_stream_labels,
     out_param_written_when,
     out_params,
