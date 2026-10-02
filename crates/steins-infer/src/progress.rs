@@ -25,9 +25,6 @@
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-/// The default threshold above which one file's walk is named: 250 ms.
-pub const DEFAULT_SLOW_FILE: Duration = Duration::from_millis(250);
-
 /// A handle to the progress channel; cheap to clone, and off by default.
 #[derive(Clone, Default)]
 pub struct Progress {
@@ -51,6 +48,10 @@ impl Progress {
 
     /// A handle that hands each line to `sink`, naming a file whose walk took
     /// at least `slow_file`. The run's clock starts now.
+    ///
+    /// Not available on the browser build, which has no clock to start and
+    /// never reports progress.
+    #[cfg(not(target_arch = "wasm32"))]
     #[must_use]
     pub fn new(sink: impl Fn(&str) + Send + Sync + 'static, slow_file: Duration) -> Self {
         let now = Instant::now();
@@ -64,19 +65,15 @@ impl Progress {
         }
     }
 
-    /// Whether this handle reports anything.
-    #[must_use]
-    pub fn is_on(&self) -> bool {
-        self.inner.is_some()
-    }
-
     /// A phase boundary: `phase` has just finished.
     pub fn phase(&self, phase: &str) {
-        self.phase_with(phase, "");
+        self.phase_with(phase, String::new);
     }
 
-    /// [`Self::phase`] with a short `detail` appended in parentheses.
-    pub fn phase_with(&self, phase: &str, detail: &str) {
+    /// [`Self::phase`] with a short `detail` appended in parentheses. The
+    /// detail is built only when the handle reports, so an off handle formats
+    /// nothing.
+    pub fn phase_with(&self, phase: &str, detail: impl FnOnce() -> String) {
         let Some(channel) = &self.inner else { return };
         let now = Instant::now();
         let took = {
@@ -86,7 +83,8 @@ impl Progress {
             took
         };
         let total = now.duration_since(channel.started);
-        let detail = if detail.is_empty() { String::new() } else { format!(", {detail}") };
+        let detail = detail();
+        let detail = if detail.is_empty() { detail } else { format!(", {detail}") };
         (channel.sink)(&format!("{phase}: {} (elapsed {}{detail})", span(took), span(total)));
     }
 
@@ -126,16 +124,16 @@ mod tests {
     fn an_off_handle_is_silent_and_clockless() {
         let off = Progress::off();
         off.phase("parse");
+        off.phase_with("walk", || unreachable!("an off handle builds no detail"));
         assert!(off.file_clock().is_none());
         off.file_done("a.php", None);
-        assert!(!off.is_on());
     }
 
     #[test]
     fn phases_report_in_order_with_their_detail() {
-        let (progress, lines) = collected(DEFAULT_SLOW_FILE);
+        let (progress, lines) = collected(Duration::from_millis(250));
         progress.phase("parse");
-        progress.phase_with("walk", "3 file(s)");
+        progress.phase_with("walk", || "3 file(s)".to_owned());
         let lines = lines.lock().unwrap();
         assert_eq!(lines.len(), 2);
         assert!(lines[0].starts_with("parse: ") && lines[0].contains("(elapsed "));

@@ -38,8 +38,8 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 use steins_db::{EffectsPolicy, PluginFacts, Project, SourceFile, SteinsDatabase, composer, parse};
 use steins_infer::{
-    Diagnostic, GenerationMode, GenerationParams, PhaseTimings, RuntimePostures, SidecarFolder,
-    check_project, generation_check,
+    Diagnostic, GenerationMode, GenerationParams, PhaseTimings, Progress, RuntimePostures,
+    SidecarFolder, check_project, generation_check,
 };
 use steins_syntax::SourceTree;
 
@@ -601,6 +601,7 @@ fn measure_warm_in_store(
         postures: RuntimePostures::default(),
         php: matches!(posture, Posture::Php),
         paranoid,
+        progress: &Progress::off(),
     };
 
     let check = |tag: &str, findings: Vec<Diagnostic>| -> Option<String> {
@@ -1337,6 +1338,7 @@ fn run_generation(
         postures: RuntimePostures::default(),
         php: matches!(posture, Posture::Php),
         paranoid,
+        progress: &Progress::off(),
     };
     let outcome = generation_check(&params).map_err(|e| e.to_string())?;
     Ok((outcome.report.mode, outcome.findings, outcome.report))

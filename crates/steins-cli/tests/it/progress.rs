@@ -5,6 +5,7 @@
 //! pipeline, not of the sidecar, and a test that needs `php` on `PATH` proves
 //! nothing more about it.
 
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -37,11 +38,29 @@ struct Run {
     stderr: String,
 }
 
+/// A throwaway project directory, removed on drop.
+struct Project(PathBuf);
+
+impl Deref for Project {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for Project {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// A fresh project: a Composer manifest and `files` PHP files under `src/`.
-fn project(tag: &str, files: usize) -> PathBuf {
+fn project(tag: &str, files: usize) -> Project {
     static COUNTER: AtomicU32 = AtomicU32::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("steins-progress-{}-{tag}-{n}", std::process::id()));
+    let name = format!("steins-progress-{}-{tag}-{n}", std::process::id());
+    let dir = std::env::temp_dir().join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("src")).expect("create project");
     std::fs::write(
@@ -53,7 +72,7 @@ fn project(tag: &str, files: usize) -> PathBuf {
         let body = FIXTURE.replace("namespace App;", &format!("namespace App\\N{i};"));
         std::fs::write(dir.join(format!("src/F{i:03}.php")), body).expect("write fixture");
     }
-    dir
+    Project(dir)
 }
 
 /// `steins check --no-php <args> src` in `dir`, with the progress environment
@@ -110,8 +129,10 @@ fn the_environment_turns_the_channel_on() {
     let dir = project("env", 1);
     let run = check(&dir, &["--no-cache"], &[("STEINS_PROGRESS", "1")]);
     assert_eq!(phases(&run.stderr), PHASES_COLD);
-    let off = check(&dir, &["--no-cache"], &[("STEINS_PROGRESS", "0")]);
-    assert!(progress_lines(&off.stderr).is_empty(), "`0` is off:\n{}", off.stderr);
+    for value in ["0", "true", ""] {
+        let off = check(&dir, &["--no-cache"], &[("STEINS_PROGRESS", value)]);
+        assert!(progress_lines(&off.stderr).is_empty(), "{value:?} is off:\n{}", off.stderr);
+    }
 }
 
 #[test]
@@ -141,7 +162,8 @@ fn a_file_under_the_threshold_is_not_named() {
 }
 
 /// The fan-out hands lines to the sink from several threads: each file is
-/// named exactly once, and no line is cut by another's.
+/// named exactly once, and no line is cut by another's. The `walk` line says
+/// how many workers the walk really used, so the test knows it fanned out.
 #[test]
 fn the_parallel_fleet_names_every_file_in_whole_lines() {
     const FILES: usize = 48;
@@ -151,13 +173,16 @@ fn the_parallel_fleet_names_every_file_in_whole_lines() {
         &["--progress"],
         &[("STEINS_PROGRESS_SLOW_MS", "0"), ("STEINS_WALK_WORKERS", "4")],
     );
+    let fanned = format!("{FILES} of {FILES} file(s) walked on 4 worker(s)");
+    assert!(run.stderr.contains(&fanned), "the walk did not fan out:\n{}", run.stderr);
     for line in run.stderr.lines().filter(|l| l.contains("progress")) {
         assert!(line.starts_with("steins: progress: "), "a line was cut or merged: {line:?}");
         assert_eq!(line.matches("steins: ").count(), 1, "two lines merged: {line:?}");
     }
     for i in 0..FILES {
         let wanted = format!("steins: progress: slow file: src/F{i:03}.php walked in ");
-        let n = run.stderr.lines().filter(|l| l.starts_with(&wanted) && l.ends_with(" ms")).count();
+        let named = |l: &&str| l.starts_with(&wanted) && l.ends_with(" ms");
+        let n = run.stderr.lines().filter(named).count();
         assert_eq!(n, 1, "src/F{i:03}.php named {n} times:\n{}", run.stderr);
     }
 }
@@ -166,7 +191,9 @@ fn the_parallel_fleet_names_every_file_in_whole_lines() {
 /// streams are what they were without it.
 #[test]
 fn the_channel_changes_no_other_byte() {
-    for (tag, args) in [("plain", &["--no-cache"][..]), ("store", &[][..]), ("json", &["--format", "json"][..])] {
+    let runs: [(&str, &[&str]); 3] =
+        [("plain", &["--no-cache"]), ("store", &[]), ("json", &["--format", "json"])];
+    for (tag, args) in runs {
         let dir = project(tag, 2);
         let off = check(&dir, args, &[]);
         let mut with = args.to_vec();

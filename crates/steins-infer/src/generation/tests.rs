@@ -22,7 +22,7 @@ use steins_db::{EffectsPolicy, PluginFacts, composer};
 use steins_sidecar::{FoldArg, Sidecar};
 
 use super::{GenerationMode, GenerationOutcome, GenerationParams, generation_check};
-use crate::{FoldEngine, PREG_INVALID_PATTERN_ID, RecordingFolder, RuntimePostures};
+use crate::{FoldEngine, PREG_INVALID_PATTERN_ID, Progress, RecordingFolder, RuntimePostures};
 
 // ---------------------------------------------------------------------------
 // The fault seam.
@@ -163,6 +163,7 @@ fn run(root: &Path, files: &[PathBuf], fault: Option<Fault>) -> GenerationOutcom
         postures: RuntimePostures::default(),
         php: true,
         paranoid: false,
+        progress: &Progress::off(),
     };
     AFTER_BOOT.with(|slot| *slot.borrow_mut() = fault);
     let outcome = generation_check(&params).expect("the generation lifecycle runs");
