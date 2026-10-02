@@ -138,3 +138,4 @@ list in one place.
 | ADR-0098 | [A place, not a variable, names a heap entity: the array element carrier](0098-places-name-heap-entities.md) |
 | ADR-0099 | [A body's sites resolve once: reachable code, implicit user code and coverage gaps](0099-sites-resolve-once.md) |
 | ADR-0100 | [Exhaustiveness has a floor: the maybe- siblings of the envelope checks, and destructors](0100-exhaustiveness-has-a-floor.md) |
+| ADR-0101 | [A locale read is an effect, decided lexically: ambient settings, their labelled reads and writes, and the `%F` remedy](0101-ambient-settings-lexical-locale-read.md) |

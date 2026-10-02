@@ -64,6 +64,19 @@ union of shapes lives as contract arms (where discrimination happens), never
 inside one fact.
 _Avoid_: mirroring the contract lane's array split into the fact domain
 
+**Remembered call result** (ADR-0102, designed-not-implemented):
+A call's result held as a value-domain fact on the call itself — callee,
+argument places, receiver place — so a later call with the same key in the
+same scope answers the remembered fact until an **invalidating site**: a
+setting write to a cell the callee reads, any `io*` site for the stat family,
+a coverage gap or escape hatch, or a write to an argument or receiver place.
+A proof about what the engine returns, not about the world (`is_dir` after an
+external `rmdir` still answers from the stat cache; `file_exists` never does).
+The invalidation set is derived from effect labels (ADR-0101 §5.4), never from
+a purity bit.
+_Avoid_: impure point / forgetting (PHPStan's mechanism and its trigger; ours
+is label-scoped), memoization (an optimisation, not a fact), CSE
+
 **KeyCover** (ADR-0062 A-G8):
 A disjunctive presence fact on one array: "at least one of these keys is
 there", recorded from `isset(…) || isset(…)`-style guards and consumed by
@@ -248,6 +261,33 @@ The curated effect signatures of builtin/extension functions — together with
 language constructs, the *only* origins of effects (origin closure).
 Uncatalogued functions widen to unknown-effect.
 _Avoid_: function metadata (PHPStan's artifact)
+
+**Ambient setting** (ADR-0101):
+A cell of process-owned state the script is born holding, that only its own
+calls rewrite, and that a builtin reads implicitly rather than through an
+argument — the locale, the default timezone, the environment block, an ini
+value. Unlike `nondet.*`, a repeat read with no intervening write returns the
+same value; unlike `io.*`, nothing outside the process writes it. The RNG
+state is not one (every draw writes it), nor is the stat cache (the world
+writes the file and any plain-stream operation evicts the entry): those stay
+`nondet.random` and `io`.
+_Avoid_: ambient channel (ADR-0083's `io.output`/`io.input`, born-held but
+written by the world), pseudo-constant (ADR-0008's unbuilt opt-in that would
+pin a setting, not the setting itself), global state (too wide — superglobals
+and `global $x` are `global.*` and are variables, not settings)
+
+**Setting read / setting write** (ADR-0101):
+The effect of reading or rewriting an ambient setting, labelled
+`global.read.setting.<cell>` / `global.write.setting.<cell>` — a child of
+`global.read`/`global.write`, so a coarse envelope admits it and ADR-0096's
+discardable set covers it by prefix. A read is an effect like any other: no
+envelope admits it by default, `Pure` included. A literal argument can decide
+it lexically — a printf format with no `f`/`g`/`G` conversion drops the
+locale read; `%F`, `%h` and `%H` are the locale-independent spellings a
+fix-it offers.
+_Avoid_: pure modulo ambient state / practically pure (the rejected
+convenience, owner ruling 2026-10-03), locale-sensitive as a catalog
+disposition (a reason to colour a row, not to refuse one), epoch-stable read
 
 **Site** (ADR-0099):
 One call-like or operator construct in a body — a call, a method call, a
