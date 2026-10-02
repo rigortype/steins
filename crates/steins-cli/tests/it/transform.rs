@@ -651,3 +651,26 @@ fn written_envelopes_leave_no_sibling_finding_at_strict() {
         r.stdout
     );
 }
+
+/// The other half, pinned rather than hidden (ADR-0100 §6): `throws-envelope` seeds
+/// the escapes it **proved**, whether or not the body's throw set is exhaustive, so
+/// the `@throws` it writes on a `…?` body is an envelope nothing verified, and the
+/// strict floor says so. `effects-envelope` writes only where its lane is
+/// exhaustive, which is why the test above holds for it unconditionally.
+#[test]
+fn a_written_throws_tag_on_a_gapped_body_is_named_at_strict() {
+    let proj = TempProject::new("floor-written-throws-gapped");
+    proj.write(
+        "lib.php",
+        "<?php\nfunction g(callable $c): void { $c(); throw new \\RuntimeException(\"x\"); }\n",
+    );
+
+    let r = run(&["transform", "throws-envelope", "--apply", proj.path()]);
+    assert_eq!(r.code, 0, "stderr:\n{}", r.stderr);
+    assert!(proj.read("lib.php").contains("@throws \\RuntimeException"), "no tag written");
+
+    let args = ["check", "--profile", "strict", "--no-cache", "--no-php", "--format", "json"];
+    let r = run(&[args.as_slice(), &[proj.path()]].concat());
+    assert_eq!(r.stdout.matches("throw.maybe-undeclared").count(), 1, "{}", r.stdout);
+    assert!(r.stdout.contains("dynamic-callee"), "{}", r.stdout);
+}

@@ -362,6 +362,19 @@ an implementation whose proven effects exceed the envelope declared on the class
 or interface method it overrides is a finding. Implementations may be purer,
 never less pure ([closures.md](closures.md)).
 
+`effect.maybe-envelope-exceeded` (contract layer, **strict floor**) is the
+possibly-grade sibling of `effect.envelope-exceeded` (ADR-0100). The definite id
+reads the proven lane and is silent on a gap, so a declared-pure body that runs
+something the analyzer cannot see passes it. The sibling names each gap: one
+finding per own site and gap kind, and one per call edge into a project body that
+is itself `…?` and carries no envelope of its own. Five discharges narrow it:
+the ⊤ envelope is no unit; `$f()` on a parameter typed `pure-callable` /
+`pure-closure` (or flagged `@pure-unless-callable-is-impure`) and not rebound; an
+interop envelope whose imported bound fits; an edge to an enveloped callee; and,
+in the throw lane, a site under a `catch (\Throwable)`. Every other gap kind,
+`no-effect-row` included, is reported. Exhaustiveness, `annotate` and
+`effect-diff` read the same gaps and are unchanged.
+
 ## The declared lane
 
 Dependency injection breaks the call graph on purpose: a controller holding a

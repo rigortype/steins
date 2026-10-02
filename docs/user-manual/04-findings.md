@@ -152,7 +152,7 @@ $ steins doctor --no-php .
 ```
 
 Today that count runs 48 ids at `default`, 49 at `throws-direct`, 66 at
-`contracts`, 74 at `strict` and 67 at `pedantic`. The profiles, the baseline
+`contracts`, 76 at `strict` and 67 at `pedantic`. The profiles, the baseline
 ratchet that makes raising one survivable, and user-defined profiles all live in
 [chapter 5](05-profiles-and-baseline.md). The normative rules for layers,
 facets, and suppression are in
@@ -166,7 +166,7 @@ facets, and suppression are in
 
 ## The catalogue
 
-The registry holds **80 ids**, 79 of them with a live emitter. It is a closed
+The registry holds **82 ids**, 81 of them with a live emitter. It is a closed
 set bound by a totality test, so an id that reaches your terminal is in it
 and an id outside it cannot be emitted (ADR-0022). Each id below is shown
 with the PHP that triggers it and the transcript it produces.
@@ -785,7 +785,7 @@ and a baseline entry or `@steins-ignore` is the way to carry it.
 
 ### `throw.*` — `@throws` envelopes
 
-Two ids, contract layer. An unannotated function is never envelope-checked;
+Three ids, contract layer. An unannotated function is never envelope-checked;
 writing `@throws` is what opts a declaration in (ADR-0040).
 
 **`throw.undeclared`** is the one id with a *facet*: `origin`, either
@@ -831,6 +831,47 @@ named in the message is what distinguishes them. `contracts` added the
 propagated one. Only proven escapes report — a `Maybe` escape, or a class
 whose hierarchy Steins cannot fully resolve, stays silent.
 
+**`throw.maybe-undeclared`** is the strict-floor sibling of `throw.undeclared`,
+and it is on the `strict` rung only: a bare `check` and `contracts` print
+nothing new. `throw.undeclared` reports an escape Steins *proved*; a body whose
+throw set is marked `…?` in `steins annotate` is silent there, because an
+unknown is not an escape. This id names the unknowns, so the silence is a
+choice you can inspect rather than a hole. It fires on the declarations
+`throw.undeclared` already judges, once per site and gap kind (the kind's
+spelling, such as `dynamic-callee` or `declared-receiver`, is in the message),
+and once per call into a project function that is itself `…?` and declares no
+`@throws` of its own.
+
+```php
+<?php
+
+declare(strict_types=1);
+
+final class Importer
+{
+    /** @throws RuntimeException */
+    public function run(callable $step): void
+    {
+        $step();
+    }
+}
+```
+
+```
+$ steins check --profile strict src/Gap.php
+src/Gap.php:25:9: error[throw.maybe-undeclared]: what can be thrown at this site is unbounded (dynamic-callee: the callee is computed at run time), but Importer::run() declares only @throws RuntimeException
+```
+
+It is deliberately loud on real code: on the public corpus about four in five
+declarations that spell `@throws` have a `…?` throw set. Five things quiet it,
+and nothing else does. A declared `@throws \Throwable` is the top envelope and
+is never judged. A call to an enveloped function is owed to that function's own
+finding, not repeated at every caller. A site under a `catch (\Throwable)` is
+caught. The rest is yours to calibrate: a plugin that declares what a
+dynamic call provides, a `@steins-ignore throw.maybe-undeclared` with its
+reason, or the baseline. Because the id is strict-floor, `contracts` keeps its
+meaning.
+
 **`throw.liskov-widened`** fires when an override declares a checked
 exception the abstraction does not, and only when both sides declare
 `@throws`.
@@ -860,7 +901,7 @@ src/Liskov.php:14:21: error[throw.liskov-widened]: RuntimeException is declared 
 
 ### `effect.*` — effect envelopes
 
-Four ids in two layers. Effects are the second dimension Steins infers, and
+Five ids in two layers. Effects are the second dimension Steins infers, and
 the handbook's [effects chapter](../handbook/04-effects.md) is the tour.
 
 **`effect.envelope-exceeded`** and **`effect.liskov-widened`** are contract
@@ -904,6 +945,51 @@ $ steins check --profile contracts src/Effects.php
 src/Effects.php:13:21: error[effect.liskov-widened]: EchoFormatter::format() has proven effect output but Formatter::format() (its abstraction) is declared #[\Steins\Pure] — Liskov effect widening
 src/Effects.php:24:5: error[effect.envelope-exceeded]: echo has effect output, but slugify() is declared #[\Steins\Pure]
 ```
+
+**`effect.maybe-envelope-exceeded`** is the strict-floor sibling of
+`effect.envelope-exceeded`, on the `strict` rung only. The definite id judges
+what inference *proved*, so a declared-pure body that calls something Steins
+cannot resolve (`{…?}` in `steins annotate`) is silent there. This id names
+that call, so "declared pure, but the body runs something the analyzer cannot
+see" has somewhere to surface. It fires on the declarations the definite id
+judges, excluding the top envelope (a bare `@phpstan-impure`), once per site
+and gap kind, and once per call into a project function that is itself `…?`
+and carries no envelope of its own.
+
+```php
+<?php
+
+declare(strict_types=1);
+
+#[\Steins\Pure]
+function apply(callable $f, string $line): string
+{
+    return $f($line);
+}
+
+/**
+ * @param pure-callable $f
+ */
+#[\Steins\Pure]
+function applyChecked(callable $f, string $line): string
+{
+    return $f($line);
+}
+```
+
+```
+$ steins check --profile strict src/Gap.php
+src/Gap.php:8:12: error[effect.maybe-envelope-exceeded]: effects at this site are unbounded (dynamic-callee: the callee is computed at run time), but apply() is declared #[\Steins\Pure]
+```
+
+`applyChecked()` is silent: a `$f()` on a parameter typed `pure-callable`,
+`pure-closure` or `static-pure-closure`, or flagged
+`@pure-unless-callable-is-impure`, is answered at the call sites that bind the
+argument. The other discharges are an interop envelope whose imported bound fits
+the declaration's, and a call to a function with an envelope of its own. A
+missing catalog row (`no-effect-row`) is *not* discharged: it is the analyzer's
+own coverage hole. The ids add findings at `strict` and change no
+exhaustiveness bit, no tag `effects-envelope` writes, and no other id.
 
 **`effect.unknown-label`** is mechanics, and prints in every profile
 including a bare `check`. A typo'd label silently disables the envelope that

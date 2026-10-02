@@ -113,6 +113,9 @@ Emitting ids, by layer (the registry is the source of truth —
   `phpdoc.maybe-undefined` (a read of a top-level `@var T|unset $x` the
   declaration says may not be bound — ADR-0087 §4), `throw.undeclared`,
   `throw.liskov-widened`, `effect.envelope-exceeded`, `effect.liskov-widened`,
+  `throw.maybe-undeclared` and `effect.maybe-envelope-exceeded` (the strict-floor
+  `maybe-` siblings of the two envelope checks: a coverage gap behind a `…?`
+  summary, named instead of omitted — ADR-0100),
   `effect.interop-unknown-label` (floor `contracts`, like the rest of this
   list: an unrecognized label in one of upstream's purity tags, reported only
   where something makes label-intent evident —

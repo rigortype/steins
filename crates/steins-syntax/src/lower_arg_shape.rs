@@ -218,7 +218,7 @@ impl FrameBindings {
     /// An aliasing frame shows nothing, and a write of any kind (an assignment,
     /// `++`, a `foreach` binding, `unset`) rules the name out.
     pub(crate) fn unrebound_param(&self, name: &str) -> bool {
-        !self.opaque && self.params.contains(name) && self.stores.get(name).is_none()
+        !self.opaque && self.params.contains(name) && !self.stores.contains_key(name)
     }
 
     /// The shape of a bare `$name` argument.

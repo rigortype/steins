@@ -89,6 +89,14 @@ the effect syntax (ADR-0006).
 Only proven escapes report; a `Maybe` escape and an unknown hierarchy stay
 silent.
 
+`throw.maybe-undeclared` (contract layer, **strict floor**) is its possibly-grade
+sibling (ADR-0100): the same declarations, reported for the coverage gaps behind
+a `…?` throw set rather than for a proven escape. One finding per own site and
+gap kind, one per call edge into a project body that is itself `…?` and declares
+no `@throws`. A declared `@throws \Throwable` (⊤), a call to a declaring callee,
+and a site under a `catch (\Throwable)` are discharged; nothing else is, a
+missing throw-row included.
+
 An undocumented function is never a finding: absent a declaration there is no
 contract to violate. This is the envelope discipline from
 [effects.md](effects.md), applied to throws.

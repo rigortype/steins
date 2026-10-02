@@ -7,6 +7,7 @@ mod cast_value;
 mod closures;
 mod deep_nesting;
 mod docblock_assoc;
+mod dynamic_call_var;
 mod foreach_sites;
 mod global_constants;
 mod grouped_use;
