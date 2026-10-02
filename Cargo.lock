@@ -1124,6 +1124,7 @@ version = "0.1.8"
 name = "steins-sidecar"
 version = "0.1.8"
 dependencies = [
+ "libc",
  "serde_json",
 ]
 

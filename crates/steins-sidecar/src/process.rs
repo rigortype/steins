@@ -113,6 +113,17 @@ pub fn is_boot_failure(error: &std::io::Error) -> bool {
     error.get_ref().is_some_and(|inner| inner.is::<BootFailure>())
 }
 
+/// How long [`Channel::close`] waits for the reader thread after the child is
+/// killed, before it gives the thread up (issue #894).
+///
+/// A killed child's stdout closes at once, so the reader normally ends in well
+/// under a millisecond. It outlives that only when something outside the child
+/// still holds the pipe: a descendant that escaped the kill, which on Unix means
+/// one that left the process group, and elsewhere any descendant at all. Waiting
+/// on that is waiting on a stranger, so the thread is detached instead, blocked on
+/// a pipe nobody reads, and the run goes on.
+const READER_GRACE: Duration = Duration::from_millis(500);
+
 /// The id the opening handshake carries. [`Sidecar`] numbers its requests from
 /// 1, so a reply that is not the handshake's can never pass for one.
 const HANDSHAKE_ID: u64 = 0;
@@ -157,7 +168,10 @@ fn frame(id: u64, method: &str, params: serde_json::Value) -> String {
 /// where the [`Child`] is fresh but the [`Receiver`] still belongs to the corpse.
 struct Channel {
     child: Child,
-    stdin: ChildStdin,
+    /// `None` once the channel is closed. Dropping it is what tells a process the
+    /// kill did not reach, such as an interpreter behind a wrapper that did not
+    /// `exec` it, that no more requests are coming (issue #894).
+    stdin: Option<ChildStdin>,
     /// Lines drained from the child's stdout by the reader thread.
     lines: Receiver<std::io::Result<String>>,
     reader: Option<JoinHandle<()>>,
@@ -166,6 +180,10 @@ struct Channel {
     /// must reach the SAME build: a replacement resolved from `PATH` would answer
     /// the next request as a different PHP.
     bin: String,
+    /// Whether `child` has been waited on. Its pid, which is also its process
+    /// group's id, can be recycled from then on, so the group is never signalled
+    /// after it.
+    reaped: bool,
 }
 
 impl Channel {
@@ -203,16 +221,25 @@ impl Channel {
     }
 
     /// Start the child and its reader thread, without waiting for it to answer.
+    ///
+    /// On Unix the child leads a process group of its own, so [`Self::kill`] can
+    /// reach whatever it starts. `php` is often a wrapper script (a version
+    /// manager, a container shim), and one that runs the interpreter without
+    /// `exec` leaves the interpreter a grandchild that killing the child alone
+    /// would miss (issue #894).
     fn launch(bin: &str) -> std::io::Result<Self> {
-        let mut child = Command::new(bin)
+        let mut command = Command::new(bin);
+        command
             .arg("-r")
             .arg(runner_code())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             // Discard stderr: warnings must never reach us, real failures widen
             // anyway; this is also where an uncatchable fatal prints before death.
-            .stderr(Stdio::null())
-            .spawn()?;
+            .stderr(Stdio::null());
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(&mut command, 0);
+        let mut child = command.spawn()?;
 
         let stdin = child.stdin.take().expect("piped stdin");
         let stdout = child.stdout.take().expect("piped stdout");
@@ -237,7 +264,21 @@ impl Channel {
             }
         });
 
-        Ok(Self { child, stdin, lines: rx, reader: Some(reader), bin: bin.to_owned() })
+        Ok(Self {
+            child,
+            stdin: Some(stdin),
+            lines: rx,
+            reader: Some(reader),
+            bin: bin.to_owned(),
+            reaped: false,
+        })
+    }
+
+    /// Write one request line. A closed channel fails like a closed pipe.
+    fn send(&mut self, line: &str) -> std::io::Result<()> {
+        let stdin = self.stdin.as_mut().ok_or(std::io::ErrorKind::BrokenPipe)?;
+        stdin.write_all(line.as_bytes())?;
+        stdin.flush()
     }
 
     /// Send the `env` request and wait [`boot_timeout`] for a well-formed answer.
@@ -250,9 +291,7 @@ impl Channel {
     fn handshake(&mut self) -> std::io::Result<()> {
         use std::io::ErrorKind;
         let request = frame(HANDSHAKE_ID, "env", env_params());
-        self.stdin
-            .write_all(request.as_bytes())
-            .and_then(|()| self.stdin.flush())
+        self.send(&request)
             .map_err(|e| boot_failure(e.kind(), "php closed its input during its boot handshake"))?;
         // One deadline for the whole handshake: noise lines do not extend it.
         let deadline = Instant::now() + boot_timeout();
@@ -288,19 +327,78 @@ impl Channel {
         }
     }
 
-    /// Kill the child, **reap** it, and join the reader thread.
+    /// Kill the child and, on Unix, everything in its process group.
+    ///
+    /// Safe to call at any point: once the child is reaped the group is left
+    /// alone, and std's own kill is a no-op on a reaped child.
+    fn kill(&mut self) {
+        if !self.reaped {
+            kill_group(self.child.id());
+        }
+        let _ = self.child.kill();
+    }
+
+    /// Close stdin, kill the child, **reap** it, and wait a bounded time for the
+    /// reader thread. Idempotent.
     ///
     /// The reaping is the point: a respawn that only killed would leave a zombie
-    /// per dead child. Killing closes the child's stdout, which ends the reader's
-    /// `read_line` loop, so the join cannot hang on a live process.
+    /// per dead child. The rest is so that no close can block a run (issue #894).
+    /// Killing the child closes its stdout, which ends the reader's `read_line`
+    /// loop, but only if nothing else holds the pipe: behind a wrapper that did
+    /// not `exec`, the interpreter does. The group kill reaches it on Unix, the
+    /// closed stdin lets it exit wherever the kill does not, and
+    /// [`READER_GRACE`] bounds the wait when neither works.
     fn close(&mut self) {
-        let _ = self.child.kill();
+        drop(self.stdin.take());
+        self.kill();
         let _ = self.child.wait();
-        if let Some(reader) = self.reader.take() {
-            let _ = reader.join();
+        self.reaped = true;
+        self.finish_reader();
+    }
+
+    /// Join the reader thread once it has ended, or detach it after
+    /// [`READER_GRACE`]. The thread ends by dropping its sender, so the
+    /// disconnect is the signal; a line still in flight is discarded, since no
+    /// one is waiting for it.
+    fn finish_reader(&mut self) {
+        let Some(reader) = self.reader.take() else { return };
+        let deadline = Instant::now() + READER_GRACE;
+        loop {
+            let wait = deadline.saturating_duration_since(Instant::now());
+            match self.lines.recv_timeout(wait) {
+                Ok(_) if Instant::now() < deadline => {}
+                Err(RecvTimeoutError::Disconnected) => {
+                    let _ = reader.join();
+                    return;
+                }
+                // Out of grace: dropping the handle detaches the thread.
+                Ok(_) | Err(RecvTimeoutError::Timeout) => return,
+            }
         }
     }
 }
+
+/// `SIGKILL` to the process group `pid` leads (see [`Channel::launch`]).
+///
+/// Called only before the leader is reaped, so the id cannot have been
+/// recycled: an unreaped child keeps its pid, and with it the group's id. A
+/// group that is already empty fails with `ESRCH`, which is ignored like
+/// every other kill failure here.
+#[cfg(unix)]
+fn kill_group(pid: u32) {
+    // A group id of 0 would name this process's own group.
+    let Some(group) = libc::pid_t::try_from(pid).ok().filter(|&group| group > 0) else {
+        return;
+    };
+    // SAFETY: `killpg` takes two integers and touches no memory of ours.
+    unsafe { libc::killpg(group, libc::SIGKILL) };
+}
+
+/// Elsewhere the child leads no group, so there is nothing more to signal: the
+/// closed stdin and [`READER_GRACE`] are what keep a descendant from holding a
+/// close there.
+#[cfg(not(unix))]
+fn kill_group(_pid: u32) {}
 
 /// A resident PHP sidecar process plus its request loop.
 ///
@@ -571,7 +669,7 @@ impl Sidecar {
 
         let line = frame(id, method, params);
 
-        if self.chan.stdin.write_all(line.as_bytes()).is_err() || self.chan.stdin.flush().is_err() {
+        if self.chan.send(&line).is_err() {
             self.poison();
             return None;
         }
@@ -614,14 +712,15 @@ impl Sidecar {
     fn poison(&mut self) {
         self.poisoned = true;
         self.deaths += 1;
-        let _ = self.chan.child.kill();
+        self.chan.kill();
     }
 }
 
 impl Drop for Sidecar {
     fn drop(&mut self) {
         // Closing stdin lets a healthy runner exit; killing covers a hung or
-        // poisoned child. `Channel::close` also reaps it and joins the reader.
+        // poisoned child and, on Unix, anything it started. `Channel::close`
+        // also reaps it and waits a bounded time for the reader.
         self.chan.close();
     }
 }
