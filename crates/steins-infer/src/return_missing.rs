@@ -6,8 +6,8 @@
 use std::collections::HashSet;
 
 use steins_syntax::{
-    CallExpr, Callee, OpaqueConstruct, RetHintKind, Scope, ScopeOwner, Stmt, StmtKind, body_end,
-    body_has_terminator,
+    CallExpr, Callee, OpaqueConstruct, RefKind, RetHintKind, Scope, ScopeOwner, Stmt, StmtKind,
+    body_end, body_has_terminator,
 };
 
 use crate::cx::Cx;
@@ -148,12 +148,17 @@ fn scope_calls_never_returning(cx: &Cx, scope: &Scope, never_returning: &HashSet
 
 /// Whether one call is a callee the veto set names.
 ///
-/// A function call that resolves to a project function is judged on that function's FQN
-/// alone: `namespace Two { function g(): int {} }` is not vetoed by a `: never` `One\g`
-/// elsewhere in the file (issue #925). A function call that does not resolve to one —
-/// ambiguous, builtin-shadowing, undefined — falls back to its simple name against every
-/// entry's last segment, the larger-silence direction. A method call is its simple name
-/// against the method entries, which are keyed that way.
+/// A function call that resolves to a project function is judged on that function's FQN:
+/// `namespace Two { function g(): int {} }` is not vetoed by a `: never` `One\g` elsewhere in
+/// the file (issue #925). An unqualified, unimported call inside a namespace is also judged
+/// on the global candidate, because PHP falls back to the global function at run time when the
+/// namespaced one was never defined — a conditional declaration (`if (getenv(…)) { function
+/// g() {} }`) that did not run, or a file that was not loaded.
+///
+/// A function call that does not resolve to one — ambiguous, builtin-shadowing, undefined —
+/// falls back to its simple name against every entry's last segment, the larger-silence
+/// direction. A method call is its simple name against the method entries, which are keyed
+/// that way (and against a global function's key, the same string, which only adds silence).
 fn calls_never_returning(cx: &Cx, call: &CallExpr, never_returning: &HashSet<String>) -> bool {
     let Some(simple) = callee_simple_name(call) else { return false };
     let simple = simple.to_ascii_lowercase();
@@ -161,9 +166,21 @@ fn calls_never_returning(cx: &Cx, call: &CallExpr, never_returning: &HashSet<Str
         return never_returning.contains(&simple);
     }
     if let Some(site) = cx.resolve_user_fn_any(call) {
-        return never_returning.contains(&cx.fn_decl(site).fqn);
+        return never_returning.contains(&cx.fn_decl(site).fqn)
+            || (falls_back_to_global(cx, call) && never_returning.contains(&simple));
     }
     never_returning.iter().any(|key| key.rsplit('\\').next() == Some(simple.as_str()))
+}
+
+/// Whether PHP would try the global function of the call's name after its namespaced
+/// candidate: an unqualified name, in a namespace, that no `use function` imports.
+fn falls_back_to_global(cx: &Cx, call: &CallExpr) -> bool {
+    let Some(r) = &call.callee_ref else { return false };
+    if r.kind != RefKind::Unqualified {
+        return false;
+    }
+    let ctx = cx.tree().ctx_at(r.offset);
+    !ctx.namespace.is_empty() && !ctx.fn_imports.contains_key(&r.raw.to_ascii_lowercase())
 }
 
 /// `true` when any statement-position call in `stmts` (or in a structured
