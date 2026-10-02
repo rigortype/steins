@@ -370,5 +370,5 @@ set to say whether some subclass of a bound class runs a destructor, and a
 shard without it would answer no. The drop sites read it now, and the gap
 kind `destructor` that rides with it is appended to `GapKind`, a facts payload
 enum decoded past the gate, so that half is no bump. The sites themselves
-(`OperatorFamily::Drop` and its four forms) are appended to the trace
+(`OperatorFamily::Drop`, its four forms and `EffectRecv::Bound`) are appended to the trace
 payload's enums, which are decoded past the gate too: no bump.
