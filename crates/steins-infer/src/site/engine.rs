@@ -264,17 +264,22 @@ pub(crate) fn has_effect_row(name: &str) -> bool {
     steins_catalog::effect_labels(name).is_some() || steins_catalog::out_params(name).is_some()
 }
 
+/// Whether the mined engine hierarchy declares `class` (an FQN, case-insensitive):
+/// a class, interface or enum php-src's stubs declare, a namespaced one under its
+/// namespace (`Random\RandomException`) as a global one under its bare name. The
+/// hierarchy keys classes by FQN, so a name the user's namespace made up
+/// (`App\PDO`) is not in it, and neither is an unimported spelling that resolved
+/// into the user's namespace (ADR-0099 §3).
+pub(crate) fn declares_engine_class(class: &str) -> bool {
+    steins_catalog::builtin_class_display(class).is_some()
+        || steins_catalog::builtin_class_supers(class).is_some()
+}
+
 /// The gap for a known name the catalog has no row for on `axis`'s side, at a
 /// class the chain leaves the project at: the axis's missing-row kind when the
 /// catalog knows the class at all, [`GapKind::UnknownClass`] when it does not (a
 /// name nobody declares in the project, such as `new Engine`, is not thereby an
 /// engine class).
 pub(crate) fn missing_row(class: &str, axis: GapKind) -> GapKind {
-    if steins_catalog::builtin_class_display(class).is_some()
-        || steins_catalog::builtin_class_supers(class).is_some()
-    {
-        axis
-    } else {
-        GapKind::UnknownClass
-    }
+    if declares_engine_class(class) { axis } else { GapKind::UnknownClass }
 }
