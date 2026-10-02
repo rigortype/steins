@@ -271,6 +271,8 @@ mod tests {
 mod fan_out {
     use super::*;
 
+    use std::sync::{Arc, Mutex};
+
     use steins_db::{EffectsPolicy, PluginFacts, ProjectLayout};
     use steins_syntax::SourceTree;
 
@@ -298,6 +300,15 @@ mod fan_out {
     /// Walk the fixture at `width`, returning the findings and the per-file
     /// ledger, plus the width the loop actually used.
     fn walk_at(width: usize, named: bool) -> (Vec<Diagnostic>, Vec<FileWalk>, usize) {
+        walk_reporting(width, named, &crate::Progress::off())
+    }
+
+    /// [`walk_at`] reporting through `progress`.
+    fn walk_reporting(
+        width: usize,
+        named: bool,
+        progress: &crate::Progress,
+    ) -> (Vec<Diagnostic>, Vec<FileWalk>, usize) {
         let sources = sources();
         let trees: Vec<LazyTree<'static>> =
             sources.iter().map(|(_, text)| LazyTree::ready(SourceTree::parse(text))).collect();
@@ -322,7 +333,7 @@ mod fan_out {
             &PluginFacts::none(),
             &EffectsPolicy::none(),
             Some(&mut control),
-            &crate::Progress::off(),
+            progress,
         );
         (findings, std::mem::take(&mut control.ledger), control.workers)
     }
@@ -339,6 +350,32 @@ mod fan_out {
             assert_eq!(workers, width, "the loop fanned out to the width it was given");
             assert_eq!(findings, expected, "width {width} did not produce the sequential run");
             assert_eq!(ledger, expected_ledger, "width {width} recorded a different ledger");
+        }
+    }
+
+    /// The in-flight reader (issue #658) is balanced on both paths: every file
+    /// the walk started is a file it ended, so a finished run names none, and
+    /// the last boundary it crossed is the report. Walking with the handle on
+    /// also changes no finding.
+    #[test]
+    fn the_in_flight_reader_is_empty_once_a_walk_returns_at_every_width() {
+        let (expected, _, _) = walk_at(1, true);
+        for width in [1, 4, sources().len()] {
+            let named = Arc::new(Mutex::new(Vec::new()));
+            let sink = Arc::clone(&named);
+            let progress = crate::Progress::new(
+                move |line| sink.lock().unwrap().push(line.to_owned()),
+                std::time::Duration::ZERO,
+            );
+            let (findings, _, workers) = walk_reporting(width, true, &progress);
+            assert_eq!(workers, width);
+            assert_eq!(findings, expected, "width {width}: the handle changed a finding");
+            let snapshot = progress.snapshot().expect("an on handle reads");
+            assert!(snapshot.in_flight.is_empty(), "width {width}: {:?}", snapshot.in_flight);
+            assert_eq!(snapshot.last_phase.as_deref(), Some("report"));
+            let lines = named.lock().unwrap();
+            let slow = lines.iter().filter(|l| l.starts_with("slow file: ")).count();
+            assert_eq!(slow, sources().len(), "width {width}: every file started and ended once");
         }
     }
 

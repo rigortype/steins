@@ -125,7 +125,7 @@ pub use project::{
 };
 
 use project::Index;
-pub use progress::Progress;
+pub use progress::{InFlightFile, Progress, ProgressSnapshot};
 pub use walk_fleet::WALK_WORKERS_ENV;
 pub use walk_plan::Divergence;
 
