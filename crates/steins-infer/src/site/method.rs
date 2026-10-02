@@ -161,9 +161,17 @@ pub(crate) fn throwable_creation_hooks(
     enclosing: Option<&str>,
     class: &StaticClass,
 ) -> bool {
+    use crate::contract::IsA;
     new_start(cx, enclosing, class).is_some_and(|(start, exact)| {
-        super::operator::engine_chain_hooks(cx, &start, exact)
-            && cx.is_a(&start, "Throwable") != crate::contract::IsA::No
+        let throwable = cx.is_a(&start, "Throwable");
+        // A hook on the named class's own chain counts unless the walk shows it is no
+        // `Throwable`; one on a class that may stand in for a late-bound `static` only
+        // when the walk shows the named class is one (an `Unknown` there would charge
+        // every `new static` of a vendor-parented class).
+        (throwable != IsA::No && super::operator::engine_chain_hooks(cx, &start, true))
+            || (!exact
+                && throwable == IsA::Yes
+                && super::operator::engine_chain_hooks(cx, &start, false))
     })
 }
 
