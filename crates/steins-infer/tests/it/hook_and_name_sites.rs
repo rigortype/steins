@@ -326,3 +326,50 @@ fn this_in_a_project_exception_is_bounded_by_its_own_subclasses_only() {
     let (effects, _) = lanes(sealed, "FinalEx::m");
     assert_eq!(effects, Vec::<&str>::new());
 }
+
+#[test]
+fn a_coalescing_offset_write_converts_its_value_into_a_string_container() {
+    // `$s[5] ??= $o` runs `__toString` on a string (witnessed), as `=` does.
+    gap("function f(string $s, S $o) { $s[5] ??= $o; return $s; }", "f", TO_STRING);
+    gap("function f(S $o) { $s = 'abc'; $s[1] ??= $o; return $s; }", "f", TO_STRING);
+    exhaustive("function f(array $a, S $o) { $a[5] ??= $o; return $a; }", "f");
+}
+
+#[test]
+fn a_hooking_class_with_a_parent_the_universe_cannot_read_may_be_the_bound() {
+    // `VEx` hooks `$message` over a vendor parent: it may be a `Throwable`, and a class
+    // that only imports a trait over such a parent is still not charged.
+    let hooking = "<?php\nclass VEx extends \\Vendor\\Base { protected $message { get => 'v'; } }\n\
+        function g(Throwable $e) { return $e->getMessage(); }\n";
+    assert_eq!(summary(hooking, "g").gaps, [PROPERTY]);
+    // A hooking class the walk shows is not a `Throwable` is not charged.
+    let other = "<?php\nclass NotEx { public $m { get => 'v'; } }\n\
+        function g(Throwable $e) { return $e->getMessage(); }\n";
+    assert!(summary(other, "g").exhaustive);
+}
+
+#[test]
+fn an_exception_created_with_a_hook_on_its_chain_runs_it_whatever_constructor_runs() {
+    // The engine sets `$line` and `$file` at creation: an own empty constructor and a
+    // project parent's do not keep a hook on either from running (witnessed).
+    let own = "class LEx extends RuntimeException {\n\
+        protected int $line { set(int $v) { echo 'h'; $this->line = $v; } }\n\
+        public function __construct() {} }\n\
+        function f() { return new LEx; }";
+    gap(own, "f", PROPERTY);
+    let parent = "class PEx extends RuntimeException { public function __construct() {} }\n\
+        class LEx3 extends PEx { protected int $line { set(int $v) { echo 'h'; $this->line = $v; } } }\n\
+        function f() { return new LEx3; }";
+    gap(parent, "f", PROPERTY);
+    // No hook on the chain, or a class that is no `Throwable`: nothing.
+    exhaustive("class PEx extends RuntimeException { public function __construct() {} }\nfunction f() { return new PEx; }", "f");
+    exhaustive("class Plain { public int $n { set(int $v) { $this->n = $v; } } }\nfunction f() { return new Plain; }", "f");
+}
+
+#[test]
+fn a_get_only_hook_on_a_promoted_parameter_runs_nothing_at_promotion() {
+    exhaustive("", "PromoPlain::__construct");
+    let get = "class PGet { public function __construct(public string $p { get => strtoupper($this->p); }) {} }";
+    exhaustive(get, "PGet::__construct");
+    exhaustive(&format!("{get}\nfunction f() {{ return new PGet('x'); }}"), "f");
+}

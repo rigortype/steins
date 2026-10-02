@@ -483,8 +483,10 @@ unknown class or an operand nothing names is `operator-to-string`.
   target or a `foreach` binding), or `$this->p` declared with such a type and not hooked, each only
   while no call of the frame may take the variable by reference. An `ArrayAccess` object is such a
   container: `offsetSet` receives the value and converts nothing (`ArrayAccess` is §4.3's own row).
-  An append `$c[] = v` is never a site: on a string it is a fatal error, not a conversion
-  (witnessed). A container that is an element (`$a['x']['y'] = $o`, where `$a['x']` may hold a
+  `$c[k] ??= v` is a site as `=` is: on a string it stores the value when the offset is unset
+  and converts it (witnessed); the other compound forms (`.=`, `++`, `&=`) on a string offset
+  raise an `Error` before converting, and an append `$c[] = v` is a fatal error, so none of them
+  is one. A container that is an element (`$a['x']['y'] = $o`, where `$a['x']` may hold a
   string), a call result or another object's property is not shown, so it is a site.
 - **Resolution.** `OperatorConstruct::Name` has one operand; `OperatorConstruct::OffsetValue` has
   two, the value and the container, and the resolver rules the site out through the container
@@ -496,7 +498,8 @@ unknown class or an operand nothing names is `operator-to-string`.
 ### §4.3, a promoted-hook site, and §4.2, hooked chains
 
 - **A hooked promoted parameter is a MagicProp `Write` site on `$this`** in the constructor's own
-  row, named by the parameter (`__construct(public string $p { set { … } })`), placed before the
+  row, named by the parameter (`__construct(public string $p { set { … } })`; a `get`-only hook
+  runs nothing at promotion and is no site), placed before the
   body's sites because promotion runs before the first statement. It resolves as an explicit
   `$this->p = …` does: the hooked property is `operator-magic-property`. The gap sits in the
   constructor's row and reaches every `new` and `parent::__construct` through the ordinary edge, so
@@ -510,7 +513,11 @@ unknown class or an operand nothing names is `operator-to-string`.
   subclass declares on any of them runs in the engine's code. It applies to `new Sub(…)` and
   `parent::__construct(…)` in both lanes, and to a method call that reaches an engine row in the
   effect lane (the throw lane's method calls have no row and are a gap already). Which property the
-  engine touches is not read: any hook on the chain counts. For a `new` the class is exact, so the
+  engine touches is not read: any hook on the chain counts. The engine also sets `$file` and
+  `$line` when it *creates* any exception or error, before and whatever its constructor, so a
+  `new` of a project class that is (or may be) a `Throwable` and carries a hook on its chain is the
+  same gap when its constructor is a project one too (an own empty constructor, a project parent's;
+  witnessed with a hook on `$line`). For a `new` the class is exact, so the
   chain alone decides; for `parent::__construct`, `$this->m()`, `parent::m()` and a declared receiver
   the object is the enclosing class, a subclass of it or any class the declared type bounds, which
   §4.4's gate answers.
@@ -520,13 +527,16 @@ unknown class or an operand nothing names is `operator-to-string`.
 `subclass_adds_property_magic` asks whether `Chain::of(sub).has(class)`, and a chain never lists an
 engine ancestor (`Throwable`, `Exception`), so for a receiver bound by an engine class the answer
 was always no. The gate for a hook on any property is therefore asked of the supertype walk: some
-class in `magic_property_classes` that hooks a property or imports a trait (whose body is not
-lowered) **is** the bound (`is_a` is `Yes`), or an anonymous class extends something that is. The
-bound is the receiver's own class, not the engine class the chain exits at: `$this->getMessage()` in
-a `LogicException` subclass is not charged for a hooking `RuntimeException`. A class whose chain
-leaves the universe before it reaches the bound (`Unknown`) does not count, as in `Chain::has`: it
-is §7.2's open question, and counting it charged every site for every class whose parent a
-vendor-less checkout lacks (measured: it made 406 public-corpus bodies gain the kind, 5 once corrected).
+class in `magic_property_classes` that hooks a property, or imports a trait (whose body is not
+lowered), and may be the bound, or an anonymous class extends something that is. The bound is the
+receiver's own class, not the engine class the chain exits at: `$this->getMessage()` in a
+`LogicException` subclass is not charged for a hooking `RuntimeException`. A class that itself
+hooks a property counts unless the walk shows it is not the bound, so one whose parent the universe
+cannot read (a vendor parent) counts: its hook is user code whatever the parent is (witnessed with
+`$e->getMessage()` on a `Throwable`). A class that only imports a trait, and an anonymous class,
+count only when the walk shows they **are** the bound (`Yes`): counting an `Unknown` there charged
+every site for every class whose parent a vendor-less checkout lacks (measured: it made 406
+public-corpus bodies gain the kind, 5 once corrected), which is §7.2's open question.
 
 ### §7.6 closed, and what it leaves open
 
@@ -543,6 +553,9 @@ promoted parameter's hook. Left open, each witnessed:
 - **A hook a trait declares.** A trait's body is not lowered; a class importing one is counted by
   the universe gate and its chain is not closed, but a hook the trait declares on a property an
   engine class writes is not looked for in the trait itself.
+- **A name in a write, `unset`, `++` or `&` position** (`$p->$n = 'w'` with `final class S` and
+  `S $n`) is a gap where the read is an edge: the lvalue holds `$n`, which the declared-receiver
+  gate counts as written. Sound, and left as it is.
 - **A destructuring or `foreach` target that is an offset** is a site with an unknown value, which
   over-reports (`foreach ($rows as $a[$k])` over an array container the scan cannot show).
 

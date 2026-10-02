@@ -151,6 +151,22 @@ pub(crate) fn new_hooks(cx: &Cx, enclosing: Option<&str>, class: &StaticClass) -
         .is_some_and(|(start, exact)| super::operator::engine_chain_hooks(cx, &start, exact))
 }
 
+/// Whether a `new` of a project class creates a `Throwable` whose chain hooks a
+/// property. The engine sets `$file` and `$line` when it creates any exception or
+/// error, before and whatever its constructor, so a hook on either runs at the
+/// `new` even for an own empty constructor or a project parent's (witnessed);
+/// [`new_hooks`] covers the `new` that reaches the engine's constructor itself.
+pub(crate) fn throwable_creation_hooks(
+    cx: &Cx,
+    enclosing: Option<&str>,
+    class: &StaticClass,
+) -> bool {
+    new_start(cx, enclosing, class).is_some_and(|(start, exact)| {
+        super::operator::engine_chain_hooks(cx, &start, exact)
+            && cx.is_a(&start, "Throwable") != crate::contract::IsA::No
+    })
+}
+
 /// Whether the object `parent::__construct(...)` runs the engine's constructor
 /// on may hook a property: `$this`, which is the enclosing class or a subclass of
 /// it, so the enclosing class's chain and every class that may stand in for it.
