@@ -43,7 +43,8 @@ use crate::fold::foldable;
 ///   `vsprintf` are `global.read.setting.locale` and `printf`/`vprintf` carry it
 ///   beside `io.output.buffer`, because `%f`, `%g` and `%G` render the locale's
 ///   decimal point. `localeconv`, `nl_langinfo` and `strcoll` read it, and
-///   `setlocale` is `global.write.setting.locale`. A literal format that shows
+///   `setlocale` is `global.write.setting.locale` with a coarse `global.read` for
+///   the environment block it consults for `''` or `null`. A literal format that shows
 ///   no such conversion is read by [`format_reads_locale`](crate::format_reads_locale).
 /// * `curl_exec` keeps `io.output` arg-blind (only `CURLOPT_RETURNTRANSFER`
 ///   suppresses it); `system`/`passthru` take parent `io.output` since
@@ -65,7 +66,10 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
     // printf family's `f`/`g`/`G` conversions and by the locale readers, and
     // rewritten by `setlocale`.
     const LOCALE_READ: &[&str] = &["global.read.setting.locale"];
-    const LOCALE_WRITE: &[&str] = &["global.write.setting.locale"];
+    // `setlocale` also reads the environment block when its locale is `''` or
+    // `null` (`putenv("LC_ALL=fr_FR.ISO8859-1"); setlocale(LC_ALL, "")` answers
+    // `fr_FR`), so the row carries the coarse `global.read` beside the write.
+    const LOCALE_WRITE_ENV_READ: &[&str] = &["global.write.setting.locale", "global.read"];
     // `printf`/`vprintf` write their rendering to the output channel AND read
     // the locale while rendering.
     const OUTPUT_BUFFER_LOCALE_READ: &[&str] = &["io.output.buffer", "global.read.setting.locale"];
@@ -153,10 +157,15 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
         "date_default_timezone_set" | "mb_regex_encoding" | "ini_set" | "putenv" => {
             Some(GLOBAL_WRITE)
         }
-        // `setlocale` rewrites the locale cell and nothing else. `setlocale($c,
-        // '0')` only queries it; narrowing that call to the read waits for the
-        // call-site slice (ADR-0101 D6), and the argument-blind row is the write.
-        "setlocale" => Some(LOCALE_WRITE),
+        // `setlocale` rewrites the locale cell, and with `''` or `null` as its
+        // locale it also takes the name from the environment block, which is a
+        // read; there is no environment cell yet, so that read is the coarse
+        // `global.read`. The row is argument-blind, so both stand at every call.
+        // The environment read narrows to its own label when the env cell lands
+        // (issue #1000, S6), and `setlocale($c, '0')`, which only queries the cell,
+        // narrows to the locale read in S4 with the other call-site narrowings
+        // (ADR-0101 D6).
+        "setlocale" => Some(LOCALE_WRITE_ENV_READ),
         // Process-global state, no channel: seeding pair replaces RNG state;
         // `clearstatcache` empties the stat cache. Drawing stays `nondet.random`.
         "srand" | "mt_srand" | "clearstatcache" => Some(GLOBAL_WRITE),
@@ -1770,7 +1779,10 @@ mod tests {
             Some(&["io.output.buffer", "global.read.setting.locale"][..])
         );
         assert_eq!(effect_labels("error_log"), Some(&["io"][..]));
-        assert_eq!(effect_labels("setlocale"), Some(&["global.write.setting.locale"][..]));
+        assert_eq!(
+            effect_labels("setlocale"),
+            Some(&["global.write.setting.locale", "global.read"][..])
+        );
         assert_eq!(effect_labels("getenv"), Some(&["global.read"][..]));
         assert_eq!(effect_labels("srand"), Some(&["global.write"][..]));
         assert_eq!(effect_labels("mt_srand"), Some(&["global.write"][..]));
@@ -1779,7 +1791,8 @@ mod tests {
 
     /// ADR-0101 §2.4: the locale cell's rows. The printf family reads it, the
     /// `v` spellings follow their siblings, `printf` keeps its output label
-    /// beside the read, `setlocale` writes it, and the three readers report it.
+    /// beside the read, `setlocale` writes it (and reads the environment for `''` and
+    /// `null`), and the three readers report it.
     #[test]
     fn the_locale_cell_rows() {
         const READ: Option<&[&str]> = Some(&["global.read.setting.locale"]);
@@ -1795,7 +1808,11 @@ mod tests {
         }
         assert_eq!(effect_labels("vsprintf"), effect_labels("sprintf"));
         assert_eq!(effect_labels("vprintf"), effect_labels("printf"));
-        assert_eq!(effect_labels("setlocale"), Some(&["global.write.setting.locale"][..]));
+        assert_eq!(
+            effect_labels("setlocale"),
+            Some(&["global.write.setting.locale", "global.read"][..]),
+            "the write, and the environment read of `''` and `null`"
+        );
         // Every label the rows use is a registry entry.
         for name in ["sprintf", "printf", "setlocale", "strcoll"] {
             for label in effect_labels(name).expect(name) {

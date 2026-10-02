@@ -243,6 +243,17 @@ pub struct FormatReading {
     /// Whether some conversion reads the locale's decimal point: `f`, `g` and
     /// `G` do (ADR-0101 §3.1). `F`, `e`, `E`, `h`, `H`, every integer and
     /// character conversion, `s` and `%%` never do.
+    ///
+    /// `false` means no **locale** read, not that the call reads no setting.
+    /// A `%s` of a value that may be a float renders it through the `precision`
+    /// ini (`ini_set('precision', '3')` turns `1234.5678` into `1.23E+3`), and
+    /// it is the only conversion that does: `d`, `e`, `F`, `g`, `h` and the rest
+    /// give the same text at any `precision`, and none reads
+    /// `serialize_precision` (witnessed, PHP 8.5, with variable arguments, since
+    /// 8.4 folds a literal `sprintf('%s', 1.5)` at compile time). The `precision`
+    /// cell has no label yet (ADR-0101 D4), so a caller that drops the locale
+    /// label on `!reads_locale` must keep whatever read of `precision` the
+    /// call's `%s` positions carry once that label exists.
     pub reads_locale: bool,
 }
 

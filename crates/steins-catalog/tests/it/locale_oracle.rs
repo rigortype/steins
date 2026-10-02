@@ -1,12 +1,23 @@
 //! The ADR-0101 witness table against the engine: a literal printf format reads
 //! the locale exactly when its output moves between `C` and `de_DE.UTF-8`, for
 //! `sprintf` and `vsprintf` alike (issue #991). Every test skips, loudly, without
-//! `php` on the PATH or without the `de_DE.UTF-8` locale installed.
+//! `php` on the PATH or without the `de_DE.UTF-8` locale installed, unless `CI` is
+//! set: the CI test job installs both, so there a missing one fails the test
+//! rather than letting a green run mean nothing.
 
 use std::io::Write as _;
 use std::process::{Command, Stdio};
 
 use steins_catalog::format_reads_locale;
+
+/// Whether the oracle cannot run: a loud skip off CI, a failure on CI.
+fn oracle_unavailable(reason: &str) {
+    assert!(
+        std::env::var_os("CI").is_none(),
+        "the locale oracle cannot run on CI: {reason}; the test job installs php and generates de_DE.UTF-8"
+    );
+    eprintln!("SKIP: {reason}; oracle comparison not run");
+}
 
 /// For each format, whether `sprintf` of floats moves between `C` and
 /// `de_DE.UTF-8`, and whether `vsprintf` gave `sprintf`'s answer in both
@@ -15,7 +26,7 @@ use steins_catalog::format_reads_locale;
 /// decimal point. `None` (a skip) without `php` or the locale.
 fn engine_locale_moves(formats: &[String]) -> Option<Vec<(bool, bool)>> {
     if Command::new("php").arg("--version").output().is_err() {
-        eprintln!("SKIP: php not on PATH; oracle comparison not run");
+        oracle_unavailable("php is not on PATH");
         return None;
     }
     // One format per line: none of them holds a newline.
@@ -50,7 +61,7 @@ fn engine_locale_moves(formats: &[String]) -> Option<Vec<(bool, bool)>> {
     assert!(out.status.success(), "php failed");
     let text = String::from_utf8(out.stdout).expect("utf8");
     if text.starts_with("NOLOCALE") {
-        eprintln!("SKIP: de_DE.UTF-8 is not installed; oracle comparison not run");
+        oracle_unavailable("de_DE.UTF-8 is not installed");
         return None;
     }
     Some(text.lines().map(|l| (l.starts_with('1'), l.ends_with('1'))).collect())
