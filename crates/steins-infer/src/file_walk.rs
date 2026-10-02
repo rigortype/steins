@@ -82,9 +82,9 @@ impl WalkInputs<'_> {
     pub(crate) fn walk(&self, folder: &mut dyn Folder, fi: usize) -> FileSink {
         let mut diagnostics = Vec::new();
         let path = self.units[fi].path;
-        let started = self.progress.file_start(path);
+        let walking = self.progress.file_start(path);
         let uncovered = walk_one_file(self, folder, fi, &mut diagnostics);
-        self.progress.file_done(path, started);
+        walking.done();
         FileSink { diagnostics, uncovered }
     }
 }

@@ -137,34 +137,18 @@ impl Progress {
         (channel.sink)(&format!("{phase}: {} (elapsed {}{detail})", span(took), span(total)));
     }
 
-    /// A file's walk starts: record it as in flight and return the clock it
-    /// starts on, or `None` when nothing reports (no clock, no lock). `path`
-    /// is the file's diagnostic path.
-    pub(crate) fn file_start(&self, path: &str) -> Option<Instant> {
-        let channel = self.inner.as_ref()?;
-        let since = Instant::now();
-        let walking = Walking { thread: std::thread::current().id(), path: path.to_owned(), since };
-        channel.in_flight.lock().unwrap_or_else(PoisonError::into_inner).push(walking);
-        Some(since)
-    }
-
-    /// A file's walk is done: it is named if it was slow, and then it is no
-    /// longer in flight. `path` is the file's diagnostic path.
-    ///
-    /// The file leaves the in-flight list *after* its slow-file line is handed
-    /// over, so a reader that sees the line can still see the file, and a sink
-    /// that waits for a reader (a watchdog's test) has something to read.
-    pub(crate) fn file_done(&self, path: &str, started: Option<Instant>) {
-        let (Some(channel), Some(started)) = (&self.inner, started) else { return };
-        let took = started.elapsed();
-        if took >= channel.slow_file {
-            (channel.sink)(&format!("slow file: {path} walked in {}", span(took)));
-        }
-        let thread = std::thread::current().id();
-        let mut walking = channel.in_flight.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(at) = walking.iter().position(|w| w.thread == thread && w.path == path) {
-            walking.swap_remove(at);
-        }
+    /// A file's walk starts: record it as in flight until the returned guard
+    /// drops. With nothing reporting the guard holds nothing (no clock, no
+    /// lock). `path` is the file's diagnostic path.
+    pub(crate) fn file_start<'a>(&'a self, path: &'a str) -> FileWalk<'a> {
+        let started = self.inner.as_ref().map(|channel| {
+            let since = Instant::now();
+            let thread = std::thread::current().id();
+            let walking = Walking { thread, path: path.to_owned(), since };
+            channel.in_flight.lock().unwrap_or_else(PoisonError::into_inner).push(walking);
+            since
+        });
+        FileWalk { progress: self, path, started }
     }
 
     /// What the run is doing now, readable from any thread; `None` for an off
@@ -196,6 +180,42 @@ impl Progress {
     }
 }
 
+/// A file whose walk is in progress, from [`Progress::file_start`]. The file
+/// is in flight until this drops, so an unwind through the walk cannot leave a
+/// stale entry behind.
+pub(crate) struct FileWalk<'a> {
+    progress: &'a Progress,
+    path: &'a str,
+    started: Option<Instant>,
+}
+
+impl FileWalk<'_> {
+    /// The walk returned: name the file if it was slow, then let it leave the
+    /// in-flight list (on drop).
+    ///
+    /// The file leaves *after* its slow-file line is handed over, so a reader
+    /// that sees the line can still see the file, and a sink that waits for a
+    /// reader (a watchdog's test) has something to read.
+    pub(crate) fn done(self) {
+        let (Some(channel), Some(started)) = (&self.progress.inner, self.started) else { return };
+        let took = started.elapsed();
+        if took >= channel.slow_file {
+            (channel.sink)(&format!("slow file: {} walked in {}", self.path, span(took)));
+        }
+    }
+}
+
+impl Drop for FileWalk<'_> {
+    fn drop(&mut self) {
+        let (Some(channel), Some(_)) = (&self.progress.inner, self.started) else { return };
+        let thread = std::thread::current().id();
+        let mut walking = channel.in_flight.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(at) = walking.iter().position(|w| w.thread == thread && w.path == self.path) {
+            walking.swap_remove(at);
+        }
+    }
+}
+
 /// A duration in the one spelling every progress line uses.
 fn span(d: Duration) -> String {
     format!("{:.1} ms", d.as_secs_f64() * 1000.0)
@@ -217,8 +237,7 @@ mod tests {
         let off = Progress::off();
         off.phase("parse");
         off.phase_with("walk", || unreachable!("an off handle builds no detail"));
-        assert!(off.file_start("a.php").is_none());
-        off.file_done("a.php", None);
+        off.file_start("a.php").done();
         assert!(off.snapshot().is_none(), "an off handle has nothing to read");
     }
 
@@ -236,10 +255,10 @@ mod tests {
     #[test]
     fn only_a_file_at_or_over_the_threshold_is_named() {
         let (never, lines) = collected(Duration::from_secs(3600));
-        never.file_done("quick.php", never.file_start("quick.php"));
+        never.file_start("quick.php").done();
         assert!(lines.lock().unwrap().is_empty());
         let (always, lines) = collected(Duration::ZERO);
-        always.file_done("src/Slow.php", always.file_start("src/Slow.php"));
+        always.file_start("src/Slow.php").done();
         let lines = lines.lock().unwrap();
         assert_eq!(lines.len(), 1);
         assert!(lines[0].starts_with("slow file: src/Slow.php walked in "));
@@ -252,12 +271,25 @@ mod tests {
         assert_eq!(before.last_phase, None);
         assert!(before.in_flight.is_empty());
 
-        let started = progress.file_start("src/Hot.php");
+        let walk = progress.file_start("src/Hot.php");
         let during = progress.snapshot().unwrap();
         let paths: Vec<&str> = during.in_flight.iter().map(|f| f.path.as_str()).collect();
         assert_eq!(paths, ["src/Hot.php"]);
 
-        progress.file_done("src/Hot.php", started);
+        walk.done();
+        assert!(progress.snapshot().unwrap().in_flight.is_empty());
+    }
+
+    /// A walk that unwinds leaves nothing behind (the guard drops).
+    #[test]
+    fn an_unwound_walk_is_no_longer_in_flight() {
+        let (progress, _) = collected(Duration::from_secs(3600));
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _walk = progress.file_start("src/Boom.php");
+            assert_eq!(progress.snapshot().unwrap().in_flight.len(), 1);
+            panic!("the walk panics");
+        }));
+        assert!(caught.is_err());
         assert!(progress.snapshot().unwrap().in_flight.is_empty());
     }
 
@@ -285,10 +317,10 @@ mod tests {
                 let (progress, all_started, read) = (&progress, &all_started, &read);
                 scope.spawn(move || {
                     let path = format!("src/W{w}.php");
-                    let started = progress.file_start(&path);
+                    let walk = progress.file_start(&path);
                     all_started.wait();
                     read.wait();
-                    progress.file_done(&path, started);
+                    walk.done();
                 });
             }
             all_started.wait();
@@ -312,12 +344,11 @@ mod tests {
         let here = progress.file_start("a.php");
         std::thread::scope(|scope| {
             scope.spawn(|| {
-                let there = progress.file_start("a.php");
-                progress.file_done("a.php", there);
+                progress.file_start("a.php").done();
             });
         });
         assert_eq!(progress.snapshot().unwrap().in_flight.len(), 1, "this thread's walk remains");
-        progress.file_done("a.php", here);
+        here.done();
         assert!(progress.snapshot().unwrap().in_flight.is_empty());
     }
 }
