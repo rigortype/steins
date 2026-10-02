@@ -141,7 +141,9 @@ pub(crate) enum GapKind {
     OperatorToString,
     /// A property fetch or store on an operand whose class may run `__get`,
     /// `__set`, `__isset`, `__unset` or a property hook (the MagicProp family,
-    /// including §4.4's universe gate).
+    /// including §4.4's universe gate), a hooked promoted constructor parameter, and
+    /// the engine's own code (an inherited constructor, a final accessor) run on an
+    /// object whose chain hooks a property (§4.2).
     OperatorMagicProperty,
     /// An offset access on an operand that may be an `ArrayAccess` object (the
     /// ArrayAccess family: `$x[k]`, `isset`, `unset`, destructuring).
@@ -254,7 +256,9 @@ impl GapKind {
             Self::OperatorToString => {
                 "an operand may be an object whose `__toString` the site cannot pin"
             }
-            Self::OperatorMagicProperty => "a property access may run `__get`, `__set` or a hook",
+            Self::OperatorMagicProperty => {
+                "a property access, or the engine's code on a hooked chain, may run `__get`, `__set` or a hook"
+            }
             Self::OperatorArrayAccess => "an offset access may run `ArrayAccess` methods",
             Self::OperatorIteration => "an iterated operand may run `Traversable` methods",
             Self::OperatorClone => "a cloned operand may run `__clone`",

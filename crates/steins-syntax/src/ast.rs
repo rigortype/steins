@@ -856,6 +856,24 @@ pub enum OperatorConstruct {
     /// on the clone, so `__set` may run. The parser reads it as a call of a
     /// function named `clone`; the lowering recognises that spelling.
     CloneWith,
+    /// A name the engine converts to a string: a dynamic property name
+    /// (`$o->$n`, `$o->{$e}`), a variable-variable name (`$$n`, `${$e}`) and a
+    /// static property's name (`P::$$n`). One operand, the name expression
+    /// ([`OperatorFamily::ToString`]).
+    Name,
+    /// The value an offset write stores (`$c[k] = v`, and a destructuring or
+    /// `foreach` target `$c[k]`), which a string container converts to a string
+    /// ([`OperatorFamily::ToString`]). Two operands: the value, and the
+    /// container. The container's shape is [`ArgShape::Param`] or
+    /// [`ArgShape::Local`] with [`Stored::Array`], or `$this->p`
+    /// ([`ArgShape::ThisProperty`]), only for a variable or property shown no
+    /// string (a parameter whose declared type admits none, a local every write
+    /// of which is an array, a number, a boolean, `null` or an object); the
+    /// resolver rules the site out for such a container, whose offset write
+    /// stores an element or calls `offsetSet` and converts nothing. Any other
+    /// container is [`ArgShape::Unknown`]. An append (`$c[] = v`) is never one:
+    /// on a string it is a fatal error, not a conversion.
+    OffsetValue,
 }
 
 impl OperatorFamily {
@@ -866,7 +884,7 @@ impl OperatorFamily {
 
 impl OperatorConstruct {
     /// Every form, in declaration order, which is the order the payload codec numbers them by.
-    pub const ALL: [Self; 25] = [
+    pub const ALL: [Self; 27] = [
         Self::Concat,
         Self::ConcatAssign,
         Self::Interpolation,
@@ -892,6 +910,8 @@ impl OperatorConstruct {
         Self::Spread,
         Self::Clone,
         Self::CloneWith,
+        Self::Name,
+        Self::OffsetValue,
     ];
 
     /// The family a form belongs to, or `None` for the forms
@@ -908,7 +928,9 @@ impl OperatorConstruct {
             | Self::Print
             | Self::LooseCompare
             | Self::OrderCompare
-            | Self::Switch => Some(OperatorFamily::ToString),
+            | Self::Switch
+            | Self::Name
+            | Self::OffsetValue => Some(OperatorFamily::ToString),
             Self::Destructure => Some(OperatorFamily::ArrayAccess),
             Self::Foreach | Self::YieldFrom | Self::Spread => Some(OperatorFamily::Iterate),
             Self::Clone | Self::CloneWith => Some(OperatorFamily::Clone),

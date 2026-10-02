@@ -33,18 +33,48 @@
 use mago_span::HasSpan;
 use mago_syntax::cst::{
     Access, Argument, ArrayElement, AssignmentOperator, Binary, BinaryOperator,
-    ClassLikeMemberSelector, DocumentString, Expression, FunctionCall, Literal, Node, StringPart,
-    SwitchCase, UnaryPrefix, UnaryPrefixOperator,
+    ClassLikeMemberSelector, DocumentString, Expression, FunctionCall, FunctionLikeParameterList,
+    Literal, Node, StringPart, SwitchCase, UnaryPrefix, UnaryPrefixOperator, Variable,
 };
 
 use super::{SiteScope, scan_sites};
 use crate::ast::{
-    ArgShape, OperatorConstruct as C, OperatorFamily as F, SiteKind, SiteOrigin,
+    ArgShape, ConstArgs, EffectRecv, OperatorConstruct as C, OperatorFamily as F, SiteKind,
+    SiteOrigin,
 };
-use crate::lower_arg_shape::arg_shape;
+use crate::lower_arg_shape::{arg_shape, container_shape_of};
 use crate::lower_expr::{effect_recv_of_object_declared, method_name_of};
 use crate::stack_guard;
-use crate::{bytes_to_string, to_span};
+use crate::{bytes_to_string, strip_dollar, to_span};
+
+/// The sites a constructor's promoted parameters run in its prologue, before any
+/// statement of its body: a property hook on a promoted parameter (PHP 8.4) runs
+/// its `set` hook when the constructor promotes the argument, a write to `$this`
+/// that no statement spells. One MagicProp `Write` site on `$this` per hooked
+/// promoted parameter, naming it, which resolves as an explicit `$this->p = …`
+/// does (ADR-0099 §4.3): the hooked property is a gap. A promoted parameter with
+/// no hook is not one: its write runs nothing unless a subclass hooks the
+/// property, which is the explicit write's §4.4 question and is not asked here.
+pub(crate) fn promoted_hook_sites(params: &FunctionLikeParameterList<'_>) -> Vec<SiteOrigin> {
+    params
+        .parameters
+        .iter()
+        .filter(|p| p.is_promoted_property() && p.hooks.is_some())
+        .map(|p| SiteOrigin {
+            span: to_span(p.span()),
+            kind: SiteKind::Operator {
+                family: F::MagicProp,
+                construct: C::Write,
+                receivers: vec![Some(EffectRecv::This)],
+                member: Some(strip_dollar(bytes_to_string(p.variable.name))),
+            },
+            guards: Vec::new(),
+            operands: Some(vec![ArgShape::Unknown]),
+            ref_targets: None,
+            const_args: ConstArgs::default(),
+        })
+        .collect()
+}
 
 /// Record the operator sites `node` is, if it is one. Returns `true` when this
 /// already walked the node's children (a role-taking form: its targets are
@@ -82,10 +112,17 @@ pub(super) fn lower(node: &Node<'_, '_>, sx: &SiteScope<'_>, out: &mut Vec<SiteO
         // A fetch in value position; a role-taking parent never lets the walk reach one.
         Node::PropertyAccess(pa) => {
             property_site(pa.object, &pa.property, to_span(pa.span()), C::Read, sx, out);
+            selector_name(&pa.property, sx, out);
             false
         }
         Node::NullSafePropertyAccess(pa) => {
             property_site(pa.object, &pa.property, to_span(pa.span()), C::Read, sx, out);
+            selector_name(&pa.property, sx, out);
+            false
+        }
+        // `$$n`, `${$e}` and the name of `P::$$n`: the name is converted to a string.
+        Node::Variable(v) => {
+            variable_name(v, sx, out);
             false
         }
         Node::ArrayAccess(aa) => {
@@ -249,6 +286,7 @@ fn assignment(
                 targets(elements, sx, out);
             } else {
                 chain(a.lhs, C::Write, sx, out);
+                offset_value(a.lhs, Some(a.rhs), sx, out);
             }
         }
         AssignmentOperator::Concat(_) => {
@@ -316,6 +354,7 @@ fn target(expr: &Expression<'_>, sx: &SiteScope<'_>, out: &mut Vec<SiteOrigin>) 
         targets(elements, sx, out);
     } else {
         chain(expr, C::Write, sx, out);
+        offset_value(expr, None, sx, out);
     }
 }
 
@@ -363,11 +402,77 @@ fn inner(role: C) -> C {
     }
 }
 
-/// Walk a dynamic property name (`->$n`, `->{expr}`); an identifier has nothing to walk.
+/// Walk a dynamic property name (`->$n`, `->{expr}`), which the engine converts
+/// to a string; an identifier has nothing to walk.
 fn selector(selector: &ClassLikeMemberSelector<'_>, sx: &SiteScope<'_>, out: &mut Vec<SiteOrigin>) {
     if !matches!(selector, ClassLikeMemberSelector::Identifier(_)) {
+        selector_name(selector, sx, out);
         scan_sites(&Node::ClassLikeMemberSelector(selector), sx, out);
     }
+}
+
+/// The ToString site of a dynamic property name: `$o->$n` and `$o->{$e}` convert
+/// the name expression's value, which is an object's `__toString` when it is one.
+/// A method name is not here: `$o->$n()` is a dynamic callee already.
+fn selector_name(
+    selector: &ClassLikeMemberSelector<'_>,
+    sx: &SiteScope<'_>,
+    out: &mut Vec<SiteOrigin>,
+) {
+    match selector {
+        ClassLikeMemberSelector::Variable(v) => {
+            let name = Expression::Variable(v.clone());
+            push_at(F::ToString, C::Name, to_span(v.span()), None, &[&name], sx, out);
+        }
+        ClassLikeMemberSelector::Expression(e) => {
+            push_at(F::ToString, C::Name, to_span(e.span()), None, &[e.expression], sx, out);
+        }
+        ClassLikeMemberSelector::Identifier(_) | ClassLikeMemberSelector::Missing(_) => {}
+    }
+}
+
+/// The ToString site of a variable-variable's name: `$$n` converts the value of
+/// `$n`, `${$e}` the value of `$e`. The same node is the static property name in
+/// `P::$$n`, which the construct lowering hands to the scan.
+fn variable_name(variable: &Variable<'_>, sx: &SiteScope<'_>, out: &mut Vec<SiteOrigin>) {
+    let span = to_span(variable.span());
+    match variable {
+        Variable::Direct(_) => {}
+        Variable::Indirect(iv) => push_at(F::ToString, C::Name, span, None, &[iv.expression], sx, out),
+        Variable::Nested(nv) => {
+            let name = Expression::Variable((*nv.variable).clone());
+            push_at(F::ToString, C::Name, span, None, &[&name], sx, out);
+        }
+    }
+}
+
+/// The value an offset write `$c[k] = v` stores, which a string container
+/// converts to a string ([`C::OffsetValue`]). `value` is `None` for a target
+/// whose value nothing names (a destructuring or `foreach` target): shown as an
+/// unknown operand. Not emitted when the value is shown to hold no object, and
+/// never for an append (`$c[] = v` is a fatal error on a string, not a conversion).
+fn offset_value(
+    target: &Expression<'_>,
+    value: Option<&Expression<'_>>,
+    sx: &SiteScope<'_>,
+    out: &mut Vec<SiteOrigin>,
+) {
+    let Expression::ArrayAccess(aa) = target.unparenthesized() else { return };
+    let (shape, receiver) = match value {
+        Some(v) => (arg_shape(v, &sx.cx.bindings), effect_recv_of_object_declared(v, sx.cx)),
+        None => (ArgShape::Unknown, None),
+    };
+    if holds_no_object(C::OffsetValue, &shape) {
+        return;
+    }
+    let container = container_shape_of(aa.array, &sx.cx.bindings);
+    let kind = SiteKind::Operator {
+        family: F::ToString,
+        construct: C::OffsetValue,
+        receivers: vec![receiver, None],
+        member: None,
+    };
+    emit(kind, to_span(aa.span()), vec![shape, container], sx, out);
 }
 
 /// A property access on `object` under `role`.

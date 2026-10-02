@@ -106,21 +106,8 @@ pub(crate) enum NewTarget {
 /// subclass can replace. In a trait, `self` and `parent` are the using class's,
 /// which the trait body cannot name, so they stay unknown there.
 pub(crate) fn resolve_new(cx: &Cx, enclosing: Option<&str>, class: &StaticClass) -> NewTarget {
-    let own = || enclosing.filter(|e| !cx.find_class(e).is_some_and(|(_, cd)| cd.is_trait));
-    let (start, exact) = match class {
-        StaticClass::Named(name) => (cx.class_fqn(name), true),
-        StaticClass::SelfKw => match own() {
-            Some(e) => (e.to_owned(), true),
-            None => return NewTarget::Unknown(GapKind::UnknownClass),
-        },
-        StaticClass::Parent => match own().and_then(|e| cx.parent_fqn(e)) {
-            Some(p) => (p, true),
-            None => return NewTarget::Unknown(GapKind::UnknownClass),
-        },
-        StaticClass::Static => match own() {
-            Some(e) => (e.to_owned(), cx.find_class(e).is_some_and(|(_, cd)| cd.is_final)),
-            None => return NewTarget::Unknown(GapKind::UnknownClass),
-        },
+    let Some((start, exact)) = new_start(cx, enclosing, class) else {
+        return NewTarget::Unknown(GapKind::UnknownClass);
     };
     // A class a subclass can extend, named by `static`, runs the constructor of
     // whichever class the call is late-bound to: the callee is computed.
@@ -136,6 +123,39 @@ pub(crate) fn resolve_new(cx: &Cx, enclosing: Option<&str>, class: &StaticClass)
         }
         _ => unresolved,
     }
+}
+
+/// The class a `new` names and whether the object is exactly that class: `None`
+/// for a `self`, `parent` or `static` with no class in scope.
+fn new_start(cx: &Cx, enclosing: Option<&str>, class: &StaticClass) -> Option<(String, bool)> {
+    let own = || enclosing.filter(|e| !cx.find_class(e).is_some_and(|(_, cd)| cd.is_trait));
+    Some(match class {
+        StaticClass::Named(name) => (cx.class_fqn(name), true),
+        StaticClass::SelfKw => (own()?.to_owned(), true),
+        StaticClass::Parent => (own().and_then(|e| cx.parent_fqn(e))?, true),
+        StaticClass::Static => {
+            let e = own()?;
+            (e.to_owned(), cx.find_class(e).is_some_and(|(_, cd)| cd.is_final))
+        }
+    })
+}
+
+/// Whether a project class on the chain of the class a `new` names hooks a
+/// property, for a `new` whose constructor is the engine's ([`NewTarget::Engine`]).
+/// The engine's constructor writes the properties of its own class (`$message`,
+/// `$code`, `$previous`), which a hook of the subclass intercepts: the site is a
+/// [`GapKind::OperatorMagicProperty`] beside the constructor's row (ADR-0099
+/// §4.2, issue #875). The class is exact there, so no subclass stands in for it.
+pub(crate) fn new_hooks(cx: &Cx, enclosing: Option<&str>, class: &StaticClass) -> bool {
+    new_start(cx, enclosing, class)
+        .is_some_and(|(start, exact)| super::operator::engine_chain_hooks(cx, &start, exact))
+}
+
+/// Whether the object `parent::__construct(...)` runs the engine's constructor
+/// on may hook a property: `$this`, which is the enclosing class or a subclass of
+/// it, so the enclosing class's chain and every class that may stand in for it.
+pub(crate) fn parent_constructor_hooks(cx: &Cx, enclosing: Option<&str>) -> bool {
+    enclosing.is_some_and(|e| super::operator::engine_chain_hooks(cx, e, false))
 }
 
 /// The engine class `start`'s chain leaves the project at, when no project
@@ -176,8 +196,11 @@ pub(crate) fn new_origin(class: &StaticClass) -> String {
 /// project edge.
 pub(super) enum EngineMethod {
     /// The catalog's row for the method (issue #67); an empty one is a
-    /// catalogued-pure method.
-    Row(Hit),
+    /// catalogued-pure method. `hooked` is whether a project class that may be the
+    /// object the method runs on hooks a property, which the engine's code reads
+    /// or writes through its hook (`getMessage()` reads `$message`): the call is
+    /// a [`GapKind::OperatorMagicProperty`] beside the row (issue #875).
+    Row { hit: Hit, hooked: bool },
     /// The chain leaves the project at an engine class that gives no row an
     /// answer for this receiver.
     Gap(GapKind),
@@ -221,10 +244,38 @@ pub(super) fn engine_method(
     method: &str,
 ) -> EngineMethod {
     let bound_this = matches!(receiver, EffectRecv::This | EffectRecv::SelfKw);
-    match engine_start(cx, enclosing, params, receiver, method) {
-        Some((start, exact, origin)) => engine_row(cx, &start, method, (exact, bound_this), origin),
-        None => EngineMethod::NotEngine,
+    let Some((start, exact, origin)) = engine_start(cx, enclosing, params, receiver, method) else {
+        return EngineMethod::NotEngine;
+    };
+    match engine_row(cx, &start, method, (exact, bound_this), origin) {
+        EngineMethod::Row { hit, .. } => {
+            let hooked = receiver_hooks(cx, enclosing, receiver, (&start, exact));
+            EngineMethod::Row { hit, hooked }
+        }
+        other => other,
     }
+}
+
+/// Whether the object a method call runs the engine's code on may hook a property
+/// ([`EngineMethod::Row`]): a hook on the chain of the class the receiver names, a
+/// class that may stand in for a bound receiver, and, for `parent::m()` and
+/// `Foo::m()`, which run on `$this` when the frame's class is one of them, the
+/// frame's own class and its subclasses.
+fn receiver_hooks(
+    cx: &Cx,
+    enclosing: Option<&str>,
+    receiver: &EffectRecv,
+    (start, exact): (&str, bool),
+) -> bool {
+    if super::operator::engine_chain_hooks(cx, start, exact) {
+        return true;
+    }
+    let on_this = matches!(receiver, EffectRecv::Parent | EffectRecv::ClassName(_));
+    on_this
+        && enclosing.is_some_and(|own| {
+            cx.is_a(own, start) != crate::contract::IsA::No
+                && super::operator::engine_chain_hooks(cx, own, false)
+        })
 }
 
 /// The engine class a method call's chain leaves the project at, for the throw
@@ -278,15 +329,18 @@ fn engine_row(
 ) -> EngineMethod {
     let Some(fqn) = engine_exit(cx, start, method) else { return EngineMethod::NotEngine };
     match engine::method_effects(&fqn, method, exact) {
-        MethodRow::Labels(labels) => EngineMethod::Row(Hit {
-            kind: HitKind::Method,
-            callee: fqn,
-            method: method.to_owned(),
-            spelled: origin.clone(),
-            origin,
-            labels: labels.to_vec(),
-            throws: &[],
-        }),
+        MethodRow::Labels(labels) => EngineMethod::Row {
+            hit: Hit {
+                kind: HitKind::Method,
+                callee: fqn,
+                method: method.to_owned(),
+                spelled: origin.clone(),
+                origin,
+                labels: labels.to_vec(),
+                throws: &[],
+            },
+            hooked: false,
+        },
         // A row the engine's class has, that a subclass may replace: `$this` and
         // `self::` are a non-final `$this` as for a project method, and any other
         // bound (a declared receiver) is an open method.

@@ -9,9 +9,12 @@
 
 use std::collections::{HashMap, HashSet};
 
+use std::ops::{Deref, DerefMut};
+
 use mago_syntax::cst::{
-    Access, Argument, ArgumentList, ArrayElement, AssignmentOperator, BinaryOperator, Construct,
-    Expression, FunctionLikeParameterList, Node, UnaryPrefixOperator, Variable,
+    Access, Argument, ArgumentList, ArrayElement, Assignment, AssignmentOperator, BinaryOperator,
+    Construct, Expression, FunctionLikeParameterList, Hint, Literal, Node, UnaryPrefixOperator,
+    Variable,
 };
 
 use crate::ast::{ArgShape, SUPERGLOBALS, Stored};
@@ -78,6 +81,23 @@ pub(crate) fn arg_shape(expr: &Expression<'_>, frame: &FrameBindings) -> ArgShap
             Some(Stored::Array) => ArgShape::Array,
             None => ArgShape::Unknown,
         },
+    }
+}
+
+/// The shape of the container of an offset write ([`FrameBindings::container_shape`]):
+/// a bare variable, or `$this->name` for the engine to read the property's declared
+/// type. Any other container (an element, a call, another object's property) is not
+/// shown to be a non-string.
+pub(crate) fn container_shape_of(expr: &Expression<'_>, frame: &FrameBindings) -> ArgShape {
+    match expr.unparenthesized() {
+        Expression::Variable(Variable::Direct(dv)) => {
+            frame.container_shape(&strip_dollar(bytes_to_string(dv.name)))
+        }
+        Expression::Access(Access::Property(pa)) => match prop_fetch_of(pa.object, &pa.property) {
+            Some((var, prop)) if var == "this" => ArgShape::ThisProperty(prop),
+            _ => ArgShape::Unknown,
+        },
+        _ => ArgShape::Unknown,
     }
 }
 
@@ -173,8 +193,11 @@ pub(crate) struct FrameBindings {
     imported: HashSet<String>,
     /// An arrow function captures every free variable from its parent.
     captures_all: bool,
-    /// The meet of what each write stores, per variable.
-    stores: Stores,
+    /// The meet of what each write stores, per variable, and the variables some
+    /// whole-variable write may leave a string.
+    stores: Writes,
+    /// The by-value parameters whose declared type admits no string.
+    non_string_params: HashSet<String>,
     /// An aliasing frame, or one this summary was never built for.
     opaque: bool,
 }
@@ -199,6 +222,9 @@ impl FrameBindings {
             if p.is_reference() || p.ellipsis.is_some() {
                 frame.imported.insert(name);
             } else {
+                if p.hint.as_ref().is_some_and(non_string_hint) {
+                    frame.non_string_params.insert(name.clone());
+                }
                 frame.params.insert(name);
             }
         }
@@ -221,8 +247,42 @@ impl FrameBindings {
         !self.opaque && self.params.contains(name) && !self.stores.contains_key(name)
     }
 
+    /// The shape of the container of an offset write `$name[…] = …`: a variable
+    /// the frame never leaves a string, so an offset write into it stores an
+    /// element (or calls `offsetSet`) and converts nothing. A parameter
+    /// qualifies by its declared type, which admits no `string`, `mixed` or
+    /// `callable`; a local by its writes, each an array, `null`, a number, a
+    /// boolean or an object (`new`, a closure, a cast to one of those), and the
+    /// union `+=` of an array. Anything else is [`ArgShape::Unknown`]: a string
+    /// container converts the value it is handed (`$s[0] = $o`).
+    ///
+    /// The shape is [`ArgShape::Param`] or [`ArgShape::Local`] with
+    /// [`Stored::Array`], whatever the variable holds, so that the engine's
+    /// by-reference check still applies (`Frame::container_not_string`): only
+    /// this function builds the shape of an offset write's container, and the
+    /// engine reads no other as a non-string one.
+    pub(crate) fn container_shape(&self, name: &str) -> ArgShape {
+        let foreign = name == "this" || SUPERGLOBALS.contains(&name);
+        if self.opaque
+            || foreign
+            || self.imported.contains(name)
+            || self.stores.maybe_string.contains(name)
+        {
+            return ArgShape::Unknown;
+        }
+        if self.params.contains(name) {
+            let declared = self.non_string_params.contains(name);
+            declared.then(|| ArgShape::Param { name: name.to_owned(), stores: Stored::Array })
+        } else if self.captures_all {
+            None
+        } else {
+            Some(ArgShape::Local { name: name.to_owned(), stores: Stored::Array })
+        }
+        .unwrap_or(ArgShape::Unknown)
+    }
+
     /// The shape of a bare `$name` argument.
-    fn shape(&self, name: &str) -> ArgShape {
+    pub(crate) fn shape(&self, name: &str) -> ArgShape {
         let foreign = name == "this" || SUPERGLOBALS.contains(&name);
         if self.opaque || foreign || self.imported.contains(name) {
             return ArgShape::Unknown;
@@ -246,6 +306,136 @@ impl FrameBindings {
 /// write stores a value nothing is shown about ([`FrameBindings`]).
 type Stores = HashMap<String, Option<Stored>>;
 
+/// The writes a frame makes: what each variable stores ([`Stores`], which a
+/// `Writes` derefs to), and the variables some whole-variable write may leave a
+/// string (`$v = 'abc'`, `$v = f()`, `$v .= 'x'`, a destructuring target), which
+/// [`FrameBindings::container_shape`] reads.
+#[derive(Debug, Default)]
+struct Writes {
+    stores: Stores,
+    maybe_string: HashSet<String>,
+}
+
+impl Deref for Writes {
+    type Target = Stores;
+
+    fn deref(&self) -> &Stores {
+        &self.stores
+    }
+}
+
+impl DerefMut for Writes {
+    fn deref_mut(&mut self) -> &mut Stores {
+        &mut self.stores
+    }
+}
+
+/// Whether the declared type `hint` admits no string: every member is a class,
+/// `array`, `iterable`, `object`, a number, a boolean or `null`. `string`,
+/// `mixed` and `callable` (a function name is a string) may hold one.
+fn non_string_hint(hint: &Hint<'_>) -> bool {
+    match hint {
+        Hint::Identifier(_)
+        | Hint::Array(_)
+        | Hint::Null(_)
+        | Hint::True(_)
+        | Hint::False(_)
+        | Hint::Static(_)
+        | Hint::Self_(_)
+        | Hint::Parent(_)
+        | Hint::Float(_)
+        | Hint::Bool(_)
+        | Hint::Integer(_)
+        | Hint::Object(_)
+        | Hint::Iterable(_)
+        | Hint::Intersection(_) => true,
+        Hint::Nullable(n) => non_string_hint(n.hint),
+        Hint::Parenthesized(p) => non_string_hint(p.hint),
+        Hint::Union(u) => non_string_hint(u.left) && non_string_hint(u.right),
+        Hint::Callable(_)
+        | Hint::Void(_)
+        | Hint::Never(_)
+        | Hint::String(_)
+        | Hint::Mixed(_) => false,
+    }
+}
+
+/// Whether storing `value` into a variable shows it is no string: an array, an
+/// object (`new`, a closure), a number, a boolean or `null`, or a cast to one.
+fn string_free_value(value: &Expression<'_>) -> bool {
+    match value.unparenthesized() {
+        Expression::Array(_)
+        | Expression::LegacyArray(_)
+        | Expression::Instantiation(_)
+        | Expression::Closure(_)
+        | Expression::ArrowFunction(_) => true,
+        Expression::Literal(literal) => !matches!(literal, Literal::String(_)),
+        Expression::UnaryPrefix(u) => matches!(
+            u.operator,
+            UnaryPrefixOperator::ArrayCast(..)
+                | UnaryPrefixOperator::ObjectCast(..)
+                | UnaryPrefixOperator::BoolCast(..)
+                | UnaryPrefixOperator::BooleanCast(..)
+                | UnaryPrefixOperator::IntCast(..)
+                | UnaryPrefixOperator::IntegerCast(..)
+                | UnaryPrefixOperator::FloatCast(..)
+                | UnaryPrefixOperator::DoubleCast(..)
+        ),
+        _ => false,
+    }
+}
+
+/// Whether an assignment stores into a bare variable a value shown no string that
+/// is neither object-free nor an array literal: an object (`new`, a closure).
+fn is_object_write(a: &Assignment<'_>) -> bool {
+    matches!(a.operator, AssignmentOperator::Assign(_) | AssignmentOperator::Coalesce(_))
+        && matches!(a.lhs.unparenthesized(), Expression::Variable(Variable::Direct(_)))
+        && stored_of(a.rhs).is_none()
+        && string_free_value(a.rhs)
+}
+
+/// Record the variables an assignment may leave a string in
+/// ([`Writes::maybe_string`]): a whole-variable target unless its value is shown
+/// no string (`=` and `??=`, and `+=` of an array), and every variable of a
+/// destructuring pattern.
+fn note_maybe_string(a: &Assignment<'_>, out: &mut Writes) {
+    match a.lhs.unparenthesized() {
+        Expression::Variable(Variable::Direct(dv)) => {
+            let keeps = match a.operator {
+                AssignmentOperator::Assign(_)
+                | AssignmentOperator::Coalesce(_)
+                | AssignmentOperator::Addition(_) => string_free_value(a.rhs),
+                _ => false,
+            };
+            if !keeps {
+                out.maybe_string.insert(strip_dollar(bytes_to_string(dv.name)));
+            }
+        }
+        Expression::List(l) => l.elements.iter().for_each(|e| pattern_vars(e, out)),
+        Expression::Array(arr) => arr.elements.iter().for_each(|e| pattern_vars(e, out)),
+        Expression::LegacyArray(arr) => arr.elements.iter().for_each(|e| pattern_vars(e, out)),
+        _ => {}
+    }
+}
+
+/// Every variable a destructuring pattern element binds, nested patterns included.
+fn pattern_vars(element: &ArrayElement<'_>, out: &mut Writes) {
+    let target = match element {
+        ArrayElement::KeyValue(kv) => kv.value,
+        ArrayElement::Value(v) => v.value,
+        ArrayElement::Variadic(_) | ArrayElement::Missing(_) => return,
+    };
+    match target.unparenthesized() {
+        Expression::Variable(Variable::Direct(dv)) => {
+            out.maybe_string.insert(strip_dollar(bytes_to_string(dv.name)));
+        }
+        Expression::List(l) => l.elements.iter().for_each(|e| pattern_vars(e, out)),
+        Expression::Array(arr) => arr.elements.iter().for_each(|e| pattern_vars(e, out)),
+        Expression::LegacyArray(arr) => arr.elements.iter().for_each(|e| pattern_vars(e, out)),
+        _ => {}
+    }
+}
+
 /// Which variables a frame imports from its parent ([`FrameBindings::new`]).
 pub(crate) enum Captures<'a> {
     /// A function or method: none.
@@ -257,8 +447,12 @@ pub(crate) enum Captures<'a> {
 }
 
 /// Fold what `value` holds into everything a variable has been shown to store.
-fn record(stores: &mut Stores, name: String, value: Option<Stored>) {
-    let slot = stores.entry(name).or_insert(Some(Stored::ObjectFree));
+fn record(out: &mut Writes, name: String, value: Option<Stored>) {
+    // A write nothing reads (a `foreach` or `catch` binding, a reference) may leave a string.
+    if value.is_none() {
+        out.maybe_string.insert(name.clone());
+    }
+    let slot = out.stores.entry(name).or_insert(Some(Stored::ObjectFree));
     *slot = match (*slot, value) {
         (None, _) | (_, None) => None,
         (Some(Stored::Array), _) | (_, Some(Stored::Array)) => Some(Stored::Array),
@@ -273,9 +467,18 @@ fn record(stores: &mut Stores, name: String, value: Option<Stored>) {
 /// bare variable in a named call with positional arguments, which the effects
 /// pass checks against the callee it resolves. Nested function-like bodies are
 /// frames of their own and are not descended.
-fn collect_stores(node: &Node<'_, '_>, out: &mut Stores) {
+fn collect_stores(node: &Node<'_, '_>, out: &mut Writes) {
     match node {
+        // A whole-variable write of a value shown no string that no `Stored` names
+        // (`$v = new Foo`) stores "anything" for the variable's own shape, and leaves
+        // it no string for an offset write's container.
+        Node::Assignment(a) if is_object_write(a) => {
+            if let Expression::Variable(Variable::Direct(dv)) = a.lhs.unparenthesized() {
+                out.stores.insert(strip_dollar(bytes_to_string(dv.name)), None);
+            }
+        }
         Node::Assignment(a) => {
+            note_maybe_string(a, out);
             let value = match a.operator {
                 AssignmentOperator::Assign(_) | AssignmentOperator::Coalesce(_) => stored_of(a.rhs),
                 AssignmentOperator::Concat(_) => Some(Stored::ObjectFree),
@@ -362,7 +565,7 @@ fn collect_stores(node: &Node<'_, '_>, out: &mut Stores) {
 /// element holding `value`; a property write rebinds no variable; a
 /// destructuring hands each target an element of `value`. Any other target
 /// counts every variable in it as storing anything.
-fn store_into(lhs: &Expression<'_>, value: Option<Stored>, out: &mut Stores) {
+fn store_into(lhs: &Expression<'_>, value: Option<Stored>, out: &mut Writes) {
     match lhs.unparenthesized() {
         Expression::Variable(Variable::Direct(dv)) => {
             record(out, strip_dollar(bytes_to_string(dv.name)), value);
@@ -392,7 +595,7 @@ fn store_into(lhs: &Expression<'_>, value: Option<Stored>, out: &mut Stores) {
 }
 
 /// One element of a destructuring target ([`store_into`]).
-fn destructure(element: &ArrayElement<'_>, value: Option<Stored>, out: &mut Stores) {
+fn destructure(element: &ArrayElement<'_>, value: Option<Stored>, out: &mut Writes) {
     match element {
         ArrayElement::KeyValue(kv) => store_into(kv.value, value, out),
         ArrayElement::Value(v) => store_into(v.value, value, out),
@@ -421,7 +624,7 @@ fn element_root(lhs: &Expression<'_>) -> Option<String> {
 /// taking the argument by reference writes through (`f($a['k'])` can turn a
 /// `null` into an array, or store an object into it). A value no reference
 /// can bind to has no root.
-fn store_into_root(expr: &Expression<'_>, out: &mut Stores) {
+fn store_into_root(expr: &Expression<'_>, out: &mut Writes) {
     let mut cur = expr.unparenthesized();
     loop {
         cur = match cur {
@@ -442,7 +645,7 @@ fn store_into_root(expr: &Expression<'_>, out: &mut Stores) {
 /// variable is left for it to check against the callee's parameters, through
 /// the shapes the call's origin carries; every other argument's root counts as
 /// storing anything.
-fn store_into_args(list: &ArgumentList<'_>, resolvable: bool, out: &mut Stores) {
+fn store_into_args(list: &ArgumentList<'_>, resolvable: bool, out: &mut Writes) {
     let positional =
         list.arguments.iter().all(|a| matches!(a, Argument::Positional(p) if p.ellipsis.is_none()));
     for arg in list.arguments.iter() {
