@@ -4,12 +4,16 @@
 
 use std::collections::HashSet;
 
+use steins_contract::ContractTy;
 use steins_domain::Certainty;
-use steins_syntax::{ArgValue, CallExpr, ClassDecl, NameRef, RefKind, StaticClass};
+use steins_syntax::{
+    ArgValue, ArrayKey, CallExpr, ClassDecl, EXISTENCE_PREDICATES, NameRef, RefKind, StaticClass,
+};
 
-use crate::fold::Folder;
 use crate::cx::Cx;
+use crate::dam::DamKind;
 use crate::env::{Store, Vouch};
+use crate::fold::Folder;
 use crate::project::{FnResolution, Res};
 use crate::walk::WalkCx;
 
@@ -82,18 +86,9 @@ pub(crate) fn global_function_callee<'a>(cx: &Cx, call: &'a CallExpr) -> Option<
 /// [`global_function_callee`], which owns that whole rule).
 fn existence_predicate(cx: &Cx, call: &CallExpr) -> Option<&'static str> {
     let callee = global_function_callee(cx, call)?;
-    const PREDS: &[&str] = &[
-        "method_exists",
-        "function_exists",
-        "class_exists",
-        "interface_exists",
-        "trait_exists",
-        "enum_exists",
-        // global constants (ADR-0078, issue #198)
-        "defined",
-        // end global constants (ADR-0078, issue #198)
-    ];
-    PREDS.iter().copied().find(|p| callee.eq_ignore_ascii_case(p))
+    // The vocabulary lives in the syntax crate, which reads it too: a region whose test is
+    // one of these is the only call-bearing guard region the lowering carries.
+    EXISTENCE_PREDICATES.iter().copied().find(|p| callee.eq_ignore_ascii_case(p))
 }
 
 /// Fold a recognized existence-guard call to a verdict (the N3 machinery). Anything
@@ -148,6 +143,17 @@ pub(crate) fn eval_existence_call(w: &WalkCx, folder: &mut dyn Folder, call: &Ca
         };
         constant_defined_verdict(w.cx, folder, name)
     // end global constants (ADR-0078, issue #198)
+    } else if pred == "extension_loaded" {
+        if !call.positional_only || call.args.len() != 1 {
+            return Certainty::Maybe;
+        }
+        let ArgValue::Str(name) = &call.args[0].value else {
+            return Certainty::Maybe;
+        };
+        let Some(name) = name.as_str() else {
+            return Certainty::Maybe;
+        };
+        extension_loaded_verdict(w.cx, folder, name)
     } else {
         // `class_exists`/`interface_exists`/`trait_exists`/`enum_exists('Name')`.
         if !call.positional_only || call.args.is_empty() {
@@ -300,6 +306,30 @@ fn constant_defined_verdict(cx: &Cx, folder: &mut dyn Folder, name: &str) -> Cer
 }
 // end global constants (ADR-0078, issue #198)
 
+/// The three-valued `extension_loaded('name')` verdict (issue #928): the sidecar's
+/// loaded-extension list answers it, case-insensitively, as PHP's own lookup does.
+///
+/// The question is about the running process, as `defined()`'s is, and the answer is
+/// the boot surface's only while nothing can change it: a `dl(...)` call anywhere in the
+/// universe ([`DamKind::ExtensionLoad`]) loads extensions at run time, so with one
+/// standing neither polarity is decidable. No sidecar answers `Maybe` (the caller has
+/// already refused an unavailable absence family, and the folder answers `None` for an
+/// unanswerable `env()`).
+///
+/// This is what discharges the common optional-extension guard
+/// (`if (extension_loaded('redis')) { new Redis; }`) on a runtime that lacks the
+/// extension: the guard is provably false, so its body is a dead region.
+fn extension_loaded_verdict(cx: &Cx, folder: &mut dyn Folder, name: &str) -> Certainty {
+    if cx.dam.sites().iter().any(|s| s.kind == DamKind::ExtensionLoad) {
+        return Certainty::Maybe;
+    }
+    match folder.boot_surface_extension(name) {
+        Some(true) => Certainty::Yes,
+        Some(false) => Certainty::No,
+        None => Certainty::Maybe,
+    }
+}
+
 /// The three-valued `class_exists`/`interface_exists`/`trait_exists`/`enum_exists`
 /// verdict (ADR-0049 §4 / S1 existence). A uniquely-indexed unconditional project
 /// class-like of the MATCHING kind is present; an absent name the boot surface reports
@@ -350,51 +380,127 @@ fn classlike_kind_matches(pred: &str, cd: &ClassDecl) -> bool {
     }
 }
 
-/// The symbol a positive existence guard call vouches for (ADR-0049 §4 guard-respect
-/// leg), resolved against the branch store. `None` when the call isn't a recognized
-/// existence predicate or its subject can't be pinned to a concrete symbol.
-/// `method_exists` additionally resolves a `$var` receiver to its store-known class,
-/// so the instance idiom `if (method_exists($o,'m')) { $o->m(); }` vouches `C::m` —
-/// the vouch key is the resolved class + name.
-pub(crate) fn existence_vouch(cx: &Cx, store: &Store, call: &CallExpr) -> Option<Vouch> {
-    let pred = existence_predicate(cx, call)?;
-    if pred == "method_exists" {
-        if !call.positional_only || call.args.len() != 2 {
-            return None;
+/// The symbols a positive existence guard call vouches for (ADR-0049 §4 guard-respect
+/// leg), resolved against the branch store. Empty when the call isn't a recognized
+/// guard or its subject can't be pinned to a concrete symbol.
+///
+/// The member guards (`method_exists`, `is_callable([$o, 'm'])`, `property_exists`)
+/// vouch a member of whatever the receiver can be, read the way the absence emitters
+/// read it ([`receiver_classes`]): the one class of an allocation-proven `$var`, else one
+/// vouch per class of its narrowed declared arms — a parameter `N $n` has no allocation,
+/// and the guard `method_exists($n, 'go')` is exactly as much evidence for `N::go`.
+pub(crate) fn existence_vouch(cx: &Cx, store: &Store, call: &CallExpr) -> Vec<Vouch> {
+    if let Some(vouches) = member_guard_vouch(cx, store, call) {
+        return vouches;
+    }
+    let Some(pred) = existence_predicate(cx, call) else {
+        return Vec::new();
+    };
+    match pred {
+        "function_exists" => {
+            if !call.positional_only || call.args.len() != 1 {
+                return Vec::new();
+            }
+            let ArgValue::Str(name) = &call.args[0].value else {
+                return Vec::new();
+            };
+            name.as_str()
+                .map(|n| Vouch::Function(n.trim_start_matches('\\').to_ascii_lowercase()))
+                .into_iter()
+                .collect()
         }
-        let ArgValue::Str(method) = &call.args[1].value else {
-            return None;
-        };
-        let class = match &call.args[0].value {
-            ArgValue::Var(v) => store.class_of(v)?.to_owned(),
-            other => existence_class_literal(cx, other)?,
-        };
-        Some(Vouch::Method {
-            class: class.trim_start_matches('\\').to_ascii_lowercase(),
-            method: method.as_str()?.to_ascii_lowercase(),
-        })
-    } else if pred == "function_exists" {
-        if !call.positional_only || call.args.len() != 1 {
-            return None;
-        }
-        let ArgValue::Str(name) = &call.args[0].value else {
-            return None;
-        };
-        Some(Vouch::Function(name.as_str()?.trim_start_matches('\\').to_ascii_lowercase()))
-    // global constants (ADR-0078, issue #198)
-    } else if pred == "defined" {
+        // global constants (ADR-0078, issue #198)
+        //
         // `defined('X')` vouches nothing, on purpose: `constant.undefined` is
         // judged by a file-wide pass with no branch store, like `class.undefined`,
         // and takes its guard leg from dead-region pruning instead (see
-        // `constant_defined_verdict`). The arm exists so the class-predicate arm
-        // below can't mistake a constant name for a class name.
-        None
-    // end global constants (ADR-0078, issue #198)
-    } else {
-        if !call.positional_only || call.args.is_empty() {
+        // `constant_defined_verdict`). Likewise `extension_loaded`: it names no symbol.
+        // The arm exists so the class-predicate arm below can't mistake a constant
+        // or an extension name for a class name. `method_exists` is read by
+        // `member_guard_vouch` above, and answers here only when that declined.
+        "defined" | "extension_loaded" | "method_exists" => Vec::new(),
+        // end global constants (ADR-0078, issue #198)
+        _ => {
+            if !call.positional_only || call.args.is_empty() {
+                return Vec::new();
+            }
+            existence_class_literal(cx, &call.args[0].value)
+                .map(|name| Vouch::Class(name.trim_start_matches('\\').to_ascii_lowercase()))
+                .into_iter()
+                .collect()
+        }
+    }
+}
+
+/// The vouches of the member-existence guards, or `None` when `call` is not one.
+/// `method_exists($r, 'm')` and `is_callable([$r, 'm'])` vouch a method;
+/// `property_exists($r, 'p')` vouches a property. The method name is lowercased (PHP
+/// method names are case-insensitive), the property name kept as written.
+fn member_guard_vouch(cx: &Cx, store: &Store, call: &CallExpr) -> Option<Vec<Vouch>> {
+    let callee = global_function_callee(cx, call)?;
+    if !call.positional_only {
+        return None;
+    }
+    let (receiver, member, is_method) = if callee.eq_ignore_ascii_case("method_exists") {
+        let [recv, name] = call.args.as_slice() else { return None };
+        (&recv.value, &name.value, true)
+    } else if callee.eq_ignore_ascii_case("property_exists") {
+        let [recv, name] = call.args.as_slice() else { return None };
+        (&recv.value, &name.value, false)
+    } else if callee.eq_ignore_ascii_case("is_callable") {
+        // `is_callable([$r, 'm'])` — the pair form, as the only argument.
+        let [arg] = call.args.as_slice() else { return None };
+        let ArgValue::Array(items) = &arg.value else { return None };
+        let [(k0, recv), (k1, name)] = items.as_slice() else { return None };
+        let positional =
+            |k: &ArrayKey, i: i64| matches!(k, ArrayKey::Auto) || *k == ArrayKey::Int(i);
+        if !positional(k0, 0) || !positional(k1, 1) {
             return None;
         }
-        let name = existence_class_literal(cx, &call.args[0].value)?;
-        Some(Vouch::Class(name.trim_start_matches('\\').to_ascii_lowercase()))
+        (recv, name, true)
+    } else {
+        return None;
+    };
+    let ArgValue::Str(member) = member else { return Some(Vec::new()) };
+    let Some(member) = member.as_str() else { return Some(Vec::new()) };
+    let vouches = receiver_classes(cx, store, receiver)
+        .into_iter()
+        .map(|class| {
+            let class = class.trim_start_matches('\\').to_ascii_lowercase();
+            if is_method {
+                Vouch::Method { class, method: member.to_ascii_lowercase() }
+            } else {
+                Vouch::Property { class, property: member.to_owned() }
+            }
+        })
+        .collect();
+    Some(vouches)
+}
+
+/// The classes a member guard's receiver argument can denote: a literal class
+/// (`N::class`, `'N'`); a `$var` read the way the absence emitters read it — the heap
+/// class of an allocation-proven variable, else every class a narrowed declared arm
+/// names (a plain class, or each member of an intersection). Empty for anything else.
+fn receiver_classes(cx: &Cx, store: &Store, receiver: &ArgValue) -> Vec<String> {
+    let ArgValue::Var(v) = receiver else {
+        return existence_class_literal(cx, receiver).into_iter().collect();
+    };
+    if let Some(class) = store.class_of(v) {
+        return vec![class.to_owned()];
     }
+    let mut classes = Vec::new();
+    for arm in store.contract_arms(v).unwrap_or(&[]) {
+        match &arm.ty {
+            ContractTy::Class(f) => classes.push(f.clone()),
+            ContractTy::Inter(members) => {
+                for m in members {
+                    if let ContractTy::Class(f) = m {
+                        classes.push(f.clone());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    classes
 }

@@ -2504,6 +2504,34 @@ pub enum CondOperand {
     },
 }
 
+/// The source extent of a `&&`/`||` right operand, carried on [`CondExpr::And`] and
+/// [`CondExpr::Or`] so a proven short-circuit can record exactly the region PHP never
+/// evaluates as dead, whatever it holds (a call, a class reference, a constant fetch)
+/// — a [`CondExpr`] is a lowered form, not a CST node, and has no extent of its own.
+///
+/// Position, not denotation: excluded from [`Hash`], as the arm spans of
+/// [`ArgValue::Ternary`] are (a narrower hash than `PartialEq` is always sound).
+/// [`Self::NONE`] — the empty extent, which contains no byte — is what a connective
+/// the lowering synthesizes (a multi-argument `isset`, an `empty()` desugaring) carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
+pub struct OperandSpan(pub Span);
+
+impl OperandSpan {
+    /// The empty extent: nothing is recorded dead for it.
+    pub const NONE: Self = Self(Span { start: 0, end: 0 });
+
+    /// Whether this is the empty extent ([`Self::NONE`] or any other zero-width one).
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.0.start >= self.0.end
+    }
+}
+
+impl std::hash::Hash for OperandSpan {
+    fn hash<H: std::hash::Hasher>(&self, _: &mut H) {}
+}
+
 /// A small lowered condition language (ADR-0031); the trace evaluator walks it against the
 /// env to a `Certainty` (yes/no/maybe). Unrecognized conditions become [`CondExpr::Opaque`],
 /// carrying the read variables so the walk can forget them on the excluded path.
@@ -2519,10 +2547,12 @@ pub enum CondExpr {
     Instanceof { operand: CondOperand, class_ref: NameRef },
     /// `!cond`.
     Not(Box<CondExpr>),
-    /// `a && b` / `a and b`.
-    And(Box<CondExpr>, Box<CondExpr>),
-    /// `a || b` / `a or b`.
-    Or(Box<CondExpr>, Box<CondExpr>),
+    /// `a && b` / `a and b`. The [`OperandSpan`] is the right operand's source extent,
+    /// the region PHP never evaluates when `a` is false.
+    And(Box<CondExpr>, Box<CondExpr>, OperandSpan),
+    /// `a || b` / `a or b`. The [`OperandSpan`] is the right operand's extent, as for
+    /// [`Self::And`]: the region PHP never evaluates when `a` is true.
+    Or(Box<CondExpr>, Box<CondExpr>, OperandSpan),
     /// A resolvable call in guard position (`if (isFoo($x))`). Retained (not opaqued) so
     /// inference can consume `@phpstan-assert-if-true`/`-if-false` (ADR-0052 §5, `Asserted`
     /// stratum) and fold existence predicates (`method_exists`/etc, ADR-0049 §4/N3) to a real
@@ -3033,6 +3063,49 @@ pub struct Stmt {
     /// carry the empty record, and the statement that consumes a hoisted arm
     /// carries its calls instead.
     pub runs: Runs,
+    /// The ternaries and short-circuit expressions this statement's own expressions carry
+    /// (issue #928) — see [`GuardRegion`]. Read off the CST by `lower_stmt`'s central fill,
+    /// for the four statement kinds [`Self::string_contexts`] reads and no other.
+    pub guards: Vec<GuardRegion>,
+}
+
+/// The functions the analyzer folds as **existence guards** (ADR-0049 §4 / N3, issues #198
+/// and #928): a call of one of these, naming a literal symbol, decides to `Yes`/`No` against
+/// the boot surface and the project index, so a [`GuardRegion`] testing one is worth
+/// carrying in the trace. The analyzer's own vocabulary is this list — it reads it, so the
+/// two cannot drift — and the member guards that only *vouch* (`is_callable`,
+/// `property_exists`) are not in it, since they fold to nothing.
+pub const EXISTENCE_PREDICATES: &[&str] = &[
+    "method_exists",
+    "function_exists",
+    "class_exists",
+    "interface_exists",
+    "trait_exists",
+    "enum_exists",
+    "defined",
+    "extension_loaded",
+];
+
+/// One expression a statement evaluates conditionally (issue #928): a ternary, a short
+/// ternary, or a `&&`/`||` expression, with the source extents PHP leaves unevaluated
+/// once `cond` is decided.
+///
+/// `cond` is the test: a ternary's condition, or — for a logical expression — the whole
+/// expression lowered as a condition, so that evaluating it records the right operand of
+/// every connective in it that its left operand decides ([`CondExpr::And`] carries that
+/// operand's extent), and the two `dead_if_*` fields stay empty.
+///
+/// A region is judged with no environment at all (the walk's sweep) and only decides
+/// where it can without one — a guard on a function, class, constant or extension, a
+/// version comparison. Anything that names a variable is not carried.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
+pub struct GuardRegion {
+    pub cond: CondExpr,
+    /// The extent that is dead when `cond` is proven true: a ternary's `else` arm.
+    pub dead_if_true: Option<Span>,
+    /// The extent that is dead when `cond` is proven false: a ternary's `then` arm.
+    pub dead_if_false: Option<Span>,
 }
 
 /// The calls a statement's own evaluation makes, as the **top-level rebind
@@ -3119,6 +3192,7 @@ impl Stmt {
             end: BodyEnd::FallsThrough,
             has_terminator: false,
             runs: Runs::default(),
+            guards: Vec::new(),
         }
     }
 }
@@ -3697,6 +3771,11 @@ pub enum DynamismKind {
     /// [`GlobalConstDecl`] and isn't a dam site. Damming is narrower than "any dynamism":
     /// read only by the `constant.undefined` ladder, since `define()` can't mint a function or class.
     DefineDynamic,
+    /// A `dl(...)` call (issue #928): loads an extension at run time, so the set of loaded
+    /// extensions — and every function, class and constant they bring — is no longer what
+    /// the boot surface reports. Read by the `extension_loaded()` guard fold, which turns
+    /// `Maybe` when any such site stands, and by the constant ladder (any site closes it).
+    ExtensionLoad,
 }
 
 /// One dynamic-code construct in a file (ADR-0046 §2), collected file-wide (every scope,

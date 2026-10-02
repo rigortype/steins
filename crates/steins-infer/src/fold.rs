@@ -6,7 +6,7 @@
 //! delivered over a run. The two transports live in [`crate::fold_process`] and
 //! [`crate::fold_table`]; argument lowering in [`crate::fold_args`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use steins_catalog::{RefusalAxis, ResourceParam, ResourceReturn};
 use steins_domain::Fact;
@@ -135,6 +135,17 @@ pub trait Folder {
         None
     }
     // end global constants (ADR-0078, issue #198)
+
+    /// Ask the project's own PHP whether the extension `name` is loaded — what
+    /// `extension_loaded('name')` answers on the boot surface (issue #928), from the
+    /// sidecar `env()`'s loaded-extension list. Case-insensitive, as PHP's own lookup
+    /// is. `Some(true)` — loaded; `Some(false)` — not loaded; `None` — unanswerable
+    /// (no sidecar / `--no-php` / a mid-run failure ⇒ the guard folds to `Maybe`).
+    /// The default is `None`: the sound subset (ADR-0004).
+    fn boot_surface_extension(&mut self, name: &str) -> Option<bool> {
+        let _ = name;
+        None
+    }
 
     // reflected class world (ADR-0024 `reflect`, issue #269)
 
@@ -444,6 +455,11 @@ pub struct EngineFolder<E: FoldEngine> {
     /// — the ADR-0049 §9 message register's closure-evidence clause for the
     /// existence ids. `Some(None)` records "asked, unanswerable".
     boot_surface_label: Option<Option<String>>,
+    /// Memoized loaded-extension set from `env` (issue #928), lowercased — what the
+    /// `extension_loaded()` guard fold asks. An `env`-derived whole-run answer, dropped
+    /// with the others by [`Self::refresh_env_memos`]. `Some(None)` records "asked,
+    /// unanswerable".
+    extensions: Option<Option<HashSet<String>>>,
     /// Per-name memo of the builtin return-fact (ADR-0056 R1) so a repeated call to
     /// the same builtin never triggers duplicate `reflect` traffic. Keyed by the
     /// lowercased simple name (PHP function names are case-insensitive).
@@ -520,7 +536,7 @@ pub struct EngineFolder<E: FoldEngine> {
     /// family (the boot surface interrogated must be a declared-supported
     /// version) and the curated return-fact admission.
     php_target: Option<steins_db::PhpTarget>,
-    /// The transport generation ([`FoldEngine::restarts`]) the four `env`-derived
+    /// The transport generation ([`FoldEngine::restarts`]) the five `env`-derived
     /// memos above were taken at (issue #245). See [`Self::refresh_env_memos`].
     env_generation: u32,
 }
@@ -536,6 +552,7 @@ impl<E: FoldEngine> EngineFolder<E> {
             boot_surface_memo: HashMap::new(),
             boot_surface_fn_memo: HashMap::new(),
             php_minor: None,
+            extensions: None,
             int_size: None,
             boot_surface_label: None,
             return_fact_memo: HashMap::new(),
@@ -583,11 +600,11 @@ impl<E: FoldEngine> EngineFolder<E> {
         self.php_target = target;
     }
 
-    /// Drop the four `env`-derived whole-run answers when the child that gave
+    /// Drop the five `env`-derived whole-run answers when the child that gave
     /// them has since been replaced (issue #245).
     ///
-    /// The four memos below (`absence_available`, `php_minor`, `int_size`,
-    /// `boot_surface_label`) are *whole-run* answers taken from a single `env()`
+    /// The five memos below (`absence_available`, `php_minor`, `int_size`,
+    /// `boot_surface_label`, `extensions`) are *whole-run* answers taken from a single `env()`
     /// reply, and each gates a whole family: a declined `env` would otherwise turn
     /// the entire absence family off for the rest of the run from one badly-timed
     /// request. The lost *request* stays lost (ADR-0024: never retried); what must
@@ -597,7 +614,7 @@ impl<E: FoldEngine> EngineFolder<E> {
     /// decline" would pay the ADR-0024 timeout at every call site against a merely
     /// hung sidecar; re-asking on "the engine that declined was replaced" costs at
     /// most one `env` per respawn, bounded as [`FoldEngine::restarts`] says. All
-    /// four are dropped together rather than only the declines, since they come
+    /// five are dropped together rather than only the declines, since they come
     /// from one reply and a conditional would have to distinguish a decline from
     /// a real verdict (a loaded monkey-patch extension is a legitimate
     /// `absence_available == Some(false)`).
@@ -616,6 +633,7 @@ impl<E: FoldEngine> EngineFolder<E> {
         self.php_minor = None;
         self.int_size = None;
         self.boot_surface_label = None;
+        self.extensions = None;
     }
 
     // reflected class world (issue #269)
@@ -985,6 +1003,18 @@ impl<E: FoldEngine> Folder for EngineFolder<E> {
         answer
     }
     // end global constants (ADR-0078, issue #198)
+
+    fn boot_surface_extension(&mut self, name: &str) -> Option<bool> {
+        self.refresh_env_memos();
+        if self.extensions.is_none() {
+            let answer = self.engine.env().map(|e| {
+                e.extensions.iter().map(|x| x.to_ascii_lowercase()).collect::<HashSet<String>>()
+            });
+            self.extensions = Some(answer);
+        }
+        let loaded = self.extensions.as_ref()?.as_ref()?;
+        Some(loaded.contains(&name.to_ascii_lowercase()))
+    }
 
     // reflected class world (issue #269)
     fn reflected_class(&mut self, fqn: &str) -> Option<ClassReflection> {

@@ -1362,3 +1362,65 @@ triage entries, the `contracts` rung and the documentation of
   as at the plain read (value-domain evidence only).
 - 8.5.11 is the only 8.5 patch witnessed; the rule takes the minor's
   floor, as every version-keyed rule here does.
+
+## Amendment (2026-10-03): guard discharge is position-independent (issues #928, #930)
+
+Status: PENDING ratification (post-hoc-ratification mode, ADR-0077
+precedent). Source: the default-surface false-positive sweep (#963), slice
+S5. §4's guard-respect leg and the N3 fold both existed, but each was wired
+to one syntactic position: `defined()` and `class_exists()` discharged only
+as an `if` condition, a ternary reached them only from the assignment seam,
+and `method_exists($param, …)` vouched only for an allocation-proven
+receiver. A guard that a program provably cannot pass is a guard, wherever
+it is written.
+
+### A25. A guard discharges the same way in every position
+
+The rule is that **a decided guard marks what PHP does not evaluate as dead
+in whatever position it stands**, and that a positive member guard vouches
+for the member on **whatever the receiver can be**.
+
+- **Operands carry their extent.** `CondExpr::And`/`Or` carry the right
+  operand's source span (`OperandSpan`, outside `Hash`), so a short-circuit
+  the left side decides marks the whole operand dead, not only the calls the
+  lowered form could name. The documented residue — a class reference or a
+  constant fetch in a dead operand — is gone.
+- **One sweep per statement.** The lowering records every ternary and
+  short-circuit expression in an expression statement, a `return` and an
+  `echo` (`Stmt::guards`), read off the CST so that `echo`, a bare
+  `a && b;` and a ternary in an argument reach it like any other position,
+  and the plain walk judges each region against **no environment**: only a
+  guard that names no variable decides there, so a statement's own
+  bindings are never read stale. The decided arm or operand is a dead
+  region, which is how `class.undefined` and `constant.undefined` already
+  take their guard leg.
+- **`switch (true)` is an `if` chain.** `true == <test>` is the test's
+  truthiness, so a `switch (true)` whose cases do not fit the by-value shape
+  lowers to `if`/`elseif`/`else` under the existing no-fall-through and
+  no-stray-jump conditions, with one relaxation that only the chain takes:
+  its last case may run off its end, and trailing empty labels are no-ops.
+- **`extension_loaded('x')` is an existence predicate.** It answers from
+  the sidecar `env()` loaded-extension list, case-insensitively, `Yes` or
+  `No`; `Maybe` without a sidecar, and `Maybe` when `dl(…)` is called
+  anywhere in the universe (`DamKind::ExtensionLoad`, a dam site of every
+  kind: a loaded extension brings functions, classes and constants too). The
+  answer is the analysing PHP's, as `class_exists`'s is.
+- **Vouches follow the receiver.** `existence_vouch` reads a `$var` receiver
+  as the emitters do: the heap class when the variable is allocation-proven,
+  else one vouch per class of its narrowed declared arms. `is_callable([$v,
+  'm'])` vouches the method as `method_exists` does, and `property_exists`
+  vouches the property (`Vouch::Property`). The declared-receiver method
+  lane and the property lanes (`property.undefined`,
+  `property.maybe-undefined`) consult the vouches the way the exact lane has
+  since N3.
+
+- **Findings only disappear.** Everything above removes a finding from code
+  the guard proves unreachable on the analysing PHP, and nothing adds one.
+- **A guard on a symbol that exists keeps its body live**: the verdict is
+  `Yes`, the `else` side is the dead one.
+- **A reference outside any guard, or on the guard's other side, reports as
+  before**: `defined('X') ? 1 : X` reads `X` when the guard fails.
+- **Not changed:** `defined()` still never folds to `Yes` (the
+  `!defined(…) { define(…) }` idiom), a `Maybe` guard still leans on the
+  vouch, and the `$var` receiver of `method_exists` is still not folded to a
+  verdict, only vouched.

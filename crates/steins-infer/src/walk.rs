@@ -11,8 +11,8 @@ use std::collections::{HashMap, HashSet};
 use steins_domain::{Fact, Key, Val};
 use steins_phpdoc::Type as PType;
 use steins_syntax::{
-    ArgValue, CallExpr, Callee, CondExpr, NameRef, NativeType, RefKind, Scope, ScopeOwner, Span,
-    Stmt, StmtKind,
+    ArgValue, CallExpr, Callee, CondExpr, NameRef, NativeType, OperandSpan, RefKind, Scope,
+    ScopeOwner, Span, Stmt, StmtKind,
 };
 
 use crate::fold::Folder;
@@ -36,6 +36,7 @@ use crate::dump::{adopted_trace_docblock, emit_trace_annotations};
 use crate::entry_state::seed_entry_state;
 use crate::env::{AllocId, Descent, ExitContribution, HeapRes, Known, Store, Stratum, SummaryCtx};
 use crate::foreach_check::check_foreach_subject;
+use crate::guard_sweep::sweep_guard_regions;
 use crate::heap::apply_prop_assign;
 use crate::loops::walk_loop;
 use crate::operands::check_operand_sites;
@@ -411,14 +412,20 @@ pub(crate) fn mark_dead_span(w: &WalkCx, span: Span) {
     w.dead.borrow_mut().push(span);
 }
 
-/// Record every call this condition carries as dead. Used where a whole operand of
-/// `&&`/`||` is proven unevaluated: the operand itself has no span (a [`CondExpr`]
-/// is a lowered form, not a CST node), but its calls do.
+/// Record a `&&`/`||` right operand a proven short-circuit never evaluates as dead:
+/// its whole source extent, so a class reference or a constant fetch in it is covered
+/// as well as a call (the file-wide `class.undefined` and `constant.undefined` passes
+/// skip a reference in a dead region).
 ///
-/// A non-call site inside such an operand (a class reference, a constant fetch)
-/// keeps its own filter and is NOT covered — a known residue, not papered over.
-pub(crate) fn mark_dead_cond_calls(w: &WalkCx, cond: &CondExpr) {
-    let calls = collect_guard_calls_any(cond);
+/// A connective the lowering synthesized has no extent ([`OperandSpan::NONE`]); its
+/// operand is a fetch or a test of a variable, and the calls it carries, if any, are
+/// recorded individually.
+pub(crate) fn mark_dead_operand(w: &WalkCx, operand: &CondExpr, span: OperandSpan) {
+    if !span.is_empty() {
+        w.dead.borrow_mut().push(span.0);
+        return;
+    }
+    let calls = collect_guard_calls_any(operand);
     if calls.is_empty() {
         return;
     }
@@ -552,6 +559,9 @@ pub(crate) fn walk_trace(
         // per-scope pass.
         if descent.is_none() {
             check_read_positions(w, folder, stmt, env, store, out);
+            // The ternaries and `&&`/`||` the statement evaluates, in any position: a
+            // decided guard proves the arm or operand it skips dead (issue #928).
+            sweep_guard_regions(w, folder, stmt);
         }
 
         // 1a. Escape + sweep (ADR-0036): passing an object into a call escapes it;

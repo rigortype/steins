@@ -329,6 +329,14 @@ pub(crate) fn check_phpdoc_undefined_method(
     let Some(lane) = declared_receiver_conjuncts(cx, arms) else {
         return;
     };
+    // Guard-respect leg (ADR-0049 §4, issue #930): a positive `method_exists($var, 'm')`
+    // or `is_callable([$var, 'm'])` dominating this site vouched the method on every
+    // class of the receiver's declared arms, and the programmer's evidence outranks a
+    // proof that rests on the same closed world — in it the guard is simply false and
+    // the call unreachable. Read exactly as the exact-receiver lane reads it.
+    if lane.iter().flatten().any(|class| store.vouches_method(class, &method)) {
+        return;
+    }
     // A13: minimum over the participating (post-narrowing) arms, computed
     // here so it can never drift from the arms the claim rests on.
     let id = declared_receiver_id(arms);

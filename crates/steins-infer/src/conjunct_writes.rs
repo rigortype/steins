@@ -26,7 +26,7 @@
 
 use std::borrow::Cow;
 
-use steins_syntax::{ArgValue, CallExpr, Callee, CondExpr, CondOperand};
+use steins_syntax::{ArgValue, CallExpr, Callee, CondExpr, CondOperand, OperandSpan};
 
 use crate::by_value::arg_is_by_ref;
 use crate::cx::Cx;
@@ -50,7 +50,7 @@ use crate::cx::Cx;
 /// caller's and unchanged.
 pub(crate) fn mask_stale_conjuncts<'c>(cx: &Cx, cond: &'c CondExpr) -> Cow<'c, CondExpr> {
     match cond {
-        CondExpr::And(a, b) | CondExpr::Or(a, b) => {
+        CondExpr::And(a, b, _) | CondExpr::Or(a, b, _) => {
             let later = cond_rebinds(cx, b);
             let left = mask_stale_conjuncts(cx, a);
             let left = match mask_mentions(&left, &later) {
@@ -104,7 +104,7 @@ fn collect_rebinds(cx: &Cx, cond: &CondExpr, out: &mut Vec<String>) {
         }
         CondExpr::Opaque { writes, .. } => push_all(writes, out),
         CondExpr::Not(c) => collect_rebinds(cx, c, out),
-        CondExpr::And(a, b) | CondExpr::Or(a, b) => {
+        CondExpr::And(a, b, _) | CondExpr::Or(a, b, _) => {
             collect_rebinds(cx, a, out);
             collect_rebinds(cx, b, out);
         }
@@ -173,7 +173,7 @@ fn mask_mentions(cond: &CondExpr, names: &[String]) -> Option<CondExpr> {
     }
     match cond {
         CondExpr::Not(c) => mask_mentions(c, names).map(|m| CondExpr::Not(Box::new(m))),
-        CondExpr::And(a, b) | CondExpr::Or(a, b) => {
+        CondExpr::And(a, b, _) | CondExpr::Or(a, b, _) => {
             let (ma, mb) = (mask_mentions(a, names), mask_mentions(b, names));
             if ma.is_none() && mb.is_none() {
                 return None;
@@ -225,7 +225,8 @@ fn operand_mentions(op: &CondOperand, names: &[String]) -> bool {
 fn rebuild(cond: &CondExpr, left: CondExpr, right: CondExpr) -> CondExpr {
     let (left, right) = (Box::new(left), Box::new(right));
     match cond {
-        CondExpr::Or(..) => CondExpr::Or(left, right),
-        _ => CondExpr::And(left, right),
+        CondExpr::Or(_, _, span) => CondExpr::Or(left, right, *span),
+        CondExpr::And(_, _, span) => CondExpr::And(left, right, *span),
+        _ => CondExpr::And(left, right, OperandSpan::NONE),
     }
 }

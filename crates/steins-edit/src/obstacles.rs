@@ -192,7 +192,7 @@ pub fn detect(db: &dyn Db, project: Project, vouches: &VouchSet) -> DynamismObst
                 DynamismKind::ClassAlias => {}
                 // Likewise a computed `define(...)` (ADR-0078, issue #198): it mints
                 // a constant name, hiding no call site.
-                DynamismKind::DefineDynamic => {}
+                DynamismKind::DefineDynamic | DynamismKind::ExtensionLoad => {}
             }
         }
     }

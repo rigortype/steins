@@ -411,14 +411,14 @@ pub(crate) fn collect_shape_guards(
             }
         }
         CondExpr::Not(c) => collect_shape_guards(cx, c, !then, env, out),
-        CondExpr::And(a, b) if then => {
+        CondExpr::And(a, b, _) if then => {
             collect_shape_guards(cx, a, then, env, out);
             collect_shape_guards(cx, b, then, env, out);
         }
         // De Morgan: `¬(isset a ∨ isset b)` is `¬isset a ∧ ¬isset b`, so the false
         // branch is just both disjuncts at false polarity (per-key S4 narrowing);
         // the cover (S5) lives on the TRUE branch only.
-        CondExpr::Or(a, b) if !then => {
+        CondExpr::Or(a, b, _) if !then => {
             collect_shape_guards(cx, a, then, env, out);
             collect_shape_guards(cx, b, then, env, out);
         }
@@ -443,7 +443,7 @@ type PresenceDisjunct = (String, VKey, PresenceFlavor);
 /// strong as its weakest disjunct, so one unmodelled arm voids the whole claim.
 fn presence_disjuncts(cx: &Cx, cond: &CondExpr, out: &mut Vec<PresenceDisjunct>) -> bool {
     match cond {
-        CondExpr::Or(a, b) => {
+        CondExpr::Or(a, b, _) => {
             presence_disjuncts(cx, a, out) && presence_disjuncts(cx, b, out)
         }
         CondExpr::Isset { var, key } => match guard_key(key) {
