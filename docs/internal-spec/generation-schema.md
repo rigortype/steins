@@ -367,6 +367,8 @@ parents sit), which most likely fails the decode and, if a payload happened to
 decode, would hold the wrong table: the **misdecode** kind. It is the **meaning**
 kind as well, prospectively: the drop sites that land after this row read the
 set to say whether some subclass of a bound class runs a destructor, and a
-shard without it would answer no. Nothing reads the set yet, and the gap kind
-`destructor` that rides with it is appended to `GapKind`, a facts payload
-enum decoded past the gate, so that half is no bump.
+shard without it would answer no. The drop sites read it now, and the gap
+kind `destructor` that rides with it is appended to `GapKind`, a facts payload
+enum decoded past the gate, so that half is no bump. The sites themselves
+(`OperatorFamily::Drop` and its four forms) are appended to the trace
+payload's enums, which are decoded past the gate too: no bump.

@@ -303,9 +303,18 @@ A recorded reason an effect or throw answer is incomplete — a dynamic
 callee, an unknown class, unseen code, user code an operand may reach, a
 missing row on an axis. A body is `…?` on a lane exactly when its sites, or a
 callee its edges reach, left a gap on that lane; exhaustive is modulo handlers
-attributed to their registration and destructors (ADR-0099 §4.5, §7.1). Not a **Dischargeable
+attributed to their registration (ADR-0099 §4.5) and the drops ADR-0100 §7 lists
+as residue. Not a **Dischargeable
 obstacle**, which is a silence leg of a check family.
 _Avoid_: obstacle (taken by Dischargeable obstacle)
+
+**Drop site** (ADR-0100 §7):
+A place a frame releases a value — `unset`, a reassignment, the end of the
+body, a `new` that dies in the expression holding it — resolved to the
+`destructor` gap when the value's class reaches a `__destruct` (its chain, a
+subclass, or a typed property's class), and to nothing otherwise. Never an
+edge: the destructor runs in whichever frame frees the last reference.
+_Avoid_: destructor site, release site
 
 **Interop envelope**:
 The unchecked docblock spelling of an effect envelope — `@phpstan-impure
