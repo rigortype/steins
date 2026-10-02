@@ -185,6 +185,7 @@ pub use builtins::{
     declared_return,
     declared_return_changed_at,
     engine_constant,
+    engine_class_declarations,
     engine_constant_count,
     failure_arms,
     hierarchy_entry_count,

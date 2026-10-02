@@ -20,6 +20,26 @@ Run `cargo xtask gen-catalog` after any of them, and commit the TOML and the
 generated `.rs` together — `gen-catalog --check` is a CI gate and the two are one
 artefact.
 
+## The class hierarchy
+
+`phpsrc-mining/hierarchy.toml` is the odd one out: no xtask, no engine. It is the output of
+`extract_hierarchy.py` over the pinned php-src checkout's stubs, and `cargo xtask gen-catalog`
+turns it into `hierarchy_generated.rs` and `display_names_generated.rs`:
+
+```sh
+PHP_SRC_ROOT=<php-src checkout> python3 docs/research/phpsrc-mining/extract_hierarchy.py \
+  > docs/research/phpsrc-mining/hierarchy.toml
+cargo xtask gen-catalog
+```
+
+Every key is the class's FQN: the script reads a `namespace` statement across lines and resolves a
+parent the way PHP does (a leading backslash is fully qualified, anything else is relative to the
+declaring namespace), and it says on stderr when a relative parent names no declaration. A run that
+prints such a line has found a stub that spells a parent the engine does not read that way (#871);
+read the line before committing. The pin in the file's header is the checkout's commit; the
+`engine_hierarchy_keys` test holds each row to a live PHP's `ReflectionClass`, and rows the running
+PHP lacks (an unloaded extension, a class newer than that minor) are skipped, not failed.
+
 ## The engine set
 
 One engine per PHP minor, low first, the top one last. On the maintainer's Mac

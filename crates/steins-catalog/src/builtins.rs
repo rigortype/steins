@@ -72,6 +72,14 @@ pub fn builtin_class_display(name: &str) -> Option<&'static str> {
         .map(|i| display_names_generated::DISPLAY_NAMES[i].1)
 }
 
+/// Every class-like the mined hierarchy declares (enums included) as `(key, declared
+/// name)`: the lowercased FQN [`builtin_class_supers`] and [`builtin_class_display`] are
+/// keyed by, and the casing php-src declares. For a tripwire that asks a live engine
+/// whether each key names what it is stored as (issue #871); no judgment reads it.
+pub fn engine_class_declarations() -> impl Iterator<Item = (&'static str, &'static str)> {
+    display_names_generated::DISPLAY_NAMES.iter().copied()
+}
+
 /// The **measured/curated** throw facts of a builtin call (ADR-0040 source
 /// #2): the global class names a builtin provably raises. Deliberately tiny
 /// and hand-verified; uncatalogued contributes no throw fact (widen, never a
@@ -1268,6 +1276,46 @@ mod tests {
         assert_eq!(crate::method_effect_labels("Dom\\Element", "__construct"), None);
     }
 
+    /// Issue #871's converse: every namespaced class a PHP 8.5.11 build declares
+    /// from php-src (`get_declared_classes()` and its siblings, each one
+    /// `ReflectionClass::isInternal()` and named as listed; `ast\*` and
+    /// `Brotli\*` are PECL, and `Dom\DOMException` is an alias of the global
+    /// class) is a hierarchy row under its FQN. The live half, that each row
+    /// resolves, is `steins-infer`'s `engine_hierarchy_keys`.
+    #[test]
+    fn every_namespaced_class_php_src_declares_is_keyed_by_fqn() {
+        const NAMESPACED: &[&str] = &[
+            "BcMath\\Number", "Dba\\Connection", "Dom\\AdjacentPosition", "Dom\\Attr",
+            "Dom\\CDATASection", "Dom\\CharacterData", "Dom\\ChildNode", "Dom\\Comment",
+            "Dom\\Document", "Dom\\DocumentFragment", "Dom\\DocumentType",
+            "Dom\\DtdNamedNodeMap", "Dom\\Element", "Dom\\Entity", "Dom\\EntityReference",
+            "Dom\\HTMLCollection", "Dom\\HTMLDocument", "Dom\\HTMLElement",
+            "Dom\\Implementation", "Dom\\NamedNodeMap", "Dom\\NamespaceInfo", "Dom\\Node",
+            "Dom\\NodeList", "Dom\\Notation", "Dom\\ParentNode", "Dom\\ProcessingInstruction",
+            "Dom\\Text", "Dom\\TokenList", "Dom\\XMLDocument", "Dom\\XPath", "FFI\\CData",
+            "FFI\\CType", "FFI\\Exception", "FFI\\ParserException", "FTP\\Connection",
+            "Filter\\FilterException", "Filter\\FilterFailedException", "LDAP\\Connection",
+            "LDAP\\Result", "LDAP\\ResultEntry", "Odbc\\Connection", "Odbc\\Result",
+            "Pcntl\\QosClass", "Pdo\\Dblib", "Pdo\\Mysql", "Pdo\\Odbc", "Pdo\\Pgsql",
+            "Pdo\\Sqlite", "PgSql\\Connection", "PgSql\\Lob", "PgSql\\Result",
+            "Random\\BrokenRandomEngineError", "Random\\CryptoSafeEngine", "Random\\Engine",
+            "Random\\Engine\\Mt19937", "Random\\Engine\\PcgOneseq128XslRr64",
+            "Random\\Engine\\Secure", "Random\\Engine\\Xoshiro256StarStar",
+            "Random\\IntervalBoundary", "Random\\RandomError", "Random\\RandomException",
+            "Random\\Randomizer", "Soap\\Sdl", "Soap\\Url", "Uri\\InvalidUriException",
+            "Uri\\Rfc3986\\Uri", "Uri\\UriComparisonMode", "Uri\\UriError",
+            "Uri\\UriException", "Uri\\WhatWg\\InvalidUrlException", "Uri\\WhatWg\\Url",
+            "Uri\\WhatWg\\UrlValidationError", "Uri\\WhatWg\\UrlValidationErrorType",
+        ];
+        for class in NAMESPACED {
+            let key = class.to_ascii_lowercase();
+            assert_eq!(super::builtin_class_display(&key), Some(*class), "{class}");
+        }
+        // Not an engine class: an alias is the global class's, and PECL is not php-src.
+        assert_eq!(super::builtin_class_display("dom\\domexception"), None);
+        assert_eq!(super::builtin_class_display("ast\\node"), None);
+    }
+
     #[test]
     fn builtin_class_supers_tree() {
         use super::builtin_class_supers as s;
@@ -1331,6 +1379,14 @@ mod tests {
         // The one parent a stub spells relative to a namespace that has no such
         // class: the engine registers it on the global one.
         assert_eq!(s("Openssl\\OpensslException"), Some(vec!["Exception"]));
+        // A relative parent that the miner once left bare: `FFI\ParserException` is an
+        // `Error` (through `FFI\Exception`), not an `Exception`, and
+        // `Filter\FilterFailedException` has a parent, which makes it a `Throwable`.
+        assert_eq!(s("Filter\\FilterFailedException"), Some(vec!["Filter\\FilterException"]));
+        assert_eq!(
+            s("Io\\Poll\\FailedHandleAddException"),
+            Some(vec!["Io\\Poll\\FailedPollOperationException"])
+        );
     }
 
     #[test]
