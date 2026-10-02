@@ -175,15 +175,22 @@ future consumer and this repo already demonstrated it does not generalize.
      literal that disagrees declines.
    - **Names (§2.5, extended).** A name *token* (identifier of any form, or a
      variable) that spans a point marks the tree (`SourceTree::names_lossy`).
-     A string literal read *as* a name (a callable, an effect label, a string
-     argument of a statically named call) does not mark the file: it is read
-     through the restored bytes, and non-UTF-8 bytes take the site's own
-     decline (an opaque callback, `RunArg::Other`, an unrecognized envelope),
-     which is §2.5's per-site silence. A non-UTF-8 name can only name something
-     whose declaring token is itself over a replaced byte, and that file is
-     marked already. (The first version of this amendment marked the file at
-     those sites too, which took every file that spelled a lossy string as a
-     call argument out of the analysis; the review caught it.)
+     A string literal read *as* a name (a callable, a string argument of a
+     statically named call) does not mark the file: it is read through the
+     restored bytes, and non-UTF-8 bytes take the site's own decline (an opaque
+     callback, `RunArg::Other`), which is §2.5's per-site silence. A non-UTF-8
+     name can only name something whose declaring token is itself over a
+     replaced byte, and that file is marked already. (The first version of this
+     amendment marked the file at those sites too, which took every file that
+     spelled a lossy string as a call argument out of the analysis; the review
+     caught it.) An **effect label** is the exception to the decline, because
+     the vocabulary is ASCII plus plugin labels and so a label over non-UTF-8
+     bytes is never a known one: it stays an unknown label, spelled with the
+     `\xNN` escapes `array.duplicate-key` prints for a byte key (`io\xC9`), and
+     its envelope stays bound. Declining the envelope would have dropped the
+     `effect.unknown-label` and `effect.envelope-exceeded` findings the base
+     reports on it, and those are true, in a valid UTF-8 file that writes the
+     byte as an escape just as in a Latin-1 one.
      The analyzer skips a marked file's own passes, silently and without the
      `syntax.unparsable` finding or its dam, because the source is fine and
      only the text it was read as is not, and no caller descends into its
@@ -194,9 +201,14 @@ future consumer and this repo already demonstrated it does not generalize.
    - **Writers.** `check --fix` and `transform` drop the edits to a file that
      was analyzed through a lossy decoding, one named notice per file with the
      reason `byte-lossy-source`, and judge and write the rest of the plan as it
-     stands (`transform` does this at plan time, so a dry run does not offer a
-     diff `--apply` would drop; a `--fix` whose every edit is in such files is
-     refused with that reason). MCP `apply_plan` refuses a plan that edits one,
+     stands. A transform's planners refuse each candidate site in such a file
+     with that reason, after enumerating it, so the completeness oracle, the
+     refusals and the diff all say what `--apply` writes and a dry run does not
+     offer a diff `--apply` would drop; the edit-dropping step stays as a
+     backstop behind them. A `--fix` whose every edit is in such files is
+     refused with that reason, and under `--format json` its `fix.skipped`
+     lists each file left out (`path`, `reason`, `detail`) while the finding
+     keeps its unapplied `fix` payload. MCP `apply_plan` refuses a plan that edits one,
      and `annotate` refuses such a target, since its output is a copy of the
      text. Which files are lossy is read off the analyzed inputs' loss maps,
      not re-read from disk. The writers splice into the decoding, and writing

@@ -70,6 +70,7 @@ agent reads and can act on. The taxonomy in use today includes:
 | `already-declared` | every proven escape is already covered (the idempotent no-op) |
 | `docblock-not-round-trippable` | no lossless insertion point, or the seeded tag fails the re-parse round-trip |
 | `declaration-mid-line` | the declaration head does not start its own line |
+| `byte-lossy-source` | the file is not valid UTF-8, so it was analyzed through a lossy decoding and an edit would overwrite its bytes; every candidate in it refuses, after it is enumerated (ADR-0080 §3.2 interim) |
 
 ## The completeness oracle
 
