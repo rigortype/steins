@@ -359,21 +359,31 @@ for `while`, `for` and `foreach`. It is false for `do`-`while`, whose body runs
 at least once, so `$x = null; do { return; } while (false); $x->bar();`
 reported `call.on-null` on a line nothing reaches.
 
-**The body decides the successor, under two jump gates.** The body walk
-counts a `StmtKind::LoopJump` as terminating its path, because it leaves the
-block it is written in, but two of those jumps come back. A `break` of this
-loop lands on the successor, and `break_free` already rules it out, together
-with any jump out past this loop. A `continue` of this loop lands on the
-condition, which may then fail. `StmtKind::DoWhile` gains `continue_free` for
-that one. It is computed on the CST body at lowering, by the scan that
-computes `break_free` and with the same depth counting: `continue N` targets
-this loop at `N == depth + 1`. A bare `continue` inside a nested `switch`
-belongs to the switch, since PHP treats a `switch` as a loop for `continue`.
-A non-literal level is read as the worst case. With both gates open, every
-jump the body walk stopped at belongs to a nested construct whose own walk
-has answered for it. What remains is `return`, `throw`, `exit` and a `: never`
-call, and none of those comes back. A body that terminates on every path
-only by `continue` is therefore not terminated.
+**The body decides the successor, under one jump gate.** The body walk counts
+a `StmtKind::LoopJump` as terminating its path, because it leaves the block it
+is written in, but two of those jumps come back. A `break` of this loop lands
+on the successor, and a `continue` of it lands on the condition, which may
+then fail. `StmtKind::DoWhile` gains `nested_jumps_only`, computed on the CST
+body at lowering with the depth counting `break_free` uses. It is `true` when
+the body holds no `goto` and every `break`/`continue` in it has the literal
+level 1 and sits inside a nested loop or `switch`; nested function-likes are
+not descended. With it, every jump the body walk stopped at belongs to a
+nested construct whose own walk has answered for it. What remains is
+`return`, `throw`, `exit` and a `: never` call, and none of those comes back.
+A body that terminates on every path only by `continue` is therefore not
+terminated. `break_free` stays, for the exit negation; `nested_jumps_only`
+implies it.
+
+**Multi-level jumps are refused, though some are harmless.** The exact gate
+would be `break_free` plus "no `continue` of this loop": a `break 2` that
+leaves only an outer loop still inside the body does not come back. But the
+walker's structured `switch` and the presence pass credit a jump to the
+innermost breakable, so a multi-level jump out of a nested loop is
+mis-credited by both (#904). A `switch` case holding `foreach (…) { break 2; }`
+followed by `return` is structured as ending in its `return`, although the
+jump lands after the switch. The gate therefore refuses every multi-level
+jump until those passes count levels, and then relaxes to the exact one. The
+cost is precision only: such a `do`-`while` keeps its successor live.
 
 **The header is not read.** The `while (true)` rule above is deliberately not
 extended to `do`-`while`, so `do { … } while (true);` still falls through in
@@ -381,28 +391,17 @@ the walker. The entry env misses a write that reaches a tested name through
 an alias the loop's sets do not name. At file scope `$GLOBALS['go'] = false`
 rewrites `$go` without putting `go` in `writes`, so a `Yes` read off `$go`
 would silence a successor PHP does reach. The same hole exists for `while`
-and is tracked on its own; this amendment does not widen it.
-
-**A `switch` case's stray-jump scan counts levels.** The `do`-`while` rule
-trusts a nested construct's own answer, so that answer has to be right. A
-structured `switch` refused a case holding a `break` or `continue`, but did
-not look inside a nested loop. A `break 2` or `continue 2` there leaves the
-switch and lands after it, so the case does not end in its `return`, and the
-switch was structured as if it did. The scan now shares the loop scans'
-depth counting: a jump reaches the switch, or past it, when its level exceeds
-its depth.
+and is tracked on its own (#902); this amendment does not widen it.
 
 **The syntactic and presence passes agree.** The `stmt_end` row for
-`do`-`while` answers `Terminates` when the body is break-free and
-continue-free and its `block_end` terminates. When the body is undecided (a
-`try` in it), the row answers `Unknown`, because the body is the only way to
-the condition. Otherwise it falls back to the infinite-loop row it had.
-`type.return-missing` and its `maybe-` sibling stop reporting a function that
-ends in such a loop. The binding-presence pass answers `Terminated` for a
-`do`-`while` whose body reaches neither a `break` nor its back edge. A branch
-join then drops that arm as it drops a `return`. That pass credits every
-`break` and `continue` to the innermost loop whatever its level, so it is
-gated by the same two lowering scans.
+`do`-`while` answers `Terminates` when the body passes `nested_jumps_only`
+and its `block_end` terminates, and otherwise keeps the infinite-loop row it
+had. `type.return-missing` and its `maybe-` sibling stop reporting a function
+that ends in such a loop. A body whose end is undecided, such as one holding
+a `try`, falls through as before; that over-report is older than this
+amendment (#905). The binding-presence pass answers `Terminated` for a
+`do`-`while` whose body reaches neither a `break` nor its back edge, under
+the same gate. A branch join then drops that arm as it drops a `return`.
 
 The trace payload changes shape, but under the 2026-09-27 narrowing
 (`docs/internal-spec/generation-schema.md`) a trace-IR change moves the
@@ -413,9 +412,9 @@ Fixtures: `crates/steins-infer/tests/it/loop_exit_condition.rs`. They cover the
 two shapes from the issue, nested constructs that own their own jumps, the
 negative controls (a conditional return, `break`, `continue`, `break 2` and
 `continue 2`, and a body that terminates only by `continue`), the
-`$GLOBALS` alias that keeps the header unread, a jump out of a loop nested in
-a `switch` case, and a terminating loop inside an `if` arm. Also
+`$GLOBALS` alias that keeps the header unread, multi-level jumps the gate
+refuses, and a terminating loop inside an `if` arm. Also
 `crates/steins-syntax/tests/it/terminality.rs`,
 `crates/steins-syntax/tests/it/binding_presence.rs`,
-`crates/steins-syntax/tests/it/trace_stmt_lowering.rs` for `continue_free`,
-and `crates/steins-infer/tests/it/return_missing.rs`.
+`crates/steins-syntax/tests/it/trace_stmt_lowering.rs` for
+`nested_jumps_only`, and `crates/steins-infer/tests/it/return_missing.rs`.
