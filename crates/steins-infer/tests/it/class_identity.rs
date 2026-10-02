@@ -245,3 +245,168 @@ function thrower(): void {
     let ds = findings(src);
     assert!(ds.iter().any(|d| d.id == THROW_UNDECLARED_ID), "{ds:#?}");
 }
+
+// A name the catalog declares cannot be minted: PHP refuses, and `class_alias` is false.
+
+#[test]
+fn a_guarded_polyfill_alias_of_stringable_does_not_shadow_the_catalog() {
+    silent(
+        "<?php declare(strict_types=1);
+interface MyStringable { public function __toString(): string; }
+if (PHP_VERSION_ID < 80000) { class_alias(MyStringable::class, 'Stringable'); }
+class T { public function __toString(): string { return 't'; } }
+function f(Stringable $s): void {}
+f(new T());
+",
+    );
+}
+
+#[test]
+fn a_class_without_to_string_still_misses_stringable() {
+    let src = "<?php declare(strict_types=1);
+interface MyStringable { public function __toString(): string; }
+if (PHP_VERSION_ID < 80000) { class_alias(MyStringable::class, 'Stringable'); }
+class Plain {}
+function f(Stringable $s): void {}
+f(new Plain());
+";
+    assert_eq!(ids(src), vec!["type.argument-mismatch"], "{:#?}", findings(src));
+}
+
+#[test]
+fn a_guarded_polyfill_alias_of_dom_domexception_keeps_the_catalog_identity() {
+    silent(
+        "<?php declare(strict_types=1);
+class MyDomEx extends Exception {}
+if (!class_exists('Dom\\\\DOMException')) { class_alias(MyDomEx::class, 'Dom\\\\DOMException'); }
+/** @throws \\RuntimeException */
+function t(): void {
+    try { throw new \\DOMException('y'); } catch (\\Dom\\DOMException $e) { echo 'caught'; }
+}
+function takes(\\Dom\\DOMException $e): void {}
+takes(new \\DOMException('x'));
+",
+    );
+}
+
+// A name that two routes bind to different classes is ambiguous, not the first route's class.
+
+#[test]
+fn a_name_reached_through_two_candidates_declines_on_either() {
+    silent(
+        "<?php declare(strict_types=1);
+class T {}
+class W {}
+class_alias(W::class, 'Z');
+class_alias('Z', 'Y');
+class_alias(T::class, 'Y');
+class_alias('Y', 'X');
+function f(X $x): void {}
+f(new W());
+f(new T());
+",
+    );
+}
+
+#[test]
+fn a_member_of_an_ambiguous_alias_is_not_proven_absent() {
+    let src = "<?php declare(strict_types=1);
+class T {}
+class W { public function w(): string { return 'w'; } }
+class_alias(W::class, 'Z');
+class_alias('Z', 'Y');
+class_alias(T::class, 'Y');
+class_alias('Y', 'X');
+echo (new X())->w();
+";
+    let ds = findings(src);
+    assert!(ds.iter().all(|d| d.id != "call.undefined-method"), "{ds:#?}");
+}
+
+#[test]
+fn an_alias_loop_resolves_to_the_declared_class_from_either_name() {
+    silent(
+        "<?php declare(strict_types=1);
+class Real {}
+class_alias(Real::class, 'A');
+class_alias('A', 'B');
+@class_alias('B', 'A');
+function f(A $a): void {}
+function g(B $b): void {}
+f(new Real());
+g(new Real());
+",
+    );
+}
+
+#[test]
+fn an_alias_of_a_conditionally_declared_class_is_ambiguous_and_silent() {
+    silent(
+        "<?php declare(strict_types=1);
+interface Marker {}
+if (PHP_VERSION_ID >= 80000) {
+    class Dup implements Marker {}
+} else {
+    class Dup {}
+}
+class_alias(Dup::class, 'A');
+function f(Marker $m): void {}
+function g(A $a): void {}
+f(new A());
+g(new Dup());
+",
+    );
+}
+
+// The BC shim: the alias name is also a textual declaration beside the alias call.
+
+fn project(files: &[(&str, &str)]) -> Vec<Diagnostic> {
+    use steins_db::{PluginFacts, Project, ProjectLayout, SourceFile, SteinsDatabase};
+    use steins_infer::{NoFold, check_project};
+    let db = SteinsDatabase::default();
+    let inputs: Vec<SourceFile> = files
+        .iter()
+        .map(|(p, t)| SourceFile::new(&db, (*p).to_owned(), (*t).to_owned()))
+        .collect();
+    let project = Project::new(&db, inputs, ProjectLayout::fallback(), PluginFacts::none());
+    check_project(&db, project, &mut NoFold)
+}
+
+#[test]
+fn the_bc_shim_declines_instead_of_proving_the_new_class_unrelated() {
+    let ds = project(&[
+        (
+            "src/NewItem.php",
+            "<?php declare(strict_types=1);\nnamespace Lib;\nclass NewItem {}\nclass_alias(NewItem::class, OldItem::class);\n",
+        ),
+        (
+            "src/OldItem.php",
+            "<?php declare(strict_types=1);\nnamespace Lib;\nif (false) {\n    class OldItem extends NewItem {}\n}\n",
+        ),
+        (
+            "src/use.php",
+            "<?php declare(strict_types=1);\nfunction legacy(\\Lib\\OldItem $i): string { return 'x'; }\nlegacy(new \\Lib\\NewItem());\n",
+        ),
+    ]);
+    let ds: Vec<_> = ds.iter().filter(|d| !d.id.starts_with("untyped.")).collect();
+    assert!(ds.is_empty(), "{ds:#?}");
+}
+
+/// A conditional alias to two targets: the walk enumerated one of them, so the ambiguous
+/// alias declines; a class that is neither candidate keeps its proof.
+#[test]
+fn a_conditional_alias_declines_on_a_candidate_and_proves_on_a_stranger() {
+    let src = "<?php declare(strict_types=1);
+class Real {}
+class Other {}
+class Third {}
+if (PHP_VERSION_ID > 0) { class_alias(Real::class, 'Alias'); } else { class_alias(Other::class, 'Alias'); }
+function f(Alias $a): void {}
+f(new Real());
+f(new Other());
+f(new Third());
+";
+    let ds = findings(src);
+    assert_eq!(ids(src), vec!["type.argument-mismatch"], "{ds:#?}");
+    assert!(ds[0].message.contains("new Third()"), "{ds:#?}");
+}

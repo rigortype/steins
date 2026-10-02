@@ -194,12 +194,70 @@ fn a_cycle_of_aliases_mints_nothing_and_ends() {
 }
 
 #[test]
-fn an_alias_of_an_ambiguous_alias_mints_nothing() {
-    // `X` is minted by two edges, so it is ambiguous, and nothing aliasing it is unique.
+fn an_alias_of_an_ambiguous_alias_is_ambiguous_not_absent() {
+    // `X` is minted by two edges to different classes, so it is ambiguous, and so is
+    // everything aliasing it: the name exists, and which class it is cannot be said.
     let files = &[(
         "a.php",
         "<?php\nclass A {}\nclass C {}\nclass_alias('A', 'X');\nclass_alias('C', 'X');\nclass_alias('X', 'Y');\n",
     )];
     assert_eq!(kind(resolve(files, "X")), Kind::Ambiguous);
-    assert_eq!(kind(resolve(files, "Y")), Kind::Absent);
+    assert_eq!(kind(resolve(files, "Y")), Kind::Ambiguous);
+}
+
+#[test]
+fn two_edges_to_one_class_name_it_uniquely() {
+    // The second call fails at run time and the name is still `A`: one candidate.
+    let files = &[("a.php", "<?php\nclass A {}\nclass_alias('A', 'X');\nclass_alias('A', 'X');\n")];
+    assert!(same_unique(resolve(files, "X"), resolve(files, "A")));
+}
+
+/// A name reached through two routes to different classes is ambiguous: a round
+/// snapshot used to mint `X` as the first class alone.
+#[test]
+fn a_name_with_two_candidates_through_a_chain_is_ambiguous() {
+    let files = &[(
+        "a.php",
+        "<?php\nclass T {}\nclass W {}\nclass_alias('W', 'Z');\nclass_alias('Z', 'Y');\nclass_alias('T', 'Y');\nclass_alias('Y', 'X');\n",
+    )];
+    assert_eq!(kind(resolve(files, "Y")), Kind::Ambiguous);
+    assert_eq!(kind(resolve(files, "X")), Kind::Ambiguous);
+    assert!(same_unique(resolve(files, "Z"), resolve(files, "W")));
+}
+
+/// A second call that names the first's alias back (`'B'` to `'A'`) leaves one candidate.
+#[test]
+fn a_loop_through_a_declared_class_stays_unique() {
+    let files = &[(
+        "a.php",
+        "<?php\nclass Real {}\nclass_alias('Real', 'A');\nclass_alias('A', 'B');\nclass_alias('B', 'A');\n",
+    )];
+    assert!(same_unique(resolve(files, "A"), resolve(files, "Real")));
+    assert!(same_unique(resolve(files, "B"), resolve(files, "Real")));
+}
+
+/// PHP refuses to redeclare an engine class, so `class_alias` returns false and the
+/// catalog's name keeps its identity: the fold mints nothing for it.
+#[test]
+fn an_alias_named_for_a_catalog_class_mints_nothing() {
+    for name in ["Stringable", "stringable", "ArrayAccess", "DOMException", "Dom\\DOMException"] {
+        let src = format!("<?php\nclass Legacy {{}}\nclass_alias('Legacy', '{name}');\n");
+        let files = &[("a.php", src.as_str())];
+        assert_eq!(kind(resolve(files, name)), Kind::Absent, "{name}");
+    }
+}
+
+/// A textual declaration a call also names (the BC shim: `class_alias(New, Old)` beside
+/// `if (false) { class Old extends New {} }`) is ambiguous.
+#[test]
+fn a_textual_name_an_alias_also_names_is_ambiguous() {
+    let files = &[
+        (
+            "new.php",
+            "<?php\nnamespace Lib;\nclass NewItem {}\nclass_alias(NewItem::class, OldItem::class);\n",
+        ),
+        ("old.php", "<?php\nnamespace Lib;\nif (false) { class OldItem extends NewItem {} }\n"),
+    ];
+    assert_eq!(kind(resolve(files, "Lib\\OldItem")), Kind::Ambiguous);
+    assert_eq!(kind(resolve(files, "Lib\\NewItem")), Kind::Unique);
 }

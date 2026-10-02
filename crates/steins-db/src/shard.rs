@@ -27,7 +27,7 @@
 //! The `persist` feature (issue #487) serializes shards into the `symbols`
 //! section of a package artifact — see the `persist` module.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use steins_gen::Package;
 use steins_phpdoc::{MagicTagKind, scan_magic_member_tags};
@@ -389,6 +389,11 @@ pub struct MergedTables {
     pub classes: HashMap<String, ShardSite>,
     /// Class FQNs demoted by any collision — textual, cross-package, or alias.
     pub ambiguous_classes: HashSet<String>,
+    /// For each name the alias fold left **ambiguous** (it is a textual declaration an
+    /// edge also names, or its edges reach two classes, or one that is itself
+    /// ambiguous), the sorted lowercase textual FQNs it may bind to
+    /// ([`fold_class_aliases`]). A textual duplicate no edge touches has no entry.
+    pub alias_candidates: HashMap<String, Vec<String>>,
     /// Lowercased simple function name → every site, in universe file order.
     pub fn_by_simple: HashMap<String, Vec<ShardSite>>,
     /// The A14 records, keyed by the declaring class-like's lowercase FQN, each
@@ -404,6 +409,78 @@ pub struct MergedTables {
     pub constants: HashSet<String>,
     /// Diagnostic path → file slot for every file in the universe.
     pub files: HashMap<String, usize>,
+}
+
+/// The literal `class_alias` fold (ADR-0049 §2, ADR-0043 *class identity is
+/// resolved*): mint every `(alias, target)` edge into the textual class tables.
+///
+/// A **candidate-set fixpoint**, never call order. A textual name's identity set is
+/// itself; for every surviving edge, `cand[alias] ∪= ident(target)`, where
+/// `ident(t)` is `{t}` when `t` is a textual declaration (unique or ambiguous) and
+/// `cand[t]` otherwise. Sets only grow and are bounded by the textual names, so the
+/// loop ends, and a cycle no declaration stands under ends with empty sets (the names
+/// stay absent). The result is a fact about the multiset of edges (ADR-0048).
+///
+/// An edge whose alias name the **catalog** declares is dropped: PHP refuses to
+/// redeclare an engine class and `class_alias` returns false, so the catalog's name
+/// keeps its identity (`Stringable`, `Dom\DOMException`). Then each alias name is
+/// finalized from its set: the alias is itself a textual declaration, or has two
+/// candidates, or one candidate that is textually ambiguous, → **ambiguous**; exactly
+/// one candidate unique in `classes` → that site; an empty set mints nothing.
+///
+/// Returns the textual FQNs (sorted, lowercase) each **ambiguous** alias-touched name
+/// may bind to, so a consumer can tell that an ambiguous name is one of the classes it
+/// has enumerated.
+pub fn fold_class_aliases<S: Copy>(
+    classes: &mut HashMap<String, S>,
+    ambiguous: &mut HashSet<String>,
+    edges: &[(&str, &str)],
+) -> HashMap<String, Vec<String>> {
+    let textual = |name: &str| classes.contains_key(name) || ambiguous.contains(name);
+    let edges: Vec<&(&str, &str)> =
+        edges.iter().filter(|(alias, _)| steins_catalog::builtin_class_display(alias).is_none()).collect();
+    let mut cand: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
+    loop {
+        let mut grew = false;
+        for &&(alias, target) in &edges {
+            let ident: Vec<String> = if textual(target) {
+                vec![target.to_owned()]
+            } else {
+                cand.get(target).map(|set| set.iter().cloned().collect()).unwrap_or_default()
+            };
+            let set = cand.entry(alias).or_default();
+            for name in ident {
+                grew |= set.insert(name);
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    let mut ambiguous_candidates: HashMap<String, Vec<String>> = HashMap::new();
+    let mut minted: Vec<(&str, S)> = Vec::new();
+    let mut demoted: Vec<&str> = Vec::new();
+    for (alias, set) in &cand {
+        if set.is_empty() {
+            continue;
+        }
+        let only = if set.len() == 1 { set.iter().next().and_then(|c| classes.get(c)) } else { None };
+        match only {
+            Some(&site) if !textual(alias) => minted.push((alias, site)),
+            _ => {
+                demoted.push(alias);
+                ambiguous_candidates.insert((*alias).to_owned(), set.iter().cloned().collect());
+            }
+        }
+    }
+    for (alias, site) in minted {
+        classes.insert(alias.to_owned(), site);
+    }
+    for alias in demoted {
+        classes.remove(alias);
+        ambiguous.insert(alias.to_owned());
+    }
+    ambiguous_candidates
 }
 
 /// Recompute every global table from the shards. Order-independent by
@@ -442,42 +519,14 @@ pub fn merge_shards(shards: &[PackageShard]) -> MergedTables {
         sites.sort_unstable();
     }
 
-    // The literal class_alias fold (ADR-0049 §2): resolve the edges against
-    // the merged snapshot, then mint them. An alias colliding with a textual
-    // decl of the same FQN, or two alias edges for one name, demotes to
-    // ambiguous; an absent or ambiguous target mints nothing.
-    //
-    // The fold is a **fixpoint over rounds**, so an alias of an alias resolves
-    // (`class_alias(Real::class, 'A1'); class_alias('A1', 'A2');`): each round
-    // resolves every pending edge against the snapshot the round began with and
-    // mints them together, so the result is a fact about the edge multiset and
-    // never about visit order (ADR-0048), and a name two edges mint is
-    // ambiguous before any later round reads it. An edge whose target is
-    // ambiguous is dropped for good (ambiguity only grows); one whose target is
-    // absent waits for a round that may mint it. Every round resolves at least
-    // one edge or ends the loop, so a cycle of aliases no declaration stands
-    // under (`'B1'` ↔ `'B2'`) terminates having minted nothing.
-    let mut pending: Vec<&ShardAlias> = shards.iter().flat_map(|s| &s.class_alias_edges).collect();
-    while !pending.is_empty() {
-        let mut resolved: Vec<(&str, ShardSite)> = Vec::new();
-        let mut waiting: Vec<&ShardAlias> = Vec::new();
-        for edge in pending {
-            if m.ambiguous_classes.contains(&edge.target_fqn) {
-                continue;
-            }
-            match m.classes.get(&edge.target_fqn) {
-                Some(&target) => resolved.push((&edge.alias_fqn, target)),
-                None => waiting.push(edge),
-            }
-        }
-        if resolved.is_empty() {
-            break;
-        }
-        for (alias_fqn, target) in resolved {
-            insert_unique(&mut m.classes, &mut m.ambiguous_classes, alias_fqn, target);
-        }
-        pending = waiting;
-    }
+    // The literal class_alias fold (ADR-0049 §2), a candidate-set fixpoint over the
+    // edge multiset ([`fold_class_aliases`]).
+    let edges: Vec<(&str, &str)> = shards
+        .iter()
+        .flat_map(|s| &s.class_alias_edges)
+        .map(|edge| (edge.alias_fqn.as_str(), edge.target_fqn.as_str()))
+        .collect();
+    m.alias_candidates = fold_class_aliases(&mut m.classes, &mut m.ambiguous_classes, &edges);
 
     // The obstacle table: order the records by slot (stable, so one file's
     // records keep their scan order) and group by declaring FQN — the same

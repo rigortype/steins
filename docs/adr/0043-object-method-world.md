@@ -205,25 +205,50 @@ project file declares, the declared name of the catalog class it is a second nam
 (`steins_catalog::builtin_class_alias`); else the name itself. `supertype_walk` compares
 the identity of every visited node with the identity of the target, so the reflexive
 `Yes`, the `seen` set and the `Stringable` special case all speak identity. An ambiguous
-name (two declarations, nothing to pick) stays its own identity: a guess may widen a `Yes`
-and never a `No`, and the walk already reads an ambiguous ancestor as incomplete.
+name is its own identity for the reflexive check; a `No` against it holds only when the
+walk enumerated none of the identities the name can bind to (the index keeps them:
+`alias_candidates`). Enumerating one — PHP-Parser's BC shim
+`class_alias(NewItem::class, OldItem::class)` beside `if (false) { class OldItem extends
+NewItem {} }`, or a conditional alias to two targets — answers `Unknown`. A name no
+enumerated class can be keeps its `No`: a third class passed to the ambiguous alias still
+reports.
 
-**The alias fold is a fixpoint.** The index mints `class_alias` edges in rounds: each round
-resolves every pending edge against the snapshot it began with and mints the round
-together, so `class_alias(Real::class, 'A1'); class_alias('A1', 'A2');` resolves whatever
-order the calls are written in, and a result is a fact about the multiset of edges, never
-about visit order (ADR-0048). An edge whose target is ambiguous is dropped (ambiguity only
-grows); one whose target is absent waits; a cycle no declaration stands under mints nothing
-and ends because every round resolves an edge or stops. The affected-set declaration table
-repeats its alias pass to the same fixpoint, so a file naming the end of a chain still
-reaches the declaring file in one hop.
+**The alias fold is a candidate-set fixpoint.** The index mints `class_alias` edges from
+the edge multiset, never from call order. A textual name's identity set is itself; for
+every surviving edge, `cand[alias] ∪= ident(target)`, where `ident(t)` is `{t}` when `t` is
+textual (declared, unique or ambiguous) and `cand[t]` otherwise; the sets only grow and are
+bounded by the textual names, so the loop ends, and a cycle no declaration stands under ends
+with empty sets and names nothing. Each name is then finalized from its set: the name is
+itself a textual declaration, or has two candidates, or one that is textually ambiguous →
+**ambiguous** (the index keeps the sorted textual candidates, `alias_candidates`); exactly
+one candidate unique in the project → that declaration's site; an empty set mints nothing.
+So `class_alias(Real::class, 'A1'); class_alias('A1', 'A2');` resolves in either order, and a
+name two routes bind to different classes (`class_alias('Z', 'Y'); class_alias(T::class,
+'Y');` with `Z` an alias of `W`) is ambiguous instead of the first route's class, which a
+round-by-round snapshot got wrong (the member lane then proved an absence on it). Two
+edges to one class name it uniquely. The fold reads the edge multiset, not call order:
+across files a target resolves through autoload; a same-file `class_alias` written before
+its target exists fails at runtime and the fold still mints it, which can lose a
+`TypeError` proof and never make one. The affected-set declaration table repeats its alias
+pass to the same fixpoint, so a file naming the end of a chain still reaches the declaring
+file in one hop.
 
-**An unseen target declines.** A walk that would answer `No` for a target resolved in
-neither the project (ambiguous names included) nor the catalog, while the dam is not clear
-(a dynamic `class_alias`, an `eval`, an unprovable include), answers `Unknown`: the
-runtime-minted class might be the target, and might be the class the walk enumerated. A
-known class's mismatch still proves, since an alias renames nothing that exists, and in a
-clear universe a name nothing declares stays a proven `No`, `class.undefined`'s case.
+**A catalog name cannot be minted.** A `class_alias` whose alias name the catalog declares
+(`Stringable`, `Dom\DOMException`, any engine class-like, enums included) mints nothing: PHP
+refuses to redeclare an engine class and `class_alias` returns false, so the catalog keeps
+the name's identity. A guarded polyfill (`if (PHP_VERSION_ID < 80000) {
+class_alias(MyStringable::class, 'Stringable'); }`) therefore no longer shadows `Stringable`
+for every class with a `__toString`. A textual polyfill class of the same name keeps the
+issue #67 precedence (the project's declaration speaks over the catalog's).
+
+**An unseen target declines.** In the main pass's contexts, a walk that would answer `No`
+for a target resolved in neither the project (ambiguous names included) nor the catalog,
+while the dam is not clear (a dynamic `class_alias`, an `eval`, an unprovable include),
+answers `Unknown`: the runtime-minted class might be the target, and might be the class the
+walk enumerated. A known class's mismatch still proves, since an alias renames nothing that
+exists, and in a clear universe a name nothing declares stays a proven `No`,
+`class.undefined`'s case. The throw lane's own rows are built under the auxiliary empty dam
+and do not decline yet (#970).
 
 **The catalog learns aliases.** `extract_hierarchy.py` reads a class-level `/** @alias X */`
 docblock (the docblock directly above the declaration; method- and function-level `@alias`
@@ -234,10 +259,25 @@ tags are other things) and emits `aliases = [...]` on the declared class's row; 
 no name has two answers. The sidecar's `ReflectedClass.name` as a second source, for classes
 the pinned stubs do not declare (PECL), is a follow-up.
 
-Witnessed on PHP 8.5.11: `takes(\Dom\DOMException $e)` accepts `new \DOMException`; a
-`catch (\Dom\DOMException)` catches a thrown `\DOMException` and the converse; `is_a(new
-DOMException, 'Dom\DOMException')` is true; an alias passed where its target (or another
-alias of it) is declared is accepted in strict mode, for classes, interfaces and enums.
+Witnessed on PHP 8.5.11:
+
+- `takes(\Dom\DOMException $e)` accepts `new \DOMException`; a `catch (\Dom\DOMException)`
+  catches a thrown `\DOMException` and the converse; `is_a(new DOMException,
+  'Dom\DOMException')` is true; an alias passed where its target (or another alias of it)
+  is declared is accepted in strict mode, for classes, interfaces and enums.
+- a11: `if (PHP_VERSION_ID < 80000) { class_alias(MyStringable::class, 'Stringable'); }` is
+  not executed, and `f(Stringable $s)` accepts `new T()` where `T` has a `__toString`: `ok`.
+- a40: with `class_alias(W::class,'Z'); class_alias('Z','Y'); class_alias(T::class,'Y');
+  class_alias('Y','X');`, `f(X $x)` accepts `new W()` (the second alias to `Y` fails, so
+  `X` is `W`): `ok`; the fold reads the edge multiset, so it calls `X` ambiguous and
+  declines, which is sound and loses nothing.
+- shim: PHP-Parser's `NewItem`/`OldItem` pair across two files, `legacy(\Lib\OldItem $i)`
+  called with `new \Lib\NewItem()`: prints `Lib\NewItem`.
+- a4: `if (PHP_VERSION_ID > 0) { class_alias(Real::class, 'Alias'); } else {
+  class_alias(Other::class, 'Alias'); }`: `f(new Real())` is accepted, and `g(new Alias())`
+  against `Other $o` is a `TypeError`, the one proof the ambiguous alias now declines.
+
 Controls that stay findings: an unrelated class against a param typed with an alias of
-`Real`, an alias of `Real` against a param typed `Other`, and, under a dynamic
+`Real`, an alias of `Real` against a param typed `Other`, a class without `__toString`
+against `Stringable`, a third class against an ambiguous alias, and, under a dynamic
 `class_alias`, a known class's mismatch (while a param typed with an unknown name declines).
