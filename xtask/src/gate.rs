@@ -636,7 +636,12 @@ pub fn run(args: &[String]) -> Result<bool, String> {
     // project whose warm re-check did not reproduce its cold pass (issue #525).
     let total_diags: usize = reports.iter().map(|r| r.diagnostics.len()).sum::<usize>()
         + local_reports.iter().map(|r| r.diagnostics.len()).sum::<usize>();
-    let parity_ok = reports.iter().chain(local_reports.iter()).all(|r| r.parity.is_green());
+    let parity_broken =
+        reports.iter().chain(local_reports.iter()).filter(|r| !r.parity.is_green()).count();
+    let tripped = regressions.len()
+        + throw_regressions.len()
+        + effect_regressions.len()
+        + possibly_regressions.len();
 
     // Take the stores back off disk. The next run wipes them anyway, so nothing
     // depends on this — but 131 MB over the pinned corpus is 131 MB CI would
@@ -645,12 +650,7 @@ pub fn run(args: &[String]) -> Result<bool, String> {
     // is disk, not a verdict.
     let _ = std::fs::remove_dir_all(&stores);
 
-    Ok(total_diags == 0
-        && parity_ok
-        && regressions.is_empty()
-        && throw_regressions.is_empty()
-        && effect_regressions.is_empty()
-        && possibly_regressions.is_empty())
+    Ok(headline(total_diags, tripped, parity_broken).is_green())
 }
 
 /// One measurement-mode regression: a package whose count exceeds its expectation.
@@ -1313,38 +1313,70 @@ fn print_report(
     );
 
     println!();
-    let measurement_ok =
-        regressions.is_empty() && throw_regressions.is_empty() && effect_regressions.is_empty();
-    match (td == 0, measurement_ok, broken.is_empty()) {
-        (true, true, true) => {
-            println!(
-                "GATE GREEN — no proof-layer diagnostics on clean-parsing corpus code, \
-                 no phpdoc.*/throw.* regression past the expected baselines, and every \
-                 project's warm re-check reproduced its cold findings."
-            );
-        }
-        (false, _, _) => {
-            println!(
-                "GATE RED — {td} proof-layer diagnostic(s) on clean code. Human FP triage required (ADR-0013)."
-            );
-        }
-        (true, false, _) => {
-            println!(
-                "GATE RED — {} package(s) regressed past their expected phpdoc.*/throw.* baseline \
-                 (see the tripwire lists above). Investigate the new finding(s); update \
-                 PHPDOC_EXPECTED / THROW_EXPECTED in xtask/fp-gate/ only once the change is \
-                 understood and intended.",
-                regressions.len() + throw_regressions.len()
-            );
-        }
-        (true, true, false) => {
-            println!(
-                "GATE RED — {} project(s) failed the warm ≡ cold parity check (see above). A \
+    let tripped = regressions.len()
+        + throw_regressions.len()
+        + effect_regressions.len()
+        + possibly_regressions.len();
+    println!("{}", headline(td, tripped, broken.len()).message());
+}
+
+/// The verdict `run` exits on and the line `print_report` ends with, chosen in
+/// one place so the two cannot disagree (issue #791: the report once ended
+/// `GATE GREEN` over a red exit because its own copy of the verdict forgot a
+/// tripwire).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Headline {
+    Green,
+    /// Red-on-sight proof-layer findings on clean code.
+    Diagnostics(usize),
+    /// Measurement-family rows past their baseline, across `phpdoc.*`,
+    /// `throw.*`, `effect.*` and the possibly-grade ids.
+    Regressed(usize),
+    /// Projects whose warm re-check did not reproduce their cold pass.
+    ParityBroken(usize),
+}
+
+/// Pick the headline from the three counts. A proof-layer diagnostic outranks a
+/// tripwire, which outranks a parity break: the order is the order of what a
+/// reader should triage first.
+fn headline(diagnostics: usize, regressions: usize, parity_broken: usize) -> Headline {
+    if diagnostics > 0 {
+        Headline::Diagnostics(diagnostics)
+    } else if regressions > 0 {
+        Headline::Regressed(regressions)
+    } else if parity_broken > 0 {
+        Headline::ParityBroken(parity_broken)
+    } else {
+        Headline::Green
+    }
+}
+
+impl Headline {
+    fn is_green(self) -> bool { self == Headline::Green }
+
+    fn message(self) -> String {
+        match self {
+            Headline::Green => "GATE GREEN — no proof-layer diagnostics on clean-parsing corpus \
+                 code, no phpdoc.*/throw.*/effect.*/possibly-grade regression past the \
+                 expected baselines, and every project's warm re-check reproduced its cold \
+                 findings."
+                .to_owned(),
+            Headline::Diagnostics(n) => format!(
+                "GATE RED — {n} proof-layer diagnostic(s) on clean code. Human FP triage required (ADR-0013)."
+            ),
+            Headline::Regressed(n) => format!(
+                "GATE RED — {n} package row(s) regressed past their expected \
+                 phpdoc.*/throw.*/effect.*/possibly-grade baseline (see the tripwire lists \
+                 above). Investigate the new finding(s); update PHPDOC_EXPECTED / \
+                 THROW_EXPECTED / EFFECT_EXPECTED / POSSIBLY_EXPECTED in xtask/fp-gate/ only \
+                 once the change is understood and intended."
+            ),
+            Headline::ParityBroken(n) => format!(
+                "GATE RED — {n} project(s) failed the warm ≡ cold parity check (see above). A \
                  divergence is a SOUNDNESS bug in the generation cache, not a cost regression: \
                  `steins check` ships that cache on by default, so a finding the warm pass \
-                 loses is a finding the product loses.",
-                broken.len()
-            );
+                 loses is a finding the product loses."
+            ),
         }
     }
 }
@@ -1372,8 +1404,9 @@ mod tests {
     use steins_infer::{is_vendor_path, layer};
 
     use super::{
-        Baselines, GateBucket, RevisionStatus, WorktreeState, classify_revision, gate_bucket,
-        parse_pins, parse_table, revision_summary_line, revision_tripwire_line,
+        Baselines, GateBucket, Headline, RevisionStatus, WorktreeState, classify_revision,
+        gate_bucket, headline, parse_pins, parse_table, revision_summary_line,
+        revision_tripwire_line,
     };
 
     // Synthetic revisions only. A real private-corpus sha must never enter a
@@ -1451,6 +1484,43 @@ mod tests {
             assert!(layer(&p.id).is_some(), "{at}: the id is not registered");
             assert_eq!(gate_bucket(&p.id), GateBucket::RedOnSight, "{at}");
         }
+    }
+
+    #[test]
+    fn the_headline_is_green_only_when_nothing_is_red_and_never_otherwise() {
+        // Issue #791: every combination of the three red conditions, so a
+        // tripwire left out of the headline's input is a failing row here.
+        for diagnostics in [0, 3] {
+            for tripped in [0, 2] {
+                for broken in [0, 1] {
+                    let h = headline(diagnostics, tripped, broken);
+                    let all_clear = diagnostics + tripped + broken == 0;
+                    assert_eq!(h.is_green(), all_clear, "{diagnostics}/{tripped}/{broken}: {h:?}");
+                    assert_eq!(
+                        h.message().starts_with("GATE GREEN"),
+                        all_clear,
+                        "{diagnostics}/{tripped}/{broken}"
+                    );
+                }
+            }
+        }
+        // The triage order: diagnostics, then a tripwire, then a parity break.
+        assert_eq!(headline(3, 2, 1), Headline::Diagnostics(3));
+        assert_eq!(headline(0, 2, 1), Headline::Regressed(2));
+        assert_eq!(headline(0, 0, 1), Headline::ParityBroken(1));
+    }
+
+    #[test]
+    fn the_red_tripwire_headline_names_all_four_measurement_families() {
+        let msg = headline(0, 1, 0).message();
+        for family in ["phpdoc.*", "throw.*", "effect.*", "possibly-grade"] {
+            assert!(msg.contains(family), "{msg}");
+        }
+        for table in ["PHPDOC_EXPECTED", "THROW_EXPECTED", "EFFECT_EXPECTED", "POSSIBLY_EXPECTED"] {
+            assert!(msg.contains(table), "{msg}");
+        }
+        // The green line makes the same claim about the same four families.
+        assert!(headline(0, 0, 0).message().contains("possibly-grade"));
     }
 
     #[test]
