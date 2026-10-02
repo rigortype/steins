@@ -16,6 +16,7 @@ mod mcp;
 mod output_seam;
 mod plugin_channel;
 mod profile;
+mod progress;
 mod runtime_final_keyword;
 mod sidecar_handshake;
 mod suppress;

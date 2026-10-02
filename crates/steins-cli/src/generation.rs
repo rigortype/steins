@@ -21,7 +21,9 @@
 //! per-run narration: the report a user reads is the same report either way,
 //! and a cache that announces itself on every invocation is noise on every
 //! invocation. Where the run's disposition genuinely wants looking at, that is
-//! `steins doctor`'s store section.
+//! `steins doctor`'s store section. The one narration there is, `--progress`
+//! (issue #885), is opt-in and says where the run's time is going on either
+//! arm, not what the cache did.
 //!
 //! **Silence is a property, not a preference.** Every way this path can
 //! degrade — an unopenable store, a source that moved under the seal, a
@@ -41,12 +43,12 @@ use std::path::{Component, Path, PathBuf};
 
 use steins_db::{EffectsPolicy, PluginFacts, ProjectLayout};
 use steins_infer::{
-    Diagnostic, GenerationParams, INLINE_IGNORE, LazyTree, Progress, RuntimePostures,
+    Diagnostic, GenerationParams, INLINE_IGNORE, LazyTree, RuntimePostures,
     generation_check_reporting,
 };
 use steins_syntax::SourceTree;
 
-use crate::check::suppression_over;
+use crate::check::{CheckRequest, suppression_over};
 use crate::profile;
 use crate::project::{LoadedProject, assemble_loaded, resolve_layout};
 
@@ -86,17 +88,15 @@ pub(crate) struct CachedRun {
 /// — so a `None` leaves stderr untouched for `load_project` to fill exactly as
 /// it would have on a machine that never had a store.
 pub(crate) fn try_generation_check(
-    files: &[PathBuf],
-    paths: &[String],
+    req: &CheckRequest<'_>,
     plugin_allow: Option<&[String]>,
     effects: &EffectsPolicy,
     postures: &RuntimePostures,
-    no_php: bool,
     runtime_warnings: &[String],
-    progress: &Progress,
 ) -> Option<CachedRun> {
+    let (files, no_php) = (req.files, req.no_php);
     let cwd = std::env::current_dir().ok()?;
-    let layout = resolve_layout(paths);
+    let layout = resolve_layout(req.paths);
     let plugins = PluginFacts::discover(&layout, plugin_allow);
     // The cold path's order, kept here so the two stderrs are one stderr:
     // `load_project` prints plugin refusals, then the effect label vocabulary,
@@ -131,7 +131,7 @@ pub(crate) fn try_generation_check(
     // A failure here is cost, never meaning (ADR-0092 §2), so it degrades to
     // the ordinary cold path in silence — and having printed nothing yet is
     // what lets the cold path own stderr whole.
-    let outcome = generation_check_reporting(&params, progress).ok()?;
+    let outcome = generation_check_reporting(&params, &req.progress).ok()?;
     notices.extend(outcome.attribution_notices);
     notices.extend(runtime_warnings.iter().cloned());
 
