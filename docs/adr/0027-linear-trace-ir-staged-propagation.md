@@ -281,7 +281,7 @@ test the loop makes, since that env holds at each of them. `Yes` plus
 { …; return; }` is the `if (true) { return; }` twin `walk_if` already
 terminates — and the `while`/`for` arms answer `Flow::Terminated` rather
 than walking dead code the old `Opaque` washed out by forgetting `reads`.
-A `do`-`while` is not this question (issue #679).
+A `do`-`while` is not this question (issue #679, the 2026-10-02 amendment below).
 
 **The order is the soundness, and it is the part worth reading twice.** The
 negation is applied to the **post-forget** env — `writes` gone, `reads` kept
@@ -348,3 +348,55 @@ Fixtures: `crates/steins-infer/tests/it/loop_exit_condition.rs` — the shape an
 its `if`/`else` twin, both post-forget readings, the four loop forms, the
 `break`/`break 2`/nested-`switch`/nested-loop level matrix, `continue` and
 `continue 2`, `goto`, and the `foreach` subject surviving into a second loop.
+
+## Amendment (2026-10-02): a `do`-`while` body that terminates on every path terminates the loop — PENDING ratification
+
+Issue #679. The amendment above answers `Flow::Terminated` for a `while` or
+`for` whose header can never fail, and leaves the `do`-`while` out. The body
+walk's own `Flow` was discarded for every loop form, on the reasoning that a
+loop whose condition is not decided may run its body zero times. That holds
+for `while`, `for` and `foreach`. It is false for `do`-`while`, whose body runs
+at least once, so `$x = null; do { return; } while (false); $x->bar();`
+reported `call.on-null` on a line nothing reaches.
+
+**The body decides the successor, under two jump gates.** The body walk
+counts a `StmtKind::LoopJump` as terminating its path, because it leaves the
+block it is written in, but two of those jumps come back. A `break` of this
+loop lands on the successor, and `break_free` already rules it out, together
+with any jump out past this loop. A `continue` of this loop lands on the
+condition, which may then fail. `StmtKind::DoWhile` gains `continue_free` for
+that one. It is computed on the CST body at lowering, by the scan that
+computes `break_free` and with the same depth counting: `continue N` targets
+this loop at `N == depth + 1`. A bare `continue` inside a nested `switch`
+belongs to the switch, since PHP treats a `switch` as a loop for `continue`.
+A non-literal level is read as the worst case. With both gates open, every
+jump the body walk stopped at belongs to a nested construct whose own walk
+has answered for it. What remains is `return`, `throw`, `exit` and a `: never`
+call, and none of those comes back. A body that terminates on every path
+only by `continue` is therefore not terminated.
+
+**The header half applies too.** The condition, evaluated on the body's entry
+env, is the verdict of every test the loop makes, since that env holds
+everywhere inside the loop. So `Yes` plus `break_free` proves the successor
+unreachable here as it does for `while (true)`. This is not the entry
+narrowing the 2026-09-10 amendment withholds. That narrowing would state a
+test's outcome before the first test runs. This reads a verdict that every
+test shares.
+
+**`stmt_end` agrees.** The syntactic terminality row for `do`-`while` answers
+`Terminates` when the body's `block_end` terminates and the body is both
+break-free and continue-free. It shares the lowering's scans. Otherwise it
+falls back to the infinite-loop row it had. `type.return-missing` and its
+`maybe-` sibling stop reporting a function that ends in such a loop.
+
+The trace payload changes shape, but under the 2026-09-27 narrowing
+(`docs/internal-spec/generation-schema.md`) a trace-IR change moves the
+analyzer version, and that refuses every stored trace. `SCHEMA_VERSION` does
+not move.
+
+Fixtures: `crates/steins-infer/tests/it/loop_exit_condition.rs`. They cover the
+two shapes from the issue, nested constructs that own their own jumps, and the
+negative controls: a conditional return, `break`, `continue`, `break 2` and
+`continue 2`, and a body that terminates only by `continue`. Also
+`crates/steins-syntax/tests/it/terminality.rs` and
+`crates/steins-infer/tests/it/return_missing.rs` for the `stmt_end` row.
