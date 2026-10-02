@@ -60,10 +60,10 @@ With #884 in (2026-10-02, release build, `--no-cache --no-php --profile strict`,
 | parse | 90.6 s |
 | universe + purity oracle | 15.4 s |
 | walk (1 worker) | 28.4 s |
-| report (fixpoints: effects 15.2 s, throws 35.5 s) | 36.3 s |
+| report (fixpoints in all: effects 15.2 s, throws 35.5 s) | 36.3 s |
 | suppress + output | 6.5 s |
 
-- **The cost is spread across phases.** Parsing is about half of the wall, and the report's fixpoints cost more than the walk. Six files took 250 ms or more to walk and none took a second, so a walk that dominates again will show as one or a few slow-file lines, not a flat tail.
+- **The cost is spread across phases.** Parsing is about half of the wall, and the report phase costs more than the walk. The "fixpoints in all" figures are not additive with the report's span: the effects fixpoint is forced early by the purity oracle, so its time is inside the universe + purity-oracle row, and only the rest of it lands in the report. Six files took 250 ms or more to walk and none took a second, so a walk that dominates again will show as one or a few slow-file lines, not a flat tail.
 - **Do not read its profile as the shape-saturated column above.** That column is a synthetic workload; this project's cost was one input pathology, now bounded.
 - **Peak RSS is the parsed universe, not the walk.** The 10 GB and the 65 MB readings in the #658 diagnosis came from one process at two stages: the whole project's parsed trees held in the salsa database, which is the resident set while the walk runs, and what is left once the process is paged out while stuck on one file. Nothing grew in the hot loop. So an RSS number says how large the parsed universe is, scaled by file count and size; it is not evidence of a leak, and it does not move when a walk-time fix lands.
 

@@ -96,32 +96,69 @@ pub fn deadline_from_args(args: &[String]) -> Result<Option<Duration>, String> {
     Ok((!deadline.is_zero()).then_some(deadline))
 }
 
-/// A project past its deadline, as the watchdog read it.
+/// The watchdog's reading when a project is past its deadline: every project
+/// it was timing, oldest first. The first is past the deadline and is the
+/// headline; the others are there because the projects share the walk pool, and
+/// a thread of one project that waits on the pool can run another project's
+/// jobs, so the oldest project is not always the one that is running.
 #[derive(Debug)]
 pub struct Expiry {
+    pub deadline: Duration,
+    /// Oldest first; never empty.
+    pub projects: Vec<Standing>,
+}
+
+/// One project at the moment of an [`Expiry`].
+#[derive(Debug)]
+pub struct Standing {
     pub project: String,
     /// `cold` or `warm`, or `setup` before the first pass began.
     pub pass: &'static str,
     pub elapsed: Duration,
-    pub deadline: Duration,
     /// What the pass's progress channel held; `None` before a pass began.
     pub snapshot: Option<ProgressSnapshot>,
 }
 
 impl Expiry {
-    /// The report the gate prints before it exits: what ran too long, where it
-    /// last was, and what to run next.
+    /// The project that outlived the deadline (the oldest).
+    pub fn headline(&self) -> &Standing {
+        &self.projects[0]
+    }
+
+    /// The report the gate prints before it exits: what ran too long, where
+    /// every project running last was, and what to run next.
     pub fn render(&self) -> String {
+        let head = self.headline();
         let mut out = format!(
             "fp-gate: DEADLINE EXCEEDED: project `{}` has run for {} (deadline {}); \
              the gate is failed, not hung",
-            self.project,
-            secs(self.elapsed),
+            head.project,
+            secs(head.elapsed),
             secs(self.deadline),
         );
+        out.push_str(&format!(
+            "\n  projects running ({}), oldest first; `*` marks those past the deadline:",
+            self.projects.len()
+        ));
+        for standing in &self.projects {
+            let mark = if standing.elapsed >= self.deadline { '*' } else { ' ' };
+            out.push_str(&format!("\n  {mark} {}", standing.render()));
+        }
+        out.push_str(&next_step(head));
+        out.push_str(
+            "\n  `--deadline SECS` changes the limit and `--deadline 0` removes it; the \
+             engine itself has no wall-clock budget",
+        );
+        out
+    }
+}
+
+impl Standing {
+    fn render(&self) -> String {
+        let mut out = format!("{} ({} in total): ", self.project, secs(self.elapsed));
         let Some(snapshot) = &self.snapshot else {
             out.push_str(&format!(
-                "\n  pass: {} (no phase finished yet, so the stall is before the analysis began)",
+                "pass {} (no phase finished yet, so it is before the analysis began)",
                 self.pass
             ));
             return out;
@@ -131,31 +168,45 @@ impl Expiry {
             |p| format!("last phase finished: `{p}`, {} ago", secs(snapshot.since_phase)),
         );
         out.push_str(&format!(
-            "\n  pass: {} (running for {}); {phase} (phases are named as they end, so the \
+            "pass {} (running for {}); {phase} (phases are named as they end, so the \
              running one is the next)",
             self.pass,
             secs(snapshot.elapsed),
         ));
         if snapshot.in_flight.is_empty() {
             out.push_str(
-                "\n  files in flight: none, so the stall is outside the per-file walk (see the \
-                 phase above)",
+                "\n      no file of this project is walking; it may be waiting on the shared \
+                 walk pool or on another project (see the projects below)",
             );
         } else {
-            out.push_str(&format!("\n  files in flight ({}):", snapshot.in_flight.len()));
+            out.push_str(&format!("\n      files in flight ({}):", snapshot.in_flight.len()));
             for file in &snapshot.in_flight {
-                out.push_str(&format!("\n    {} (walking for {})", file.path, secs(file.running)));
+                out.push_str(&format!(
+                    "\n        {} (walking for {})",
+                    file.path,
+                    secs(file.running)
+                ));
             }
-            out.push_str(
-                "\n  next step: re-run `steins check --progress --no-cache --profile strict \
-                 <file>` on the longest-running file (paths are relative to the project root)",
-            );
         }
-        out.push_str(
-            "\n  `--deadline SECS` changes the limit and `--deadline 0` removes it; the \
-             engine itself has no wall-clock budget",
-        );
         out
+    }
+}
+
+/// What to run next, from the project that outlived its deadline: its
+/// longest-running file if it has one in flight.
+fn next_step(head: &Standing) -> String {
+    let file = head.snapshot.as_ref().and_then(|s| s.in_flight.first());
+    match file {
+        Some(file) => format!(
+            "\n  next step: re-run `steins check --progress --no-cache --profile strict \
+             <file>` on `{}`, the longest-running file of `{}` (a pinned corpus package's paths \
+             are relative to the repository root, a local project's to its own root)",
+            file.path, head.project
+        ),
+        None => "\n  next step: no file of the oldest project is walking, so read the phases \
+                 above, or re-run `steins check --progress --no-cache --profile strict <dir>` \
+                 on the project to see them"
+            .to_owned(),
     }
 }
 
@@ -225,20 +276,26 @@ impl Watchdog {
         }
     }
 
-    /// The oldest project that has run for the deadline as of `now`, if any.
+    /// Every project being timed as of `now`, oldest first, if the oldest has
+    /// run for the deadline.
     pub(super) fn check(&self, now: Instant) -> Option<Expiry> {
         let entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
-        entries
+        let mut aged: Vec<&Entry> = entries.iter().collect();
+        aged.sort_by_key(|e| e.started);
+        let oldest = aged.first()?;
+        if now.saturating_duration_since(oldest.started) < self.deadline {
+            return None;
+        }
+        let projects = aged
             .iter()
-            .filter(|e| now.saturating_duration_since(e.started) >= self.deadline)
-            .min_by_key(|e| e.started)
-            .map(|e| Expiry {
+            .map(|e| Standing {
                 project: e.project.clone(),
                 pass: e.pass,
                 elapsed: now.saturating_duration_since(e.started),
-                deadline: self.deadline,
                 snapshot: e.progress.as_ref().and_then(Progress::snapshot),
             })
+            .collect();
+        Some(Expiry { deadline: self.deadline, projects })
     }
 
     fn stop(&self) {
@@ -500,20 +557,33 @@ mod tests {
         (watch, rx, lines)
     }
 
+    /// The watchdog's own thread fires and names the project. What it says
+    /// about the pass is graded below with an injected clock, because the
+    /// thread's timing (a 5 ms deadline) is not something to assert a phase on.
+    #[test]
+    fn the_watchdog_thread_fires_on_a_project_past_its_deadline() {
+        let (watch, expired, _) = collecting(Duration::from_millis(5), DEFAULT_SLOW_FILE);
+        let _running = watch.begin("acme/widgets", 3);
+        let expiry = expired.recv_timeout(Duration::from_secs(60)).expect("the deadline fires");
+        assert_eq!(expiry.headline().project, "acme/widgets");
+        assert!(expiry.headline().elapsed >= expiry.deadline);
+    }
+
     #[test]
     fn a_project_past_its_deadline_is_reported_with_its_pass_and_phase() {
-        let (watch, expired, _) = collecting(Duration::from_millis(5), DEFAULT_SLOW_FILE);
+        let (watch, _, _) = collecting(Duration::from_secs(3600), DEFAULT_SLOW_FILE);
+        let dog = watch.dog.as_ref().unwrap();
         let running = watch.begin("acme/widgets", 3);
-        let progress = running.pass("cold");
-        progress.phase("parse");
-        let expiry = expired.recv_timeout(Duration::from_secs(60)).expect("the deadline fires");
-        assert_eq!(expiry.project, "acme/widgets");
-        assert_eq!(expiry.pass, "cold");
-        assert!(expiry.elapsed >= expiry.deadline);
+        running.pass("cold").phase("parse");
+        let expiry = dog.check(Instant::now() + Duration::from_secs(3601)).expect("past it");
+        assert_eq!(expiry.headline().project, "acme/widgets");
+        assert_eq!(expiry.headline().pass, "cold");
+        assert!(expiry.headline().elapsed >= expiry.deadline);
         let text = expiry.render();
         assert!(text.contains("DEADLINE EXCEEDED: project `acme/widgets`"), "{text}");
         assert!(text.contains("last phase finished: `parse`"), "{text}");
-        assert!(text.contains("files in flight: none"), "{text}");
+        assert!(text.contains("no file of this project is walking"), "{text}");
+        assert!(text.contains("shared walk pool"), "{text}");
     }
 
     #[test]
@@ -525,7 +595,7 @@ mod tests {
     }
 
     #[test]
-    fn the_check_names_the_oldest_project_at_the_deadline_and_no_other() {
+    fn the_check_lists_every_running_project_oldest_first() {
         let (watch, _, _) = collecting(Duration::from_secs(3600), DEFAULT_SLOW_FILE);
         let dog = watch.dog.as_ref().unwrap();
         let first = watch.begin("first", 1);
@@ -533,12 +603,36 @@ mod tests {
         let now = Instant::now();
         assert!(dog.check(now).is_none(), "nothing has run for an hour");
         let later = dog.check(now + Duration::from_secs(3601)).expect("both are past it");
-        assert_eq!(later.project, "first", "the one that began first");
+        let names: Vec<&str> = later.projects.iter().map(|p| p.project.as_str()).collect();
+        assert_eq!(names, ["first", "second"], "the one that began first leads");
         drop(first);
         let later = dog.check(now + Duration::from_secs(3601)).unwrap();
-        assert_eq!(later.project, "second");
-        assert_eq!(later.snapshot, None, "no pass began, so nothing to read");
+        assert_eq!(later.projects.len(), 1, "a finished project is not listed");
+        assert_eq!(later.headline().project, "second");
+        assert!(later.headline().snapshot.is_none(), "no pass began, so nothing to read");
         assert!(later.render().contains("before the analysis began"));
+    }
+
+    /// The oldest project is the headline but not necessarily the one running
+    /// (projects share the walk pool), so the report shows the others and
+    /// marks which are past the deadline.
+    #[test]
+    fn the_report_shows_every_project_and_marks_those_past_the_deadline() {
+        let standing = |project: &str, secs: u64| Standing {
+            project: project.to_owned(),
+            pass: "cold",
+            elapsed: Duration::from_secs(secs),
+            snapshot: None,
+        };
+        let expiry = Expiry {
+            deadline: Duration::from_secs(10),
+            projects: vec![standing("old/one", 12), standing("young/two", 3)],
+        };
+        let text = expiry.render();
+        assert!(text.contains("projects running (2)"), "{text}");
+        assert!(text.contains("\n  * old/one (12.00 s in total)"), "{text}");
+        assert!(text.contains("\n    young/two (3.00 s in total)"), "{text}");
+        assert!(text.contains("next step: no file of the oldest project is walking"), "{text}");
     }
 
     #[test]
@@ -600,14 +694,21 @@ mod tests {
         let report = super::super::analyze_local(&project, &[], &watch);
         let _ = std::fs::remove_dir_all(&dir);
         let store = super::super::store_root(&crate::corpus::repo_root(), &name);
-        let _ = std::fs::remove_dir_all(store);
+        let _ = std::fs::remove_dir_all(&store);
+        // The directory every store lives under, if this test made it and
+        // nothing else uses it (`remove_dir` refuses a non-empty one).
+        let _ = store.parent().map(std::fs::remove_dir);
 
         assert_eq!(report.file_count, 1);
         let expiry = held.lock().unwrap().take().expect("a file was named while in flight");
-        assert_eq!(expiry.project, name);
-        assert_eq!(expiry.pass, "cold");
+        assert_eq!(expiry.headline().project, name);
+        assert_eq!(expiry.headline().pass, "cold");
         let text = expiry.render();
-        assert!(text.contains("files in flight (1):\n    src/Stuck.php (walking for "), "{text}");
+        assert!(
+            text.contains("files in flight (1):\n        src/Stuck.php (walking for "),
+            "{text}"
+        );
+        assert!(text.contains("on `src/Stuck.php`, the longest-running file"), "{text}");
         assert!(text.contains("last phase finished: `purity oracle`"), "{text}");
         assert!(text.contains("steins check --progress"), "{text}");
         let lines = lines.lock().unwrap();
