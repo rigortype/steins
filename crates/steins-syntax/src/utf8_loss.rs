@@ -29,9 +29,12 @@
 //!   the file is marked ([`SourceTree::names_lossy`](crate::SourceTree::names_lossy)) and the
 //!   analyzer makes no claim from it (ADR-0080 §2.5, extended to names that are *lossily
 //!   decoded* rather than non-UTF-8 values). A string literal read *as* a name (a callable,
-//!   an effect label) does **not** mark the file: it takes the per-site silence of §2.5
-//!   (`literal_name` answers `None` for non-UTF-8 bytes), because a non-UTF-8 name can only
-//!   name something whose own declaring token is lossy, and that file is marked already.
+//!   a string argument of a named call) does **not** mark the file: it takes the per-site
+//!   silence of §2.5 (`literal_name` answers `None` for non-UTF-8 bytes), because a
+//!   non-UTF-8 name can only name something whose own declaring token is lossy, and that
+//!   file is marked already. An effect label is the exception to the silence: no known label
+//!   is non-UTF-8, so `literal_label` keeps it as an unknown label in its `\xNN` spelling and
+//!   the envelope stays bound.
 //!
 //! A valid UTF-8 file has no loss, enters no scope, and is untouched — a genuine `U+FFFD`
 //! in one is an ordinary character, keyed and compared as it always was.
@@ -49,6 +52,7 @@ use mago_allocator::LocalArena;
 use mago_span::HasSpan;
 use mago_syntax::cst::{LiteralString, LiteralStringPart, Node, Program};
 use mago_syntax_core::utils::parse_literal_string_in;
+use steins_domain::PhpStr;
 
 use crate::ast::Span;
 use crate::{children, to_span};
@@ -294,19 +298,42 @@ fn quoted_content(raw: &[u8]) -> Option<(usize, &[u8], u8)> {
 // Names.
 // ---------------------------------------------------------------------------
 
-/// A string literal read *as* a name — a callable's, an effect label — or `None` when the
-/// bytes it spells are not valid UTF-8.
+/// A string literal read *as* a name — a callable's, a string argument of a named call — or
+/// `None` when the bytes it spells are not valid UTF-8.
 ///
 /// The bytes come through [`restore_literal`], so a replaced byte is the byte the file
 /// spells and the name is non-UTF-8, not a U+FFFD that reads alike for two names. `None`
-/// takes the site's existing decline (an opaque callback, `RunArg::Other`, an unrecognized
-/// envelope) and does **not** mark the file: a non-UTF-8 name can only name something whose
+/// takes the site's existing decline (an opaque callback, `RunArg::Other`) and does **not**
+/// mark the file: a non-UTF-8 name can only name something whose
 /// declaring token is itself over a replaced byte, and that file is marked by
 /// [`names_touch_a_loss`] (ADR-0080 §2.5, per-site silence).
 #[must_use]
 pub(crate) fn literal_name(ls: &LiteralString<'_>) -> Option<String> {
     let bytes = restore_literal(ls)?;
     std::str::from_utf8(&bytes).ok().map(str::to_owned)
+}
+
+/// A string literal read as an effect label: its text when the bytes are valid UTF-8, else
+/// the `\xNN` spelling of those bytes, or `None` when the parser could not decode its escapes.
+///
+/// A label is a vocabulary word and the vocabulary is ASCII plus plugin labels, so a label
+/// whose bytes are not valid UTF-8 is never a known one, and it must stay an *unknown* label
+/// (`effect.unknown-label`, an envelope the body is checked against) rather than vanish with
+/// the whole envelope, which would silence a true positive. The escaped spelling is the one
+/// `array.duplicate-key` prints for a byte key, without the quotes (`io\xC9`): it is not the
+/// U+FFFD two such labels would collapse to, and no known label spells it. The same label
+/// comes out of a valid UTF-8 file that writes the byte as an escape and a Latin-1 file that
+/// writes it raw.
+#[must_use]
+pub(crate) fn literal_label(ls: &LiteralString<'_>) -> Option<String> {
+    let bytes = restore_literal(ls)?;
+    Some(match std::str::from_utf8(&bytes) {
+        Ok(text) => text.to_owned(),
+        Err(_) => {
+            let quoted = PhpStr::from_bytes(&bytes).render_with('"');
+            quoted[1..quoted.len() - 1].to_owned()
+        }
+    })
 }
 
 /// Whether any name token in `program` spans a loss point.
