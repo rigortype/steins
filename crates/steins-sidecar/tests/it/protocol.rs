@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use steins_sidecar::{
     ConstantDefined, FoldArg, FoldKey, FoldResult, FoldValue, PregCompile, ReflectedClassKind,
-    Sidecar,
+    Sidecar, is_boot_failure,
 };
 
 /// An unkeyed (`ArrayKey::Auto`) array argument of `values`.
@@ -1070,11 +1070,22 @@ fn a_child_that_fails_its_handshake_is_a_failed_spawn() {
         }) else {
             return;
         };
-        assert!(
-            Sidecar::spawn_with(&shim.php()).is_err(),
-            "a handshake that {tag} fails the spawn"
-        );
+        let Err(e) = Sidecar::spawn_with(&shim.php()) else {
+            panic!("a handshake that {tag} must fail the spawn");
+        };
+        assert!(is_boot_failure(&e), "a handshake that {tag} is a boot failure, got {e:?}");
     }
+}
+
+/// A `php` that cannot be started at all is not a boot failure: the caller
+/// reports the two differently (absent is the sound subset, a broken boot is a
+/// degraded run).
+#[test]
+fn a_php_that_cannot_be_started_is_not_a_boot_failure() {
+    let Err(e) = Sidecar::spawn_with("/nonexistent/steins-test/php") else {
+        panic!("a missing interpreter must fail the spawn");
+    };
+    assert!(!is_boot_failure(&e), "a launch error is not a boot failure, got {e:?}");
 }
 
 /// On a revive a failed handshake is a strike like a failed spawn: the fold

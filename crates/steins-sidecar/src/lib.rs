@@ -56,4 +56,4 @@ pub use wire::{
 mod process;
 
 #[cfg(not(target_arch = "wasm32"))]
-pub use process::{RESPAWN_CAP, RUNNER_SRC, Sidecar};
+pub use process::{RESPAWN_CAP, RUNNER_SRC, Sidecar, is_boot_failure};

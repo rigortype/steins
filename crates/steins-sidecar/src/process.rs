@@ -61,6 +61,57 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(2);
 /// running child is unchanged.
 const BOOT_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// The environment variable that overrides [`BOOT_TIMEOUT`], in milliseconds.
+/// Read once per process; unset, unparsable or zero means the default.
+///
+/// A knob and a test seam: a CI runner starved harder than 20 s can raise it,
+/// and a test that wants to see a hung boot fail does not have to wait out the
+/// default.
+const BOOT_TIMEOUT_ENV: &str = "STEINS_SIDECAR_BOOT_TIMEOUT_MS";
+
+fn boot_timeout() -> Duration {
+    static TIMEOUT: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
+    *TIMEOUT.get_or_init(|| {
+        std::env::var(BOOT_TIMEOUT_ENV)
+            .ok()
+            .and_then(|ms| ms.trim().parse::<u64>().ok())
+            .filter(|&ms| ms > 0)
+            .map_or(BOOT_TIMEOUT, Duration::from_millis)
+    })
+}
+
+/// Why a child that started did not finish booting: the payload of the
+/// [`std::io::Error`] [`Sidecar::spawn_with`] returns for it.
+///
+/// A distinct payload because the two ways a spawn fails mean different things
+/// to a caller (issue #110, #891). `php` that cannot be started at all (absent,
+/// not executable) is the sound subset, announced as such. `php` that started
+/// and then never answered, or died, or spoke garbage, is a *degraded* run:
+/// the engine exists and failed, which is not the same report as it being
+/// missing. Read it with [`is_boot_failure`].
+#[derive(Debug)]
+struct BootFailure(&'static str);
+
+impl std::fmt::Display for BootFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl std::error::Error for BootFailure {}
+
+fn boot_failure(kind: std::io::ErrorKind, what: &'static str) -> std::io::Error {
+    std::io::Error::new(kind, BootFailure(what))
+}
+
+/// Whether `error`, from [`Sidecar::spawn`] or [`Sidecar::spawn_with`], is a
+/// child that started but did not complete its boot handshake, as opposed to
+/// one that could not be started at all.
+#[must_use]
+pub fn is_boot_failure(error: &std::io::Error) -> bool {
+    error.get_ref().is_some_and(|inner| inner.is::<BootFailure>())
+}
+
 /// The id the opening handshake carries. [`Sidecar`] numbers its requests from
 /// 1, so a reply that is not the handshake's can never pass for one.
 const HANDSHAKE_ID: u64 = 0;
@@ -135,7 +186,7 @@ impl Channel {
     /// # The boot handshake
     ///
     /// Returns only a child that has answered an `env` request, under
-    /// [`BOOT_TIMEOUT`] rather than the request budget (issue #891). A child that
+    /// [`boot_timeout`] rather than the request budget (issue #891). A child that
     /// does not answer is killed and reaped here and reported as an `Err`, so a
     /// slow boot is a failed spawn (the engine-off posture) or a strike on a
     /// revive, never a lost real request.
@@ -188,26 +239,29 @@ impl Channel {
         Ok(Self { child, stdin, lines: rx, reader: Some(reader), bin: bin.to_owned() })
     }
 
-    /// Send the `env` request and wait [`BOOT_TIMEOUT`] for a well-formed answer.
+    /// Send the `env` request and wait [`boot_timeout`] for a well-formed answer.
     /// The reply is checked and dropped: `env` is asked again, by the caller who
     /// wants it, so the handshake feeds no state back into the [`Sidecar`].
+    ///
+    /// Every failure here is a [`BootFailure`], the write's included: a child
+    /// that exited before reading its request is a boot that failed, not a
+    /// `php` that could not be started.
     fn handshake(&mut self) -> std::io::Result<()> {
-        use std::io::{Error, ErrorKind};
-        self.stdin.write_all(frame(HANDSHAKE_ID, "env", env_params()).as_bytes())?;
-        self.stdin.flush()?;
-        let line = match self.lines.recv_timeout(BOOT_TIMEOUT) {
-            Ok(line) => line?,
+        use std::io::ErrorKind;
+        let request = frame(HANDSHAKE_ID, "env", env_params());
+        self.stdin
+            .write_all(request.as_bytes())
+            .and_then(|()| self.stdin.flush())
+            .map_err(|e| boot_failure(e.kind(), "php closed its input during its boot handshake"))?;
+        let line = match self.lines.recv_timeout(boot_timeout()) {
+            Ok(line) => line.map_err(|e| boot_failure(e.kind(), "php's output failed at boot"))?,
             Err(RecvTimeoutError::Timeout) => {
-                return Err(Error::new(
-                    ErrorKind::TimedOut,
-                    "php did not answer its boot handshake",
-                ));
+                let what = "php did not answer its boot handshake";
+                return Err(boot_failure(ErrorKind::TimedOut, what));
             }
             Err(RecvTimeoutError::Disconnected) => {
-                return Err(Error::new(
-                    ErrorKind::UnexpectedEof,
-                    "php exited during its boot handshake",
-                ));
+                let what = "php exited during its boot handshake";
+                return Err(boot_failure(ErrorKind::UnexpectedEof, what));
             }
         };
         let answered = serde_json::from_str::<serde_json::Value>(line.trim()).ok().is_some_and(|v| {
@@ -217,7 +271,8 @@ impl Channel {
         if answered {
             Ok(())
         } else {
-            Err(Error::new(ErrorKind::InvalidData, "php answered its boot handshake with garbage"))
+            let what = "php answered its boot handshake with garbage";
+            Err(boot_failure(ErrorKind::InvalidData, what))
         }
     }
 

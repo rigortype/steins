@@ -48,6 +48,19 @@ The per-request timeout is charged from the write, so on a fresh child it used
 to include PHP's own startup. On a loaded machine that cost the first answer,
 then up to three respawns, then (ADR-0092's #784 amendment) the generation. A
 child now has to answer an `env` handshake under its own boot timeout (20 s)
-before the first request is sent. A child that fails it is a failed spawn (the
-sound subset) or one respawn strike; real requests keep the 2 s budget, so
-hang detection on a running child is unchanged.
+before the first request is sent; real requests keep the 2 s budget, so hang
+detection on a running child is unchanged. The budget is read from
+`STEINS_SIDECAR_BOOT_TIMEOUT_MS` (milliseconds, once per process; unset,
+unparsable or zero mean 20 000), which is also how a test sees a hung boot fail
+without waiting it out.
+
+A child that fails the handshake (no answer in time, exit, garbage, a wrong id,
+or a closed pipe) is a failed spawn, on a first spawn, or one respawn strike,
+on a revive. The two failures of a spawn stay distinct (issue #110): `php` that
+cannot be started at all is the sound subset and prints the "no PHP sidecar"
+notice; `php` that started and failed its boot is a *degraded* run, prints the
+"sound subset (degraded)" notice, once, and counts as one lost answer. The
+engine is off for the rest of the run in both cases. A lost answer withholds
+the publish (ADR-0092's #784 amendment), so a run that met a broken `php`
+leaves no generation behind for later runs to replay, while a run with no `php`
+at all still publishes under its engine-off stamp, as before.

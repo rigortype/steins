@@ -108,9 +108,11 @@ fn stub_php_dir_mid_run() -> PathBuf {
 }
 
 /// Runs `steins` with `PATH` narrowed to `stub_dir` so the sidecar spawns the
-/// stub, not the host's real `php`. Per-request ADR-0024 timeouts for one
-/// foldable argument (`env()` plus one fold attempt, each its own respawn) stay
-/// under ten seconds; the 30-second bound below only guards an actual hang.
+/// stub, not the host's real `php`. The opening stub never answers its boot
+/// handshake, which is charged `STEINS_SIDECAR_BOOT_TIMEOUT_MS` (issue #891,
+/// 20 s by default); it is set short here so the test does not wait that out.
+/// Per-request ADR-0024 timeouts for one foldable argument stay under ten
+/// seconds; the 30-second bound below only guards an actual hang.
 ///
 /// A `check` runs `--no-cache`: these fixtures are checked in, and a cached run
 /// would leave a `.steins/` in the repository for the next run of the suite to
@@ -122,7 +124,12 @@ fn run_against_stub(stub_dir: &Path, args: &[&str]) -> Run {
     if args.first() == Some(&"check") {
         args.insert(1, "--no-cache");
     }
-    let out = steins_cmd().args(&args).env("PATH", stub_dir).output().expect("run steins");
+    let out = steins_cmd()
+        .args(&args)
+        .env("PATH", stub_dir)
+        .env("STEINS_SIDECAR_BOOT_TIMEOUT_MS", "1500")
+        .output()
+        .expect("run steins");
     let _ = std::fs::remove_dir_all(stub_dir);
     Run {
         code: out.status.code().unwrap_or(-1),
@@ -174,7 +181,8 @@ fn check_surfaces_the_handshake_notice_when_php_never_answers() {
         "the notice should point the reader at doctor for detail, got:\n{}",
         r.stderr
     );
-    // Distinct from --no-php / spawn-failure wording: `php` genuinely started here.
+    // Distinct from --no-php / spawn-failure wording: `php` genuinely started here
+    // (a failed boot, issue #891, is the degraded report and not the absent one).
     assert!(
         !r.stderr.contains("no PHP sidecar"),
         "a spawned-but-silent php must not be reported as absent, got:\n{}",
@@ -233,4 +241,57 @@ fn check_surfaces_the_notice_when_the_sidecar_stops_answering_mid_run() {
         "a spawned-and-partly-responsive php must not be reported as absent, got:\n{}",
         r.stderr
     );
+}
+
+/// A cached `check` of a private copy of `fold_mixed.php`, `PATH` narrowed to
+/// `path_dir`: returns the run and whether it published a generation.
+///
+/// The cache is on here, unlike every other run in this file, because what is
+/// under test is the publish gate (ADR-0092, #784): a run that lost a sidecar
+/// answer publishes nothing, a run that never had a sidecar still does.
+fn cached_run_against(tag: &str, path_dir: &Path) -> (Run, bool) {
+    let tree =
+        std::env::temp_dir().join(format!("steins-handshake-tree-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tree);
+    std::fs::create_dir_all(&tree).expect("create the tree");
+    std::fs::copy(fixture("fold_mixed.php"), tree.join("fold_mixed.php")).expect("copy fixture");
+    let out = steins_cmd()
+        .current_dir(&tree)
+        .args(["check", "."])
+        .env("PATH", path_dir)
+        .env("STEINS_SIDECAR_BOOT_TIMEOUT_MS", "1500")
+        .output()
+        .expect("run steins");
+    let published = tree.join(".steins/gen/CURRENT").is_file();
+    let _ = std::fs::remove_dir_all(&tree);
+    let _ = std::fs::remove_dir_all(path_dir);
+    let run = Run {
+        code: out.status.code().unwrap_or(-1),
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+    };
+    (run, published)
+}
+
+/// A `php` that started and never booted is a lost answer: the degraded notice,
+/// and no generation for a later run to replay (issue #891).
+#[test]
+fn a_php_that_never_boots_publishes_nothing() {
+    let (r, published) = cached_run_against("hung", &stub_php_dir());
+    assert!(r.stderr.contains("sound subset (degraded)"), "got stderr:\n{}", r.stderr);
+    assert!(!r.stderr.contains("no PHP sidecar"), "got stderr:\n{}", r.stderr);
+    assert!(!published, "a run that lost the engine published a generation:\n{}", r.stderr);
+    assert_eq!(r.code, 1, "the direct finding still fires, got:\n{}", r.stdout);
+}
+
+/// No `php` at all is the plain sound subset, which publishes under its
+/// engine-off stamp as it always did.
+#[test]
+fn an_absent_php_still_publishes() {
+    let empty = std::env::temp_dir().join(format!("steins-handshake-empty-{}", std::process::id()));
+    std::fs::create_dir_all(&empty).expect("create an empty PATH dir");
+    let (r, published) = cached_run_against("absent", &empty);
+    assert!(r.stderr.contains("no PHP sidecar"), "got stderr:\n{}", r.stderr);
+    assert!(!r.stderr.contains("sound subset (degraded)"), "got stderr:\n{}", r.stderr);
+    assert!(published, "an absent php is the engine-off posture and publishes:\n{}", r.stderr);
 }

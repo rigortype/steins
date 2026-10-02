@@ -289,6 +289,23 @@ whole. A file is named only after its walk ends, so a walk that never ends
 shows as silence: the last line printed is `purity oracle`, and no `walk` line
 follows.
 
+### A slow-starting PHP
+
+A fresh `php` child has to answer an `env` handshake before steins sends it
+anything, and gets 20 seconds to do so; each later request gets 2. The boot is
+therefore not charged to the first request, so a loaded CI runner that takes a
+few seconds to start `php` still runs with the sidecar. A `php` that starts but
+does not answer its handshake (it hangs, exits, or speaks something else) turns
+the sidecar off for that run and prints the degraded notice, `sound subset
+(degraded)`, not the `no PHP sidecar` one, because the engine exists and
+failed; the run publishes no cache generation, so no later run replays what it
+computed without PHP.
+
+`STEINS_SIDECAR_BOOT_TIMEOUT_MS=<n>` changes the handshake's budget, in
+milliseconds (read once per process; unset, unparsable or `0` mean the 20 000
+default). Raise it on a runner starved harder than that, or lower it to see a
+hung `php` fail quickly. It does not touch the 2-second per-request budget.
+
 ### `--fix`
 
 Some findings carry their remedy as a first-class payload (ADR-0010), and
