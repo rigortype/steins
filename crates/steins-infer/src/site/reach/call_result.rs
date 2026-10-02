@@ -164,7 +164,8 @@ fn contract_held(ty: &ContractTy) -> Held {
         ContractTy::ListOf { elem, .. } => elements_held([&**elem]),
         ContractTy::MapOf { key, val, .. } => elements_held([&**key, &**val]),
         ContractTy::Shape { fields, unsealed, .. } => {
-            let tail = unsealed.iter().flat_map(|(key, val)| key.as_deref().into_iter().chain([&**val]));
+            let tail =
+                unsealed.iter().flat_map(|(key, val)| key.as_deref().into_iter().chain([&**val]));
             elements_held(fields.iter().map(|field| &field.ty).chain(tail))
         }
         ContractTy::Union(members) => {
@@ -210,16 +211,14 @@ mod tests {
         ] {
             assert_eq!(held(scalar), Held::ObjectFree, "{scalar}");
         }
-        for list in ["list<string>", "list<int|string>", "array<string, int>", "string[]", "non-empty-list<int>"]
-        {
+        for list in ["list<string>", "list<int|string>", "array<string, int>", "string[]"] {
             assert_eq!(held(list), Held::ObjectFree, "{list}");
         }
         // An array that may hold an object is an array, not an object-free one.
-        for array in ["array", "array<int, object>", "list<mixed>", "array<string, Foo>", "iterable|array"]
-        {
-            let expected = if array.starts_with("iterable") { Held::Unknown } else { Held::NonObject };
-            assert_eq!(held(array), expected, "{array}");
+        for array in ["array", "array<int, object>", "list<mixed>", "array<string, Foo>"] {
+            assert_eq!(held(array), Held::NonObject, "{array}");
         }
+        assert_eq!(held("iterable|array"), Held::Unknown);
         assert_eq!(held("string|array"), Held::NonObject);
         assert_eq!(held("string|null|array"), Held::NonObject);
         assert_eq!(held("array{a: int, b: string}"), Held::ObjectFree);

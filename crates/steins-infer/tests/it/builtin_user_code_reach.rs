@@ -214,7 +214,8 @@ fn s7_array_search_is_held_to_the_reach_rule() {
 #[test]
 fn s8_a_call_result_is_an_argument_shape() {
     // The engine constructor's `Coerced` message position, handed a `string` result.
-    proven_pure(&file(false, "string $s", "return new \\RuntimeException(sprintf('%s!', $s));"), "f");
+    let message = "return new \\RuntimeException(sprintf('%s!', $s));";
+    proven_pure(&file(false, "string $s", message), "f");
     // `count()` reaches `Countable::count` through an object, never through a list.
     proven_pure(&file(false, "string $s", "return count(explode(',', $s));"), "f");
     proven_pure(&file(false, "string $s", "return strlen(strtoupper($s));"), "f");

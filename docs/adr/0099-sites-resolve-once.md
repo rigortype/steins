@@ -588,3 +588,58 @@ grew without a new site: 67 are `operator-to-string` (65 at an offset write, 2 a
 1 is `operator-magic-property` (`parent::__construct` into `DateInterval`); the count rows of
 `possibly_expected.toml` are reseeded by that delta. The public corpora declare no property hook, so
 the hook rows move nothing there, and the one place a hook gap appears is the trait case above.
+
+## Amendment (2026-10-03, second): a call result is an operand shape (#877) — PENDING ratification
+
+**Status: proposed 2026-10-03; pending ratification.** This amendment is slice S8 of the run tracked
+in #915. It dates §7.3's "before operand proofs" and adds a measured row to §6; the rule itself is
+ADR-0021's second amendment's, in its note of this date, and is not repeated here. Everything in
+§4.3 and §4.4 stands: an operand shown not to be an object runs nothing, and what S8 adds is one
+more way to show it.
+
+### §7.3, dated: a declared return needs no walk
+
+§7.3 says the effects fixpoint runs before the walk whose narrowed facts could rule more operands
+out, and that #856 measured 6 bodies bought by a call's declared return type. The sentence was
+written for a return the walk reads off a local. The proof S8 adds does not wait for the walk: the
+declared return of the callee the site names is read at resolution, from the catalog's mined row or
+the project's native hint, which no fixpoint changes. What stays behind §7.3 is what only dataflow
+can say: a local assigned from a call (`$t = trim($s); 'x' . $t`), arithmetic (`$n * 2`: `GMP` and
+`BcMath\Number` overload it, so an `int` operand does not make its product one), and a value
+narrowed by a guard. The three are still gaps, with their kinds, and witnessed so (rows 8.12 and the
+local row of `operator_rules.rs`).
+
+### §6, a measured row
+
+| Slice | Issue | Measured on the public corpora |
+|---|---|---|
+| call results as operands | #877 (S8) | 2,321 of 28,847 functions change the kinds behind their `…?`; none gains one and none loses exhaustiveness; 84 become exhaustive (63 in both lanes, 20 in the throw lane only, 1 in the effect lane only); `effect-diff` reports 64 `coverage-completed` events; no proven label moves; `transform effects-envelope` 723 → 741 edits, `throws-envelope` and `loop-to-array-map` byte-identical; at `strict` (with `--vendor-diagnostics`) `throw.maybe-undeclared` -283 findings, none added; at `default` `check` is byte-identical but for two vendored-finding counts |
+
+The removals, by what the call's declared return is: a builtin's 1,850 functions, a project
+method's native return 390, a final `Throwable` accessor 5, and 72 that need two categories or
+inherit the change through a call edge. By the gap kind removed: `operator-to-string` 1,272
+functions, `operator-iteration` 1,044, `user-code-reach` 297 in the effect lane and 465 in the
+throw lane, `operator-array-access` 119. Call results and array elements together were the
+largest sole cause of #859's `…?` bodies (195 of 703 in §6's operator row); the strict findings a
+call result takes with it are the same kinds, 112
+`operator-to-string` (17 at the value of an offset write, §4.3's Name row), 107 `user-code-reach`,
+36 `operator-array-access` and 27 `operator-iteration`.
+
+### What stays open
+
+- **A local assigned from a call.** 65 of the offset-write findings S4 added sit at `$c[k] = v` with
+  a container that is a local assigned from a call, an element or an untyped property; the call
+  shape does not reach them, since the container's shape is a write summary the syntax crate builds
+  without the catalog. A shape that carries the callees of a local's writes (`ArgShape::Local` with
+  the call shapes it was assigned) and a classifier for "admits no string" over a declared return
+  would. #877's next sub-slice.
+- **A bound receiver's engine method.** Only a final `Throwable` accessor is read; the engine's
+  declared type of any other method may be a tentative one, and the mined row does not say which
+  (the sidecar's `reflect_class` carries `return_type_tentative`; the mined table has no column for it).
+  `Countable::count()`, `IteratorAggregate::getIterator()` and `JsonSerializable::jsonSerialize()`
+  stay gaps on a bound receiver, as they are.
+- **A mined row is Asserted, not Verified** (ADR-0069 §2), and this proof reads it as a premise of
+  a coverage claim, which no finding rests on. A row that is wrong in the object-free direction
+  would complete a body that should read `…?`. The rows are countersigned arm-wise against the
+  pinned engines (8.2 to 8.5), and a version-sensitive one is read only for a target at or past
+  its move.

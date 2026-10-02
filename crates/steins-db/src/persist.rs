@@ -1046,6 +1046,29 @@ mod tests {
         assert_eq!(constructs, serde_variants::<OperatorConstruct>());
     }
 
+    /// An operand's [`ArgShape`] is numbered by position too: the call-result
+    /// variants (issue #877) are appended after `Unknown`, so no index a stored
+    /// payload holds moves, and both survive the payload codec.
+    #[test]
+    fn the_arg_shape_call_variants_are_appended_and_round_trip() {
+        use steins_syntax::{ArgShape, EffectRecv, NameRef, RefKind};
+        let variants = serde_variants::<ArgShape>();
+        let expected =
+            ["ObjectFree", "Array", "Param", "Local", "ThisProperty", "Unknown", "Call", "MethodCall"];
+        assert_eq!(variants, expected);
+        let call = NameRef { raw: "strlen".to_owned(), kind: RefKind::Unqualified, offset: 7 };
+        let shapes = [
+            ArgShape::Call(call.clone()),
+            ArgShape::MethodCall { receiver: EffectRecv::Var("e".to_owned()), method: "m".into() },
+            ArgShape::MethodCall { receiver: EffectRecv::ClassName(call), method: "n".into() },
+        ];
+        for shape in shapes {
+            let bytes = crate::wire::to_vec(&shape).expect("a shape serializes");
+            let back: ArgShape = crate::wire::from_slice(&bytes).expect("a shape round-trips");
+            assert_eq!(back, shape);
+        }
+    }
+
     /// Every family and every construct of an operator site is in the fixture and
     /// round-trips through the payload codec with its receivers and member name.
     #[test]

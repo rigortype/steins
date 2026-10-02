@@ -105,6 +105,23 @@
 # `src/Composer/Autoload/ClassLoader.php`, an untyped `@var array` property) are not counted.
 # The throw lane does not read the sidecar, so the CI posture moves them alike.
 
+# Triage of the `throw.maybe-undeclared` that issue #877 removes, 2026-10-03 (ADR-0099's amendment of
+# that date, slice S8), over the ten public packages: -283 findings in seven of them (composer 120,
+# phpunit 74, console 62, process 13, Carbon 5, guzzle 5, monolog 4), none added, and 305 that stay
+# with fewer kinds behind them. An operand that is a call is read off the callee's declared return
+# (a builtin's mined row, a project function's or method's native hint, a final `Throwable`
+# accessor), so what it holds no longer leaves the site unbounded. By the kind the base finding
+# named: operator-to-string 112 (`'x' . strlen($s)`, an interpolated `$this->name()`, an offset
+# write's value: 17, the kind S4 added), user-code-reach 107 (a
+# call result handed to `sprintf`, `count`, `implode`, a message constructor), operator-array-access
+# 36 (`explode(…)[0]`), operator-iteration 27 (`foreach (explode(…) as …)`). Every removal is a
+# declared return that holds no object (or only an array, which a conversion, an offset read and a
+# `foreach` run no user code over); no site that was bounded becomes unbounded. 13 of the 283 sit in
+# vendored copies of composer's `ClassLoader.php` and fixtures (composer 7, phpunit 6), which the
+# gate's `--vendor-diagnostics` posture counts. Counts agree with `steins check --profile strict
+# --no-php --vendor-diagnostics` base and head. `phpstan/phpstan-src` has no public checkout here
+# and is not remeasured.
+
 # 1 — `PluginManager.php:525`, class 1.
 # 1 → 3, 2026-09-11 with issue #619 (the declaration-only dispatch path,
 # ADR-0049 A16): two `type.maybe-argument-mismatch` rows at
@@ -124,7 +141,8 @@
 # strict-floor gap report of ADR-0100 (triage by kind above the composer row); the
 # phpdoc/offset rows moved here from their family tables with the posture routing.
 # 3392 → 3421  2026-10-03 (issues #880, #875): +29 throw.maybe-undeclared, 29 operator-to-string at an offset write (8 in vendored copies of `ClassLoader.php`); the triage by kind is above the composer row.
-"composer/composer" = 3421
+# 3421 → 3301  2026-10-03 (issue #877): -120 throw.maybe-undeclared (operator-to-string 80, operator-array-access 19, user-code-reach 17, operator-iteration 4; 7 in vendored copies and fixtures); the triage is above the composer row.
+"composer/composer" = 3301
 
 # 1 — `Application.php:409`, class 4 (`exitWithErrorMessage`).
 # 1 → 2, 2026-09-01 with issue #589 (the cross-lane guard join; see
@@ -174,7 +192,8 @@
 # strict-floor gap report of ADR-0100 (triage by kind above the composer row); the
 # phpdoc/offset rows moved here from their family tables with the posture routing.
 # 3262 → 3281  2026-10-03 (issues #880, #875): +19 throw.maybe-undeclared, 19 operator-to-string at an offset write (10 in vendored copies of `ClassLoader.php`); the triage by kind is above the composer row.
-"sebastianbergmann/phpunit" = 3281
+# 3281 → 3207  2026-10-03 (issue #877): -74 throw.maybe-undeclared (user-code-reach 27, operator-to-string 18, operator-iteration 18, operator-array-access 10, dynamic-callee 1; 6 in fixtures); the triage is above the composer row.
+"sebastianbergmann/phpunit" = 3207
 
 # 10 — six class 1/2/3 in `Application.php`, `CompletionInput.php` and
 # `SymfonyStyle.php`; four class 5 in `Tests/`.
@@ -194,7 +213,8 @@
 # strict-floor gap report of ADR-0100 (triage by kind above the composer row); the
 # phpdoc/offset rows moved here from their family tables with the posture routing.
 # 548 → 551  2026-10-03 (issues #880, #875): +3 throw.maybe-undeclared, 3 operator-to-string at an offset write; the triage by kind is above the composer row.
-"symfony/console" = 551
+# 551 → 489  2026-10-03 (issue #877): -62 throw.maybe-undeclared (user-code-reach 51, operator-to-string 6, operator-iteration 3, operator-array-access 2); the triage is above the composer row.
+"symfony/console" = 489
 
 # 6 — every row class 4 (`$this->fail()` in `ProcessTest.php`).
 # Unmoved by issue #599 leg 1 (2026-09-01), and twice over. Every row is
@@ -207,7 +227,8 @@
 # 6 → 149  2026-10-02 (issues #915, #922): +143 throw.maybe-undeclared. The throw sibling is the
 # strict-floor gap report of ADR-0100 (triage by kind above the composer row); the
 # phpdoc/offset rows moved here from their family tables with the posture routing.
-"symfony/process" = 149
+# 149 → 136  2026-10-03 (issue #877): -13 throw.maybe-undeclared (user-code-reach 9, operator-array-access 2, operator-to-string 2); the triage is above the composer row.
+"symfony/process" = 136
 
 # 2 — both class 4 (`markTestSkipped()` in the serialization tests).
 # 2 → 3, 2026-08-17 with issue #423 (ADR-0056 §9): the wave's one proof-layer
@@ -245,7 +266,8 @@
 # strict-floor gap report of ADR-0100 (triage by kind above the composer row); the
 # phpdoc/offset rows moved here from their family tables with the posture routing.
 # 453 → 463  2026-10-03 (issues #880, #875): +10 throw.maybe-undeclared, 7 operator-to-string at an offset write, 2 operator-to-string at a dynamic name, 1 operator-magic-property at an inherited engine constructor; the triage by kind is above the composer row.
-"briannesbitt/Carbon" = 463
+# 463 → 458  2026-10-03 (issue #877): -5 throw.maybe-undeclared (user-code-reach 2, operator-array-access 2, operator-to-string 1); the triage is above the composer row.
+"briannesbitt/Carbon" = 458
 
 # 0 → 1, 2026-08-16 with issue #391 — and a sixth class, the first that is not
 # a binding claim at all: `type.maybe-argument-mismatch` on
@@ -292,9 +314,11 @@
 #   thephpleague/flysystem   38 =  37 throw.maybe-undeclared + 1 phpdoc.maybe-argument-mismatch
 #   cakephp/chronos          50 =  50 throw.maybe-undeclared
 # 253 → 259  2026-10-03 (issues #880, #875): +6 throw.maybe-undeclared, 6 operator-to-string at an offset write; the triage by kind is above the composer row.
-"guzzle/guzzle" = 259
+# 259 → 254  2026-10-03 (issue #877): -5 throw.maybe-undeclared (operator-iteration 2, operator-to-string 2, operator-array-access 1); the triage is above the composer row.
+"guzzle/guzzle" = 254
 # 175 → 176  2026-10-03 (issues #880, #875): +1 throw.maybe-undeclared, 1 operator-to-string at an offset write; the triage by kind is above the composer row.
-"Seldaek/monolog" = 176
+# 176 → 172  2026-10-03 (issue #877): -4 throw.maybe-undeclared (operator-to-string 3, user-code-reach 1); the triage is above the composer row.
+"Seldaek/monolog" = 172
 "thephpleague/flysystem" = 38
 "cakephp/chronos" = 50
 
