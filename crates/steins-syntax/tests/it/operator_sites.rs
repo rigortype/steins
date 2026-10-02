@@ -520,6 +520,9 @@ fn an_offset_write_of_a_value_holding_no_object_or_an_append_emits_no_value_site
     // A compound assignment into an offset is not a plain write.
     assert_eq!(writes("$a[0] .= $o;"), 0);
     assert_eq!(writes("$s[0] = $o;"), 1);
+    // `??=` stores the value as `=` does when the offset is unset (witnessed), so it converts too.
+    assert_eq!(writes("$s[5] ??= $o;"), 1);
+    assert_eq!(writes("$s[5] ??= 'z';"), 0);
 }
 
 #[test]
@@ -551,12 +554,14 @@ fn promoted(params: &str, body: &str) -> Vec<(Option<String>, Vec<Option<EffectR
 fn a_hooked_promoted_parameter_is_a_magic_property_write_on_this_in_the_constructor() {
     let hooked = promoted("public string $p { set(string $v) { $this->p = $v; } }", "");
     assert_eq!(hooked, [(Some("p".to_owned()), vec![Some(EffectRecv::This)])]);
-    // One per hooked parameter; a plain promoted one and an ordinary one are not.
+    // One per parameter with a `set` hook; a `get`-only hook runs nothing at promotion,
+    // and neither does a plain promoted parameter or an ordinary one.
     let two = promoted(
-        "public string $a { get => 'x'; }, public int $b, string $c, public int $d { set => 1; }",
+        "public string $a { get => 'x'; }, public int $b, string $c, public int $d { set => 1; }, \
+         public int $e { get => 1; set => 2; }",
         "",
     );
-    assert_eq!(two.iter().map(|s| s.0.as_deref()).collect::<Vec<_>>(), [Some("a"), Some("d")]);
+    assert_eq!(two.iter().map(|s| s.0.as_deref()).collect::<Vec<_>>(), [Some("d"), Some("e")]);
     assert_eq!(promoted("public string $p", ""), []);
     assert_eq!(promoted("string $p", ""), []);
     // The prologue runs before the body: the site leads the constructor's list.

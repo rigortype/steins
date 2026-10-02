@@ -231,18 +231,24 @@ pub(super) fn hooks_property(cx: &Cx, class: &str, exact: bool) -> bool {
 /// [`subclass_adds_property_magic`] for a hook on any property, with the stand-in
 /// tested through the is-a walk instead of [`Chain::has`]: a chain never lists an
 /// engine class (`Throwable`, `Exception`), so `has` is false for a bound that is
-/// one. A class counts when it hooks a property or imports a trait (whose body is
-/// not lowered) and the walk shows it **is** `class`, and an anonymous class counts
-/// for the parents the index lists. A class whose chain leaves the universe before
-/// reaching `class` (the verdict `Unknown`) does not: as in [`Chain::has`], a
-/// subclass the universe cannot show is §7.2's open question, and counting it would
-/// charge every site for every class whose parent a vendor-less checkout lacks.
+/// one. A class that hooks a property counts unless the walk shows it is not `class`
+/// (an `Unknown` verdict counts: the hook is user code whatever its unreadable
+/// parent is). A class that imports a trait (whose body is not lowered) counts only
+/// when the walk shows it **is** `class`, and so does an anonymous class for the
+/// parents the index lists: counting an `Unknown` there would charge every site for
+/// every trait user whose parent a vendor-less checkout lacks (§7.2's open question).
 fn subclass_hooks_property(cx: &Cx, class: &str) -> bool {
-    let stands_in = |sub: &str| cx.is_a(sub, class) == IsA::Yes;
+    let is = |sub: &str| cx.is_a(sub, class) == IsA::Yes;
+    // A class that itself hooks a property counts unless the walk shows it is not the
+    // bound: a hook it declares is user code whatever its unreadable parent is.
+    let may_be = |sub: &str| {
+        let walk = cx.supertype_walk(sub, class);
+        walk.verdict != IsA::No || (walk.catalog && cx.a11_demote_catalog())
+    };
     cx.index.magic_property_classes().iter().any(|sub| match cx.find_class(sub) {
-        None => stands_in(sub),
-        Some((_, cd)) => (cd.uses_traits || hooks(cd, None)) && stands_in(sub),
-    }) || cx.index.anonymous_subclass_parents().iter().any(|parent| stands_in(parent))
+        None => may_be(sub),
+        Some((_, cd)) => (hooks(cd, None) && may_be(sub)) || (cd.uses_traits && is(sub)),
+    }) || cx.index.anonymous_subclass_parents().iter().any(|parent| is(parent))
 }
 
 /// Whether a class in the universe other than `class`'s own chain, but extending

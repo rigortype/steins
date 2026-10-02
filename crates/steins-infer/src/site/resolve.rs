@@ -42,6 +42,7 @@ use super::contract::{conditional_purity, eval_conditional_purity};
 use super::engine;
 use super::method::{
     EngineMethod, engine_class_of, engine_method, method_edge, new_hooks, parent_constructor_hooks,
+    throwable_creation_hooks,
 };
 use super::operator;
 use super::reach::{Frame, builtin_reach, callback_reaches_user_code, engine_method_reach};
@@ -557,6 +558,8 @@ impl<'a> Resolver<'a, '_, '_> {
         let target = resolve_new(self.cx, self.frame.class_fqn, class);
         if matches!(target, NewTarget::Engine(_)) {
             self.hooked_engine_code(new_hooks(self.cx, self.frame.class_fqn, class));
+        } else {
+            self.hooked_engine_code(throwable_creation_hooks(self.cx, self.frame.class_fqn, class));
         }
         match target {
             NewTarget::Edge(sym) => self.push(Edge::call(sym)),

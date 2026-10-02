@@ -48,8 +48,8 @@ use crate::stack_guard;
 use crate::{bytes_to_string, strip_dollar, to_span};
 
 /// The sites a constructor's promoted parameters run in its prologue, before any
-/// statement of its body: a property hook on a promoted parameter (PHP 8.4) runs
-/// its `set` hook when the constructor promotes the argument, a write to `$this`
+/// statement of its body: a `set` hook on a promoted parameter (PHP 8.4) runs
+/// when the constructor promotes the argument (a `get`-only hook does not run), a write to `$this`
 /// that no statement spells. One MagicProp `Write` site on `$this` per hooked
 /// promoted parameter, naming it, which resolves as an explicit `$this->p = …`
 /// does (ADR-0099 §4.3): the hooked property is a gap. A promoted parameter with
@@ -59,7 +59,12 @@ pub(crate) fn promoted_hook_sites(params: &FunctionLikeParameterList<'_>) -> Vec
     params
         .parameters
         .iter()
-        .filter(|p| p.is_promoted_property() && p.hooks.is_some())
+        .filter(|p| {
+            p.is_promoted_property()
+                && p.hooks.as_ref().is_some_and(|list| {
+                    list.hooks.iter().any(|h| h.name.value.eq_ignore_ascii_case(b"set"))
+                })
+        })
         .map(|p| SiteOrigin {
             span: to_span(p.span()),
             kind: SiteKind::Operator {
@@ -294,7 +299,11 @@ fn assignment(
             push(F::ToString, C::ConcatAssign, a.span(), None, &operands, sx, out);
             chain(a.lhs, C::ReadWrite, sx, out);
         }
-        AssignmentOperator::Coalesce(_) => chain(a.lhs, C::CoalesceAssign, sx, out),
+        AssignmentOperator::Coalesce(_) => {
+            chain(a.lhs, C::CoalesceAssign, sx, out);
+            // `$s[5] ??= $o` on a string converts `$o` as `=` does (witnessed).
+            offset_value(a.lhs, Some(a.rhs), sx, out);
+        }
         _ => chain(a.lhs, C::ReadWrite, sx, out),
     }
     scan_sites(&Node::Expression(a.rhs), sx, out);
