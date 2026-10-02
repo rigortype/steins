@@ -20,9 +20,17 @@
 //!   threads; every line is handed to the sink whole, and the sink is
 //!   responsible for writing it whole.
 //!
+//! A third thing is **readable from another thread** (issue #658): a
+//! [`Progress::snapshot`] names the last phase crossed and every file whose
+//! walk has started and not yet ended, so a watchdog can say *where* a run is
+//! stuck without the stuck thread's cooperation. A slow-file line only prints
+//! once a walk returns; the snapshot is the signal for a walk that never does.
+//! The library still writes nothing: the reader is the caller's.
+//!
 //! Progress is cost-only: nothing here reads or changes a finding.
 
 use std::sync::{Arc, Mutex, PoisonError};
+use std::thread::ThreadId;
 use std::time::{Duration, Instant};
 
 /// A handle to the progress channel; cheap to clone, and off by default.
@@ -35,8 +43,48 @@ struct Channel {
     sink: Box<dyn Fn(&str) + Send + Sync>,
     slow_file: Duration,
     started: Instant,
-    /// When the previous phase boundary was crossed.
-    lap: Mutex<Instant>,
+    /// When the previous phase boundary was crossed, and which one it was.
+    lap: Mutex<Lap>,
+    /// The files being walked right now, one entry per walk in progress. A
+    /// parallel walk has one per worker, so an entry is keyed by the worker's
+    /// thread and the list is as long as the fan-out is wide.
+    in_flight: Mutex<Vec<Walking>>,
+}
+
+struct Lap {
+    at: Instant,
+    /// The phase that ended at [`Self::at`]; `None` before the first boundary.
+    phase: Option<String>,
+}
+
+struct Walking {
+    thread: ThreadId,
+    path: String,
+    since: Instant,
+}
+
+/// What a run is doing, read from another thread (issue #658).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProgressSnapshot {
+    /// The last phase the run finished, or `None` if it has not finished one.
+    /// Phases are said as they *end*, so the phase running now is the one
+    /// after it: this names where the run was last known to be.
+    pub last_phase: Option<String>,
+    /// How long ago that boundary was crossed (or the run began, if none was).
+    pub since_phase: Duration,
+    /// Time since the run began.
+    pub elapsed: Duration,
+    /// Every file whose walk has begun and not ended, longest-running first.
+    pub in_flight: Vec<InFlightFile>,
+}
+
+/// One file being walked at the moment of a [`ProgressSnapshot`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InFlightFile {
+    /// The file's diagnostic path.
+    pub path: String,
+    /// How long its walk has been running.
+    pub running: Duration,
 }
 
 impl Progress {
@@ -60,7 +108,8 @@ impl Progress {
                 sink: Box::new(sink),
                 slow_file,
                 started: now,
-                lap: Mutex::new(now),
+                lap: Mutex::new(Lap { at: now, phase: None }),
+                in_flight: Mutex::new(Vec::new()),
             })),
         }
     }
@@ -78,8 +127,8 @@ impl Progress {
         let now = Instant::now();
         let took = {
             let mut lap = channel.lap.lock().unwrap_or_else(PoisonError::into_inner);
-            let took = now.duration_since(*lap);
-            *lap = now;
+            let took = now.duration_since(lap.at);
+            *lap = Lap { at: now, phase: Some(phase.to_owned()) };
             took
         };
         let total = now.duration_since(channel.started);
@@ -88,19 +137,60 @@ impl Progress {
         (channel.sink)(&format!("{phase}: {} (elapsed {}{detail})", span(took), span(total)));
     }
 
-    /// The clock a file's walk starts on, or `None` when nothing reports.
-    pub(crate) fn file_clock(&self) -> Option<Instant> {
-        self.inner.as_ref().map(|_| Instant::now())
+    /// A file's walk starts: record it as in flight and return the clock it
+    /// starts on, or `None` when nothing reports (no clock, no lock). `path`
+    /// is the file's diagnostic path.
+    pub(crate) fn file_start(&self, path: &str) -> Option<Instant> {
+        let channel = self.inner.as_ref()?;
+        let since = Instant::now();
+        let walking = Walking { thread: std::thread::current().id(), path: path.to_owned(), since };
+        channel.in_flight.lock().unwrap_or_else(PoisonError::into_inner).push(walking);
+        Some(since)
     }
 
-    /// A file's walk is done: name it if it was slow. `path` is the file's
-    /// diagnostic path.
+    /// A file's walk is done: it is no longer in flight, and it is named if it
+    /// was slow. `path` is the file's diagnostic path.
     pub(crate) fn file_done(&self, path: &str, started: Option<Instant>) {
         let (Some(channel), Some(started)) = (&self.inner, started) else { return };
+        let thread = std::thread::current().id();
+        {
+            let mut walking = channel.in_flight.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(at) = walking.iter().position(|w| w.thread == thread && w.path == path) {
+                walking.swap_remove(at);
+            }
+        }
         let took = started.elapsed();
         if took >= channel.slow_file {
             (channel.sink)(&format!("slow file: {path} walked in {}", span(took)));
         }
+    }
+
+    /// What the run is doing now, readable from any thread; `None` for an off
+    /// handle. It takes the two short locks a walk takes at a file's start and
+    /// end, so it never waits on a walk itself, only on another reader or a
+    /// boundary.
+    #[must_use]
+    pub fn snapshot(&self) -> Option<ProgressSnapshot> {
+        let channel = self.inner.as_ref()?;
+        let now = Instant::now();
+        let (last_phase, lap_at) = {
+            let lap = channel.lap.lock().unwrap_or_else(PoisonError::into_inner);
+            (lap.phase.clone(), lap.at)
+        };
+        let mut in_flight: Vec<InFlightFile> = channel
+            .in_flight
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .map(|w| InFlightFile { path: w.path.clone(), running: now.duration_since(w.since) })
+            .collect();
+        in_flight.sort_by(|a, b| b.running.cmp(&a.running).then_with(|| a.path.cmp(&b.path)));
+        Some(ProgressSnapshot {
+            last_phase,
+            since_phase: now.duration_since(lap_at),
+            elapsed: now.duration_since(channel.started),
+            in_flight,
+        })
     }
 }
 
@@ -125,8 +215,9 @@ mod tests {
         let off = Progress::off();
         off.phase("parse");
         off.phase_with("walk", || unreachable!("an off handle builds no detail"));
-        assert!(off.file_clock().is_none());
+        assert!(off.file_start("a.php").is_none());
         off.file_done("a.php", None);
+        assert!(off.snapshot().is_none(), "an off handle has nothing to read");
     }
 
     #[test]
@@ -143,12 +234,88 @@ mod tests {
     #[test]
     fn only_a_file_at_or_over_the_threshold_is_named() {
         let (never, lines) = collected(Duration::from_secs(3600));
-        never.file_done("quick.php", never.file_clock());
+        never.file_done("quick.php", never.file_start("quick.php"));
         assert!(lines.lock().unwrap().is_empty());
         let (always, lines) = collected(Duration::ZERO);
-        always.file_done("src/Slow.php", always.file_clock());
+        always.file_done("src/Slow.php", always.file_start("src/Slow.php"));
         let lines = lines.lock().unwrap();
         assert_eq!(lines.len(), 1);
         assert!(lines[0].starts_with("slow file: src/Slow.php walked in "));
+    }
+
+    #[test]
+    fn a_file_is_in_flight_between_its_start_and_its_end() {
+        let (progress, _) = collected(Duration::from_secs(3600));
+        let before = progress.snapshot().expect("an on handle reads");
+        assert_eq!(before.last_phase, None);
+        assert!(before.in_flight.is_empty());
+
+        let started = progress.file_start("src/Hot.php");
+        let during = progress.snapshot().unwrap();
+        let paths: Vec<&str> = during.in_flight.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, ["src/Hot.php"]);
+
+        progress.file_done("src/Hot.php", started);
+        assert!(progress.snapshot().unwrap().in_flight.is_empty());
+    }
+
+    #[test]
+    fn the_last_phase_is_the_last_boundary_crossed() {
+        let (progress, _) = collected(Duration::from_secs(3600));
+        progress.phase("parse");
+        progress.phase("universe");
+        let seen = progress.snapshot().unwrap();
+        assert_eq!(seen.last_phase.as_deref(), Some("universe"));
+        assert!(seen.since_phase <= seen.elapsed);
+    }
+
+    /// The fleet shape: several workers each hold a file at once, and the
+    /// reader names all of them, longest-running first, then sees each leave.
+    #[test]
+    fn every_workers_file_is_named_while_they_all_run() {
+        use std::sync::Barrier;
+        const WORKERS: usize = 4;
+        let (progress, _) = collected(Duration::from_secs(3600));
+        let all_started = Barrier::new(WORKERS + 1);
+        let read = Barrier::new(WORKERS + 1);
+        std::thread::scope(|scope| {
+            for w in 0..WORKERS {
+                let (progress, all_started, read) = (&progress, &all_started, &read);
+                scope.spawn(move || {
+                    let path = format!("src/W{w}.php");
+                    let started = progress.file_start(&path);
+                    all_started.wait();
+                    read.wait();
+                    progress.file_done(&path, started);
+                });
+            }
+            all_started.wait();
+            let during = progress.snapshot().unwrap();
+            let mut paths: Vec<String> = during.in_flight.iter().map(|f| f.path.clone()).collect();
+            assert!(
+                during.in_flight.windows(2).all(|w| w[0].running >= w[1].running),
+                "longest-running first"
+            );
+            paths.sort();
+            let expected: Vec<String> = (0..WORKERS).map(|w| format!("src/W{w}.php")).collect();
+            assert_eq!(paths, expected);
+            read.wait();
+        });
+        assert!(progress.snapshot().unwrap().in_flight.is_empty());
+    }
+
+    #[test]
+    fn two_walks_of_one_path_on_different_threads_end_independently() {
+        let (progress, _) = collected(Duration::from_secs(3600));
+        let here = progress.file_start("a.php");
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let there = progress.file_start("a.php");
+                progress.file_done("a.php", there);
+            });
+        });
+        assert_eq!(progress.snapshot().unwrap().in_flight.len(), 1, "this thread's walk remains");
+        progress.file_done("a.php", here);
+        assert!(progress.snapshot().unwrap().in_flight.is_empty());
     }
 }
