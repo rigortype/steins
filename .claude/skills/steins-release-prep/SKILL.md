@@ -292,8 +292,9 @@ Reading the results:
   clean corpus code blocks the release. Run `cargo xtask corpus-sync` first if
   the corpus is absent. Private corpora enter through `corpus.local.toml` and
   stay outside the repo, and so do their baselines and triage pins
-  (`fp-gate.local.toml`); confirm the `ledger:` line under the report's header
-  says it was loaded before reading a green as the full-corpus claim.
+  (`fp-gate.local.toml`); before reading a green as the full-corpus claim,
+  confirm the `ledger:` line under the report's header says loaded with its rows
+  applied, and that the local projects appear in the summary.
 - **phpdoc-oracle** is the conformance rerun; it needs `php` + `composer` + the
   harness `vendor/`. It **succeeds without them** by design, so confirm from its
   output that it actually ran rather than skipped.

@@ -88,9 +88,11 @@ zero everywhere and read as a wall of regressions. An *empty*
 `fp-gate.local.toml` is the explicit way to run with no local rows. With no
 `corpus.local.toml` project (CI, a fresh clone) an absent ledger is simply the
 public baselines. Rows for a name `corpus.local.toml` does not list are unused,
-not errors. The line under the report's header says whether the ledger was
-loaded, how many rows it contributed and how many were unused, so a run without
-it cannot pass for one that held it.
+not errors, and are left out of the merged tables. The line under the report's
+header says whether the ledger was loaded, how many rows it applied and how many
+were unused; a ledger none of whose rows applies to a listed project is reported
+as present but NOT applied. So a run without the private ledger cannot pass for
+one that held it.
 
 Triaged true positives in the proof layer are **fingerprint-pinned**
 (`EXPECTED_PROOF_FINDINGS`, `xtask/fp-gate/expected_proof_findings.toml`),

@@ -28,7 +28,8 @@
 //! [possibly]
 //! ```
 //!
-//! The rules, each of which refuses before any analysis runs:
+//! The rules. Every refusal happens before any analysis runs; one rule, about
+//! unlisted names, is deliberately not a refusal:
 //!
 //! - **A listed local project needs the file.** When `corpus.local.toml` lists
 //!   any project and the ledger is absent, the gate stops: a private project
@@ -44,7 +45,9 @@
 //! - **Unlisted names are unused, not errors.** A row for a name
 //!   `corpus.local.toml` does not list (a project removed from it, or one that
 //!   exists only on another machine) matches no report row, so it never gates;
-//!   the report line counts them so a typo is visible.
+//!   the report line counts them so a typo is visible, and they are not merged,
+//!   so they touch no table, total or section. A ledger none of whose rows
+//!   applies to a listed project is reported as present but NOT applied.
 //! - **One home per project.** A project name that has rows in a built-in table
 //!   may not have rows in the same table of the overlay (and a package with
 //!   built-in pins may not have overlay pins): a ledger split across two files
@@ -89,8 +92,9 @@ pub enum Overlay {
     /// alone.
     #[default]
     Absent,
-    /// A file was read and merged; the counts are the rows it contributed, of
-    /// which `unlisted` name a project `corpus.local.toml` does not list.
+    /// A file was read and merged; the counts are the rows applied to listed
+    /// projects, and `unlisted` the rows for a project `corpus.local.toml` does
+    /// not list, which were left out.
     Loaded {
         pins: usize,
         phpdoc: usize,
@@ -110,11 +114,18 @@ impl Overlay {
                  no project, so there is no private ledger to hold)."
             ),
             Overlay::Loaded { pins, phpdoc, throw, effect, possibly, unlisted } => {
+                let applied = pins + phpdoc + throw + effect + possibly;
+                if applied == 0 && *unlisted > 0 {
+                    return format!(
+                        "ledger: {OVERLAY_FILE} present but NOT applied — corpus.local.toml lists \
+                         none of its projects ({unlisted} row(s) unused); this run measured no \
+                         private corpus."
+                    );
+                }
                 let mut line = format!(
-                    "ledger: {OVERLAY_FILE} loaded — {} row(s) merged with the built-in \
-                     baselines ({pins} pin(s), {phpdoc} phpdoc, {throw} throw, {effect} effect, \
-                     {possibly} possibly).",
-                    pins + phpdoc + throw + effect + possibly
+                    "ledger: {OVERLAY_FILE} loaded — {applied} row(s) applied on top of the \
+                     built-in baselines ({pins} pin(s), {phpdoc} phpdoc, {throw} throw, \
+                     {effect} effect, {possibly} possibly).",
                 );
                 if *unlisted > 0 {
                     line.push_str(&format!(
@@ -173,10 +184,10 @@ pub fn merge(
             return Ok(base);
         }
         return Err(format!(
-            "{OVERLAY_FILE} is absent, but corpus.local.toml lists {} project(s). Their \
-             baselines live in {OVERLAY_FILE}; measured without it they expect zero everywhere \
-             and every finding would read as a regression. Restore the file, or create an empty \
-             one to run with no local rows.",
+            "{OVERLAY_FILE} is absent, but corpus.local.toml lists {} project(s), and the gate \
+             requires {OVERLAY_FILE} whenever local projects are listed: without it a private \
+             project's baselines would be missing and every finding would read as a regression. \
+             Restore the file, or create an empty one to run with no local rows.",
             roster.local.len()
         ));
     };
@@ -185,9 +196,9 @@ pub fn merge(
     validate_pins(OVERLAY_FILE, &file.finding)?;
 
     let mut base = base;
-    let mut unlisted = file.finding.iter().filter(|p| !roster.lists(&p.package)).count();
-    let counts = [file.phpdoc.len(), file.throw.len(), file.effect.len(), file.possibly.len()];
+    let mut unlisted = 0;
 
+    let mut pins = 0;
     for p in &file.finding {
         let name = p.package.as_str();
         if let Some(why) = roster.refusal(name, "expected_proof_findings.toml") {
@@ -196,28 +207,35 @@ pub fn merge(
         if base.proof.iter().any(|b| b.package == name) {
             return Err(clash(name, "[[finding]] pins", "expected_proof_findings.toml"));
         }
+        pins += usize::from(roster.lists(name));
     }
-    let pins = file.finding.len();
+    unlisted += file.finding.len() - pins;
+    base.proof.extend(file.finding.into_iter().filter(|p| roster.lists(&p.package)));
+
     let tables = [
         ("phpdoc", "phpdoc_expected.toml", &mut base.phpdoc, file.phpdoc),
         ("throw", "throw_expected.toml", &mut base.throw, file.throw),
         ("effect", "effect_expected.toml", &mut base.effect, file.effect),
         ("possibly", "possibly_expected.toml", &mut base.possibly, file.possibly),
     ];
-    for (table, tracked, into, from) in tables {
-        for name in from.0.keys() {
-            if let Some(why) = roster.refusal(name, tracked) {
+    let mut applied = [0usize; 4];
+    for (n, (table, tracked, into, from)) in tables.into_iter().enumerate() {
+        for (name, count) in from.0 {
+            if let Some(why) = roster.refusal(&name, tracked) {
                 return Err(format!("{OVERLAY_FILE}: [{table}]: {why}"));
             }
-            if into.0.contains_key(name) {
-                return Err(clash(name, &format!("[{table}] rows"), tracked));
+            if into.0.contains_key(&name) {
+                return Err(clash(&name, &format!("[{table}] rows"), tracked));
             }
-            unlisted += usize::from(!roster.lists(name));
+            if roster.lists(&name) {
+                into.0.insert(name, count);
+                applied[n] += 1;
+            } else {
+                unlisted += 1;
+            }
         }
-        into.0.extend(from.0);
     }
-    base.proof.extend(file.finding);
-    let [phpdoc, throw, effect, possibly] = counts;
+    let [phpdoc, throw, effect, possibly] = applied;
     base.overlay = Overlay::Loaded { pins, phpdoc, throw, effect, possibly, unlisted };
     Ok(base)
 }
@@ -228,10 +246,6 @@ fn clash(name: &str, what: &str, tracked_file: &str) -> String {
         "`{name}` has {what} in both {BASELINE_DIR}/{tracked_file} and {OVERLAY_FILE}: a \
          project's rows live in one of them, so move the other's"
     )
-}
-
-impl CountTable {
-    fn len(&self) -> usize { self.0.len() }
 }
 
 #[cfg(test)]
@@ -351,23 +365,41 @@ mod tests {
     }
 
     #[test]
-    fn rows_for_an_unlisted_project_are_unused_and_counted_not_refused() {
+    fn rows_for_an_unlisted_project_are_counted_and_left_out_of_the_tables() {
         let text = format!(
             "{}\n{PIN}\n[effect]\n\"nowhere\" = 1\n[possibly]\n\"local-a\" = 1\n",
             PIN.replace("local-a", "nowhere")
         );
         let b = merged(&text).unwrap();
-        assert_eq!(b.effect.expected("nowhere"), 1);
+        // The unlisted rows touch no table, no total, and so no section.
+        assert_eq!(b.effect.expected("nowhere"), 0);
+        assert!(b.effect.is_empty() && b.effect.total() == 0);
+        assert_eq!(b.proof.len(), 2, "the built-in pin and the listed one; not the unlisted pin");
+        assert!(b.proof.iter().all(|p| p.package != "nowhere"));
+        assert_eq!(b.possibly.expected("local-a"), 1);
         assert_eq!(
             b.overlay,
-            Overlay::Loaded { pins: 2, phpdoc: 0, throw: 0, effect: 1, possibly: 1, unlisted: 2 }
+            Overlay::Loaded { pins: 1, phpdoc: 0, throw: 0, effect: 0, possibly: 1, unlisted: 2 }
         );
         let line = b.overlay.report_line();
+        assert!(line.contains("loaded") && line.contains("2 row(s) applied"), "{line}");
         assert!(line.contains("2 row(s) for unlisted project(s), unused"), "{line}");
         // The duplicate refusal still covers an unlisted name.
         let mut dup = base();
         dup.effect = parse_table("t.toml", "\"nowhere\" = 1\n").unwrap();
         assert!(merge(dup, Some("[effect]\n\"nowhere\" = 2\n"), &roster()).is_err());
+    }
+
+    #[test]
+    fn a_ledger_applying_to_no_listed_project_says_it_was_not_applied() {
+        let nobody = Roster { public: PUBLIC, local: &[] };
+        let b = merge(base(), Some("[effect]\n\"nowhere\" = 1\n"), &nobody).unwrap();
+        let line = b.overlay.report_line();
+        assert!(line.contains("present but NOT applied"), "{line}");
+        assert!(line.contains("no private corpus") && !line.contains("loaded"), "{line}");
+        // A deliberately empty ledger is not that: nothing was left unapplied.
+        let empty = merge(base(), Some(""), &nobody).unwrap().overlay.report_line();
+        assert!(empty.contains("loaded") && empty.contains("0 row(s)"), "{empty}");
     }
 
     #[test]
