@@ -220,7 +220,11 @@ fn a_target_that_admits_8_4_is_silent_even_on_an_8_5_sidecar() {
 }
 
 #[test]
-fn a_target_wholly_at_or_above_8_5_reports_whatever_the_sidecar_says() {
+fn a_target_wholly_at_or_above_8_5_pins_the_version_interval_under_a_stubbed_gate() {
+    // Pins the `version_id` arithmetic only: the stub's `absence_family_available`
+    // is always true. In the product the real session switches the offset family off
+    // when the sidecar's minor is outside the declared target (`target_admits_runtime`
+    // in `fold.rs`), so `>=8.5` on an 8.4 sidecar is silent there, not reported.
     let src = body("$v = 42; [$x] = $v;");
     for (t, minor) in [
         (require(">=8.5", V85, None), Some(V84)),

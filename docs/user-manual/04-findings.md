@@ -523,7 +523,9 @@ on a `null` is silent on every version. On an `int`, `float`, `bool` or
 reports it only when the whole analysed PHP range is 8.5 or later: the
 `require.php` (or `config.platform.php`) floor when `composer.json`
 declares one, else the version of the PHP that Steins runs. A range that
-admits 8.4, such as `^8.1`, is silent.
+admits 8.4, such as `^8.1`, is silent. A PHP that Steins runs outside the
+declared range silences the whole `offset.*` proof family, so `>=8.5`
+under an 8.4 PHP reports nothing.
 
 **`offset.undeclared`** and **`offset.maybe-missing`** are contract layer.
 The evidence is your docblock rather than a folded value, so the claim is
