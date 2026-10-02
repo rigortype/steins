@@ -410,3 +410,48 @@ f(new Third());
     assert_eq!(ids(src), vec!["type.argument-mismatch"], "{ds:#?}");
     assert!(ds[0].message.contains("new Third()"), "{ds:#?}");
 }
+
+/// An alias of the BC shim's alias: `Older` may be `OldItem`'s declaration or the class
+/// its call names, so it declines on the class the walk enumerated.
+#[test]
+fn an_alias_of_the_bc_shim_alias_declines_too() {
+    let ds = project(&[
+        (
+            "src/NewItem.php",
+            "<?php declare(strict_types=1);\nnamespace Lib;\nclass NewItem {}\nclass_alias(NewItem::class, OldItem::class);\n",
+        ),
+        (
+            "src/OldItem.php",
+            "<?php declare(strict_types=1);\nnamespace Lib;\nif (false) {\n    class OldItem extends NewItem {}\n}\n",
+        ),
+        (
+            "src/use.php",
+            "<?php declare(strict_types=1);\nclass_alias(\\Lib\\OldItem::class, 'Lib\\Older');\nfunction legacy(\\Lib\\Older $i): string { return 'x'; }\nlegacy(new \\Lib\\NewItem());\n",
+        ),
+    ]);
+    let ds: Vec<_> = ds.iter().filter(|d| !d.id.starts_with("untyped.")).collect();
+    assert!(ds.is_empty(), "{ds:#?}");
+}
+
+/// The same shape in one file (a71): the shadowed alias is aliased again, and a class
+/// that neither name can be keeps its proof against an ambiguous alias.
+#[test]
+fn a_shadowed_alias_aliased_again_declines_and_a_stranger_still_reports() {
+    let src = "<?php declare(strict_types=1);
+class Real {}
+class Other {}
+class_alias(Real::class, 'Shadow');
+if (false) { class Shadow {} }
+class_alias('Shadow', 'Next');
+function f(Next $n): void {}
+f(new Real());
+if (PHP_VERSION_ID > 0) { class Dup {} } else { class Dup {} }
+class_alias(Dup::class, 'DA');
+function g(DA $d): void {}
+g(new Other());
+g(new Dup());
+";
+    let ds = findings(src);
+    assert_eq!(ids(src), vec!["type.argument-mismatch"], "{ds:#?}");
+    assert!(ds[0].message.contains("new Other()"), "{ds:#?}");
+}
