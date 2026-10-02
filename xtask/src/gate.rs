@@ -1577,6 +1577,40 @@ mod tests {
     }
 
     #[test]
+    fn strict_floor_ids_route_to_the_possibly_table_whatever_their_layer_or_name() {
+        // Issue #922: the posture follows the registry's floor, so a contract-layer
+        // `maybe-` sibling leaves its family table, and the definite ids stay.
+        for id in [
+            "throw.maybe-undeclared",
+            "effect.maybe-envelope-exceeded",
+            "phpdoc.maybe-argument-mismatch",
+            "phpdoc.maybe-return-mismatch",
+            "offset.maybe-missing",
+            "type.maybe-argument-mismatch",
+            "variable.maybe-undefined",
+        ] {
+            assert_eq!(gate_bucket(id), GateBucket::Tripwire, "{id}");
+        }
+        for id in ["throw.undeclared", "throw.liskov-widened", "effect.envelope-exceeded"] {
+            assert_eq!(gate_bucket(id), GateBucket::Measurement, "{id}");
+        }
+        // The family selectors follow: the throw table no longer holds the sibling.
+        let diag = |id: &'static str| steins_infer::Diagnostic {
+            id,
+            path: String::new(),
+            line: 1,
+            column: 1,
+            message: String::new(),
+            facet: None,
+            fix: None,
+        };
+        assert!(super::is_throw(&diag("throw.undeclared")));
+        assert!(!super::is_throw(&diag("throw.maybe-undeclared")));
+        assert!(super::is_possibly(&diag("throw.maybe-undeclared")));
+        assert!(!super::is_effect_contract(&diag("effect.maybe-envelope-exceeded")));
+    }
+
+    #[test]
     fn the_headline_is_green_only_when_nothing_is_red_and_never_otherwise() {
         // Issue #791: every combination of the three red conditions, so a
         // tripwire left out of the headline's input is a failing row here.

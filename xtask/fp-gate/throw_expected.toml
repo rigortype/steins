@@ -54,53 +54,18 @@
 # composer row had read 93 against a measured 91 (CI and local alike) since an
 # earlier, unrecorded drop; it is reset to the measured count plus the three.
 
-# Raised 2026-10-02 (issue #915, ADR-0100): `throw.maybe-undeclared`, the strict-floor
-# sibling of `throw.undeclared`, joins the family. It is a gap report, not a proof:
-# one finding per site and gap kind inside a declaration that spells `@throws`, plus
-# one per call into a project function that is itself `...?` and declares none. The
-# gate counts every emitted id regardless of profile, so the rows below are the old
-# `throw.undeclared` + `throw.liskov-widened` count plus the sibling's. Measured with
-# the CI engine posture (PHP 8.4.25), and cross-checked with `steins check --profile
-# strict --no-php --vendor-diagnostics` (the throw lane does not read the sidecar, so
-# the two agree). The sibling alone, by package, as direct + inherited:
-#   composer/composer          3374 = 3119 + 255
-#   sebastianbergmann/phpunit  3194 = 2688 + 506
-#   symfony/console             537 =  494 +  43
-#   guzzle/guzzle               249 =  213 +  36
-#   Seldaek/monolog             174 =  163 +  11
-#   symfony/process             143 =  126 +  17
-#   briannesbitt/Carbon         440 =  431 +   9
-#   cakephp/chronos              50 =   50 +   0
-#   thephpleague/flysystem       37 =   26 +  11
-#   nikic/PHP-Parser              4 =    3 +   1        (8,202 in all: 7,313 + 889)
-# Triaged by gap kind over the public corpus (direct findings): dynamic-callee 2,320
-# (a `$f()` or `$o->$m()` the lane cannot name; phpunit's 1,185 are almost all test
-# doubles and callbacks), operator-array-access 954 and operator-to-string 631 and
-# operator-magic-property 564 (an untyped or non-final operand that may run user code,
-# ADR-0099 §4.3), declared-receiver 737 (an injected collaborator typed to an
-# interface or non-final class, ADR-0067), user-code-reach 711 (a builtin's argument
-# that may reach `__toString` or a callback), unknown-class 397, non-final-this 359,
-# no-throw-row 349 (a catalog name with no audited throw row; `#881` audits the table),
-# operator-iteration 226, unresolved-throw 38, unknown-function 12, flag-dependent-throw
-# 7, method-not-found 3, operator-clone 3, unseen-code 2. Every kind is a TRUE gap in
-# the sense the id claims: the analyzer cannot bound what the site throws. Whether a
-# given site can in fact throw is not what is asserted, which is why the id sits at
-# `strict`, and why 81% of the corpus' `@throws` declarations carry at least one. The
-# `throw.undeclared` and `throw.liskov-widened` counts underneath are unchanged:
-# composer 94, phpunit 32, console 13, monolog 7, guzzle 2, nikic 1.
-# `phpstan/phpstan-src`'s row, further down, is reseeded from a run that has that
-# checkout (it is only in `corpus.local.toml`; CI does not measure it).
+# 2026-10-02 (issues #915 and #922, ADR-0100): `throw.maybe-undeclared`, the strict-floor
+# sibling of `throw.undeclared`, is counted in POSSIBLY_EXPECTED, not here. The gate
+# routes by the registry's floor (`gate_bucket`), so a strict-floor id leaves its family
+# table: the rows below are the definite `throw.undeclared` + `throw.liskov-widened`
+# counts and are the ones the slice left unchanged (the gate prints them as measured).
 
-"composer/composer" = 3468
-"sebastianbergmann/phpunit" = 3226
-"guzzle/guzzle" = 251
-"Seldaek/monolog" = 181
-"symfony/console" = 550
-"nikic/PHP-Parser" = 5
-"symfony/process" = 143
-"briannesbitt/Carbon" = 440
-"cakephp/chronos" = 50
-"thephpleague/flysystem" = 37
+"composer/composer" = 94
+"sebastianbergmann/phpunit" = 32
+"guzzle/guzzle" = 2
+"Seldaek/monolog" = 7
+"symfony/console" = 13
+"nikic/PHP-Parser" = 1
 
 # Registered 2026-07-24 (v0.1.0 run, oracle idea A): PHPStan's own `src/` as a
 # local project. First run 0 proof-layer / 0 phpdoc.* / 20 throw.undeclared,
@@ -121,12 +86,8 @@
 #            the denylist already named the same directories. The key buys
 #            enforcement: an allowlist cannot silently readmit a fixture tree
 #            added later, a denylist can.
-#   21 → 890  2026-10-02 (issue #915, ADR-0100): the strict-floor sibling. 22 definite
-#            `throw.undeclared` (0 liskov; not changed by this slice, the row read 21
-#            against the live checkout) and 868 `throw.maybe-undeclared`, each a gap at
-#            a site of a declaration that spells `@throws`, or a call edge into a `...?`
-#            function that declares none, of the same kinds the public rows above are
-#            triaged by. Measured locally under PHP 8.5 with the `src` + `vendor`
-#            scoping, because CI does not measure this project; the throw lane does not
-#            read the sidecar, so the count does not depend on the engine.
-"phpstan/phpstan-src" = 890
+#   21 → 22  2026-10-02 (issue #915): measured locally under PHP 8.5 with the `src` +
+#            `vendor` scoping, because CI does not measure this project: 22 definite
+#            `throw.undeclared`, 0 liskov. The checkout, not this slice, moved the count
+#            by one (the slice adds only strict-floor ids, which POSSIBLY_EXPECTED holds).
+"phpstan/phpstan-src" = 22

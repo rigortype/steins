@@ -10,10 +10,14 @@
 # (`xtask/src/gate/ledger.rs`). `phpstan/phpstan-src` is listed in
 # `corpus.local.toml` too but is public code, so its rows stay here.
 #
-# Permanent gate policy for the **possibly-grade** proof ids (ADR-0081 §8):
-# `variable.maybe-undefined`, `property.maybe-undefined` and
-# `type.return-maybe-missing`, selected by floor rather than by name (see
-# [`gate_bucket`]). Same per-package **increase** tripwire as
+# Permanent gate policy for the **possibly-grade** ids (ADR-0081 §8): every id
+# registered at the `strict` floor, whichever layer it sits in, selected by floor rather
+# than by name (see [`gate_bucket`]): the proof-layer `variable.maybe-undefined`,
+# `property.maybe-undefined`, `type.return-maybe-missing`, `type.maybe-*-mismatch`, and
+# the contract-layer `phpdoc.maybe-*`, `offset.maybe-missing`, and (ADR-0100, issue #915)
+# `effect.maybe-envelope-exceeded` and `throw.maybe-undeclared`. The family tables
+# (PHPDOC/THROW/EFFECT_EXPECTED) hold the definite ids only. One table holds all of
+# them; a per-id split is what issue #922 still has open. Same per-package **increase** tripwire as
 # [`PHPDOC_EXPECTED`] / [`THROW_EXPECTED`] / [`EFFECT_EXPECTED`]; absent = zero.
 #
 # A count and not per-finding pins, because a possibly-grade id claims only that
@@ -60,6 +64,26 @@
 #    an `Asserted` arm routes the same judgment to `phpdoc.maybe-argument-mismatch`
 #    and thus to [`PHPDOC_EXPECTED`].
 
+# Triage of `throw.maybe-undeclared` by gap kind, 2026-10-02 (issue #915, ADR-0100), over the
+# ten public packages (8,202 findings in all, 7,313 direct and 889 inherited; the per-package
+# split, direct + inherited: composer 3374 = 3119 + 255, phpunit 3194 = 2688 + 506, console
+# 537 = 494 + 43, guzzle 249 = 213 + 36, monolog 174 = 163 + 11, process 143 = 126 + 17,
+# Carbon 440 = 431 + 9, chronos 50 = 50 + 0, flysystem 37 = 26 + 11, PHP-Parser 4 = 3 + 1).
+# Direct findings by kind: dynamic-callee 2,320 (a `$f()` or `$o->$m()` the lane cannot name;
+# phpunit's 1,185 are almost all test doubles and callbacks), operator-array-access 954 and
+# operator-to-string 631 and operator-magic-property 564 (an untyped or non-final operand that
+# may run user code, ADR-0099 §4.3), declared-receiver 737 (an injected collaborator typed to
+# an interface or non-final class, ADR-0067), user-code-reach 711 (a builtin's argument that
+# may reach `__toString` or a callback), unknown-class 397, non-final-this 359, no-throw-row
+# 349 (a catalog name with no audited throw row; #881 audits the table), operator-iteration
+# 226, unresolved-throw 38, unknown-function 12, flag-dependent-throw 7, method-not-found 3,
+# operator-clone 3, unseen-code 2. Every kind is a TRUE gap in the sense the id claims: the
+# analyzer cannot bound what the site throws. Whether a given site can in fact throw is not
+# what is asserted, which is why the id sits at `strict`, and why 81% of the corpus' `@throws`
+# declarations carry at least one. `effect.maybe-envelope-exceeded` is 0 on every public
+# package. These counts are with the CI engine posture (PHP 8.4.25) and agree with
+# `steins check --profile strict --no-php --vendor-diagnostics` to the finding.
+
 # 1 — `PluginManager.php:525`, class 1.
 # 1 → 3, 2026-09-11 with issue #619 (the declaration-only dispatch path,
 # ADR-0049 A16): two `type.maybe-argument-mismatch` rows at
@@ -75,7 +99,10 @@
 # rather than to PHPDOC_EXPECTED. Whether the arm is inhabited on a live path
 # — composer sets `distType` whenever `installationSource` is `'dist'` — is
 # exactly what the possibly grade does not claim.
-"composer/composer" = 3
+# 3 → 3392  2026-10-02 (issues #915, #922): +3,374 throw.maybe-undeclared, +12 phpdoc.maybe-argument-mismatch, +2 phpdoc.maybe-return-mismatch, +1 offset.maybe-missing. The throw sibling is the
+# strict-floor gap report of ADR-0100 (triage by kind above the composer row); the
+# phpdoc/offset rows moved here from their family tables with the posture routing.
+"composer/composer" = 3392
 
 # 1 — `Application.php:409`, class 4 (`exitWithErrorMessage`).
 # 1 → 2, 2026-09-01 with issue #589 (the cross-lane guard join; see
@@ -121,7 +148,10 @@
 # never true; certifying the name removes it and the pre-existing correlation
 # FP surfaces at both reads. A false excuse hiding a false positive is not a
 # reason to keep either, and the proof layer is untouched (0 diagnostics).
-"sebastianbergmann/phpunit" = 3
+# 3 → 3262  2026-10-02 (issues #915, #922): +3,194 throw.maybe-undeclared, +65 phpdoc.maybe-argument-mismatch. The throw sibling is the
+# strict-floor gap report of ADR-0100 (triage by kind above the composer row); the
+# phpdoc/offset rows moved here from their family tables with the posture routing.
+"sebastianbergmann/phpunit" = 3262
 
 # 10 — six class 1/2/3 in `Application.php`, `CompletionInput.php` and
 # `SymfonyStyle.php`; four class 5 in `Tests/`.
@@ -137,7 +167,10 @@
 # considered real. Coercive mode, and `null` into a non-nullable parameter of a
 # USER function is a `TypeError` there too (the 8.1 deprecation is internal
 # functions only) — the possibly grade is the right one.
-"symfony/console" = 11
+# 11 → 548  2026-10-02 (issues #915, #922): +537 throw.maybe-undeclared. The throw sibling is the
+# strict-floor gap report of ADR-0100 (triage by kind above the composer row); the
+# phpdoc/offset rows moved here from their family tables with the posture routing.
+"symfony/console" = 548
 
 # 6 — every row class 4 (`$this->fail()` in `ProcessTest.php`).
 # Unmoved by issue #599 leg 1 (2026-09-01), and twice over. Every row is
@@ -147,7 +180,10 @@
 # the corpus checkout ships no `vendor/`, so `TestCase`'s chain leaves the
 # project and dispatch answers nothing — whatever the shipped PHPUnit
 # declares for `Assert::fail()` is not a fact this index holds.
-"symfony/process" = 6
+# 6 → 149  2026-10-02 (issues #915, #922): +143 throw.maybe-undeclared. The throw sibling is the
+# strict-floor gap report of ADR-0100 (triage by kind above the composer row); the
+# phpdoc/offset rows moved here from their family tables with the posture routing.
+"symfony/process" = 149
 
 # 2 — both class 4 (`markTestSkipped()` in the serialization tests).
 # 2 → 3, 2026-08-17 with issue #423 (ADR-0056 §9): the wave's one proof-layer
@@ -181,7 +217,10 @@
 # The message also names the `int` and `float` arms, which `is_numeric`
 # ought to have subtracted; that is a narrowing gap in the message's
 # explanation, not in its verdict, and it does not make the row false.
-"briannesbitt/Carbon" = 4
+# 4 → 453  2026-10-02 (issues #915, #922): +440 throw.maybe-undeclared, +9 phpdoc.maybe-argument-mismatch. The throw sibling is the
+# strict-floor gap report of ADR-0100 (triage by kind above the composer row); the
+# phpdoc/offset rows moved here from their family tables with the posture routing.
+"briannesbitt/Carbon" = 453
 
 # 0 → 1, 2026-08-16 with issue #391 — and a sixth class, the first that is not
 # a binding claim at all: `type.maybe-argument-mismatch` on
@@ -192,7 +231,10 @@
 # the arm is real and its inhabitation on a live path is exactly the part this
 # grade does not claim. The package's other issue #391 finding rides an
 # `Asserted` premise and is counted in PHPDOC_EXPECTED instead.
-"nikic/PHP-Parser" = 1
+# 1 → 10  2026-10-02 (issues #915, #922): +4 throw.maybe-undeclared, +5 phpdoc.maybe-argument-mismatch. The throw sibling is the
+# strict-floor gap report of ADR-0100 (triage by kind above the composer row); the
+# phpdoc/offset rows moved here from their family tables with the posture routing.
+"nikic/PHP-Parser" = 10
 
 # 10 — 8 `variable.maybe-undefined` (classes 1 and 4) plus the 2
 # `type.return-maybe-missing` rows absorbed from `EXPECTED_PROOF_FINDINGS`.
@@ -200,4 +242,26 @@
 # a `string|null` (a nullable native declaration) handed to a native `string`
 # parameter; the null arm is real, its inhabitation is what the grade does
 # not claim.
-"phpstan/phpstan-src" = 11
+# 11 → 880  2026-10-02 (issues #915, #922): +868 `throw.maybe-undeclared` and +1
+# `effect.maybe-envelope-exceeded` — `return $this->unsealed;` in the `@phpstan-pure`
+# `ConstantArrayType::getUnsealedTypes()` (`src/Type/Constant/ConstantArrayType.php:225:10`),
+# kind `operator-magic-property`, a property read through a non-final `$this` (ADR-0099 §4.4);
+# the floor reports it as it should, and whether a declared property read on `$this` ought to
+# stay a gap is a separate precision question. Both counts were measured locally under PHP 8.5
+# with the `src` + `vendor` scoping on the commit before the floor's discharges were narrowed
+# (CI does not measure this project) and are carried here, not re-measured: any
+# `phpdoc.maybe-*` or `offset.maybe-missing` this project holds also moved into this table
+# with the posture routing, so the first local run may print a different count to reseed.
+"phpstan/phpstan-src" = 880
+
+# New rows, 2026-10-02 (issues #915, #922): the strict-floor ids of the public packages that
+# had none. Measured under PHP 8.4.25 (CI's posture); the throw lane does not read the sidecar.
+#   guzzle/guzzle           253 = 249 throw.maybe-undeclared + 4 phpdoc.maybe-argument-mismatch
+#   Seldaek/monolog         175 = 174 throw.maybe-undeclared + 1 phpdoc.maybe-argument-mismatch
+#   thephpleague/flysystem   38 =  37 throw.maybe-undeclared + 1 phpdoc.maybe-argument-mismatch
+#   cakephp/chronos          50 =  50 throw.maybe-undeclared
+"guzzle/guzzle" = 253
+"Seldaek/monolog" = 175
+"thephpleague/flysystem" = 38
+"cakephp/chronos" = 50
+

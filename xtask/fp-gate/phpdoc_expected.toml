@@ -179,7 +179,10 @@
 #   whose `false` arm is a strict-mode `TypeError`. The `file_exists()` two
 #   lines above it is not a discharge — it proves the path exists, not that
 #   the read succeeds, and the two are separated by a real window.
-"composer/composer" = 35
+# 35 → 21  2026-10-02 (issues #915, #922): the 14 `phpdoc.maybe-argument-mismatch` /
+# `phpdoc.maybe-return-mismatch` rows are strict-floor ids, and the gate now counts every
+# strict-floor id in POSSIBLY_EXPECTED, by the registry's floor. Same findings, other table.
+"composer/composer" = 21
 
 #   8 → 12 (+4): `realpath()` into a `string` parameter four times — `new
 #   TestCase($filename)` twice in `Runner/Phpt/TestCaseTest.php`, `new
@@ -274,7 +277,10 @@
 #   answer `0` and retire these rows, not a wider refusal. Seen on the CI
 #   8.4 engine; the local 8.5 A/B for this slice reported +4 rows elsewhere
 #   and none here.
-"sebastianbergmann/phpunit" = 104
+# 104 → 39  2026-10-02 (issues #915, #922): the 65 `phpdoc.maybe-argument-mismatch` /
+# `phpdoc.maybe-return-mismatch` rows are strict-floor ids, and the gate now counts every
+# strict-floor id in POSSIBLY_EXPECTED, by the registry's floor. Same findings, other table.
+"sebastianbergmann/phpunit" = 39
 
 # 0 → 4 (+4), 2026-08-17 (issue #423), all shape (a) — the tempnam idiom:
 # `$certFile` / `$tmpfname` carry `non-falsy-string|false` and go straight
@@ -294,7 +300,9 @@
 #   a real `TypeError`. Read verbatim, not reseeded blind — it is the same
 #   `T|false`-into-native-`T` shape as the four rows above it, arriving on the
 #   return side rather than the argument side.
-"guzzle/guzzle" = 5
+# 5 → 0  2026-10-02 (issues #915, #922): the 5 `phpdoc.maybe-argument-mismatch` /
+# `phpdoc.maybe-return-mismatch` rows are strict-floor ids, and the gate now counts every
+# strict-floor id in POSSIBLY_EXPECTED, by the registry's floor. Same findings, other table.
 
 # 4 → 5 (+1), 2026-08-14, with ADR-0056 §8: `resource` stopped being an
 # unmodeled spelling and became a relation. `StreamHandlerTest`'s
@@ -330,7 +338,10 @@
 # `@phpstan-type InputOptions array{…}` declaring that shape is wrapped across
 # 22 physical lines, so reading a body off one line left it unresolvable, and
 # reading the *first* line off would have been worse than silence.
-"Seldaek/monolog" = 7
+# 7 → 6  2026-10-02 (issues #915, #922): the 1 `phpdoc.maybe-argument-mismatch` /
+# `phpdoc.maybe-return-mismatch` rows are strict-floor ids, and the gate now counts every
+# strict-floor id in POSSIBLY_EXPECTED, by the registry's floor. Same findings, other table.
+"Seldaek/monolog" = 6
 
 # 1 → 2 (+1) with ADR-0043 stage 4 (phpdoc-side class contracts). The new
 # finding is a class-value contract: `new MountManager(['valid' => 'something
@@ -351,7 +362,10 @@
 # one-level alias-names-alias rule to be visible at all, since `Toxic`'s body
 # names `Attributes`. Finding-level diff against the same-day `fee437c`
 # baseline: exactly this row.
-"thephpleague/flysystem" = 4
+# 4 → 3  2026-10-02 (issues #915, #922): the 1 `phpdoc.maybe-argument-mismatch` /
+# `phpdoc.maybe-return-mismatch` rows are strict-floor ids, and the gate now counts every
+# strict-floor id in POSSIBLY_EXPECTED, by the registry's floor. Same findings, other table.
+"thephpleague/flysystem" = 3
 
 # 0 → 1 (+1) with ADR-0043 stage 4. `ChoiceQuestionTest` passes a literal array
 # `[..., null]` to `ChoiceQuestion::__construct(@param array<string|bool|int|
@@ -420,7 +434,10 @@
 # below `String_.php:120` guards the same arm by hand
 # (`\is_int($dec) ? $dec : \PHP_INT_MAX`), which is the author agreeing the
 # arm is real in general.
-"nikic/PHP-Parser" = 20
+# 20 → 15  2026-10-02 (issues #915, #922): the 5 `phpdoc.maybe-argument-mismatch` /
+# `phpdoc.maybe-return-mismatch` rows are strict-floor ids, and the gate now counts every
+# strict-floor id in POSSIBLY_EXPECTED, by the registry's floor. Same findings, other table.
+"nikic/PHP-Parser" = 15
 
 # 0 → 9 (+9), 2026-08-17 (issue #423), all shape (a). Two in `src/`:
 # `preg_split('/[_.-]+/', $completeLocale)` with `$completeLocale` a
@@ -433,4 +450,6 @@
 # suites), and `trim(file_get_contents(…))`
 # (CarbonInterval/ConstructTest.php:563). Each is one line of PHP and each
 # false/null arm is real.
-"briannesbitt/Carbon" = 9
+# 9 → 0  2026-10-02 (issues #915, #922): the 9 `phpdoc.maybe-argument-mismatch` /
+# `phpdoc.maybe-return-mismatch` rows are strict-floor ids, and the gate now counts every
+# strict-floor id in POSSIBLY_EXPECTED, by the registry's floor. Same findings, other table.
