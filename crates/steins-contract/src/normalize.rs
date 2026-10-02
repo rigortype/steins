@@ -1573,6 +1573,12 @@ fn enum_case_covers(
 ///   `final`/enum **and** `is_a(M, T) = No` (an open class could still
 ///   implement `T`, so `Maybe`, as does `Unknown`); a scalar/null/array arm
 ///   dies; a bare `object`/`Opaque`/`mixed` arm survives.
+///
+/// An [`ContractTy::EnumCase`] arm is an object of exact class `E`, its enum
+/// (issue #700), so it is judged as `E` is: the language makes every enum
+/// final, so the positive branch needs no finality query, and `is_a(E, T)`
+/// answers for `E` itself, `UnitEnum`/`BackedEnum` and the interfaces `E`
+/// declares, all of which hold for each of its cases alike.
 fn class_covers(fqn: &str, polarity: bool, arm: &ContractTy, oracle: &dyn IsaOracle) -> Certainty {
     use Certainty::{Maybe, No, Yes};
     if polarity {
@@ -1581,6 +1587,9 @@ fn class_covers(fqn: &str, polarity: bool, arm: &ContractTy, oracle: &dyn IsaOra
             ContractTy::Class(m) => {
                 if oracle.is_final(m) && oracle.is_a(m, fqn) == No { Yes } else { Maybe }
             }
+            ContractTy::EnumCase { enum_fqn, .. } => {
+                if oracle.is_a(enum_fqn, fqn) == No { Yes } else { Maybe }
+            }
             ContractTy::ObjectAny | ContractTy::Opaque | ContractTy::Mixed => Maybe,
             _ => Yes,
         }
@@ -1588,6 +1597,7 @@ fn class_covers(fqn: &str, polarity: bool, arm: &ContractTy, oracle: &dyn IsaOra
         // Subtrahend = instances of T. is_a(M, T): Yes deletes; No/Maybe keep.
         match arm {
             ContractTy::Class(m) => oracle.is_a(m, fqn),
+            ContractTy::EnumCase { enum_fqn, .. } => oracle.is_a(enum_fqn, fqn),
             ContractTy::ObjectAny | ContractTy::Opaque | ContractTy::Mixed => Maybe,
             _ => No,
         }
@@ -2764,6 +2774,56 @@ mod tests {
                 &mock(),
             );
             assert_eq!(arms, vec![class("animal")], "polarity {polarity}");
+        }
+    }
+
+    // ---- a class subtrahend over enum case arms (issue #700) ---------------
+
+    /// `enum Cat` (one of the mock's known, Animal-implementing classes) read as
+    /// an enum: its case arms are judged as the class `cat` is.
+    fn tabby() -> ContractTy {
+        ecase("cat", "Tabby")
+    }
+
+    fn guard(fqn: &str, polarity: bool) -> Subtrahend {
+        Subtrahend::Class { fqn: fqn.to_owned(), polarity }
+    }
+
+    #[test]
+    fn a_positive_class_guard_keeps_the_cases_of_a_member_enum() {
+        // `$s instanceof Cat` / `instanceof Animal`: every case IS a Cat, so the
+        // arm survives (it used to fall to the non-object `Yes` and die).
+        for t in ["Cat", "Animal"] {
+            let mut arms = vec![tabby(), ContractTy::Base(Base::String), ContractTy::Null];
+            subtract(&mut arms, &guard(t, true), &mock());
+            assert_eq!(arms, vec![tabby()], "instanceof {t}");
+        }
+    }
+
+    #[test]
+    fn a_positive_class_guard_deletes_the_cases_of_a_non_member_enum() {
+        // The enum is final by the language: `is_a(cat, dog) = No` deletes the
+        // case without the finality query a `Class` arm needs (the mock does not
+        // even list `cat` as final). An unknown hierarchy keeps it.
+        let mut died = vec![tabby()];
+        subtract(&mut died, &guard("Dog", true), &mock());
+        assert_eq!(died, Vec::<ContractTy>::new());
+        let mut kept = vec![ecase("mystery", "A")];
+        subtract(&mut kept, &guard("Dog", true), &mock());
+        assert_eq!(kept, vec![ecase("mystery", "A")]);
+    }
+
+    #[test]
+    fn a_negative_class_guard_deletes_exactly_the_cases_of_a_member_enum() {
+        // `!($s instanceof Animal)`: the case is an Animal and dies; under a guard
+        // the enum is not (Dog) or cannot be judged (Mystery), it survives.
+        let mut arms = vec![tabby(), ContractTy::Base(Base::Int)];
+        subtract(&mut arms, &guard("Animal", false), &mock());
+        assert_eq!(arms, vec![ContractTy::Base(Base::Int)]);
+        for t in ["Dog", "Mystery"] {
+            let mut arms = vec![tabby()];
+            subtract(&mut arms, &guard(t, false), &mock());
+            assert_eq!(arms, vec![tabby()], "!instanceof {t}");
         }
     }
 
