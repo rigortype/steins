@@ -208,6 +208,27 @@ fn s7_array_search_is_held_to_the_reach_rule() {
     assert!(!s.exhaustive && s.gaps == ["user-code-reach"], "{s:?}");
 }
 
+/// A call result is an argument shape (issue #877, rows 8.3, 8.4 and 8.14): what
+/// the callee's declared return holds rules out the reach of the call it is handed
+/// to, and an unproven result keeps it.
+#[test]
+fn s8_a_call_result_is_an_argument_shape() {
+    // The engine constructor's `Coerced` message position, handed a `string` result.
+    proven_pure(&file(false, "string $s", "return new \\RuntimeException(sprintf('%s!', $s));"), "f");
+    // `count()` reaches `Countable::count` through an object, never through a list.
+    proven_pure(&file(false, "string $s", "return count(explode(',', $s));"), "f");
+    proven_pure(&file(false, "string $s", "return strlen(strtoupper($s));"), "f");
+    // `current()` is `mixed`, and a project function with no native return may be anything.
+    unknown(&file(false, "array $a", "return count(current($a));"), "f");
+    let untyped = "<?php\nfunction pass($x) { return $x; }\n\
+                   function f(string $s) { return new \\RuntimeException(pass($s)); }\n";
+    unknown(untyped, "f");
+    // Row 8.14: `strlen($s)` of an untyped `$s` keeps the call's own reach to `__toString`
+    // under coercive typing, and the string conversion of its `int` result runs nothing.
+    let s = summary(&file(false, "$s", "return 'x' . strlen($s);"), "f");
+    assert!(!s.exhaustive && s.gaps == ["user-code-reach"], "{s:?}");
+}
+
 /// `vsprintf` stays uncertified (issue #991: `%f`, `%g` and `%G` read
 /// `LC_NUMERIC`), so even an object-free call keeps its `no-effect-row`.
 #[test]

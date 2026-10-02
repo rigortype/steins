@@ -592,10 +592,22 @@ pub enum ArgShape {
     /// holds a value of its type on every read, the value a `__get` returns
     /// for an unset one included, which the engine checks against the type.
     ThisProperty(String),
-    /// Anything else: a call, a property of another object, a constant, a
-    /// variable some write of the frame stores an unknown value into, or one
-    /// a frame imports or aliases.
+    /// Anything else: a call the two variants below do not name, a property of
+    /// another object, a constant, a variable some write of the frame stores an
+    /// unknown value into, or one a frame imports or aliases.
     Unknown,
+    /// The result of a plain call `f(...)` by a name the scan can spell (issue
+    /// #877). The syntax crate cannot consult the catalog or the project, so the
+    /// shape names the callee and the engine reads what its declared return holds
+    /// (a builtin's mined row, a project function's native hint). Appended
+    /// **after** [`Self::Unknown`] so no persisted variant index moves.
+    Call(NameRef),
+    /// The result of a method or static call `$r->m(...)`, `Foo::m(...)`,
+    /// `(new Foo)->m(...)` whose receiver the scan names as a method-call site's is
+    /// ([`EffectRecv`]), read like [`Self::Call`] off the declared return of the
+    /// method that receiver reaches. A `?->` call is [`Self::Unknown`], as it
+    /// records no site receiver. Appended after [`Self::Call`].
+    MethodCall { receiver: EffectRecv, method: String },
 }
 
 /// What every write a frame makes to a variable is shown to store (an

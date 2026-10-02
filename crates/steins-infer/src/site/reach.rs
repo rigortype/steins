@@ -11,6 +11,8 @@
 //! ([`Held`]) or, for a coerced `string` parameter only, by the calling file's
 //! `declare(strict_types=1)`.
 
+mod call_result;
+
 use std::cell::OnceCell;
 use std::collections::HashSet;
 
@@ -72,6 +74,10 @@ impl<'a> Frame<'a> {
             }
             ArgShape::Local { name, stores } => self.variable_held(cx, name, *stores),
             ArgShape::ThisProperty(name) => this_property_held(cx, self.class_fqn, name),
+            ArgShape::Call(name) => call_result::function_result(cx, name),
+            ArgShape::MethodCall { receiver, method } => {
+                call_result::method_result(cx, self, receiver, method)
+            }
             ArgShape::Unknown => Held::Unknown,
         }
     }

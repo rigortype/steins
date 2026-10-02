@@ -468,7 +468,7 @@ fn offset_value(
 ) {
     let Expression::ArrayAccess(aa) = target.unparenthesized() else { return };
     let (shape, receiver) = match value {
-        Some(v) => (arg_shape(v, &sx.cx.bindings), effect_recv_of_object_declared(v, sx.cx)),
+        Some(v) => (arg_shape(v, sx.cx), effect_recv_of_object_declared(v, sx.cx)),
         None => (ArgShape::Unknown, None),
     };
     if holds_no_object(C::OffsetValue, &shape) {
@@ -562,7 +562,7 @@ fn push_at(
     sx: &SiteScope<'_>,
     out: &mut Vec<SiteOrigin>,
 ) {
-    let shapes: Vec<ArgShape> = operands.iter().map(|e| arg_shape(e, &sx.cx.bindings)).collect();
+    let shapes: Vec<ArgShape> = operands.iter().map(|e| arg_shape(e, sx.cx)).collect();
     if shapes.iter().all(|shape| holds_no_object(construct, shape)) {
         return;
     }

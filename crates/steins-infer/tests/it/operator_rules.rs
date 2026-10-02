@@ -543,3 +543,159 @@ fn the_unknown_operand_gap_survives_through_a_caller() {
     assert_eq!(gaps(&src, "g"), [TO_STRING]);
     assert_eq!(gaps(&src, "f"), [TO_STRING]);
 }
+
+// ---- a call result is read off its declared return (S8, issue #877) ----------
+
+/// The classes and helpers the S8 rows name: `S` converts to a string with an effect;
+/// a project function whose native return is a string, one with none, one returning
+/// `S`; a final and a non-final class with a `string`-returning method.
+const RETURNS: &str = "class S { public function __toString(): string { echo 's'; return '8'; } }\n\
+    function helper_string(string $x): string { return $x . '!'; }\n\
+    function helper_untyped($x) { return $x; }\n\
+    function helper_object(): S { return new S; }\n\
+    final class Acc { public function name(): string { return 'n'; } }\n\
+    class OpenAcc { public function name(): string { return 'n'; } }\n";
+
+fn returns(function: &str) -> String {
+    file(RETURNS, function)
+}
+
+/// The effect lane's and the throw lane's gap kinds, which differ where only one
+/// of them has a row to miss.
+fn lane_gaps(src: &str, symbol: &str) -> (Vec<&'static str>, Vec<&'static str>) {
+    let s = summary(src, symbol);
+    (s.gaps, s.throws_gaps)
+}
+
+/// Rows 8.1, 8.2, 8.5: a builtin's mined return holds no object, so the string
+/// conversion of its result runs nothing. The classifier reads the phpdoc-shaped
+/// spelling: `int<1, max>|0`, `uppercase-string`, `non-empty-string|false`.
+#[test]
+fn s8_a_builtins_scalar_return_runs_nothing_at_a_string_conversion() {
+    covered(&returns("function f(string $s) { return 'x' . strlen($s); }"), "f");
+    covered(&returns("function f(string $s) { return 'x' . strtoupper($s); }"), "f");
+    covered(&returns("function f() { return 'x' . json_encode(['a' => 1]); }"), "f");
+    covered(&returns("function f(string $s) { return \"v: {$s}\" . trim($s) . intdiv(3, 2); }"), "f");
+    // A comparison reads an array's elements, so a scalar result is enough and an
+    // array one is not: `array_keys` is `list<int|string>`, which holds no object.
+    covered(&returns("function f(array $a) { return array_keys($a) == 'x'; }"), "f");
+    gap(&returns("function f(array $a) { return array_values($a) == 'x'; }"), "f", TO_STRING);
+}
+
+/// Row 8.13 and the rows a builtin's declared return does not rule out: `mixed`, a
+/// class (`GMP`, row 8.11) and an unmodeled spelling stay a gap.
+#[test]
+fn s8_a_builtins_object_or_mixed_return_is_still_unknown() {
+    for call in ["current($a)", "json_decode('1')", "date_create()", "gmp_init(5)"] {
+        let src = returns(&format!("function f(array $a) {{ return 'x' . {call}; }}"));
+        assert_eq!(operator_gaps(&src, "f"), [TO_STRING], "{call}");
+    }
+    let gmp = lane_gaps(&returns("function f() { return 'n=' . gmp_init(5); }"), "f");
+    assert_eq!(gmp, (vec!["no-effect-row", TO_STRING], vec!["no-throw-row", TO_STRING]));
+}
+
+/// Rows 8.6, 8.7 and 8.10: a project function's or an exact method's native return.
+/// A hint that admits a class, or no hint, proves nothing.
+#[test]
+fn s8_a_project_functions_native_return_decides() {
+    covered(&returns("function f(string $s) { return 'x' . helper_string($s); }"), "f");
+    covered(&returns("function f() { return 'x' . (new Acc())->name(); }"), "f");
+    gap(&returns("function f($x) { return 'x' . helper_untyped($x); }"), "f", TO_STRING);
+    gap(&returns("function f() { return 'x' . helper_object(); }"), "f", TO_STRING);
+    let hints = "function r_opt(): ?string { return null; }\n\
+        function r_arr(): array { return []; }\n\
+        function r_union(): int|string|null { return 1; }\n\
+        function r_iter(): iterable { return []; }\n\
+        function r_mixed(): mixed { return 1; }\n\
+        function r_void(): void {}\n\
+        function r_iface(): \\Stringable { return new S(); }";
+    for call in ["r_opt()", "r_arr()", "r_union()"] {
+        let src = file(&format!("{RETURNS}{hints}"), &format!("function f() {{ return 'x' . {call}; }}"));
+        covered(&src, "f");
+    }
+    for call in ["r_iter()", "r_mixed()", "r_void()", "r_iface()"] {
+        let src = file(&format!("{RETURNS}{hints}"), &format!("function f() {{ return 'x' . {call}; }}"));
+        gap(&src, "f", TO_STRING);
+    }
+}
+
+/// A namespaced function that shadows a builtin is the one PHP calls, and a
+/// conditional declaration binds by load order: neither is the builtin's row.
+#[test]
+fn s8_a_call_php_may_bind_elsewhere_proves_nothing() {
+    let shadowed = "<?php\nnamespace App;\nclass S { public function __toString(): string { echo 's'; return '8'; } }\n\
+        function strlen(string $s): S { return new S(); }\n\
+        function f(string $s) { return 'x' . strlen($s); }\n";
+    gap(shadowed, "f", TO_STRING);
+    let conditional = "<?php\nclass S { public function __toString(): string { echo 's'; return '8'; } }\n\
+        if (!function_exists('cond')) { function cond(): string { return 's'; } }\n\
+        function f() { return 'x' . cond(); }\n";
+    gap(conditional, "f", TO_STRING);
+}
+
+/// Row 8.8: a final engine accessor holds a string, in both lanes; the throw lane's
+/// `declared-receiver` (the interface envelope it cannot read) stays.
+#[test]
+fn s8_a_final_engine_accessor_returns_a_string() {
+    let src = returns("function f(\\Throwable $e) { return 'x' . $e->getMessage(); }");
+    assert_eq!(lane_gaps(&src, "f"), (vec![], vec!["declared-receiver"]));
+    let exact = returns("function f() { return 'x' . (new \\RuntimeException('m'))->getMessage(); }");
+    assert!(operator_gaps(&exact, "f").is_empty());
+    // `getTrace()` is an array that may hold objects: not an object itself.
+    let trace = returns("function f(\\Throwable $e) { return 'x' . $e->getTrace(); }");
+    assert!(!lane_gaps(&trace, "f").0.contains(&TO_STRING));
+    // Any other engine method on a bound receiver may be a userland override of a
+    // tentative return type: `Countable::count()` returns whatever the class does.
+    let count = returns("function f(\\Countable $c) { return 'x' . $c->count(); }");
+    assert!(lane_gaps(&count, "f").0.contains(&TO_STRING));
+    // An exact engine receiver runs the engine's own method.
+    let iterator = returns("function f() { return 'x' . (new \\ArrayIterator([1]))->count(); }");
+    assert!(operator_gaps(&iterator, "f").is_empty());
+}
+
+/// Row 8.15: a bound receiver's method with a native return holds that type under
+/// every subclass, since PHP refuses a non-covariant override; the call's own gap
+/// (`declared-receiver`, `non-final-this`) stays, and only the operator's goes.
+#[test]
+fn s8_a_bound_receivers_native_return_binds_every_subclass() {
+    let src = returns("function f(OpenAcc $a) { return 'x' . $a->name(); }");
+    assert!(operator_gaps(&src, "f").is_empty());
+    assert_eq!(lane_gaps(&src, "f").1, ["declared-receiver"]);
+    let this = "class K { public function name(): string { return 'k'; }\n\
+        public function m() { return 'x' . $this->name(); } }";
+    assert!(operator_gaps(&returns(this), "K::m").is_empty());
+    let untyped = "class K { public function name() { return 'k'; }\n\
+        public function m() { return 'x' . $this->name(); } }";
+    assert_eq!(operator_gaps(&returns(untyped), "K::m"), [TO_STRING]);
+    let object = "class K { public function me(): static { return $this; }\n\
+        public function m() { return 'x' . $this->me(); } }";
+    assert_eq!(operator_gaps(&returns(object), "K::m"), [TO_STRING]);
+    let iface = "interface HasName { public function name(): string; }";
+    let src = file(&format!("{RETURNS}{iface}"), "function f(HasName $h) { return 'x' . $h->name(); }");
+    assert!(operator_gaps(&src, "f").is_empty());
+}
+
+/// A method the enclosing scope cannot reach is `__call`'s, which may return an
+/// object whatever the hidden method's hint says.
+#[test]
+fn s8_a_method_the_scope_cannot_reach_proves_nothing() {
+    let hidden = "class Priv { private function secret(): string { return 's'; }\n\
+        public function __call($n, $a) { return new S(); } }\n\
+        function outside(Priv $p) { return 'x' . $p->secret(); }";
+    assert!(lane_gaps(&returns(hidden), "outside").0.contains(&TO_STRING));
+    // Inside the class the private method is the one called.
+    let inside = "class Priv { private function secret(): string { return 's'; }\n\
+        public function m() { return 'x' . $this->secret(); } }";
+    covered(&returns(inside), "Priv::m");
+}
+
+/// Rows 8.9 and 8.12: an untyped operand and arithmetic stay a gap (the arithmetic
+/// sub-slice of #877 is deferred: `GMP` and `BcMath\Number` overload it).
+#[test]
+fn s8_an_untyped_operand_and_arithmetic_stay_a_gap() {
+    gap(&returns("function f($x) { return 'x' . $x; }"), "f", TO_STRING);
+    gap(&returns("function f(int $n) { return 'n=' . ($n * 2); }"), "f", TO_STRING);
+    // A local assigned from a call is not read either: the syntax pass cannot ask
+    // the catalog what the call returns.
+    gap(&returns("function f(string $s) { $t = trim($s); return 'x' . $t; }"), "f", TO_STRING);
+}
