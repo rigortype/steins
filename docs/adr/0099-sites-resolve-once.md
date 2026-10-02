@@ -444,3 +444,121 @@ that run add their own dated sections.
      `\Dom\DOMException` parameter, and `throw.undeclared` for a `\DOMException` caught by
      `catch (\Dom\DOMException)`. A follow-up issue tracks it; it needs the two names to agree in
      the is-a walk and in catch matching, which this slice does not model.
+
+## Amendment (2026-10-03): names that convert, offset-write values and property hooks outside an explicit write are sites (#880, #875) — PENDING ratification
+
+**Status: proposed 2026-10-03; pending ratification.** This amendment is slice S4 of the run
+tracked in #915. It closes §7.6 and amends §4.2, §4.3 and §4.4; the coercion at user boundaries
+(§4.6, §7.5) and the destructors (§7.1) are other slices' sections and stay as they are. Every
+witness below was run on PHP 8.5.11, in a file with `strict_types=1` and in one without: none of
+the three conversions depends on the calling file's mode.
+
+### §4.3, a Name row: the names and values the engine converts to a string
+
+The ToString family gains two forms, both resolved by the family's existing rule
+(`string_conversion`, no new gap kind): an operand shown not to be an object runs nothing; an
+exact class with no `__toString` runs nothing; an exact class with one is an edge; a bound, an
+unknown class or an operand nothing names is `operator-to-string`.
+
+- **A name** is converted: a dynamic property name (`$o->$n`, `$o->{$e}`, `$o?->$n`, as a read, a
+  write, `isset`, `unset`), a variable-variable name (`$$n`, `${$e}`, `$$$n`) and a static
+  property's name (`P::$$n`). The operand is the name expression. A dynamic *method* name is not
+  one: `$o->$n()` with an object `$n` raises `Error: Method name must be a string`, and it is a
+  dynamic callee already (§4.1). `$$n` is lowered by the site scan on the variable node, so every
+  context that carries one (a read, an assignment target, `isset`, a static property's name) has
+  the site. Reading `$$n` puts the frame on ADR-0001's give-up list, where no variable of the frame
+  is shown to hold anything: `string $n` is not shown a string there, since `$$m = new S` can
+  rebind it, and the name is a gap, as every other operator site over a variable of such a frame
+  already is.
+- **An offset write's value** is converted when the container is a string: `$s = 'abc'; $s[0] =
+  new S;` runs `S::__toString` and stores its first byte. The rule is *not* "a string-offset write",
+  which cannot be told from an array write syntactically (the container's shape is
+  [`ArgShape::ObjectFree`] for a string and for an array of scalars alike). It is: a site over the
+  value of every `$c[k] = v` (and every destructuring or `foreach` target `$c[k]`, whose value is
+  unknown) whose value is not shown object-free and whose container is **not shown to hold no
+  string**. A container is shown that way, and the site is ruled out, when it is a parameter whose
+  declared type admits no `string`, `mixed` or `callable` (`array`, `?array`, a class, `iterable`,
+  `int`), a local every whole-variable write of which is an array, `null`, a number, a boolean or an
+  object (`$a = []`, `$o = new Foo`; never `'abc'`, a call, another variable, `.=`, a destructuring
+  target or a `foreach` binding), or `$this->p` declared with such a type and not hooked, each only
+  while no call of the frame may take the variable by reference. An `ArrayAccess` object is such a
+  container: `offsetSet` receives the value and converts nothing (`ArrayAccess` is §4.3's own row).
+  An append `$c[] = v` is never a site: on a string it is a fatal error, not a conversion
+  (witnessed). A container that is an element (`$a['x']['y'] = $o`, where `$a['x']` may hold a
+  string), a call result or another object's property is not shown, so it is a site.
+- **Resolution.** `OperatorConstruct::Name` has one operand; `OperatorConstruct::OffsetValue` has
+  two, the value and the container, and the resolver rules the site out through the container
+  before it asks the family anything. A written local such as `$n = new S` is not an exact `S`: the
+  walk is flow-insensitive and names a class only for a `new` written at the site, a final class or
+  a never-written parameter, as for every other ToString operand, so `(new P)->$n` with `$n = new S`
+  is `operator-to-string`, and so is the same shape with `new N`.
+
+### §4.3, a promoted-hook site, and §4.2, hooked chains
+
+- **A hooked promoted parameter is a MagicProp `Write` site on `$this`** in the constructor's own
+  row, named by the parameter (`__construct(public string $p { set { … } })`), placed before the
+  body's sites because promotion runs before the first statement. It resolves as an explicit
+  `$this->p = …` does: the hooked property is `operator-magic-property`. The gap sits in the
+  constructor's row and reaches every `new` and `parent::__construct` through the ordinary edge, so
+  the constructor itself no longer reads exhaustive. A promoted parameter with no hook is not a
+  site; the question of a *subclass's* hook over an inherited, unhooked promoted property is left
+  open below.
+- **A chain that leaves the project at an engine class and carries a hooking project class is a
+  `operator-magic-property` gap beside the engine row** (§4.2's per-method rows are unchanged). The
+  engine's constructors write the properties of their own class (`Exception::__construct` sets
+  `$message`, `$code`, `$previous`) and its accessors read them (`getMessage()`), so a hook the
+  subclass declares on any of them runs in the engine's code. It applies to `new Sub(…)` and
+  `parent::__construct(…)` in both lanes, and to a method call that reaches an engine row in the
+  effect lane (the throw lane's method calls have no row and are a gap already). Which property the
+  engine touches is not read: any hook on the chain counts. For a `new` the class is exact, so the
+  chain alone decides; for `parent::__construct`, `$this->m()`, `parent::m()` and a declared receiver
+  the object is the enclosing class, a subclass of it or any class the declared type bounds, which
+  §4.4's gate answers.
+
+### §4.4, the universe gate through `is_a`
+
+`subclass_adds_property_magic` asks whether `Chain::of(sub).has(class)`, and a chain never lists an
+engine ancestor (`Throwable`, `Exception`), so for a receiver bound by an engine class the answer
+was always no. The gate for a hook on any property is therefore asked of the supertype walk: some
+class in `magic_property_classes` that hooks a property or imports a trait (whose body is not
+lowered) **is** the bound (`is_a` is `Yes`), or an anonymous class extends something that is. The
+bound is the receiver's own class, not the engine class the chain exits at: `$this->getMessage()` in
+a `LogicException` subclass is not charged for a hooking `RuntimeException`. A class whose chain
+leaves the universe before it reaches the bound (`Unknown`) does not count, as in `Chain::has`: it
+is §7.2's open question, and counting it charged every site for every class whose parent a
+vendor-less checkout lacks (measured: it made 406 public-corpus bodies gain the kind, 5 once corrected).
+
+### §7.6 closed, and what it leaves open
+
+All three places §7.6 named are sites: the offset write's value, the dynamic names, and the
+promoted parameter's hook. Left open, each witnessed:
+
+- **A subclass's hook over an inherited, unhooked promoted property.** `class Sub extends Base {
+  public string $p { set { echo '…'; } } }` with `Base::__construct(public string $p)` runs the hook
+  at `new Sub('x')`. A promoted parameter with no hook is no site, so `Base::__construct` reads
+  exhaustive. Lowering one MagicProp `Write` site for every promoted parameter would give the
+  explicit write's §4.4 gate; the public corpora hold 4,554 constructors with 9,603 promoted
+  parameters, none hooked, so the sites would cost payload and resolution for a gate that fires on a
+  hook nobody there declares. Decided against here, not measured as a gap.
+- **A hook a trait declares.** A trait's body is not lowered; a class importing one is counted by
+  the universe gate and its chain is not closed, but a hook the trait declares on a property an
+  engine class writes is not looked for in the trait itself.
+- **A destructuring or `foreach` target that is an offset** is a site with an unknown value, which
+  over-reports (`foreach ($rows as $a[$k])` over an array container the scan cannot show).
+
+### What moves (public corpora, `check --profile strict`, `--no-cache --no-php`)
+
+On the ten public packages (28,847 functions) no body loses exhaustiveness in either lane (the 366
+bodies that gain a kind were already `…?`), no proven label moves, `effect-diff` reports no event,
+and the `effects-envelope`, `throws-envelope` and `loop-to-array-map` dry-runs are byte-identical per
+package (723, 1,934 and 0 edits). 361 functions gain `operator-to-string` in both lanes: 202 carry the
+construct in their own body (an offset write 187, a dynamic name 14, both 1, classified by reading
+the body) and 159 inherit it through an edge. Five gain `operator-magic-property`: two `Chronos`
+methods and `CarbonTimeZone::__construct` (an engine constructor or `createFromFormat` reached on a
+`$this` whose class imports a trait) and two `writeError` methods that call `getMessage()` on a
+declared `\Exception`, in a universe where a class importing a trait is an `Exception`. At `strict`,
+`throw.maybe-undeclared` gains 50 findings, one per new (site, kind), and rewords 18 whose kind list
+grew without a new site: 49 are `operator-to-string` (47 at an offset write, 2 at a dynamic name) and
+1 is `operator-magic-property` (`parent::__construct` into `DateInterval`); the count rows of
+`possibly_expected.toml` are reseeded by that delta. The public corpora declare no property hook, so
+the hook rows move nothing there, and the one place a hook gap appears is the trait case above.

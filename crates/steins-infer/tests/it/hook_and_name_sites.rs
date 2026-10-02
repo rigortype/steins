@@ -290,3 +290,39 @@ fn a_universe_with_no_hooking_exception_leaves_the_accessor_exhaustive() {
     let s = summary(src, "g");
     assert!(s.exhaustive, "{s:?}");
 }
+
+#[test]
+fn a_trait_importing_exception_is_a_possible_hook_and_one_the_universe_cannot_place_is_not() {
+    // A trait's body is not lowered, so a class importing one may hook a property.
+    let traity = "<?php\ntrait T {}\nclass Tx extends RuntimeException { use T; }\n\
+        function g(Throwable $e) { return $e->getMessage(); }\n";
+    assert_eq!(summary(traity, "g").gaps, [PROPERTY]);
+    // A class whose parent the universe does not hold is not shown to be a `Throwable`:
+    // the same open question as §4.4's subclasses outside the universe.
+    let unplaced = "<?php\ntrait T {}\nclass U extends \\Vendor\\Base { use T; }\n\
+        function g(Throwable $e) { return $e->getMessage(); }\n";
+    assert!(summary(unplaced, "g").exhaustive);
+    // An anonymous class extending the exception class counts as well.
+    let anonymous = "<?php\nclass Ax extends RuntimeException {}\n\
+        function make() { return new class('x') extends Ax {}; }\n\
+        function g(Ax $e) { return $e->getMessage(); }\n";
+    assert_eq!(summary(anonymous, "g").gaps, [PROPERTY]);
+}
+
+#[test]
+fn this_in_a_project_exception_is_bounded_by_its_own_subclasses_only() {
+    // `$this->getMessage()` runs the engine's accessor on `$this`: a subclass of the
+    // enclosing class that hooks `$message` runs the hook (witnessed), one that is not a
+    // subclass of it cannot be `$this`.
+    let own = "class MyEx extends RuntimeException { function m() { return $this->getMessage(); } }";
+    let (effects, _) = lanes(own, "MyEx::m");
+    assert_eq!(effects, Vec::<&str>::new());
+    let sub = "class MyEx extends RuntimeException { function m() { return $this->getMessage(); } }\n\
+        class Hooked extends MyEx { protected $message { get => 'g'; } }";
+    let (effects, _) = lanes(sub, "MyEx::m");
+    assert_eq!(effects, [PROPERTY]);
+    // A final class has no subclass: only its own chain counts.
+    let sealed = "final class FinalEx extends RuntimeException { function m() { return $this->getMessage(); } }";
+    let (effects, _) = lanes(sealed, "FinalEx::m");
+    assert_eq!(effects, Vec::<&str>::new());
+}

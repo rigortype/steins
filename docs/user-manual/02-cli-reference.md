@@ -660,8 +660,12 @@ the kinds that make it `…?`. The kinds are `dynamic-callee`, `unknown-class`,
 `operator-to-string`, `operator-magic-property`, `operator-array-access`,
 `operator-iteration`, `operator-clone` and `destructor` (`operator-…` is an
 operator whose operand's class the analysis cannot pin: `.`, `echo`, `$o->p`,
-`$o['k']`, `foreach`, `clone`; `destructor` is a value that may run `__destruct`
-when dropped).
+`$o['k']`, `foreach`, `clone`; the name of a dynamic property, `$o->$n`, and
+the value of an offset write into something that may be a string, `$s[0] = $o`,
+are `operator-to-string`, and a property hook the engine's own code can run, in
+an inherited exception constructor or `getMessage()`, or that a promoted
+constructor parameter declares, is `operator-magic-property`; `destructor` is a
+value that may run `__destruct` when dropped).
 
 > **If you know PHPStan or Psalm:** this is the batch answer to what you get
 > from sprinkling `\PHPStan\dumpType()` and rerunning — a whole file's

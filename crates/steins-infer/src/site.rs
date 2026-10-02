@@ -256,9 +256,7 @@ impl GapKind {
             Self::OperatorToString => {
                 "an operand may be an object whose `__toString` the site cannot pin"
             }
-            Self::OperatorMagicProperty => {
-                "a property access, or the engine's code on a hooked chain, may run `__get`, `__set` or a hook"
-            }
+            Self::OperatorMagicProperty => "a property access may run `__get`, `__set` or a hook",
             Self::OperatorArrayAccess => "an offset access may run `ArrayAccess` methods",
             Self::OperatorIteration => "an iterated operand may run `Traversable` methods",
             Self::OperatorClone => "a cloned operand may run `__clone`",
