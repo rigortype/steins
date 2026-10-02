@@ -851,6 +851,31 @@ mod tests {
         assert!(certainty_of(3).is_none(), "the closed set is three values wide");
     }
 
+    /// The byte-lossy name mark (issue #927) is a fact about the file's bytes and rides the
+    /// payload, so a warm run that never decodes the tree still skips the file; a file that
+    /// was valid UTF-8 carries no mark, a genuine U+FFFD in a name included.
+    #[test]
+    fn the_byte_lossy_name_mark_survives_the_payload() {
+        let facts_of = |tree: &SourceTree| {
+            let lazy = crate::project::LazyTree::borrowed(tree);
+            let units = [FileUnit { path: "src/a.php", tree: &lazy }];
+            let index = Index::from_units(&units);
+            let mut facts = vec![FileFacts::from_tree("src/a.php", tree)];
+            fill_rows(&mut facts, &units, &index, &PluginFacts::none(), &EffectsPolicy::none());
+            facts.pop().expect("one file")
+        };
+        let (text, loss) = steins_syntax::decode_source(b"<?php class A\xC9 {}\n".to_vec());
+        let lossy = facts_of(&SourceTree::parse_with_loss(&text, loss.as_ref()));
+        assert!(lossy.names_lossy);
+        let decoded = read_facts(&facts_payload(&lossy)).expect("the payload decodes");
+        assert!(decoded.names_lossy);
+        assert_eq!(decoded, lossy);
+
+        let valid = facts_of(&SourceTree::parse("<?php class A\u{FFFD} {}\n"));
+        assert!(!valid.names_lossy);
+        assert!(!read_facts(&facts_payload(&valid)).expect("decodes").names_lossy);
+    }
+
     /// The include target is resolved at write time and the universe test is
     /// not — the split ADR-0049 A5's reading needs.
     #[test]
