@@ -41,10 +41,9 @@ every difference classified (cause, count, two examples).
 
 ## Your report
 
-Write the full report to `report.md` in your scratch directory: branch and
-commits; what changed, by file and function; tests added; the witness table
-with each row's outcome; the A/B table with each difference classified; gate
-results; and plainly, what you did not measure or were unsure of.
-
-Return at most 30 lines: branch and head commit, status (done or blocked, and
-on what), the headline numbers, anything unmeasured, and the report's path.
+Return at most 30 lines: branch and head commit; status (done, or blocked and
+on what); what changed, by file; the witness table's outcome, naming any
+must-stay row that moved; the A/B headline with each difference class; gate
+results; and plainly, what you did not measure or were unsure of. Redirect
+every test run, witness run and A/B diff to a log in your scratch directory as
+you go, and name the logs the orchestrator would open.

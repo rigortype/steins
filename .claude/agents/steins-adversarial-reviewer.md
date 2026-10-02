@@ -35,6 +35,7 @@ what you verified as correct, and one verdict: approve, approve-with-fixes, or
 reject. A false positive, a lost soundness check, a persisted-format change
 without its bump, or a regression against the base is a blocker.
 
-Write all of that to `review.md` in your scratch directory. Return at most 30
-lines: the verdict, each blocker and should-fix in one line, the witness rows
-you added, and the file's path.
+Return at most 30 lines: the verdict, each blocker and should-fix in one line
+with its evidence pointer, the witness rows you added, and what you verified.
+Keep the witness snippets and both outputs as files in your scratch directory
+and name them.
