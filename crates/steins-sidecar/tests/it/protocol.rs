@@ -1008,6 +1008,32 @@ impl Drop for Shim {
     }
 }
 
+/// An interpreter that is still open for writing when the spawn starts is
+/// busy to `exec` on Linux (`ETXTBSY`, issue #910), and a spawn rides that out:
+/// the writer here closes after 30 ms, the retries span about 150 ms. Without
+/// the retry this fails every time, not intermittently. Other kernels do not
+/// refuse the `exec`, so there is nothing to ride out there.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_interpreter_busy_for_writing_is_waited_out() {
+    let Some(shim) = Shim::new("an_interpreter_busy_for_writing", |_| {
+        "exec \"$REAL\" \"$@\"".to_owned()
+    }) else {
+        return;
+    };
+    let writer = std::fs::OpenOptions::new()
+        .write(true)
+        .open(shim.dir.join("php"))
+        .expect("hold the shim open for writing");
+    let closer = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(30));
+        drop(writer);
+    });
+    let mut sc = Sidecar::spawn_with(&shim.php()).expect("a busy interpreter is waited out");
+    closer.join().expect("the closer thread");
+    assert!(sc.env().is_some(), "the interpreter that was busy answers");
+}
+
 /// The boot is slower than the request budget, and costs nothing: the child
 /// answers, no death is charged.
 #[cfg(unix)]
