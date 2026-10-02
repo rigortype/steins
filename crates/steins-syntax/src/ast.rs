@@ -2788,20 +2788,21 @@ pub enum StmtKind {
     /// A walker still gets everything else a `while` gives it: the same sets, the
     /// same entry forgetting, `break_free`, and a body to walk.
     ///
-    /// `continue_free` is the one fact a `while` has no use for (issue #679). The
+    /// `nested_jumps_only` is the one fact a `while` has no use for (issue #679). The
     /// body runs at least once, so a body that terminates on every path decides the
-    /// construct's successor — provided none of those paths is a jump that comes
-    /// back to it. A `break` of this loop lands on the successor, and `break_free`
-    /// already rules that out; a `continue` of this loop lands on the condition,
-    /// which may then fail and fall through. `continue_free` is `true` when no
-    /// `continue` in the body targets THIS loop: `continue N` at `N == depth + 1`,
-    /// counting `depth` as `break_free` does (a bare `continue` inside a nested
-    /// `switch` is that switch's), and a non-literal level as the worst case.
+    /// construct's successor — provided none of those paths is a jump that comes back
+    /// to it (a `break` of this loop lands on the successor, a `continue` of it on the
+    /// condition). It is `true` when the body holds no `goto` and every
+    /// `break`/`continue` in it has the literal level 1 and sits inside a nested loop
+    /// or `switch`; it implies `break_free`. Multi-level jumps out of a nested loop are
+    /// refused as well, because the walker's structured `switch` and the presence pass
+    /// credit a jump to the innermost breakable and mis-credit those (#904); once they
+    /// count levels, this relaxes to "`break_free` and no `continue` of this loop".
     DoWhile {
         cond: CondExpr,
         body: Vec<Stmt>,
         break_free: bool,
-        continue_free: bool,
+        nested_jumps_only: bool,
         writes: Vec<String>,
         reads: Vec<String>,
         poisons: bool,

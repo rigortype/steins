@@ -13,9 +13,7 @@ use mago_syntax::cst::{
 
 use crate::ast::{Comment, CommentKind, UndefinedRead, UnsetSeedFacts, UnsetSeedRead};
 use crate::lower_scope::{VarUsage, bind_lvalue_roots, scan_var_usage};
-use crate::lower_stmt::{
-    body_is_break_free, body_is_continue_free, expr_is_false, expr_is_true, stmt_end,
-};
+use crate::lower_stmt::{body_has_nested_jumps_only, expr_is_false, expr_is_true, stmt_end};
 use crate::memo;
 use crate::{bytes_to_string, strip_dollar, to_span};
 
@@ -349,9 +347,8 @@ where
 /// never evaluates the condition and never reaches the successor, so the construct
 /// answers [`PresenceFlow::Terminated`] and a branch join subtracts it like a
 /// `return`. This pass credits every `break`/`continue` to the innermost loop
-/// whatever its level, so the lowering's level-counting scans
-/// ([`body_is_break_free`], [`body_is_continue_free`]) gate it as they gate the
-/// walker's `do_while_flow`.
+/// whatever its level (#904), so the lowering's [`body_has_nested_jumps_only`]
+/// gates it as it gates the walker's `do_while_flow`.
 fn presence_do_while(
     d: &mago_syntax::cst::DoWhile<'_>,
     state: &mut PresenceState,
@@ -360,10 +357,8 @@ fn presence_do_while(
     let body = std::slice::from_ref(d.statement);
     let entry = state.clone();
     let exits = presence_loop_body(body, &entry, cx);
-    let terminates = exits.broke.is_empty()
-        && !exits.reaches_back_edge
-        && body_is_break_free(body)
-        && body_is_continue_free(body);
+    let terminates =
+        exits.broke.is_empty() && !exits.reaches_back_edge && body_has_nested_jumps_only(body);
     *state = join_loop_exit(&entry, exits, true);
     if terminates {
         return PresenceFlow::Terminated;
