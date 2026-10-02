@@ -416,8 +416,8 @@ pub struct MergedTables {
 ///
 /// A **candidate-set fixpoint**, never call order. A textual name's identity set is
 /// itself; for every surviving edge, `cand[alias] ∪= ident(target)`, where
-/// `ident(t)` is `{t}` when `t` is a textual declaration (unique or ambiguous) and
-/// `cand[t]` otherwise. Sets only grow and are bounded by the textual names, so the
+/// `ident(t)` is `cand[t]`, plus `{t}` when `t` is a textual declaration (unique or
+/// ambiguous). Sets only grow and are bounded by the textual names, so the
 /// loop ends, and a cycle no declaration stands under ends with empty sets (the names
 /// stay absent). The result is a fact about the multiset of edges (ADR-0048).
 ///
@@ -443,11 +443,15 @@ pub fn fold_class_aliases<S: Copy>(
     loop {
         let mut grew = false;
         for &&(alias, target) in &edges {
-            let ident: Vec<String> = if textual(target) {
-                vec![target.to_owned()]
-            } else {
-                cand.get(target).map(|set| set.iter().cloned().collect()).unwrap_or_default()
-            };
+            // A declared name that an edge also names (`class_alias(Real::class,
+            // 'Shadow')` beside `if (false) { class Shadow {} }`) is itself and every
+            // class its own edges reach: it is ambiguous once finalized, so an alias of
+            // it may be any of them.
+            let mut ident: Vec<String> =
+                cand.get(target).map(|set| set.iter().cloned().collect()).unwrap_or_default();
+            if textual(target) {
+                ident.push(target.to_owned());
+            }
             let set = cand.entry(alias).or_default();
             for name in ident {
                 grew |= set.insert(name);

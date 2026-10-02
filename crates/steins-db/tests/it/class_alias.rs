@@ -261,3 +261,15 @@ fn a_textual_name_an_alias_also_names_is_ambiguous() {
     assert_eq!(kind(resolve(files, "Lib\\OldItem")), Kind::Ambiguous);
     assert_eq!(kind(resolve(files, "Lib\\NewItem")), Kind::Unique);
 }
+
+/// An alias of a declared name an edge also names may be any class that name can be:
+/// `Next` is ambiguous, with both candidates, not `Shadow`'s declaration alone.
+#[test]
+fn an_alias_of_a_shadowed_alias_is_ambiguous() {
+    let files = &[(
+        "a.php",
+        "<?php\nclass Real {}\nclass_alias('Real', 'Shadow');\nif (false) { class Shadow {} }\nclass_alias('Shadow', 'Next');\n",
+    )];
+    assert_eq!(kind(resolve(files, "Shadow")), Kind::Ambiguous);
+    assert_eq!(kind(resolve(files, "Next")), Kind::Ambiguous);
+}
