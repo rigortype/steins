@@ -689,6 +689,31 @@ fn s8_a_method_the_scope_cannot_reach_proves_nothing() {
     covered(&returns(inside), "Priv::m");
 }
 
+/// An array result is no object: iterating it and reading an offset of it run nothing
+/// (neighbouring rows, the two largest classes the public corpora move). A result that
+/// may be an object, or holds no type, keeps the gap.
+#[test]
+fn s8_iterating_or_indexing_an_array_result_runs_nothing() {
+    let covered_ops = |function: &str, symbol: &str| {
+        let found = operator_gaps(&returns(function), symbol);
+        assert!(found.is_empty(), "{function}: {found:?}");
+    };
+    covered_ops("function f(string $s) { foreach (explode(',', $s) as $p) {} }", "f");
+    covered_ops("function f(string $s) { return explode(',', $s)[0]; }", "f");
+    covered_ops("function f(array $a) { foreach (array_map('trim', $a) as $k => $v) {} }", "f");
+    covered_ops(
+        "class K { private function parts(): array { return []; }\n\
+         public function f() { foreach ($this->parts() as $p) {} return $this->parts()[0]; } }",
+        "K::f",
+    );
+    let iterate = |call: &str| {
+        operator_gaps(&returns(&format!("function f($x, array $a) {{ foreach ({call} as $p) {{}} }}")), "f")
+    };
+    assert_eq!(iterate("current($a)"), [ITERATION]);
+    assert_eq!(iterate("helper_untyped($x)"), [ITERATION]);
+    assert_eq!(iterate("new_iterator()"), [ITERATION]);
+}
+
 /// Rows 8.9 and 8.12: an untyped operand and arithmetic stay a gap (the arithmetic
 /// sub-slice of #877 is deferred: `GMP` and `BcMath\Number` overload it).
 #[test]

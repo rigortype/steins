@@ -40,9 +40,37 @@ fn an_expression_qualifies_by_its_form() {
     use ArgShape::{Array, ObjectFree, Unknown};
     let args = "1, 'a', \"x{$v}\", 'a' . $v, $v === 1, !$v, (string) $v, isset($v), [1, ['k' => 2]]";
     assert_eq!(shapes("$v", &format!("g({args});")), vec![ObjectFree; 9]);
-    assert_eq!(shapes("$v", "g([$v], (array) $v, $v + 1, PHP_EOL, h(), $v ? 'a' : 'b');"), [
-        Array, Array, Unknown, Unknown, Unknown, ObjectFree
+    assert_eq!(shapes("$v", "g([$v], (array) $v, $v + 1, PHP_EOL, $v ? 'a' : 'b');"), [
+        Array, Array, Unknown, Unknown, ObjectFree
     ]);
+}
+
+/// A call result carries its callee (issue #877): the syntax crate cannot ask the
+/// catalog or the project what it returns, so the engine does. The receiver is
+/// spelled as a method-call site's is, and a callee the scan cannot name is unknown.
+#[test]
+fn a_call_result_names_its_callee() {
+    use steins_syntax::{EffectRecv, NameRef, RefKind};
+    let call = |name: &str| ArgShape::Call(NameRef { raw: name.to_owned(), kind: RefKind::Unqualified, offset: 0 });
+    let method = |receiver, name: &str| ArgShape::MethodCall { receiver, method: name.to_owned() };
+    let class = |name: &str| EffectRecv::ClassName(NameRef { raw: name.to_owned(), kind: RefKind::Unqualified, offset: 0 });
+    assert_eq!(shapes("$v", "g(h(), h($v));"), [call("h"), call("h")]);
+    assert_eq!(shapes("$v", "g(strlen($v));"), [call("strlen")]);
+    assert_eq!(shapes("$v", "g($this->m(), self::m(), parent::m(), Foo::m());"), [
+        method(EffectRecv::This, "m"),
+        method(EffectRecv::SelfKw, "m"),
+        method(EffectRecv::Parent, "m"),
+        method(class("Foo"), "m"),
+    ]);
+    assert_eq!(shapes("$v", "g((new Foo())->m());"), [method(class("Foo"), "m")]);
+    // A parameter nothing writes names its declared type; a written one, a
+    // dynamic callee, a dynamic method name and a null-safe call name nothing.
+    assert_eq!(shapes("Foo $r", "g($r->m());"), [method(EffectRecv::Var("r".to_owned()), "m")]);
+    assert_eq!(shapes("Foo $r", "$r = h(); g($r->m());"), [ArgShape::Unknown]);
+    assert_eq!(shapes("$f", "g($f());"), [ArgShape::Unknown]);
+    assert_eq!(shapes("Foo $r, $n", "g($r->$n());"), [ArgShape::Unknown]);
+    assert_eq!(shapes("?Foo $r", "g($r?->m());"), [ArgShape::Unknown]);
+    assert_eq!(shapes("$v", "g(static::m());"), [ArgShape::Unknown]);
 }
 
 #[test]
