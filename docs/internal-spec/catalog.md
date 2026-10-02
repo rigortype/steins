@@ -266,7 +266,7 @@ that a call is pure, and Decision 2's bar for an **empty** row is unchanged.
 | `sprintf`, `vsprintf` | `{global.read.setting.locale}` |
 | `printf`, `vprintf` | `{io.output.buffer, global.read.setting.locale}` |
 | `localeconv`, `nl_langinfo`, `strcoll` | `{global.read.setting.locale}` |
-| `setlocale` | `{global.write.setting.locale}` (the argument-blind row; `setlocale($c, '0')` is a query, narrowed later) |
+| `setlocale` | `{global.write.setting.locale, global.read}` (the argument-blind row: the write, and the environment block read for `''` and `null`, coarse until the env cell has a label; `setlocale($c, '0')` is a query, narrowed later) |
 
 `fprintf` and `vfprintf` still have no row. The rows are argument-blind and the
 read stands at every call until a call site reads a literal format with

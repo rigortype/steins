@@ -195,12 +195,17 @@ setting at all. Verified on PHP 8.5.11 and in php-src at the pinned commit.
 | `sprintf`, `vsprintf` | `{}` (via the allowlist; `vsprintf` uncatalogued) | `{global.read.setting.locale}` |
 | `printf`, `vprintf` | `{io.output.buffer}` | `{io.output.buffer, global.read.setting.locale}` |
 | `fprintf`, `vfprintf` | none | none; a stream writer's row is issue #989 |
-| `setlocale` | `{global.write}` | `{global.write.setting.locale}` |
+| `setlocale` | `{global.write}` | `{global.write.setting.locale, global.read}` |
 | `localeconv`, `nl_langinfo` | none | `{global.read.setting.locale}` |
 | `strcoll` | none | `{global.read.setting.locale}` (a call-site certified `string` pair, ADR-0021 §3) |
 
 `setlocale(LC_x, '0')` is a query. Narrowing it to the read at a literal `'0'`
-is cheap and is listed as D6; the argument-blind row is the write.
+is cheap and is listed as D6; the argument-blind row is the write. A locale of
+`''` or `null` also takes the name from the environment block
+(`putenv("LC_ALL=fr_FR.ISO8859-1"); setlocale(LC_ALL, "")` answers `fr_FR`,
+witnessed in review), which is a read; with no environment cell registered yet
+the row carries the coarse `global.read` beside the write, and that read narrows
+to the env cell's label when it lands (S6).
 
 ## 3. Decision: the printf family is decided lexically
 
@@ -234,7 +239,14 @@ has not landed: `format_reach` has no reader in `steins-infer` today, and
 `arity.rs`'s `printf_family_shape` is ADR-0078's slot counter. Until that seam
 exists, the row's label stands at every printf call, which is the sound side
 (a call reads the locale unless shown not to). When the seam lands, a literal
-`'%d-%s'` drops the read and is pure again, and `'%.2f'` keeps it.
+`'%d-%s'` drops the read and is pure again, and `'%.2f'` keeps it. Dropping
+the *locale* label is not the claim that the call reads no setting: a `%s` of a
+value that may be a float renders it through `precision`, and no other
+conversion does (witnessed with variable arguments, since 8.4 folds a literal
+`sprintf('%s', 1.5)` at compile time). Under D4, where builtin readers are
+coloured, that read is the `precision` cell's and the label is registered in
+the slice that colours its first row (§2.2), so S1 and S3 do not carry it and
+S3 must not treat `!reads_locale` as purity of the call.
 
 ### 3.3 The fold
 

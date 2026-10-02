@@ -384,8 +384,9 @@ fn str_pred_out(
         // NUMERIC is a SEPARATE, stricter question — [`sprintf_whole_numeric_conversion`]
         // answers it — forcing `StrPreds::NUMERIC` (closes to `NON_EMPTY` too) when
         // the WHOLE format is one admitted conversion. `b`/`d`/`o` are forced
-        // unconditionally (PHP's int cast cannot render anything but digits) for
-        // EITHER name — issue #41's `vsprintf('%d', $array)` row (`bug-7387.php`)
+        // unconditionally (PHP's int cast clamps to an integer, whose digits are all
+        // that is rendered; `b`/`o` with a precision are the exception, as their
+        // digits are truncated to it) for EITHER name — issue #41's `vsprintf('%d', $array)` row (`bug-7387.php`)
         // needs no look inside `$array` at all. `e`/`E`/`F`/`h`/`H` are forced only when
         // the paired value argument is provably an `int` — a float value could BE
         // `NAN`/`INF` — and only `sprintf` exposes that argument positionally;
@@ -651,7 +652,10 @@ fn sprintf_emits_a_literal(fmt: &[u8]) -> Option<bool> {
 ///
 /// `b`/`d`/`o` go through PHP's int cast (`zend_dval_to_lval`), which clamps any
 /// input to a definite, in-range integer, rendering only ASCII digits (and an
-/// optional leading `-`), so these three are admitted UNCONDITIONALLY:
+/// optional leading `-`), so these three are admitted UNCONDITIONALLY, with one
+/// exception: `b` and `o` **with a precision** are declined, because
+/// `php_sprintf_append2n` truncates their digits to it (`sprintf('%.0b', 5)` is
+/// `''`, `sprintf('%5.0o', 5)` is five spaces, `sprintf('%.3b', 5)` is `''`):
 ///
 /// ```text
 /// php -r 'var_dump(sprintf("%d", NAN));'        // "0"   (int-cast clamps; NUMERIC)
@@ -705,7 +709,9 @@ fn sprintf_whole_numeric_conversion(fmt: &[u8]) -> Option<u8> {
         i += 1;
     }
     // Precision: `.` optionally followed by digits.
+    let mut has_precision = false;
     if i < n && fmt[i] == b'.' {
+        has_precision = true;
         i += 1;
         while i < n && fmt[i].is_ascii_digit() {
             i += 1;
@@ -716,6 +722,12 @@ fn sprintf_whole_numeric_conversion(fmt: &[u8]) -> Option<u8> {
     // (whose `$` is never consumed by the loops above), a custom-pad quote — is
     // leftover content this whole-format claim cannot admit.
     if i + 1 != n {
+        return None;
+    }
+    // `%b` and `%o` go through `php_sprintf_append2n`, which truncates the digits
+    // to the precision: `sprintf('%.0b', 5)` is `''` and `sprintf('%5.0o', 5)` is
+    // five spaces, neither numeric. `%d` pads a number and never truncates it.
+    if has_precision && matches!(fmt[i], b'b' | b'o') {
         return None;
     }
     matches!(fmt[i], b'b' | b'd' | b'o' | b'e' | b'E' | b'F' | b'h' | b'H').then_some(fmt[i])

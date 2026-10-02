@@ -657,11 +657,22 @@ fn sprintf_never_forces_numeric_from_the_locale_dependent_conversions() {
     }
 }
 
-/// The int-cast trio is unmoved by the locale restriction.
+/// The int-cast conversions keep `NUMERIC` under the locale restriction, with one
+/// exception that predates it: `%b` and `%o` with a precision are not numeric,
+/// because `php_sprintf_append2n` truncates their digits to it (`sprintf('%.0b',
+/// 5)` is `''`, `sprintf('%5.0o', 5)` is five spaces). `%d` never truncates.
 #[test]
-fn the_int_cast_conversions_keep_numeric_under_the_locale_restriction() {
-    for f in ["'%b'", "'%d'", "'%o'", "'%05d'"] {
+fn the_int_cast_conversions_keep_numeric_except_b_and_o_with_a_precision() {
+    for f in ["'%b'", "'%d'", "'%o'", "'%05d'", "'%.0d'", "'%.3d'", "'%5.2d'", "'%5b'", "'%-8o'"] {
         assert_eq!(dump_int(&format!("sprintf({f}, $v)")), "dumped type: numeric-string", "{f}");
+    }
+    for f in ["'%.0b'", "'%5.0o'", "'%.3b'", "'%.1o'", "'%05.0b'", "'%-5.0o'", "'%+.2b'"] {
+        assert_eq!(
+            dump_int(&format!("sprintf({f}, $v)")),
+            "dumped type: string",
+            "{f} truncates its digits to the precision"
+        );
+        assert_eq!(dump("string", &format!("sprintf({f}, $v)")), "dumped type: string", "{f}");
     }
 }
 
@@ -669,11 +680,18 @@ fn the_int_cast_conversions_keep_numeric_under_the_locale_restriction() {
 /// format conversion the analyzer calls `numeric-string` for a proven `int` must
 /// render a numeric string under `C` **and** under `de_DE.UTF-8` for every int
 /// the engine can hold, and the three conversions it declines are exactly the
-/// ones that stop being numeric there. Skips without `php` or the locale.
+/// ones that stop being numeric there. Skips without `php` or the locale (and
+/// fails instead when `CI` is set).
 #[test]
 fn the_numeric_claim_holds_under_de_de() {
+    const SHAPES: [&str; 12] =
+        ["", "+", "0", "-", " ", "010", "-10", "+.3", ".2", "5.2", "020.5", "+020"];
     let letters = ['e', 'E', 'f', 'F', 'g', 'G', 'h', 'H'];
-    let Some(numeric) = engine_numeric_under_both_locales(&letters) else { return };
+    let groups: Vec<Vec<String>> = letters
+        .iter()
+        .map(|l| SHAPES.iter().map(|shape| format!("%{shape}{l}")).collect())
+        .collect();
+    let Some(numeric) = engine_numeric_under_both_locales(&groups) else { return };
     for (letter, engine) in letters.iter().zip(numeric) {
         let claimed = dump_int(&format!("sprintf('%{letter}', $v)")) == "dumped type: numeric-string";
         assert!(!claimed || engine, "%{letter} was claimed numeric and is not under de_DE");
@@ -681,40 +699,72 @@ fn the_numeric_claim_holds_under_de_de() {
     }
 }
 
-/// For each conversion letter, whether `sprintf('%<letter>', $int)` is a numeric
-/// string for every int in a spread of magnitudes and flag shapes, under `C` and
-/// under `de_DE.UTF-8` alike. `None` (a skip) without `php` or the locale.
-fn engine_numeric_under_both_locales(letters: &[char]) -> Option<Vec<bool>> {
-    use std::process::Command;
+/// The same oracle for the int-cast conversions: every format the analyzer calls
+/// numeric is numeric in the engine, and the `b`/`o` precision shapes it declines
+/// are the ones the engine renders non-numeric.
+#[test]
+fn the_int_cast_claim_holds_in_the_engine() {
+    let formats =
+        ["%b", "%d", "%o", "%05d", "%.0d", "%.3d", "%5.2d", "%5b", "%-8o", "%.0b", "%5.0o", "%.3b"];
+    let groups: Vec<Vec<String>> = formats.iter().map(|f| vec![(*f).to_owned()]).collect();
+    let Some(numeric) = engine_numeric_under_both_locales(&groups) else { return };
+    for (format, engine) in formats.iter().zip(numeric) {
+        let claimed =
+            dump_int(&format!("sprintf('{format}', $v)")) == "dumped type: numeric-string";
+        assert!(!claimed || engine, "{format} was claimed numeric and is not");
+        assert_eq!(claimed, engine, "{format}: the claim and the engine disagree");
+    }
+}
+
+/// Whether the oracle cannot run: a skip, loudly, off CI, and a failure on CI,
+/// where a missing `php` or locale would otherwise let a green run mean nothing.
+fn oracle_unavailable(reason: &str) {
+    assert!(
+        std::env::var_os("CI").is_none(),
+        "the locale oracle cannot run on CI: {reason}; the test job installs php and generates de_DE.UTF-8"
+    );
+    eprintln!("SKIP: {reason}; oracle comparison not run");
+}
+
+/// For each group of formats, whether every `sprintf($format, $int)` is a numeric
+/// string for every int in a spread of magnitudes, under `C` and under
+/// `de_DE.UTF-8` alike. `None` (a skip) without `php` or the locale.
+fn engine_numeric_under_both_locales(groups: &[Vec<String>]) -> Option<Vec<bool>> {
+    use std::io::Write as _;
+    use std::process::{Command, Stdio};
 
     if Command::new("php").arg("--version").output().is_err() {
-        eprintln!("SKIP: php not on PATH; oracle comparison not run");
+        oracle_unavailable("php is not on PATH");
         return None;
     }
+    // One group per line, its formats separated by tabs: none holds either.
     let script = r#"
         if (setlocale(LC_ALL, 'de_DE.UTF-8') === false) { echo "NOLOCALE\n"; exit; }
         $ints = [0, 1, -1, 5, 42, 1000000, -1000000, PHP_INT_MAX, PHP_INT_MIN, 123456789012];
-        $shapes = ['', '+', '0', '-', ' ', '010', '-10', '+.3', '.2', '5.2', '020.5', '+020'];
-        foreach (str_split($argv[1]) as $letter) {
+        foreach (explode("\n", rtrim(stream_get_contents(STDIN), "\n")) as $group) {
             $all = true;
             foreach (['C', 'de_DE.UTF-8'] as $locale) {
                 setlocale(LC_ALL, $locale);
-                foreach ($shapes as $shape) foreach ($ints as $i) {
-                    $all = $all && is_numeric(@sprintf("%$shape$letter", $i));
+                foreach (explode("\t", $group) as $format) foreach ($ints as $i) {
+                    $all = $all && is_numeric(@sprintf($format, $i));
                 }
             }
             echo $all ? "1\n" : "0\n";
         }
     "#;
-    let arg: String = letters.iter().collect();
-    let out = Command::new("php")
-        .args(["-d", "display_errors=stderr", "-r", script, "--", &arg])
-        .output()
-        .expect("run php");
-    assert!(out.status.success(), "php failed: {}", String::from_utf8_lossy(&out.stderr));
+    let mut child = Command::new("php")
+        .args(["-d", "display_errors=stderr", "-r", script])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn php");
+    let payload: Vec<String> = groups.iter().map(|g| g.join("\t")).collect();
+    child.stdin.take().expect("stdin").write_all(payload.join("\n").as_bytes()).expect("write");
+    let out = child.wait_with_output().expect("php run");
+    assert!(out.status.success(), "php failed");
     let text = String::from_utf8(out.stdout).expect("utf8");
     if text.starts_with("NOLOCALE") {
-        eprintln!("SKIP: de_DE.UTF-8 is not installed; oracle comparison not run");
+        oracle_unavailable("de_DE.UTF-8 is not installed");
         return None;
     }
     Some(text.lines().map(|l| l == "1").collect())

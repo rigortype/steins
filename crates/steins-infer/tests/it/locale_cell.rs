@@ -65,12 +65,13 @@ fn the_v_spellings_follow_their_siblings_and_printf_keeps_its_output_label() {
     }
 }
 
-/// `setlocale` writes the cell and nothing coarser; `localeconv`, `nl_langinfo`
-/// and `strcoll` read it.
+/// `setlocale` writes the cell, and reads the environment block for `''` and
+/// `null` (a coarse `global.read` until the environment cell has a label);
+/// `localeconv`, `nl_langinfo` and `strcoll` read the cell.
 #[test]
 fn setlocale_writes_the_cell_and_its_readers_read_it() {
     let s = summary(&body("", "return setlocale(LC_ALL, 'de_DE.UTF-8');"), "f");
-    assert_eq!(s.labels, ["global.write.setting.locale"], "{s:?}");
+    assert_eq!(s.labels, ["global.read", "global.write.setting.locale"], "{s:?}");
     for call in ["localeconv()", "nl_langinfo(CODESET)", "strcoll('a', 'b')"] {
         let s = summary(&body("", &format!("return {call};")), "f");
         assert_eq!(s.labels, [READ], "{call}: {s:?}");
@@ -88,9 +89,11 @@ fn a_caller_inherits_the_read_through_its_callee() {
     assert!(s.exhaustive, "{s:?}");
 }
 
-/// A read-free body is untouched: `number_format`, `strval`, `(string) $f`,
-/// `json_encode` of a float read no setting, and a literal that merely contains
-/// a percent sign calls nothing.
+/// A body with no printf-family call carries no setting label: `(string) $f`,
+/// `strval`, `json_encode` and `round` of a float carry none, and a literal that
+/// merely contains a percent sign calls nothing. (The string cast and `strval`
+/// do read the `precision` ini, which is its own cell under D4 and has no label
+/// yet, so "no label" is the claim and not "reads no setting".)
 #[test]
 fn a_body_with_no_printf_family_call_keeps_no_read() {
     for call in ["(string) $f", "strval($f)", "json_encode($f)", "round($f, 2)", "'%f'"] {
@@ -116,9 +119,16 @@ fn a_pure_envelope_over_the_read_is_exceeded_and_a_global_read_envelope_admits_i
         );
         assert!(findings(&src).is_empty(), "{envelope} admits the read");
     }
-    let write = "<?php\n#[\\Steins\\Effect('global.read')]\nfunction f(): void { setlocale(LC_ALL, 'C'); }\n";
-    assert_eq!(findings(write).len(), 1, "a global.read envelope is no write");
-    let write_ok =
-        "<?php\n#[\\Steins\\Effect('global.write')]\nfunction f(): void { setlocale(LC_ALL, 'C'); }\n";
-    assert!(findings(write_ok).is_empty(), "global.write admits the cell's write");
+    // `setlocale` is a write and an environment read: neither coarse envelope covers both.
+    let call = "function f(): void { setlocale(LC_ALL, ''); }\n";
+    let read_only = format!("<?php\n#[\\Steins\\Effect('global.read')]\n{call}");
+    let found: Vec<String> = findings(&read_only).into_iter().map(|d| d.message).collect();
+    assert_eq!(found.len(), 1, "a global.read envelope is no write: {found:#?}");
+    assert!(found[0].contains("global.write.setting.locale"), "{found:#?}");
+    let write_only = format!("<?php\n#[\\Steins\\Effect('global.write')]\n{call}");
+    let found: Vec<String> = findings(&write_only).into_iter().map(|d| d.message).collect();
+    assert_eq!(found.len(), 1, "a global.write envelope is no read: {found:#?}");
+    assert!(found[0].contains("setlocale() has effect global.read,"), "{found:#?}");
+    let both = format!("<?php\n#[\\Steins\\Effect('global')]\n{call}");
+    assert!(findings(&both).is_empty(), "global admits the write and the read");
 }
