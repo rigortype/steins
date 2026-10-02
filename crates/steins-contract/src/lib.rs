@@ -2120,9 +2120,10 @@ mod known_unenforced_tests {
     /// The walk a namespace resolver runs: every class position, nothing else.
     #[test]
     fn map_class_names_reaches_every_nested_class() {
-        let ty = lower_str(
-            r"list<User>|array<Key, \Val>|iterable<It>|array{a: Shp, ...<Tail>}|(A&B)|callable(P): R|int",
-        )
+        let ty = lower_str(concat!(
+            r"list<User>|array<Key, \Val>|iterable<It>|",
+            r"array{a: Shp, ...<Tail>}|(A&B)|callable(P): R|int",
+        ))
         .expect("lowers");
         let mut seen = Vec::new();
         let mapped = ty.map_class_names(&mut |n| {
@@ -2136,9 +2137,10 @@ mod known_unenforced_tests {
         assert_eq!(
             spell::spell_nested_for_test(&mapped),
             spell::spell_nested_for_test(
-                &lower_str(
-                    r"list<ns\user>|array<ns\key, ns\val>|iterable<ns\it>|array{a: ns\shp, ...<ns\tail>}|(ns\a&ns\b)|callable(ns\p): ns\r|int",
-                )
+                &lower_str(concat!(
+                    r"list<ns\user>|array<ns\key, ns\val>|iterable<ns\it>|",
+                    r"array{a: ns\shp, ...<ns\tail>}|(ns\a&ns\b)|callable(ns\p): ns\r|int",
+                ))
                 .expect("lowers")
             ),
         );

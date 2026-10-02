@@ -279,6 +279,7 @@ fn a_positive_instanceof_of_an_enum_supertype_keeps_every_case() {
              function h(Level $l): void {{ if ($l instanceof \\BackedEnum) {{\
              if ($l === Level::Low) {{ return; }} \\PHPStan\\dumpType($l); }} }}\n"
         )),
+        // `UnitEnum` pins current behaviour (PHPStan prints `Suit`), pending a follow-up.
         ["UnitEnum", "Suit::Spades|Suit::Clubs", "Suit::Spades|Suit::Clubs", "Level::High"]
     );
 }
