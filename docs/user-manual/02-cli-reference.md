@@ -665,7 +665,11 @@ the value of an offset write into something that may be a string, `$s[0] = $o`,
 are `operator-to-string`, and a property hook the engine's own code can run, in
 an inherited exception constructor or `getMessage()`, or that a promoted
 constructor parameter declares, is `operator-magic-property`; `destructor` is a
-value that may run `__destruct` when dropped).
+value that may run `__destruct` when dropped, at an `unset`, a reassignment,
+the end of the body or a `new` that dies in the expression holding it: the
+class declares `__destruct`, imports a trait, has a subclass that may, or
+holds such a class in a typed property; an untyped value, an array and a
+closure's captures are not covered).
 
 > **If you know PHPStan or Psalm:** this is the batch answer to what you get
 > from sprinkling `\PHPStan\dumpType()` and rerunning — a whole file's
