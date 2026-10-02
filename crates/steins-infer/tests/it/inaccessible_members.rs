@@ -836,3 +836,163 @@ function f(): int {
     assert_eq!(property(src).len(), 1, "one property site");
     assert_eq!(class_const(src).len(), 1, "one class-constant site");
 }
+
+// ---------------------------------------------------------------------------
+// protected visibility is judged against the member's root class (issue #942)
+//
+// PHP asks `zend_check_protected` of the class that first introduced the member in
+// the inheritance line, not of the class that redeclares it. Witnessed at PHP 8.5.9
+// (`php -r`), each shape below:
+//
+//   Base{protected h,$p} A extends Base{redeclares} B extends Base: `(new A)->h()` and
+//     `(new A)->p` from B                    -> legal (root Base, B is in its line)
+//   the same with a non-declaring Mid between Base and A  -> legal
+//   `protected static` redeclared, `A::s()` from B           -> legal
+//   abstract protected root, concrete redeclaration          -> legal
+//   `private` Base member, protected redeclaration in A      -> Call to protected method
+//     A::h() / Cannot access protected property A::$p from B (a private ancestor is a
+//     different member and stops the walk)
+//   member only on A, B sibling via an empty Base            -> still the fatal
+//   redeclaration on an unrelated root, scope U              -> still the fatal
+//   abstract protected `__construct` root, `new A` from B    -> legal; a non-abstract
+//     parent constructor is no prototype -> Call to protected A2::__construct() from B2
+//   `protected const K` redeclared in A, `A::K` from B       -> Cannot access protected
+//     constant A::K (constants keep the declaring class; 8.4 and 8.5 both fatal)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_redeclared_protected_method_is_judged_against_its_root() {
+    let src = "<?php
+class Base { protected function h(): int { return 1; } }
+class A extends Base { protected function h(): int { return 3; } }
+class B extends Base {
+    public function t(): int { $a = new A(); $x = $a->h(); return $x; }
+}
+";
+    assert!(method(src).is_empty(), "B shares the root Base with A: {:#?}", method(src));
+}
+
+#[test]
+fn a_redeclared_protected_property_is_judged_against_its_root() {
+    let src = "<?php
+class Base { protected int $p = 1; }
+class A extends Base { protected int $p = 3; }
+class B extends Base {
+    public function u(): int { $a = new A(); $y = $a->p; return $y; }
+}
+";
+    assert!(property(src).is_empty(), "B shares the root Base with A: {:#?}", property(src));
+}
+
+#[test]
+fn a_non_declaring_ancestor_between_root_and_redeclaration_is_walked_through() {
+    let src = "<?php
+class Base { protected function h(): int { return 1; } protected int $p = 1; }
+class Mid extends Base {}
+class A extends Mid { protected function h(): int { return 3; } protected int $p = 3; }
+class B extends Base {
+    public function t(): int { $a = new A(); return $a->h(); }
+    public function u(): int { $a = new A(); return $a->p; }
+}
+";
+    assert!(method(src).is_empty(), "{:#?}", method(src));
+    assert!(property(src).is_empty(), "{:#?}", property(src));
+}
+
+#[test]
+fn a_redeclared_protected_static_method_is_judged_against_its_root() {
+    let src = "<?php
+class Base { protected static function s(): int { return 1; } }
+class A extends Base { protected static function s(): int { return 3; } }
+class B extends Base { public function t(): int { return A::s(); } }
+";
+    assert!(method(src).is_empty(), "{:#?}", method(src));
+}
+
+#[test]
+fn an_abstract_protected_root_covers_the_concrete_redeclaration() {
+    let src = "<?php
+abstract class AB { abstract protected function ab(): int; }
+class AA extends AB { protected function ab(): int { return 1; } }
+class BB extends AB {
+    protected function ab(): int { return 2; }
+    public function t(): int { $a = new AA(); return $a->ab(); }
+}
+";
+    assert!(method(src).is_empty(), "{:#?}", method(src));
+}
+
+#[test]
+fn a_private_ancestor_declaration_stops_the_root_walk() {
+    let src = "<?php
+class Base { private function h(): int { return 1; } private int $p = 1; }
+class A extends Base { protected function h(): int { return 3; } protected int $p = 3; }
+class B extends Base {
+    public function t(): int { $a = new A(); return $a->h(); }
+    public function u(): int { $a = new A(); return $a->p; }
+}
+";
+    let m = method(src);
+    assert_eq!(m.len(), 1, "a private Base::h is another member; the root stays A: {m:#?}");
+    assert!(m[0].message.contains("protected method A::h()"), "{m:#?}");
+    let p = property(src);
+    assert_eq!(p.len(), 1, "{p:#?}");
+}
+
+#[test]
+fn a_member_declared_only_on_the_receiver_still_fires_from_a_sibling() {
+    let src = "<?php
+class Base {}
+class A extends Base { protected function h(): void {} protected int $p = 1; }
+class B extends Base {
+    public function t(): void { $a = new A(); $a->h(); $v = $a->p; }
+}
+";
+    assert_eq!(method(src).len(), 1, "no root above A: {:#?}", method(src));
+    assert_eq!(property(src).len(), 1, "no root above A: {:#?}", property(src));
+}
+
+#[test]
+fn a_protected_member_on_an_unrelated_root_still_fires() {
+    let src = "<?php
+class Base { protected function h(): int { return 1; } protected int $p = 1; }
+class A extends Base { protected function h(): int { return 3; } protected int $p = 3; }
+class U {
+    public function t(): int { $a = new A(); return $a->h(); }
+    public function u(): int { $a = new A(); return $a->p; }
+}
+";
+    assert_eq!(method(src).len(), 1, "{:#?}", method(src));
+    assert_eq!(property(src).len(), 1, "{:#?}", property(src));
+}
+
+#[test]
+fn a_constructor_walks_only_through_an_abstract_parent_constructor() {
+    let abstract_root = "<?php
+abstract class Base { abstract protected function __construct(); }
+class A extends Base { protected function __construct() {} }
+class B extends Base {
+    protected function __construct() {}
+    public function t(): object { return new A(); }
+}
+";
+    assert!(method(abstract_root).is_empty(), "{:#?}", method(abstract_root));
+    let concrete_root = "<?php
+class Base { protected function __construct() {} }
+class A extends Base { protected function __construct() {} }
+class B extends Base { public function t(): object { return new A(); } }
+";
+    assert_eq!(method(concrete_root).len(), 1, "{:#?}", method(concrete_root));
+}
+
+#[test]
+fn a_redeclared_protected_class_constant_keeps_its_declaring_class() {
+    let src = "<?php
+class Base { protected const K = 1; }
+class A extends Base { protected const K = 3; }
+class B extends Base { public function t(): int { return A::K; } }
+";
+    let d = class_const(src);
+    assert_eq!(d.len(), 1, "PHP 8.4 and 8.5 fatal on this fetch: {d:#?}");
+    assert!(d[0].message.contains("declared by A"), "{d:#?}");
+}
