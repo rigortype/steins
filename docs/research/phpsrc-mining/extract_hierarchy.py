@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Extract class/interface/enum declarations with extends/implements from php-src stubs."""
-import json, os, re, subprocess, sys, glob
+import os, re, subprocess, sys, glob
 
 ROOT = os.environ.get("PHP_SRC_ROOT", os.path.expanduser("~/local/src/php-src"))
 stubs = sorted(glob.glob(os.path.join(ROOT, "**", "*.stub.php"), recursive=True))
@@ -25,9 +25,7 @@ def resolve(ref, cur_ns):
 
 def parse_file(path):
     with open(path, encoding='utf-8', errors='replace') as fh:
-        return parse_lines(fh.readlines(), os.path.relpath(path, ROOT))
-
-def parse_lines(lines, relpath):
+        lines = fh.readlines()
     out = []
     i = 0
     n = len(lines)
@@ -89,7 +87,7 @@ def parse_lines(lines, relpath):
                 'mods': mods,
                 'extends': extends,
                 'implements': implements,
-                'file': relpath,
+                'file': os.path.relpath(path, ROOT),
                 'line': i + 1,
             })
         i = j + 1
@@ -126,71 +124,22 @@ for d in seen.values():
             fixed.append(ref)
         d[field] = fixed
 
-# Which rows the pinned release declares. The stubs above are php-src's development
-# branch; the pinned PHP is an older minor, so a row may name a class that release does not
-# have (`Io\Poll\PollException`, `StreamException`). Whether it does is a fact about php-src
-# at the release, not about the machine the miner runs on, so it is read from the release's
-# own stubs: the same parser, run over every `*.stub.php` at the tag `PINNED_TAG` (default:
-# the newest stable `php-<minor>.<n>` tag the checkout has, for the minor of `PHP_BIN`). A
-# row whose class is not declared there is marked `absent_on_pinned = true`, and the catalog
-# refuses to treat it as an engine class (#871). An extension a build lacks has nothing to do
-# with it: `EnchantBroker` is declared at the tag whether or not this PHP has ext-enchant.
-PHP_BIN = os.environ.get("PHP_BIN", "php")
-
-def run(cmd, **kw):
-    try:
-        return subprocess.run(cmd, capture_output=True, text=True, check=True, **kw).stdout
-    except (OSError, subprocess.CalledProcessError) as e:
-        sys.exit(f"extract_hierarchy.py: `{' '.join(cmd[:3])}` failed (PHP_BIN={PHP_BIN}, "
-                 f"PHP_SRC_ROOT={ROOT}): {e}")
-
-php_version = run([PHP_BIN, "-r", "echo PHP_VERSION;"]).strip()
-minor = ".".join(php_version.split(".")[:2])
-pinned_tag = os.environ.get("PINNED_TAG")
-if not pinned_tag:
-    tags = [t for t in run(["git", "tag", "-l", f"php-{minor}.*"], cwd=ROOT).split()
-            if re.fullmatch(r"php-\d+\.\d+\.\d+", t)]
-    if not tags:
-        sys.exit(f"extract_hierarchy.py: no php-{minor}.N tag in {ROOT} (set PINNED_TAG)")
-    pinned_tag = max(tags, key=lambda t: [int(x) for x in t[4:].split(".")])
-pinned_commit = run(["git", "rev-parse", pinned_tag + "^{commit}"], cwd=ROOT).strip()
-tag_names = set()
-for path in run(["git", "ls-tree", "-r", "--name-only", pinned_tag], cwd=ROOT).split("\n"):
-    if path.endswith(".stub.php"):
-        text = run(["git", "show", f"{pinned_tag}:{path}"], cwd=ROOT)
-        tag_names.update(d['name'].lower() for d in parse_lines(text.splitlines(True), path))
-
 TEST_PREFIXES = ("ext/zend_test/", "ext/skeleton/", "ext/dl_test/", "sapi/")
-production = [d for d in seen.values() if not d['file'].startswith(TEST_PREFIXES)]
-absent = {d['name'] for d in production if d['name'].lower() not in tag_names}
-print(f"# {pinned_tag} ({pinned_commit[:10]}): {len(absent)} of {len(production)} rows are not "
-      f"declared: {sorted(absent)}", file=sys.stderr)
 
-# Sanity check against the local PHP, never a source: `class_exists`-family, autoload off.
-# A row the tag declares, whose extension is loaded here and which this PHP lacks, or a row
-# the tag lacks that this PHP declares, says the tag, the parse or the build is off.
-PROBE = (
-    '$n = json_decode(stream_get_contents(STDIN)); $o = [];'
-    'foreach ($n as [$x, $e]) { $o[] = [class_exists($x, false) || interface_exists($x, false)'
-    ' || enum_exists($x, false) || trait_exists($x, false), extension_loaded($e)]; }'
-    'echo json_encode($o);'
-)
+# The release the stubs were read at: the checkout's HEAD, which must be a release tag.
+# The table is that release's, so a class only php-src's development branch declares is
+# never a row (#871): point `PHP_SRC_ROOT` at a checkout of the tag, not at master.
+def git(*args):
+    return subprocess.run(["git", *args], cwd=ROOT, capture_output=True, text=True,
+                          check=True).stdout.strip()
 
-def ext_of(source):
-    parts = source.split('/')
-    if parts[0] == 'ext':
-        return 'zend opcache' if parts[1] == 'opcache' else parts[1]
-    return 'core'
-
-local = json.loads(run([PHP_BIN, "-r", PROBE],
-                       input=json.dumps([[d['name'], ext_of(d['file'])] for d in production])))
-for d, (here, ext_loaded) in zip(production, local):
-    if d['name'] in absent and here:
-        print(f"# WARNING: `{d['name']}` is not at {pinned_tag} but PHP {php_version} declares it",
-              file=sys.stderr)
-    if d['name'] not in absent and not here and ext_loaded:
-        print(f"# WARNING: `{d['name']}` is at {pinned_tag} and `{ext_of(d['file'])}` is loaded, "
-              f"but PHP {php_version} lacks it", file=sys.stderr)
+try:
+    tag = git("describe", "--tags", "--exact-match", "HEAD")
+    tag_object = git("rev-parse", tag)
+    commit = git("rev-parse", "HEAD")
+except (OSError, subprocess.CalledProcessError):
+    sys.exit(f"extract_hierarchy.py: {ROOT} is not a checkout of a release tag "
+             "(set PHP_SRC_ROOT to one, e.g. a worktree of php-8.5.11)")
 
 print(f"# total declarations parsed: {len(all_decls)}, unique names: {len(seen)}", file=sys.stderr)
 if dups:
@@ -202,16 +151,12 @@ def toml_list(xs):
 
 rows = sorted(seen.values(), key=lambda d: (d['file'], d['line']))
 print('# hierarchy.toml — builtin class/interface/enum hierarchy mined from php-src stubs')
-print('# php-src commit: 6bc7c26cf67a9480b5ef9d6191aebe87fa931183 (Thu Jul 9 2026)')
-print(f'# Pinned release: {pinned_tag} ({pinned_commit}). A row whose class is not declared')
-print('# by that release\'s own stubs carries `absent_on_pinned = true`, and the catalog does')
-print('# not treat it as an engine class. Extensions a build lacks do not enter into it.')
+print(f'# php-src tag: {tag} ({tag_object})')
+print(f'# php-src commit: {commit}')
 print('# Names preserve declared casing; Steins lowercases at its seam.')
 print('# Namespaced names are fully-qualified (no leading backslash).')
 print('# Test-only extensions (ext/zend_test, ext/skeleton, ext/dl_test, sapi/*) are EXCLUDED.')
 print(f'# Total production declarations: {sum(1 for d in rows if not d["file"].startswith(TEST_PREFIXES))}')
-print()
-print(f"pinned_tag = '{pinned_tag}'")
 print()
 for d in rows:
     if d['file'].startswith(TEST_PREFIXES):
@@ -231,7 +176,5 @@ for d in rows:
         for fl in flags:
             k, v = fl.split(' = ')
             print(f'{k} = {v}')
-    if d['name'] in absent:
-        print('absent_on_pinned = true')
     print(f"source = '{d['file']}:{d['line']}'")
     print()

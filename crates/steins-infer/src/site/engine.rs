@@ -264,21 +264,18 @@ pub(crate) fn has_effect_row(name: &str) -> bool {
     steins_catalog::effect_labels(name).is_some() || steins_catalog::out_params(name).is_some()
 }
 
-/// Whether `class` (an FQN, case-insensitive) is an **engine class**: the mined hierarchy
-/// declares it (a class, interface or enum php-src's stubs declare, a namespaced one under its
-/// namespace, `Random\RandomException`, as a global one under its bare name) and the pinned
-/// release's own stubs declare it too.
+/// Whether `class` (an FQN, case-insensitive) is an **engine class**: a row of the mined
+/// hierarchy, which is the pinned release's (`php-8.5.11`): a class, interface or enum its
+/// stubs declare, a namespaced one under its namespace (`Random\RandomException`), a global
+/// one under its bare name.
 ///
 /// The hierarchy keys classes by FQN, so a name the user's namespace made up (`App\PDO`, or an
-/// unimported `PDO` inside `namespace App`) is not in it. A row the mined stubs declare and the
-/// pinned release does not (`Io\Poll\PollException`, newer than the pinned minor) is the
-/// development branch's claim, not the engine's: `new` of it is an `Error`, so no row may
-/// answer for it and it stays a gap
-/// ([`steins_catalog::builtin_class_absent_on_pinned`], ADR-0099 §3).
+/// unimported `PDO` inside `namespace App`) is not in it. Membership is the pin's, not the
+/// running engine's, as the catalog's function rows are: a class only php-src's development
+/// branch declares is no row, and a class of an extension this build lacks is (ADR-0099 §3).
 pub(crate) fn declares_engine_class(class: &str) -> bool {
-    (steins_catalog::builtin_class_display(class).is_some()
-        || steins_catalog::builtin_class_supers(class).is_some())
-        && !steins_catalog::builtin_class_absent_on_pinned(class)
+    steins_catalog::builtin_class_display(class).is_some()
+        || steins_catalog::builtin_class_supers(class).is_some()
 }
 
 /// The gap for a known name the catalog has no row for on `axis`'s side, at a

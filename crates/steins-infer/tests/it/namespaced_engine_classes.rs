@@ -188,28 +188,41 @@ fn a_namespaced_engine_class_without_a_row_is_a_gap_of_its_own() {
     assert_eq!(s.throws_gaps, vec!["no-throw-row"], "{s:?}");
 }
 
-/// The hierarchy is mined from php-src's development stubs, which name classes the pinned release
-/// (8.5.6) does not have: `new \Io\Poll\PollException('x')` is "Class not found" there. A row
-/// the pinned PHP does not declare is no engine class, so such a `new` or `throw new` stays a
-/// gap in both lanes, as it was before the namespaced rows were reachable.
+/// The hierarchy is mined from the stubs at the pinned release tag (`php-8.5.11`), so a class
+/// only php-src's development branch declares is no row: `new \Io\Poll\PollException('x')` is
+/// "Class not found" on 8.5. Such a `new`, `throw new` or subclass is an unknown class in both
+/// lanes, exactly as any name nobody declares.
 #[test]
-fn a_class_the_pinned_php_does_not_declare_is_no_engine_class() {
-    for class in [
-        "\\Io\\Poll\\PollException",
-        "\\Io\\IoException",
-        "\\Io\\Poll\\FailedHandleAddException",
-        "\\Openssl\\OpensslException",
-        // A global name the stubs declare and the pinned release lacks: refused too.
-        "\\StreamException",
-    ] {
+fn a_class_the_pinned_release_does_not_declare_is_an_unknown_class() {
+    for class in ["\\Io\\Poll\\PollException", "\\StreamException"] {
         let made = format!("<?php\nfunction make(): object {{ return new {class}('x'); }}\n");
-        assert_eq!(exhaustive(&made, "make"), (false, false), "new {class}");
         let thrown = format!("<?php\nfunction fail(): never {{ throw new {class}('x'); }}\n");
-        assert_eq!(exhaustive(&thrown, "fail"), (false, false), "throw new {class}");
         let sub = format!(
             "<?php\nclass Oops extends {class} {{}}\n\
              function fail(): never {{ throw new Oops('x'); }}\n"
         );
-        assert_eq!(exhaustive(&sub, "fail"), (false, false), "a subclass of {class}");
+        for (src, symbol, what) in [
+            (&made, "make", format!("new {class}")),
+            (&thrown, "fail", format!("throw new {class}")),
+            (&sub, "fail", format!("a subclass of {class}")),
+        ] {
+            let s = summary(src, symbol);
+            assert_eq!(s.gaps, vec!["unknown-class"], "{what}: {s:?}");
+            assert_eq!(s.throws_gaps, vec!["unknown-class"], "{what}: {s:?}");
+        }
+    }
+}
+
+/// An extension class the pin declares is an engine class whatever this build has loaded:
+/// membership is the pin's, as the catalog's function rows are, so `new \SNMPException`
+/// reads exhaustive on a build without ext-snmp, and `\com_exception` on a Linux one. The
+/// runtime leg, asking the running engine whether the class is there, is #954.
+#[test]
+fn an_extension_class_the_pin_declares_is_an_engine_class_whatever_this_build_loads() {
+    for class in ["\\SNMPException", "\\com_exception"] {
+        let src = format!("<?php\nfunction make(): object {{ return new {class}('x'); }}\n");
+        let s = summary(&src, "make");
+        assert!(s.exhaustive && s.throws_exhaustive, "new {class}: {s:?}");
+        assert!(s.throws.is_empty(), "new {class}: {s:?}");
     }
 }

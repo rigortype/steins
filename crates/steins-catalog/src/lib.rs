@@ -22,9 +22,13 @@
 //!   refusal (`docs/research/phpsrc-mining/return_facts.toml`).
 
 /// The PHP minor version the builtin catalog is pinned to (`major`, `minor`):
-/// mining data (`docs/research/phpsrc-mining/hierarchy.toml`, pin
-/// `6bc7c26cf6…`) is cross-checked against **PHP 8.5.8**, so reported
-/// class-hierarchy edges are those of the `8.5` line.
+/// the class hierarchy (`docs/research/phpsrc-mining/hierarchy.toml`) is mined from
+/// the stubs at php-src tag **`php-8.5.11`**, so a row is a class PHP 8.5 declares when
+/// its extension is built in, and the reported hierarchy edges are those of the `8.5`
+/// line. Membership is the pin's, not the running engine's: `new \SNMPException` is
+/// answered by its row on a build without ext-snmp, and `new \Uri\InvalidUriException`
+/// on an 8.4 runtime, exactly as the function rows are. `steins doctor` reports the skew
+/// and `require catalog-pin-match` refuses it.
 ///
 /// ADR-0052 amendment A11: a catalog-backed is-a verdict used for **arm
 /// deletion** is trustworthy only when the project's own PHP is on this same
@@ -176,7 +180,6 @@ pub use builtins::{
     ResourceKind,
     ResourceParam,
     ResourceReturn,
-    builtin_class_absent_on_pinned,
     builtin_class_display,
     builtin_class_supers,
     builtin_throws,
@@ -189,7 +192,6 @@ pub use builtins::{
     engine_class_declarations,
     engine_constant_count,
     failure_arms,
-    hierarchy_pinned_tag,
     hierarchy_entry_count,
     invocation_shape,
     is_migrated_resource_class,

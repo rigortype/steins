@@ -24,9 +24,9 @@ use crate::{
 /// root returns empty), `None` for an *unknown* external (→ `Unknown`, never
 /// `No`; FP-safe).
 ///
-/// The **single source of truth** for the builtin hierarchy: 352 production
-/// classes + interfaces mined from php-src (pin `6bc7c26cf6…`, cross-checked
-/// vs PHP 8.5.8), generated into `hierarchy_generated::HIERARCHY`. Subsumes the
+/// The **single source of truth** for the builtin hierarchy: 330 production
+/// classes + interfaces mined from the php-src stubs at tag `php-8.5.11`,
+/// generated into `hierarchy_generated::HIERARCHY`. Subsumes the
 /// SPL/engine `Throwable` tree, which the throw lane walks (ADR-0040), and the
 /// enum interface roots.
 ///
@@ -70,30 +70,6 @@ pub fn builtin_class_display(name: &str) -> Option<&'static str> {
         .binary_search_by(|(n, _)| (*n).cmp(key.as_str()))
         .ok()
         .map(|i| display_names_generated::DISPLAY_NAMES[i].1)
-}
-
-/// Whether the hierarchy lists `name` (class, interface or enum, case-insensitive, a leading
-/// backslash ignored) but the pinned release's own stubs ([`hierarchy_pinned_tag`]) do not
-/// declare it (issue #871).
-///
-/// The rows are php-src's development stubs, later than the PHP the table is pinned to
-/// (`Io\Poll\PollException`, `StreamException`). Such a row is a fact about the development
-/// branch, so the is-a walk and the display name keep it, but it is **no engine class**: `new`
-/// of it is an `Error` on the pinned release, and no catalog row may claim what the constructor
-/// of a class that is not there does. Which extensions a build has does not enter into it: a
-/// row the release declares stays unmarked on a PHP built without it. `false` for a name the
-/// hierarchy does not list.
-#[must_use]
-pub fn builtin_class_absent_on_pinned(name: &str) -> bool {
-    let key = name.trim_start_matches('\\').to_ascii_lowercase();
-    hierarchy_generated::ABSENT_ON_PINNED.binary_search(&key.as_str()).is_ok()
-}
-
-/// The php-src release tag (`php-8.5.6`) whose own stubs decided which rows are
-/// [`builtin_class_absent_on_pinned`].
-#[must_use]
-pub fn hierarchy_pinned_tag() -> &'static str {
-    hierarchy_generated::PINNED_TAG
 }
 
 /// Every class-like the mined hierarchy declares (enums included) as `(key, declared
@@ -1324,36 +1300,24 @@ mod tests {
         assert_eq!(crate::method_effect_labels("Dom\\Element", "__construct"), None);
     }
 
-    /// Issue #871: a row the pinned release's own stubs lack is marked, and only those; what a
-    /// build does not have loaded is not.
+    /// Issue #871: the hierarchy is the pinned release's, so a class only php-src's
+    /// development branch declares is no row, whatever its stub says.
     #[test]
-    fn rows_the_pinned_release_lacks_are_marked() {
-        use super::builtin_class_absent_on_pinned as absent;
-        assert!(super::hierarchy_pinned_tag().starts_with("php-8."));
-        // A later php-src than the pinned release: the Io and Stream APIs, ext/uri's builder.
+    fn a_class_the_tag_does_not_declare_is_no_row() {
         for class in [
             "Io\\Poll\\PollException",
             "\\io\\ioexception",
-            "Openssl\\OpensslException",
             "StreamException",
-            "SortDirection",
             "Uri\\Rfc3986\\UriBuilder",
+            "Openssl\\OpensslException",
+            "SortDirection",
         ] {
-            assert!(absent(class), "{class}");
-            assert!(super::builtin_class_display(class).is_some(), "{class}: still a row");
+            assert_eq!(super::builtin_class_display(class), None, "{class}");
+            assert_eq!(super::builtin_class_supers(class), None, "{class}");
         }
-        // Declared by the release and absent from builds without the extension: not marked.
-        for class in [
-            "EnchantBroker", "com_exception", "COMPersistHelper", "variant", "Pdo\\Firebird",
-            "Random\\RandomException", "PDO", "Exception", "Uri\\WhatWg\\Url", "NoSuch",
-        ] {
-            assert!(!absent(class), "{class}");
-        }
-        let t = super::hierarchy_generated::ABSENT_ON_PINNED;
-        assert!(t.windows(2).all(|w| w[0] < w[1]), "ABSENT_ON_PINNED must be strictly sorted");
-        assert!(!t.is_empty() && t.len() < 100, "{} marked rows", t.len());
-        for key in t {
-            assert!(super::builtin_class_display(key).is_some(), "`{key}` is not a hierarchy row");
+        // Declared by the release, whatever extensions a build has loaded.
+        for class in ["EnchantBroker", "com_exception", "SNMPException", "Pdo\\Firebird"] {
+            assert!(super::builtin_class_display(class).is_some(), "{class}");
         }
     }
 
@@ -1457,17 +1421,10 @@ mod tests {
             assert_eq!(s(stale), None, "`{stale}` is no global engine class");
             assert_eq!(super::builtin_class_display(stale), None, "`{stale}`");
         }
-        // The one parent a stub spells relative to a namespace that has no such
-        // class: the engine registers it on the global one.
-        assert_eq!(s("Openssl\\OpensslException"), Some(vec!["Exception"]));
         // A relative parent that the miner once left bare: `FFI\ParserException` is an
         // `Error` (through `FFI\Exception`), not an `Exception`, and
         // `Filter\FilterFailedException` has a parent, which makes it a `Throwable`.
         assert_eq!(s("Filter\\FilterFailedException"), Some(vec!["Filter\\FilterException"]));
-        assert_eq!(
-            s("Io\\Poll\\FailedHandleAddException"),
-            Some(vec!["Io\\Poll\\FailedPollOperationException"])
-        );
     }
 
     #[test]
