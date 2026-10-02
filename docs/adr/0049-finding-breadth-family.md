@@ -1317,8 +1317,13 @@ gate and the `warning-handler` posture, as before:
   `80500`. That interval is the declared target's floor when the project
   declares a target (`config.platform.php` or `require.php`), else the
   sidecar's minor, so a project declaring `^8.1` is silent on an 8.5
-  sidecar, `>=8.5` reports on any sidecar, and the answer is the same
+  sidecar, and `>=8.5` reports on an 8.5 sidecar. The answer is the same
   `PhpView::version_id` the `PHP_VERSION_ID` guard fold reads (issue #29).
+  The interval is only half the gate: A9's availability gate stays in
+  force, and the real session switches the whole offset family off when
+  the sidecar's minor lies outside the declared target
+  (`target_admits_runtime`, `fold.rs`), so `>=8.5` on an 8.4 sidecar is
+  silent.
 - **A straddling or unknown interval is silent**: no sidecar minor and no
   target, a range that admits any minor below 8.5, or a project that
   declares its own `PHP_VERSION_ID` constant (which zeroes the interval).
@@ -1330,12 +1335,24 @@ The finding's message says what the plain read's did not: `destructuring
 $v — provably int; from PHP 8.5 each target reads null with "Cannot use
 int as array"`. The id is the plain read's, so existing `ignore` and
 triage entries, the `contracts` rung and the documentation of
-`offset.on-unsupported` keep their meaning. Finding movement is only
-removal: `null` sources, and scalar sources whose interval is not proven
-8.5.
+`offset.on-unsupported` keep their meaning. Findings move three ways:
+
+- `null` sources and `int`, `float` and `bool` sources whose interval is
+  not proven 8.5 lose their finding.
+- `int`, `float` and `bool` sources on a proven 8.5 interval keep their
+  finding with the corrected message. The baseline key carries no
+  message, so no baseline churns.
+- A proven `string` source is **newly reported** on a proven 8.5
+  interval (`[$x] = 'ab';`, `$s = ''; [$x] = $s;`). The plain read's
+  Case 1 declined strings as offsetable, so base was silent. These are
+  true positives: 8.5.11 warns and 7.4 through 8.4 are silent.
 
 **Not covered.**
 
+- A scalar below the first pattern level: `[[$a]] = [1];` and
+  `list($a, list($b)) = [1, 2];` warn on PHP 8.5, and Steins is silent,
+  on the base and here, because `reads` below depth 1 names an
+  intermediate base neither leg resolves (#288's depth-1 limit).
 - An object source is a fatal `Error` on every version and was never
   reported; the offset family has no object case (§7's deferred
   `ArrayAccess` split).
