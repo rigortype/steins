@@ -197,3 +197,75 @@ fn switch_never_contributes_this_id_regardless_of_its_residue() {
     );
     assert_eq!(undeclared(&src), Vec::new());
 }
+
+// ---------------------------------------------------------------------------
+// An arm the subtraction cannot model voids the verdict, whatever an earlier
+// guard narrowed (the mark is that guard's evidence, not this construct's)
+// ---------------------------------------------------------------------------
+
+/// A `@throws \RuntimeException` function over `$s: <ty>` running `<body>`.
+fn suit_fn(ty: &str, body: &str) -> String {
+    format!(
+        "<?php\n{SUIT}\nfinal class Defaults {{ public const FALLBACK = Suit::Clubs; }}\n\
+         /** @throws \\RuntimeException */\nfunction f({ty} $s): int {{\n{body}\n}}\n"
+    )
+}
+
+/// `<arms>` inside an `if ($s instanceof Suit)` branch, `return 0;` after it.
+fn inside_instanceof(arms: &str) -> String {
+    format!("if ($s instanceof Suit) {{\n{arms}\n}}\nreturn 0;")
+}
+
+#[test]
+fn a_variable_arm_after_a_guard_claims_no_missing_case() {
+    // `$clubs` holds the third case; nothing can subtract it, so the residue
+    // `Suit::Clubs` is ignorance about that arm, not a missing case. The
+    // `instanceof` guard (either polarity) and the `=== null` guard each narrow
+    // the lane before the match, and that mark must not stand in for its arms.
+    let arms = "$clubs = Suit::Clubs;\n\
+                return match ($s) { Suit::Hearts => 1, Suit::Spades => 2, $clubs => 3 };";
+    for (ty, guard) in [
+        ("Suit|null", "if (!($s instanceof Suit)) { return 0; }"),
+        ("Suit|string", "if (!($s instanceof Suit)) { return 0; }"),
+        ("?Suit", "if ($s === null) { return 0; }"),
+        ("Suit", ""),
+    ] {
+        let src = suit_fn(ty, &format!("{guard}\n{arms}"));
+        assert_eq!(undeclared(&src), Vec::new(), "{ty} / {guard}");
+    }
+    assert_eq!(undeclared(&suit_fn("Suit|null", &inside_instanceof(arms))), Vec::new());
+}
+
+#[test]
+fn a_class_constant_arm_after_a_guard_claims_no_missing_case() {
+    let arms = "return match ($s) {\n\
+                Suit::Hearts => 1, Suit::Spades => 2, Defaults::FALLBACK => 3,\n\
+                };";
+    assert_eq!(undeclared(&suit_fn("Suit|null", &inside_instanceof(arms))), Vec::new());
+    assert_eq!(undeclared(&suit_fn("Suit", arms)), Vec::new());
+}
+
+#[test]
+fn a_guarded_match_missing_a_case_still_reports() {
+    // The true positives the guard path opens: every arm is a modelled
+    // condition, so the residue is a real missing case, inside or after an
+    // `instanceof`.
+    let missing = "return match ($s) { Suit::Hearts => 1, Suit::Spades => 2 };";
+    for src in [
+        suit_fn("Suit", &inside_instanceof(missing)),
+        suit_fn(
+            "Suit|int",
+            "if (!($s instanceof Suit)) { return 0; }\nreturn match ($s) { Suit::Hearts => 1 };",
+        ),
+    ] {
+        assert_eq!(undeclared(&src).len(), 1, "{src}");
+    }
+    // A literal that cannot shrink the arm it hits (`'a'` out of `string`) is not
+    // a landed subtraction either, so this one is silent although it does miss
+    // values: the residue would be the guard's evidence again, the rule above.
+    let scalar = suit_fn(
+        "Suit|string",
+        "if ($s instanceof Suit) { return 0; }\nreturn match ($s) { 'a' => 1 };",
+    );
+    assert_eq!(undeclared(&scalar), Vec::new());
+}
