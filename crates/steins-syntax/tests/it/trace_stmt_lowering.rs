@@ -66,6 +66,39 @@ fn a_do_while_keeps_its_body() {
 }
 
 #[test]
+fn a_do_while_records_whether_a_continue_targets_it() {
+    // Issue #679: `continue_free` is read off the CST body with levels counted, as
+    // `break_free` is. A bare `continue` inside a nested `switch` is the switch's;
+    // `continue 2` there, or inside a nested loop, is this loop's.
+    let continue_free = |body: &str| {
+        let got = stmts("int $n", &format!("do {{ {body} }} while ($n > 0);"));
+        match &got[..] {
+            [Stmt { kind: StmtKind::DoWhile { continue_free, .. }, .. }] => *continue_free,
+            other => panic!("the `do`-`while` lowered to {other:?}"),
+        }
+    };
+    for body in [
+        "return;",
+        "break;",
+        "while ($n) { continue; }",
+        "foreach ([1] as $v) { if ($v) { continue; } }",
+        "switch ($n) { case 1: continue; }",
+        "$f = function () { foreach ([1] as $v) { continue; } };",
+    ] {
+        assert!(continue_free(body), "`{body}` has no `continue` of this loop");
+    }
+    for body in [
+        "continue;",
+        "if ($n) { continue; }",
+        "while ($n) { continue 2; }",
+        "switch ($n) { case 1: continue 2; }",
+        "foreach ([1] as $v) { switch ($v) { case 1: continue 3; } }",
+    ] {
+        assert!(!continue_free(body), "`{body}` continues this loop");
+    }
+}
+
+#[test]
 fn a_foreach_keeps_its_header_and_body() {
     let got = stmts(
         "array $xs, array $ys",

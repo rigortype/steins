@@ -13,7 +13,9 @@ use mago_syntax::cst::{
 
 use crate::ast::{Comment, CommentKind, UndefinedRead, UnsetSeedFacts, UnsetSeedRead};
 use crate::lower_scope::{VarUsage, bind_lvalue_roots, scan_var_usage};
-use crate::lower_stmt::{expr_is_false, expr_is_true, stmt_end};
+use crate::lower_stmt::{
+    body_is_break_free, body_is_continue_free, expr_is_false, expr_is_true, stmt_end,
+};
 use crate::memo;
 use crate::{bytes_to_string, strip_dollar, to_span};
 
@@ -338,6 +340,38 @@ where
     PresenceFlow::Fell
 }
 
+/// The presence transfer for a `do`-`while`. The body runs at least once, so there
+/// is no zero-iteration path to join in — but the condition can still be false, so
+/// the back edge does reach the successor.
+///
+/// Unless nothing reaches the back edge (issue #679): a body whose every path ends
+/// in `return`/`throw`/`exit`, with no `break` and no `continue` of this loop,
+/// never evaluates the condition and never reaches the successor, so the construct
+/// answers [`PresenceFlow::Terminated`] and a branch join subtracts it like a
+/// `return`. This pass credits every `break`/`continue` to the innermost loop
+/// whatever its level, so the lowering's level-counting scans
+/// ([`body_is_break_free`], [`body_is_continue_free`]) gate it as they gate the
+/// walker's `do_while_flow`.
+fn presence_do_while(
+    d: &mago_syntax::cst::DoWhile<'_>,
+    state: &mut PresenceState,
+    cx: &mut PresenceCx,
+) -> PresenceFlow {
+    let body = std::slice::from_ref(d.statement);
+    let entry = state.clone();
+    let exits = presence_loop_body(body, &entry, cx);
+    let terminates = exits.broke.is_empty()
+        && !exits.reaches_back_edge
+        && body_is_break_free(body)
+        && body_is_continue_free(body);
+    *state = join_loop_exit(&entry, exits, true);
+    if terminates {
+        return PresenceFlow::Terminated;
+    }
+    presence_leaf(&Node::Expression(d.condition), state, cx);
+    PresenceFlow::Fell
+}
+
 /// The presence transfer function for one statement.
 fn presence_stmt(
     s: &Statement<'_>,
@@ -374,16 +408,7 @@ fn presence_stmt(
             }
             PresenceFlow::Fell
         }
-        Statement::DoWhile(d) => {
-            // The body runs at least once, so there is no zero-iteration path to
-            // join in — but the condition can still be false, so the back edge does
-            // reach the successor.
-            let entry = state.clone();
-            let exits = presence_loop_body(std::slice::from_ref(d.statement), &entry, cx);
-            *state = join_loop_exit(&entry, exits, true);
-            presence_leaf(&Node::Expression(d.condition), state, cx);
-            PresenceFlow::Fell
-        }
+        Statement::DoWhile(d) => presence_do_while(d, state, cx),
         Statement::For(f) => {
             for init in f.initializations.iter() {
                 presence_leaf(&Node::Expression(init), state, cx);
@@ -692,6 +717,10 @@ struct LoopExits {
     looped: PresenceState,
     /// Every `break` state, in order.
     broke: Vec<PresenceState>,
+    /// Whether any path reaches the back edge at all — the body's end, or a
+    /// `continue`. `false` means every path left by `break` or terminated, which
+    /// is what lets a `do`-`while` terminate (issue #679).
+    reaches_back_edge: bool,
 }
 
 /// The walk itself, uncached; [`presence_loop_body`] is the entry the statements
@@ -737,9 +766,10 @@ fn presence_loop_walk(
     if flow == PresenceFlow::Fell {
         back.push(fell);
     }
+    let reaches_back_edge = !back.is_empty();
     let looped = back.into_iter().reduce(|a, b| join_states(&a, &b)).unwrap_or(body_entry);
     let broke = std::mem::replace(&mut cx.breaks, outer_breaks);
-    LoopExits { looped, broke }
+    LoopExits { looped, broke, reaches_back_edge }
 }
 
 /// Join a loop's exits into the state after it. `entry` is folded in for the
@@ -750,7 +780,7 @@ fn join_loop_exit(
     exits: LoopExits,
     can_exit_by_condition: bool,
 ) -> PresenceState {
-    let LoopExits { looped, broke } = exits;
+    let LoopExits { looped, broke, .. } = exits;
     let mut states = broke;
     if can_exit_by_condition {
         states.push(looped);
