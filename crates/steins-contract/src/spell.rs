@@ -43,11 +43,11 @@ use crate::{
 /// `xtask nsrt`'s normalizer sorts a union's atoms before comparing, so arm
 /// order is not what the harness scores.
 ///
-/// The name spells as [`ContractTy::Class`] stores it — normalized (lowercased,
-/// leading `\` stripped). A caller with a class index re-cases the arm before
-/// calling (`steins-infer`'s `render_contract_arms` does, via
-/// `Cx::class_display_fqn`); a class nested inside an array arm keeps the
-/// normalized spelling, as it did before this slice.
+/// The name spells as [`ContractTy::Class`] stores it — lowercased, and with
+/// its leading `\` if it was never resolved and was written fully qualified. A
+/// caller with a class index resolves and re-cases every class arm before
+/// calling, nested ones included (`steins-infer`'s `render_contract_arms` does,
+/// via `Cx::class_display_fqn`).
 #[must_use]
 pub fn spell_arms(arms: &[ContractTy]) -> Option<String> {
     let mut has_int = false;
