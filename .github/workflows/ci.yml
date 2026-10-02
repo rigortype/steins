@@ -365,7 +365,7 @@ jobs:
       - name: Run FP gate
         # A project that outlives 300 s fails the gate, naming it and the files
         # in flight (issue #658), instead of the job timeout killing a stall
-        # silently. The public projects take about 20 s each.
+        # silently. The public projects take at most about 20 s each.
         run: cargo run -p xtask -- fp-gate --deadline 300
 
   # Not a gate — a MINING job, and the only reason it lives in CI is that the
