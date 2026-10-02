@@ -20,13 +20,17 @@
 //!
 //! Naming: the ADR's `VKey` is this crate's [`Key`] — one key vocabulary.
 
+use std::collections::HashSet;
+
 use crate::certainty::Certainty;
 use crate::fact::Fact;
 use crate::range::IntRange;
 use crate::value::{Key, Val};
 
 /// Field-width bound for a single shape (A-G6); PHPStan's `ARRAY_COUNT_LIMIT`,
-/// imported as-is. Beyond it, a lift/seed degrades to the tail-only summary.
+/// imported as-is. Beyond it, a shape degrades to the tail-only summary: the
+/// bound is enforced by [`ShapeFact::normalize_counted`], so no producer (a
+/// lift, a seed, an append or an offset write) can build a wider one.
 /// Distinct from the `OneOf` cap (whole-array union size); ADR-0062 §7
 /// declines that union-degradation role here.
 pub const SHAPE_WIDTH_LIMIT: usize = 256;
@@ -180,7 +184,9 @@ type Field = (Key, Presence, Option<Box<Fact>>);
 /// The canonical abstract array fact, built through [`ShapeFact::normalize`]
 /// (and the constructors that call it), which establishes:
 ///
-/// * `fields` sorted by key ([`Key`] order: ints before strings), one per key;
+/// * `fields` sorted by key ([`Key`] order: ints before strings), one per key,
+///   and at most [`SHAPE_WIDTH_LIMIT`] of them (a wider list degrades to the
+///   tail-only summary, A-G6) — the sort is what lets a lookup binary-search;
 /// * no `Absent` field under a `Sealed` tail (sealing already proves absence);
 /// * `covers` a deterministic antichain, size ≥ 2, none containing a
 ///   `Required` key;
@@ -312,7 +318,9 @@ impl ShapeFact {
     /// under a `Sealed` tail whose declared keys the floor exhausts, every
     /// declared key becomes `Required` (the exact-count pin), at
     /// `witnessed: false` unless already witnessed (A-G9). No pin under
-    /// `Unsealed` — a floor there bounds count only, not keys.
+    /// `Unsealed` — a floor there bounds count only, not keys. More than
+    /// [`SHAPE_WIDTH_LIMIT`] fields degrade to the tail-only summary
+    /// (A-G6), whatever built them.
     #[must_use]
     pub fn normalize_counted(
         mut fields: Vec<Field>,
@@ -326,6 +334,11 @@ impl ShapeFact {
             count_bound.intersect(IntRange::NON_NEGATIVE).unwrap_or(IntRange::NON_NEGATIVE);
         fields.sort_by(|a, b| a.0.cmp(&b.0));
         fields.dedup_by(|a, b| a.0 == b.0);
+
+        // The width bound holds here, for every producer (A-G6).
+        if fields.len() > SHAPE_WIDTH_LIMIT {
+            return degrade_wide(&fields, tail, is_list, non_empty, count_bound);
+        }
 
         // A singleton cover is presence, not a disjunction, so it's promoted;
         // an empty cover claims nothing and is dropped (widening).
@@ -367,6 +380,11 @@ impl ShapeFact {
         let computed = compute_is_list(&fields, &tail, non_empty);
         let is_list = sharpen_is_list(computed, is_list);
 
+        debug_assert!(
+            fields.windows(2).all(|w| w[0].0 < w[1].0),
+            "shape fields must be sorted by key, one per key: `field_of` binary-searches them"
+        );
+
         // `order: None` unconditionally — the drop discipline's enforcement
         // point (every derived shape is built here).
         ShapeFact { fields, tail, is_list, non_empty, covers, count_bound, order: None }
@@ -380,10 +398,14 @@ impl ShapeFact {
     /// guards against a caller installing a witness it never actually observed.
     #[must_use]
     pub fn with_order(mut self, order: Vec<Key>) -> ShapeFact {
+        // Membership through a set keeps this linear in the width: a witness
+        // is reattached after every append, so a quadratic scan here made N
+        // appends cubic (issue #884).
+        let keys: HashSet<&Key> = order.iter().collect();
         let consistent = matches!(self.tail, Tail::Sealed)
             && order.len() == self.fields.len()
-            && self.fields.iter().all(|(k, _, _)| order.contains(k))
-            && !order.iter().enumerate().any(|(i, k)| order[..i].contains(k));
+            && keys.len() == order.len()
+            && self.fields.iter().all(|(k, _, _)| keys.contains(k));
         if consistent {
             self.order = Some(order);
         }
@@ -546,7 +568,7 @@ impl ShapeFact {
         if entries.len() > SHAPE_WIDTH_LIMIT {
             return ShapeFact::normalize(
                 Vec::new(),
-                slot_tail_summary(entries),
+                slot_tail_summary(entries.iter().map(|(k, f)| (k, f.as_ref()))),
                 is_list,
                 non_empty,
                 Vec::new(),
@@ -977,7 +999,7 @@ fn tail_summary<'a, I: Iterator<Item = (&'a Key, &'a Val)>>(entries: I) -> Tail 
 /// [`tail_summary`] for fact-valued entries that may be unknown (issue #327).
 /// One unknown slot makes the whole bound unknown — the tail states what
 /// *every* undeclared entry satisfies.
-fn slot_tail_summary(entries: &[(Key, Option<Fact>)]) -> Tail {
+fn slot_tail_summary<'a, I: Iterator<Item = (&'a Key, Option<&'a Fact>)>>(entries: I) -> Tail {
     let mut key: Option<KeyClass> = None;
     let mut value: Option<Fact> = None;
     let mut all_known = true;
@@ -1001,8 +1023,48 @@ fn slot_tail_summary(entries: &[(Key, Option<Fact>)]) -> Tail {
     }
 }
 
+/// **The width bound at the constructor** (A-G6): the shape
+/// [`ShapeFact::normalize_counted`] builds when `fields` (sorted, deduped)
+/// outnumber [`SHAPE_WIDTH_LIMIT`], whoever the producer was.
+///
+/// It degrades exactly as a too-wide literal does at [`ShapeFact::lift`]: the
+/// fields go, and the key class and the value slot of every field that is not
+/// proven `Absent` are joined into the tail, joined again with whatever the
+/// tail already admitted. The count bound is kept; covers and the order
+/// witness are dropped (no keys are left to cover or to sequence).
+///
+/// `is_list` and `non_empty` are settled from the fields *before* they go: a
+/// 300-entry list is still a list, and one `Required` field still proves the
+/// array non-empty.
+fn degrade_wide(
+    fields: &[Field],
+    tail: Tail,
+    is_list: Certainty,
+    non_empty: bool,
+    count_bound: IntRange,
+) -> ShapeFact {
+    let non_empty = non_empty || fields.iter().any(|(_, p, _)| p.is_required());
+    let is_list = sharpen_is_list(compute_is_list(fields, &tail, non_empty), is_list);
+    let summary = slot_tail_summary(
+        fields
+            .iter()
+            .filter(|(_, p, _)| !matches!(p, Presence::Absent))
+            .map(|(k, _, slot)| (k, slot.as_deref())),
+    );
+    let tail = join_tails(&tail, &summary);
+    ShapeFact::normalize_counted(Vec::new(), tail, is_list, non_empty, Vec::new(), count_bound)
+}
+
+/// The field for `k` in `fields`, by binary search.
+///
+/// **`fields` must be sorted by key with one entry per key**: the invariant
+/// [`ShapeFact::normalize_counted`] establishes before any field list is read,
+/// and the reason [`ShapeFact`] has no struct-literal constructor. A list that
+/// breaks it makes the search miss keys silently; `normalize_counted` asserts
+/// the invariant once per build in debug builds rather than here on every
+/// lookup, where the check would be linear.
 fn field_of<'a>(fields: &'a [Field], k: &Key) -> Option<&'a Field> {
-    fields.iter().find(|(fk, _, _)| fk == k)
+    fields.binary_search_by(|(fk, _, _)| fk.cmp(k)).ok().map(|i| &fields[i])
 }
 
 /// A singleton cover is presence: promote the key to
@@ -1715,6 +1777,135 @@ mod tests {
             (0..(SHAPE_WIDTH_LIMIT as i64)).map(|i| (Key::Int(i), Val::Int(i))).collect();
         let s = ShapeFact::lift(&entries);
         assert_eq!(s.fields.len(), SHAPE_WIDTH_LIMIT);
+    }
+
+    // The width bound at the constructor (A-G6, issue #884)
+
+    const WIDE: i64 = SHAPE_WIDTH_LIMIT as i64 + 1;
+
+    fn wide_fields(n: i64) -> Vec<Field> {
+        (0..n).map(|i| (k(i), Presence::Required { witnessed: true }, int_slot(i))).collect()
+    }
+
+    #[test]
+    fn normalize_at_the_width_limit_keeps_its_fields() {
+        let s = ShapeFact::normalize(
+            wide_fields(WIDE - 1),
+            Tail::Sealed,
+            Certainty::Maybe,
+            false,
+            Vec::new(),
+        );
+        assert_eq!(s.fields.len(), SHAPE_WIDTH_LIMIT);
+        assert_eq!(s.tail, Tail::Sealed);
+        assert!(s.field(&k(255)).is_some());
+    }
+
+    #[test]
+    fn normalize_past_the_width_limit_degrades_to_the_tail_summary() {
+        let s = ShapeFact::normalize(
+            wide_fields(WIDE),
+            Tail::Sealed,
+            Certainty::Yes,
+            false,
+            Vec::new(),
+        );
+        assert!(s.fields.is_empty(), "257 fields exceed the bound");
+        assert!(matches!(s.tail, Tail::Unsealed { key: KeyClass::Int, value: Some(_) }));
+        assert!(s.non_empty, "a Required field proves the array non-empty");
+        assert_eq!(s.is_list, Certainty::Yes, "list-ness is settled before the fields go");
+        assert_eq!(s.order, None);
+        // The summary is wider than the shape it replaces, never narrower.
+        let entries: Vec<(Key, Val)> = (0..WIDE).map(|i| (k(i), Val::Int(i))).collect();
+        assert!(s.admits(&entries));
+        assert!(s.admits(&entries[..3]));
+    }
+
+    #[test]
+    fn the_summary_joins_the_key_class_and_the_slots() {
+        let mut fields = wide_fields(WIDE - 1);
+        fields.push((ks("name"), req(), slot(Fact::Singleton(Val::Str("x".into())))));
+        let s = ShapeFact::normalize(fields, Tail::Sealed, Certainty::Maybe, false, Vec::new());
+        assert!(s.fields.is_empty());
+        let Tail::Unsealed { key, value } = &s.tail else { panic!("expected a tail summary") };
+        assert_eq!(*key, KeyClass::ArrayKey);
+        let value = value.as_deref().expect("every slot was known");
+        assert!(value.admits(&Val::Int(7)) && value.admits(&Val::Str("x".into())));
+        assert_eq!(s.is_list, Certainty::No, "a string key is no list");
+    }
+
+    #[test]
+    fn one_unknown_slot_makes_the_summary_value_unknown() {
+        let mut fields = wide_fields(WIDE);
+        fields[10].2 = None;
+        let s = ShapeFact::normalize(fields, Tail::Sealed, Certainty::Maybe, false, Vec::new());
+        assert!(matches!(s.tail, Tail::Unsealed { value: None, .. }));
+    }
+
+    #[test]
+    fn the_summary_joins_with_the_tail_it_replaces() {
+        let tail = Tail::Unsealed { key: KeyClass::Str, value: slot(Fact::Singleton(Val::Null)) };
+        let s = ShapeFact::normalize(wide_fields(WIDE), tail, Certainty::Maybe, false, Vec::new());
+        let Tail::Unsealed { key, value } = &s.tail else { panic!("expected a tail summary") };
+        assert_eq!(*key, KeyClass::ArrayKey, "int fields join the existing string tail");
+        let value = value.as_deref().expect("both sides were known");
+        assert!(value.admits(&Val::Null) && value.admits(&Val::Int(3)));
+    }
+
+    #[test]
+    fn proven_absent_keys_add_nothing_to_the_summary() {
+        let mut fields = wide_fields(WIDE);
+        fields.push((ks("gone"), Presence::Absent, int_slot(0)));
+        let tail = Tail::Unsealed { key: KeyClass::Int, value: None };
+        let s = ShapeFact::normalize(fields, tail, Certainty::Maybe, false, Vec::new());
+        assert!(matches!(s.tail, Tail::Unsealed { key: KeyClass::Int, .. }));
+    }
+
+    #[test]
+    fn the_count_bound_survives_the_degradation() {
+        let s = ShapeFact::normalize_counted(
+            wide_fields(WIDE),
+            Tail::Sealed,
+            Certainty::Maybe,
+            false,
+            Vec::new(),
+            IntRange::new(300, 400).unwrap(),
+        );
+        assert!(s.fields.is_empty());
+        assert_eq!(s.count_bound, IntRange::new(300, 400).unwrap());
+    }
+
+    #[test]
+    fn a_degraded_shape_takes_no_order_witness() {
+        let s = ShapeFact::normalize(
+            wide_fields(WIDE),
+            Tail::Sealed,
+            Certainty::Yes,
+            false,
+            Vec::new(),
+        );
+        assert_eq!(s.with_order((0..WIDE).map(k).collect()).order, None);
+    }
+
+    #[test]
+    fn covers_do_not_outlive_the_fields_they_name() {
+        let covers = vec![Cover::new(vec![ks("a"), ks("b")], CoverFlavor::Isset)];
+        let s = ShapeFact::normalize(wide_fields(WIDE), Tail::Sealed, Certainty::Maybe, false, covers);
+        assert!(s.covers.is_empty());
+    }
+
+    #[test]
+    fn field_lookup_finds_every_key_whatever_order_they_arrive_in() {
+        let mut fields = wide_fields(SHAPE_WIDTH_LIMIT as i64 - 2);
+        fields.push((ks("z"), req(), None));
+        fields.push((ks("a"), req(), None));
+        fields.reverse();
+        let s = ShapeFact::normalize(fields, Tail::Sealed, Certainty::Maybe, false, Vec::new());
+        for i in 0..(SHAPE_WIDTH_LIMIT as i64 - 2) {
+            assert!(s.field(&k(i)).is_some(), "key {i} was lost");
+        }
+        assert!(s.field(&ks("a")).is_some() && s.field(&ks("z")).is_some());
+        assert!(s.field(&k(-1)).is_none() && s.field(&ks("m")).is_none());
     }
 
     // from_witnessed_entries (issue #327)
