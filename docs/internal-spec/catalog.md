@@ -245,7 +245,7 @@ argument-blind (`certified_at_call_site(name)`): `strcmp`, `strncmp`,
 #860): it is not on the fold allowlist, so without a place here the effect lane
 answered `no-effect-row` for it, which no proof at the call site can
 discharge. `vsprintf` stays out because `%f`, `%g` and `%G` read `LC_NUMERIC`
-(issue #991, as `sprintf`'s do). They are not on
+(issue #991, as `sprintf`'s do); it is coloured instead, below. They are not on
 `effect_labels`, so no other pass reads them as known builtins; the effects
 pass resolves an otherwise unresolved call against the list and answers pure
 only where the call site rules the reaching arguments out. Names that read the
@@ -253,6 +253,29 @@ locale or an ini setting (`basename`, `pathinfo`, `strnatcmp`,
 `strnatcasecmp`, `substr_compare`, `parse_url`, `escapeshellarg`,
 `strip_tags`, `number_format`, the `ctype_*` and `mb_*` families,
 `htmlspecialchars`) stay out.
+
+**The locale cell** (ADR-0101, issue #991) has four registry labels,
+`global.read.setting`, `global.read.setting.locale`, `global.write.setting` and
+`global.write.setting.locale`, and these coloured rows. The coloured row answers
+ahead of the fold allowlist's empty one, so `sprintf` is on the allowlist and
+carries a read; the allowlist is permission to ask the engine, not a promise
+that a call is pure, and Decision 2's bar for an **empty** row is unchanged.
+
+| name | row |
+| --- | --- |
+| `sprintf`, `vsprintf` | `{global.read.setting.locale}` |
+| `printf`, `vprintf` | `{io.output.buffer, global.read.setting.locale}` |
+| `localeconv`, `nl_langinfo`, `strcoll` | `{global.read.setting.locale}` |
+| `setlocale` | `{global.write.setting.locale}` (the argument-blind row; `setlocale($c, '0')` is a query, narrowed later) |
+
+`fprintf` and `vfprintf` still have no row. The rows are argument-blind and the
+read stands at every call until a call site reads a literal format with
+`format_reads_locale`; `strcoll` is a rowed name, so its `string` parameters are
+held to the reach rule like any other coloured row. The fold seam refuses a
+printf-family call whose literal format keeps the read (`fold_reads_ambient_setting`
+in `steins-infer`'s `fold.rs`): the runner always answers under `LC_NUMERIC=C`,
+and a fold of `sprintf('%.2f', 1.5)` would claim a locale the project never
+declared. `sprintf('%d-%s', 1, 'a')` and `sprintf('%.2F', 1.5)` still fold.
 
 A literal printf format refines the printf family's value positions
 (`format_reach(format)` and `printf_family(name)`, issue #860, ADR-0021's
@@ -267,7 +290,12 @@ strongest where several name it, and `Inert` for a value no conversion names.
 `None` leaves the call to the row: an unknown or missing conversion, a padding
 quote with nothing after it, an argument number of zero or past `INT_MAX`, a
 `*` width or precision, a `%` behind modifiers, a position past an internal
-bound. `printf_family` names the format position (0 for `sprintf`, `printf`,
+bound. The same parse gives a second verdict (`read_format` returns both,
+`format_reads_locale` is the bit alone): a conversion ending in `f`, `g` or `G`
+reads the locale, `F`, `e`, `E`, `h`, `H`, every integer and character
+conversion, `s` and `%%` never do, and an unreadable format keeps the read, so
+one walk of the bytes answers both questions and they cannot disagree about
+which specs the format holds. `printf_family` names the format position (0 for `sprintf`, `printf`,
 `vsprintf`, `vprintf`) and whether the values are one array, which is `Nested`
 when some conversion is `%s` and `Inert` when none is. `fprintf` and
 `vfprintf` have no row of any kind and are not in it. The engine reads a

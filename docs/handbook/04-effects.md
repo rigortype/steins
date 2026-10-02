@@ -55,6 +55,8 @@ catalog can color a function with:
 ```text
 eval   exit   ffi
 global.read   global.write
+     global.read.setting   global.read.setting.locale
+     global.write.setting  global.write.setting.locale
 io   io.db   io.fs   io.fs.read   io.fs.write   io.input   io.ipc
      io.net   io.net.http   io.process   io.signal
      io.output   io.output.buffer   io.output.header

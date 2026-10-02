@@ -1,5 +1,11 @@
 # Catalog seeding is demand-driven; the initial FP-gate corpus
 
+> Amended by ADR-0101: the 2026-10-01 amendment's Decision 2 keeps its bar for
+> an **empty** row ("reads only its arguments: no ini setting, locale, …"), and
+> a builtin that fails the bar only by reading a setting is now catalogued with
+> that read, `global.read.setting.<cell>`, instead of being refused. `sprintf`
+> and `vsprintf` carry `global.read.setting.locale` (issue #991).
+
 **Catalog (ADR-0014) seeding order**: type signatures are generated
 mechanically from php-src stubs in bulk; **effect coloring follows measured
 demand** — builtin call frequency counted over the FP-gate corpus, colored

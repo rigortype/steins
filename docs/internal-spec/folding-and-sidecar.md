@@ -66,7 +66,11 @@ An expression folds only when three things hold:
    because `$x` is not known to be one entry.
 
 An allowlist entry is *permission* to fold, not a promise that a call folds —
-the gates below still apply per call.
+the gates below still apply per call. One of them reads a **setting**: a
+printf-family call whose literal format keeps a locale read (`%f`, `%g`, `%G`, or
+a format the parser cannot read) does not fold, because the runner answers under
+`LC_NUMERIC=C` and a fold is a claim about the project's own runtime (ADR-0101
+§3.3). `sprintf('%d-%s', 1, 'a')` and `sprintf('%.2F', 1.5)` still fold.
 
 ### Arrays cross the seam in both directions
 

@@ -73,6 +73,8 @@ eval
 exit
 ffi
 global.read   global.write
+     global.read.setting   global.read.setting.locale
+     global.write.setting  global.write.setting.locale
 io   io.db   io.fs   io.fs.read   io.fs.write   io.input   io.ipc
      io.net  io.net.http   io.process   io.signal
      io.output   io.output.buffer   io.output.header
@@ -469,6 +471,15 @@ of the same envelope concept, one trust stratum below the attribute.
 - The declaring function is contract-checked against its interop envelope
   (`effect.envelope-exceeded`) — reading the tag is not believing it, it is
   verifying it.
+- A locale read is an effect (ADR-0101): a `@phpstan-pure` body that keeps a
+  `global.read.setting.locale` read, which the printf family's `%f`, `%g` and
+  `%G` conversions make, is `effect.envelope-exceeded` at that call. PHPStan has
+  no locale concept and accepts `sprintf` under its purity model, so this is a
+  finding Steins can make and PHPStan cannot, not a divergence of imported type
+  semantics. `steins transform effects-envelope` writes `@phpstan-impure
+  global.read.setting.locale` for a function whose only effect is that read, like
+  any other label, and a project that wants the old silence tolerates
+  `global.read.setting` (ADR-0084).
 - A bare `@phpstan-impure` stays a non-tag in Steins (⊤ adds no information);
   a bare `@phpstan-pure` is read as the `{mutate.local}` envelope.
 - Within the interop stratum the class/method precedence is upstream's

@@ -363,7 +363,7 @@ issue #492).
 | [Extension-class reflection, past the first slice](#extension-class-reflection) | Resolves against the project's own PHP (#269); a class the runtime cannot reflect stays `Unknown`-silent. |
 | The full effect catalog | What ships is a frequency-seeded starter set; ADR-0014's php-src stub sourcing is not built. |
 | Computed folding purity | Folding permission is a hand-picked allowlist, not a derived property. |
-| Locale/timezone pseudo-constants | The ADR-0008 opt-in that would let `mb_*` and locale-sensitive functions fold. |
+| Locale/timezone pseudo-constants | The ADR-0008 opt-in that would let `mb_*` and locale-sensitive functions fold. A setting read is now a catalogued effect (ADR-0101, `global.read.setting.locale` on the printf family), so what the opt-in would do is drop that label, and a fold of `sprintf('%f', …)` stays refused until it exists. The `precision` cell (`precision`, `serialize_precision`) is **registered only in the roster, with no label and no row**: only builtin readers will be coloured, and the operator sites that read it (`(string) $float`, `.`, `echo`, `implode`) wait for this opt-in (ADR-0101 D4). |
 
 #### Extension-class reflection
 
