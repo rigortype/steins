@@ -142,6 +142,7 @@ pub use knowledge::{
     flag_gated_throw,
     knows,
     throws_of,
+    throws_of_literals,
 };
 
 mod reach;

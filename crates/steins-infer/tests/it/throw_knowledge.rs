@@ -97,6 +97,35 @@ fn a_name_with_a_value_error_row_is_exhaustive_with_the_error_in_its_set() {
     assert_eq!(summary(&src, "f").throws, ["ValueError"]);
 }
 
+#[test]
+fn a_name_that_compares_its_elements_carries_the_error_of_a_recursive_array() {
+    // Two distinct arrays that contain themselves by reference compare to an
+    // `Error` ("Nesting level too deep"), and the parameter type admits them: these
+    // names left the throwless table for a row (issue #881), and the row keeps the
+    // body exhaustive with the `Error` in its set.
+    for body in [
+        "return in_array(1, [1, 2]);",
+        "return array_search(1, [1, 2]);",
+        "return array_unique([1, 1]);",
+        "return array_replace_recursive([1], [2]);",
+        "return date_create('now');",
+        "return date_create_immutable('now');",
+    ] {
+        let s = summary(&file(true, "", body), "f");
+        assert!(s.throws_exhaustive, "{body}: {s:?}");
+        assert_eq!(s.throws, ["Error"], "{body}");
+    }
+    // A sort takes its array by reference, so a local operand is a gap of its own
+    // kind; the row is still what it says.
+    for sort in ["sort", "rsort", "asort", "arsort"] {
+        let s = summary(&file(true, "", &format!("$a = [2, 1]; {sort}($a); return $a;")), "f");
+        assert_eq!(s.throws, ["Error"], "{sort}: {s:?}");
+    }
+    // `ksort` compares keys, which are never arrays: still on the table.
+    let s = summary(&file(true, "", "$a = [2, 1]; ksort($a); return $a;"), "f");
+    assert!(s.throws_exhaustive && s.throws.is_empty(), "{s:?}");
+}
+
 // ---- array_keys: the certification gives the throw lane its arity too -------
 
 #[test]
@@ -104,6 +133,12 @@ fn array_keys_is_throw_exhaustive_at_one_argument_only() {
     // Comparing `$filter` loosely with every element may run an object's
     // `__toString`: at two arguments the operand reaches user code.
     assert!(throw_gaps(&file(true, "array $a", "return array_keys($a);")).is_empty());
+    // At one argument nothing is compared, so the set is empty: the `Error` of the
+    // search form, which compares two recursive arrays, is the other arities'.
+    let one = summary(&file(true, "array $a", "return array_keys($a);"), "f");
+    assert!(one.throws_exhaustive && one.throws.is_empty(), "{one:?}");
+    let two = summary(&file(true, "", "return array_keys([1, 2], 1);"), "f");
+    assert!(two.throws_exhaustive && two.throws == ["Error"], "{two:?}");
     assert_eq!(throw_gaps(&file(true, "array $a, $v", "return array_keys($a, $v);")), ["user-code-reach"]);
     // A spread list has no arity to certify. The spread of a variable is also an
     // iteration site, and the callee may take the variable by reference.

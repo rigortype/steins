@@ -133,7 +133,9 @@ pub(crate) fn function_effects(
 /// where there are no arguments to read, a builtin handed over as a callback,
 /// which its invoker calls with arguments of the invoker's choosing.
 ///
-/// * A row, or the audited throwless table, answers ([`steins_catalog::throws_of`]).
+/// * A row, or the audited throwless table, answers ([`steins_catalog::throws_of`]);
+///   a call at an arity the name is certified pure at ([`steins_catalog::pure_at_arity`])
+///   raises nothing whatever the row says of its other arities.
 /// * A name that raises only under a flag (`json_encode`, `json_decode`) answers
 ///   with its flag-free throws when the call shows its flags absent or a constant
 ///   expression without the flag, and is a [`GapKind::FlagDependentThrow`]
@@ -145,6 +147,14 @@ pub(crate) fn function_throws(
     call: Option<(Option<usize>, &ConstArgs)>,
 ) -> Result<&'static [&'static str], GapKind> {
     let Some(gate) = steins_catalog::flag_gated_throw(name) else {
+        // A name certified pure at the call's arity compares nothing there, so
+        // the row it carries for its other arities does not apply: `array_keys($a)`
+        // copies keys, and `array_keys($a, $v)` compares `$v` with every element,
+        // which is an `Error` for two arrays that contain themselves.
+        let arity = call.and_then(|(arity, _)| arity);
+        if arity.is_some_and(|n| steins_catalog::pure_at_arity(name, n)) {
+            return Ok(&[]);
+        }
         return steins_catalog::throws_of(name).ok_or(GapKind::NoThrowRow);
     };
     let (arity, consts) = call.ok_or(GapKind::FlagDependentThrow)?;

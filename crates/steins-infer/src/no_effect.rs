@@ -245,8 +245,11 @@ fn builtin_does_nothing(name: &str) -> bool {
     // it is a name nobody has audited, and a statement is dead only where the
     // call is *known* not to raise. [`steins_catalog::throws_of`] answers
     // `Some(&[])` for exactly the audited names, so an unaudited builtin stays
-    // silent here until its audit lands.
-    if !steins_catalog::throws_of(name).is_some_and(<[_]>::is_empty) {
+    // silent here until its audit lands. The call is held to flat literals
+    // ([`literal_call_shape`]), which is the question `throws_of_literals`
+    // answers: the `Error` of `in_array` is two arrays that contain themselves,
+    // and no literal is one.
+    if !steins_catalog::throws_of_literals(name).is_some_and(<[_]>::is_empty) {
         return false;
     }
     // The diagnostic and engine-state refusals, for the same reason in the
@@ -387,7 +390,7 @@ mod tests {
             assert!(labels.iter().all(|l| discardable(l)), "{name} declines on its colour: {labels:?}");
             assert!(steins_catalog::out_params(name).is_none(), "{name} declines on its out-param row");
             assert!(
-                steins_catalog::throws_of(name).is_none_or(<[_]>::is_empty),
+                steins_catalog::throws_of_literals(name).is_none_or(<[_]>::is_empty),
                 "{name} declines on its throw row"
             );
             assert!(!builtin_does_nothing(name), "{name} must be refused");
