@@ -479,6 +479,11 @@ impl Index {
         &self.destructor_classes
     }
 
+    /// Every uniquely declared class-like's lowercase name (an alias's too).
+    pub(crate) fn class_names(&self) -> impl Iterator<Item = &String> {
+        self.classes.keys()
+    }
+
     /// The lowercase names that are, or are an ancestor of, a class of
     /// [`Self::destructor_classes`] or an anonymous class's parent: the question
     /// "may a subclass run a destructor" for a bound class is one lookup. The

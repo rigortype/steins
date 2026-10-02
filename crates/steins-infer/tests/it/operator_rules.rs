@@ -1094,3 +1094,80 @@ fn s6_a_new_in_a_loop_drops_the_previous_iteration_s_value() {
     dtor_gap("function f($xs) { foreach ($xs as $x) { $d = new D; } }", "f");
     dtor_gap("function f() { while (true) { $d = new D; } }", "f");
 }
+
+/// Whether `symbol` of a whole file carries the destructor gap.
+fn dtor_src(src: &str, symbol: &str) -> bool {
+    dtor(&format!("<?php\n{src}\n"), symbol)
+}
+
+/// B1: an interface a *subclass* of the declaring class implements is an ancestor of a
+/// class that inherits the destructor, so a value typed to it may run it (witnessed:
+/// `[P]<body>`). The abstract middle class, a hop through a property and a trait-user
+/// parent are the same shape; an interface nothing with a destructor implements is not.
+#[test]
+fn s6_an_interface_a_subclass_of_the_declaring_class_implements_is_reached() {
+    let sub = "interface I {}\nclass P { public function __destruct() {} }\n\
+        final class C extends P implements I {}\n";
+    assert!(dtor_src(&format!("{sub}function g(I $i) {{ $i = null; }}"), "g"));
+    assert!(dtor_src(&format!("{sub}function g(?I $i) {{ }}"), "g"));
+    let hop = format!("{sub}final class H {{ public ?I $i = null; }}\nfunction g(H $h) {{ $h = null; }}");
+    assert!(dtor_src(&hop, "g"));
+    let mid = "abstract class Base {}\nclass P extends Base { public function __destruct() {} }\n\
+        interface J {}\nabstract class Mid extends P implements J {}\nfinal class C extends Mid {}\n\
+        function g(J $j) { $j = null; }";
+    assert!(dtor_src(mid, "g"));
+    let traity = "trait T { public function __destruct() {} }\nclass U { use T; }\ninterface I {}\n\
+        final class V extends U implements I {}\nfunction g(I $i) { $i = null; }";
+    assert!(dtor_src(traity, "g"));
+    let none = format!("{sub}interface K {{}}\nfinal class Q implements K {{}}\n\
+        function g(K $k) {{ $k = null; }}");
+    assert!(!dtor_src(&none, "g"));
+}
+
+/// B2: a property that names its own class holds a bound, though the value it was
+/// reached from is exact: `Node` the exact class has no destructor, a `DNode` in its
+/// `?Node` property does (witnessed: `<body>[DNode]`).
+#[test]
+fn s6_a_self_typed_property_on_an_exact_new_asks_the_bound_question() {
+    let src = "class Node { public ?Node $next = null;\n\
+        public function __construct() { $this->next = new DNode(); } }\n\
+        class DNode extends Node { public function __destruct() { echo '[DNode]'; } }\n\
+        function f() { $n = new Node(); echo '<body>'; }";
+    assert!(dtor_src(src, "f"));
+    let plain = "class Node { public ?Node $next = null; }\nclass Leaf extends Node {}\n\
+        function f() { $n = new Node(); }\nfunction g(Node $n) { }";
+    assert!(!dtor_src(plain, "f"));
+    assert!(!dtor_src(plain, "g"));
+}
+
+/// S1: a hint's class members count whatever else the union holds, and `self` and
+/// `parent` name the class they stand in (witnessed: `[D]<body>`).
+#[test]
+fn s6_a_union_with_an_array_and_a_self_hint_are_read_by_their_classes() {
+    assert!(dtor_src("final class D { public function __destruct() {} }\n\
+        function g(array|D $x) { $x = null; }", "g"));
+    assert!(dtor_src("final class D { public function __destruct() {} }\n\
+        function g(int|string|null|D $x) { }", "g"));
+    assert!(dtor_src("final class D { public function __destruct() {}\n\
+        public function merge(self $o): void { $o = null; } }", "D::merge"));
+    assert!(dtor_src("class B { public function __destruct() {} }\n\
+        class K extends B { public function m(parent $p): void { } }", "K::m"));
+    // The enclosing class reaches nothing, so neither does its `self`.
+    assert!(!dtor_src("final class E { public function merge(self $o): void { $o = null; } }", "E::merge"));
+    assert!(!dtor_src("function g(array|int|null $x) { $x = null; }", "g"));
+}
+
+/// S5: a class declared twice cannot be read, and may be the declaration that has the
+/// destructor; an absent one is residue (witnessed: `[P]<body>`).
+#[test]
+fn s6_a_class_declared_twice_may_run_a_destructor() {
+    let twice = "class P { public function __destruct() { echo '[P]'; } }\n\
+        if (PHP_VERSION_ID >= 80000) { final class C extends P {} } else { final class C extends P {} }\n\
+        function g(C $c) { $c = null; }\nfunction h() { $c = new C(); echo '<body>'; }";
+    assert!(dtor_src(twice, "g"));
+    assert!(dtor_src(twice, "h"));
+    let absent = "function g(\\Vendor\\Missing $m) { $m = null; }\n\
+        function h() { $m = new \\Vendor\\Missing(); }";
+    assert!(!dtor_src(absent, "g"));
+    assert!(!dtor_src(absent, "h"));
+}

@@ -577,8 +577,9 @@ fn a_hooked_promoted_parameter_is_a_magic_property_write_on_this_in_the_construc
 // ---- Drop sites (ADR-0100 §7, issue #882) -------------------------------------
 
 /// One drop site of `function f(params) { body }`: its construct, the receivers it
-/// carries (`C` for the exact class `C`, `$p` for the parameter `p`, `?` for a class
-/// the lowering knows runs user code), and the source text its span covers.
+/// carries (`C` for the exact class `C`, `~C` for `C` or a subclass, `self` and `parent`
+/// for those hints, `?` for a class the lowering knows runs user code), and the source
+/// text its span covers.
 type Drop = (C, Vec<String>, String);
 
 fn drops(params: &str, body: &str) -> Vec<Drop> {
@@ -598,7 +599,9 @@ fn drops(params: &str, body: &str) -> Vec<Drop> {
                     .iter()
                     .map(|r| match r {
                         Some(EffectRecv::ClassName(name)) => name.raw.clone(),
-                        Some(EffectRecv::Var(name)) => format!("${name}"),
+                        Some(EffectRecv::Bound(name)) => format!("~{}", name.raw),
+                        Some(EffectRecv::SelfKw) => "self".to_owned(),
+                        Some(EffectRecv::Parent) => "parent".to_owned(),
                         None => "?".to_owned(),
                         other => panic!("{other:?}"),
                     })
@@ -686,15 +689,30 @@ fn a_parameter_is_a_subject_by_its_hint_even_where_the_frame_writes_it() {
     assert_eq!(
         sites,
         [
-            drop_site(C::DropReassign, &["$d"], "$d = null"),
-            drop_site(C::DropUnset, &["$d"], "$d"),
-            drop_site(C::DropScopeExit, &["$d"], "}"),
+            drop_site(C::DropReassign, &["~D"], "$d = null"),
+            drop_site(C::DropUnset, &["~D"], "$d"),
+            drop_site(C::DropScopeExit, &["~D"], "}"),
         ]
     );
     // Every hint that can name a class: nullable, union, intersection.
     for hint in ["?D", "D|int", "D&E", "int|D|null"] {
         assert_eq!(drops(&format!("{hint} $d"), "").len(), 1, "{hint}");
     }
+}
+
+#[test]
+fn a_hint_names_every_class_member_whatever_else_it_holds() {
+    let exit = |receivers: &[&str]| [drop_site(C::DropScopeExit, receivers, "}")];
+    assert_eq!(drops("array|D $x", ""), exit(&["~D"]));
+    assert_eq!(drops("D|E|array|int|null $x", ""), exit(&["~D", "~E"]));
+    assert_eq!(drops("mixed|D $x", ""), exit(&["~D"]));
+    assert_eq!(drops("(A&B)|array $x", ""), exit(&["~A", "~B"]));
+    // `self` and `parent` are the enclosing class and its parent, which the resolver reads.
+    assert_eq!(drops("self $x", ""), exit(&["self"]));
+    assert_eq!(drops("?self|array $x", ""), exit(&["self"]));
+    assert_eq!(drops("parent $x", ""), exit(&["parent"]));
+    // A repeated class is one receiver.
+    assert_eq!(drops("D|?D $x", ""), exit(&["~D"]));
 }
 
 #[test]
@@ -707,8 +725,8 @@ fn a_parameter_that_cannot_name_a_class_or_is_not_dropped_by_value_is_no_subject
         "callable $c",
         "object $o",
         "$u",
-        "self $s",
         "string|int $s",
+        "array|null $a",
         "&$r",
         "D &$r",
         "D ...$ds",

@@ -96,6 +96,7 @@ fn receiver_start(cx: &Cx, frame: &Frame, receiver: &EffectRecv) -> Option<(Stri
             let fqn = declared_receiver_fqn(cx, frame.class_fqn, frame.params, receiver)?;
             (fqn, false)
         }
+        EffectRecv::Bound(_) => return None,
     })
 }
 
