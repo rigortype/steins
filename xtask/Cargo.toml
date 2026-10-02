@@ -40,6 +40,10 @@ steins-catalog = { path = "../crates/steins-catalog" }
 # measurement cannot drift from what the store actually writes.
 steins-gen = { path = "../crates/steins-gen" }
 
+# `wait4`, for `perf`'s per-run peak RSS (issue #913): std's `Child::wait` drops
+# the `rusage` the kernel hands back with the status, and `ru_maxrss` is only in it.
+libc.workspace = true
+
 rayon.workspace = true
 toml.workspace = true
 semver.workspace = true

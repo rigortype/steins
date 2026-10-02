@@ -77,7 +77,27 @@ If the profile ever moves — a shape-heavy workload where `steins-domain` clear
 
 ## Perf harness
 
-`cargo xtask perf <target-dir>... [--runs N] [--bless] [--no-php] [--warm] [--paranoid] [--edits]` measures a cold library-path run per target tree — the same load → parse → `check_project` pipeline `fp-gate` drives, never a shelled-out binary, so process startup is not in the numbers — and reports load+parse, analyze, and total wall clock as the median over N runs (default 3). Each run gets a fresh salsa DB and a fresh sidecar, so every run is cold by construction; the OS file cache is the one warmth the harness does not control. The corpus checkouts make good targets (`cargo xtask perf corpus/nikic__PHP-Parser`).
+`cargo xtask perf <target-dir>... [--runs N] [--bless] [--no-php] [--warm] [--paranoid] [--edits] [--check-rss] [--baseline PATH]` measures a cold library-path run per target tree — the same load → parse → `check_project` pipeline `fp-gate` drives, never a shelled-out binary, so process startup is not in the numbers — and reports load+parse, analyze, total wall clock, and peak RSS as the median over N runs (default 3). Each run gets a fresh salsa DB and a fresh sidecar, so every run is cold by construction; the OS file cache is the one warmth the harness does not control. The corpus checkouts make good targets (`cargo xtask perf corpus/nikic__PHP-Parser`).
+
+### Peak RSS (#913)
+
+Each cold run executes in its own **child process**: the xtask re-invokes itself as the hidden `perf-child <dir> [--no-php]` subcommand (absent from the usage text; the protocol is in `xtask/src/perf/child.rs`), which does one cold run and prints a header line (file count, timings, findings hash, byte length) followed by the canonical findings text. The parent drains that, reaps the child itself with `wait4`, and reads `ru_maxrss` from the returned `rusage`, normalised to bytes (macOS reports bytes, Linux KiB) and printed as MB (10⁶ bytes). Timing is taken inside the child around the same load and analyze phases as before, so process startup is still not in the numbers, and the determinism oracle and the findings hash read the same text they always did. A stream that is truncated, padded or hashes differently from its header is an error, not a hash mismatch.
+
+Why a child: in one process `ru_maxrss` is a lifetime high-water mark, so it stops moving after run 1 and includes the harness. In the child it is that run's own peak. It folds in the PHP sidecar as a maximum, not a sum, and the sidecar is far smaller, so the number is the analyzer's.
+
+- **The number is one build profile's.** `cargo xtask` is a debug build; a release build has a different resident set. Bless and check under the same profile (and the same OS: a blessed macOS peak says nothing about Linux).
+- **`--warm` stays in-process** and records no RSS; only the cold runs have one.
+- **`--bless`** stores `peak_rss_mb` (the median over the runs, rounded to 0.1 MB) beside the timings. An entry blessed before this field existed still loads; it has no ceiling until re-blessed.
+- **The ceiling.** `--check-rss` fails the run (exit 1) when the median peak is above the blessed value × 1.10 (`RSS_CEILING_FRACTION`; exactly at it holds). It is an error (exit 2), not a pass, when there is nothing to compare against: no entry for the target, an entry without `peak_rss_mb`, or a platform without `wait4`. It cannot be combined with `--bless`. Without the flag the same comparison prints as an advisory line. A reduction never fails; ratchet the ceiling down by re-blessing, which stays a conscious act.
+- **`--baseline PATH`** reads and writes that file (relative to the repo root, or absolute) instead of `perf.local.toml`. `perf.local.toml` is untracked, so a CI job keeps its blessed ceilings in a tracked file of its own.
+
+A CI job over the public corpus runs, with the ceilings blessed on the runner's own OS and kept in the tracked file:
+
+```
+cargo xtask perf corpus/nikic__PHP-Parser --runs 3 --no-php --check-rss --baseline perf.ci.toml
+```
+
+and `--bless --baseline perf.ci.toml` (without `--check-rss`) re-records it. `--no-php` keeps the findings hash, which the same run also checks, independent of the runner's PHP.
 
 `--warm` adds the generation lifecycle: a cold build into a scratch store, then N warm rebuilds, with the analyze phase split into merge / whole-universe facts / each fixpoint / the walk loop / the reporting passes (issue #516), and the per-run counters — files loaded, parsed, and **decoded** (a loaded file's tree is only decoded where a walk reaches it, so a no-change rebuild should report zero). The cold build reports the same split, because it is the one run that walks the whole universe. `--paranoid` turns the walk verifier on: every file is walked anyway and every would-be skip is compared against its fresh walk.
 
@@ -92,4 +112,5 @@ What fails vs what only warns:
 - **Determinism fails the run.** Every invocation runs the full cold analysis at least twice on identical inputs and asserts the findings serialize byte-identically (sorted the way `steins check` sorts its output). A mismatch prints a per-diagnostic-id count diff and exits red. This is the **cold half of ADR-0092 §5's warm ≡ cold oracle**; issue #489 extends the same comparison to warm-vs-cold when the generation layer lands.
 - **A findings-hash mismatch against the baseline fails the run.** Either the target tree moved or the analyzer changed what it finds — triage, then re-bless consciously.
 - **A posture mismatch is an error, not a number.** A baseline blessed under the other engine posture is refused before any hash comparison, exit 2.
+- **Peak RSS gates only under `--check-rss`.** Above the blessed value × 1.10 fails the run; see Peak RSS above.
 - **Timing only warns.** Deltas against the blessed medians print but never gate — machine variance. The provisional M5 targets live in the harness, not the roadmap: cold within 10% of the pre-persistence baseline (printed as an advisory when crossed), warm re-check ≤ 2s p95 at the ~30k-file scale (unenforceable until the warm path exists).
