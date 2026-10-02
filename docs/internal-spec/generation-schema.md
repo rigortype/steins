@@ -68,6 +68,7 @@ requires.
 | [21](#schema-21) | #320 (ADR-0096), #352 | misdecode, meaning | `Stmt` grows `value_position` (#320); `CallTarget` grows `Bool` (#352). |
 | [22](#schema-22) | #654 | misdecode | `CondOperand::Other`, `CondExpr::Call` and `CondExpr::Opaque` grow `writes`. |
 | [23](#schema-23) | #859 (ADR-0099 §4.4) | misdecode, meaning | The `symbols` shard's `PackageShard` grows `magic_property_classes` and `anonymous_subclass_parents`. |
+| [24](#schema-24) | #882 (ADR-0100 §7) | misdecode, meaning | The `symbols` shard's `PackageShard` grows `destructor_classes`, between `magic_property_classes` and `anonymous_subclass_parents`. |
 
 ## Where the record and the code disagree
 
@@ -352,3 +353,18 @@ constants as the new sets: the **misdecode** kind. It is also a **meaning**
 bump, not an under-answer: a shard that decoded without the sets would let the
 gate answer that every bound class's declared property runs nothing, which is
 a wrong answer.
+
+### Schema 24
+
+`24` is the destructor gate (issue #882, ADR-0100 §7). `PackageShard`, the
+`symbols` shard, grows one set between `magic_property_classes` and
+`anonymous_subclass_parents`: the class-likes that declare `__destruct` or
+import a trait, whose body is not lowered. The shard is decoded before the
+analyzer gate and the wire codec reads a struct's fields by position, so a
+schema-23 shard would decode the anonymous-subclass parents as the new set and
+the constants as the parents: the **misdecode** kind. It is the **meaning**
+kind as well, prospectively: the drop sites that land after this row read the
+set to say whether some subclass of a bound class runs a destructor, and a
+shard without it would answer no. Nothing reads the set yet, and the gap kind
+`destructor` that rides with it is appended to `GapKind`, a facts payload
+enum decoded past the gate, so that half is no bump.

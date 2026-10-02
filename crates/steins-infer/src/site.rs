@@ -152,11 +152,19 @@ pub(crate) enum GapKind {
     /// An operand cloned whose `__clone` (or `__set`, for `clone` with a property
     /// list) the site cannot pin.
     OperatorClone,
+    /// A value dropped (`unset`, a reassignment, the end of its scope) whose class
+    /// may run `__destruct`: a body-local `new` binding or a parameter bound to a
+    /// class that, or some subclass of which, declares one (ADR-0100 §7). A drop
+    /// is a may-run, never an edge: the destructor runs in whichever frame
+    /// releases the last reference, and the caller may keep one. Source: the Drop
+    /// family of the operator resolver; recorded by the destructor slice's sites,
+    /// not by the gate that adds the kind.
+    Destructor,
 }
 
 impl GapKind {
     /// Every kind, in the order the facts payload's codec numbers them.
-    pub(crate) const ALL: [Self; 22] = [
+    pub(crate) const ALL: [Self; 23] = [
         Self::DynamicCallee,
         Self::UnknownClass,
         Self::UnknownFunction,
@@ -179,6 +187,7 @@ impl GapKind {
         Self::OperatorArrayAccess,
         Self::OperatorIteration,
         Self::OperatorClone,
+        Self::Destructor,
     ];
 
     /// The kind's spelling on the surfaces that name it (`annotate --format
@@ -208,6 +217,7 @@ impl GapKind {
             Self::OperatorArrayAccess => "operator-array-access",
             Self::OperatorIteration => "operator-iteration",
             Self::OperatorClone => "operator-clone",
+            Self::Destructor => "destructor",
         }
     }
 
@@ -248,6 +258,7 @@ impl GapKind {
             Self::OperatorArrayAccess => "an offset access may run `ArrayAccess` methods",
             Self::OperatorIteration => "an iterated operand may run `Traversable` methods",
             Self::OperatorClone => "a cloned operand may run `__clone`",
+            Self::Destructor => "a dropped value may run `__destruct`",
         }
     }
 }

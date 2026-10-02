@@ -269,6 +269,10 @@ pub(crate) struct Index {
     /// by lowercase FQN: the table the operator resolver reads to rule out a
     /// subclass adding user code to a property access (ADR-0099 §4.4).
     magic_property_classes: HashSet<String>,
+    /// The class-likes declaring `__destruct` or importing a trait, by lowercase
+    /// FQN: the table the drop sites read to rule out a subclass that runs a
+    /// destructor (ADR-0100 §7).
+    destructor_classes: HashSet<String>,
     /// The classes and interfaces the universe's anonymous classes extend or
     /// implement, as resolved in their files (ADR-0099 §4.4).
     anonymous_subclass_parents: HashSet<String>,
@@ -351,6 +355,7 @@ impl Index {
             magic_obstacles: m.magic_obstacles,
             property_writes: m.property_writes,
             magic_property_classes: m.magic_property_classes,
+            destructor_classes: m.destructor_classes,
             anonymous_subclass_parents: m.anonymous_subclass_parents,
             constants: m.constants,
             files: m.files,
@@ -386,6 +391,7 @@ impl Index {
         idx.magic_obstacles = m.magic_obstacles;
         idx.property_writes = m.property_writes;
         idx.magic_property_classes = m.magic_property_classes;
+        idx.destructor_classes = m.destructor_classes;
         idx.anonymous_subclass_parents = m.anonymous_subclass_parents;
         idx.constants = m.constants;
         idx.files = m.files;
@@ -449,6 +455,13 @@ impl Index {
     /// `__isset` or `__unset`, or hook a property (ADR-0099 §4.4).
     pub(crate) fn magic_property_classes(&self) -> &HashSet<String> {
         &self.magic_property_classes
+    }
+
+    /// The lowercase FQNs of the class-likes that declare `__destruct` or import a
+    /// trait (ADR-0100 §7).
+    #[expect(dead_code, reason = "read by the drop sites of #882's second slice")]
+    pub(crate) fn destructor_classes(&self) -> &HashSet<String> {
+        &self.destructor_classes
     }
 
     /// The classes and interfaces some anonymous class extends or implements.
