@@ -335,11 +335,6 @@ impl ShapeFact {
         fields.sort_by(|a, b| a.0.cmp(&b.0));
         fields.dedup_by(|a, b| a.0 == b.0);
 
-        // The width bound holds here, for every producer (A-G6).
-        if fields.len() > SHAPE_WIDTH_LIMIT {
-            return degrade_wide(&fields, tail, is_list, non_empty, count_bound);
-        }
-
         // A singleton cover is presence, not a disjunction, so it's promoted;
         // an empty cover claims nothing and is dropped (widening).
         let mut kept: Vec<Cover> = Vec::new();
@@ -357,6 +352,14 @@ impl ShapeFact {
         // A sealed tail already proves absence; an `Absent` field is redundant.
         if matches!(tail, Tail::Sealed) {
             fields.retain(|(_, p, _)| !matches!(p, Presence::Absent));
+        }
+
+        // The width bound holds here, for every producer (A-G6). It is read
+        // after the retain above so that the bound counts the fields the shape
+        // actually keeps, and after the cover promotion so that no later step
+        // can push a field past it.
+        if fields.len() > SHAPE_WIDTH_LIMIT {
+            return degrade_wide(&fields, tail, is_list, non_empty, count_bound);
         }
 
         // Exact-count pin: no room left for an absent declared key; `declared`
@@ -1045,13 +1048,14 @@ fn degrade_wide(
 ) -> ShapeFact {
     let non_empty = non_empty || fields.iter().any(|(_, p, _)| p.is_required());
     let is_list = sharpen_is_list(compute_is_list(fields, &tail, non_empty), is_list);
-    let summary = slot_tail_summary(
-        fields
-            .iter()
-            .filter(|(_, p, _)| !matches!(p, Presence::Absent))
-            .map(|(k, _, slot)| (k, slot.as_deref())),
-    );
-    let tail = join_tails(&tail, &summary);
+    // Proven-absent keys add nothing; with no other field left the tail stays
+    // as it was rather than gaining an untyped summary.
+    let mut live = fields.iter().filter(|(_, p, _)| !matches!(p, Presence::Absent)).peekable();
+    let tail = if live.peek().is_none() {
+        tail
+    } else {
+        join_tails(&tail, &slot_tail_summary(live.map(|(k, _, slot)| (k, slot.as_deref()))))
+    };
     ShapeFact::normalize_counted(Vec::new(), tail, is_list, non_empty, Vec::new(), count_bound)
 }
 
@@ -1862,6 +1866,28 @@ mod tests {
     }
 
     #[test]
+    fn absent_fields_under_an_unsealed_tail_keep_the_summary_out_of_it() {
+        // 257 fields, all proven absent: nothing to summarize, so the tail the
+        // shape had is the tail it keeps, untyped summary and all avoided.
+        let fields: Vec<Field> = (0..WIDE).map(|i| (k(i), Presence::Absent, None)).collect();
+        let tail = Tail::Unsealed { key: KeyClass::Str, value: slot(Fact::Singleton(Val::Null)) };
+        let s = ShapeFact::normalize(fields, tail.clone(), Certainty::Maybe, false, Vec::new());
+        assert!(s.fields.is_empty());
+        assert_eq!(s.tail, tail);
+    }
+
+    #[test]
+    fn a_sealed_tail_drops_absent_fields_before_the_bound_counts() {
+        // 256 live fields plus 10 `Absent`: sealing already proves the absence,
+        // so the shape is exactly at the bound and keeps its fields.
+        let mut fields = wide_fields(SHAPE_WIDTH_LIMIT as i64);
+        fields.extend((0..10).map(|i| (ks(&format!("gone{i}")), Presence::Absent, None)));
+        let s = ShapeFact::normalize(fields, Tail::Sealed, Certainty::Maybe, false, Vec::new());
+        assert_eq!(s.fields.len(), SHAPE_WIDTH_LIMIT);
+        assert_eq!(s.tail, Tail::Sealed);
+    }
+
+    #[test]
     fn the_count_bound_survives_the_degradation() {
         let s = ShapeFact::normalize_counted(
             wide_fields(WIDE),
@@ -1890,7 +1916,8 @@ mod tests {
     #[test]
     fn covers_do_not_outlive_the_fields_they_name() {
         let covers = vec![Cover::new(vec![ks("a"), ks("b")], CoverFlavor::Isset)];
-        let s = ShapeFact::normalize(wide_fields(WIDE), Tail::Sealed, Certainty::Maybe, false, covers);
+        let s =
+            ShapeFact::normalize(wide_fields(WIDE), Tail::Sealed, Certainty::Maybe, false, covers);
         assert!(s.covers.is_empty());
     }
 
