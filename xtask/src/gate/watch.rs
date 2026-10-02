@@ -159,9 +159,9 @@ impl Expiry {
     }
 }
 
-/// Seconds, to a tenth: the one spelling the gate's progress lines use.
+/// Seconds, to a hundredth: the one spelling the gate's progress lines use.
 fn secs(d: Duration) -> String {
-    format!("{:.1} s", d.as_secs_f64())
+    format!("{:.2} s", d.as_secs_f64())
 }
 
 /// A project the watchdog is timing.
@@ -272,6 +272,9 @@ impl Watchdog {
     }
 }
 
+/// The phase lines one pass's progress handle reported.
+type PhaseLines = Arc<Mutex<Vec<String>>>;
+
 /// Where the gate's progress lines go, one whole line per call.
 pub(super) type Out = Arc<dyn Fn(&str) + Send + Sync>;
 
@@ -350,7 +353,7 @@ pub struct Running<'w> {
     started: Instant,
     id: Option<u64>,
     /// Each pass's label and the phase lines its handle reported.
-    passes: Mutex<Vec<(&'static str, Arc<Mutex<Vec<String>>>)>>,
+    passes: Mutex<Vec<(&'static str, PhaseLines)>>,
 }
 
 impl Running<'_> {
@@ -460,7 +463,7 @@ mod tests {
             "parse: 216.4 ms (elapsed 233.5 ms)".to_owned(),
             "walk: 2500.0 ms (elapsed 4000.0 ms, 270 of 270 file(s) walked)".to_owned(),
         ];
-        assert_eq!(phase_split(&lines), "parse 0.2 s, walk 2.5 s");
+        assert_eq!(phase_split(&lines), "parse 0.22 s, walk 2.50 s");
         assert_eq!(phase_split(&[]), "no phases reported");
     }
 
@@ -477,7 +480,7 @@ mod tests {
         progress.phase("parse");
         progress.phase_with("walk", || "3 file(s)".to_owned());
         let split = phase_split(&lines.lock().unwrap());
-        assert_eq!(split, "parse 0.0 s, walk 0.0 s");
+        assert_eq!(split, "parse 0.00 s, walk 0.00 s");
     }
 
     /// A watch whose expiries are handed to the returned receiver instead of
@@ -548,7 +551,7 @@ mod tests {
         let lines = lines.lock().unwrap();
         assert_eq!(lines[0], "fp-gate: acme/widgets: start (2 file(s))");
         assert!(lines[1].starts_with("fp-gate: acme/widgets: done in "), "{}", lines[1]);
-        assert!(lines[1].ends_with("(cold 1.5 s: parse 0.0 s; warm 0.5 s: walk 0.0 s)"));
+        assert!(lines[1].ends_with("(cold 1.50 s: parse 0.00 s; warm 0.50 s: walk 0.00 s)"));
     }
 
     /// The deadline path end to end, through the gate's own project driver: a

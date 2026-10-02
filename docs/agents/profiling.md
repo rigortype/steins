@@ -48,6 +48,18 @@ The cost centre is a family of whole-subtree scans in `steins-syntax` that re-ru
 
 `corpus/` under-represents array-shape density. The workload that would show the shape stratum honestly is the private half of `cargo xtask fp-gate`, so re-measure there before acting on the second column.
 
+## The large private project (#658, 2026-10)
+
+The profile above is of the public corpus. The largest private fp-gate project was a different story until #884 (bounded shapes) and #793 (the presence pass's loop-body walk) landed: it did not finish, because one generated file with tens of thousands of straight-line `$x[] = <literal>;` appends cost O(N³) in `walk_trace` → `apply_offset_append` → `array_push_written_fact` → `sealed_with_order`, and nothing crosses file boundaries in that cost. Measure the order of magnitude before trusting any whole-project number taken from it.
+
+With those two fixes in:
+
+- **The project completes** (minutes cold on a contended machine, via `steins check --progress --no-cache --no-php`), and the per-file walk is no longer the bottleneck. The slow-file lines are the way to confirm that on a new checkout; a walk that dominates again will show as one or a few files, not a flat tail.
+- **Do not read its profile as the shape-saturated column above.** That column was a synthetic workload; this project's cost was one input pathology, now bounded.
+- **Peak RSS is the parsed universe, not the walk.** The 10 GB and the 65 MB readings in the #658 diagnosis came from one process at two stages: the whole project's parsed trees held in the salsa database, which is the resident set while the walk runs, and what is left once the process is paged out while stuck on one file. Nothing grew in the hot loop. So an RSS number says how large the parsed universe is, scaled by file count and size; it is not evidence of a leak, and it does not move when a walk-time fix lands.
+
+To see where a run is, use `steins check --progress` (phases and slow files) and, in the gate, the start and end lines and `--deadline` (see `docs/agents/verification.md`).
+
 ## Ruled out on this evidence
 
 **Interning type values** — one canonical instance per distinct type, so an identity check stands in for structural comparison ([phpstan/phpstan-src#6261](https://github.com/phpstan/phpstan-src/pull/6261), which measured −3.1% upstream). It does not transfer. That win comes from identity fast paths already sitting on PHPStan's hot paths, over `Type` objects that are the allocation-heavy graphs ADR-0035 explicitly declined; here the scalar layers are canonical by construction and compare in a few words, `Fact` and `ContractTy` are plain values with no identity to exploit, and the measured target is under 1% of real-code CPU. Introducing one would mean a handle representation threaded through roughly 40 files, and Salsa's `#[salsa::interned]` is not the route — it wants a database handle at every construction site, which inverts `steins-domain`'s zero-dependency layering.
