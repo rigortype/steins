@@ -33,6 +33,11 @@
 @phpstan-assert Foo $x
 @phpstan-assert Foo the value $x
 @phpstan-assert !Foo $x
+@phpstan-assert =Foo $x
+@phpstan-assert-if-true Foo $x the value
+@param list<\SIG*> $signals
+@phpstan-param ($isGlobal is true ? null : Foo) $root
+@param \Closure(\ReflectionFunction $function, int $b): array $resolver
 @property Foo $bar
 @property Foo $bar the thing
 @property Foo the thing $bar

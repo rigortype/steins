@@ -174,6 +174,12 @@ This is why the grammar can be called normatively compatible rather than
 "close": compatibility is measured, not asserted. See
 [`phpdoc-grammar.md`](../type-specification/phpdoc-grammar.md).
 
+`dump.php --tags` runs one docblock tag per line through the full `PhpDocParser`
+and reports the type and the variable the tag declares (or `INVALID`). The
+`doc-tags` fixtures in `crates/steins-phpdoc/tests` hold those verdicts, and the
+tag scanners are checked against them: the reference reads a tag's variable from
+the token after its type, so a `$name` in the description declares nothing.
+
 ## `lean-check`
 
 The differential harness for the value domain's *algebra* (ADR-0059).
