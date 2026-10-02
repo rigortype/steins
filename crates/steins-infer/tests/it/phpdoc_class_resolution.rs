@@ -131,9 +131,53 @@ fn an_imported_alias_keeps_naming_the_owners_class() {
              /**\n * @phpstan-import-type One from \\Vendor\\Geo\n\
              * @phpstan-import-type Rows from \\Vendor\\Geo\n */\nclass Probe {\n\
              /**\n * @param One $o\n * @param Rows $l\n */\n\
-             public function m($o, $l): void { \\PHPStan\\dumpType($o); \\PHPStan\\dumpType($l); }\n}\n"
+             public function m($o, $l): void {\n\
+             \\PHPStan\\dumpType($o); \\PHPStan\\dumpType($l);\n}\n}\n"
         ),
         ["Vendor\\Row (asserted)", "list<Vendor\\Row> (asserted)"]
+    );
+}
+
+#[test]
+fn a_template_type_read_across_namespaces_keeps_the_owners_class() {
+    // `template-type<OneBox, \App\Box, 'T'>` reads `User` off an edge written in
+    // `namespace App`; read from `namespace Other`, it used to resolve again
+    // there and print `other\app\user`.
+    assert_eq!(
+        types(
+            "<?php\nnamespace App {\nfinal class User {}\n/** @template T */\nclass Box {}\n\
+             /** @extends Box<User> */\nclass OneBox extends Box {}\n}\n\
+             namespace Other {\nuse App\\OneBox;\nfinal class User {}\n\
+             /** @param template-type<OneBox, \\App\\Box, 'T'> $b */\n\
+             function f($b): void { \\PHPStan\\dumpType($b); }\n}\n"
+        ),
+        ["App\\User (asserted)"]
+    );
+}
+
+#[test]
+fn a_fully_qualified_assert_narrows_by_the_global_class() {
+    // `@phpstan-assert \Foo` names the global `Foo`, which nothing declares; the
+    // lane is `App\Foo|int`, and the final `App\Foo` is provably not a `\Foo`.
+    // * The negated assert removes nothing (`int|App\Foo`); it used to read
+    //   `\Foo` as `App\Foo` and leave `int`.
+    // * The positive one removes every arm. No value of the declaration
+    //   satisfies the assertion, so `*NEVER*` would be the exact answer, but an
+    //   emptied lane of `Asserted` arms has no dump of its own (only an
+    //   all-`Verified` one reads `*NEVER*`) and the dump falls to `unknown`. That
+    //   is how an emptied `Asserted` lane already renders, not a resolution
+    //   question; pinned as is. It used to read `App\Foo`, the wrong class.
+    assert_eq!(
+        types(
+            "<?php\nnamespace App;\nfinal class Foo {}\n\
+             /** @phpstan-assert \\Foo $x */\nfunction assertFoo($x): void {}\n\
+             /** @phpstan-assert !\\Foo $x */\nfunction assertNotFoo($x): void {}\n\
+             /** @param Foo|int $a */\n\
+             function f($a): void { assertNotFoo($a); \\PHPStan\\dumpType($a); }\n\
+             /** @param Foo|int $a */\n\
+             function g($a): void { assertFoo($a); \\PHPStan\\dumpType($a); }\n"
+        ),
+        ["int|App\\Foo (asserted)", "unknown"]
     );
 }
 
