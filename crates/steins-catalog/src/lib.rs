@@ -155,13 +155,16 @@ pub use knowledge::{
 mod reach;
 pub use reach::{
     ArgReach,
+    FormatReading,
     MethodReachRow,
     PrintfFamily,
     ReachRow,
     arg_reach,
     format_reach,
+    format_reads_locale,
     method_arg_reach,
     printf_family,
+    read_format,
 };
 
 mod labels;
