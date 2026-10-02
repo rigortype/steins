@@ -171,8 +171,16 @@ fn deferred_tree(open: &Arc<OpenArtifact>, path: &str, text: &Arc<String>) -> La
         // Where a test counts the tree decodes (issue #828).
         #[cfg(test)]
         super::gate_order::decoded(super::gate_order::Payload::Trace, &path);
-        let mut reader = open.reader.lock().expect("the artifact lock is never poisoned");
-        open.trace.read_tree(&mut reader, &path).unwrap_or_else(|_| SourceTree::parse(&text))
+        // The fallback parse runs after the lock is released: a walk that
+        // decodes this tree is isolated (issue #895 D3), and a parser panic
+        // inside the critical section would poison the artifact's lock for
+        // every later decode, turning one file's panic into its whole
+        // package's.
+        let decoded = {
+            let mut reader = open.reader.lock().expect("the artifact lock is never poisoned");
+            open.trace.read_tree(&mut reader, &path)
+        };
+        decoded.unwrap_or_else(|_| SourceTree::parse(&text))
     })
 }
 

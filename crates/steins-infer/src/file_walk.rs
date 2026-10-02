@@ -24,6 +24,7 @@ use crate::fold::Folder;
 use crate::generics::{check_callable_arg, check_phpdoc_param};
 use crate::mechanics::check_array_duplicate_keys;
 use crate::overrides::check_declaration_fatals;
+use crate::panic_guard;
 use crate::progress::Progress;
 use crate::project::{Diagnostic, FileUnit, Index, LazyTree};
 use crate::purity::PurityOracle;
@@ -79,13 +80,29 @@ pub(crate) struct WalkInputs<'a> {
 
 impl WalkInputs<'_> {
     /// Walk unit `fi` on `folder`, into a sink of its own.
+    ///
+    /// The walk is the unit of fault isolation (issue #895 D3, see
+    /// [`panic_guard`]): when it panics, the sink holds the file's one
+    /// `internal.panic` finding and nothing else — whatever the walk had
+    /// appended before it broke is dropped with it, since it is a block the
+    /// walk never finished — and no `uncovered_matches` entry, which the throw
+    /// pass reads as "not proved uncovered", its silent answer.
     pub(crate) fn walk(&self, folder: &mut dyn Folder, fi: usize) -> FileSink {
         let mut diagnostics = Vec::new();
         let path = self.units[fi].path;
         let walking = self.progress.file_start(path);
-        let uncovered = walk_one_file(self, folder, fi, &mut diagnostics);
+        let walked = panic_guard::guard(|| {
+            panic_guard::provoke_for_test(path);
+            walk_one_file(self, folder, fi, &mut diagnostics)
+        });
         walking.done();
-        FileSink { diagnostics, uncovered }
+        match walked {
+            Ok(uncovered) => FileSink { diagnostics, uncovered },
+            Err(described) => FileSink {
+                diagnostics: vec![panic_guard::internal_panic(path, &described)],
+                uncovered: None,
+            },
+        }
     }
 }
 

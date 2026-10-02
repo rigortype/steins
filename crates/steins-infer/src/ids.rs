@@ -704,6 +704,18 @@ pub const SYNTAX_UNPARSABLE_ID: &str = "syntax.unparsable";
 
 // end parse failure (ADR-0079, issue #180)
 
+/// The registry id for a file whose walk **panicked** (ADR-0050's 2026-10-02
+/// amendment, issue #895 D3): the analyzer itself failed on this file, so the
+/// file's own findings are missing from the run. **Mechanics** layer, floor
+/// `Default`.
+///
+/// It is a claim about the tool, never about the code, and so it sits outside
+/// every channel: profile `disable`/`warn`, the vendor filter, inline ignores
+/// and the baseline all pass it through untouched, it is never captured into a
+/// baseline header, and `steins check` exits `2` when one is displayed. A run
+/// that reports one publishes no generation, so no later run replays it.
+pub const INTERNAL_PANIC_ID: &str = "internal.panic";
+
 // inaccessible members (ADR-0078, issue #185)
 
 /// The registry id for a call to a method the call site's scope **cannot see**
@@ -1189,6 +1201,8 @@ pub const ALL_EMITTABLE_IDS: &[&str] = &[
     // parse failure (ADR-0079, issue #180)
     SYNTAX_UNPARSABLE_ID,
     // end parse failure (ADR-0079, issue #180)
+    // per-file fault isolation (issue #895 D3)
+    INTERNAL_PANIC_ID,
     // inaccessible members (ADR-0078, issue #185)
     CALL_INACCESSIBLE_METHOD_ID,
     PROPERTY_INACCESSIBLE_ID,

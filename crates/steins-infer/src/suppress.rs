@@ -48,6 +48,8 @@ use crate::{
 use crate::{CALL_ON_NON_OBJECT_ID, PROPERTY_ON_NON_OBJECT_ID};
 // parse failure (ADR-0079, issue #180)
 use crate::SYNTAX_UNPARSABLE_ID;
+// per-file fault isolation (issue #895 D3)
+use crate::INTERNAL_PANIC_ID;
 // inaccessible members (ADR-0078, issue #185)
 use crate::{CALL_INACCESSIBLE_METHOD_ID, CLASS_CONST_INACCESSIBLE_ID, PROPERTY_INACCESSIBLE_ID};
 // member absence (ADR-0078, issue #197)
@@ -473,6 +475,9 @@ pub const DIAGNOSTIC_REGISTRY: &[(&str, Layer, Floor)] = &[
     // parse failure (ADR-0079, issue #180): a `php -l`-rejected file is apparatus
     // rot — undemotable, suppression-exempt; the remedy is fixing the file.
     (SYNTAX_UNPARSABLE_ID, Layer::Mechanics, Floor::Default),
+    // per-file fault isolation (issue #895 D3): the analyzer panicked on a file.
+    // A claim about the tool, so it rides outside every channel — see the id.
+    (INTERNAL_PANIC_ID, Layer::Mechanics, Floor::Default),
     // debug — the dump surface (ADR-0053): requested introspection, not a finding.
     // Suppression-, baseline-, and fp-gate-exempt (§4/§8), decided as a layer
     // property before the ladder is consulted.
