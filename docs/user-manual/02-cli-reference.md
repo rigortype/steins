@@ -36,7 +36,7 @@ whole surface to stderr and exits `2`:
 
 ```
 $ steins
-usage: steins check [--format text|json|github|sarif] [--profile <name>] [--no-php] [--no-cache] [--no-tolerated-effects] [--vendor-diagnostics] [--fix] [--set-baseline] [--baseline <path>] [--ignore-baseline] <paths...>
+usage: steins check [--format text|json|github|sarif] [--profile <name>] [--no-php] [--no-cache] [--no-tolerated-effects] [--vendor-diagnostics] [--progress] [--fix] [--set-baseline] [--baseline <path>] [--ignore-baseline] <paths...>
        steins annotate [--no-php] [--format text|json] <file.php>
        steins transform <phpdoc-to-native|phpdoc-honesty|throws-envelope|effects-envelope|loop-to-array-map> [--apply] [--asserted-subjects] [--format text|json] <paths...>
        steins effect-diff [--baseline <path>] [--set-baseline] [--format text|json] <paths...>
@@ -119,8 +119,8 @@ Analyze a tree and report findings. This is the command you run in CI.
 
 ```
 steins check [--format text|json|github|sarif] [--profile <name>] [--no-php]
-             [--no-cache] [--vendor-diagnostics] [--fix] [--set-baseline]
-             [--baseline <path>] [--ignore-baseline]
+             [--no-cache] [--vendor-diagnostics] [--progress] [--fix]
+             [--set-baseline] [--baseline <path>] [--ignore-baseline]
              [--no-tolerated-effects] <paths...>
 ```
 
@@ -131,6 +131,7 @@ steins check [--format text|json|github|sarif] [--profile <name>] [--no-php]
 | `--no-php` | off | Skip the PHP sidecar and run the sound subset. |
 | `--no-cache` | off | Analyze from source, ignoring and not writing `.steins/` — see [the analysis cache](#the-analysis-cache). |
 | `--vendor-diagnostics` | off | Report findings inside vendor trees too. |
+| `--progress` | off (`STEINS_PROGRESS=1` turns it on too) | Say where the run is, on stderr, while it runs — see [progress](#progress). |
 | `--fix` | off | Apply the fixes findings carry, post-check-gated — see [`--fix`](#--fix). |
 | `--baseline <path>` | `.steins-baseline.jsonl` when it exists | Locate the baseline file. |
 | `--set-baseline` | off | Write the baseline instead of reporting; exits `0`. Cannot combine with `--fix`. |
@@ -230,6 +231,52 @@ not the cache's fault. It is *not* needed in CI — a fresh runner has no
 store to reuse, so the cached and uncached runs do the same work.
 
 Deleting `.steins/` at any time is safe; the next run rebuilds it.
+
+### Progress
+
+A run over a large tree prints nothing until it finishes, so a slow run looks
+like a hung one. `--progress` (or `STEINS_PROGRESS=1` in the environment; `0`,
+`false` and the empty string are off) makes `check` say where it is, on
+stderr, as it goes. It is off by default, and off it changes nothing: stdout
+and stderr are byte-for-byte what a build without the flag wrote. On, it
+adds lines and changes nothing else — no finding, no exit code.
+
+```
+$ steins check --progress src
+steins: progress: discover: 0.7 ms (elapsed 0.7 ms, 214 file(s))
+steins: progress: capture: 41.2 ms (elapsed 42.0 ms)
+steins: progress: parse: 190.6 ms (elapsed 232.6 ms)
+steins: progress: fold engine: 3.1 ms (elapsed 235.7 ms)
+steins: progress: universe: 18.4 ms (elapsed 254.1 ms)
+steins: progress: purity oracle: 0.0 ms (elapsed 254.1 ms)
+steins: progress: slow file: src/Generated/Map.php walked in 612.8 ms
+steins: progress: walk: 1204.5 ms (elapsed 1458.6 ms, 214 of 214 file(s) walked)
+steins: progress: report: 87.3 ms (elapsed 1545.9 ms, fixpoints in all: effects 60.2 ms, throws 12.9 ms)
+steins: progress: persist: 22.0 ms (elapsed 1567.9 ms)
+steins: progress: suppress: 1.6 ms (elapsed 1569.5 ms)
+src/Foo.php:12:5: error[...]: ...
+steins: progress: output: 0.4 ms (elapsed 1569.9 ms)
+```
+
+Each phase line is written when the phase **ends**: the time the phase took,
+then the time since the run began. So the last line printed names the phase
+that finished last, and the run is inside the next one. The phases are
+`discover` (collecting files), then on the cached path `capture`, `parse`
+and `fold engine`, or on the `--no-cache` path just `parse` (which there
+includes building the project index); then `universe`, `purity oracle`,
+`walk`, `report` (whose detail gives the two fixpoints' total cost, which
+the earlier lines may already have paid for), `persist` (cached path only),
+`suppress` and `output`. A run that replays a file from the cache does not
+walk it, and `walk` says how many it did.
+
+A line naming a file is printed when a single file's walk took at least
+**250 ms**; the name is the path findings report the file under.
+`STEINS_PROGRESS_SLOW_MS=<n>` changes the threshold (`0` names every file).
+The walk runs on several threads, so the slow-file lines arrive in the order
+files finish, not the order they are listed — but every line is written
+whole. A file is named only after its walk ends, so a walk that never ends
+shows as silence: the last line printed is `purity oracle`, and no `walk` line
+follows.
 
 ### `--fix`
 

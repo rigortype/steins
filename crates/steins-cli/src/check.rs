@@ -336,16 +336,7 @@ pub(crate) fn analyze_check(req: &CheckRequest<'_>) -> Result<CheckOutcome, Setu
     let cached = if req.no_cache {
         None
     } else {
-        try_generation_check(
-            req.files,
-            req.paths,
-            plugin_allow.as_deref(),
-            &effects_policy,
-            &postures,
-            req.no_php,
-            said,
-            &req.progress,
-        )
+        try_generation_check(req, plugin_allow.as_deref(), &effects_policy, &postures, said)
     };
 
     // Suppression channels, ADR-0050 §6 order (vendor → surface → policy →
