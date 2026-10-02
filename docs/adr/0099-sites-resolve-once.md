@@ -558,13 +558,24 @@ promoted parameter's hook. Left open, each witnessed:
   gate counts as written. Sound, and left as it is.
 - **A destructuring or `foreach` target that is an offset** is a site with an unknown value, which
   over-reports (`foreach ($rows as $a[$k])` over an array container the scan cannot show).
+- **A hooking class declared twice.** A class the index cannot place, such as one declared in two
+  files under `class_exists` guards, counts for the universe gate only where the walk shows it is
+  the bound. `DupEx extends \Vendor\Base` with a `get` hook on `$message`, declared twice, runs
+  that hook at `$e->getMessage()` on a declared `Throwable`, which reads exhaustive (a `new` of the
+  class is already `unknown-class`). Counting every such class on `Unknown` costs 6,908 functions
+  on a private project, because the magic-property set the gate reads cannot tell a hook from
+  `__get`; a separate hooking-class set in the `symbols` shard would, at a schema bump (#993).
+- **An abstract class's bodiless hook declaration** (`abstract public string $p { get; }`) counts
+  as a hook though it runs nothing: conservative, a gap where PHP runs no user code.
 
 ### What moves (public corpora, `check --profile strict`, `--no-cache --no-php`)
 
 On the ten public packages (28,847 functions) no body loses exhaustiveness in either lane (the 366
 bodies that gain a kind were already `…?`), no proven label moves, `effect-diff` reports no event,
 and the `effects-envelope`, `throws-envelope` and `loop-to-array-map` dry-runs are byte-identical per
-package (723, 1,934 and 0 edits). 361 functions gain `operator-to-string` in both lanes: 202 carry the
+package (723, 1,934 and 0 edits). (The counts in this paragraph predate the coalescing offset
+write `$c[k] ??= v` added in review, which brings the bodies that gain a kind to 371, 366 of them
+`operator-to-string`, and moves no strict finding.) 361 functions gain `operator-to-string` in both lanes: 202 carry the
 construct in their own body (an offset write 187, a dynamic name 14, both 1, classified by reading
 the body) and 159 inherit it through an edge. Five gain `operator-magic-property`: two `Chronos`
 methods and `CarbonTimeZone::__construct` (an engine constructor or `createFromFormat` reached on a
