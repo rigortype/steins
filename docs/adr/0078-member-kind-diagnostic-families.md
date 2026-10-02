@@ -287,13 +287,18 @@ Status: PENDING ratification (post-hoc, as above).
 
 `call.inaccessible-method` and `property.inaccessible` ran the protected leg
 against the class that *redeclares* the member. PHP asks the member's **root**:
-the class that first introduced it in the inheritance line
-(for a method, `zend_get_function_root_class` reads the prototype's scope).
-With `Base { protected h() }`, `A extends Base` redeclaring `h()`, and `B
-extends Base`, `(new A)->h()` from `B` is legal, because `B` is in `Base`'s
-hierarchy. Judging against `A` found `B` unrelated and reported a call that
-runs (witnessed at PHP 8.5.9; the instance
-property, `static` and `abstract` forms behave the same).
+the class that first introduced it in the inheritance line (for a method,
+`zend_get_function_root_class` reads the prototype's scope). With `Base {
+protected h() }`, `A extends Base` redeclaring `h()`, and `B extends Base`,
+`(new A)->h()` from `B` is legal, because `B` is in `Base`'s hierarchy. Judging
+against `A` found `B` unrelated and reported a call that runs.
+
+**The version split, witnessed on PHP 7.4 through 8.5.** The root rule holds for
+**methods**, instance and `static`, on every minor 7.4 to 8.5. For **properties**
+it exists only from PHP 8.4, whose `zend_object_handlers.c` checks
+`property_info->prototype->ce`: 7.4 to 8.3 check `property_info->ce`, the
+redeclaring class, and fatal on the same read (instance, typed, untyped, promoted,
+`readonly` and `static` properties alike; 8.4 and later allow it).
 
 **The rule.** In the already-enumerated member chain, start at the node that
 declares the member the site reaches and walk up:
@@ -307,21 +312,30 @@ declares the member the site reaches and walk up:
   h() } class A extends Base { protected h() }` keeps `A` as the root, and
   `(new A)->h()` from a sibling `B` still raises `Call to protected method A::h()
   from scope B` (witnessed);
-- a constructor continues only through an `abstract` parent constructor, the one
-  case where PHP links a prototype across constructors. Over a concrete parent
-  constructor the root stays the redeclaring class (witnessed).
+- a **constructor's** prototype link is conditional and transitive
+  (`zend_inheritance.c`: the parent's prototype, else the parent, is linked only
+  when that is abstract). The ordinary walk finds the topmost non-private
+  constructor `top`: if it is `abstract` the root is `top`, and otherwise the root is
+  the declaring class itself. An abstract constructor can only sit at the top of a
+  declaration line, so this is exact. It keys on the method being `__construct`,
+  which covers `$a->__construct()` as well as `new A`.
 
 `protected_invisible` then runs, unchanged, against the root. It stays bidirectional
 and keeps its definite-`No` discipline.
 
-**The exception: class constants.** PHP 8.4 and 8.5 fatal on a `protected` constant
-redeclared in `A` and fetched as `A::K` from a sibling `B` (`Cannot access protected
-constant A::K`, witnessed), so `class-const.inaccessible` keeps judging against the
-declaring class and its finding stands. Constants are checked against the class that
-declares them, not a root.
+**The property gate.** A property is judged against the root unless the declared
+PHP target puts the whole analysed interval below 8.4 (`ceiling < 8.4`), where it is
+judged against the redeclaring class as before. An undeclared, open or straddling
+target takes the root, which only reports less (the same direction as ADR-0049
+A12/A22's boundary-straddling declines). A method takes the root on every target.
+
+**The exception: class constants.** PHP fatals on a `protected` constant redeclared in
+`A` and fetched as `A::K` from a sibling `B` (`Cannot access protected constant A::K`)
+on every supported minor 7.4 to 8.5 (witnessed), so `class-const.inaccessible` keeps
+judging against the declaring class and its finding stands.
 
 **What this does not touch.** The reach is unchanged: only exact receivers and named
 classes are subjects, so no new site is claimed. No static-property fetch (`A::$sp`)
-has an inaccessibility id; the rule would apply there if one is added. The change only
-removes findings: a protected member whose root is a common ancestor of the site's
-scope.
+has an inaccessibility id; the rule would apply there from 8.4 if one is added. The
+change only removes findings: a protected member whose root is a common ancestor of
+the site's scope.

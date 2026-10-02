@@ -38,9 +38,15 @@
 //! $this + descendant's magic fallback   -> rescues it too
 //! ```
 
+use std::path::PathBuf;
+
+use steins_db::{
+    GoverningRoot, PhpTarget, PhpTargetSource, PluginFacts, Project, ProjectLayout, SourceFile,
+    SteinsDatabase,
+};
 use steins_infer::{
-    CALL_INACCESSIBLE_METHOD_ID, CLASS_CONST_INACCESSIBLE_ID, Diagnostic,
-    PROPERTY_INACCESSIBLE_ID, check,
+    CALL_INACCESSIBLE_METHOD_ID, CLASS_CONST_INACCESSIBLE_ID, Diagnostic, NoFold,
+    PROPERTY_INACCESSIBLE_ID, check, check_project_with_runtime,
 };
 use steins_syntax::SourceTree;
 
@@ -841,8 +847,9 @@ function f(): int {
 // protected visibility is judged against the member's root class (issue #942)
 //
 // PHP asks `zend_check_protected` of the class that first introduced the member in
-// the inheritance line, not of the class that redeclares it. Witnessed at PHP 8.5.9
-// (`php -r`), each shape below:
+// the inheritance line, not of the class that redeclares it. Witnessed on PHP 7.4 to 8.5
+// (`php -r`), each shape below (a protected *property* only from 8.4, see the target
+// tests at the end; methods on every minor):
 //
 //   Base{protected h,$p} A extends Base{redeclares} B extends Base: `(new A)->h()` and
 //     `(new A)->p` from B                    -> legal (root Base, B is in its line)
@@ -854,10 +861,11 @@ function f(): int {
 //     different member and stops the walk)
 //   member only on A, B sibling via an empty Base            -> still the fatal
 //   redeclaration on an unrelated root, scope U              -> still the fatal
-//   abstract protected `__construct` root, `new A` from B    -> legal; a non-abstract
-//     parent constructor is no prototype -> Call to protected A2::__construct() from B2
+//   abstract protected `__construct` at the top of the line  -> legal, also through a
+//     concrete middle (the prototype link is transitive); a concrete top is no
+//     prototype -> Call to protected A2::__construct() from B2
 //   `protected const K` redeclared in A, `A::K` from B       -> Cannot access protected
-//     constant A::K (constants keep the declaring class; 8.4 and 8.5 both fatal)
+//     constant A::K (constants keep the declaring class; every minor fatals)
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -967,8 +975,8 @@ class U {
 }
 
 #[test]
-fn a_constructor_walks_only_through_an_abstract_parent_constructor() {
-    let abstract_root = "<?php
+fn an_abstract_constructor_at_the_top_of_the_line_is_the_root() {
+    let src = "<?php
 abstract class Base { abstract protected function __construct(); }
 class A extends Base { protected function __construct() {} }
 class B extends Base {
@@ -976,13 +984,72 @@ class B extends Base {
     public function t(): object { return new A(); }
 }
 ";
-    assert!(method(abstract_root).is_empty(), "{:#?}", method(abstract_root));
+    assert!(method(src).is_empty(), "{:#?}", method(src));
+}
+
+#[test]
+fn a_constructor_prototype_link_is_transitive_through_a_concrete_middle() {
+    // `Mid`'s constructor links to `Top`'s abstract one, and `A`'s links to `Mid`'s
+    // prototype, which is `Top`'s (`zend_inheritance.c`): the root is `Top`.
+    let from_top = "<?php
+abstract class Top { abstract protected function __construct(); }
+class Mid extends Top { protected function __construct() {} }
+class A extends Mid { protected function __construct() {} }
+class B extends Top {
+    protected function __construct() {}
+    public function t(): object { return new A(); }
+}
+";
+    assert!(method(from_top).is_empty(), "{:#?}", method(from_top));
+    let from_mid = "<?php
+abstract class Top { abstract protected function __construct(); }
+class Mid extends Top { protected function __construct() {} }
+class A extends Mid { protected function __construct() {} }
+class B extends Mid { public function t(): object { return new A(); } }
+";
+    assert!(method(from_mid).is_empty(), "{:#?}", method(from_mid));
+    let abstract_middle = "<?php
+abstract class Top { abstract protected function __construct(); }
+abstract class Mid extends Top { abstract protected function __construct(); }
+class A extends Mid { protected function __construct() {} }
+class B extends Top {
+    protected function __construct() {}
+    public function t(): object { return new A(); }
+}
+";
+    assert!(method(abstract_middle).is_empty(), "{:#?}", method(abstract_middle));
+}
+
+#[test]
+fn a_concrete_constructor_is_no_prototype_anywhere_on_the_line() {
     let concrete_root = "<?php
 class Base { protected function __construct() {} }
 class A extends Base { protected function __construct() {} }
 class B extends Base { public function t(): object { return new A(); } }
 ";
     assert_eq!(method(concrete_root).len(), 1, "{:#?}", method(concrete_root));
+    let concrete_top = "<?php
+class Top { protected function __construct() {} }
+class Mid extends Top { protected function __construct() {} }
+class A extends Mid { protected function __construct() {} }
+class B extends Top { public function t(): object { return new A(); } }
+";
+    assert_eq!(method(concrete_top).len(), 1, "{:#?}", method(concrete_top));
+}
+
+#[test]
+fn an_explicit_constructor_call_follows_the_constructor_rule() {
+    // `$a->__construct()` reaches the same declaration as `new A()`, so it is keyed on
+    // the method name, not the site kind: over a concrete parent constructor both the
+    // `new` and the explicit call from the sibling `B` are blamed.
+    let src = "<?php
+class Base { protected function __construct() {} }
+class A extends Base { protected function __construct() {} }
+class B extends Base {
+    public function t(): void { $a = new A(); $a->__construct(); }
+}
+";
+    assert_eq!(method(src).len(), 2, "{:#?}", method(src));
 }
 
 #[test]
@@ -995,4 +1062,58 @@ class B extends Base { public function t(): int { return A::K; } }
     let d = class_const(src);
     assert_eq!(d.len(), 1, "PHP 8.4 and 8.5 fatal on this fetch: {d:#?}");
     assert!(d[0].message.contains("declared by A"), "{d:#?}");
+}
+
+// A protected property's root rule exists only from PHP 8.4 (`property_info->prototype->ce`);
+// 7.4 to 8.3 check the redeclaring class (witnessed), so a target whose whole interval is
+// below 8.4 keeps the base verdict, and an undeclared or straddling target takes the root.
+
+fn property_under(src: &str, floor: (u16, u16), ceiling: Option<(u16, u16)>) -> Vec<Diagnostic> {
+    let root = GoverningRoot::new(
+        PathBuf::from("/proj/composer.json"),
+        PathBuf::from("/proj"),
+        vec![PathBuf::from("/proj/vendor")],
+        vec![],
+    )
+    .with_php_target(Some(PhpTarget {
+        floor,
+        ceiling,
+        source: PhpTargetSource::Require,
+        raw: String::new(),
+    }));
+    let layout = ProjectLayout::new(PathBuf::from("/proj"), vec![root]);
+    let db = SteinsDatabase::default();
+    let file = SourceFile::new(&db, "/proj/t.php".to_owned(), src.to_owned());
+    let project = Project::new(&db, vec![file], layout, PluginFacts::none());
+    check_project_with_runtime(&db, project, &mut NoFold, true)
+        .into_iter()
+        .filter(|d| d.id == PROPERTY_INACCESSIBLE_ID)
+        .collect()
+}
+
+const REDECLARED_PROTECTED_PROPERTY: &str = "<?php
+class Base { protected int $p = 1; }
+class A extends Base { protected int $p = 3; }
+class B extends Base {
+    public function u(): int { $a = new A(); $y = $a->p; return $y; }
+}
+";
+
+#[test]
+fn a_pre_84_target_judges_a_protected_property_against_the_redeclaring_class() {
+    let d = property_under(REDECLARED_PROTECTED_PROPERTY, (8, 1), Some((8, 3)));
+    assert_eq!(d.len(), 1, "8.1 to 8.3 fatal on this read: {d:#?}");
+}
+
+#[test]
+fn an_84_or_later_or_open_target_judges_it_against_the_root() {
+    for (floor, ceiling) in [((8, 4), None), ((8, 5), None), ((8, 4), Some((8, 5)))] {
+        let d = property_under(REDECLARED_PROTECTED_PROPERTY, floor, ceiling);
+        assert!(d.is_empty(), "8.4 and later allow it: {d:#?}");
+    }
+    // A target that straddles the boundary takes the root too: only less is reported.
+    let straddling = property_under(REDECLARED_PROTECTED_PROPERTY, (8, 1), Some((8, 5)));
+    assert!(straddling.is_empty(), "{straddling:#?}");
+    let open = property_under(REDECLARED_PROTECTED_PROPERTY, (8, 1), None);
+    assert!(open.is_empty(), "{open:#?}");
 }
