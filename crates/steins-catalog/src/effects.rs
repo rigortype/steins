@@ -255,8 +255,9 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
 ///   `class_exists` and the other `*_exists` questions autoload a class named
 ///   by a string, and `defined`/`function_exists` read engine symbol tables
 ///   that a later declaration changes.
-/// * `array_search` and `array_combine` compare or cast values, so an object
-///   value runs its `__toString`.
+/// * `array_combine` casts values, so an object value runs its `__toString`;
+///   `array_search` compares them, and is certified at a call site instead
+///   ([`CERTIFIED_AT_CALL_SITE`]).
 /// * The string family (`strcmp`, `ord`, `dirname`, …), for the `__toString`
 ///   its `string` parameters run under coercive typing.
 /// * `spl_object_id` and `spl_object_hash` answer object identity, which
@@ -320,7 +321,17 @@ pub(crate) fn certified_pure(name: &str) -> bool {
 /// * `strspn`, `strcspn`: `php_strspn_strcspn_common`, a byte table;
 /// * `substr_count`, `ord`, `chr`, `bin2hex`, `hex2bin`: byte loops;
 /// * `dirname`: `zend_dirname`, separator scanning;
-/// * `unpack`: `ext/standard/pack.c`, the format read byte by byte.
+/// * `unpack`: `ext/standard/pack.c`, the format read byte by byte;
+/// * `array_search` (issue #860): `_php_search_array` in `ext/standard/array.c`
+///   compares the needle with each element, by `fast_is_identical_function`
+///   when the strict flag is true and by `fast_equal_check_function` when it is
+///   not, and writes nothing. A loose comparison of an object with a string
+///   runs `__toString`, which is the reach the call-site rule holds it to;
+/// * `vsprintf`: `php_formatted_print` in `ext/standard/formatted_print.c`, the
+///   same formatter as `sprintf` (which the fold allowlist already certifies)
+///   over an array's elements. Only a `%s` renders an element, so an object
+///   reaches `__toString` there and nowhere else; `%f` and `%e` read
+///   `LC_NUMERIC`'s decimal point, as `sprintf`'s do.
 ///
 /// Deliberately absent, each reading the locale or an ini setting: `basename`
 /// and `pathinfo` (`php_basename` consults `ascii_compatible_locale` and
@@ -344,6 +355,8 @@ const CERTIFIED_AT_CALL_SITE: &[&str] = &[
     "hex2bin",
     "dirname",
     "unpack",
+    "array_search",
+    "vsprintf",
 ];
 
 /// Whether `name` is certified pure at a call site that rules out its

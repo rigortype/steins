@@ -159,6 +159,212 @@ fn declared_reach(ty: &str) -> ArgReach {
         .unwrap_or(ArgReach::Nested)
 }
 
+/// Where a printf-family builtin keeps its format string and how the values
+/// the format names reach it ([`printf_family`]).
+///
+/// The family's value positions are not a declared-type question: `sprintf`
+/// converts an object through `__toString` only where the format says `%s`,
+/// and every numeric conversion turns it into a number with a warning. The
+/// row's `Object` at the first value is the reading for a format the call
+/// site cannot read; a literal format is read by [`format_reach`], and this
+/// type maps its answer back onto call positions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrintfFamily {
+    format: usize,
+    vector: bool,
+}
+
+impl PrintfFamily {
+    /// The 0-based call position of the format string.
+    #[must_use]
+    pub const fn format_position(&self) -> usize {
+        self.format
+    }
+
+    /// Whether the values arrive as one array (`vsprintf`, `vprintf`) and not
+    /// as the positions after the format.
+    #[must_use]
+    pub const fn is_vector(&self) -> bool {
+        self.vector
+    }
+
+    /// The reach of the argument at call `position`, given a literal format's
+    /// per-value reaches ([`format_reach`]), or `None` for a position at or
+    /// before the format, which the builtin's own row answers.
+    ///
+    /// A value no conversion names is never read, so it is
+    /// [`ArgReach::Inert`] whatever it holds. A vector is
+    /// [`ArgReach::Nested`] when some conversion is `%s` (an element of the
+    /// array is rendered) and [`ArgReach::Inert`] when none is. A position past
+    /// the vector is an `ArgumentCountError` raised before anything runs.
+    #[must_use]
+    pub fn reach_at(&self, per_value: &[ArgReach], position: usize) -> Option<ArgReach> {
+        let value = position.checked_sub(self.format + 1)?;
+        if !self.vector {
+            return Some(per_value.get(value).copied().unwrap_or(Inert));
+        }
+        Some(match value {
+            0 if per_value.contains(&Object) => ArgReach::Nested,
+            _ => Inert,
+        })
+    }
+}
+
+/// The printf-family layout of the builtin `name` (case-insensitive), or
+/// `None` for any other function.
+///
+/// `fprintf` and `vfprintf` (format at position 1) are not listed: the catalog
+/// has no row for either yet, and a layout without a row would read a call the
+/// effect lane still cannot place.
+#[must_use]
+pub fn printf_family(name: &str) -> Option<PrintfFamily> {
+    let key = name.trim_start_matches('\\');
+    let at = |format, vector| Some(PrintfFamily { format, vector });
+    match key.to_ascii_lowercase().as_str() {
+        "sprintf" | "printf" => at(0, false),
+        "vsprintf" | "vprintf" => at(0, true),
+        _ => None,
+    }
+}
+
+/// The largest value position a format may name before [`format_reach`] gives
+/// up: far past any call's argument count, and a bound on the answer's size.
+const MAX_FORMAT_POSITIONS: usize = 1024;
+
+/// What a literal printf `format` does with each value it is given: one
+/// [`ArgReach`] per value position, `0` being the first value after the
+/// format. [`ArgReach::Object`] where some conversion naming the value is
+/// `%s` (it renders the value, which runs an object's `__toString`) and
+/// [`ArgReach::Inert`] where every conversion naming it is numeric (`d u c o
+/// x X b e E f F g G h H`: an object becomes a number with a warning and runs
+/// nothing). A value several conversions name takes the strongest of them. The
+/// answer is as long as the highest position the format names; a value past it
+/// is never read.
+///
+/// `None` is "the format cannot be read, ask the row": any spec the engine
+/// would reject (an unknown conversion, a missing one at the end, a padding
+/// quote with nothing after it, an argument number of zero or past `INT_MAX`),
+/// a `*` width or precision (it consumes an argument as an integer and changes
+/// which value the conversion names), a `%` with modifiers in front of it (a
+/// conversion that renders `%` and still consumes a value slot), and a format
+/// naming a position past 1,024 (far past any call's argument count). A
+/// malformed format may still run `__toString` for an earlier `%s` before it
+/// fails, so the whole format is unreadable, never a prefix of it.
+///
+/// The grammar is php-src's `php_formatted_print`
+/// (`ext/standard/formatted_print.c`), read as bytes: `%%`, then a spec that
+/// starts with a letter (just the conversion) or otherwise with an optional
+/// `n$`, any of the flags `' '`, `0`, `-`, `+`, `'c` (c any byte), a width, a
+/// `.` precision, an optional `l`, and the conversion. A spec with no `n$` takes
+/// the next value in order; a spec with one leaves that counter alone.
+#[must_use]
+pub fn format_reach(format: &str) -> Option<Vec<ArgReach>> {
+    let bytes = format.as_bytes();
+    let mut reach: Vec<ArgReach> = Vec::new();
+    let mut next = 0_usize;
+    let mut at = 0_usize;
+    while let Some(offset) = bytes[at..].iter().position(|&b| b == b'%') {
+        at += offset + 1;
+        if bytes.get(at) == Some(&b'%') {
+            at += 1;
+            continue;
+        }
+        let (position, kind) = spec(bytes, &mut at, &mut next)?;
+        if position >= MAX_FORMAT_POSITIONS {
+            return None;
+        }
+        if reach.len() <= position {
+            reach.resize(position + 1, Inert);
+        }
+        reach[position] = reach[position].max(kind);
+    }
+    Some(reach)
+}
+
+/// One conversion spec of [`format_reach`], `at` just past its `%`: the value
+/// position it names and the reach of its conversion, leaving `at` past it.
+fn spec(bytes: &[u8], at: &mut usize, next: &mut usize) -> Option<(usize, ArgReach)> {
+    let mut named = None;
+    if !bytes.get(*at).is_some_and(u8::is_ascii_alphabetic) {
+        let digits = digit_run(bytes, *at);
+        if bytes.get(*at + digits) == Some(&b'$') {
+            named = Some(number(&bytes[*at..*at + digits]).filter(|&n| n > 0)? - 1);
+            *at += digits + 1;
+        }
+        flags(bytes, at)?;
+        if bytes.get(*at) == Some(&b'*') {
+            return None;
+        }
+        skip_number(bytes, at)?;
+        if bytes.get(*at) == Some(&b'.') {
+            *at += 1;
+            if bytes.get(*at) == Some(&b'*') {
+                return None;
+            }
+            skip_number(bytes, at)?;
+        }
+    }
+    if bytes.get(*at) == Some(&b'l') {
+        *at += 1;
+    }
+    let position = named.unwrap_or_else(|| {
+        *next += 1;
+        *next - 1
+    });
+    let kind = match bytes.get(*at)? {
+        b's' => Object,
+        b'd' | b'u' | b'c' | b'o' | b'x' | b'X' | b'b' | b'e' | b'E' | b'f' | b'F' | b'g'
+        | b'G' | b'h' | b'H' => Inert,
+        _ => return None,
+    };
+    *at += 1;
+    Some((position, kind))
+}
+
+/// The length of the ASCII digit run at `at`.
+fn digit_run(bytes: &[u8], at: usize) -> usize {
+    bytes[at.min(bytes.len())..].iter().take_while(|b| b.is_ascii_digit()).count()
+}
+
+/// The value of an ASCII digit run, as php-src's `php_sprintf_getnumber`
+/// reads it: `None` for an empty run or one at or past `INT_MAX`, which the
+/// engine rejects.
+fn number(digits: &[u8]) -> Option<usize> {
+    const INT_MAX: u64 = 2_147_483_647;
+    if digits.is_empty() {
+        return None;
+    }
+    let value = digits
+        .iter()
+        .fold(0_u64, |n, d| n.saturating_mul(10).saturating_add(u64::from(d - b'0')));
+    if value >= INT_MAX { None } else { usize::try_from(value).ok() }
+}
+
+/// Moves `at` past a width or precision's digits, if there are any.
+fn skip_number(bytes: &[u8], at: &mut usize) -> Option<()> {
+    let digits = digit_run(bytes, *at);
+    if digits > 0 {
+        number(&bytes[*at..*at + digits])?;
+        *at += digits;
+    }
+    Some(())
+}
+
+/// Moves `at` past a spec's flags: `' '`, `0`, `-`, `+`, and `'` with the
+/// padding byte after it, which must exist.
+fn flags(bytes: &[u8], at: &mut usize) -> Option<()> {
+    loop {
+        match bytes.get(*at) {
+            Some(b' ' | b'0' | b'-' | b'+') => *at += 1,
+            Some(b'\'') => {
+                bytes.get(*at + 1)?;
+                *at += 2;
+            }
+            _ => return Some(()),
+        }
+    }
+}
+
 /// The curated rows of `name`.
 fn overrides(name: &str) -> &'static [(usize, ArgReach)] {
     OVERRIDES.iter().find(|(n, _)| *n == name).map_or(&[], |(_, row)| row)
@@ -255,8 +461,11 @@ const OVERRIDES: &[(&str, &[(usize, ArgReach)])] = &[
 
 #[cfg(test)]
 mod tests {
-    use super::{ArgReach, OVERRIDES, arg_reach};
-    use crate::{certified_at_call_site, effect_labels, foldable, param_facts};
+    use super::{ArgReach, OVERRIDES, arg_reach, format_reach, printf_family};
+    use crate::{certified_at_call_site, effect_labels, foldable, knows, param_facts, throws_of};
+
+    const I: ArgReach = ArgReach::Inert;
+    const O: ArgReach = ArgReach::Object;
 
     fn at(name: &str, position: usize) -> ArgReach {
         arg_reach(name).unwrap_or_else(|| panic!("{name} has no row")).at(position)
@@ -324,6 +533,235 @@ mod tests {
             let row = arg_reach(name).expect(name);
             assert!(row.reaches_blind(true), "{name} reaches even in strict mode");
             assert_eq!(crate::throws_of(name), None, "{name} is not throwless");
+        }
+    }
+
+    // ---- the printf-format parser (issue #860, S7-catalog) ----------------
+    //
+    // Every verdict below is checked against PHP 8.5.11: a probe passed one
+    // tagged object per value and logged which `__toString` ran.
+
+    /// The numeric conversions witnessed as inert (row 7.9): an object becomes a
+    /// number with a warning, flags, padding quotes, widths, precisions and the
+    /// `l` modifier included; `%%` names no value.
+    #[test]
+    fn a_numeric_conversion_never_reaches_user_code() {
+        let cases: &[(&str, &[ArgReach])] = &[
+            ("%d", &[I]),
+            ("%.2f", &[I]),
+            ("%05d", &[I]),
+            ("100%% %d", &[I]),
+            ("%u %o", &[I, I]),
+            ("%lx %ld", &[I, I]),
+            ("%h %H %g %G %e %E %F", &[I; 7]),
+            ("%c%c%d", &[I, I, I]),
+            ("%b%X", &[I, I]),
+        ];
+        for (format, expected) in cases {
+            assert_eq!(format_reach(format).as_deref(), Some(*expected), "{format}");
+        }
+    }
+
+    /// Only `%s` renders its value (rows 7.2 to 7.6 and 7.9): the value lands on
+    /// the conversion that names it, in order or by `n$`, whatever flags,
+    /// padding quote, width and precision sit in front.
+    #[test]
+    fn a_string_conversion_reaches_the_value_it_names() {
+        let cases: &[(&str, &[ArgReach])] = &[
+            ("%s", &[O]),             // 7.2
+            ("%d %s", &[I, O]),       // 7.3
+            ("%s %d", &[O, I]),       // 7.4
+            ("%2$s %1$d", &[I, O]),   // 7.5
+            ("%2$d %1$s", &[O, I]),   // 7.6
+            ("%5.2s", &[O]),
+            ("% 5s", &[O]),
+            ("%ls", &[O]),
+            ("%-+ 05.3s", &[O]),
+            ("%5.s", &[O]),
+            ("%.s", &[O]),
+            ("%1$-5s", &[O]),
+            ("%1$'#5s", &[O]),
+            ("%'xs", &[O]), // the padding byte is `x`, the conversion `s`
+            ("%1$05d %2$s", &[I, O]),
+            ("%c%c%s", &[I, I, O]),
+            ("%%%s", &[O]),
+            ("%s%%", &[O]),
+            ("%3$s", &[I, I, O]),
+            // 7.9: the `'*` padding, `-5s`, `+.1e`, `%x`, `%c`, `%u` and `%b`.
+            ("%'*10d|%-5s|%+.1e|%x|%c|%u|%b", &[I, O, I, I, I, I, I]),
+        ];
+        for (format, expected) in cases {
+            assert_eq!(format_reach(format).as_deref(), Some(*expected), "{format}");
+        }
+    }
+
+    /// A value several conversions name takes the strongest of them (row 7.7:
+    /// `%1$d|%1$s` runs `__toString` for the `%s`), and a spec with `n$` leaves
+    /// the in-order counter alone.
+    #[test]
+    fn a_value_named_twice_reaches_if_any_conversion_renders_it() {
+        assert_eq!(format_reach("%1$d|%1$s").as_deref(), Some(&[O][..]));
+        assert_eq!(format_reach("%1$s %1$d").as_deref(), Some(&[O][..]));
+        assert_eq!(format_reach("%1$s%2$s%1$s").as_deref(), Some(&[O, O][..]));
+        // `%2$s` does not advance the counter: the two plain `%s` take values 0 and 1.
+        assert_eq!(format_reach("%2$s %s %s").as_deref(), Some(&[O, O][..]));
+        assert_eq!(format_reach("%s %2$s %s").as_deref(), Some(&[O, O][..]));
+        assert_eq!(format_reach("%1$d %d %s").as_deref(), Some(&[I, O][..]));
+    }
+
+    /// A format with no conversion names no value, and text between conversions
+    /// is just text.
+    #[test]
+    fn a_format_without_conversions_names_nothing() {
+        for format in ["", "abc", "100%%", "%%%%"] {
+            assert_eq!(format_reach(format).as_deref(), Some(&[][..]), "{format:?}");
+        }
+    }
+
+    /// Row 7.10 and the rest of what the engine rejects: the whole format is
+    /// unreadable. `%s %q` runs `%s`'s `__toString` before the `ValueError`, so
+    /// a prefix is never trusted.
+    #[test]
+    fn a_malformed_format_is_unreadable() {
+        let malformed = [
+            "%q",                // 7.10, ValueError: Unknown format specifier
+            "%s %q",             // reached [0] before the ValueError
+            "%d %q",             // ArgumentCountError first, still unreadable
+            "%",                 // ValueError: Missing format specifier
+            "%5.",               // ValueError
+            "%1$",               // ValueError
+            "%'",                // ValueError: Missing padding character
+            "%'x",               // ValueError: no conversion after the padding
+            "%0$s",              // ValueError: argument number must be positive
+            "%$s",               // ValueError: no digits before `$`
+            "%2147483647$s",     // ValueError: at INT_MAX
+            "%99999999999999$s", // ValueError: past INT_MAX
+            "%2147483647d",      // ValueError: Width must be between 0 and INT_MAX
+            "%.2147483647d",     // ValueError: Precision
+            "%-$s",              // `$` is not a conversion
+            "% 1$s",             // the argument number must come first
+            "%\u{e9}",           // a multibyte letter is no conversion
+            "%1025$s",           // past the parser's own bound
+        ];
+        for format in malformed {
+            assert_eq!(format_reach(format), None, "{format:?}");
+        }
+    }
+
+    /// `*` takes its width or precision from an argument and shifts which value
+    /// the conversion names, and `%` behind modifiers renders `%` while
+    /// consuming a value slot (`sprintf('%5%s', $a, $o)` never reaches `$o`):
+    /// the parser models neither, so the format is left to the row.
+    #[test]
+    fn a_star_or_a_modified_percent_is_left_to_the_row() {
+        for format in ["%*d", "%.*f", "%s%*d", "%1$*d", "%5%s", "%-%", "%1$%"] {
+            assert_eq!(format_reach(format), None, "{format:?}");
+        }
+    }
+
+    /// A value count that does not match the format changes the outcome, never
+    /// the parse: too few values is an `ArgumentCountError` (row 7.11, argument
+    /// checking, not user code), and a value past the last conversion is never
+    /// read.
+    #[test]
+    fn the_parse_does_not_depend_on_how_many_values_are_given() {
+        assert_eq!(format_reach("%d %d").as_deref(), Some(&[I, I][..])); // 7.11
+        let sprintf = printf_family("sprintf").expect("sprintf");
+        let parsed = format_reach("%d").expect("readable");
+        assert_eq!(sprintf.reach_at(&parsed, 1), Some(I)); // `sprintf('%d', $o)`
+        assert_eq!(sprintf.reach_at(&parsed, 2), Some(I), "sprintf('%d', 1, $o) never reads $o");
+        assert_eq!(sprintf.reach_at(&parsed, 7), Some(I));
+        let parsed = format_reach("%s").expect("readable");
+        assert_eq!(sprintf.reach_at(&parsed, 1), Some(O)); // 7.2
+        assert_eq!(sprintf.reach_at(&parsed, 2), Some(I), "sprintf('%s', 1, $o) never reads $o");
+    }
+
+    /// Which functions are printf-family, where the format sits and how the
+    /// values come: `fprintf` and `vfprintf` have no row yet and are not named
+    /// (row 7.16, a follow-up).
+    #[test]
+    fn the_printf_family_names_its_format_and_whether_values_are_a_vector() {
+        for (name, vector) in
+            [("sprintf", false), ("printf", false), ("vsprintf", true), ("vprintf", true)]
+        {
+            let family = printf_family(name).unwrap_or_else(|| panic!("{name}"));
+            assert_eq!((family.format_position(), family.is_vector()), (0, vector), "{name}");
+        }
+        assert_eq!(printf_family("\\SPrintF"), printf_family("sprintf"));
+        for name in ["fprintf", "vfprintf", "number_format", "implode", "in_array", "sprintf2"] {
+            assert_eq!(printf_family(name), None, "{name}");
+        }
+    }
+
+    /// The format and anything before it is the row's: `reach_at` answers only
+    /// the value positions.
+    #[test]
+    fn the_format_position_itself_is_left_to_the_row() {
+        let sprintf = printf_family("sprintf").expect("sprintf");
+        let parsed = format_reach("%s").expect("readable");
+        assert_eq!(sprintf.reach_at(&parsed, 0), None);
+        assert_eq!(at("sprintf", 0), ArgReach::Coerced, "a non-literal format may be an object");
+    }
+
+    /// Row 7.15: `vsprintf`'s array is inert when no conversion is `%s`
+    /// (`vsprintf('%d-%d', $a)` printed `1-1`) and nested when one is
+    /// (`vsprintf('%s', [$o])` ran `__toString`, as did `%s %d` and `%d %s`).
+    #[test]
+    fn a_vector_is_inert_unless_a_conversion_renders_an_element() {
+        for name in ["vsprintf", "vprintf"] {
+            let family = printf_family(name).expect(name);
+            let numeric = format_reach("%d-%d").expect("readable");
+            assert_eq!(family.reach_at(&numeric, 1), Some(I), "{name}");
+            let string = format_reach("%s").expect("readable");
+            assert_eq!(family.reach_at(&string, 1), Some(ArgReach::Nested), "{name}");
+            let mixed = format_reach("%d %s").expect("readable");
+            assert_eq!(family.reach_at(&mixed, 1), Some(ArgReach::Nested), "{name}");
+            assert_eq!(family.reach_at(&mixed, 2), Some(I), "{name}: past the array");
+            assert_eq!(family.reach_at(&mixed, 0), None, "{name}: the format");
+        }
+        // The row stays what the declared types say where no literal format helps.
+        assert_eq!(at("vsprintf", 0), ArgReach::Coerced);
+        assert_eq!(at("vsprintf", 1), ArgReach::Nested);
+    }
+
+    // ---- the effect rows of `array_search` and `vsprintf` (rows 7.12, 7.15) --
+
+    /// Both names answer `no-effect-row` on master: neither is foldable, and
+    /// the call-site certification is what the effect lane asks next. They are
+    /// certified at a call site and nowhere else, so no pass reads them as
+    /// pure argument-blind, and the reach rule holds every call.
+    #[test]
+    fn array_search_and_vsprintf_are_certified_at_the_call_site() {
+        for name in ["array_search", "vsprintf"] {
+            assert!(certified_at_call_site(name), "{name}");
+            assert!(knows(name), "{name}");
+            assert!(effect_labels(name).is_none() && !foldable(name), "{name} is not blind-pure");
+            assert!(arg_reach(name).expect(name).reaches_blind(true), "{name} may reach user code");
+        }
+        assert!(certified_at_call_site("ARRAY_SEARCH") && certified_at_call_site("VSprintf"));
+    }
+
+    /// The by-value reach of `array_search` is `in_array`'s: needle and
+    /// haystack are `mixed` and `array` (`Nested`), the strict flag is a bool.
+    /// Rows 7.13 and 7.14 stay with `in_array`.
+    #[test]
+    fn array_search_reaches_as_in_array_does() {
+        for name in ["array_search", "in_array"] {
+            assert_eq!(at(name, 0), ArgReach::Nested, "{name}");
+            assert_eq!(at(name, 1), ArgReach::Nested, "{name}");
+            assert_eq!(at(name, 2), ArgReach::Inert, "{name}");
+            assert_eq!(at(name, 3), ArgReach::Inert, "{name}: past the list");
+        }
+    }
+
+    /// Row 7.16: `fprintf` and `vfprintf` have no row of any kind, and this
+    /// change gives them none.
+    #[test]
+    fn fprintf_and_vfprintf_keep_no_effect_row() {
+        for name in ["fprintf", "vfprintf"] {
+            assert!(!certified_at_call_site(name), "{name}");
+            assert!(effect_labels(name).is_none() && !foldable(name), "{name}");
+            assert_eq!(throws_of(name), None, "{name}");
         }
     }
 

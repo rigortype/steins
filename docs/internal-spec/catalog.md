@@ -201,9 +201,10 @@ certified:
 (`pure_at_arity(name, positional)`): its search form compares loosely, which
 runs an object's `__toString`, so its argument-blind row stays `None` and the
 effects pass reads the call's arity. `current`, `key`, `get_class`,
-`is_callable`, `is_a`, the `*_exists` questions, `array_search`,
-`array_combine` and the string family stay out, each for a reason the
-amendment records. A certified name is also "known" to every pass that asks the
+`is_callable`, `is_a`, the `*_exists` questions, `array_combine` and the
+string family stay out, each for a reason the amendment records
+(`array_search`, which compares values, is certified at a call site instead,
+below). A certified name is also "known" to every pass that asks the
 catalog whether a name is a builtin (`knows(name)`, below). It is **not**
 thereby throwless: the throw lane reads `throws_of(name)`, which answers only
 for a row or an audited name (below).
@@ -240,14 +241,37 @@ The row's labels apply either way.
 The **string family** is certified under the same rule rather than
 argument-blind (`certified_at_call_site(name)`): `strcmp`, `strncmp`,
 `strcasecmp`, `strncasecmp`, `strspn`, `strcspn`, `substr_count`, `ord`, `chr`,
-`bin2hex`, `hex2bin`, `dirname` and `unpack`. They are not on
+`bin2hex`, `hex2bin`, `dirname` and `unpack`, joined by `array_search` and
+`vsprintf` (issue #860): neither is on the fold allowlist, so without a place
+here the effect lane answered `no-effect-row` for them, which no proof at the
+call site can discharge. They are not on
 `effect_labels`, so no other pass reads them as known builtins; the effects
 pass resolves an otherwise unresolved call against the list and answers pure
-only where the call site rules the `string` parameters out. Names that read the
+only where the call site rules the reaching arguments out. Names that read the
 locale or an ini setting (`basename`, `pathinfo`, `strnatcmp`,
 `strnatcasecmp`, `substr_compare`, `parse_url`, `escapeshellarg`,
 `strip_tags`, `number_format`, the `ctype_*` and `mb_*` families,
 `htmlspecialchars`) stay out.
+
+A literal printf format refines the printf family's value positions
+(`format_reach(format)` and `printf_family(name)`, issue #860, ADR-0021's
+second 2026-10-01 amendment, the 2026-10-03 note). The row says `Object` at
+`sprintf`'s values because a `%s` renders an object through `__toString`; a
+literal format says which values that is. `format_reach` parses php-src's
+`php_formatted_print` grammar (`%%`, `n$`, the flags `' '`, `0`, `-`, `+`,
+`'c`, width, `.precision`, `l`) into one `ArgReach` per value: `Object` where a
+conversion naming it is `%s`, `Inert` where every one is numeric (`d u c o x X
+b e E f F g G h H`, which turn an object into a number with a warning), the
+strongest where several name it, and `Inert` for a value no conversion names.
+`None` leaves the call to the row: an unknown or missing conversion, a padding
+quote with nothing after it, an argument number of zero or past `INT_MAX`, a
+`*` width or precision, a `%` behind modifiers, a position past an internal
+bound. `printf_family` names the format position (0 for `sprintf`, `printf`,
+`vsprintf`, `vprintf`) and whether the values are one array, which is `Nested`
+when some conversion is `%s` and `Inert` when none is. `fprintf` and
+`vfprintf` have no row of any kind and are not in it. The engine reads a
+literal format at the call site (a later slice); the catalog answers only for
+the format it is given.
 
 Coverage is frequency-seeded (`docs/notes/20260722-builtin-frequency.md`) plus
 the gaps identified in `docs/research/phpsrc-mining/effects_gaps.md`:

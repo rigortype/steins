@@ -344,6 +344,61 @@ Holes this rule does not close, recorded for follow-up:
   values render through `%s` (about 7% of its failing sites would pass), and
   `in_array(…, true)` compares strictly; neither is read yet.
 
+### Note (2026-10-03): a literal printf format names the values it renders — PENDING ratification
+
+Issue #860, catalog half (run 2, S7). **Status: PENDING ratification.** Designed
+autonomously under the owner's standing delegation. This note covers the
+literal printf format only; the call site that reads it, and the strict flag of
+`in_array`/`array_search`, are the engine half and get their own note.
+
+The row's `Object` at `sprintf`'s first value is the reading for a format the
+call site cannot read. For a literal format, `steins_catalog::format_reach`
+parses php-src's `php_formatted_print` grammar into one reach per value:
+`Object` where a conversion naming the value is `%s`, `Inert` where every one
+is numeric (`d u c o x X b e E f F g G h H`). Witnessed on PHP 8.5.11, an
+object handed to a numeric conversion becomes a number with a warning and runs
+no `__toString`. Positional `n$` is honoured and leaves the in-order counter
+alone; a value several conversions name takes the strongest; a value no
+conversion names is never read; too few values is an `ArgumentCountError`,
+which is argument checking and not user code (ADR-0099 §3.3).
+
+The parser returns `None`, leaving the call to the row, for any format it
+cannot read as the engine does: an unknown or missing conversion, a padding
+quote with nothing after it, an argument number of zero or past `INT_MAX`, a
+width or precision past `INT_MAX`, a `*` width or precision (it consumes a
+value as an integer and shifts which value a conversion names), a `%` behind
+modifiers (it renders `%` and still consumes a slot), and a position past an
+internal bound. A malformed format may run `__toString` for an earlier `%s`
+before it fails, so the whole format is unreadable, never a prefix. The
+verdict was checked against PHP over 960,000 generated runs (random formats,
+zero to six tagged objects, `sprintf` and `vsprintf`): no value a run rendered
+was parsed `Inert`, and where the run succeeded with enough values the
+rendered set equalled the parsed `Object` set.
+
+`printf_family(name)` names the layout: the format at position 0, the values
+the positions after it (`sprintf`, `printf`) or one array (`vsprintf`,
+`vprintf`), where the array is `Nested` when some conversion is `%s` and
+`Inert` when none is. `fprintf` and `vfprintf` have no row of any kind (the
+format sits at position 1) and are not named: a layout without a row would
+read a call the effect lane still cannot place, and a stream writer's row is
+its own issue.
+
+`vsprintf` and `array_search` joined the call-site certified list
+(`certified_at_call_site`), the names whose own effects are certified and
+whose call is pure only where the call site rules out every reaching argument.
+Before, both answered `no-effect-row` in the effect lane, which no call-site
+proof could ever discharge (they are not on the fold allowlist, which is how
+`sprintf` and `in_array` reached the reach rule). `vsprintf` reads
+`LC_NUMERIC` through `%f` and `%e` exactly as `sprintf`, already certified
+through the fold allowlist, does. Nothing reads the parser yet, so the only
+effect is the two names' gap kind: `no-effect-row` becomes `user-code-reach`
+unless the arguments are already shown object-free. On the ten public corpus packages `check` is byte-identical
+under `default` and `strict`, and no function's labels, exhaustiveness or throw
+lane move; 20 of 28,846 summaries change the kinds behind their `…?` (9 swap
+`no-effect-row` for `user-code-reach`, 7 lose `no-effect-row` beside an existing
+`user-code-reach`, 4 gain `user-code-reach` beside a `no-effect-row` another
+call keeps), every one an `array_search` call.
+
 ## Amendment (2026-10-02): the call-site rule holds at every site — ratified 2026-10-02
 
 ADR-0099 (issue #865) takes the holes the second amendment of 2026-10-01

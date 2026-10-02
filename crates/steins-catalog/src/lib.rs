@@ -156,9 +156,12 @@ mod reach;
 pub use reach::{
     ArgReach,
     MethodReachRow,
+    PrintfFamily,
     ReachRow,
     arg_reach,
+    format_reach,
     method_arg_reach,
+    printf_family,
 };
 
 mod labels;
