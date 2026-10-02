@@ -420,6 +420,7 @@ runs only when the definite pass's `reads` hold a read of a *bound* name
 (`has_presence_candidate`), and a read withheld by these shields is no
 longer in `reads`. A scope whose only such candidate sits in a shielded
 region therefore no longer runs the pass, which can withhold a
-`variable.maybe-undefined` finding the pass would have made (for example
-`unset($y); echo $y;` after `if (!isset($y)) { return; }`). The same was
-already true of the bare `if`/`?:` shield; the corpus A/B shows no movement.
+`variable.maybe-undefined` finding the pass would have made. No witness
+of that was found (the `unset`-after-guard shapes are silent on the base
+too), the same gate already behaved so for the bare `if`/`?:` shield, and
+the public-corpus A/B shows no movement.
