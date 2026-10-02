@@ -412,6 +412,34 @@ debt layer. Silence is never a safety claim: it means "not proven".
 > the type-coherence checking those tools do at every level lives behind
 > Steins' `contracts`/`strict` profiles instead of the default surface.
 
+### "check never exits behind a `php` wrapper script"
+
+**Symptom.** `steins check` prints its findings, or stalls partway, and
+then never exits; only an outside timeout or Ctrl-C ends it. The `php` on
+`PATH` is a shell script, not the interpreter itself.
+
+**Cause.** The wrapper runs the real interpreter without `exec`, as in
+`/path/to/php "$@"`. Version managers and container shims are often
+written this way. The sidecar's child is then the wrapper, and the real
+`php` is the wrapper's own child. Steins 0.1.8 and earlier closed a
+sidecar child by killing it and waiting for its output to end, but
+killing the wrapper missed the interpreter, which kept that output open,
+so the wait never ended. Every close was exposed: the end of a run, a
+request that timed out, a replaced child.
+
+**Fixed after 0.1.8.** A later steins closes the child's input, kills the
+child's whole process group (the wrapper and everything it started), and
+stops waiting for the child's output after half a second. A wrapper that
+does not `exec` works as it is (issue #894).
+
+**Fix for 0.1.8 and earlier.** Make the wrapper `exec` the interpreter, so
+the process steins started *is* `php`:
+
+```sh
+#!/bin/sh
+exec /path/to/php "$@"
+```
+
 ### "it missed an obvious bug"
 
 **Symptom.** Code that looks wrong to you — a nullable value used
