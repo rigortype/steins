@@ -646,10 +646,20 @@ fn a_conjunction_guard_shields_the_names_it_tests() {
     // conjunction held, so `isset($x)` in it is as good a test as a bare one. php -r
     // witness (8.5.9): silent, the condition is false on every run.
     silent("<?php\nfunction f(bool $c): mixed {\n    return isset($x) && $c ? $x : null;\n}\n");
-    // The shield is still only for the name the conjunction tests.
+    // The shield is still only for the name the conjunction tests…
     fires(
         "<?php\nfunction f(bool $c): mixed {\n    return isset($x) && $c ? $other : null;\n}\n",
         "other",
+    );
+    // …and only on the side the conjunction proves it: the else arm runs when `$c`
+    // alone was false, with `$x` unbound.
+    fires(
+        "<?php\nfunction f(bool $c): mixed {\n    return isset($x) && $c ? null : $x;\n}\n",
+        "x",
+    );
+    fires(
+        "<?php\nfunction f(bool $c): void {\n    if (isset($x) && $c) {\n    } else {\n        echo $x;\n    }\n}\n",
+        "x",
     );
 }
 
@@ -677,6 +687,12 @@ fn a_short_circuit_shield_names_only_what_the_left_tests() {
     // `$other` is judged, and so is a read on the LEFT of the operator, before any guard.
     fires("<?php\nfunction f(): void { isset($x) && print($other); }\n", "other");
     fires("<?php\nfunction f(): void { print($x) && isset($x); }\n", "x");
+    // Polarity: the right operand is shielded only where the left proves the name bound.
+    // php -r witness (8.5.11): each of these warns, `$x` never bound.
+    fires("<?php\nfunction f(): void { isset($x) || print($x); }\n", "x");
+    fires("<?php\nfunction f(): void { !isset($x) && print($x); }\n", "x");
+    fires("<?php\nfunction f(): void { empty($x) && print($x); }\n", "x");
+    fires("<?php\nfunction f(): void { !empty($x) || print($x); }\n", "x");
     // Outside the operator the name is judged again.
     let d = diags("<?php\nfunction f(): void {\n    isset($x) && print($x);\n    echo $x;\n}\n");
     assert_eq!(d.len(), 1, "{d:#?}");
@@ -690,10 +706,17 @@ fn a_terminating_if_shields_the_statements_after_it() {
     silent("<?php\nfunction f(): void { if (!isset($x)) { throw new Exception(); } print($x); echo $x; }\n");
     silent("<?php\nfunction f(): void { if (!isset($x)): return; endif; print($x); }\n");
     // Inside a nested list the shield reaches the rest of THAT list, and the guard's own
-    // disjunction counts when every disjunct tests a name.
+    // disjunction counts when every disjunct proves a name bound on its false side.
     silent(
         "<?php\nfunction f(bool $c): void { if ($c) { if (!isset($x) || !isset($y)) { return; } print($x); } }\n",
     );
+    // A conjunction is false when either conjunct is, so the name is dead only while
+    // both are never bound.
+    silent(
+        "<?php\nfunction f(): void { if (!isset($x) && !isset($y)) { return; } print($x); }\n",
+    );
+    // An offset chain proves its root.
+    silent("<?php\nfunction f(): void { if (!isset($x['a'])) { return; } print($x); }\n");
     // A loop body is a statement list too: `continue` ends the iteration.
     silent("<?php\nfunction f(array $a): void { foreach ($a as $v) { if (!isset($x)) { continue; } print($x); } }\n");
 }
@@ -704,6 +727,19 @@ fn a_terminating_if_stops_shielding_where_its_list_ends() {
     // Nothing terminates, so the read after the guard is reachable with `$x` unbound.
     fires("<?php\nfunction f(): void { if (isset($x)) {} echo $x; }\n", "x");
     fires("<?php\nfunction f(): void { if (!isset($x)) { echo 1; } echo $x; }\n", "x");
+    // The successor is reached by the condition coming out FALSE, and a false `isset`
+    // proves nothing about the binding. php -r witness (8.5.11): both warn.
+    fires("<?php\nfunction f(): mixed { if (isset($x)) { return 1; } return $x; }\n", "x");
+    fires("<?php\nfunction f(): void { if (!empty($x)) { return; } print($x); }\n", "x");
+    // Neither does a false conjunction: `$c` alone can be what came out false.
+    fires(
+        "<?php\nfunction f(bool $c): void { if (!isset($x) && $c) { return; } print($x); }\n",
+        "x",
+    );
+    fires(
+        "<?php\nfunction f(int $y): void { if (!isset($x) && !isset($y)) { return; } print($x); }\n",
+        "x",
+    );
     // An `else` or `elseif` makes the successor reachable another way.
     fires(
         "<?php\nfunction f(): void { if (!isset($x)) { return; } else { echo 1; } echo $x; }\n",
@@ -736,7 +772,7 @@ fn a_disjunction_of_guards_shields_its_body_while_every_name_is_never_bound() {
     silent("<?php\nfunction f(): void { if (isset($x) || isset($y)) { echo $x; } }\n");
     silent("<?php\nfunction f(): void { if (isset($y) || isset($x)) { echo $x; } }\n");
     silent("<?php\nfunction f(): void { if (isset($x) or isset($y)) { echo $x; } }\n");
-    silent("<?php\nfunction f(): void { print(isset($x) || empty($y) ? $x : 0); }\n");
+    silent("<?php\nfunction f(): void { print(isset($x) || !empty($y) ? $x : 0); }\n");
     // A conjunct inside a disjunct contributes its names too.
     silent("<?php\nfunction f(): void { if (isset($x) || (isset($y) && isset($z))) { echo $x; } }\n");
 }
@@ -752,6 +788,13 @@ fn a_disjunction_guard_fires_when_another_disjunct_can_hold() {
         "<?php\nfunction f(int $y): void { if (isset($y) || isset($x)) { echo $x; } }\n",
         "x",
     );
+    // The false side of a disjunction proves nothing: it is reached with `$x` unbound.
+    fires(
+        "<?php\nfunction f(): void { if (isset($x) || isset($y)) {} else { echo $x; } }\n",
+        "x",
+    );
+    // `empty($y)` is TRUE for an unbound `$y`, so that disjunct holds on its own.
+    fires("<?php\nfunction f(): void { print(isset($x) || empty($y) ? $x : 0); }\n", "x");
     // A disjunct that tests no name can hold on its own: the disjunction guards nothing.
     fires("<?php\nfunction f(int $y): void { if (isset($x) || $y > 0) { echo $x; } }\n", "x");
     fires("<?php\nfunction f(): void { if (isset($x) || rand()) { echo $x; } }\n", "x");

@@ -340,52 +340,63 @@ has an inaccessibility id; the rule would apply there from 8.4 if one is added. 
 change only removes findings: a protected member whose root is a common ancestor of
 the site's scope.
 
-## Amendment (2026-10-03): the never-bound guard reads its own condition, a terminating `if`, and a disjunction (issue #929)
+## Amendment (2026-10-03): the never-bound guard reads its own condition, a terminating `if`, and a disjunction, by polarity (issue #929)
 
 **Status: PENDING ratification.** `variable.undefined` (#194) shielded a
 read only under a bare `isset`/`empty` (optionally negated) that
 *enclosed* it: the arms of `isset($x) ? … : …`, the body of
 `if (empty($x)) { … }`. A name that is never bound makes every such test
-constant (`isset` false, `empty` true), so any read the test stands in
-front of is dead code, and PHP runs it without the warning. Three shapes
-stood in front of a read without enclosing it, and the id reported all
-three. Each rule below stays the containment rule the id already used: it
-asks what the condition spells, never which arm the guard protects, so an
-over-shield costs a finding and cannot manufacture one.
+constant (`isset` false, `empty` true), so a read that only the other
+outcome reaches is dead code, and PHP runs it without the warning. Three
+shapes stood in front of such a read without enclosing it, and the id
+reported all three.
 
-1. **A short-circuit operand.** For `&&`, `and`, `||` and `or`, the names
-   the left operand tests through `isset`/`empty`, at either polarity,
-   shield the right operand. `!isset($x) || print($x)`, `empty($x) || …`
-   and `isset($x) && $x > 1` are silent.
-2. **A conjunction or disjunction as the condition.** The tested names
-   distribute through `&&`: `isset($x) && $c ? $x : null` shields the
-   arms with `x`. Through `||` the names of every disjunct are tested
-   *jointly*: the body of `if (isset($x) || isset($y))` runs when either
-   holds, so a read of `$x` in it is discharged only while every name any
-   disjunct tests is never bound. The decision waits for the scope's
-   binding set (`VarUsage::settle`), so `isset($x) || isset($y)` with a
-   bound `$y` still reports `$x`. A disjunct that tests nothing
-   (`isset($x) || $y > 0`) can hold on its own, so the disjunction tests
-   nothing and the read reports. This retires the old carve-out that a
-   conjunction shields nothing, which was kept to the corpus shape and
-   reported `isset($x) && $c ? $x : null`.
+The enclosing-arm rule is unchanged, either polarity and containment
+rather than reachability. The three rules below are different: each asks
+**which outcome of the condition reaches the read**, and shields a name
+only where that outcome proves it bound. `bound_when(cond, outcome)`
+(`lower_scope.rs`) is the presence pass's `guard_bound_names` polarity:
+
+- `isset($x)` proves `$x` bound when true, and `empty($x)` when false.
+  `!` flips the outcome. An offset or property chain proves its root
+  (`isset($x['a'])` proves `$x`).
+- `&&` when true and `||` when false hold both operands, so their names
+  add.
+- `&&` when false and `||` when true hold *either* operand, so one
+  operand's names prove nothing alone. A name is then shielded only when
+  **every** operand proves something, and only while every name any
+  operand proves is never bound (`Shield::joint`, decided by
+  `VarUsage::settle` once the scope's bindings are known). This is the one
+  place the disjunction rule survives the move to polarity, and it is
+  needed there: `if (isset($x) || isset($y)) { echo $x; }` runs its body
+  when `$y` is bound, with `$x` unbound. An operand that proves nothing
+  (`$y > 0`, `empty($y)`) can hold on its own and voids the whole.
+
+The rules:
+
+1. **A short-circuit operand.** The right operand of `&&`/`and` takes
+   `bound_when(lhs, true)`, and of `||`/`or` takes `bound_when(lhs,
+   false)`. `isset($x) && $x > 1`, `!isset($x) || print($x)` and
+   `empty($x) || print($x)` are silent.
+2. **A compound condition's arms.** The then-arm of an `if` or `?:` takes
+   `bound_when(cond, true)` and the `elseif`/`else` clauses and the
+   else-arm take `bound_when(cond, false)`, in addition to the bare tests
+   above. `isset($x) && $c ? $x : null` and the three disjunction shapes
+   of the issue (`isset($x) || isset($y)` as the condition) are silent.
 3. **A terminating `if`.** An `if` with no `elseif` and no `else`, whose
-   body provably terminates (`BodyEnd::provably_terminates`, so a `try`,
-   a `goto` or a `switch` that cannot be structured never counts), and
-   whose condition tests names, shields the statements after it in the
-   same statement list: `if (!isset($x)) { return; } print($x);`. The
-   shield stops at the end of the list the `if` sits in and does not reach
-   a statement before it. `if (isset($x)) {} echo $x;` still reports,
-   because nothing terminates.
+   body provably terminates (`BodyEnd::provably_terminates`, so a `try`, a
+   `goto` or a `switch` that cannot be structured never counts), shields
+   the statements after it in the same statement list with
+   `bound_when(cond, false)`, the only outcome that reaches them:
+   `if (!isset($x)) { return; } print($x);`. The shield stops at the end
+   of the list and does not reach a statement before the `if`.
 
-**What the polarity-blindness costs, accepted.** Each rule withholds the
-finding on a shape where the read is reachable with the name unbound:
-`isset($x) || print($x)`, `!isset($x) && print($x)` and
-`if (isset($x)) { return; } echo $x;` all warn in PHP and are now silent
-for a never-bound `$x`. A polarity-aware reading would keep them (the
-presence pass's `guard_bound_names` already computes it); this amendment
-keeps the id's existing containment trade instead, and the finer reading
-is the follow-up.
+**What stays reported**, each witnessed to warn on PHP 8.5.11 with `$x`
+never bound: `isset($x) || print($x)`, `!isset($x) && print($x)`,
+`if (isset($x)) { return 1; } return $x;`,
+`if (!isset($x) && $c) { return; } print($x);`, the else-arm of
+`isset($x) && $c ? null : $x`, `if (isset($x)) {} echo $x;`, and a
+disjunction one of whose names is bound.
 
 **What is not touched.** The presence pass (`variable.maybe-undefined`)
 judges each unit against the flowing state and already shields a unit by
