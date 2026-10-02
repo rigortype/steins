@@ -40,13 +40,14 @@
 use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 use steins_db::{EffectsPolicy, PluginFacts, ProjectLayout};
 use steins_infer::{
     Diagnostic, GenerationParams, INLINE_IGNORE, LazyTree, RuntimePostures,
     generation_check,
 };
-use steins_syntax::SourceTree;
+use steins_syntax::{SourceTree, Utf8Loss};
 
 use crate::check::{CheckRequest, suppression_over};
 use crate::profile;
@@ -137,10 +138,13 @@ pub(crate) fn try_generation_check(
     notices.extend(runtime_warnings.iter().cloned());
 
     // The salsa view over the same sealed texts, in the same slot order.
-    let entries: Vec<(String, String)> = outcome
+    let entries: Vec<(String, String, Option<Arc<Utf8Loss>>)> = outcome
         .trees
         .iter()
-        .map(|(path, _)| (path.clone(), outcome.texts.get(path).cloned().unwrap_or_default()))
+        .map(|(path, _)| {
+            let text = outcome.texts.get(path).cloned().unwrap_or_default();
+            (path.clone(), text, outcome.losses.get(path).cloned())
+        })
         .collect();
     let loaded = assemble_loaded(entries, layout, plugins, effects.clone());
     let directive_files: HashSet<String> = outcome

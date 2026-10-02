@@ -609,11 +609,21 @@ fn tool_apply_plan(session: &mut Session, args: &Value) -> Result<Reply, ToolErr
                 format!("the plan edits {path} but carries no source text for it"),
             )
         })?;
-        let current = std::fs::read(path)
-            .map(|b| String::from_utf8_lossy(&b).into_owned())
-            .map_err(|e| {
-                ToolError::new("plan-target-unreadable", format!("cannot re-read {path}: {e}"))
-            })?;
+        let bytes = std::fs::read(path).map_err(|e| {
+            ToolError::new("plan-target-unreadable", format!("cannot re-read {path}: {e}"))
+        })?;
+        // The plan was spliced into a lossy decoding of a file that was not valid UTF-8
+        // (issue #927); writing it would replace that file's own bytes.
+        if let Err(e) = std::str::from_utf8(&bytes) {
+            return Err(ToolError::new(
+                "byte-lossy-source",
+                format!(
+                    "refusing to rewrite {path}: the file is not valid UTF-8 (first ill-formed byte at offset {}), so writing the plan would destroy its original bytes. Nothing was written.",
+                    e.valid_up_to()
+                ),
+            ));
+        }
+        let current = String::from_utf8_lossy(&bytes).into_owned();
         if &current != planned {
             return Err(ToolError::new(
                 "tree-changed-since-plan",

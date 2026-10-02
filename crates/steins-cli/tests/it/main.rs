@@ -2,6 +2,7 @@
 
 mod annotate_duplicate_fqn;
 mod annotate_runtime;
+mod byte_lossy_source;
 mod check_fix;
 mod cli;
 mod deep_nesting;

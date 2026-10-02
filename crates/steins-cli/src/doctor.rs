@@ -1057,11 +1057,10 @@ fn parse_project(root: &Path) -> (Vec<ParsedFile>, Vec<SkippedLink>) {
         .files
         .iter()
         .filter_map(|file| {
-            let bytes = std::fs::read(file).ok()?;
-            let text = String::from_utf8_lossy(&bytes);
+            let (text, loss) = crate::project::read_source(file).ok()?;
             Some(ParsedFile {
                 path: file.to_string_lossy().into_owned(),
-                tree: SourceTree::parse(&text),
+                tree: SourceTree::parse_with_loss(&text, loss.as_deref()),
             })
         })
         .collect();
