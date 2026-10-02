@@ -53,6 +53,7 @@
 //! fails the gate, naming the project and every file in flight, when one
 //! outlives it; see [`watch`]. Stdout stays the report, byte for byte.
 
+mod ledger;
 mod watch;
 
 use std::collections::{BTreeMap, HashSet};
@@ -395,10 +396,13 @@ fn is_effect_contract(d: &Diagnostic) -> bool {
 // `iterable-value` / `generics` floors are decided.
 
 /// The seeded baselines the gate measures against (issue #775): four
-/// per-package count tables and the pinned proof-layer findings. They are data
-/// under `xtask/fp-gate/`, one TOML file per table, built into the binary with
-/// `include_str!` — so the gate reads no file at run time, and a malformed
-/// table stops it before any analysis runs.
+/// per-package count tables and the pinned proof-layer findings. The public
+/// half is data under `xtask/fp-gate/`, one TOML file per table, built into
+/// the binary with `include_str!` — so a malformed table stops the gate before
+/// any analysis runs. The private half (rows for the projects
+/// `corpus.local.toml` injects) is the gitignored `fp-gate.local.toml`, which
+/// [`Baselines::load_with_ledger`] merges in when the file exists; see
+/// [`ledger`] for the rules and for why those rows are not tracked.
 ///
 /// Each table keeps the name it had as a Rust constant, which is also its file
 /// stem (`PHPDOC_EXPECTED` is `phpdoc_expected.toml`), so the triage notes,
@@ -407,6 +411,7 @@ fn is_effect_contract(d: &Diagnostic) -> bool {
 /// but the person moving the count, and a comment keeps each ledger's wrapping
 /// and column alignment byte for byte, so a reseed stays a one-line count
 /// change plus the lines that say why. The table's policy is the file's header.
+#[derive(Debug)]
 struct Baselines {
     /// `PHPDOC_EXPECTED`: the `phpdoc.*` contract ids ([`is_phpdoc`], ADR-0030
     /// relation #1).
@@ -422,6 +427,8 @@ struct Baselines {
     /// `EXPECTED_PROOF_FINDINGS`: triaged TRUE proof-layer positives (ADR-0043
     /// §5), matched by [`is_expected_true_positive`].
     proof: Vec<ExpectedProofFinding>,
+    /// Whether the local ledger was merged in, and with how many rows.
+    overlay: ledger::Overlay,
 }
 
 /// Where the tables live, for the messages that name one.
@@ -443,7 +450,19 @@ impl Baselines {
             effect: table!(parse_table, "effect_expected.toml")?,
             possibly: table!(parse_table, "possibly_expected.toml")?,
             proof: table!(parse_pins, "expected_proof_findings.toml")?,
+            overlay: ledger::Overlay::Absent,
         })
+    }
+
+    /// The built-in tables merged with the local ledger (`fp-gate.local.toml`)
+    /// when it exists. `locals` are the projects `corpus.local.toml` lists —
+    /// the only names the ledger may carry rows for.
+    fn load_with_ledger(locals: &[LocalProject]) -> Result<Self, String> {
+        let base = Self::load()?;
+        let text = ledger::read_overlay(&ledger::overlay_path())?;
+        let public: Vec<&str> = PACKAGES.iter().map(|p| p.name).collect();
+        let local: Vec<&str> = locals.iter().map(|p| p.name.as_str()).collect();
+        ledger::merge(base, text.as_deref(), &ledger::Roster { public: &public, local: &local })
     }
 }
 
@@ -451,7 +470,7 @@ impl Baselines {
 /// package or local-project name and the count it is expected not to exceed.
 /// A name with no row expects zero. TOML refuses a repeated key, so a name has
 /// at most one row — the property a lookup's single answer rests on.
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, Default, serde::Deserialize)]
 #[serde(transparent)]
 struct CountTable(BTreeMap<String, usize>);
 
@@ -504,21 +523,27 @@ struct PinFile {
 /// per finding — a second row under the same package, id, path and line is a
 /// pin nobody can tell from the first.
 fn parse_pins(file: &str, text: &str) -> Result<Vec<ExpectedProofFinding>, String> {
-    let pins = toml::from_str::<PinFile>(text)
-        .map_err(|e| format!("{BASELINE_DIR}/{file}: {e}"))?
-        .finding;
+    let origin = format!("{BASELINE_DIR}/{file}");
+    let pins = toml::from_str::<PinFile>(text).map_err(|e| format!("{origin}: {e}"))?.finding;
+    validate_pins(&origin, &pins)?;
+    Ok(pins)
+}
+
+/// The checks [`parse_pins`] holds a pin file to, for any file of pins
+/// (`origin` names it in the error): the built-in one and the local ledger's.
+fn validate_pins(origin: &str, pins: &[ExpectedProofFinding]) -> Result<(), String> {
     let mut seen = HashSet::new();
-    for p in &pins {
+    for p in pins {
         let at = format!("{}:{} [{}] in {}", p.path_suffix, p.line, p.id, p.package);
         if p.path_suffix.is_empty() || p.line == 0 || p.message_contains.is_empty() {
             let why = "needs a path suffix, a line and a message fingerprint";
-            return Err(format!("{BASELINE_DIR}/{file}: the pin at {at} {why}"));
+            return Err(format!("{origin}: the pin at {at} {why}"));
         }
         if !seen.insert((&p.package, &p.id, &p.path_suffix, p.line)) {
-            return Err(format!("{BASELINE_DIR}/{file}: {at} is pinned twice"));
+            return Err(format!("{origin}: {at} is pinned twice"));
         }
     }
-    Ok(pins)
+    Ok(())
 }
 
 /// Whether `d` is a recorded, triaged TRUE proof-layer positive for `package`
@@ -538,9 +563,11 @@ fn is_expected_true_positive(pins: &[ExpectedProofFinding], package: &str, d: &D
 /// the gate is GREEN (no diagnostics on clean code).
 pub fn run(args: &[String]) -> Result<bool, String> {
     let deadline = watch::deadline_from_args(args)?;
-    // The baselines first: a malformed table stops the gate before it analyzes
-    // anything.
-    let baselines = Baselines::load()?;
+    // The baselines first: a malformed table, or a malformed or clashing local
+    // ledger, stops the gate before it analyzes anything. The local projects
+    // are read first because the ledger may only carry rows for them.
+    let locals = corpus_local::read_local()?;
+    let baselines = Baselines::load_with_ledger(&locals)?;
     let lock = read_lock();
     if lock.packages.is_empty() {
         return Err("corpus.lock.toml is empty — run `cargo xtask corpus-sync` first".to_owned());
@@ -582,7 +609,6 @@ pub fn run(args: &[String]) -> Result<bool, String> {
     // Private-corpus injection point (ADR-0013 §4): each `[[project]]` in the
     // optional (gitignored) `corpus.local.toml` is analyzed like a package;
     // vendor files are indexed but their findings don't count.
-    let locals = corpus_local::read_local()?;
     let mut local_reports: Vec<PackageReport> =
         locals.par_iter().map(|p| analyze_local(p, &baselines.proof, &watch)).collect();
     local_reports.sort_by(|a, b| a.name.cmp(&b.name));
@@ -1047,6 +1073,7 @@ fn print_report(
     possibly_regressions: &[PhpdocRegression],
 ) {
     println!("\n=== fp-gate: per-package findings ===\n");
+    println!("{}\n", baselines.overlay.report_line(local_reports.len()));
     if !local_reports.is_empty() {
         println!(
             "note: {} local project(s) are UNPINNED live working trees (corpus.local.toml, \
