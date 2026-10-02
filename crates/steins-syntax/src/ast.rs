@@ -3201,7 +3201,13 @@ const ZERO_SPAN: Span = Span { start: 0, end: 0 };
 #[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub enum ScopeOwner {
     TopLevel,
-    Function(String),
+    /// A free function, by the name it was written with and its namespaced identity. `fqn` is
+    /// the case-preserved FQN (no leading `\`), as a [`ScopeOwner::Method`]'s `class` is:
+    /// `name` alone is not unique in a file, since `namespace One { function f() {} }
+    /// namespace Two { function f() {} }` declares two functions with one simple name, so a
+    /// lookup of the declaration of a scope matches [`FunctionDecl::fqn`] case-insensitively
+    /// against this. `name` is what a message spells.
+    Function { name: String, fqn: String },
     Method { class: String, method: String },
     /// A closure/arrow-function body (ADR-0033), addressed by definition-site byte offset
     /// (the closure/`fn` keyword span start); an [`ArgValue::Closure`] naming this offset
@@ -3401,8 +3407,10 @@ pub struct RetHint {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub struct Scope {
-    /// `None` for the top-level script and method bodies; `Some(name)` for a free function
-    /// body — needed by function-world propagation paths that key on a free-function name.
+    /// `None` for the top-level script and method bodies; `Some(fqn)` for a free function
+    /// body, the case-preserved FQN of [`ScopeOwner::Function`] — needed by function-world
+    /// propagation paths that key on a free function. The FQN, not the simple name: two
+    /// namespaces of one file may each declare a function of the same simple name.
     pub function_name: Option<String>,
     /// The precise owner of this scope (top-level / function / method).
     pub owner: ScopeOwner,

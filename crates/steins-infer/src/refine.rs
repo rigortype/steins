@@ -1356,7 +1356,7 @@ mod n4_carrier_tests {
     fn native_arms_lowers_scalars_instances_and_null() {
         let src = "<?php function f(?int $a, User|Guest $b): void {}";
         with_cx(src, None, |cx| {
-            let scope = cx.tree().scopes().iter().find(|s| matches!(&s.owner, ScopeOwner::Function(n) if n == "f")).unwrap();
+            let scope = cx.tree().scopes().iter().find(|s| matches!(&s.owner, ScopeOwner::Function { name: n, .. } if n == "f")).unwrap();
             let params = cx.scope_params(scope).unwrap();
             // `?int` → [int, null] Verified.
             assert_eq!(
@@ -1376,7 +1376,7 @@ mod n4_carrier_tests {
         // `object $value` (native None) + `@param User|Guest` → phpdoc arms, Asserted.
         let src = "<?php /** @param User|Guest $value */ function f(object $value): void {}";
         with_cx(src, None, |cx| {
-            let scope = cx.tree().scopes().iter().find(|s| matches!(&s.owner, ScopeOwner::Function(n) if n == "f")).unwrap();
+            let scope = cx.tree().scopes().iter().find(|s| matches!(&s.owner, ScopeOwner::Function { name: n, .. } if n == "f")).unwrap();
             let p = &cx.scope_params(scope).unwrap()[0];
             let env = cx.scope_envelopes(scope).unwrap();
             let seeded = seed_contract_arms(p, env.param("value"), &id_resolve).unwrap();
@@ -1394,7 +1394,7 @@ mod n4_carrier_tests {
         // Asserted.
         let src = "<?php /** @param int $x */ function f(int $x): void {}";
         with_cx(src, None, |cx| {
-            let scope = cx.tree().scopes().iter().find(|s| matches!(&s.owner, ScopeOwner::Function(n) if n == "f")).unwrap();
+            let scope = cx.tree().scopes().iter().find(|s| matches!(&s.owner, ScopeOwner::Function { name: n, .. } if n == "f")).unwrap();
             let p = &cx.scope_params(scope).unwrap()[0];
             let env = cx.scope_envelopes(scope).unwrap();
             assert_eq!(

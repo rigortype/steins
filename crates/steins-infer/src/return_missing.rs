@@ -27,8 +27,8 @@ use crate::{TYPE_RETURN_MAYBE_MISSING_ID, TYPE_RETURN_MISSING_ID};
 /// walked value can change — the same posture `check_declaration_fatals` and
 /// `docblock_hygiene` take.
 ///
-/// `never_returning` is the set of callee names the run proved never return; see
-/// [`never_returning_names`].
+/// `never_returning` is the set of callees the run proved never return — a function by its
+/// lowercase FQN, a method by its lowercase simple name; see [`never_returning_names`].
 pub(crate) fn check_return_missing(cx: &Cx, never_returning: &HashSet<String>, out: &mut Vec<Diagnostic>) {
     for scope in cx.tree().scopes() {
         // Premise 1a: a written, non-void, non-never return hint. The RAW hint, not
@@ -55,7 +55,7 @@ pub(crate) fn check_return_missing(cx: &Cx, never_returning: &HashSet<String>, o
         // Never-returning-callee refinement: `function g(): never { exit(1); }`
         // makes `function f(): int { g(); }` run clean (witnessed 8.5.9). Scope-wide
         // rather than path-precise — the safe, larger-silence direction.
-        if scope_calls_never_returning(scope, never_returning) {
+        if scope_calls_never_returning(cx, scope, never_returning) {
             continue;
         }
         // `include`/`require`/`eval` bring in code that can `exit` the whole script,
@@ -111,7 +111,7 @@ pub(crate) fn check_return_missing(cx: &Cx, never_returning: &HashSet<String>, o
 /// `{closure:file:line}` no source text can be quoted for.
 fn return_missing_subject(cx: &Cx, scope: &Scope) -> (String, String) {
     match &scope.owner {
-        ScopeOwner::Function(name) => (format!("function {name}"), name.clone()),
+        ScopeOwner::Function { name, .. } => (format!("function {name}"), name.clone()),
         ScopeOwner::Method { class, method } => {
             let qualified = format!("{class}::{method}");
             (format!("method {qualified}"), qualified)
@@ -132,20 +132,38 @@ fn return_missing_subject(cx: &Cx, scope: &Scope) -> (String, String) {
     }
 }
 
-/// Whether `scope` calls anything named in the never-returning veto set.
+/// Whether `scope` calls anything in the never-returning veto set.
 ///
 /// Two sources, together covering every call the lowering records: the trace's
 /// statement-position calls (descending the structured `if`/`match` sub-traces,
 /// which are where the fall-through path's own statements live) and
 /// `Scope::method_calls`, the comprehensive method-call enumeration.
-fn scope_calls_never_returning(scope: &Scope, never_returning: &HashSet<String>) -> bool {
+fn scope_calls_never_returning(cx: &Cx, scope: &Scope, never_returning: &HashSet<String>) -> bool {
     if never_returning.is_empty() {
         return false;
     }
-    let named = |call: &CallExpr| {
-        callee_simple_name(call).is_some_and(|n| never_returning.contains(&n.to_ascii_lowercase()))
-    };
+    let named = |call: &CallExpr| calls_never_returning(cx, call, never_returning);
     scope.method_calls.iter().any(named) || trace_calls_any(&scope.stmts, &named)
+}
+
+/// Whether one call is a callee the veto set names.
+///
+/// A function call that resolves to a project function is judged on that function's FQN
+/// alone: `namespace Two { function g(): int {} }` is not vetoed by a `: never` `One\g`
+/// elsewhere in the file (issue #925). A function call that does not resolve to one —
+/// ambiguous, builtin-shadowing, undefined — falls back to its simple name against every
+/// entry's last segment, the larger-silence direction. A method call is its simple name
+/// against the method entries, which are keyed that way.
+fn calls_never_returning(cx: &Cx, call: &CallExpr, never_returning: &HashSet<String>) -> bool {
+    let Some(simple) = callee_simple_name(call) else { return false };
+    let simple = simple.to_ascii_lowercase();
+    if !matches!(call.receiver, Callee::Function(_)) {
+        return never_returning.contains(&simple);
+    }
+    if let Some(site) = cx.resolve_user_fn_any(call) {
+        return never_returning.contains(&cx.fn_decl(site).fqn);
+    }
+    never_returning.iter().any(|key| key.rsplit('\\').next() == Some(simple.as_str()))
 }
 
 /// `true` when any statement-position call in `stmts` (or in a structured

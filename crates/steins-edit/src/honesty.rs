@@ -283,7 +283,7 @@ fn plan_return(
     tags: &[DocTag],
     path: &str,
     tree: &SourceTree,
-    scopes: &HashMap<&str, &Scope>,
+    scopes: &HashMap<String, &Scope>,
     blocking: Option<&(&'static str, String)>,
     plan: &mut EditPlan,
     refusals: &mut Vec<Refusal>,
@@ -295,7 +295,7 @@ fn plan_return(
     let Some((gov_contract, _consumed)) = tag_contract(gov) else { return };
 
     // Own return-site values (structurally-visible; same set the checker models).
-    let Some(scope) = scopes.get(func.name.as_str()) else { return };
+    let Some(scope) = scopes.get(&func.fqn) else { return };
     let mut returns: Vec<&ArgValue> = Vec::new();
     collect_returns(&scope.stmts, &mut returns);
 
@@ -726,13 +726,23 @@ fn dedup(vals: &mut Vec<Val>) {
     vals.dedup();
 }
 
-/// Map each free-function written name to its scope (for `@return` return scans).
-fn scopes_by_function(tree: &SourceTree) -> HashMap<&str, &Scope> {
-    let mut map = HashMap::new();
+/// Map each free function's lowercase FQN ([`FunctionDecl::fqn`]) to its scope (for `@return`
+/// return scans). Keyed on the FQN, not the written name: a file of several namespaces may
+/// declare `One\f` and `Two\f`, and a name key would scan the wrong body (issue #925). An FQN
+/// two scopes share (a conditional redeclaration) has no entry, so its `@return` is not judged.
+fn scopes_by_function(tree: &SourceTree) -> HashMap<String, &Scope> {
+    let mut map: HashMap<String, &Scope> = HashMap::new();
+    let mut shared: Vec<String> = Vec::new();
     for scope in tree.scopes() {
-        if let ScopeOwner::Function(name) = &scope.owner {
-            map.insert(name.as_str(), scope);
+        if let ScopeOwner::Function { fqn, .. } = &scope.owner {
+            let key = fqn.to_ascii_lowercase();
+            if map.insert(key.clone(), scope).is_some() {
+                shared.push(key);
+            }
         }
+    }
+    for key in &shared {
+        map.remove(key);
     }
     map
 }

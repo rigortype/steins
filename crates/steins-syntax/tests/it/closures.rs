@@ -143,7 +143,7 @@ fn nested_closures_each_get_a_scope() {
 fn closure_inside_function_body_gets_its_own_scope() {
     let src = "<?php\nfunction outer() { $f = fn () => 1; return $f; }\n";
     let tree = SourceTree::parse(src);
-    assert!(tree.scopes().iter().any(|s| matches!(&s.owner, ScopeOwner::Function(n) if n == "outer")));
+    assert!(tree.scopes().iter().any(|s| matches!(&s.owner, ScopeOwner::Function { name: n, .. } if n == "outer")));
     assert_eq!(closure_scopes(&tree).len(), 1);
 }
 

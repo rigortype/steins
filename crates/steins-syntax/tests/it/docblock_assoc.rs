@@ -65,7 +65,7 @@ use steins_syntax::ScopeOwner;
 fn fn_scope(tree: &SourceTree) -> &steins_syntax::Scope {
     tree.scopes()
         .iter()
-        .find(|s| matches!(s.owner, ScopeOwner::Function(_)))
+        .find(|s| matches!(s.owner, ScopeOwner::Function { .. }))
         .expect("function scope")
 }
 

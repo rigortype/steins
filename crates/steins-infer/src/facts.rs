@@ -12,7 +12,7 @@
 //! | phase | what it read off every tree |
 //! |---|---|
 //! | [`crate::dam::dam_facts`] | the first parse error, the dynamism sites |
-//! | `never_returning_names` | every `: never` scope's name |
+//! | `never_returning_names` | every `: never` function's FQN and method's name |
 //! | the PHP-view guard | whether the file declares `PHP_VERSION_ID` |
 //! | the parse-failure sweep | the first error and how many followed |
 //! | [`crate::affected`] | the footprint, the declared names, the inheritance refs |
@@ -165,7 +165,7 @@ pub(crate) struct FileFacts {
     /// The file's dam candidates (ADR-0049 §2), each with the pre-resolved
     /// include target the universe test compares against.
     pub(crate) dynamism: Vec<DamCandidate>,
-    /// The simple names of this file's `: never` functions and methods.
+    /// The keys of this file's `: never` functions (lowercase FQN) and methods (lowercase simple name).
     pub(crate) never_returning: Vec<String>,
     /// Whether the file declares a userland `PHP_VERSION_ID` (issue #29).
     pub(crate) version_id_declared: bool,
@@ -351,16 +351,21 @@ pub(crate) fn dam_candidates_of(path: &str, tree: &SourceTree) -> Vec<DamCandida
         .collect()
 }
 
-/// The simple names of every `: never` function and method in one file — the
+/// The never-returning keys of every `: never` function and method in one file — the
 /// per-file half of the run's never-returning veto set.
+///
+/// A function is keyed by its lowercase **FQN**: a file of several namespaces may declare
+/// `One\g(): never` beside a `Two\g(): int`, and the simple name would veto the second
+/// (issue #925). A method is keyed by its lowercase simple name, as ever — a call's receiver
+/// class is not known where the set is read.
 pub(crate) fn never_returning_of(tree: &SourceTree) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for scope in tree.scopes() {
         if scope.ret_hint.is_none_or(|h| h.kind != RetHintKind::Never) {
             continue;
         }
-        let name = match &scope.owner {
-            ScopeOwner::Function(name) => name,
+        let key = match &scope.owner {
+            ScopeOwner::Function { fqn, .. } => fqn,
             ScopeOwner::Method { method, .. } => method,
             // A hook writes no return type of its own (`get(): int` is a parse
             // error), so no hook scope can ever carry a `: never` hint.
@@ -368,7 +373,7 @@ pub(crate) fn never_returning_of(tree: &SourceTree) -> Vec<String> {
             | ScopeOwner::Closure { .. }
             | ScopeOwner::PropertyHook { .. } => continue,
         };
-        let lower = name.to_ascii_lowercase();
+        let lower = key.to_ascii_lowercase();
         if !out.contains(&lower) {
             out.push(lower);
         }

@@ -292,6 +292,21 @@ fn honest_return_is_not_enumerated() {
     assert_eq!(report.oracle.enumerated, 0);
 }
 
+#[test]
+fn return_scan_reads_each_namespaces_own_function_body() {
+    // Two `f`s of one file (issue #925): the scope table was keyed on the written name, so
+    // `One\f`'s tag was judged against `Two\f`'s returns and rewritten to them as well.
+    let lib = "<?php\nnamespace One;\n/** @return int */\nfunction f() { return 1; }\n\
+               namespace Two;\n/** @return int */\nfunction f() { return \"1\"; }\n";
+    let report = plan(&[("lib.php", lib)]);
+    assert_oracle_complete(&report);
+    assert_eq!(report.oracle.transformed, 1, "{:#?}", report.refusals);
+    let out = report.plan.apply_file("lib.php", lib);
+    assert_eq!(out.matches("@return int").count(), 1, "One\\f keeps its honest tag:\n{out}");
+    assert!(out.contains("@return '1'"), "Two\\f is repaired:\n{out}");
+    assert_docblock_types_parse(&out);
+}
+
 // 5b. Docblock-unsafe string literals must not corrupt the docblock
 
 #[test]

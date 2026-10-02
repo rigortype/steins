@@ -1367,3 +1367,40 @@ fn multibyte_method_names_do_not_panic_reflection_lowering() {
     // ASCII-prefixed calls still classify; the multibyte-led one is not a reflection site.
     assert!(tree.parse_errors().is_empty());
 }
+
+/// A function scope carries the FQN of its declaration (issue #925): two functions of one
+/// simple name in different namespaces of one file are told apart by it, and it folds onto
+/// `FunctionDecl::fqn` — the key every lookup of "the declaration of this scope" matches.
+#[test]
+fn a_function_scope_carries_its_namespaced_fqn() {
+    for (src, global) in [
+        (
+            "<?php\nnamespace One { function F() {} }\nnamespace Two { function f() {} }\n\
+             namespace { function f() {} }\n",
+            true,
+        ),
+        ("<?php\nnamespace One;\nfunction F() {}\nnamespace Two;\nfunction f() {}\n", false),
+    ] {
+        let tree = SourceTree::parse(src);
+        let owners: Vec<(&str, &str)> = tree
+            .scopes()
+            .iter()
+            .filter_map(|s| match &s.owner {
+                ScopeOwner::Function { name, fqn } => Some((name.as_str(), fqn.as_str())),
+                _ => None,
+            })
+            .collect();
+        let mut want = vec![("F", "One\\F"), ("f", "Two\\f")];
+        let mut want_fqn = vec!["one\\f", "two\\f"];
+        if global {
+            want.push(("f", "f"));
+            want_fqn.push("f");
+        }
+        assert_eq!(owners, want, "{src}");
+        let folded: Vec<&str> = tree.functions().iter().map(|f| f.fqn.as_str()).collect();
+        assert_eq!(folded, want_fqn, "{src}");
+        let scope_names: Vec<&str> =
+            tree.scopes().iter().filter_map(|s| s.function_name.as_deref()).collect();
+        assert_eq!(scope_names, want.iter().map(|(_, f)| *f).collect::<Vec<_>>(), "{src}");
+    }
+}
