@@ -1268,7 +1268,8 @@ struct TypeSplit {
 /// An assert whose payload does not parse keeps the first `$name` as its target. The
 /// target is what exempts the parameter from the `@param` honesty checks (ADR-0030),
 /// so losing it is not quiet; the unparsable spelling that matters is the equality
-/// assert (`@phpstan-assert =Foo $x`), which the type grammar does not read.
+/// assert (`@phpstan-assert =Foo $x`), which the type grammar does not read, so its `=`
+/// is skipped before the split and the fallback is left to a type that really fails.
 fn split_type_and_variable(
     text: &str,
     bytes: &[u8],
@@ -1280,8 +1281,18 @@ fn split_type_and_variable(
     if bytes[start] == b'$' || (is_param && matches!(bytes[start], b'&' | b'.')) {
         return None; // `@param $x` with no type — nothing to offer
     }
-    let (mut type_end, mut var_pos) = variable_after_type(text, bytes, start, end, is_param);
-    if kind.is_assert() && var_pos.is_none() && parse_type(&text[start..end]).is_err() {
+    // The equality assert's `=` is the reference's own token before the type. It stays
+    // inside `type_text` (so the type still reads as unparsable and no envelope forms),
+    // but the split reads the type that follows it.
+    let mut body = start;
+    if kind.is_assert() && bytes[start] == b'=' {
+        body += 1;
+        while body < end && matches!(bytes[body], b' ' | b'\t') {
+            body += 1;
+        }
+    }
+    let (mut type_end, mut var_pos) = variable_after_type(text, bytes, body, end, is_param);
+    if kind.is_assert() && var_pos.is_none() && parse_type(&text[body..end]).is_err() {
         var_pos = first_variable(bytes, start, end);
         if let Some(pos) = var_pos {
             type_end = pos;
