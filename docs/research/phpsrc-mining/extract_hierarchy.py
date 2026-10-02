@@ -23,6 +23,27 @@ def resolve(ref, cur_ns):
         return ref.lstrip('\\')
     return cur_ns + '\\' + ref
 
+def class_aliases(lines, i):
+    """The names a class-level `/** @alias X */` docblock gives the class declared at line
+    `i` (php-src's gen_stub: the engine registers `X` as a second name of the same class
+    entry, so `ReflectionClass::getName()` of either spelling answers the declared name).
+    Only the docblock directly above the declaration counts, attributes in between allowed;
+    a method-level or function-level `@alias` is a different tag and never reaches here. The
+    name is read as written, and one php-src stub spells it fully qualified without a leading
+    backslash (`Dom\\DOMException`), so it is not resolved against the namespace."""
+    j = i - 1
+    while j >= 0 and (not lines[j].strip() or lines[j].lstrip().startswith('#[')):
+        j -= 1
+    if j < 0 or not lines[j].rstrip().endswith('*/'):
+        return []
+    end = j
+    while j >= 0 and '/**' not in lines[j]:
+        j -= 1
+    if j < 0:
+        return []
+    doc = ' '.join(lines[j:end + 1])
+    return [m.lstrip('\\') for m in re.findall(r'@alias\s+([A-Za-z_\\][A-Za-z0-9_\\]*)', doc)]
+
 def parse_file(path):
     with open(path, encoding='utf-8', errors='replace') as fh:
         lines = fh.readlines()
@@ -87,6 +108,7 @@ def parse_file(path):
                 'mods': mods,
                 'extends': extends,
                 'implements': implements,
+                'aliases': class_aliases(lines, i),
                 'file': os.path.relpath(path, ROOT),
                 'line': i + 1,
             })
@@ -176,5 +198,7 @@ for d in rows:
         for fl in flags:
             k, v = fl.split(' = ')
             print(f'{k} = {v}')
+    if d['aliases']:
+        print(f'aliases = {toml_list(d["aliases"])}')
     print(f"source = '{d['file']}:{d['line']}'")
     print()

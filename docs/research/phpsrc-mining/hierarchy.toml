@@ -618,6 +618,7 @@ kind = 'class'
 extends = ['Exception']
 implements = []
 final = true
+aliases = ['Dom\DOMException']
 source = 'ext/dom/php_dom.stub.php:1073'
 
 [[class]]

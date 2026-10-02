@@ -45,6 +45,12 @@ mod hierarchy_generated;
 /// key → the casing php-src declares. Consulted only by [`builtin_class_display`].
 mod display_names_generated;
 
+/// Builtin class **second-name** table, from the same mining data — lowercased
+/// second name → the declared name of the class both spellings name. Consulted
+/// only by [`builtin_class_alias`], and through it by [`builtin_class_supers`]
+/// and [`builtin_class_display`].
+mod class_aliases_generated;
+
 /// Builtin return-fact refinement table (ADR-0056), from
 /// `docs/research/phpsrc-mining/return_facts.toml`. Consulted only by
 /// [`return_fact`]. May be empty.
@@ -182,6 +188,7 @@ pub use builtins::{
     ResourceKind,
     ResourceParam,
     ResourceReturn,
+    builtin_class_alias,
     builtin_class_display,
     builtin_class_supers,
     builtin_throws,
