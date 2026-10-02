@@ -371,6 +371,19 @@ emit it. `prepare` takes the same coarse colour as the rest: whether it is a
 round trip to the server depends on PDO's emulated-prepares setting, which is
 runtime configuration the catalog cannot read, so the row takes the upper bound.
 
+`PDO::setAttribute` (`io.db`) and `PDOStatement::setFetchMode` (pure) are rowed
+for what they **register** (issue #870). A class or object named by an earlier
+call is constructed or written through by a later fetch, and an argument-reach
+row cannot see it there, so the user code is attributed to the registration, as
+ADR-0099 §4.5 attributes a handler: `setFetchMode`'s `FETCH_CLASS` name and
+`FETCH_INTO` object, and `setAttribute`'s `ATTR_STATEMENT_CLASS` and
+`ATTR_DEFAULT_FETCH_MODE` value, have `Autoload` reach in `method_arg_reach`,
+and `fetch` and `fetchAll` stay as they are. A body that only fetches runs no
+user code by that route, and the body that registered the class holds the gap.
+One residual: `setFetchMode(FETCH_CLASS | FETCH_CLASSTYPE)` names no class at the
+call (a column names it at each fetch), and the reach rule does not read
+constants, so that registration is charged to neither call.
+
 Constructor rows (`__construct`, issue #804) are what `new C(...)` and a
 subclass's `parent::__construct(...)` run: `PDO` is `io.db`, `DateTime` and
 `DateTimeImmutable` are `nondet.time`, and every engine `Throwable`, the SPL

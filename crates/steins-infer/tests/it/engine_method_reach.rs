@@ -192,3 +192,102 @@ fn a_throwable_accessor_stays_exhaustive() {
         assert!(s.exhaustive && s.labels.is_empty(), "{symbol}: {s:?}");
     }
 }
+
+/// `PDOStatement::setFetchMode` and `PDO::setAttribute` are where a fetch's user
+/// code is attributed (ADR-0099 §4.5, issue #870): the class `FETCH_CLASS` names,
+/// the object `FETCH_INTO` writes through and the statement class
+/// `ATTR_STATEMENT_CLASS` registers reach the engine at the registering call,
+/// strict files included, while the fetches keep the rows they had. Neither
+/// method has a throw row, so the throw lane stays a gap there: the effect lane
+/// is the one these tests read.
+mod registration {
+    use super::summary;
+
+    /// Whether `symbol` reaches user code through an operand in the effect lane.
+    fn reaches(src: &str, symbol: &str) -> bool {
+        summary(src, symbol).gaps.contains(&"user-code-reach")
+    }
+
+    /// A `PDOStatement` subclass whose `run` makes `statement`, and a `PDO`
+    /// subclass whose `connect` makes `connection`: the exact receivers a
+    /// project wrapper writes.
+    fn wrapper(strict: bool, signature: &str, statement: &str, connection: &str) -> String {
+        let declare = if strict { "declare(strict_types=1);\n" } else { "" };
+        format!(
+            "<?php\n{declare}\
+             final class Row {{ public function __set(string $n, mixed $v): void {{ throw new \\LogicException('x'); }} }}\n\
+             class St extends \\PDOStatement {{\n\
+                 public function run({signature}): mixed {{ {statement} }}\n\
+             }}\n\
+             class Db extends \\PDO {{\n\
+                 public function connect({signature}): mixed {{ {connection} }}\n\
+             }}\n"
+        )
+    }
+
+    #[test]
+    fn a_registered_class_name_reaches_the_autoloader_in_both_modes() {
+        let call = "return parent::setFetchMode(\\PDO::FETCH_CLASS, $c);";
+        for strict in [false, true] {
+            let src = wrapper(strict, "string $c", call, "");
+            assert!(reaches(&src, "St::run"), "strict={strict}");
+        }
+        // A literal name is still looked up, so the body that registers it holds the gap.
+        let call = "return parent::setFetchMode(\\PDO::FETCH_CLASS, 'Row', []);";
+        assert!(reaches(&wrapper(true, "", call, ""), "St::run"));
+        // A bound receiver (`$this`) is a gap already: a subclass may override the
+        // method, and only a final one answers there.
+        let call = "return $this->setFetchMode(\\PDO::FETCH_CLASS, $c);";
+        let s = summary(&wrapper(false, "string $c", call, ""), "St::run");
+        assert!(!s.exhaustive && s.labels.is_empty(), "{s:?}");
+    }
+
+    #[test]
+    fn a_registered_object_reaches_through_its_set() {
+        let call = "return parent::setFetchMode(\\PDO::FETCH_INTO, $o);";
+        assert!(reaches(&wrapper(true, "Row $o", call, ""), "St::run"));
+        let call = "return parent::setFetchMode(\\PDO::FETCH_INTO, new Row());";
+        assert!(reaches(&wrapper(false, "", call, ""), "St::run"));
+    }
+
+    #[test]
+    fn a_fetch_mode_with_no_class_registers_nothing() {
+        let call = "return parent::setFetchMode(\\PDO::FETCH_ASSOC);";
+        for strict in [false, true] {
+            let src = wrapper(strict, "", call, "");
+            assert!(!reaches(&src, "St::run"), "strict={strict}");
+            let s = summary(&src, "St::run");
+            assert!(s.exhaustive && s.gaps.is_empty(), "strict={strict}: {s:?}");
+            assert!(s.labels.is_empty(), "setFetchMode is pure: {s:?}");
+        }
+    }
+
+    /// A fetch with no registration constructs nothing, so it stays as it was:
+    /// no operand, no reach.
+    #[test]
+    fn a_fetch_with_no_prior_registration_reaches_nothing() {
+        let call = "return parent::fetch();";
+        let src = wrapper(false, "", call, "");
+        assert!(!reaches(&src, "St::run"));
+        assert_eq!(summary(&src, "St::run").labels, ["io.db"]);
+    }
+
+    #[test]
+    fn a_statement_class_attribute_reaches_the_autoloader() {
+        let call = "return parent::setAttribute(\\PDO::ATTR_STATEMENT_CLASS, [$c]);";
+        for strict in [false, true] {
+            let src = wrapper(strict, "string $c", "", call);
+            assert!(reaches(&src, "Db::connect"), "strict={strict}");
+            let s = summary(&src, "Db::connect");
+            assert_eq!(s.labels, ["io.db"], "the row is kept: {s:?}");
+        }
+    }
+
+    /// `ATTR_ERRMODE` is no class, but the value is an unproven `mixed` and the
+    /// rule does not read constants: any value reaches.
+    #[test]
+    fn an_attribute_value_is_never_ruled_out() {
+        let call = "return parent::setAttribute(\\PDO::ATTR_ERRMODE, \\PDO::ERRMODE_EXCEPTION);";
+        assert!(reaches(&wrapper(true, "", "", call), "Db::connect"));
+    }
+}

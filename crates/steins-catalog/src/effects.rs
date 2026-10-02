@@ -748,6 +748,16 @@ fn scheme_of(target: &str) -> Option<&str> {
 /// configuration controls whether emulated `prepare` contacts the server, so
 /// `prepare` takes the argument-insensitive upper bound.
 ///
+/// Two rows exist for what they register, not for what they do themselves
+/// (issue #870). `PDO::setAttribute` is `io.db` like its siblings: a driver
+/// attribute can be a statement sent to the server (`ATTR_AUTOCOMMIT` on a
+/// driver that implements it that way), so it takes the upper bound as
+/// `prepare` does. `PDOStatement::setFetchMode` only stores a mode, a
+/// class name or an object, and is pure. Both are held to a reach row
+/// ([`method_arg_reach`](crate::method_arg_reach)) that charges the class or
+/// object they register, because the later `fetch` and `fetchAll` are attributed
+/// to the registration (ADR-0099 §4.5) and carry no reach of their own for it.
+///
 /// `__construct` rows (issue #804) are what `new C(...)` and a subclass's
 /// `parent::__construct(...)` run. `new PDO(...)` connects (`io.db`), and
 /// `new DateTime(...)` reads the clock unless its argument names an absolute
@@ -775,8 +785,9 @@ pub fn method_effect_labels(class: &str, method: &str) -> Option<&'static [&'sta
     const NONDET_TIME: &[&str] = &["nondet.time"];
 
     match (class.to_ascii_lowercase().as_str(), method.to_ascii_lowercase().as_str()) {
-        ("pdo", "query" | "exec" | "prepare" | "__construct") => Some(IO_DB),
+        ("pdo", "query" | "exec" | "prepare" | "__construct" | "setattribute") => Some(IO_DB),
         ("pdostatement", "execute" | "fetch" | "fetchall") => Some(IO_DB),
+        ("pdostatement", "setfetchmode") => Some(EMPTY),
         ("datetime" | "datetimeimmutable", "__construct" | "createfromformat") => {
             Some(NONDET_TIME)
         }
@@ -1858,7 +1869,7 @@ mod tests {
 
     #[test]
     fn pdo_methods_are_colored_io_db() {
-        for method in ["query", "exec", "prepare"] {
+        for method in ["query", "exec", "prepare", "setAttribute"] {
             assert_eq!(
                 method_effect_labels("PDO", method),
                 Some(&["io.db"][..]),
@@ -1872,6 +1883,19 @@ mod tests {
                 "PDOStatement::{method} is io.db"
             );
         }
+    }
+
+    /// `setFetchMode` stores a mode, a class name or an object and runs nothing
+    /// itself: pure, with the class it registers charged by its reach row.
+    #[test]
+    fn registering_a_fetch_mode_is_pure_and_registering_an_attribute_is_io_db() {
+        assert_eq!(method_effect_labels("PDOStatement", "setFetchMode"), Some(&[][..]));
+        assert_eq!(method_effect_labels("pdostatement", "SETFETCHMODE"), Some(&[][..]));
+        assert_eq!(method_effect_labels("PDO", "setFetchMode"), None, "a PDOStatement method");
+        assert_eq!(method_effect_labels("PDOStatement", "setAttribute"), None, "a PDO method");
+        // A subclass can override either, so neither is final.
+        assert_eq!(final_method_effect_labels("PDOStatement", "setFetchMode"), None);
+        assert_eq!(final_method_effect_labels("PDO", "setAttribute"), None);
     }
 
     #[test]
