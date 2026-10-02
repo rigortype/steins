@@ -1203,7 +1203,7 @@ pub(crate) fn apply_offset_write(
             // A write that adds a key does not carry list-ness (issue #884).
             let extended = witnessed_order.is_some() && shape.field(&first).is_none();
             let overwrite = shape.field(&first).is_some_and(|(_, p, _)| p.is_required());
-            if !extended && !overwrite {
+            if !extended && !overwrite && !stays_a_list(shape, &first) {
                 next = without_list_verdict(&next);
             }
             if nested { set_slot_fact(&next, &first, None) } else { set_slot_fact(&next, &first, slot) }
@@ -1331,6 +1331,15 @@ fn fact_is_integer(f: &Fact) -> bool {
     }
 }
 
+/// Does a write at `key` leave a proven list a list, whatever else the shape
+/// says? A list of `n >= lo` entries has the keys `0..n`, where `lo` is the
+/// count floor. A key below `n` overwrites, and the key `lo` can only be the
+/// next index (`n == lo`), an append; a key past the floor may be a gap.
+fn stays_a_list(shape: &ShapeFact, key: &VKey) -> bool {
+    let VKey::Int(k) = key else { return false };
+    shape.is_list == Certainty::Yes && (0..=shape.count_range().lo()).contains(k)
+}
+
 /// The shape with its `is_list` verdict reset to `Maybe`, for a write that adds
 /// or revives a key (issue #884).
 ///
@@ -1339,7 +1348,8 @@ fn fact_is_integer(f: &Fact) -> bool {
 /// leaves a non-list, and against an unsealed tail the denotational verdict is
 /// `Maybe`, so the stale `Yes` would survive `normalize`. Only the witnessed
 /// extension recomputes the flag, from a real sequence; an overwrite of a key
-/// that is already `Required` changes no key and keeps it.
+/// that is already `Required` changes no key and keeps it, and so does a write
+/// a proven list cannot make a gap in ([`stays_a_list`]).
 fn without_list_verdict(shape: &ShapeFact) -> ShapeFact {
     ShapeFact::normalize_counted(
         shape.fields.clone(),

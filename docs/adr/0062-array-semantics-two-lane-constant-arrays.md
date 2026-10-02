@@ -1395,7 +1395,9 @@ list-ness back, Amendment K), so `count()` widens to `int<1, max>` and
 
 The degradation itself only widens: the summary admits every array the listed
 shape admitted. A write that adds a key now also resets `is_list` to `Maybe`
-unless the witnessed sequence recomputes it. That fixes a defect that predates
+unless the witnessed sequence recomputes it or the write cannot leave a gap: on
+a proven list of at least `lo` entries (the count floor), a key in `0..=lo` is
+an overwrite or the next index, so the verdict is kept there. That fixes a defect that predates
 this amendment: `promote_present` carried the receiver's `is_list` through a
 write, so `$a[1000] = 'x'` on a declared `non-empty-list<int>`, or on a
 300-entry literal, kept the list verdict and the result was reported as a list

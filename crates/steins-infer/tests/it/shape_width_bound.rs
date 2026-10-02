@@ -194,6 +194,48 @@ fn overwriting_a_key_the_list_already_has_keeps_it_a_list() {
     assert_eq!(dumped(src), "dumped type: list{1, 9, 3}");
 }
 
+// A write a proven list cannot make a gap in keeps the list: a key below the
+// count floor overwrites, and the floor itself can only be the next index.
+
+fn dump_of(decl: &str, body: &str) -> String {
+    dumped(&format!(
+        "<?php\n/** @param {decl} $a */\nfunction f(array $a, bool $c): void {{ {body} \\PHPStan\\dumpType($a); }}\n"
+    ))
+}
+
+#[test]
+fn a_write_at_the_first_index_of_a_declared_list_keeps_it_a_list() {
+    let dump = dump_of("list<int>", "$a[0] = 5;");
+    assert!(dump.starts_with("dumped type: non-empty-list"), "{dump}");
+    let dump = dump_of("non-empty-list<int>", "$a[0] = 5;");
+    assert!(dump.starts_with("dumped type: non-empty-list"), "{dump}");
+}
+
+#[test]
+fn a_write_at_the_next_index_of_a_maybe_extended_list_keeps_it_a_list() {
+    let src = "<?php\nfunction f(bool $c): void { $a = [1, 2]; if ($c) { $a[] = 3; } $a[2] = 9; \
+               \\PHPStan\\dumpType($a); }\n";
+    let dump = dumped(src);
+    assert!(dump.contains("list"), "{dump}");
+}
+
+#[test]
+fn a_write_at_zero_after_an_unset_keeps_a_one_element_list() {
+    let src = "<?php\nfunction f(): void { $a = [1]; unset($a[0]); $a[0] = 2; \
+               \\PHPStan\\dumpType($a); }\n";
+    let dump = dumped(src);
+    assert!(dump.contains("list"), "{dump}");
+}
+
+#[test]
+fn a_write_past_the_count_floor_of_a_declared_list_is_still_a_gap() {
+    // The floor is 1: key 1 is an overwrite or the next index, key 2 may be a gap.
+    let dump = dump_of("non-empty-list<int>", "$a[1] = 5;");
+    assert!(dump.contains("list"), "{dump}");
+    let dump = dump_of("non-empty-list<int>", "$a[2] = 5;");
+    assert!(!dump.contains("list"), "{dump}");
+}
+
 // A docblock shape wider than the bound goes through the same constructor, so
 // it degrades too: the contract-lowering reach of Amendment M.
 
