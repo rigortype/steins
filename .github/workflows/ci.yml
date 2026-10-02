@@ -151,6 +151,7 @@ jobs:
       - name: Provide the de_DE.UTF-8 locale
         run: |
           if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get update
             sudo apt-get install -y --no-install-recommends locales
             sudo locale-gen de_DE.UTF-8
           fi

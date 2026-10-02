@@ -115,15 +115,15 @@ effect of reading a cell and a setting write the effect of rewriting one.
 | `global.read.setting` | a read of some setting; the parent of every cell's read | — (no row; the roster's later cells and a dynamic ini name hang here) |
 | `global.read.setting.locale` | a read of `LC_*` as `setlocale` leaves it | `sprintf`, `vsprintf`, `printf`, `vprintf` (`%f`, `%g`, `%G` render the locale's decimal point), `localeconv`, `nl_langinfo`, `strcoll` |
 | `global.write.setting` | a rewrite of some setting | — |
-| `global.write.setting.locale` | a rewrite of the locale cell | `setlocale` (which also carries a coarse `global.read` for the environment block it consults when its locale is `''` or `null`, until the env cell has a label) |
+| `global.write.setting.locale` | a rewrite of the locale cell | `setlocale` (which also carries a coarse `global.read` for the environment block it consults when its locale is `''` or `null`, until the env cell has a label; a call whose only locale is a written non-empty string reads no environment and is the write alone) |
 
 The four are `global.read` and `global.write` children, so prefix subsumption carries
 every existing consumer: a declared `global.read` or `global` envelope admits a setting
-read, a declared `global.write` admits `setlocale`'s write (its environment read needs `global.read` or `global` as well), and a discarded locale read is still a
+read, a declared `global.write` admits `setlocale`'s write (a locale of `''` or `null` also reads the environment, which needs `global.read` or `global` as well), and a discarded locale read is still a
 discardable read (ADR-0096). `global.read` without a child stays the row for a read the
 catalog cannot place in a cell. A cell's label is registered in the slice that colours its
 first row and never ahead of one, so the timezone, environment, encoding, `precision` and
-ini cells the ADR names are not in the registry yet. A `%s` of a float reads `precision`, which has no label in this slice, so a printf call that drops the locale read is not thereby free of settings.
+ini cells the ADR names are not in the registry yet. A `%s` of a float reads `precision`, whose label `global.read.setting.precision` is registered with the call-site slice that reads a literal format (ADR-0101 D4), so a printf call that drops the locale read is not thereby free of settings.
 
 The printf family's row is argument-blind and keeps the read at every call. A **literal**
 format settles it lexically once a call site reads the format: the read is kept iff some

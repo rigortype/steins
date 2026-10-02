@@ -161,10 +161,12 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
         // locale it also takes the name from the environment block, which is a
         // read; there is no environment cell yet, so that read is the coarse
         // `global.read`. The row is argument-blind, so both stand at every call.
-        // The environment read narrows to its own label when the env cell lands
-        // (issue #1000, S6), and `setlocale($c, '0')`, which only queries the cell,
-        // narrows to the locale read in S4 with the other call-site narrowings
-        // (ADR-0101 D6).
+        // A call whose only locale is a written non-empty string reads no
+        // environment, and [`narrowed_setlocale_labels`] drops the coarse read
+        // there. The environment read narrows to its own label when the env cell
+        // lands (issue #1000, S6), and `setlocale($c, '0')`, which only queries
+        // the cell, narrows to the locale read in S4 with the other call-site
+        // narrowings (ADR-0101 D6).
         "setlocale" => Some(LOCALE_WRITE_ENV_READ),
         // Process-global state, no channel: seeding pair replaces RNG state;
         // `clearstatcache` empties the stat cache. Drawing stays `nondet.random`.
@@ -451,6 +453,35 @@ pub fn narrowed_output_labels(name: &str, return_mode: bool) -> Option<&'static 
         "print_r" | "var_export" => Some(&[]),
         _ => None,
     }
+}
+
+/// The **narrowed** labels of a `setlocale` call that proves it reads no
+/// environment, or `None`: the caller keeps [`effect_labels`]' row, which is the
+/// locale write beside a coarse `global.read` (ADR-0101).
+///
+/// `setlocale($category, $locales)` takes the locale's name from the
+/// environment block only when it is `''` or `null` (`putenv("LC_ALL=fr_FR.…");
+/// setlocale(LC_ALL, "")` answers `fr_FR`), so a call whose **only** locale is a
+/// written, non-empty string literal reads none. `positional` is the call's
+/// argument count, which must be exactly two: a third argument is a fallback
+/// locale tried when the first fails, and it may be `''`. `'0'` stays on the
+/// row, since it is the query form and narrows to the read in a later slice
+/// (ADR-0101 D6). An array of locales, a variable and a constant fetch are not
+/// read here and keep the row.
+#[must_use]
+pub fn narrowed_setlocale_labels(
+    name: &str,
+    locale: &str,
+    positional: usize,
+) -> Option<&'static [&'static str]> {
+    if positional != 2
+        || locale.is_empty()
+        || locale == "0"
+        || !name.eq_ignore_ascii_case("setlocale")
+    {
+        return None;
+    }
+    Some(&["global.write.setting.locale"])
 }
 
 /// A call argument a **call site** proved constant (issue #318) — the evidence
@@ -1823,6 +1854,23 @@ mod tests {
         for name in ["fprintf", "vfprintf"] {
             assert_eq!(effect_labels(name), None, "{name}");
         }
+    }
+
+    /// A `setlocale` call whose only locale is a written non-empty string reads
+    /// no environment, so it narrows to the write; `''`, `'0'`, a third argument
+    /// and any other name keep the row.
+    #[test]
+    fn a_literal_locale_narrows_setlocale_to_the_write() {
+        let write = Some(&["global.write.setting.locale"][..]);
+        for locale in ["C", "de_DE.UTF-8", "LC_ALL=C", "0.", " "] {
+            assert_eq!(super::narrowed_setlocale_labels("setlocale", locale, 2), write, "{locale:?}");
+            assert_eq!(super::narrowed_setlocale_labels("SetLocale", locale, 2), write);
+        }
+        assert_eq!(super::narrowed_setlocale_labels("setlocale", "", 2), None, "the environment");
+        assert_eq!(super::narrowed_setlocale_labels("setlocale", "0", 2), None, "the query form");
+        assert_eq!(super::narrowed_setlocale_labels("setlocale", "C", 3), None, "a fallback locale");
+        assert_eq!(super::narrowed_setlocale_labels("setlocale", "C", 1), None);
+        assert_eq!(super::narrowed_setlocale_labels("putenv", "C", 2), None, "only setlocale");
     }
 
     /// Sibling rows the locale slice must not move: the dumpers keep the plain

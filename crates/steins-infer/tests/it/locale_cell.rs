@@ -65,13 +65,28 @@ fn the_v_spellings_follow_their_siblings_and_printf_keeps_its_output_label() {
     }
 }
 
-/// `setlocale` writes the cell, and reads the environment block for `''` and
-/// `null` (a coarse `global.read` until the environment cell has a label);
-/// `localeconv`, `nl_langinfo` and `strcoll` read the cell.
+/// `setlocale` writes the cell; `localeconv`, `nl_langinfo` and `strcoll` read it.
+/// A locale of `''` or `null`, or one the call does not show, also reads the
+/// environment block, a coarse `global.read` until the environment cell has a
+/// label; a written non-empty locale reads none.
 #[test]
 fn setlocale_writes_the_cell_and_its_readers_read_it() {
-    let s = summary(&body("", "return setlocale(LC_ALL, 'de_DE.UTF-8');"), "f");
-    assert_eq!(s.labels, ["global.read", "global.write.setting.locale"], "{s:?}");
+    for call in ["setlocale(LC_ALL, 'de_DE.UTF-8')", "setlocale(LC_ALL, 'C')", "\\setlocale(LC_ALL, \"C\")"] {
+        let s = summary(&body("", &format!("return {call};")), "f");
+        assert_eq!(s.labels, ["global.write.setting.locale"], "{call}: {s:?}");
+    }
+    for call in [
+        "setlocale(LC_ALL, '')",
+        "setlocale(LC_ALL, null)",
+        "setlocale(LC_ALL, $l)",
+        "setlocale(LC_ALL, '0')",
+        "setlocale(LC_ALL, 'xx_XX', '')",
+        "setlocale(LC_ALL, ['C', ''])",
+        "setlocale(LC_ALL)",
+    ] {
+        let s = summary(&body("string $l", &format!("return {call};")), "f");
+        assert_eq!(s.labels, ["global.read", "global.write.setting.locale"], "{call}: {s:?}");
+    }
     for call in ["localeconv()", "nl_langinfo(CODESET)", "strcoll('a', 'b')"] {
         let s = summary(&body("", &format!("return {call};")), "f");
         assert_eq!(s.labels, [READ], "{call}: {s:?}");
@@ -92,8 +107,9 @@ fn a_caller_inherits_the_read_through_its_callee() {
 /// A body with no printf-family call carries no setting label: `(string) $f`,
 /// `strval`, `json_encode` and `round` of a float carry none, and a literal that
 /// merely contains a percent sign calls nothing. (The string cast and `strval`
-/// do read the `precision` ini, which is its own cell under D4 and has no label
-/// yet, so "no label" is the claim and not "reads no setting".)
+/// do read the `precision` ini, which is its own cell under D4, whose label comes
+/// with the printf call-site slice, so "no label" is the claim and not "reads no
+/// setting".)
 #[test]
 fn a_body_with_no_printf_family_call_keeps_no_read() {
     for call in ["(string) $f", "strval($f)", "json_encode($f)", "round($f, 2)", "'%f'"] {
@@ -119,12 +135,17 @@ fn a_pure_envelope_over_the_read_is_exceeded_and_a_global_read_envelope_admits_i
         );
         assert!(findings(&src).is_empty(), "{envelope} admits the read");
     }
-    // `setlocale` is a write and an environment read: neither coarse envelope covers both.
-    let call = "function f(): void { setlocale(LC_ALL, ''); }\n";
+    // A written non-empty locale is a write and nothing else: `global.write` admits it
+    // (as it did before the environment read was modelled), `global.read` does not.
+    let call = "function f(): void { setlocale(LC_ALL, 'C'); }\n";
+    let write_only = format!("<?php\n#[\\Steins\\Effect('global.write')]\n{call}");
+    assert!(findings(&write_only).is_empty(), "global.write admits the locale write");
     let read_only = format!("<?php\n#[\\Steins\\Effect('global.read')]\n{call}");
     let found: Vec<String> = findings(&read_only).into_iter().map(|d| d.message).collect();
     assert_eq!(found.len(), 1, "a global.read envelope is no write: {found:#?}");
     assert!(found[0].contains("global.write.setting.locale"), "{found:#?}");
+    // A locale of `''` also reads the environment: neither coarse envelope covers both.
+    let call = "function f(): void { setlocale(LC_ALL, ''); }\n";
     let write_only = format!("<?php\n#[\\Steins\\Effect('global.write')]\n{call}");
     let found: Vec<String> = findings(&write_only).into_iter().map(|d| d.message).collect();
     assert_eq!(found.len(), 1, "a global.write envelope is no read: {found:#?}");

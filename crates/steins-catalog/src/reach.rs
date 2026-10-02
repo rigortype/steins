@@ -251,9 +251,10 @@ pub struct FormatReading {
     /// give the same text at any `precision`, and none reads
     /// `serialize_precision` (witnessed, PHP 8.5, with variable arguments, since
     /// 8.4 folds a literal `sprintf('%s', 1.5)` at compile time). The `precision`
-    /// cell has no label yet (ADR-0101 D4), so a caller that drops the locale
-    /// label on `!reads_locale` must keep whatever read of `precision` the
-    /// call's `%s` positions carry once that label exists.
+    /// cell has no label in the first slice (ADR-0101 D4): the slice that reads
+    /// a literal format registers `global.read.setting.precision` and carries it
+    /// on a `%s` of a value that may be a float, so a caller that drops the
+    /// locale label on `!reads_locale` must not treat that as a pure call.
     pub reads_locale: bool,
 }
 
