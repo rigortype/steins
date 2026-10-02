@@ -88,3 +88,16 @@ fn bought_headroom_answers_the_whole_question() {
         .expect("spawn");
     assert_eq!(worker.join().expect("join"), Vec::new(), "no refusal on a stack that can answer");
 }
+
+#[test]
+fn a_logical_chain_in_a_function_body_is_walked_under_the_guard() {
+    // The undefined-variable scan reads each `&&`/`||` operand's guard directly rather
+    // than through `children`, so the guard is asked in that arm too (issue #929): a
+    // spent budget is a named refusal at most, never a trap.
+    for op in ["&&", "||"] {
+        let chain = format!(" {op} $x").repeat(DEEP);
+        let src = format!("<?php\nfunction f() {{ return isset($x){chain}; }}\n");
+        let tree = parse_with_budget(&src);
+        assert!(refusals(&tree).len() <= 1, "{op:?}: {:?}", tree.parse_errors());
+    }
+}
