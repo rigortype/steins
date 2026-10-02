@@ -21,9 +21,29 @@
 //! so a truncated or interleaved stream is an error rather than a hash that
 //! happens to differ.
 //!
-//! What `ru_maxrss` covers: the child's own peak, and — Linux and macOS both
-//! fold a reaped descendant's peak in as a maximum, never a sum — the PHP
-//! sidecar's, which is a few tens of MB and never the larger of the two.
+//! # Which peak is the peak
+//!
+//! The figure that is blessed and gated is **the child's own**, read by the
+//! child at the end of its run ([`own_peak_bytes`]) and shipped in the header:
+//! `VmHWM` from `/proc/self/status` on Linux, `getrusage(RUSAGE_SELF)` elsewhere.
+//! The `wait4` figure the parent reads is printed beside it as information only
+//! ("incl. reaped descendants") and is never blessed or checked, for two reasons
+//! that both make it a number about more than this run:
+//!
+//! - **Linux `exec` inherits the parent's high-water mark.** `posix_spawn` is
+//!   `clone(CLONE_VM | CLONE_VFORK)`, and `exec` copies the old mm's peak into
+//!   the new process's `maxrss` (`exec_mm_put_old` → `setmax_mm_hiwater_rss` in
+//!   `fs/exec.c`). So whatever the parent's own peak was at the moment of the
+//!   spawn — after in-process `--warm` or `--edits` work, or the same-process
+//!   determinism repeats — every later child's `ru_maxrss` is at least that.
+//!   `VmHWM` describes only the new mm, which `exec` built after that copy.
+//! - **`wait4` folds in reaped descendants** as a maximum, never a sum: the PHP
+//!   sidecar the child reaps can raise the figure above the analyzer's own.
+//!
+//! The own peak is read right after the cold run returns, before the result is
+//! encoded (the encoding copies the findings text once), so it is the analysis's.
+//! A high-water mark does not fall when the database or the sidecar folder
+//! drops, so there is no earlier point to read it at.
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -52,6 +72,10 @@ struct Header {
     findings_sha256: String,
     serialized_bytes: usize,
     id_counts: BTreeMap<String, usize>,
+    /// The child's own peak resident set, bytes — see [`own_peak_bytes`]. Absent
+    /// where the platform offers no per-process reading.
+    #[serde(default)]
+    peak_rss_bytes: Option<u64>,
 }
 
 /// The stream a child prints for `run`.
@@ -64,6 +88,7 @@ fn encode(run: &ColdRun) -> Vec<u8> {
         findings_sha256: sha256::hex(run.serialized.as_bytes()),
         serialized_bytes: run.serialized.len(),
         id_counts: run.id_counts.clone(),
+        peak_rss_bytes: run.peak_rss_bytes,
     };
     let json = serde_json::to_string(&header).expect("the header serializes");
     let mut out = format!("{MAGIC} {json}\n").into_bytes();
@@ -71,8 +96,8 @@ fn encode(run: &ColdRun) -> Vec<u8> {
     out
 }
 
-/// A child's stream back into a [`ColdRun`] (without its peak RSS, which the
-/// parent reads from the exit status, not the stream).
+/// A child's stream back into a [`ColdRun`], with the child's own peak RSS from
+/// its header; the parent adds the `wait4` figure from the exit status.
 fn decode(stream: &[u8]) -> Result<ColdRun, String> {
     let newline = stream
         .iter()
@@ -111,7 +136,8 @@ fn decode(stream: &[u8]) -> Result<ColdRun, String> {
         },
         serialized,
         id_counts: header.id_counts,
-        peak_rss_bytes: None,
+        peak_rss_bytes: header.peak_rss_bytes,
+        reaped_peak_rss_bytes: None,
     })
 }
 
@@ -131,12 +157,14 @@ pub fn run_child(args: &[String]) -> Result<(), String> {
         }
     }
     let dir = dir.ok_or_else(|| format!("usage: {CHILD_COMMAND} <dir> [--no-php]"))?;
-    let run = std::thread::Builder::new()
+    let mut run = std::thread::Builder::new()
         .stack_size(WORKER_STACK_SIZE)
         .spawn(move || cold_run(Path::new(&dir), posture))
         .expect("failed to spawn the perf-child worker thread")
         .join()
         .unwrap_or_else(|panic| std::panic::resume_unwind(panic))?;
+    // Before `encode`, which copies the findings text once more.
+    run.peak_rss_bytes = own_peak_bytes();
     let mut stdout = std::io::stdout().lock();
     stdout
         .write_all(&encode(&run))
@@ -166,16 +194,17 @@ fn collect_run(command: Command) -> Result<ColdRun, String> {
         ));
     }
     let mut run = decode(&done.stdout)?;
-    run.peak_rss_bytes = done.peak_rss_bytes;
+    run.reaped_peak_rss_bytes = done.reaped_peak_rss_bytes;
     Ok(run)
 }
 
-/// A finished child: its status, everything it wrote to stdout, and its peak
-/// resident set where the platform reports one.
+/// A finished child: its status, everything it wrote to stdout, and the peak
+/// `wait4` reported for it and the descendants it reaped, where the platform
+/// has one — informational, see the module doc.
 struct Collected {
     status: ExitStatus,
     stdout: Vec<u8>,
-    peak_rss_bytes: Option<u64>,
+    reaped_peak_rss_bytes: Option<u64>,
 }
 
 /// Spawn `command` with stdout piped (stderr inherited), drain the pipe, then
@@ -191,10 +220,10 @@ fn collect(mut command: Command) -> Result<Collected, String> {
         .expect("stdout was piped")
         .read_to_end(&mut stdout);
     // Reap before reporting a read error, so a failed drain leaves no zombie.
-    let (status, peak_rss_bytes) =
+    let (status, reaped_peak_rss_bytes) =
         wait_with_peak(&mut child).map_err(|e| format!("waiting for the perf-child: {e}"))?;
     drained.map_err(|e| format!("reading the perf-child's stdout: {e}"))?;
-    Ok(Collected { status, stdout, peak_rss_bytes })
+    Ok(Collected { status, stdout, reaped_peak_rss_bytes })
 }
 
 /// Reap `child` with `wait4`. The `Child` is spent afterwards: the pid is
@@ -230,6 +259,40 @@ fn wait_with_peak(child: &mut Child) -> std::io::Result<(ExitStatus, Option<u64>
     child.wait().map(|status| (status, None))
 }
 
+/// This process's own peak resident set, bytes: what the child reports as its
+/// peak. Linux reads `VmHWM` (the current mm only, so a parent's inherited
+/// high-water mark is not in it) and offers no fallback, because
+/// `getrusage(RUSAGE_SELF)` there carries the inherited mark and would pass a
+/// wrong number off as a right one. Other Unixes use `getrusage`, where the
+/// figure is per process. No reading on a platform with neither.
+pub fn own_peak_bytes() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        parse_vmhwm(&std::fs::read_to_string("/proc/self/status").ok()?)
+    }
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+        // SAFETY: an all-zero `rusage` is valid, and `getrusage` writes only
+        // through the pointer it is given.
+        let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+        let ok = unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) } == 0;
+        ok.then(|| maxrss_bytes(usage.ru_maxrss as u64, RSS_UNIT_BYTES))
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
+/// `VmHWM` out of a `/proc/<pid>/status` text, in bytes (the kernel prints kB
+/// meaning KiB).
+#[cfg(any(target_os = "linux", test))]
+fn parse_vmhwm(status: &str) -> Option<u64> {
+    let line = status.lines().find_map(|l| l.strip_prefix("VmHWM:"))?;
+    let kib: u64 = line.trim().strip_suffix("kB")?.trim().parse().ok()?;
+    Some(kib.saturating_mul(1024))
+}
+
 /// How many bytes one unit of `ru_maxrss` is: macOS reports bytes, Linux and the
 /// other Unixes report KiB.
 const RSS_UNIT_BYTES: u64 =
@@ -259,7 +322,8 @@ mod tests {
             serialized: "{\"id\":\"type.mismatch\",\"path\":\"a.php\"}\n{\"id\":\"x\"}\n"
                 .to_owned(),
             id_counts,
-            peak_rss_bytes: None,
+            peak_rss_bytes: Some(123_456_789),
+            reaped_peak_rss_bytes: None,
         }
     }
 
@@ -274,7 +338,36 @@ mod tests {
         assert_eq!(back.timing.load_ms, 12.5);
         assert_eq!(back.timing.analyze_ms, 100.25);
         assert_eq!(back.timing.total_ms, 112.75);
-        assert_eq!(back.peak_rss_bytes, None);
+        // The child's own peak crosses the stream; the `wait4` figure never does.
+        assert_eq!(back.peak_rss_bytes, Some(123_456_789));
+        assert_eq!(back.reaped_peak_rss_bytes, None);
+    }
+
+    #[test]
+    fn a_header_without_a_peak_still_decodes() {
+        let mut run = sample();
+        run.peak_rss_bytes = None;
+        assert_eq!(decode(&encode(&run)).expect("decodes").peak_rss_bytes, None);
+        // And a stream from before the field existed.
+        let stream = String::from_utf8(encode(&run)).unwrap().replace(",\"peak_rss_bytes\":null", "");
+        assert!(!stream.contains("peak_rss_bytes"));
+        assert_eq!(decode(stream.as_bytes()).expect("decodes").peak_rss_bytes, None);
+    }
+
+    #[test]
+    fn vmhwm_is_read_off_proc_status_in_kib() {
+        let status = "Name:\txtask\nVmPeak:\t  900000 kB\nVmHWM:\t  125432 kB\nVmRSS:\t  100 kB\n";
+        assert_eq!(parse_vmhwm(status), Some(125_432 * 1024));
+        assert_eq!(parse_vmhwm("Name:\txtask\nVmRSS:\t 1 kB\n"), None);
+        assert_eq!(parse_vmhwm("VmHWM:\tlots\n"), None);
+    }
+
+    /// The own peak is this process's, and a live process has one.
+    #[cfg(unix)]
+    #[test]
+    fn the_own_peak_is_this_process() {
+        let peak = own_peak_bytes().expect("a per-process peak on Linux and macOS");
+        assert!(peak > 1_000_000, "a test binary is over a megabyte resident, read {peak}");
     }
 
     #[test]
@@ -330,8 +423,9 @@ mod tests {
         command.arg(&file);
         let run = collect_run(command).expect("a well-formed child decodes");
         assert_eq!(run.serialized, sample().serialized);
-        let peak = run.peak_rss_bytes.expect("wait4 reports a peak");
-        assert!(peak > 0, "cat has a resident set");
+        // `cat` is no perf-child: it reports no own peak, but `wait4` has one.
+        let reaped = run.reaped_peak_rss_bytes.expect("wait4 reports a peak");
+        assert!(reaped > 0, "cat has a resident set");
 
         // A failing child is an error naming its status, whatever it printed.
         let mut failing = Command::new("sh");
