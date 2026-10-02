@@ -122,6 +122,26 @@
 # --no-php --vendor-diagnostics` base and head. `phpstan/phpstan-src` has no public checkout here
 # and is not remeasured.
 
+# Triage of the `throw.maybe-undeclared` that issue #882 adds, 2026-10-03 (ADR-0100's amendment of
+# that date, slice S6b), over the ten public packages: +126 findings in five of them (phpunit 107,
+# console 8, composer 5, Carbon 4, guzzle 2), none removed, and 248 more whose kind list grew by
+# `destructor` without a count change (phpunit 244, composer 2, guzzle 2). Of the 126, 114 sit at a
+# drop site (a `new` that dies in a call's argument or receiver position, the end of a body, a few
+# reassignments) and 12 are a callee's (console 8, phpunit 4: an exception constructor's `Throwable`
+# parameter, an invocation's constructor). The dropped value's class reaches a destructor mostly
+# through an anonymous class somewhere in the universe that extends a class on its chain or in a
+# typed property's class (phpunit's `Constraint` and `Subscriber`, which its tests subclass
+# anonymously, whatever the anonymous body declares), then through a class on the chain that
+# imports a trait (composer's `LockArrayRepository`, a `DateInterval` or `DateTimeZone` subclass in
+# Carbon), then a project subclass of the bound that declares `__destruct`. Every one is a TRUE
+# gap in the sense the id claims, and the bodies that lose exhaustiveness (85 of 28,846 functions,
+# none gained) are all enveloped or inherited ones already counted: no other kind moves. The
+# strict-floor `effect.maybe-envelope-exceeded` stays 0 on the public packages. Counts agree with
+# `steins check --profile strict --no-php --vendor-diagnostics` base and head. `phpstan/phpstan-src`,
+# public code at the revision `corpus.local.toml` records (566c4326), measured as `src/` with
+# `vendor/` indexed and its findings not counted: +14 `throw.maybe-undeclared`, all at a drop site,
+# and 8 more with the kind in their list; the base count reproduces 888.
+
 # 1 — `PluginManager.php:525`, class 1.
 # 1 → 3, 2026-09-11 with issue #619 (the declaration-only dispatch path,
 # ADR-0049 A16): two `type.maybe-argument-mismatch` rows at
@@ -142,7 +162,8 @@
 # phpdoc/offset rows moved here from their family tables with the posture routing.
 # 3392 → 3421  2026-10-03 (issues #880, #875): +29 throw.maybe-undeclared, 29 operator-to-string at an offset write (8 in vendored copies of `ClassLoader.php`); the triage by kind is above the composer row.
 # 3421 → 3301  2026-10-03 (issue #877): -120 throw.maybe-undeclared (operator-to-string 80, operator-array-access 19, user-code-reach 17, operator-iteration 4; 7 in vendored copies and fixtures); the triage is above the composer row.
-"composer/composer" = 3301
+# 3301 → 3306  2026-10-03 (issue #882): +5 throw.maybe-undeclared at a drop site (a `new` temporary, or the end of a body whose class imports a trait), 2 more gained `destructor`; the triage is above the composer row.
+"composer/composer" = 3306
 
 # 1 — `Application.php:409`, class 4 (`exitWithErrorMessage`).
 # 1 → 2, 2026-09-01 with issue #589 (the cross-lane guard join; see
@@ -193,7 +214,8 @@
 # phpdoc/offset rows moved here from their family tables with the posture routing.
 # 3262 → 3281  2026-10-03 (issues #880, #875): +19 throw.maybe-undeclared, 19 operator-to-string at an offset write (10 in vendored copies of `ClassLoader.php`); the triage by kind is above the composer row.
 # 3281 → 3207  2026-10-03 (issue #877): -74 throw.maybe-undeclared (user-code-reach 27, operator-to-string 18, operator-iteration 18, operator-array-access 10, dynamic-callee 1; 6 in fixtures); the triage is above the composer row.
-"sebastianbergmann/phpunit" = 3207
+# 3207 → 3314  2026-10-03 (issue #882): +107 throw.maybe-undeclared (103 at a drop site, 4 a callee's), 244 more gained `destructor`; the triage is above the composer row.
+"sebastianbergmann/phpunit" = 3314
 
 # 10 — six class 1/2/3 in `Application.php`, `CompletionInput.php` and
 # `SymfonyStyle.php`; four class 5 in `Tests/`.
@@ -214,7 +236,8 @@
 # phpdoc/offset rows moved here from their family tables with the posture routing.
 # 548 → 551  2026-10-03 (issues #880, #875): +3 throw.maybe-undeclared, 3 operator-to-string at an offset write; the triage by kind is above the composer row.
 # 551 → 489  2026-10-03 (issue #877): -62 throw.maybe-undeclared (user-code-reach 51, operator-to-string 6, operator-iteration 3, operator-array-access 2); the triage is above the composer row.
-"symfony/console" = 489
+# 489 → 497  2026-10-03 (issue #882): +8 throw.maybe-undeclared, each a callee's (`CommandNotFoundException::__construct()`, whose `Throwable` parameter an anonymous class in the universe may stand in for); the triage is above the composer row.
+"symfony/console" = 497
 
 # 6 — every row class 4 (`$this->fail()` in `ProcessTest.php`).
 # Unmoved by issue #599 leg 1 (2026-09-01), and twice over. Every row is
@@ -267,7 +290,8 @@
 # phpdoc/offset rows moved here from their family tables with the posture routing.
 # 453 → 463  2026-10-03 (issues #880, #875): +10 throw.maybe-undeclared, 7 operator-to-string at an offset write, 2 operator-to-string at a dynamic name, 1 operator-magic-property at an inherited engine constructor; the triage by kind is above the composer row.
 # 463 → 458  2026-10-03 (issue #877): -5 throw.maybe-undeclared (user-code-reach 2, operator-array-access 2, operator-to-string 1); the triage is above the composer row.
-"briannesbitt/Carbon" = 458
+# 458 → 462  2026-10-03 (issue #882): +4 throw.maybe-undeclared at the end of a body (`CarbonInterval::roundUnit()`, `floor()`, `ceil()`, `CarbonTimeZone::instance()`); the triage is above the composer row.
+"briannesbitt/Carbon" = 462
 
 # 0 → 1, 2026-08-16 with issue #391 — and a sixth class, the first that is not
 # a binding claim at all: `type.maybe-argument-mismatch` on
@@ -306,7 +330,8 @@
 # inherited findings gained the kind without a count change. Measured by the local fp-gate on
 # 26699ed5 against 37d20aef, same revision.
 # 892 → 888  2026-10-03 (issue #877): -4 throw.maybe-undeclared (871 → 867), a call result read off the callee's declared return; the triage is above the composer row. Measured by the local fp-gate on 0d280bca (the first form of S8), not remeasured on the head that withdrew `getMessage()`.
-"phpstan/phpstan-src" = 888
+# 888 → 902  2026-10-03 (issue #882): +14 throw.maybe-undeclared at a drop site, 8 more gained `destructor`; the triage is above the composer row. Measured as `src/` over an indexed `vendor/` with `steins check --profile strict --no-php --vendor-diagnostics` at 566c4326, base 888 and head 902.
+"phpstan/phpstan-src" = 902
 
 # New rows, 2026-10-02 (issues #915, #922): the strict-floor ids of the public packages that
 # had none. Measured under PHP 8.4.25 (CI's posture); the throw lane does not read the sidecar.
@@ -316,7 +341,8 @@
 #   cakephp/chronos          50 =  50 throw.maybe-undeclared
 # 253 → 259  2026-10-03 (issues #880, #875): +6 throw.maybe-undeclared, 6 operator-to-string at an offset write; the triage by kind is above the composer row.
 # 259 → 254  2026-10-03 (issue #877): -5 throw.maybe-undeclared (operator-iteration 2, operator-to-string 2, operator-array-access 1); the triage is above the composer row.
-"guzzle/guzzle" = 254
+# 254 → 256  2026-10-03 (issue #882): +2 throw.maybe-undeclared at the end of a body (`StreamHandler::drain()`, `Pool::batch()`), 2 more gained `destructor`; the triage is above the composer row.
+"guzzle/guzzle" = 256
 # 175 → 176  2026-10-03 (issues #880, #875): +1 throw.maybe-undeclared, 1 operator-to-string at an offset write; the triage by kind is above the composer row.
 # 176 → 172  2026-10-03 (issue #877): -4 throw.maybe-undeclared (operator-to-string 3, user-code-reach 1); the triage is above the composer row.
 "Seldaek/monolog" = 172
