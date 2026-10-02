@@ -282,3 +282,38 @@ staged, and its implementation is slice S6 of #915 (issue #882).
   them.
 - **ADR-0084**: the project's tolerance policy applies to the §4.3 fit test as
   it does to the definite check, through the same bound.
+
+## Amendment (2026-10-03): §7's exact edge at `new` is refused, and the gap sits at the drop (#882) — PENDING ratification
+
+Amends §7 (destructors), found while designing its implementation, slice S6 of
+#915.
+
+1. **The exact edge at `new` is refused.** §7.1's stage 1 puts an edge to
+   `__destruct` at an exact `new Foo` whose closed chain declares one. A witness
+   against PHP 8.5 refutes the anchor: `function d(): D { return new D; }` prints
+   nothing itself, and the destructor runs in the caller, when the caller drops
+   what it was handed. An edge at the `new` proves `io.output.buffer` on a
+   factory, which is a false `effect.envelope-exceeded` on any enveloped factory
+   and a wrong tag for `effects-envelope`. An edge at a drop is provable only
+   for a local that never escapes (not passed, stored, returned, captured or
+   referenced), an escape analysis the syntax layer does not have. The same
+   witness set shows a parameter's drop is a may-run, not an edge:
+   `d(D $d) { $d = null; }` runs the destructor when the caller handed it a
+   temporary and not when the caller keeps a reference.
+2. **One mechanism, a gap at the drop.** §7.2's `GapKind::Destructor` replaces
+   stage 1 for both subjects: a body-local `new` binding and a parameter bound
+   to a class whose chain, or some in-universe subclass, declares `__destruct`
+   (trait users and anonymous subclasses count, §7.2). The sites are the
+   forms that drop a value: `unset`, a reassignment, the end of the scope. The
+   one shape that stays an edge is `new D;` in statement position, where the
+   temporary dies at the statement. The exact edge for a non-escaping local is a
+   follow-up that needs the escape rule.
+3. **`array_splice` is not a form.** §7.2 lists it, and it is cut: an array
+   operand carries no element class, so by the per-value rule an element dropped
+   through `array_splice` is §7.3's recorded residue (a value of an unknown
+   class), not a site.
+4. **The gate and the sites land apart.** The gate lands first: `destructor_classes`
+   in the package shard, `GapKind::Destructor` appended to `GapKind::ALL`, and the
+   schema bump of §7.2 (#882), with no site producing the kind, so findings are
+   byte-identical. The sites land after it, in a second slice, which also reseeds
+   the fp-gate's possibly-expected table by kind as the earlier floor slices did.

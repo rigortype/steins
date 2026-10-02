@@ -4,11 +4,17 @@
 //! to [`GapKind::ALL`] fails the totality test until it has a fixture or an
 //! entry in the exclusions.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
+use steins_db::EffectsPolicy;
 use steins_syntax::SourceTree;
 
-use crate::site::GapKind;
+use super::Floor;
+use crate::cx::Cx;
+use crate::project::{FileUnit, Index, LazyTree};
+use crate::purity::{EnvelopeSpelling, OperativeBound};
+use crate::site::reach::Frame;
+use crate::site::{GapKind, ResolvedSite};
 use crate::{EFFECT_MAYBE_ENVELOPE_EXCEEDED_ID, THROW_MAYBE_UNDECLARED_ID, check};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -142,10 +148,15 @@ const CASES: &[Case] = &[
 /// What a lane can never produce, and why: the exclusions the totality test reads.
 fn excluded(lane: Lane) -> &'static [GapKind] {
     match lane {
-        // The throw rows, and the thrown class the throw lane alone names.
-        Lane::Effects => {
-            &[GapKind::UnresolvedThrow, GapKind::NoThrowRow, GapKind::FlagDependentThrow]
-        }
+        // The throw rows, and the thrown class the throw lane alone names; and the
+        // destructor, which no site records yet (#882): the effect lane's reading of
+        // it is `a_destructor_gap_reports_at_strict`'s.
+        Lane::Effects => &[
+            GapKind::UnresolvedThrow,
+            GapKind::NoThrowRow,
+            GapKind::FlagDependentThrow,
+            GapKind::Destructor,
+        ],
         // The effect rows, the declared lane's interop import (the throw lane keeps
         // every declared receiver a gap), the state constructs and the arity a
         // certification needs.
@@ -154,6 +165,9 @@ fn excluded(lane: Lane) -> &'static [GapKind] {
             GapKind::StateConstruct,
             GapKind::NoEffectRow,
             GapKind::ArgumentList,
+            // Nothing records it yet, and the throw lane resolves its own sites, so a
+            // gap cannot be handed to it; it reads the same `resolved.gaps`.
+            GapKind::Destructor,
         ],
     }
 }
@@ -191,6 +205,41 @@ fn every_gap_kind_surfaces_in_every_lane_that_can_produce_it() {
             );
         }
     }
+}
+
+/// A gap of a kind no site records yet still reports at `strict`: the floor reads
+/// whatever a resolved site carries, so the destructor kind needs no decision of its
+/// own beyond being a [`GapKind`] (ADR-0100 §7.4). The gap is handed to
+/// [`Floor::report_site`] directly, over the one site of a pure function. Once a site
+/// records the kind this case moves into [`CASES`] and the exclusions drop it.
+#[test]
+fn a_destructor_gap_reports_at_strict() {
+    let src = "<?php\n#[\\Steins\\Pure]\nfunction f(): int { return strlen('x'); }";
+    let tree = SourceTree::parse(src);
+    let lazy = LazyTree::borrowed(&tree);
+    let units = [FileUnit { path: "test.php", tree: &lazy }];
+    let index = Index::from_units(&units);
+    let cx = Cx::new(&units, &index, 0);
+    let f = &tree.functions()[0];
+    let frame = Frame::new(None, &f.params, &f.sites);
+    let enveloped = HashMap::new();
+    let floor = Floor::new(&enveloped, f.docblock.as_ref(), &f.params, true);
+    let policy = EffectsPolicy::none();
+    let bound = OperativeBound {
+        labels: &[],
+        span: f.span,
+        spelling: EnvelopeSpelling::Attribute,
+        policy: &policy,
+    };
+    let site = f.sites.first().expect("the call is a site");
+    let resolved =
+        ResolvedSite { gaps: BTreeSet::from([GapKind::Destructor]), ..Default::default() };
+    let mut out = Vec::new();
+    floor.report_site(&mut out, &cx, &frame, site, &resolved, &HashMap::new(), "f", bound);
+    assert_eq!(out.len(), 1, "one finding for the one gap: {out:#?}");
+    assert_eq!(out[0].id, EFFECT_MAYBE_ENVELOPE_EXCEEDED_ID);
+    assert!(out[0].message.contains("(destructor: a dropped value may run `__destruct`)"));
+    assert!(out[0].message.contains("f() is declared #[\\Steins\\Pure]"));
 }
 
 #[test]

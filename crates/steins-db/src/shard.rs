@@ -117,6 +117,11 @@ pub struct PackageShard {
     /// hooking a property (ADR-0099 §4.4, issue #859), keyed by the lowercase
     /// FQN the syntax layer gives ([`ClassDecl::fqn`]).
     magic_property_classes: HashSet<String>,
+    /// The class-likes the package declares that run user code when an instance
+    /// is dropped: one declaring `__destruct`, or importing a trait (whose body
+    /// is not lowered), keyed like [`Self::magic_property_classes`]
+    /// (ADR-0100 §7, issue #882).
+    destructor_classes: HashSet<String>,
     /// The classes and interfaces the package's anonymous classes extend or
     /// implement, resolved in their own file. An anonymous class is invisible to
     /// the class index, and may add a property magic method to anything it
@@ -163,6 +168,9 @@ impl PackageShard {
         }
         self.magic_property_classes.extend(
             tree.classes().iter().filter(|cd| declares_property_magic(cd)).map(|cd| cd.fqn.clone()),
+        );
+        self.destructor_classes.extend(
+            tree.classes().iter().filter(|cd| declares_destructor(cd)).map(|cd| cd.fqn.clone()),
         );
         for edge in tree.anonymous_class_edges() {
             let parents = edge.parent.iter().chain(&edge.implements);
@@ -227,6 +235,7 @@ impl PackageShard {
         self.magic_obstacles
             .extend(one.magic_obstacles.iter().map(|(_, o)| (slot, o.clone())));
         self.magic_property_classes.extend(one.magic_property_classes.iter().cloned());
+        self.destructor_classes.extend(one.destructor_classes.iter().cloned());
         self.anonymous_subclass_parents.extend(one.anonymous_subclass_parents.iter().cloned());
         self.property_writes.0.extend(one.property_writes.0.iter().cloned());
         self.property_writes.1 |= one.property_writes.1;
@@ -403,6 +412,8 @@ pub struct MergedTables {
     pub property_writes: (HashSet<String>, bool),
     /// Every class-like that declares a property magic method or a property hook.
     pub magic_property_classes: HashSet<String>,
+    /// Every class-like that declares `__destruct` or imports a trait.
+    pub destructor_classes: HashSet<String>,
     /// Every class or interface an anonymous class of the universe extends or implements.
     pub anonymous_subclass_parents: HashSet<String>,
     /// Every global constant the universe declares.
@@ -547,6 +558,7 @@ pub fn merge_shards(shards: &[PackageShard]) -> MergedTables {
         m.property_writes.0.extend(s.property_writes.0.iter().cloned());
         m.property_writes.1 |= s.property_writes.1;
         m.magic_property_classes.extend(s.magic_property_classes.iter().cloned());
+        m.destructor_classes.extend(s.destructor_classes.iter().cloned());
         m.anonymous_subclass_parents.extend(s.anonymous_subclass_parents.iter().cloned());
         m.constants.extend(s.constants.keys().cloned());
         for (path, &slot) in &s.files {
@@ -613,6 +625,15 @@ fn declares_property_magic(cd: &ClassDecl) -> bool {
         || cd.methods.iter().any(|m| MAGIC.iter().any(|magic| m.name.eq_ignore_ascii_case(magic)))
         || !cd.hooked_properties.is_empty()
         || cd.properties.iter().any(|p| p.hooked)
+}
+
+/// Whether a class-like declares `__destruct`: the classes whose instances run
+/// user code when dropped, so a drop of a value bound to one of them, or to a
+/// class one of them extends, cannot be called effect-free (ADR-0100 §7). A
+/// class using a trait counts, for the reason [`declares_property_magic`]
+/// gives.
+fn declares_destructor(cd: &ClassDecl) -> bool {
+    cd.uses_traits || cd.methods.iter().any(|m| m.name.eq_ignore_ascii_case("__destruct"))
 }
 
 /// Append one class-like's own magic-member records to `out` (nothing appended
@@ -691,7 +712,7 @@ mod tests {
             (
                 1,
                 "src/b.php",
-                "<?php function dup() {} /** @method int m() */ class Twice {} class_alias('c', 'made'); $o->w = 1; class Lazy { public function __get($n) {} } class Used { use T; } $a = new class extends Lazy {};",
+                "<?php function dup() {} /** @method int m() */ class Twice {} class_alias('c', 'made'); $o->w = 1; class Lazy { public function __get($n) {} } class Used { use T; } $a = new class extends Lazy {}; class Dtor { public function __destruct() {} }",
             ),
             (
                 2,
@@ -731,6 +752,10 @@ mod tests {
         assert!(direct.magic_property_classes.contains("lazy"), "a class declaring __get");
         assert!(direct.magic_property_classes.contains("used"), "a class importing a trait");
         assert!(direct.anonymous_subclass_parents.iter().any(|p| p.eq_ignore_ascii_case("lazy")));
+        assert!(direct.destructor_classes.contains("dtor"), "a class declaring __destruct");
+        assert!(direct.destructor_classes.contains("used"), "a class importing a trait");
+        assert!(!direct.destructor_classes.contains("lazy"), "__get is not a destructor");
+        assert_eq!(direct.destructor_classes, absorbed.destructor_classes);
         assert_eq!(direct.magic_property_classes, absorbed.magic_property_classes);
         assert_eq!(direct.anonymous_subclass_parents, absorbed.anonymous_subclass_parents);
     }
@@ -748,7 +773,7 @@ mod tests {
         let b = shard_over(&[(
             1,
             "vendor/x/y/lib.php",
-            "<?php function dup() {} function only_b() {} $o->w = 1; /** @property string $p */ class Twice {}",
+            "<?php function dup() {} function only_b() {} $o->w = 1; /** @property string $p */ class Twice {} class Gone { function __destruct() {} }",
         )]);
         let c = shard_over(&[(
             3,
@@ -771,6 +796,7 @@ mod tests {
         assert!(forward.classes.contains_key("made"), "alias minted against the merged snapshot");
         assert!(forward.property_writes.1, "the computed-name bit unions in");
         assert!(forward.property_writes.0.contains("w"));
+        assert!(forward.destructor_classes.contains("gone"), "a destructor class unions in");
         assert!(forward.constants.contains("K_A") && forward.constants.contains("K_B"));
     }
 
