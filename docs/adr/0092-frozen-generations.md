@@ -489,7 +489,15 @@ So the 2026-09-27 rule for a lost fold answer extends to it: a run that
 reports any `internal.panic` publishes **nothing** and leaves `CURRENT`
 where it was. The next run walks the file again, from a generation built by
 a run that neither lost an answer nor panicked, or cold. The cost is a
-rebuild; the panic stays a property of the run that hit it. The narrower
+rebuild; the panic stays a property of the run that hit it.
+
+The consequence, accepted plainly: a panic is deterministic, so while it
+persists **no run publishes**. Every run starts from the last generation
+published before the panic began and walks again everything changed since
+— or, with no such generation (a fresh checkout, a CI cache miss), **every
+run is cold**, the whole project paying the cold price and not just the
+panicking file. The remedy is the bug report; until the fix ships, leaving
+the file out of the paths passed to `check` lets runs publish again. The narrower
 shape, publishing everything but the panicked file's block, would need a
 "walk, never replay" marker in the summaries section for one exceptional
 case, and a panicked run is already exceptional and already exits `2`.

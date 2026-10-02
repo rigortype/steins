@@ -1214,15 +1214,17 @@ underneath. Ignore syntax and placement rules are in
 
 One id, `internal.panic`: the analysis of one file hit an internal error, a
 panic, in Steins itself. That file gets this one finding at its line 1, in
-place of everything it would have reported, and every other file is
-analyzed as usual. The run then exits `2`, not `1`: the report is
+place of everything its own walk would have reported, and every other file
+is analyzed as usual. Findings the project-wide passes attribute to the
+file (a `throw.undeclared` from the throw analysis, an effect finding) do
+not come from that walk and can still appear beside it. The run then exits `2`, not `1`: the report is
 incomplete, so it is no verdict on your code (see
 [the exit codes](02-cli-reference.md#exit-codes)).
 
 ```
 $ steins check --no-php src
 src/Area.php:3:6: error[type.argument-mismatch]: argument null to area() cannot become int $a — proven TypeError (coercive mode)
-src/Width.php:1:1: error[internal.panic]: the analyzer panicked on this file: STEINS_TEST_PANIC_ON names this file (at crates/steins-infer/src/panic_guard.rs:184); its findings are missing from this run — this is a bug in Steins, please report it
+src/Width.php:1:1: error[internal.panic]: the analyzer panicked on this file: STEINS_TEST_PANIC_ON names this file (at crates/steins-infer/src/panic_guard.rs:198); its findings are missing from this run — this is a bug in Steins, please report it
 steins: 1 file(s) panicked in analysis (internal.panic); their findings are missing, so this run exits 2 — this is a bug in Steins, please report it
 ```
 
@@ -1231,15 +1233,25 @@ purpose; a real panic names its own message and its place in the analyzer
 in the same position. (The sound-subset notice line is omitted.)
 
 Nothing you configure reaches it: not a profile's `disable` or `warn`, not
-`@steins-ignore`, not the vendor filter, not the baseline. And a run that
-reports one refuses `--set-baseline`, because that baseline would be missing
-the panicked file's findings. The remedy is a bug report;
+`@steins-ignore`, not the vendor filter, not the baseline. A run that
+reports one writes nothing: `--set-baseline` and `check --fix` refuse, and
+`transform`'s post-check fails, because each would act on a report missing
+the panicked file's findings. For the same reason the panicked file's own
+`@steins-ignore` comments are not reported as `suppress.unmatched`, and its
+baseline entries are not counted stale. `annotate` exits `2` too when its
+margin shows `✗ internal.panic`. The remedy is a bug report;
 [troubleshooting](07-troubleshooting.md#a-file-reports-internalpanic) says
 what to put in it.
 
 Only the per-file analysis is isolated this way. A panic in the
 whole-project phases (parsing, the project index, the effect and throw
-fixpoints) has no file to name, and still ends the run.
+fixpoints) has no file to name, and still ends the run, as does a panic in
+`annotate`'s value margin.
+
+A run that reports `internal.panic` also publishes nothing to the warm
+cache, so no later run replays the panic. While it reproduces, no run
+publishes: runs start from the last generation published before it, or
+cold when there is none.
 
 ### `debug.*` — you asked, Steins answered
 
