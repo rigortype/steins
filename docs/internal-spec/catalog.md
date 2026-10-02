@@ -476,6 +476,26 @@ aside. The fold allowlist and the certified lists are candidates, not evidence.
 Each name was audited by reading its body and by a runtime witness on PHP 8.5.11
 (12,000 argument tuples per name, drawn from every parameter's admitted values);
 the module doc of `knowledge.rs` states the method and what it refused.
+A third, mechanical witness is the generated note
+`docs/research/phpsrc-mining/throwless_audit.md` (issue #881):
+`audit_throwless.py` beside it resolves each name through the `*_arginfo.h`
+entry tables (aliases and the `FileFunction` macro family included) to its C
+function at the pinned php-src, lists the raise calls its call graph reaches and
+classifies the name as `none`, `argument-checking`, `destructor-hazard` or
+`needs-row`, and a test holds the table to that note. The audit found twelve
+names that raise an `Error` for a value their types admit, an array that
+contains itself by reference or a `DateTimeZone` subclass that never ran its
+parent's constructor, and they carry a row instead (`in_array`, `array_search`,
+`array_keys`, `array_unique`, `sort`, `rsort`, `asort`, `arsort`,
+`array_replace_recursive`, `array_walk_recursive`, `date_create`,
+`date_create_immutable`). Two consequences are call-site rules, not table
+facts: `array_keys` at one argument compares nothing and raises nothing
+(`pure_at_arity`), and a call whose arguments are all flat literals cannot pass
+such a value (`throws_of_literals`). The pin is php-src master (8.6.0-dev) and
+the table is the 8.5 line's, so a raise that exists only there (`array_filter`'s
+`$mode`, `pathinfo`'s `$flags`, the stream error mode) is recorded in the note
+and not given a row.
+
 Converting an object argument to a string raises an `Error`, and that is not the
 table's business: every position that can hold an object is an `ArgReach`
 position, and the resolver turns it into a gap of its own unless the call site
