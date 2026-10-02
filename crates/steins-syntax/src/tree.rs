@@ -267,7 +267,8 @@ impl SourceTree {
         drop(guard);
 
         // A name token over a replaced byte marks the tree. A string read as a name does not:
-        // it declines at its own site (`utf8_loss::literal_name`).
+        // it declines at its own site (`utf8_loss::literal_name`), or for an effect label stays
+        // an unknown label (`utf8_loss::literal_label`).
         let names_lossy = lossy.is_lossy() && utf8_loss::names_touch_a_loss(program);
 
         Self {

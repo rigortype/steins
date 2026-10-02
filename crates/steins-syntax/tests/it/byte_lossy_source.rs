@@ -138,6 +138,21 @@ fn a_replaced_byte_that_is_no_name_leaves_the_names_alone() {
 }
 
 #[test]
+fn an_effect_label_over_non_utf8_bytes_is_kept_as_its_escaped_spelling() {
+    // The envelope stays bound: the label is unknown (no vocabulary word spells these bytes),
+    // not absent, so the checks that read the envelope still run. A raw byte in a Latin-1
+    // file and an escape in a valid UTF-8 one are the same bytes, so the same label.
+    for src in [
+        &b"<?php #[\\Steins\\Effect(\"io\xC9\", 'a\\\\b')] function f() {}"[..],
+        b"<?php #[\\Steins\\Effect(\"io\\xC9\", 'a\\\\b')] function f() {}",
+    ] {
+        let tree = parse_bytes(src);
+        let envelope = tree.functions()[0].effect_envelope.as_ref().expect("the envelope is kept");
+        assert_eq!(envelope.labels, ["io\\xC9", "a\\b"], "{}", String::from_utf8_lossy(src));
+    }
+}
+
+#[test]
 fn a_valid_file_is_untouched_by_a_genuine_replacement_character() {
     // A U+FFFD in a name or a literal of a file that is valid UTF-8 is an ordinary
     // character: no loss map, no mark, and the literal keeps its `Utf8` arm.
