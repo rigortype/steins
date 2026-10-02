@@ -88,8 +88,8 @@
 # `strict`, and why 81% of the corpus' `@throws` declarations carry at least one. The
 # `throw.undeclared` and `throw.liskov-widened` counts underneath are unchanged:
 # composer 94, phpunit 32, console 13, monolog 7, guzzle 2, nikic 1.
-# `phpstan/phpstan-src`'s row, further down, predates the sibling: that checkout is only
-# in `corpus.local.toml`, so it is reseeded from a run that has it.
+# `phpstan/phpstan-src`'s row, further down, is reseeded from a run that has that
+# checkout (it is only in `corpus.local.toml`; CI does not measure it).
 
 "composer/composer" = 3468
 "sebastianbergmann/phpunit" = 3226
@@ -121,4 +121,12 @@
 #            the denylist already named the same directories. The key buys
 #            enforcement: an allowlist cannot silently readmit a fixture tree
 #            added later, a denylist can.
-"phpstan/phpstan-src" = 21
+#   21 → 890  2026-10-02 (issue #915, ADR-0100): the strict-floor sibling. 22 definite
+#            `throw.undeclared` (0 liskov; not changed by this slice, the row read 21
+#            against the live checkout) and 868 `throw.maybe-undeclared`, each a gap at
+#            a site of a declaration that spells `@throws`, or a call edge into a `...?`
+#            function that declares none, of the same kinds the public rows above are
+#            triaged by. Measured locally under PHP 8.5 with the `src` + `vendor`
+#            scoping, because CI does not measure this project; the throw lane does not
+#            read the sidecar, so the count does not depend on the engine.
+"phpstan/phpstan-src" = 890
