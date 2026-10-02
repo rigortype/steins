@@ -613,12 +613,13 @@ local row of `operator_rules.rs`).
 
 | Slice | Issue | Measured on the public corpora |
 |---|---|---|
-| call results as operands | #877 (S8) | 2,321 of 28,847 functions change the kinds behind their `…?`; none gains one and none loses exhaustiveness; 84 become exhaustive (63 in both lanes, 20 in the throw lane only, 1 in the effect lane only); `effect-diff` reports 64 `coverage-completed` events; no proven label moves; `transform effects-envelope` 723 → 741 edits, `throws-envelope` and `loop-to-array-map` byte-identical; at `strict` (with `--vendor-diagnostics`) `throw.maybe-undeclared` -283 findings, none added; at `default` `check` is byte-identical but for two vendored-finding counts |
+| call results as operands | #877 (S8) | 2,317 of 28,847 functions change the kinds behind their `…?`; none gains one and none loses exhaustiveness; 83 become exhaustive (63 in both lanes, 20 in the throw lane only); `effect-diff` reports 63 `coverage-completed` events; no proven label moves; `transform effects-envelope` 723 → 740 edits, `throws-envelope` and `loop-to-array-map` byte-identical; at `strict` (with `--vendor-diagnostics`) `throw.maybe-undeclared` -283 findings, none added; at `default` `check` is byte-identical but for two vendored-finding counts |
 
 The removals, by what the call's declared return is: a builtin's 1,850 functions, a project
 method's native return 390, a final `Throwable` accessor 5, and 72 that need two categories or
-inherit the change through a call edge. By the gap kind removed: `operator-to-string` 1,272
-functions, `operator-iteration` 1,044, `user-code-reach` 297 in the effect lane and 465 in the
+inherit the change through a call edge (measured before `getMessage()` was withdrawn, see below;
+that class is gone). By the gap kind removed: `operator-to-string` 1,270
+functions, `operator-iteration` 1,044, `user-code-reach` 295 in the effect lane and 463 in the
 throw lane, `operator-array-access` 119. Call results and array elements together were the
 largest sole cause of #859's `…?` bodies (195 of 703 in §6's operator row); the strict findings a
 call result takes with it are the same kinds, 112
@@ -633,7 +634,14 @@ call result takes with it are the same kinds, 112
   without the catalog. A shape that carries the callees of a local's writes (`ArgShape::Local` with
   the call shapes it was assigned) and a classifier for "admits no string" over a declared return
   would. #877's next sub-slice.
-- **A bound receiver's engine method.** Only a final `Throwable` accessor is read; the engine's
+- **`getMessage()` and `getCode()`.** Both read an untyped property (`protected $message`,
+  `protected $code`) a subclass may fill with an object; `getMessage()` then runs its `__toString`
+  inside the accessor and `getCode()` returns the object (PHP 8.5.11). The first form of this
+  amendment read `getMessage()` as a string and tagged `RunProcessFailedException` pure; the
+  review of #996 witnessed it, and neither accessor is read on any receiver now. The effect lane's
+  own accessor row has the same premise on master (#997). `getFile()`, `getLine()` and
+  `getTraceAsString()` read typed properties and stay.
+- **A bound receiver's engine method.** Only a final `Throwable` accessor over a typed property is read; the engine's
   declared type of any other method may be a tentative one, and the mined row does not say which
   (the sidecar's `reflect_class` carries `return_type_tentative`; the mined table has no column for it).
   `Countable::count()`, `IteratorAggregate::getIterator()` and `JsonSerializable::jsonSerialize()`
