@@ -154,13 +154,13 @@ pub(crate) enum GapKind {
     /// An operand cloned whose `__clone` (or `__set`, for `clone` with a property
     /// list) the site cannot pin.
     OperatorClone,
-    /// A value dropped (`unset`, a reassignment, the end of its scope) whose class
-    /// may run `__destruct`: a body-local `new` binding or a parameter bound to a
-    /// class that, or some subclass of which, declares one (ADR-0100 §7). A drop
-    /// is a may-run, never an edge: the destructor runs in whichever frame
-    /// releases the last reference, and the caller may keep one. Source: the Drop
-    /// family of the operator resolver; recorded by the destructor slice's sites,
-    /// not by the gate that adds the kind.
+    /// A value dropped (`unset`, a reassignment, the end of its scope, a `new`
+    /// temporary's own expression) whose class may run `__destruct`: a body-local
+    /// `new` binding or a parameter bound to a class that reaches one, itself, in
+    /// a subclass, or through a typed property (ADR-0100 §7). A drop is a may-run,
+    /// never an edge: the destructor runs in whichever frame releases the last
+    /// reference, and the caller may keep one. Source: the Drop family of the
+    /// operator resolver.
     Destructor,
 }
 

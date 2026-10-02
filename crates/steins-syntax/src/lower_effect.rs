@@ -239,6 +239,9 @@ pub(crate) struct EffectScanCx {
     /// What the frame's variables are shown to hold, for the [`crate::ast::ArgShape`] of a
     /// bare variable argument; opaque until [`Self::with_body`] builds it.
     pub(crate) bindings: FrameBindings,
+    /// The variables of the frame that may hold a value to drop (ADR-0100 §7);
+    /// empty until [`Self::with_body`] reads the frame.
+    pub(crate) drops: crate::lower_site::DropSubjects,
 }
 
 impl EffectScanCx {
@@ -257,7 +260,8 @@ impl EffectScanCx {
             .map(|p| strip_dollar(bytes_to_string(p.variable.name)))
             .collect();
         let bindings = FrameBindings::opaque();
-        Self { locals, byref_params, frame_aliased, writes, constructor: false, bindings }
+        let drops = crate::lower_site::DropSubjects::new();
+        Self { locals, byref_params, frame_aliased, writes, constructor: false, bindings, drops }
     }
 
     /// Mark the frame as a `__construct` body ([`Self::constructor`]).
@@ -272,8 +276,9 @@ impl EffectScanCx {
         mut self,
         params: &mago_syntax::cst::FunctionLikeParameterList<'_>,
         captures: Captures<'_>,
-        body: impl Iterator<Item = Node<'a, 'arena>>,
+        body: impl Iterator<Item = Node<'a, 'arena>> + Clone,
     ) -> Self {
+        self.drops = crate::lower_site::drop_subjects(params, body.clone());
         if !self.frame_aliased {
             self.bindings = FrameBindings::new(params, captures, body);
         }

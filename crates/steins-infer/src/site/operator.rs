@@ -20,9 +20,11 @@
 //!
 //! The answer is shared by both lanes: what runs at `"a" . $o` does not depend on
 //! which axis reads it. The engine's own `Error`-family raises at operators stay
-//! out of scope (ADR-0099 §7.4), and destructors are ADR-0099 §7.1's.
+//! out of scope (ADR-0099 §7.4). A drop is the one family that is not an operand's
+//! use: [`drops`] answers whether the value a frame releases may run a destructor.
 
 mod chain;
+mod drops;
 mod family;
 
 use steins_syntax::{
@@ -45,6 +47,9 @@ pub(super) fn resolve<'a>(
     receivers: &[Option<EffectRecv>],
     member: Option<&str>,
 ) -> ResolvedSite {
+    if family == F::Drop {
+        return drops::resolve(cx, frame, receivers);
+    }
     let mut op = Operator {
         cx,
         frame,
@@ -136,6 +141,7 @@ const fn gap_kind(family: F) -> GapKind {
         F::ArrayAccess => GapKind::OperatorArrayAccess,
         F::Iterate => GapKind::OperatorIteration,
         F::Clone => GapKind::OperatorClone,
+        F::Drop => GapKind::Destructor,
     }
 }
 

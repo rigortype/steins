@@ -726,7 +726,7 @@ mod tests {
             ),
             (
                 "vendor/lib/b/src/operators.php",
-                "<?php\nnamespace Lib\\A;\nclass Operators {\n  public function each($o, $b): \\Generator {\n    $s = $o . $b;\n    $s .= $o;\n    $s = \"x{$o}\";\n    $s = <<<T\n      v {$o}\n      T;\n    $s = (string) $o;\n    echo $o;\n    print $o;\n    $t = $o == 'a';\n    $t = $o < $b;\n    switch ($o) { case 'a': break; }\n    $v = $o->p;\n    $o->p = 1;\n    $o->p++;\n    $t = isset($o->p);\n    $t = empty($o->p);\n    unset($o->p);\n    $t = $o->p ?? 1;\n    $o->p ??= 1;\n    $r = &$o->p;\n    [$x, $y] = $o;\n    foreach ($o as $z) {}\n    yield from $o;\n    f(...$o);\n    $c = clone $o;\n    $w = $this->q;\n    $d = clone($o, ['a' => 1]);\n    $m = $o->$b;\n    $n = $$b;\n    $o->p[0] = $b;\n  }\n}\n",
+                "<?php\nnamespace Lib\\A;\nclass Operators {\n  public function each($o, $b): \\Generator {\n    $s = $o . $b;\n    $s .= $o;\n    $s = \"x{$o}\";\n    $s = <<<T\n      v {$o}\n      T;\n    $s = (string) $o;\n    echo $o;\n    print $o;\n    $t = $o == 'a';\n    $t = $o < $b;\n    switch ($o) { case 'a': break; }\n    $v = $o->p;\n    $o->p = 1;\n    $o->p++;\n    $t = isset($o->p);\n    $t = empty($o->p);\n    unset($o->p);\n    $t = $o->p ?? 1;\n    $o->p ??= 1;\n    $r = &$o->p;\n    [$x, $y] = $o;\n    foreach ($o as $z) {}\n    yield from $o;\n    f(...$o);\n    $c = clone $o;\n    $w = $this->q;\n    $d = clone($o, ['a' => 1]);\n    $m = $o->$b;\n    $n = $$b;\n    $o->p[0] = $b;\n    $q = new Q;\n    $q = null;\n    unset($q);\n    new Q;\n  }\n}\n",
             ),
             ("vendor/autoload.php", "<?php\nfunction stray_helper() {}\n"),
         ]

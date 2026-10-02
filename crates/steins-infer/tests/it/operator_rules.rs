@@ -7,7 +7,8 @@
 //! non-final class), and an operand nothing is known of. Both lanes read the one
 //! resolution, so every case asserts the two agree.
 
-use steins_infer::{EffectSummary, effect_summary};
+use steins_db::{Project, SourceFile, SteinsDatabase};
+use steins_infer::{EffectSummary, effect_summaries_project, effect_summary};
 use steins_syntax::SourceTree;
 
 fn summary(src: &str, symbol: &str) -> EffectSummary {
@@ -792,4 +793,304 @@ fn s8_an_untyped_operand_and_arithmetic_stay_a_gap() {
     // A local assigned from a call is not read either: the syntax pass cannot ask
     // the catalog what the call returns.
     gap(&returns("function f(string $s) { $t = trim($s); return 'x' . $t; }"), "f", TO_STRING);
+}
+
+// ---- Drop sites (ADR-0100 §7, issue #882) -------------------------------------
+//
+// The witness rows of the S6 revision (#915), each run on PHP 8.5: a dropped value
+// may run `__destruct`, so every drop of a value whose class reaches a destructor is
+// a `destructor` gap in both lanes, and no drop is an edge. The rows the table marks
+// must-stay read exactly as they did before the sites landed.
+
+const DESTRUCTOR: &str = "destructor";
+
+/// The classes the rows share. `D` declares the destructor everything else reaches or
+/// does not reach; every other class is named for what it holds.
+const DROP_CLASSES: &str = "<?php\n\
+    class D { public function __destruct() { echo '[D::__destruct]'; } }\n\
+    final class FD { public function __destruct() { echo '[FD::__destruct]'; } }\n\
+    final class ND { }\n\
+    final class Empty_ { }\n\
+    class Base { }\n\
+    final class SubBase extends Base { public function __destruct() { echo '[SubBase]'; } }\n\
+    final class HoldsTyped { private D $d; public function __construct() { $this->d = new D; } }\n\
+    final class HoldsHolder { private HoldsTyped $h; }\n\
+    final class HoldsNullable { private ?D $d = null; }\n\
+    final class HoldsUntyped { private $d; public function __construct() { $this->d = new D; } }\n\
+    final class HoldsScalar { private int $n = 1; private string $s = 'x'; private ?float $f = null; }\n\
+    final class HoldsArray { private array $a = []; public function __construct() { $this->a[] = new D; } }\n\
+    final class HoldsMixed { private mixed $m; private object $o; private iterable $i; private \\Closure $c; }\n\
+    class Holder { }\n\
+    final class SubHolder extends Holder { private D $d; public function __construct() { $this->d = new D; } }\n\
+    class VD { public function __destruct() { echo '[VD]'; } }\n\
+    class R { public function m() { echo '<m>'; } public function __destruct() { echo '[R]'; } }\n\
+    class M { public function __call($n, $a) { echo '[__call]'; } }\n\
+    trait T { public function bye() { echo '[bye]'; } }\n\
+    class U { use T { bye as __destruct; } }\n\
+    trait T2 { public function __destruct() { echo '[T2]'; } }\n\
+    trait T1 { use T2; }\n\
+    class UT { use T1; }\n\
+    interface I { public function __destruct(); }\n\
+    class CI implements I { public function __destruct() { echo '[CI]'; } }\n\
+    function foo(D $d) { echo '<foo-body>'; }\n\
+    function bar($d) { echo '<bar-body>'; }\n";
+
+fn drops_in(function: &str) -> String {
+    format!("{DROP_CLASSES}{function}\n")
+}
+
+/// Whether `symbol` carries the destructor gap, which both lanes must agree on.
+fn dtor(src: &str, symbol: &str) -> bool {
+    let s = summary(src, symbol);
+    assert_eq!(
+        s.gaps.contains(&DESTRUCTOR),
+        s.throws_gaps.contains(&DESTRUCTOR),
+        "the two lanes read one resolution: {s:?}\n{src}"
+    );
+    assert_eq!(s.exhaustive, s.gaps.is_empty(), "{s:?}");
+    s.gaps.contains(&DESTRUCTOR)
+}
+
+fn dtor_gap(function: &str, symbol: &str) {
+    assert!(dtor(&drops_in(function), symbol), "{symbol} should be a destructor gap\n{function}");
+}
+
+fn dtor_none(function: &str, symbol: &str) {
+    assert!(!dtor(&drops_in(function), symbol), "{symbol} runs no destructor\n{function}");
+}
+
+/// Rows 6.1 to 6.3: a body-local `new D` dropped by `unset`, a reassignment, or the end
+/// of the scope. Row 6.14: the same through a final class.
+#[test]
+fn s6_a_local_new_whose_class_declares_a_destructor_is_a_gap_at_each_drop() {
+    dtor_gap("function f() { $f = new D; unset($f); echo '<after>'; return 1; }", "f");
+    dtor_gap("function f() { $f = new D; $f = null; echo '<after>'; return 1; }", "f");
+    dtor_gap("function f() { $f = new D; echo '<body>'; return 1; }", "f");
+    dtor_gap("function f() { $f = new FD; unset($f); }", "f");
+    // The first write alone is a scope-exit site; so is a write of another class.
+    dtor_gap("function f() { $f = new ND; $f = new D; }", "f");
+}
+
+/// Rows 6.4 to 6.7 and 6.14: a parameter is read by its declared hint, though the frame
+/// writes it, and whether the caller still holds it makes no difference (6.5).
+#[test]
+fn s6_a_parameter_is_a_gap_by_its_hint_whether_or_not_the_frame_writes_it() {
+    dtor_gap("function f(D $d) { $d = null; echo '<after>'; return 1; }", "f");
+    dtor_gap("function f(D $d) { echo '<body>'; return 1; }", "f");
+    // 6.5: the caller keeps a reference, so `d` runs nothing: still a may-run, not an edge.
+    dtor_gap("function k() { $keep = new D; foo($keep); echo '<caller>'; unset($keep); }", "k");
+    // 6.7: the bound's subclass declares the destructor.
+    dtor_gap("function f(Base $b) { $b = null; }", "f");
+    dtor_gap("function f(FD $d) { $d = null; }", "f");
+    dtor_gap("function f(?D $d) { $d = null; }", "f");
+    dtor_gap("function f(D|int $d) { }", "f");
+}
+
+/// Row 6.8: no destructor, no property. The residue shapes of 6.9 and 6.13 stay as well.
+#[test]
+fn s6_a_class_that_reaches_no_destructor_runs_nothing() {
+    dtor_none("function f() { $e = new Empty_; unset($e); $e = new Empty_; }", "f");
+    dtor_none("function f(Empty_ $e) { $e = null; }", "f");
+    dtor_none("function f(ND $n, int $i, string $s, ?float $x, bool $b) { $n = null; }", "f");
+    // The over-reporting guard: a parameter that cannot name a destructor class is no gap.
+    dtor_none("function f(array $a, mixed $m, object $o, iterable $i, callable $c) { $a = null; }", "f");
+    dtor_none("function f(\\Closure $c, \\Generator $g, \\stdClass $s, \\Throwable $t) { $c = null; }", "f");
+    dtor_none("function f($x) { unset($x); $x = new D; }", "f");
+}
+
+/// Row 6.9: an unknown-class value is recorded residue, not a gap.
+#[test]
+fn s6_an_untyped_value_is_residue() {
+    dtor_none("function f($x) { unset($x); }", "f");
+    dtor_none("function f($x) { $x = null; }", "f");
+    dtor_none("function f() { $x = make(); unset($x); }", "f");
+    dtor_none("function f() { $x = $this->make(); $x = null; }", "f");
+}
+
+/// Row 6.13: `array_splice`, and an array whatever it holds, are residue (6.21).
+#[test]
+fn s6_arrays_are_residue_whatever_they_hold() {
+    dtor_none("function f() { $a = [new D]; array_splice($a, 0, 1); }", "f");
+    dtor_none("function f() { $a = [new D]; unset($a); }", "f");
+    dtor_none("function f(array $a) { $a = null; }", "f");
+    dtor_none("function f() { $h = new HoldsArray; unset($h); }", "f");
+    dtor_none("function f(HoldsArray $h) { $h = null; }", "f");
+}
+
+/// Rows 6.10 and 6.11: a `new` that escapes is no site in this body.
+#[test]
+fn s6_a_new_that_escapes_is_no_site() {
+    dtor_none("function f(): D { return new D; }", "f");
+    dtor_none("function f() { $o = new stdClass; $o->d = new D; return $o; }", "f");
+    dtor_none("function f() { $x = new stdClass; $x->d = new D; return $x; }", "f");
+    dtor_none("function f() { return [new D]; }", "f");
+    dtor_none("function f() { $a = [new D, new D]; return count($a); }", "f");
+    dtor_none("function f() { yield new D; }", "f");
+    dtor_none("function f() { return function () { return new D; }; }", "f");
+    // The escaping `new` still reads exactly as it did: row 6.11's other gaps are the same.
+    let escapes = drops_in("function f() { $h = new stdClass; $h->d = new D; return $h; }");
+    assert_eq!(summary(&escapes, "f").gaps, ["state-construct", "operator-magic-property"]);
+}
+
+/// Rows 6.12 and 6.16: a statement-position `new D` is a may-run, since a constructor can
+/// keep the object alive past the statement, a self-reference defers it to the collector
+/// and a throwing constructor never runs it; an edge would be a false positive.
+#[test]
+fn s6_a_statement_new_is_a_gap_and_never_an_edge() {
+    dtor_gap("function f() { new D; echo '<after>'; return 1; }", "f");
+    let stores = "class SD { public static array $all = [];\n\
+        public function __construct() { self::$all[] = $this; }\n\
+        public function __destruct() { echo '[SD]'; } }\n\
+        function f() { new SD; echo '<after-statement>'; return 1; }";
+    let src = format!("<?php\n{stores}\n");
+    assert!(dtor(&src, "f"));
+    // The constructor's own gaps, inherited by the statement, read as they did.
+    let gaps = summary(&src, "f").gaps;
+    assert!(gaps.contains(&"state-construct") && gaps.contains(&OFFSET), "{gaps:?}");
+    let cycle = "class CD { public $self;\n\
+        public function __construct() { $this->self = $this; }\n\
+        public function __destruct() { echo '[CD]'; } }\n\
+        function f() { new CD; echo '<after-statement>'; return 1; }";
+    assert!(dtor(&format!("<?php\n{cycle}\n"), "f"));
+    let throws = "class TD { public function __construct() { throw new \\RuntimeException('no'); }\n\
+        public function __destruct() { echo '[TD]'; } }\n\
+        function f() { try { new TD; } catch (\\RuntimeException $e) { echo '<caught>'; } return 1; }";
+    assert!(dtor(&format!("<?php\n{throws}\n"), "f"));
+}
+
+/// Row 6.17: a temporary handed to a call, or a method called on one, dies in the caller;
+/// the callee is judged on its own parameter (`bar`'s is untyped, so none).
+#[test]
+fn s6_a_new_temporary_in_argument_or_receiver_position_is_a_gap_in_the_caller() {
+    dtor_gap("function f() { foo(new D); echo '<after>'; }", "f");
+    dtor_gap("function f() { bar(new D); echo '<after>'; }", "f");
+    dtor_gap("function f() { (new R)->m(); echo '<after>'; }", "f");
+    dtor_gap("function f($o) { $o->put(k: new D()); }", "f");
+    dtor_gap("function f() { new ND(new D); }", "f");
+    dtor_gap("function f() { return strlen((string) foo(new D)); }", "f");
+    dtor_none("function f() { bar(new ND); (new ND)->x(); }", "f");
+    dtor_none("function f() { bar(new \\ArrayObject([])); new \\stdClass; }", "f");
+    // `bar` itself has no site: an untyped parameter is residue.
+    dtor_none("function g($d) { $d = null; }", "g");
+}
+
+/// Rows 6.18 and 6.19, and the guard against the universe gate: a typed property that
+/// names a class reaching a destructor is the hop; an untyped, `array`, `mixed`,
+/// `object`, `iterable` or engine-class property is recorded residue.
+#[test]
+fn s6_a_typed_property_hops_to_a_class_that_reaches_a_destructor() {
+    dtor_gap("function f() { $h = new HoldsTyped; unset($h); }", "f");
+    dtor_gap("function f(HoldsTyped $h) { $h = null; }", "f");
+    dtor_gap("function f() { $h = new HoldsHolder; unset($h); }", "f");
+    dtor_gap("function f(HoldsHolder $h) { }", "f");
+    dtor_gap("function f(HoldsNullable $h) { }", "f");
+    // 6.19 and 6.20: residue and scalars read as they did.
+    dtor_none("function f() { $h = new HoldsUntyped; unset($h); }", "f");
+    dtor_none("function f(HoldsUntyped $h) { $h = null; }", "f");
+    dtor_none("function f() { $h = new HoldsScalar; unset($h); }", "f");
+    dtor_none("function f(HoldsScalar $h) { $h = null; }", "f");
+    dtor_none("function f() { $h = new HoldsMixed; unset($h); }", "f");
+    dtor_none("function f(HoldsMixed $h) { }", "f");
+}
+
+/// Property types that refer to each other end the walk, and an inherited property counts.
+#[test]
+fn s6_the_property_hop_ends_on_a_cycle_and_reads_the_inherited_chain() {
+    let cycle = "class CycA { private CycB $b; }\nclass CycB { private CycA $a; }\n\
+        function f(CycA $a) { $a = null; }";
+    assert!(!dtor(&drops_in(cycle), "f"));
+    let inherited = "class HoldsParent { protected D $d; }\nfinal class Child extends HoldsParent { }\n\
+        function f(Child $c) { $c = null; }";
+    assert!(dtor(&drops_in(inherited), "f"));
+    // A hop through a union property: any member that reaches counts.
+    let union = "final class HoldsUnion { private int|D $v = 1; }\nfunction f(HoldsUnion $h) { }";
+    assert!(dtor(&drops_in(union), "f"));
+}
+
+/// Row 6.22: a subclass's own property is residue when the subject is bound.
+#[test]
+fn s6_a_subclass_s_own_properties_are_residue_when_the_subject_is_bound() {
+    dtor_none("function f(Holder $h) { $h = null; }", "f");
+    // The exact class reads its own.
+    dtor_gap("function f(SubHolder $h) { $h = null; }", "f");
+    dtor_gap("function f() { $h = new SubHolder; unset($h); }", "f");
+}
+
+/// Row 6.23: captures and suspended frames are recorded residue.
+#[test]
+fn s6_closures_generators_and_fibers_are_residue() {
+    dtor_none("function f(\\Closure $c) { $c = null; }", "f");
+    dtor_none("function f(\\Generator $g) { $g = null; }", "f");
+    dtor_none(
+        "function f() { $fb = new \\Fiber(function () { try { \\Fiber::suspend(1); } \
+         finally { echo '[fiber finally]'; } }); $fb->start(); unset($fb); }",
+        "f",
+    );
+    dtor_none("function f() { $c = (function () { return 1; })(); unset($c); }", "f");
+}
+
+/// Row 6.24: an anonymous class is its own body's subject.
+#[test]
+fn s6_an_anonymous_class_carries_its_destructor_on_the_binding() {
+    dtor_gap("function f() { $x = new class { function __destruct() { echo '[anon]'; } }; unset($x); }", "f");
+    dtor_gap("function f() { foo(new class { function __destruct() {} }); }", "f");
+    // A trait whose body is unread may bring one; a parent that reaches one is the class.
+    dtor_gap("function f() { $x = new class { use T; }; unset($x); }", "f");
+    dtor_gap("function f() { $x = new class extends D {}; unset($x); }", "f");
+    dtor_gap("function f() { $x = new class extends HoldsTyped {}; unset($x); }", "f");
+    dtor_none("function f() { $x = new class { public int $n = 1; }; unset($x); }", "f");
+    // A parent no file declares reaches nothing the analysis can see.
+    dtor_none("function f() { $x = new class extends Nowhere {}; unset($x); }", "f");
+}
+
+/// Row 6.25: trait users, an inherited destructor, an interface's implementor.
+#[test]
+fn s6_trait_users_inherited_destructors_and_implementors_count() {
+    dtor_gap("function f() { $u = new U; unset($u); }", "f");
+    dtor_gap("function f(U $u) { $u = null; }", "f");
+    dtor_gap("function f(UT $u) { $u = null; }", "f");
+    dtor_gap("function f(CI $c) { $c = null; }", "f");
+    dtor_gap("function f(I $i) { $i = null; }", "f");
+    let parent = "abstract class P { public function __destruct() { echo '[P]'; } }\n\
+        class C extends P { }\nfunction f(C $c) { $c = null; }";
+    assert!(dtor(&drops_in(parent), "f"));
+}
+
+/// Row 6.25's last shape: the parent is in another file.
+#[test]
+fn s6_an_inherited_destructor_crosses_files() {
+    let db = SteinsDatabase::default();
+    let files = [
+        ("p.php", "<?php\nabstract class P { public function __destruct() { echo '[P]'; } }\n"),
+        ("c.php", "<?php\nclass C extends P {}\nfunction d(C $c) { $c = null; echo '<after>'; }\n"),
+        ("n.php", "<?php\nclass Q {}\nclass N extends Q {}\nfunction e(N $n) { $n = null; }\n"),
+    ];
+    let inputs: Vec<SourceFile> = files
+        .iter()
+        .map(|(path, text)| SourceFile::new(&db, (*path).to_owned(), (*text).to_owned()))
+        .collect();
+    let layout = steins_db::ProjectLayout::fallback();
+    let project = Project::new(&db, inputs.clone(), layout, steins_db::PluginFacts::none());
+    let gaps = |file: usize, symbol: &str| {
+        let found = effect_summaries_project(&db, project, inputs[file]);
+        let s = found.iter().find(|s| s.symbol == symbol).expect("a summary");
+        assert_eq!(s.gaps.contains(&DESTRUCTOR), s.throws_gaps.contains(&DESTRUCTOR));
+        s.gaps.contains(&DESTRUCTOR)
+    };
+    assert!(gaps(1, "d"));
+    assert!(!gaps(2, "e"));
+}
+
+/// Row 6.26: `__call` does not answer `__destruct`.
+#[test]
+fn s6_a_magic_call_is_not_a_destructor() {
+    dtor_none("function f() { $m = new M; unset($m); }", "f");
+    dtor_none("function f(M $m) { $m = null; }", "f");
+}
+
+/// A loop runs a first write again: the previous value is dropped.
+#[test]
+fn s6_a_new_in_a_loop_drops_the_previous_iteration_s_value() {
+    dtor_gap("function f($xs) { foreach ($xs as $x) { $d = new D; } }", "f");
+    dtor_gap("function f() { while (true) { $d = new D; } }", "f");
 }

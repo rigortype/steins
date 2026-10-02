@@ -24,7 +24,7 @@ use crate::lower_effect::{
 use crate::lower_expr::lower_arg_value;
 use crate::lower_guards::scan_guard_regions;
 use crate::lower_presence::{maybe_undefined_reads, push_guard_root, subtree_has_goto};
-use crate::lower_site::scan_owner_sites;
+use crate::lower_site::{body_end, scan_owner_sites, scope_exit_sites};
 use crate::lower_stmt::{
     block_end, call_invalidation, expr_end, lower_expr_stmt, lower_stmt, named_call, node_poisons,
     push_byref_captures, scan_guard_chain_no_default, scan_opaque, scan_string_contexts,
@@ -616,6 +616,7 @@ fn build_closure_scope_from_closure(
             is_generator = node_is_generator(&Node::Statement(s));
         }
     }
+    scope_exit_sites(&cx, body_end(cl.body.span()), &mut sites);
     let poisoned = !opaque.is_empty();
     let def_offset = closure_def_offset(cl);
     let vars = undefined_variable_reads(
@@ -1498,6 +1499,7 @@ fn build_closure_scope_from_arrow(
     )
     .with_body(&af.parameter_list, Captures::All, std::iter::once(Node::Expression(af.expression)));
     scan_owner_sites(&Node::Expression(af.expression), &cx, &mut sites);
+    scope_exit_sites(&cx, body_end(af.expression.span()), &mut sites);
     let mut method_calls = Vec::new();
     scan_method_calls(&Node::Expression(af.expression), &mut method_calls);
     // An arrow body lowers straight to a `return <expr>;` (below) rather than

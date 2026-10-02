@@ -802,6 +802,10 @@ pub enum OperatorFamily {
     Iterate,
     /// An operand cloned: `__clone`.
     Clone,
+    /// A value dropped: `__destruct`, and whatever a dropped value holds that
+    /// has one (ADR-0100 §7). No drop is an edge; the family only ever records
+    /// its gap ([`OperatorConstruct::DropUnset`] and the forms after it).
+    Drop,
 }
 
 /// The syntactic form an [`OperatorFamily`] site is. The property and offset
@@ -886,17 +890,28 @@ pub enum OperatorConstruct {
     /// container is [`ArgShape::Unknown`]. An append (`$c[] = v`) is never one:
     /// on a string it is a fatal error, not a conversion.
     OffsetValue,
+    /// `unset($v)` of a variable that holds a value this frame may drop
+    /// ([`OperatorFamily::Drop`]). One operand per class the variable may hold;
+    /// a receiver of `None` is a class the lowering already knows runs user code.
+    DropUnset,
+    /// An assignment `$v = …` over a variable that may hold a value to drop.
+    DropReassign,
+    /// The end of the frame's body, for each variable that may still hold a value.
+    DropScopeExit,
+    /// A `new C` whose value nothing keeps: a statement, a method call's
+    /// receiver, or a call's argument.
+    DropTemporary,
 }
 
 impl OperatorFamily {
     /// Every family, in declaration order, which is the order the payload codec numbers them by.
-    pub const ALL: [Self; 5] =
-        [Self::ToString, Self::MagicProp, Self::ArrayAccess, Self::Iterate, Self::Clone];
+    pub const ALL: [Self; 6] =
+        [Self::ToString, Self::MagicProp, Self::ArrayAccess, Self::Iterate, Self::Clone, Self::Drop];
 }
 
 impl OperatorConstruct {
     /// Every form, in declaration order, which is the order the payload codec numbers them by.
-    pub const ALL: [Self; 27] = [
+    pub const ALL: [Self; 31] = [
         Self::Concat,
         Self::ConcatAssign,
         Self::Interpolation,
@@ -924,6 +939,10 @@ impl OperatorConstruct {
         Self::CloneWith,
         Self::Name,
         Self::OffsetValue,
+        Self::DropUnset,
+        Self::DropReassign,
+        Self::DropScopeExit,
+        Self::DropTemporary,
     ];
 
     /// The family a form belongs to, or `None` for the forms
@@ -946,6 +965,9 @@ impl OperatorConstruct {
             Self::Destructure => Some(OperatorFamily::ArrayAccess),
             Self::Foreach | Self::YieldFrom | Self::Spread => Some(OperatorFamily::Iterate),
             Self::Clone | Self::CloneWith => Some(OperatorFamily::Clone),
+            Self::DropUnset | Self::DropReassign | Self::DropScopeExit | Self::DropTemporary => {
+                Some(OperatorFamily::Drop)
+            }
             Self::Read
             | Self::Write
             | Self::ReadWrite

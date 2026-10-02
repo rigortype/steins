@@ -30,7 +30,7 @@ use crate::lower_expr::{
     class_const_name, instantiation_class, is_strict_types_one, lower_arg_value, lower_call,
     method_name_of, trace_static_class,
 };
-use crate::lower_site::{promoted_hook_sites, scan_owner_sites};
+use crate::lower_site::{body_end, promoted_hook_sites, scan_owner_sites, scope_exit_sites};
 use crate::names::{
     PREG_FLAG_CONST_NAMES, RefResolver, ctx_of, name_ref, use_binds_php_version_id,
     use_binds_preg_flag_const,
@@ -638,6 +638,7 @@ fn lower_function(
     for s in f.body.statements.iter() {
         scan_owner_sites(&Node::Statement(s), &cx, &mut sites);
     }
+    scope_exit_sites(&cx, body_end(f.body.span()), &mut sites);
 
     FunctionDecl {
         name: bytes_to_string(f.name.value),
@@ -1126,6 +1127,7 @@ fn lower_method(m: &Method<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex, rc
         for s in block.statements.iter() {
             scan_owner_sites(&Node::Statement(s), &cx, &mut sites);
         }
+        scope_exit_sites(&cx, body_end(block.span()), &mut sites);
     }
 
     let visibility = visibility_of(&m.modifiers);

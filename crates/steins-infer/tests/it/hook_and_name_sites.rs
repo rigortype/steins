@@ -294,9 +294,14 @@ fn a_universe_with_no_hooking_exception_leaves_the_accessor_exhaustive() {
 #[test]
 fn a_trait_importing_exception_is_a_possible_hook_and_one_the_universe_cannot_place_is_not() {
     // A trait's body is not lowered, so a class importing one may hook a property.
+    // The `Throwable` parameter is also a drop a subclass's destructor may run (ADR-0100
+    // §7): that gap is the drop family's, and this test reads the hook's.
+    let hook_gaps = |src: &str| -> Vec<&'static str> {
+        summary(src, "g").gaps.into_iter().filter(|kind| *kind != "destructor").collect()
+    };
     let traity = "<?php\ntrait T {}\nclass Tx extends RuntimeException { use T; }\n\
         function g(Throwable $e) { return $e->getMessage(); }\n";
-    assert_eq!(summary(traity, "g").gaps, [PROPERTY]);
+    assert_eq!(hook_gaps(traity), [PROPERTY]);
     // A class whose parent the universe does not hold is not shown to be a `Throwable`:
     // the same open question as §4.4's subclasses outside the universe.
     let unplaced = "<?php\ntrait T {}\nclass U extends \\Vendor\\Base { use T; }\n\
@@ -306,7 +311,7 @@ fn a_trait_importing_exception_is_a_possible_hook_and_one_the_universe_cannot_pl
     let anonymous = "<?php\nclass Ax extends RuntimeException {}\n\
         function make() { return new class('x') extends Ax {}; }\n\
         function g(Ax $e) { return $e->getMessage(); }\n";
-    assert_eq!(summary(anonymous, "g").gaps, [PROPERTY]);
+    assert_eq!(hook_gaps(anonymous), [PROPERTY]);
 }
 
 #[test]

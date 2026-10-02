@@ -15,6 +15,7 @@
 mod call;
 mod construct;
 mod derive;
+mod drops;
 mod operator;
 mod throw;
 
@@ -24,6 +25,7 @@ use crate::ast::{CatchClause, ConstArgs, NameRef, SiteKind, SiteOrigin, Span};
 use crate::children;
 use crate::lower_effect::EffectScanCx;
 
+pub(crate) use drops::{DropSubjects, body_end, scope_exit_sites, subjects as drop_subjects};
 pub(crate) use operator::promoted_hook_sites;
 pub use derive::{derive_effect_origins, derive_throw_origins};
 
@@ -65,6 +67,7 @@ pub(crate) fn scan_owner_sites(node: &Node<'_, '_>, cx: &EffectScanCx, out: &mut
 /// nested scopes (function, closure, arrow function or class-like bodies),
 /// whose sites are their own owner's.
 fn scan_sites(node: &Node<'_, '_>, sx: &SiteScope<'_>, out: &mut Vec<SiteOrigin>) {
+    drops::visit(node, sx, out);
     match node {
         Node::FunctionCall(fc) => {
             call::function_call(fc, sx, out);
