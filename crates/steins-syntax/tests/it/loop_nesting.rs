@@ -13,7 +13,7 @@
 //! finish at these depths at all. The parse runs on a worker thread so a regression
 //! is reported as a missed budget instead of hanging the suite.
 
-use std::sync::mpsc;
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -89,9 +89,15 @@ fn lower_within_budget(src: String) -> (Vec<String>, Duration) {
             let _ = tx.send((names, elapsed));
         })
         .expect("spawn the lowering worker");
-    rx.recv_timeout(BUDGET).unwrap_or_else(|_| {
-        panic!("lowering the nest overran {BUDGET:?}: the loop-body cache is not answering")
-    })
+    match rx.recv_timeout(BUDGET) {
+        Ok(lowered) => lowered,
+        Err(RecvTimeoutError::Timeout) => {
+            panic!("lowering the nest overran {BUDGET:?}: the loop-body cache is not answering")
+        }
+        // The worker panicked (a parse error, a failed assertion) and dropped the sender;
+        // its own message is on stderr above.
+        Err(RecvTimeoutError::Disconnected) => panic!("the lowering worker died before answering"),
+    }
 }
 
 fn assert_flat(kinds: &[&str], depth: usize) {
