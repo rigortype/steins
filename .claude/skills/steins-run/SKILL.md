@@ -19,9 +19,10 @@ ratify it later (issue, ADR marked PENDING ratification).
 
 Every implementer and reviewer reads [`invariants.md`](invariants.md), and the
 machine notes in `~/.claude/steins-run-local.md` when that file exists; keep
-briefs to what is specific to the task. Agents write their full report to the
-scratch directory the brief names and return a short summary with its path;
-open the file when a decision needs its detail.
+briefs to what is specific to the task. Agents return a report of at most 30
+lines and keep raw output (test runs, A/B diffs, witness runs) as logs in the
+scratch directory the brief names; open a log when a decision needs its
+detail.
 
 ## Steps
 
