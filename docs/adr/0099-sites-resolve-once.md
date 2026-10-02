@@ -639,8 +639,11 @@ call result takes with it are the same kinds, 112
   inside the accessor and `getCode()` returns the object (PHP 8.5.11). The first form of this
   amendment read `getMessage()` as a string and tagged `RunProcessFailedException` pure; the
   review of #996 witnessed it, and neither accessor is read on any receiver now. The effect lane's
-  own accessor row has the same premise on master (#997). `getFile()`, `getLine()` and
-  `getTraceAsString()` read typed properties and stay.
+  own accessor row has the same premise on master (#997). `getTraceAsString()` and
+  `getTrace()` read a private typed property and stay. `getFile()` and `getLine()` read typed
+  properties a subclass can `unset` while declaring `__get`, which then runs (with its object's
+  `__toString`) inside the accessor; they are read only on a final class or an exact receiver, with
+  no `__get` on the chain.
 - **A bound receiver's engine method.** Only a final `Throwable` accessor over a typed property is read; the engine's
   declared type of any other method may be a tentative one, and the mined row does not say which
   (the sidecar's `reflect_class` carries `return_type_tentative`; the mined table has no column for it).

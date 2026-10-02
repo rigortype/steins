@@ -659,11 +659,41 @@ fn s8_a_conditional_class_in_the_middle_of_the_chain_proves_nothing() {
 /// premise on master, in the effect lane's own accessor row).
 #[test]
 fn s8_a_final_engine_accessor_returns_a_string() {
-    for accessor in ["getFile()", "getLine()", "getTraceAsString()"] {
+    for accessor in ["getTraceAsString()", "getTrace()"] {
         let src = returns(&format!("function f(\\Throwable $e) {{ return 'x' . $e->{accessor}; }}"));
         assert_eq!(lane_gaps(&src, "f"), (vec![], vec!["declared-receiver"]), "{accessor}");
+    }
+    // `getFile()` and `getLine()` read a typed property through `__get` once a subclass
+    // `unset`s it (the second review of #996, witnessed on PHP 8.5.11: `__get` runs and its
+    // object's `__toString` with it), so a bound receiver is not read; an exact class, or a
+    // final one whose chain declares no `__get`, is.
+    for accessor in ["getFile()", "getLine()"] {
+        let bound = returns(&format!("function f(\\Throwable $e) {{ return 'x' . $e->{accessor}; }}"));
+        assert_eq!(operator_gaps(&bound, "f"), [TO_STRING], "{accessor}");
+        let open = file(
+            &format!("{RETURNS}class RtOpen extends \\RuntimeException {{}}"),
+            &format!("function f(RtOpen $e) {{ return 'x' . $e->{accessor}; }}"),
+        );
+        assert_eq!(operator_gaps(&open, "f"), [TO_STRING], "{accessor}");
+        let magic = format!(
+            "final class RtMagic extends \\RuntimeException {{\n\
+             public function __get($n) {{ return new S(); }}\n\
+             public function m() {{ return 'x' . $this->{accessor}; }} }}"
+        );
+        assert_eq!(operator_gaps(&returns(&magic), "RtMagic::m"), [TO_STRING], "{accessor}");
+        let sealed = format!(
+            "final class RtFinal extends \\RuntimeException {{\n\
+             public function m() {{ return 'x' . $this->{accessor}; }} }}"
+        );
+        assert!(operator_gaps(&returns(&sealed), "RtFinal::m").is_empty(), "{accessor}");
         let new = format!("function f() {{ return 'x' . (new \\RuntimeException('m'))->{accessor}; }}");
         assert!(operator_gaps(&returns(&new), "f").is_empty(), "{accessor}");
+        // `parent::` runs on `$this`, which a subclass of the enclosing class may be.
+        let parent = format!(
+            "class RtBase extends \\RuntimeException {{\n\
+             public function m() {{ return 'x' . parent::{accessor}; }} }}"
+        );
+        assert_eq!(operator_gaps(&returns(&parent), "RtBase::m"), [TO_STRING], "{accessor}");
     }
     for accessor in ["getMessage()", "getCode()"] {
         for receiver in ["\\Throwable $e", "\\RuntimeException $e", "RtEvil $e"] {

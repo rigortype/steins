@@ -438,13 +438,18 @@ operand (ADR-0099 §4.3) and a builtin's or engine method's argument:
 - **An engine method**: the mined method row for the class the chain leaves the project at, for a
   receiver that names its class exactly (`new Foo`, `Foo::`, `parent::`), and for a bound receiver
   (`$this`, `self::`, a declared parameter) only a final `Throwable` accessor over a typed
-  property (`getFile()`, `getLine()`, `getTraceAsString()`: `Exception` and `Error` declare them
-  final). `getMessage()` and `getCode()` are final too but read an untyped property, which a
+  property (`getTraceAsString()`, `getTrace()`, and `getFile()` and `getLine()` where no subclass
+  can make them read through `__get`: `Exception` and `Error` declare them final). `getMessage()` and `getCode()` are final too but read an untyped property, which a
   subclass may fill with an object: `getMessage()` then runs its `__toString` in the accessor and
   `getCode()` returns it (witnessed on PHP 8.5.11), so neither is read on any receiver, `parent::`
   and `Foo::` included, which run on `$this`. They are what the review of #996 found false in
   this note's first form; the effect lane's own accessor row has the same premise on master
-  (issue #997). Any other engine
+  (issue #997). `getFile()` and `getLine()` read a typed property, but a subclass that runs
+  `unset($this->file)` and declares `__get` makes the accessor read it through `__get`, whose
+  object's `__toString` then runs in the accessor (witnessed on PHP 8.5.11, found by the second
+  review of #996; #997 is extended to the call rows). They are read only for a class that is final,
+  or for an exact receiver the enclosing class is no instance of, and in either case only when no
+  project class on the chain declares `__get`. Any other engine
   method on a bound receiver stays unproven, because the engine's declared type there may be a
   tentative one, which a userland override is free to ignore: `Countable::count()` returns what the
   class returns (witnessed on PHP 8.5.11, an override returning an object runs `__toString`).
