@@ -360,8 +360,8 @@ object handed to a numeric conversion becomes a number with a warning and runs
 no `__toString`. Positional `n$` is honoured and leaves the in-order counter
 alone; a value several conversions name takes the strongest; a value no
 conversion names is never read; too few values is an `ArgumentCountError` for
-`sprintf` and a `ValueError` for `vsprintf`, which is argument checking and not
-user code (ADR-0099 §3.3).
+`sprintf`, which is argument checking (ADR-0099 §3.3), and a `ValueError` for
+`vsprintf`, which its throw row records; neither runs user code.
 
 The parser returns `None`, leaving the call to the row, for any format it
 cannot read as the engine does: an unknown or missing conversion, a padding

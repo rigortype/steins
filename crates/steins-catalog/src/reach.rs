@@ -661,8 +661,8 @@ mod tests {
 
     /// A value count that does not match the format changes the outcome, never
     /// the parse: too few values is an `ArgumentCountError` (a `ValueError` for
-    /// `vsprintf`; row 7.11, argument checking, not user code), and a value past
-    /// the last conversion is never read.
+    /// `vsprintf`, which its throw row records; row 7.11, neither runs user code),
+    /// and a value past the last conversion is never read.
     #[test]
     fn the_parse_does_not_depend_on_how_many_values_are_given() {
         assert_eq!(format_reach("%d %d").as_deref(), Some(&[I, I][..])); // 7.11
