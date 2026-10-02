@@ -784,10 +784,17 @@ impl<'a> Cx<'a> {
     }
 
     /// The unique body scope of the user function at `site`, plus its file.
+    ///
+    /// Matched on the FQN, since a file of several namespaces may declare one simple
+    /// name more than once (issue #925); two scopes of one FQN (a conditional
+    /// redeclaration) still decline.
     pub(crate) fn fn_scope(&self, site: Site) -> Option<(usize, &'a Scope)> {
-        let name = &self.fn_decl(site).name;
+        let fqn = &self.fn_decl(site).fqn;
         let tree = self.units[site.file].tree;
-        let mut it = tree.scopes().iter().filter(|s| s.function_name.as_deref() == Some(name));
+        let mut it = tree
+            .scopes()
+            .iter()
+            .filter(|s| s.function_name.as_deref().is_some_and(|n| n.eq_ignore_ascii_case(fqn)));
         let scope = it.next()?;
         if it.next().is_some() { None } else { Some((site.file, scope)) }
     }
@@ -1451,7 +1458,10 @@ impl<'a> Cx<'a> {
             return None;
         }
         let tree = self.units[site.file].tree;
-        let mut scopes = tree.scopes().iter().filter(|s| s.function_name.as_deref() == Some(&decl.name));
+        let mut scopes = tree
+            .scopes()
+            .iter()
+            .filter(|s| s.function_name.as_deref().is_some_and(|n| n.eq_ignore_ascii_case(&decl.fqn)));
         let scope = scopes.next()?;
         if scopes.next().is_some() || scope.poisoned {
             return None;
@@ -1635,16 +1645,21 @@ impl<'a> Cx<'a> {
         }
     }
 
+    /// The declaration a [`ScopeOwner::Function`] scope's `fqn` names, in the file this
+    /// `Cx` points at. By FQN rather than by simple name: a file of several namespaces may
+    /// declare `One\f` and `Two\f`, and a simple-name search answers the first for both
+    /// (issue #925). [`FunctionDecl::fqn`] is lowercase, the owner's case-preserved.
+    fn scope_function(&self, fqn: &str) -> Option<&'a FunctionDecl> {
+        self.tree().functions().iter().find(|f| f.fqn.eq_ignore_ascii_case(fqn))
+    }
+
     /// The parameter list of a scope's owning function or method (same file this
     /// `Cx` points at), or `None` for the top-level script scope. Used by the
     /// native-type parameter seeding (Feature B).
     pub(crate) fn scope_params(&self, scope: &Scope) -> Option<&'a [Param]> {
         match &scope.owner {
             ScopeOwner::TopLevel => None,
-            ScopeOwner::Function(name) => {
-                let f = self.tree().functions().iter().find(|f| f.name.eq_ignore_ascii_case(name))?;
-                Some(&f.params)
-            }
+            ScopeOwner::Function { fqn, .. } => Some(&self.scope_function(fqn)?.params),
             ScopeOwner::Method { class, method } => {
                 let cd = self.tree().classes().iter().find(|c| c.fqn.eq_ignore_ascii_case(class))?;
                 let m = cd.methods.iter().find(|m| m.name.eq_ignore_ascii_case(method))?;
@@ -1682,8 +1697,8 @@ impl<'a> Cx<'a> {
             ScopeOwner::TopLevel
             | ScopeOwner::Closure { .. }
             | ScopeOwner::PropertyHook { .. } => None,
-            ScopeOwner::Function(name) => {
-                let f = self.tree().functions().iter().find(|f| f.name.eq_ignore_ascii_case(name))?;
+            ScopeOwner::Function { fqn, .. } => {
+                let f = self.scope_function(fqn)?;
                 self.envelopes_of(f.docblock.as_deref(), self.cur, f.span.start)
             }
             ScopeOwner::Method { class, method } => {
@@ -1718,11 +1733,8 @@ impl<'a> Cx<'a> {
                 .map_or_else(TemplateShadow::default, |cd| {
                     template_names_of(cd.docblock.as_deref())
                 }),
-            ScopeOwner::Function(name) => self
-                .tree()
-                .functions()
-                .iter()
-                .find(|f| f.name.eq_ignore_ascii_case(name))
+            ScopeOwner::Function { fqn, .. } => self
+                .scope_function(fqn)
                 .map_or_else(TemplateShadow::default, |f| template_names_of(f.docblock.as_deref())),
             ScopeOwner::Method { class, method } => {
                 let Some(cd) =
@@ -1752,9 +1764,8 @@ impl<'a> Cx<'a> {
         }
         match &scope.owner {
             ScopeOwner::TopLevel => None,
-            ScopeOwner::Function(name) => {
-                let f =
-                    self.tree().functions().iter().find(|f| f.name.eq_ignore_ascii_case(name))?;
+            ScopeOwner::Function { fqn, .. } => {
+                let f = self.scope_function(fqn)?;
                 f.ret.as_ref().map(|r| (r, f.name.clone()))
             }
             ScopeOwner::Method { class, method } => {
@@ -1812,9 +1823,8 @@ impl<'a> Cx<'a> {
         }
         match &scope.owner {
             ScopeOwner::TopLevel => None,
-            ScopeOwner::Function(name) => {
-                let f =
-                    self.tree().functions().iter().find(|f| f.name.eq_ignore_ascii_case(name))?;
+            ScopeOwner::Function { fqn, .. } => {
+                let f = self.scope_function(fqn)?;
                 let ret = self.envelopes_of(f.docblock.as_deref(), self.cur, f.span.start)?.ret?;
                 Some((ret, f.name.clone()))
             }

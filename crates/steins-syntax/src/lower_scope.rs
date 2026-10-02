@@ -96,8 +96,17 @@ fn collect_scopes(
     match node {
         Node::Function(f) => {
             let name = bytes_to_string(f.name.value);
+            let ctx = ctx_of(contexts, regions, to_span(f.name.span()).start);
+            // Case-preserved, as the class arm's: a lookup folds case against
+            // `FunctionDecl::fqn`, and the namespace is what tells two same-named
+            // functions of one file apart.
+            let fqn = if ctx.namespace.is_empty() {
+                name.clone()
+            } else {
+                format!("{}\\{}", ctx.namespace, name)
+            };
             out.push(build_scope(
-                ScopeOwner::Function(name),
+                ScopeOwner::Function { name, fqn },
                 f.body.statements.as_slice(),
                 ret_hint_of(f.return_type_hint.as_ref()),
                 Some(&f.parameter_list),
@@ -279,7 +288,7 @@ fn build_scope_from(
     // The flag IS the inventory being non-empty (never a second computation).
     let poisoned = !opaque.is_empty();
     let function_name = match &owner {
-        ScopeOwner::Function(name) => Some(name.clone()),
+        ScopeOwner::Function { fqn, .. } => Some(fqn.clone()),
         ScopeOwner::TopLevel
         | ScopeOwner::Method { .. }
         | ScopeOwner::Closure { .. }

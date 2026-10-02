@@ -12,8 +12,8 @@ is visible *in the IR*, not hidden in the walk.
 
 ```text
 Scope {
-  owner:        TopLevel | Function(name) | Method{class, method} | Closure{def_offset}
-  function_name: Option<String>          // free functions only
+  owner:        TopLevel | Function{name, fqn} | Method{class, method} | Closure{def_offset}
+  function_name: Option<String>          // free functions only: the owner's fqn
   poisoned:     bool
   stmts:        Vec<Stmt>                // the trace
   method_calls: Vec<CallExpr>            // comprehensive, see below

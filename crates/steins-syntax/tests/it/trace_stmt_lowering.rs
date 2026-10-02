@@ -12,7 +12,7 @@ use steins_syntax::{ScopeOwner, SourceTree, Stmt, StmtKind};
 fn stmts(params: &str, body: &str) -> Vec<Stmt> {
     let src = format!("<?php\nfunction f({params}): void {{\n{body}\n}}\n");
     let tree = SourceTree::parse(&src);
-    let f = tree.scopes().iter().find(|sc| matches!(&sc.owner, ScopeOwner::Function(n) if n == "f"));
+    let f = tree.scopes().iter().find(|sc| matches!(&sc.owner, ScopeOwner::Function { name: n, .. } if n == "f"));
     f.expect("the function's scope").stmts.clone()
 }
 

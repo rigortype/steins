@@ -15,7 +15,7 @@ fn scope_of(body: &str) -> Scope {
     let tree = SourceTree::parse(&src);
     tree.scopes()
         .iter()
-        .find(|s| matches!(&s.owner, ScopeOwner::Function(n) if n == "f"))
+        .find(|s| matches!(&s.owner, ScopeOwner::Function { name: n, .. } if n == "f"))
         .expect("the function scope")
         .clone()
 }

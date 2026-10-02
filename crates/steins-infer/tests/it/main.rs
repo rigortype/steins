@@ -75,6 +75,7 @@ mod fold_table_persistence;
 mod folding;
 mod foreach_elements;
 mod foreach_non_iterable;
+mod function_identity;
 mod generics_carry;
 mod guard_conjunct_writes;
 mod guard_join_cross_lane;

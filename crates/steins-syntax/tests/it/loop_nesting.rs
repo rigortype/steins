@@ -81,7 +81,7 @@ fn lower_within_budget(src: String) -> (Vec<String>, Duration) {
             let names = tree
                 .scopes()
                 .iter()
-                .filter(|s| matches!(&s.owner, ScopeOwner::Function(n) if n == "f"))
+                .filter(|s| matches!(&s.owner, ScopeOwner::Function { name: n, .. } if n == "f"))
                 .flat_map(|s| s.maybe_undefined_reads.iter().map(|r| r.name.clone()))
                 .collect();
             let errors = tree.parse_errors().len();
