@@ -173,22 +173,35 @@ future consumer and this repo already demonstrated it does not generalize.
      consumes only ASCII and a point is three non-ASCII bytes. The result is
      checked against the parser's `value` with U+FFFD at the points, and a
      literal that disagrees declines.
-   - **Names (§2.5, extended).** A name token (identifier of any form, or a
-     variable) that spans a point, or a string literal read *as* a name (a
-     callable, an effect label), marks the tree (`SourceTree::names_lossy`).
-     The analyzer skips such a file's own passes, silently and without the
+   - **Names (§2.5, extended).** A name *token* (identifier of any form, or a
+     variable) that spans a point marks the tree (`SourceTree::names_lossy`).
+     A string literal read *as* a name (a callable, an effect label, a string
+     argument of a statically named call) does not mark the file: it is read
+     through the restored bytes, and non-UTF-8 bytes take the site's own
+     decline (an opaque callback, `RunArg::Other`, an unrecognized envelope),
+     which is §2.5's per-site silence. A non-UTF-8 name can only name something
+     whose declaring token is itself over a replaced byte, and that file is
+     marked already. (The first version of this amendment marked the file at
+     those sites too, which took every file that spelled a lossy string as a
+     call argument out of the analysis; the review caught it.)
+     The analyzer skips a marked file's own passes, silently and without the
      `syntax.unparsable` finding or its dam, because the source is fine and
      only the text it was read as is not, and no caller descends into its
      function and method bodies. The declarations stay in the index, where they
      can only silence an absence claim. This is deliberately file-wide: two
      names that differ only in replaced bytes cannot be told apart by any lane
      reading the decoded text.
-   - **Writers.** `check --fix`, `transform` (at plan time, so a dry run does
-     not offer a diff `--apply` would refuse), MCP `apply_plan` and `annotate`
-     refuse a file whose bytes on disk are not valid UTF-8, by name, before
-     writing anything. They splice into the decoding, and writing it back
-     would replace the file's own bytes with U+FFFD. `effect-diff` only reads
-     sources and writes its baseline, so it needs no refusal.
+   - **Writers.** `check --fix` and `transform` drop the edits to a file that
+     was analyzed through a lossy decoding, one named notice per file with the
+     reason `byte-lossy-source`, and judge and write the rest of the plan as it
+     stands (`transform` does this at plan time, so a dry run does not offer a
+     diff `--apply` would drop; a `--fix` whose every edit is in such files is
+     refused with that reason). MCP `apply_plan` refuses a plan that edits one,
+     and `annotate` refuses such a target, since its output is a copy of the
+     text. Which files are lossy is read off the analyzed inputs' loss maps,
+     not re-read from disk. The writers splice into the decoding, and writing
+     it back would replace the file's own bytes with U+FFFD. `effect-diff` only
+     reads sources and writes its baseline, so it needs no refusal.
    - **Transport.** The loss rides on the salsa input (`SourceFile::loss`,
      a defaulted field, so `SourceFile::new` is unchanged), on the generation
      capture (`Captured`, `GenerationOutcome::losses`) for the warm path, and
@@ -203,7 +216,9 @@ future consumer and this repo already demonstrated it does not generalize.
    writers cannot touch these files and the LSP and fix-it offsets are the
    decoding's; effect and throw summaries are keyed by name across files and
    are not declined for a file whose names collapsed; and a name inside a
-   docblock is not read through the map. §3.3 (salsa backdating) is closed
+   docblock is not read through the map (#983: a docblock class name
+   collapses to U+FFFD and yields a strict-tier claim against the wrong
+   class). §3.3 (salsa backdating) is closed
    for what the value lane reads, because a literal's bytes are in the tree,
    but not for a byte-lossy file that differs only in a comment.
 3. **Salsa backdating.** `SourceTree` derives `Eq`, and two file revisions

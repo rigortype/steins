@@ -396,11 +396,13 @@ collapse (issue #927, ADR-0080 §3.2's interim): a string literal over a replace
 byte is the bytes the file spells, so it compares and keys as a byte string and
 does not fold, and a file with a class, function, method, property, constant or
 variable name over a replaced byte makes no claim at all, nor is its code
-descended into from other files. `check --fix`, `transform`, MCP apply and
-`annotate` refuse such a file, since writing the decoding back would replace its
-original bytes. What stays open is the byte-source move itself: the text is
-still the decoding, so the writers cannot touch these files, and the salsa
-backdating in §3.3 is closed only for what the value lane reads.
+descended into from other files. `check --fix` and `transform` leave such a
+file's edits out with a named notice (`byte-lossy-source`) and write the rest,
+and MCP apply and `annotate` refuse it, since writing the decoding back would
+replace its original bytes. What stays open is the byte-source move itself: the
+text is still the decoding, so the writers cannot touch these files; a name in
+a docblock is not read through the map (#983); and the salsa backdating in §3.3
+is closed only for what the value lane reads.
 
 **Builtin parameter types reach only what the engine can be asked and the
 native relation can spell** (issue #423, ADR-0056 §9; the whole-surface gap of
