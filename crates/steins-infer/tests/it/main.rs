@@ -139,6 +139,7 @@ mod printf_arity;
 mod prop_fetch_subjects;
 mod property_hook_bodies;
 mod property_maybe_undefined;
+mod reference_suite_pins;
 mod reflected_class_world;
 mod region_purity;
 mod registry;
