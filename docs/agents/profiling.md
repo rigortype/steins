@@ -50,12 +50,21 @@ The cost centre is a family of whole-subtree scans in `steins-syntax` that re-ru
 
 ## The large private project (#658, 2026-10)
 
-The profile above is of the public corpus. The largest private fp-gate project was a different story until #884 (bounded shapes) and #793 (the presence pass's loop-body walk) landed: it did not finish, because one generated file with tens of thousands of straight-line `$x[] = <literal>;` appends cost O(N³) in `walk_trace` → `apply_offset_append` → `array_push_written_fact` → `sealed_with_order`, and nothing crosses file boundaries in that cost. Measure the order of magnitude before trusting any whole-project number taken from it.
+The profile above is of the public corpus. The largest private fp-gate project was a different story until #884 (bounded shapes) landed: it did not finish, because one generated file with tens of thousands of straight-line `$x[] = <literal>;` appends cost O(N³) in `walk_trace` → `apply_offset_append` → `array_push_written_fact` → `sealed_with_order`, and nothing crosses file boundaries in that cost.
 
-With those two fixes in:
+With #884 in (2026-10-02, release build, `--no-cache --no-php --profile strict`, tens of thousands of files), the project completes in about 186 s wall with peak RSS about 21 GiB (22.7 GB), and the per-file walk is no longer the bottleneck. The split, from `--progress`:
 
-- **The project completes** (minutes cold on a contended machine, via `steins check --progress --no-cache --no-php`), and the per-file walk is no longer the bottleneck. The slow-file lines are the way to confirm that on a new checkout; a walk that dominates again will show as one or a few files, not a flat tail.
-- **Do not read its profile as the shape-saturated column above.** That column was a synthetic workload; this project's cost was one input pathology, now bounded.
+| phase | time |
+| --- | --- |
+| discover | 3.6 s |
+| parse | 90.6 s |
+| universe + purity oracle | 15.4 s |
+| walk (1 worker) | 28.4 s |
+| report (fixpoints: effects 15.2 s, throws 35.5 s) | 36.3 s |
+| suppress + output | 6.5 s |
+
+- **The cost is spread across phases.** Parsing is about half of the wall, and the report's fixpoints cost more than the walk. Six files took 250 ms or more to walk and none took a second, so a walk that dominates again will show as one or a few slow-file lines, not a flat tail.
+- **Do not read its profile as the shape-saturated column above.** That column is a synthetic workload; this project's cost was one input pathology, now bounded.
 - **Peak RSS is the parsed universe, not the walk.** The 10 GB and the 65 MB readings in the #658 diagnosis came from one process at two stages: the whole project's parsed trees held in the salsa database, which is the resident set while the walk runs, and what is left once the process is paged out while stuck on one file. Nothing grew in the hot loop. So an RSS number says how large the parsed universe is, scaled by file count and size; it is not evidence of a leak, and it does not move when a walk-time fix lands.
 
 To see where a run is, use `steins check --progress` (phases and slow files) and, in the gate, the start and end lines and `--deadline` (see `docs/agents/verification.md`).
