@@ -437,8 +437,14 @@ operand (ADR-0099 §4.3) and a builtin's or engine method's argument:
   whatever the hidden method declares.
 - **An engine method**: the mined method row for the class the chain leaves the project at, for a
   receiver that names its class exactly (`new Foo`, `Foo::`, `parent::`), and for a bound receiver
-  (`$this`, `self::`, a declared parameter) only a final `Throwable` accessor (`getMessage()`,
-  `getLine()`, `getTraceAsString()`: `Exception` and `Error` declare them final). Any other engine
+  (`$this`, `self::`, a declared parameter) only a final `Throwable` accessor over a typed
+  property (`getFile()`, `getLine()`, `getTraceAsString()`: `Exception` and `Error` declare them
+  final). `getMessage()` and `getCode()` are final too but read an untyped property, which a
+  subclass may fill with an object: `getMessage()` then runs its `__toString` in the accessor and
+  `getCode()` returns it (witnessed on PHP 8.5.11), so neither is read on any receiver, `parent::`
+  and `Foo::` included, which run on `$this`. They are what the review of #996 found false in
+  this note's first form; the effect lane's own accessor row has the same premise on master
+  (issue #997). Any other engine
   method on a bound receiver stays unproven, because the engine's declared type there may be a
   tentative one, which a userland override is free to ignore: `Countable::count()` returns what the
   class returns (witnessed on PHP 8.5.11, an override returning an object runs `__toString`).
@@ -447,22 +453,28 @@ Witnessed on PHP 8.5.11, each against the rule: a namespaced `strlen` returning 
 `strlen($s)` calls in that namespace; a `function_exists`-guarded function binds by load order; a
 private method called from outside is `__call`'s; a `: static` or class return is an object; an
 untyped function and a `: S` function are objects; `current()` is `mixed`; `gmp_init()` returns a
-`GMP`; an array result converts to `Array` and runs nothing.
+`GMP`; an array result converts to `Array` and runs nothing. A conditionally declared class
+anywhere on the chain between the receiver's class and the declaring one declines a method's
+return (the dispatch-side twin is issue #998). A namespaced function that shadows a builtin and
+sits outside the analysed paths is not seen, so the call reads the builtin's row, as every call
+site already resolves a name against the paths it was given.
 
 Public corpora, `check --profile strict --no-php --vendor-diagnostics --no-cache`, base against
-head: of 28,847 functions 2,321 change the kinds behind their `…?`, none gains a kind, 84 become
-exhaustive (63 in both lanes, 20 in the throw lane only, 1 in the effect lane only) and none loses
+head: of 28,847 functions 2,317 change the kinds behind their `…?`, none gains a kind, 83 become
+exhaustive (63 in both lanes, 20 in the throw lane only) and none loses
 exhaustiveness; no proven label moves. By the one callee category that suffices (a variant with
-only that category enabled): a builtin's return 1,850 (66 become exhaustive), a project method's
-native return 390 (17), a final `Throwable` accessor 5 (1), and 72 need two categories or inherit
-the change through a call edge. The kinds removed: `operator-to-string` 1,272 functions,
-`operator-iteration` 1,044 (`foreach (explode(…) as …)`), `user-code-reach` 297 in the effect
-lane and 465 in the throw lane, `operator-array-access` 119 (`explode(…)[0]`). `effect-diff`
-reports 64 `coverage-completed` events and nothing else. `check` under `default` is byte-identical
+only that category enabled, measured before `getMessage()` was withdrawn): a builtin's return
+1,850 (66 become exhaustive), a project method's native return 390 (17), a final `Throwable`
+accessor 5 (1), and 72 need two categories or inherit the change through a call edge; the
+accessor class is now gone with `getMessage()`, and four functions that used it regain their gaps
+(two `writeError` methods, `RunProcessFailedException::__construct` and a handler that calls it). The kinds removed: `operator-to-string` 1,270 functions,
+`operator-iteration` 1,044 (`foreach (explode(…) as …)`), `user-code-reach` 295 in the effect
+lane and 463 in the throw lane, `operator-array-access` 119 (`explode(…)[0]`). `effect-diff`
+reports 63 `coverage-completed` events and nothing else. `check` under `default` is byte-identical
 but for the vendored-finding counts (composer 332 to 325, phpunit 173 to 167). Under `strict`,
 `throw.maybe-undeclared` loses 283 findings and gains none (see ADR-0099's amendment of this
-date). `transform effects-envelope` goes from 723 to 741 edits, 14 `@phpstan-impure nondet.time`
-tags and 4 class-wide `@phpstan-all-methods-pure` tags that were refused as not exhaustive, with
+date). `transform effects-envelope` goes from 723 to 740 edits, 14 `@phpstan-impure nondet.time`
+tags and 3 class-wide `@phpstan-all-methods-pure` tags that were refused as not exhaustive, with
 none lost and no new diagnostic after the edit; `throws-envelope` (1,934) and `loop-to-array-map`
 (0) are byte-identical.
 

@@ -305,7 +305,8 @@
 # (`ResultCacheManager.php:2329`, `FixerApplication.php:273`, `StubPhpDocProvider.php:238`); five
 # inherited findings gained the kind without a count change. Measured by the local fp-gate on
 # 26699ed5 against 37d20aef, same revision.
-"phpstan/phpstan-src" = 892
+# 892 → 888  2026-10-03 (issue #877): -4 throw.maybe-undeclared (871 → 867), a call result read off the callee's declared return; the triage is above the composer row. Measured by the local fp-gate on 0d280bca (the first form of S8), not remeasured on the head that withdrew `getMessage()`.
+"phpstan/phpstan-src" = 888
 
 # New rows, 2026-10-02 (issues #915, #922): the strict-floor ids of the public packages that
 # had none. Measured under PHP 8.4.25 (CI's posture); the throw lane does not read the sidecar.
