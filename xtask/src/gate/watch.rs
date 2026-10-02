@@ -176,7 +176,7 @@ impl Standing {
         if snapshot.in_flight.is_empty() {
             out.push_str(
                 "\n      no file of this project is walking; it may be waiting on the shared \
-                 walk pool or on another project (see the projects below)",
+                 walk pool or on another running project in this list",
             );
         } else {
             out.push_str(&format!("\n      files in flight ({}):", snapshot.in_flight.len()));
