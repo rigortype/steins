@@ -535,6 +535,40 @@ function f(): int {
 }
 
 #[test]
+fn silent_on_a_do_while_whose_body_returns() {
+    // Issue #679: the body runs at least once, so a body that returns on every path
+    // returns — the condition is never evaluated.
+    assert_silent(
+        "<?php
+function f(): int {
+    do {
+        return 1;
+    } while (rand() > 0);
+}
+",
+        "proven: a `do`-`while` body runs at least once",
+    );
+}
+
+#[test]
+fn a_do_while_whose_body_can_continue_still_reports() {
+    // The negative control: a `continue` of this loop re-tests the condition, which
+    // may fail and run off the end of the function.
+    maybe(
+        "<?php
+function f(): int {
+    do {
+        if (rand() > 0) {
+            continue;
+        }
+        return 1;
+    } while (rand() > 0);
+}
+",
+    );
+}
+
+#[test]
 fn silent_on_a_match_statement_whose_every_arm_terminates() {
     // No `default`: PHP throws `\UnhandledMatchError` on no match, so the implicit
     // no-match arm is a terminator too — every arm terminating proves the whole construct.
