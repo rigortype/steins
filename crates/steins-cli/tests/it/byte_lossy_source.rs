@@ -295,6 +295,120 @@ fn transform_still_writes_the_other_files_of_a_plan_with_a_byte_lossy_one() {
 }
 
 #[test]
+fn transform_accounts_for_a_byte_lossy_file_as_refused_not_as_promoted() {
+    // Two candidate sites, one per file; only the clean one is written. The oracle and the
+    // refusals say so in both formats, rather than counting the lossy file's site as
+    // promoted and leaving the difference to a stderr notice.
+    let proj = TempProject::new("transformcounts");
+    let lossy = b"<?php\n// \x82\xA0\n/** @param int $x */\nfunction f($x) { return $x; }\n";
+    proj.write("lossy.php", lossy);
+    proj.write("clean.php", b"<?php\n/** @param int $y */\nfunction h($y) { return $y; }\n");
+    proj.write("main.php", b"<?php\nf(1);\nh(2);\n");
+
+    let text = run(&["transform", "phpdoc-to-native", proj.path()]);
+    assert!(text.stdout.contains("2 enumerated: 1 promoted, 1 refused"), "{}", text.stdout);
+    let refusal = |l: &&str| l.contains("lossy.php") && l.contains("[byte-lossy-source]");
+    assert_eq!(text.stdout.lines().filter(refusal).count(), 1, "{}", text.stdout);
+    let diffs: Vec<&str> = text.stdout.lines().filter(|l| l.starts_with("+++ ")).collect();
+    assert!(diffs.len() == 1 && diffs[0].contains("clean.php"), "only the clean file: {diffs:?}");
+
+    let json = run(&["transform", "phpdoc-to-native", "--format", "json", proj.path()]);
+    let doc: serde_json::Value = serde_json::from_str(&json.stdout).expect("json");
+    let report = &doc["report"];
+    assert_eq!(report["oracle"]["enumerated"], 2, "{}", json.stdout);
+    assert_eq!(report["oracle"]["transformed"], 1, "{}", json.stdout);
+    assert_eq!(report["oracle"]["refused"], 1, "{}", json.stdout);
+    let refusals = report["refusals"].as_array().expect("refusals");
+    assert_eq!(refusals.len(), 1, "{}", json.stdout);
+    assert_eq!(refusals[0]["reason"], "byte-lossy-source");
+    assert_eq!(refusals[0]["site"]["label"], "function f() param $x");
+    assert!(refusals[0]["site"]["path"].as_str().unwrap().ends_with("lossy.php"));
+    let edits = report["plan"]["edits"].as_array().unwrap();
+    let edited: Vec<&str> = edits.iter().map(|e| e["path"].as_str().unwrap()).collect();
+    assert!(!edited.is_empty() && edited.iter().all(|p| p.ends_with("clean.php")), "{edited:?}");
+
+    let applied = run(&["transform", "phpdoc-to-native", "--apply", proj.path()]);
+    assert!(applied.stdout.contains("2 enumerated: 1 promoted, 1 refused"), "{}", applied.stdout);
+    assert_eq!(proj.read("lossy.php"), lossy);
+    assert!(String::from_utf8(proj.read("clean.php")).unwrap().contains("function h(int $y)"));
+}
+
+#[test]
+fn every_transform_refuses_a_byte_lossy_files_sites_by_name() {
+    // Each kind enumerates the same sites in a clean file and its byte-lossy twin (the twin
+    // differs only in a comment); the twin's all end refused as `byte-lossy-source`, none
+    // transformed, and no edit reaches the plan.
+    let doc = b"/** @param int $x */\nfunction f($x) { return $x; }\n";
+    let cases: [(&str, Vec<u8>, bool); 5] = [
+        ("phpdoc-to-native", [doc.as_slice(), b"f(1);\n"].concat(), true),
+        ("phpdoc-honesty", [doc.as_slice(), b"f(\"a\");\n"].concat(), true),
+        ("throws-envelope", b"function t() { throw new Exception(\"x\"); }\n".to_vec(), true),
+        ("effects-envelope", b"function e(): void { echo \"x\"; }\n".to_vec(), true),
+        (
+            "loop-to-array-map",
+            b"function m(array $xs) { $o = []; foreach ($xs as $x) { $o[] = $x; } return $o; }\n"
+                .to_vec(),
+            false,
+        ),
+    ];
+    for (kind, body, promotes) in cases {
+        let report = |comment: &[u8]| {
+            let proj = TempProject::new("kinds");
+            proj.write("a.php", &[b"<?php\n// ", comment, b"\n", body.as_slice()].concat());
+            let r = run(&["transform", kind, "--format", "json", proj.path()]);
+            let doc: serde_json::Value = serde_json::from_str(&r.stdout).expect("json");
+            doc["report"].clone()
+        };
+        let clean = report(b"c");
+        if promotes {
+            let o = &clean["oracle"];
+            assert!(o["transformed"].as_u64() > Some(0), "{kind}: the control writes:\n{clean}");
+        }
+        let lossy = report(b"\x82\xA0");
+        let o = &lossy["oracle"];
+        assert!(o["enumerated"].as_u64() > Some(0), "{kind}: the site is enumerated:\n{lossy}");
+        assert_eq!(o["transformed"], 0, "{kind}:\n{lossy}");
+        assert_eq!(o["refused"], o["enumerated"], "{kind}:\n{lossy}");
+        assert_eq!(lossy["plan"]["edits"], serde_json::json!([]), "{kind}:\n{lossy}");
+        let refusals = lossy["refusals"].as_array().unwrap();
+        assert!(
+            refusals.iter().all(|r| r["reason"] == "byte-lossy-source"),
+            "{kind}:\n{lossy}"
+        );
+    }
+}
+
+#[test]
+fn check_fix_json_names_the_files_whose_fixes_were_left_out() {
+    let proj = TempProject::new("fixjson");
+    proj.write("app.php", b"<?php\n$x = 5;\n\\PHPStan\\dumpType($x);\n");
+    let legacy = b"<?php\n$s = \"\x82\xA0\";\n$y = 6;\n\\PHPStan\\dumpType($y);\n";
+    proj.write("legacy.php", legacy);
+    let r = run(&["check", "--fix", "--format", "json", proj.path()]);
+    let doc: serde_json::Value = serde_json::from_str(&r.stdout).expect("json");
+    let skipped = doc["fix"]["skipped"].as_array().expect("skipped");
+    assert_eq!(skipped.len(), 1, "{}", r.stdout);
+    assert_eq!(skipped[0]["reason"], "byte-lossy-source");
+    assert!(skipped[0]["path"].as_str().unwrap().ends_with("legacy.php"), "{}", r.stdout);
+    assert!(skipped[0]["detail"].as_str().unwrap().contains("not valid UTF-8"), "{}", r.stdout);
+    // The lossy file's finding is still a finding, with the fix that was not applied.
+    let findings = doc["findings"].as_array().unwrap();
+    let unfixed = |f: &&serde_json::Value| f["path"].as_str().unwrap().ends_with("legacy.php");
+    assert_eq!(findings.iter().filter(unfixed).count(), 1, "{}", r.stdout);
+    assert_eq!(doc["fix"]["fixed"].as_array().unwrap().len(), 1, "{}", r.stdout);
+    assert_eq!(proj.read("legacy.php"), legacy);
+}
+
+#[test]
+fn check_fix_json_has_an_empty_skipped_list_when_nothing_was_left_out() {
+    let proj = TempProject::new("fixjsonclean");
+    proj.write("app.php", b"<?php\n$x = 5;\n\\PHPStan\\dumpType($x);\n");
+    let r = run(&["check", "--fix", "--format", "json", proj.path()]);
+    let doc: serde_json::Value = serde_json::from_str(&r.stdout).expect("json");
+    assert_eq!(doc["fix"]["skipped"], serde_json::json!([]), "{}", r.stdout);
+}
+
+#[test]
 fn annotate_refuses_a_byte_lossy_file() {
     let proj = TempProject::new("annotate");
     let file = proj.write("lib.php", b"<?php\n// \x82\xA0\nfunction f() { return 1; }\n");
@@ -302,4 +416,43 @@ fn annotate_refuses_a_byte_lossy_file() {
     assert_eq!(r.code, 2, "stdout:\n{}\nstderr:\n{}", r.stdout, r.stderr);
     assert!(r.stderr.contains("not valid UTF-8"), "stderr:\n{}", r.stderr);
     assert!(r.stdout.is_empty(), "no annotated copy is printed:\n{}", r.stdout);
+}
+
+/// The finding ids of a run, one per `error[...]` line, in order.
+fn ids(stdout: &str) -> Vec<&str> {
+    stdout
+        .lines()
+        .filter_map(|l| l.split_once("error[")?.1.split_once(']').map(|(id, _)| id))
+        .collect()
+}
+
+#[test]
+fn an_effect_label_over_non_utf8_bytes_stays_an_unknown_label_and_a_bound_envelope() {
+    // The label's bytes are `io` and `0xC9`, the same bytes whether the file writes the
+    // escape (a valid UTF-8 file) or the raw byte (a Latin-1 one). The vocabulary is ASCII
+    // plus plugin labels, so it is an unknown label, and the envelope it sits in stays bound:
+    // the `echo` it does not cover exceeds it under the strict profile. Both findings are
+    // true positives on the base, and dropping the envelope would lose them together.
+    let proj = TempProject::new("label");
+    let body = b"] function f(): void { echo \"x\"; }\n";
+    proj.write("esc.php", &[b"<?php\n#[\\Steins\\Effect(\"io\\xC9\")".as_slice(), body].concat());
+    proj.write("raw.php", &[b"<?php\n#[\\Steins\\Effect(\"io\xC9\")".as_slice(), body].concat());
+    for file in ["esc.php", "raw.php"] {
+        let path = format!("{}/{file}", proj.path());
+        let default = run(&["check", "--no-cache", "--profile", "default", &path]);
+        assert_eq!(ids(&default.stdout), ["effect.unknown-label"], "{file}:\n{}", default.stdout);
+        assert!(
+            default.stdout.contains("unknown effect label 'io\\xC9' in #[\\Steins\\Effect]"),
+            "{file}: the label is spelled the way PHP spells those bytes:\n{}",
+            default.stdout
+        );
+        assert!(default.stdout.contains(" on f()"), "{file}:\n{}", default.stdout);
+        let strict = run(&["check", "--no-cache", "--profile", "strict", &path]);
+        assert_eq!(
+            ids(&strict.stdout),
+            ["effect.unknown-label", "effect.envelope-exceeded"],
+            "{file}:\n{}",
+            strict.stdout
+        );
+    }
 }

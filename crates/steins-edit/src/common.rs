@@ -52,6 +52,24 @@ pub const REASON_MAGIC_METHOD: &str = "magic-method";
 /// framework reflection-dispatch hole (ADR-0047 §4; amends ADR-0041 §3).
 /// Honesty never hits this: its "lie" enumeration needs an observed violation.
 pub const REASON_NO_OBSERVED_CALLERS: &str = "no-observed-callers";
+/// The candidate's file is not valid UTF-8 (issue #927): it was analyzed through a decoding
+/// that replaces each ill-formed byte with U+FFFD, and an edit is spliced into that
+/// decoding, so writing it back would destroy the file's own bytes. A per-file refusal: every
+/// candidate in such a file takes it, after it is enumerated.
+pub const REASON_BYTE_LOSSY_SOURCE: &str = "byte-lossy-source";
+
+/// The `(reason, detail)` a candidate in a byte-lossy file refuses with
+/// ([`REASON_BYTE_LOSSY_SOURCE`]).
+#[must_use]
+pub fn byte_lossy_refusal() -> (&'static str, String) {
+    (
+        REASON_BYTE_LOSSY_SOURCE,
+        "the file is not valid UTF-8, so it was analyzed through a decoding that replaces each \
+         ill-formed byte, and writing the edit back would destroy the original bytes (convert \
+         the file to UTF-8, or make the edit by hand)"
+            .to_owned(),
+    )
+}
 
 // Candidate / call-site helpers
 

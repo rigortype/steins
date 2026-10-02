@@ -421,7 +421,7 @@ pub(crate) struct FixRun {
     pub(crate) refusal: Option<FixRefusal>,
     /// The files whose fixes were left out because the analysis read them through a lossy
     /// decoding (issue #927), each with its notice. Their findings stay displayed as unfixed.
-    skipped: Vec<(String, String)>,
+    pub(crate) skipped: Vec<(String, String)>,
 }
 
 /// The fix refusal for a run, or a post-check, in which a file's analysis

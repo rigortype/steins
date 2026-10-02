@@ -20,8 +20,8 @@ use steins_infer::{Diagnostic, INTERNAL_PANIC_ID, NoFold, check_project};
 
 use crate::config::{allow_list_from_disk, effects_policy_from_disk, load_partitions, load_vouches};
 use crate::project::{
-    byte_lossy_paths, collect_files, drop_byte_lossy_edits, load_project, reject_missing_paths,
-    source_input,
+    byte_lossy_paths, byte_lossy_refusal_notices, collect_files, drop_byte_lossy_edits,
+    load_project, reject_missing_paths, source_input,
 };
 use crate::{Format, profile};
 
@@ -323,9 +323,12 @@ pub(crate) fn plan_transform_run(
     }
 
     // A file that was not valid UTF-8 is analyzed through a lossy decoding, and an edit would
-    // be spliced into that decoding and written over the file's own bytes (issue #927). Its
-    // edits are dropped, named, before the plan is shown or checked, so a dry run does not
-    // offer a diff that `--apply` would have to turn down; the rest of the plan stands.
+    // be spliced into that decoding and written over the file's own bytes (issue #927). The
+    // planners refuse its sites themselves (`byte-lossy-source`), so the oracle, the refusals
+    // and the diff all agree with what `--apply` writes; here each such file is named. Any
+    // edit that still reaches the plan for one is dropped, as a backstop for a planner that
+    // does not know the reason, before the plan is shown or checked; the rest of the plan stands.
+    notices.extend(byte_lossy_refusal_notices(&report.refusals));
     for (_, notice) in drop_byte_lossy_edits(&mut report.plan, &byte_lossy_paths(db, project)) {
         notices.push(notice);
     }
