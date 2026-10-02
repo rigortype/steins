@@ -818,8 +818,9 @@ pub fn final_method_effect_labels(class: &str, method: &str) -> Option<&'static 
     if accessor && is_builtin_throwable(class) { method_effect_labels(class, method) } else { None }
 }
 
-/// Whether `class` is a global engine class whose ancestry in the mined
-/// hierarchy reaches `Throwable`.
+/// Whether `class` is an engine class (an FQN: `Random\RandomException` counts, a
+/// namespace the project made up does not) whose ancestry in the mined hierarchy
+/// reaches `Throwable`.
 pub(crate) fn is_builtin_throwable(class: &str) -> bool {
     let mut pending = vec![class];
     let mut seen: Vec<String> = Vec::new();

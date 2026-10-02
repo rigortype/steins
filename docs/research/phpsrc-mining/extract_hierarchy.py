@@ -14,6 +14,15 @@ DECL_RE = re.compile(
     r'(?P<name>[A-Za-z_\\][A-Za-z0-9_\\]*)'
     r'(?P<rest>.*)$', re.DOTALL)
 
+def resolve(ref, cur_ns):
+    """Resolve a name in an `extends`/`implements` list the way PHP does: a leading
+    backslash is fully qualified, anything else is relative to the current namespace
+    (no stub uses `use`)."""
+    ref = ref.strip()
+    if ref.startswith('\\') or not cur_ns:
+        return ref.lstrip('\\')
+    return cur_ns + '\\' + ref
+
 def parse_file(path):
     with open(path, encoding='utf-8', errors='replace') as fh:
         lines = fh.readlines()
@@ -24,11 +33,21 @@ def parse_file(path):
     while i < n:
         raw = lines[i]
         stripped = raw.lstrip()
-        nm = re.match(r'namespace\s*([A-Za-z_\\][A-Za-z0-9_\\]*)?\s*[{;]', stripped)
-        if nm:
-            cur_ns = (nm.group(1) or "").rstrip('\\')
-            i += 1
-            continue
+        # A `namespace` statement: `namespace X {`, `namespace X;`, `namespace {`, and
+        # the same with the brace on a following line (`namespace Random` then `{`,
+        # which random.stub.php and php_dom.stub.php use). Accumulate lines up to the
+        # `{` or `;` so the name is read whatever the layout.
+        if re.match(r'namespace\b(?!\\)', stripped):
+            header = stripped
+            j = i
+            while not re.search(r'[{;]', header) and j + 1 < n:
+                j += 1
+                header += ' ' + lines[j].strip()
+            nm = re.match(r'namespace\s*([A-Za-z_\\][A-Za-z0-9_\\]*)?\s*[{;]', header)
+            if nm:
+                cur_ns = (nm.group(1) or "").rstrip('\\')
+                i = j + 1
+                continue
         m = re.match(r'(abstract\s+|final\s+|readonly\s+)*(class|interface|enum)\s', stripped)
         if not m:
             i += 1
@@ -54,10 +73,10 @@ def parse_file(path):
             implements = []
             em = re.search(r'\bextends\s+(.+?)(?:\bimplements\b|$)', rest)
             if em:
-                extends = [x.strip().lstrip('\\') for x in em.group(1).split(',') if x.strip()]
+                extends = [resolve(x, cur_ns) for x in em.group(1).split(',') if x.strip()]
             im = re.search(r'\bimplements\s+(.+)$', rest)
             if im:
-                implements = [x.strip().lstrip('\\') for x in im.group(1).split(',') if x.strip()]
+                implements = [resolve(x, cur_ns) for x in im.group(1).split(',') if x.strip()]
             fqname = name.lstrip('\\')
             if cur_ns:
                 fqname = cur_ns + '\\' + fqname
@@ -87,6 +106,22 @@ for d in all_decls:
         dups.append((d['name'], d['file'], d['line']))
     else:
         seen[key] = d
+
+# A relative parent name that resolves to no declaration, while its global tail does,
+# is the stub's own slip (`class OpensslException extends Exception` inside
+# `namespace Openssl`, whose arginfo registers it with `zend_ce_exception`): the
+# engine's parent is the global class, so record that and say so.
+for d in seen.values():
+    for field in ('extends', 'implements'):
+        fixed = []
+        for ref in d[field]:
+            tail = ref.rsplit('\\', 1)[-1]
+            if ref.lower() not in seen and ref != tail and tail.lower() in seen \
+                    and '\\' not in seen[tail.lower()]['name']:
+                print(f"# {d['name']}: `{ref}` is no declaration; recorded as `{tail}`", file=sys.stderr)
+                ref = tail
+            fixed.append(ref)
+        d[field] = fixed
 
 print(f"# total declarations parsed: {len(all_decls)}, unique names: {len(seen)}", file=sys.stderr)
 if dups:
