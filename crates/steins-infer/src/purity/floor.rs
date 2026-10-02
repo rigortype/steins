@@ -33,6 +33,7 @@ use super::{
 };
 use crate::Sym;
 use crate::cx::Cx;
+use crate::dispatch::{Resolution, resolve_in_chain};
 use crate::project::{Diagnostic, FileUnit, Index};
 use crate::site::method::declared_receiver_fqn;
 use crate::site::reach::Frame;
@@ -234,8 +235,15 @@ impl<'a> Floor<'a> {
     }
 }
 
-/// Whether the declared receiver's class is attributed, for `method`, to a label the
-/// project tolerates.
+/// Whether the body a declared-receiver call runs is attributed, by the project's
+/// policy, to a label it tolerates (discharge 6).
+///
+/// The definite lane attributes by the body that **runs**: the resolved
+/// `Sym::Method`, keyed by the class that declares it, with no inheritance. A declared
+/// receiver names an abstraction, so this reads the same key only where dispatch is
+/// exact: the declared class is final, or the resolved method is final or declared in
+/// a final class. Otherwise a subclass or an implementation may run another body (a
+/// `LoudLogger::info` behind a `Logger` attributed `telemetry`), and the gaps stay.
 fn receiver_tolerated(
     cx: &Cx,
     frame: &Frame,
@@ -243,9 +251,18 @@ fn receiver_tolerated(
     method: &str,
     bound: OperativeBound<'_>,
 ) -> bool {
-    declared_receiver_fqn(cx, frame.class_fqn, frame.params, receiver).is_some_and(|fqn| {
-        bound.policy.method_attribution(&fqn, method).iter().any(|a| bound.policy.tolerates(a))
-    })
+    let Some(fqn) = declared_receiver_fqn(cx, frame.class_fqn, frame.params, receiver) else {
+        return false;
+    };
+    let Resolution::Found(r) = resolve_in_chain(cx, &fqn, method) else { return false };
+    let declared_final = cx.find_class(&fqn).is_some_and(|(_, c)| c.is_final);
+    let exact = declared_final || r.method.is_final || r.declaring_class.is_final;
+    exact
+        && bound
+            .policy
+            .method_attribution(&r.declaring_class.fqn, &r.method.name)
+            .iter()
+            .any(|a| bound.policy.tolerates(a))
 }
 
 /// How an inherited finding names the callee: `f()`, `C::m()`, `closure (line 3)`.

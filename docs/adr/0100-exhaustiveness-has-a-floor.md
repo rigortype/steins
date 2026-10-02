@@ -61,9 +61,9 @@ declarations, 1,058 (81%) are throw-non-exhaustive.
 4. **Nothing is fed back.** The exhaustiveness bit, the fixpoints, the writers
    (`effects-envelope`, `throws-envelope`, `loop-to-array-map`) and
    `effect-diff` read the same gaps as before and do not move. `annotate`'s `…?`
-   marker and gap kinds are unchanged too; its margin and JSON list every emitted
-   id regardless of profile, so the two ids appear there as the other strict ids
-   do. The floor is two reporting loops over the resolution those lanes already
+   marker and gap kinds are unchanged too; its text margin lists every emitted id
+   regardless of profile, so the two ids appear there as the other strict ids do
+   (its JSON carries no finding ids). The floor is two reporting loops over the resolution those lanes already
    compute.
 
 ## 3. Decision: granularity
@@ -141,7 +141,11 @@ A finding is not reported when:
    the contract undecided, so the finding lands at the caller's call site and
    names it. An untainting edge (a visible callback decides the contract) draws
    nothing, as for any callee. The throw lane has no fit relation: whether a
-   callee's `@throws` fits a caller's is #958, not a floor discharge.
+   callee's `@throws` fits a caller's is #958, not a floor discharge. A known
+   conservative imprecision: a flagged function that forwards its own flagged
+   parameter to another flagged function (`g(callable $c) { return f($c); }`, both
+   flagged) is reported at the forwarding call, because that call does not decide
+   the callable either, though its own caller's would.
 5. **A site guarded by a catch that absorbs `Throwable`** (throw lane). Some
    clause of some enclosing guard names `\Throwable` itself (resolved to its
    FQN, so `catch (Throwable)` in a namespace with no import is a different
@@ -153,14 +157,22 @@ A finding is not reported when:
    (\Throwable)` is not dammed yet" for the reporting side only; the throw
    set's exhaustiveness bit is unchanged.)
 
-6. **The project's tolerance policy** (effect lane; ADR-0084 §3's attribution,
-   read as the definite check reads it). An edge into a callee whose
-   `EffectSet.attribution` holds a label the policy tolerates is discharged (the
-   predicate `finding_groups` uses), and so are the `declared-receiver` and
-   `interop-envelope` gaps of a method call whose declared receiver's class
-   (`declared_receiver_fqn`) the policy attributes, for that method, to a
-   tolerated label. A tolerance is the project's calibrated floor; reporting
-   beneath it would make the strict id a second, uncalibrated policy surface.
+6. **The project's tolerance policy** (effect lane; ADR-0084 §3's attribution).
+   Two halves, both keyed as the definite check keys them: by the body that
+   *runs*, the resolved `Sym::Method`, under `policy.method_attribution(class,
+   method)` with the class that declares it and no inheritance.
+   - An edge into a callee whose `EffectSet.attribution` holds a label the policy
+     tolerates is discharged (the predicate `finding_groups` uses).
+   - The `declared-receiver` and `interop-envelope` gaps of a method call on a
+     declared receiver are discharged only where dispatch is exact: the declared
+     class is final, or the resolved method is final or declared in a final class.
+     The attribution is then read on the class that declares the resolved
+     method. A declared receiver is an abstraction, so on a non-final class, an
+     interface, or a `$this->log` typed to either, a subclass or an
+     implementation may run a body the policy does not attribute (`Logger` is
+     attributed `telemetry` while `LoudLogger::info` echoes), and the gaps stay.
+   A tolerance is the project's calibrated floor; reporting beneath it would make
+   the strict id a second, uncalibrated policy surface.
 
 **Deliberately not discharged:** every other kind, `NoEffectRow` and
 `NoThrowRow` included. A catalog name with no row is the analyzer's own
@@ -178,9 +190,11 @@ mask without the guard that absorbed it. Measured over the public corpus, 0 of
 ## 5. Decision O1: emit `throw.maybe-undeclared` now
 
 The throw sibling is loud: on the public corpus (ten packages, measured on the
-slice's branch) it reports 8,202 findings, 7,313 direct and 889 inherited,
-against 149 findings of both throw ids before (the ten public packages; the fp-gate's `phpstan-src` row is measured separately); per package, 4 (nikic/PHP-Parser)
-to 3,374 (composer/composer). By direct kind the volume is dynamic callees
+slice's branch; every figure in this paragraph counts vendor paths, the gate's
+basis, and without them the same run reports 7,938: 7,058 direct and 880
+inherited) it reports 8,202 findings, 7,313 direct and 889 inherited, against 149
+findings of both throw ids before (the fp-gate's `phpstan-src` row is measured
+separately); per package, 4 (nikic/PHP-Parser) to 3,374 (composer/composer). By direct kind the volume is dynamic callees
 (2,320), operand reach at operators (2,378), declared receivers (737),
 user-code reach at builtins (711), unknown classes (397), non-final `$this`
 (359) and catalog names with no throw row (349). It fires on about 81% of
@@ -197,18 +211,19 @@ that declares what a dynamic call provides, `@steins-ignore` with a reason, the
 baseline. The fp-gate's `THROW_EXPECTED` is reseeded to the measured counts
 (`xtask/fp-gate/throw_expected.toml`, with the triage by kind).
 
-**Writers.** `effects-envelope` writes only from an exhaustive summary (ADR-0082 §7), so a tag it writes draws no effect sibling (measured: 0 over 723 tags across the public corpora). `throws-envelope` writes the escapes it *proved*, in lockstep with `throw.undeclared`'s fire set (`proven && !covered`, whether or not the body is `…?`; ADR-0040 §1, ADR-0037), and `throw.undeclared` itself reads certainty, never the exhaustiveness bit. On the declaring side that is also PHPStan's reading: `missingCheckedExceptionInThrows` skips implicit throw points. But a callee's `@throws` is consumed as its throw type at PHPStan call sites (absent, the call is an implicit `Throwable`), so on a `…?` body the written tag is a verified lower bound the consumer reads as an upper one. The floor names the difference, at `strict` only: a tag written on a `…?` body draws `throw.maybe-undeclared` for the body's gaps. Measured on scratch copies of the ten public packages: 1,934 tags; PHP-Parser 4 → 276, monolog 174 → 936, composer 3,170 → 13,595; all 11 tags on symfony/process land on gapped units. The writer is unchanged here; whether it should refuse a `…?` body, write and report the gap in its own report, or keep writing, is #921, decided after S2–S8 have narrowed the gaps the count depends on.
+**Writers.** `effects-envelope` writes only from an exhaustive summary (ADR-0082 §7), so a tag it writes draws no effect sibling (measured: 0 over 723 tags across the public corpora). `throws-envelope` writes the escapes it *proved*, in lockstep with `throw.undeclared`'s fire set (`proven && !covered`, whether or not the body is `…?`; ADR-0040 §1, ADR-0037), and `throw.undeclared` itself reads certainty, never the exhaustiveness bit. On the declaring side that is also PHPStan's reading: `missingCheckedExceptionInThrows` skips implicit throw points. But a callee's `@throws` is consumed as its throw type at PHPStan call sites (absent, the call is an implicit `Throwable`), so on a `…?` body the written tag is a verified lower bound the consumer reads as an upper one. The floor names the difference, at `strict` only: a tag written on a `…?` body draws `throw.maybe-undeclared` for the body's gaps. Measured on scratch copies of the ten public packages (these three counts are non-vendor, the `check` basis): 1,934 tags; PHP-Parser 4 → 276, monolog 174 → 936, composer 3,170 → 13,595; all 11 tags on symfony/process land on gapped units. The writer is unchanged here; whether it should refuse a `…?` body, write and report the gap in its own report, or keep writing, is #921, decided after S2–S8 have narrowed the gaps the count depends on.
 
 The slice's stated acceptance, "zero sibling findings on written tags", holds for `effects-envelope` and was wrong for `throws-envelope`, for the reason above.
 
-**Known gaps.** #922: the fp-gate now routes by posture (every strict-floor id leaves its family table for the possibly-grade table, `xtask/src/gate.rs`), and the remainder is a per-id split of that one table. #923: a `Maybe`-certainty escape that carries no gap kind is not reported by the floor. #956: an inherited edge into a body whose only gaps are under its own `catch (\Throwable)` (§4). #957: typed `pure-callable` spellings. #958: the throw lane's fit question.
+**Known gaps.** #922: the fp-gate now routes by posture (every strict-floor id leaves its family table for the possibly-grade table, `xtask/src/gate.rs`), and the remainder is a per-id split of that one table. #923: a `Maybe`-certainty escape that carries no gap kind is not reported by the floor. #956: an inherited edge into a body whose only gaps are under its own `catch (\Throwable)` (§4). #959: an untainting edge into a flagged free function drops that callee's unrelated gaps from the exhaustiveness bit (pre-existing; the floor skips untainting edges and so inherits it). #957: typed `pure-callable` spellings. #958: the throw lane's fit question.
 
 ## 6. What this does not change
 
 The `effect.liskov-widened`, `throw.liskov-widened` and every proof-layer id;
 the exhaustiveness bit and the gap kinds' codec numbering; `annotate`'s `…?`
-marker and gap kinds (its margin and JSON list every emitted id regardless of
-profile, so the two ids appear there as the other strict ids do); the effect
+marker and gap kinds (its text margin lists every emitted id regardless of
+profile, so the two ids appear there as the other strict ids do; its JSON carries
+no finding ids); the effect
 baseline and `effect-diff`; the three transforms' plans;
 `SCHEMA_VERSION`. `vendor_suppressed` in `check`'s summary moves: the count is tallied before the profile surface (ADR-0015 order, `crates/steins-cli/src/check.rs`), a pre-existing overstatement every strict-only id already causes; #920.
 

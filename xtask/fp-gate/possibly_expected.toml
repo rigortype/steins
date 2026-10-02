@@ -242,17 +242,18 @@
 # a `string|null` (a nullable native declaration) handed to a native `string`
 # parameter; the null arm is real, its inhabitation is what the grade does
 # not claim.
-# 11 → 880  2026-10-02 (issues #915, #922): +868 `throw.maybe-undeclared` and +1
-# `effect.maybe-envelope-exceeded` — `return $this->unsealed;` in the `@phpstan-pure`
-# `ConstantArrayType::getUnsealedTypes()` (`src/Type/Constant/ConstantArrayType.php:225:10`),
-# kind `operator-magic-property`, a property read through a non-final `$this` (ADR-0099 §4.4);
-# the floor reports it as it should, and whether a declared property read on `$this` ought to
-# stay a gap is a separate precision question. Both counts were measured locally under PHP 8.5
-# with the `src` + `vendor` scoping on the commit before the floor's discharges were narrowed
-# (CI does not measure this project) and are carried here, not re-measured: any
-# `phpdoc.maybe-*` or `offset.maybe-missing` this project holds also moved into this table
-# with the posture routing, so the first local run may print a different count to reseed.
-"phpstan/phpstan-src" = 880
+# 11 → 889  2026-10-02 (issues #915, #922): measured locally under PHP 8.5 with the `src` +
+# `vendor` scoping (CI does not measure this project) on the commit that moved the strict-floor
+# ids here: 1 `effect.maybe-envelope-exceeded`, 9 `offset.maybe-missing`, 868
+# `throw.maybe-undeclared`, 3 `type.maybe-argument-mismatch`, 2 `type.return-maybe-missing`
+# and 6 `variable.maybe-undefined`. The effect finding is `return $this->unsealed;` in the
+# `@phpstan-pure` `ConstantArrayType::getUnsealedTypes()`
+# (`src/Type/Constant/ConstantArrayType.php:225:10`), kind `operator-magic-property`, a
+# property read through a non-final `$this` (ADR-0099 §4.4): the floor reports it as it
+# should, and whether a declared property read on `$this` ought to stay a gap is a separate
+# precision question. The 9 `offset.maybe-missing` are the strict-floor contract ids that
+# had no table until the posture routing.
+"phpstan/phpstan-src" = 889
 
 # New rows, 2026-10-02 (issues #915, #922): the strict-floor ids of the public packages that
 # had none. Measured under PHP 8.4.25 (CI's posture); the throw lane does not read the sidecar.

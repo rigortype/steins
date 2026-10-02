@@ -859,7 +859,7 @@ final class Importer
 
 ```
 $ steins check --profile strict src/Gap.php
-src/Gap.php:25:9: error[throw.maybe-undeclared]: what can be thrown at this site is unbounded (dynamic-callee: the callee is computed at run time), but Importer::run() declares only @throws RuntimeException
+src/Gap.php:10:9: error[throw.maybe-undeclared]: what can be thrown at this site is unbounded (dynamic-callee: the callee is computed at run time), but Importer::run() declares only @throws RuntimeException
 ```
 
 It is deliberately loud on real code: on the public corpus about four in five
@@ -995,8 +995,8 @@ envelope of its own that fits this one's, and a call or receiver the project's
 tolerated-effects policy attributes to a tolerated label. A missing catalog row
 (`no-effect-row`) is *not* discharged: it is the analyzer's own coverage hole.
 The ids add findings at `strict` and change no exhaustiveness bit, no tag
-`effects-envelope` writes, and no other id; `steins annotate` lists them beside the
-other strict ids, with its `…?` marker and gap kinds unchanged.
+`effects-envelope` writes, and no other id; `steins annotate`'s text margin lists them
+beside the other strict ids, with its `…?` marker and gap kinds unchanged.
 
 **`effect.unknown-label`** is mechanics, and prints in every profile
 including a bare `check`. A typo'd label silently disables the envelope that
