@@ -447,8 +447,11 @@ contents; `end` is exclusive, and an empty `replacement` is a deletion:
 Under `--fix` the document additionally carries a top-level `fix` object —
 `applied` (whether the edits were written), `fixed` (the findings the run
 resolved, absent from `findings`), and `refusal` (`null`, or the named
-reason with the diagnostics the edits would have surfaced). A run without
-`--fix` has no such key.
+reason with the diagnostics the edits would have surfaced), and `skipped`
+(`[]`, or one `{path, reason, detail}` per file whose fixes were left out
+because it is not valid UTF-8, reason `byte-lossy-source`; the findings in
+those files stay in `findings` with the `fix` payload that was not applied).
+A run without `--fix` has no such key.
 
 Two text-mode lines have no JSON counterpart: the stale-baseline count and
 the surface-widening notice.
