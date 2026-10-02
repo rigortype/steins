@@ -270,6 +270,18 @@ fn a_bare_var_tag_is_never_stale() {
     silent("<?php\nfunction f(): void {\n  /** @var int */\n  $x = 1;\n}\n", PHPDOC_STALE_VAR_ID);
 }
 
+/// A `$name` in the description is prose, not the variable the tag declares (#932): the
+/// reference reads `@var Foo the result, unlike $other` as a bare `@var Foo`. The control
+/// is the same shape with the name in the variable slot, which still reports.
+#[test]
+fn a_name_in_the_description_is_not_the_tags_variable() {
+    let src = "<?php\nclass Foo {}\nfunction compute(): Foo { return new Foo(); }\n\n/** @var Foo the result, unlike $other */\n$x = compute();\n\nfunction g(): void {\n    /** @var int counts rows; see $total */\n    $n = 1;\n}\n";
+    silent(src, PHPDOC_STALE_VAR_ID);
+    let control = "<?php\nfunction g(): void {\n    /** @var int $total counts rows; see $n */\n    $n = 1;\n}\n";
+    let msg = one(control, PHPDOC_STALE_VAR_ID);
+    assert!(msg.contains("`@var $total`"), "{msg}");
+}
+
 /// Property-target spelling names a property, not the receiver (ADR-0073 §3 guard).
 #[test]
 fn a_property_target_var_tag_is_not_stale() {

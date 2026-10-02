@@ -25,7 +25,8 @@ fn parse_expected(line: &str) -> Verdict {
     }
     let mut cols = line.splitn(3, '\t');
     assert_eq!(cols.next(), Some("TAG"), "unexpected oracle row `{line}`");
-    let ty = cols.next().expect("type column").to_owned();
+    // `dump.php` escapes a backslash as `\\`, like the reference corpus's `.expected`.
+    let ty = cols.next().expect("type column").replace("\\\\", "\\");
     let variable = cols.next().expect("variable column").to_owned();
     Verdict::Tag { ty, variable }
 }

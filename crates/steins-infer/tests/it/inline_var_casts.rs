@@ -120,6 +120,17 @@ fn a_scalar_cast_seeds_the_contract_lane() {
 }
 
 #[test]
+fn a_name_in_the_description_is_not_cast() {
+    // The reference reads the variable from the token after the type (#932): in the
+    // first tag `$arr` sits in the prose, so the tag is a bare `@var` that casts nothing;
+    // in the second it is the variable, and the description after it is prose.
+    let prose = "<?php\nfunction f(array $arr): void {\n  /** @var array{a: int, b: int} the shape, unlike $arr */\n  \\PHPStan\\dumpType(count($arr));\n}\n";
+    assert_eq!(one_type(prose), "dumped type: int<0, max>");
+    let named = "<?php\nfunction f(array $arr): void {\n  /** @var array{a: int, b: int} $arr the shape, unlike $other */\n  \\PHPStan\\dumpType(count($arr));\n}\n";
+    assert_eq!(one_type(named), "dumped type: 2 (asserted)");
+}
+
+#[test]
 fn a_nullable_array_cast_declines_the_count_transfer() {
     // `count(null)` is a TypeError, so the S7 gate takes `nullable: false` facts
     // only — the cast stands in the lane, and count falls back to its envelope.

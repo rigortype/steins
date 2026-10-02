@@ -1261,9 +1261,14 @@ struct TypeSplit {
 /// `...` that may precede its variable.
 ///
 /// `None` drops the tag: a payload that opens with the variable has no type to offer,
-/// and an assert whose payload does not parse or names no target declares nothing. A
-/// payload that does not parse declares no variable, which is the quiet direction: the
-/// reference reads an invalid tag.
+/// and an assert that names no target declares nothing. A `@param`/`@var` payload that
+/// does not parse declares no variable, which is the quiet direction: the reference
+/// reads an invalid tag, and no consumer acts on a tag whose type is unparsable.
+///
+/// An assert whose payload does not parse keeps the first `$name` as its target. The
+/// target is what exempts the parameter from the `@param` honesty checks (ADR-0030),
+/// so losing it is not quiet; the unparsable spelling that matters is the equality
+/// assert (`@phpstan-assert =Foo $x`), which the type grammar does not read.
 fn split_type_and_variable(
     text: &str,
     bytes: &[u8],
@@ -1275,11 +1280,28 @@ fn split_type_and_variable(
     if bytes[start] == b'$' || (is_param && matches!(bytes[start], b'&' | b'.')) {
         return None; // `@param $x` with no type — nothing to offer
     }
-    let (type_end, var_pos) = variable_after_type(text, bytes, start, end, is_param);
+    let (mut type_end, mut var_pos) = variable_after_type(text, bytes, start, end, is_param);
+    if kind.is_assert() && var_pos.is_none() && parse_type(&text[start..end]).is_err() {
+        var_pos = first_variable(bytes, start, end);
+        if let Some(pos) = var_pos {
+            type_end = pos;
+            while type_end > start && matches!(bytes[type_end - 1], b' ' | b'\t') {
+                type_end -= 1;
+            }
+        }
+    }
     if kind.is_assert() && var_pos.is_none() {
         return None; // malformed: assert with no target
     }
     Some(TypeSplit { type_end, var_pos })
+}
+
+/// The first `$name` in `[start, end)`: the first `$` followed by an identifier char.
+fn first_variable(bytes: &[u8], start: usize, end: usize) -> Option<usize> {
+    (start..end.saturating_sub(1)).find(|&i| {
+        bytes[i] == b'$'
+            && (bytes[i + 1].is_ascii_alphabetic() || bytes[i + 1] == b'_' || bytes[i + 1] >= 0x80)
+    })
 }
 
 /// The type of the payload `[start, end)` and the variable that follows it: the end of the
