@@ -367,13 +367,18 @@ possibly-grade sibling of `effect.envelope-exceeded` (ADR-0100). The definite id
 reads the proven lane and is silent on a gap, so a declared-pure body that runs
 something the analyzer cannot see passes it. The sibling names each gap: one
 finding per own site and gap kind, and one per call edge into a project body that
-is itself `…?` and carries no envelope of its own. Five discharges narrow it:
-the ⊤ envelope is no unit; `$f()` on a parameter typed `pure-callable` /
-`pure-closure` (or flagged `@pure-unless-callable-is-impure`) and not rebound; an
-interop envelope whose imported bound fits; an edge to an enveloped callee; and,
-in the throw lane, a site under a `catch (\Throwable)`. Every other gap kind,
-`no-effect-row` included, is reported. Exhaustiveness, `annotate` and
-`effect-diff` read the same gaps and are unchanged.
+is itself `…?` and carries no envelope of its own. Six discharges narrow it:
+the ⊤ envelope is no unit; `$f()` on a parameter of a free function flagged
+`@pure-unless-callable-is-impure`, by-value, with no default and never rebound (the
+typed `pure-callable` spellings are not discharged); an interop envelope whose
+imported bound fits; an edge to an enveloped callee whose envelope fits the
+caller's, except a tainting edge into a flagged function, which is named at the
+call; the project's tolerance policy (an attributed callee or declared
+receiver); and, in the throw lane, a site under a `catch (\Throwable)`. Every
+other gap kind, `no-effect-row` included, is reported. Exhaustiveness and
+`effect-diff` read the same gaps and are unchanged, and so are `annotate`'s `…?`
+marker and gap kinds; its margin and JSON list every emitted id regardless of
+profile, so the new ids appear there as the other strict ids do.
 
 ## The declared lane
 
