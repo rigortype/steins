@@ -304,10 +304,20 @@ Amends §7 (destructors), found while designing its implementation, slice S6 of
    stage 1 for both subjects: a body-local `new` binding and a parameter bound
    to a class whose chain, or some in-universe subclass, declares `__destruct`
    (trait users and anonymous subclasses count, §7.2). The sites are the
-   forms that drop a value: `unset`, a reassignment, the end of the scope. The
-   one shape that stays an edge is `new D;` in statement position, where the
-   temporary dies at the statement. The exact edge for a non-escaping local is a
-   follow-up that needs the escape rule.
+   forms that drop a value: `unset`, a reassignment, the end of the scope, and a
+   `new` temporary that is dropped in the statement that makes it. No drop is an
+   edge. A statement-position `new D;` is a may-run too, and three witnesses on
+   PHP 8.5 defer or cancel its destructor: a constructor that stores `$this` in a
+   static keeps the object alive past the statement, so `__destruct` runs later,
+   in the caller; an object that references itself is freed by the garbage
+   collector, not at the statement; and a constructor that throws never runs the
+   destructor at all. An edge there would prove `io.output.buffer` on a path that
+   may not run it, the same false positive as the factory. The exact edge for a
+   non-escaping local is a follow-up whose escape rule must count the
+   constructor, every method call on the object (either can leak `$this`) and a
+   cycle (`$d->self = $d; unset($d)` runs at collection) as escapes, besides
+   assignment targets, call arguments, `return`, `yield`, captures and
+   references.
 3. **`array_splice` is not a form.** §7.2 lists it, and it is cut: an array
    operand carries no element class, so by the per-value rule an element dropped
    through `array_splice` is §7.3's recorded residue (a value of an unknown
@@ -317,3 +327,34 @@ Amends §7 (destructors), found while designing its implementation, slice S6 of
    schema bump of §7.2 (#882), with no site producing the kind, so findings are
    byte-identical. The sites land after it, in a second slice, which also reseeds
    the fp-gate's possibly-expected table by kind as the earlier floor slices did.
+5. **The gate is a lower bound.** "The dropped value's class declares
+   `__destruct`" under-approximates "this drop runs user code": a final class with
+   no destructor whose property holds a `D` runs `D::__destruct` when it is
+   dropped. The sound, cheap extension is the typed-property hop. Define
+   `reaches_destructor(C)` as holding when (i) `C`'s chain, or an in-universe
+   subclass of `C` (`destructor_classes` and the anonymous subclasses' parents,
+   as ADR-0099 §4.4 reads them), declares `__destruct`; or (ii) a non-static
+   property declared on `C`'s chain has a hint naming a project class `P` with
+   `reaches_destructor(P)`, recursively and with a seen set, scalar and `null`
+   members ignored. A hint member that is `array`, `mixed`, `object`, `iterable`,
+   `callable`, absent, or an engine class (`Closure`, `Generator`, `Fiber`,
+   `stdClass`, ...) contributes nothing. A gate that fired on any class with an
+   object-capable property would fire on every untyped, `array` or `mixed`
+   property, most of the public corpora, which is the universe gate §7.3 refused.
+   The shard set of this amendment's gate is clause (i); clause (ii) reads the
+   class's property hints and lands with the sites in S6b, not with the gate.
+   §7.3's residue, "a value of an unknown class", is rewritten as a list, each
+   entry a drop that runs user code with no gap and each witnessed on PHP 8.5:
+   - a value of an unknown class (untyped, `mixed`, a call result);
+   - an array, local or parameter, whatever it holds;
+   - a property of a known class that is untyped or hinted
+     `array`/`mixed`/`object`/`iterable`;
+   - a subclass's own properties when the subject is bound (a `private D $d` on a
+     subclass, dropped through its parent's type);
+   - a closure's captures;
+   - a suspended generator's or fiber's `finally`;
+   - dynamic properties and engine containers (`stdClass`, `SplObjectStorage`,
+     `WeakMap`);
+   - builtins that drop elements (`array_splice`).
+   The strict floor's `destructor` findings are therefore a lower bound on the
+   drops that run user code, and this ADR says so.
