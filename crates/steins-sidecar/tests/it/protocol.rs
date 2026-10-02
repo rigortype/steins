@@ -1358,3 +1358,61 @@ fn a_detached_reader_strands_the_instance() {
     assert_eq!(sc.deaths(), 1, "only the first timeout reached a child");
     within(limit, "the final close", move || drop(sc));
 }
+
+/// The same strand on the other close a revive makes: a replacement that fails
+/// its handshake, and whose close has to give up its reader, is the last child
+/// the instance spawns.
+#[cfg(unix)]
+#[test]
+fn a_replacement_whose_close_detaches_strands_the_instance() {
+    let has_perl = std::process::Command::new("perl")
+        .arg("-e1")
+        .status()
+        .is_ok_and(|status| status.success());
+    if !has_perl {
+        eprintln!("SKIP a_replacement_whose_close_detaches: no `perl` to leave the group with");
+        return;
+    }
+    // The first child is healthy. Each replacement starts an escapee holding
+    // stdout, waits until it has left the group (so the kill cannot land
+    // first), and only then answers its handshake wrongly.
+    let Some(shim) = Shim::new("a_replacement_whose_close_detaches", |marker| {
+        format!(
+            "if [ ! -e '{marker}.first' ]; then : > '{marker}.first'; exec \"$REAL\" \"$@\"; fi\n\
+             perl -e 'setpgrp(0, 0); open(my $f, \">>\", $ARGV[0]) or die; print $f \"$$\\n\"; \
+             close($f); open($f, \">\", $ARGV[1]) or die; close($f); exec(\"sleep\", \"600\")' \
+             '{marker}' \"{marker}.$$\" &\n\
+             while [ ! -e \"{marker}.$$\" ]; do sleep 0.01; done\n\
+             echo '{{\"hello\":1}}'\n\
+             wait"
+        )
+    }) else {
+        return;
+    };
+    let php = shim.php();
+    let limit = Duration::from_secs(15);
+    let (sc, answers) = within(limit, "revives behind failing replacements", move || {
+        let mut sc = Sidecar::spawn_with(&php).expect("the first child boots");
+        sc.set_timeout(Duration::from_millis(20));
+        let _ = sc.fold("usleep", &[int(1_000_000)], true);
+        sc.set_timeout(Duration::from_secs(2));
+        let answers: Vec<_> = (0..4).map(|_| sc.fold("strtoupper", &[s("a")], true)).collect();
+        (sc, answers)
+    });
+    let pids: Vec<u32> = std::fs::read_to_string(shim.dir.join("marker"))
+        .expect("the replacement recorded its escapee")
+        .lines()
+        .map(|line| line.trim().parse().expect("a pid"))
+        .collect();
+    for pid in &pids {
+        let _ = std::process::Command::new("kill").args(["-9", &pid.to_string()]).status();
+    }
+    assert_eq!(pids.len(), 1, "no replacement was spawned after the first detach");
+    assert!(
+        answers.iter().all(|answer| matches!(answer, FoldResult::Widen { .. })),
+        "a stranded instance widens every request, got {answers:?}"
+    );
+    assert_eq!(sc.respawns(), 1, "one replacement was attempted");
+    assert_eq!(sc.strikes(), steins_sidecar::RESPAWN_CAP, "and the instance reads as abandoned");
+    within(limit, "the final close", move || drop(sc));
+}
