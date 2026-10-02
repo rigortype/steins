@@ -1062,7 +1062,7 @@ fn a_slow_booting_replacement_costs_no_request() {
 fn a_child_that_fails_its_handshake_is_a_failed_spawn() {
     for (tag, script) in [
         ("exits", "exit 1"),
-        ("garbage", "echo 'not json'\nexec cat > /dev/null"),
+        ("not_the_runner", "echo '{\"hello\":1}'\nexec cat > /dev/null"),
         ("wrong_id", "echo '{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{}}'\nexec cat > /dev/null"),
     ] {
         let Some(shim) = Shim::new(&format!("a_child_that_fails_its_handshake_{tag}"), |_| {
@@ -1075,6 +1075,21 @@ fn a_child_that_fails_its_handshake_is_a_failed_spawn() {
         };
         assert!(is_boot_failure(&e), "a handshake that {tag} is a boot failure, got {e:?}");
     }
+}
+
+/// Startup noise on stdout (a `php.ini` that prints, a notice) is not the
+/// runner's answer: the handshake skips it and the spawn succeeds.
+#[cfg(unix)]
+#[test]
+fn startup_noise_before_the_runner_does_not_fail_the_handshake() {
+    let Some(shim) = Shim::new("startup_noise", |_| {
+        "echo\necho 'Warning: something in php.ini'\nexec \"$REAL\" \"$@\"".to_owned()
+    }) else {
+        return;
+    };
+    let mut sc = Sidecar::spawn_with(&shim.php()).expect("noise is skipped, not fatal");
+    assert!(sc.env().is_some(), "and the runner answers after it");
+    assert_eq!(sc.deaths(), 0);
 }
 
 /// A `php` that cannot be started at all is not a boot failure: the caller

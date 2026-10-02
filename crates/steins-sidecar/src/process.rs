@@ -9,7 +9,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::wire::{
     ClassReflection, ConstantDefined, EnvInfo, FoldArg, FoldResult, PregCompile, Reflection,
@@ -57,8 +57,9 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(2);
 /// wedged rather than starved fails it, and it is still short enough that the
 /// worst case stays bounded: one wait on the first spawn (the engine goes off,
 /// the sound subset), and [`RESPAWN_CAP`] waits across a revive storm, one minute
-/// in all. Real requests keep [`DEFAULT_TIMEOUT`], so hang detection on a
-/// running child is unchanged.
+/// per storm (the strikes restart at every answer, so not per run). Real
+/// requests keep [`DEFAULT_TIMEOUT`], so hang detection on a running child is
+/// unchanged.
 const BOOT_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// The environment variable that overrides [`BOOT_TIMEOUT`], in milliseconds.
@@ -253,26 +254,37 @@ impl Channel {
             .write_all(request.as_bytes())
             .and_then(|()| self.stdin.flush())
             .map_err(|e| boot_failure(e.kind(), "php closed its input during its boot handshake"))?;
-        let line = match self.lines.recv_timeout(boot_timeout()) {
-            Ok(line) => line.map_err(|e| boot_failure(e.kind(), "php's output failed at boot"))?,
-            Err(RecvTimeoutError::Timeout) => {
-                let what = "php did not answer its boot handshake";
-                return Err(boot_failure(ErrorKind::TimedOut, what));
+        // One deadline for the whole handshake: noise lines do not extend it.
+        let deadline = Instant::now() + boot_timeout();
+        loop {
+            let wait = deadline.saturating_duration_since(Instant::now());
+            let line = match self.lines.recv_timeout(wait) {
+                Ok(line) => {
+                    line.map_err(|e| boot_failure(e.kind(), "php's output failed at boot"))?
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    let what = "php did not answer its boot handshake";
+                    return Err(boot_failure(ErrorKind::TimedOut, what));
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    let what = "php exited during its boot handshake";
+                    return Err(boot_failure(ErrorKind::UnexpectedEof, what));
+                }
+            };
+            // A line that is not JSON is startup noise (a `php.ini` that prints,
+            // a deprecation notice on stdout), not the runner: skip it. The
+            // first JSON line is the runner's, and it must be the handshake's.
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+                continue;
+            };
+            let answered = value.get("id").and_then(serde_json::Value::as_u64)
+                == Some(HANDSHAKE_ID)
+                && value.get("result").and_then(parse_env_result).is_some();
+            if answered {
+                return Ok(());
             }
-            Err(RecvTimeoutError::Disconnected) => {
-                let what = "php exited during its boot handshake";
-                return Err(boot_failure(ErrorKind::UnexpectedEof, what));
-            }
-        };
-        let answered = serde_json::from_str::<serde_json::Value>(line.trim()).ok().is_some_and(|v| {
-            v.get("id").and_then(serde_json::Value::as_u64) == Some(HANDSHAKE_ID)
-                && v.get("result").and_then(parse_env_result).is_some()
-        });
-        if answered {
-            Ok(())
-        } else {
-            let what = "php answered its boot handshake with garbage";
-            Err(boot_failure(ErrorKind::InvalidData, what))
+            let what = "php answered its boot handshake with something else";
+            return Err(boot_failure(ErrorKind::InvalidData, what));
         }
     }
 

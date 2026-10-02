@@ -35,8 +35,11 @@ use crate::fold_budget::fold_within_allocation_budget;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct FoldPosture {
     /// Whether a live engine was ever reached at all. `false` covers both
-    /// `--no-php` and a failed spawn — the plain sound subset, which the
-    /// [`SOUND_SUBSET_NOTICE`] already names at the top of the run.
+    /// `--no-php` and a `php` that could not be started — the plain sound
+    /// subset, which the [`SOUND_SUBSET_NOTICE`] already names at the top of
+    /// the run. A `php` that started and failed its boot handshake (issue #891)
+    /// reports `engaged: true`, `losses: 1`, `abandoned: true`: it was reached,
+    /// and it lost the run its answers.
     ///
     /// [`SOUND_SUBSET_NOTICE`]: crate::SOUND_SUBSET_NOTICE
     pub engaged: bool,

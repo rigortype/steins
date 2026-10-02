@@ -265,47 +265,42 @@ those ids need a live PHP to rule out every candidate name. See
 ["findings vanished after adding `--no-php`"](#findings-vanished-after-adding---no-php)
 below for what that looks like on real code.
 
-### The sidecar spawns but a request goes unanswered
+### The sidecar spawns but never answers
 
-**What you see.** `steins doctor` reports a third, distinct Runtime line —
-not "not spawnable", but "spawned, but the env() query failed":
+**What you see.** `steins doctor` reports a third, distinct Runtime line,
+not "not spawnable" but "spawned, but did not complete its boot handshake":
 
 ```
 $ env PATH=/path/to/broken-php-wrapper steins doctor
 …
 Runtime
-  PHP sidecar: spawned, but the env() query failed
+  PHP sidecar: spawned, but did not complete its boot handshake (php did not answer its boot handshake)
   posture: sound subset (degraded) — findings that require executing PHP are omitted (exit 0, ADR-0004)
 …
 ```
 
-That line is `doctor`'s own opening-handshake probe; the failure it describes
-is one instance of a broader one, below.
+The text in parentheses says how the boot failed: no answer in time, the
+process exited, or it answered something that is not the sidecar's reply.
 
-**Cause.** `php` exists on `PATH` and the process starts, but a request never
-gets answered — a `php` wrapper script that never execs real PHP, a broken
-`php.ini` that hangs on startup, an `auto_prepend_file` that never returns, a
-`php` built without the pieces the sidecar's inline script needs. This can
-happen at the very first request (the opening `env()` handshake, which is
-what `doctor`'s probe above catches) or partway through an otherwise healthy
-run — the same causes, just not hit until later, or a child that answers
-fine and then dies or hangs answering some particular call. Either way this
-is the "protocol mismatch" case: the process is alive, but it is not
-speaking the sidecar's JSON-RPC framing for that one request, so it times
-out and that specific fold widens; the sidecar recovers on the next request
-(respawning up to a small cap) but the finding that request would have
-proven is already lost.
+**Cause.** `php` exists on `PATH` and the process starts, but it does not
+answer: a `php` wrapper script that never execs real PHP, a broken `php.ini`
+that hangs on startup, an `auto_prepend_file` that never returns, a `php`
+built without the pieces the sidecar's inline script needs. Every fresh `php`
+child has to answer an `env` handshake before steins sends it anything, and
+gets **20 seconds** for it (a few hundred times an idle boot, so a loaded CI
+runner that merely starts `php` slowly still passes). A child that fails the
+handshake is killed, the sidecar is off for the rest of that run, and the run
+**publishes no cache generation**, so no later run replays findings computed
+without PHP. A child that boots and then stops answering partway through a
+run is the same posture, reached later: its request has the 2-second budget,
+the lost reply is never retried, and the sidecar is replaced up to a small
+cap.
 
-**`check` and `annotate` now say so, either way.** Unlike the two failure
-modes above, this one used to reach the exit with no notice at all — the
-request silently widened to `FoldResult::Widen` per call, which was correct
-(nothing false was ever reported) but invisible, the one degradation mode
-that broke ADR-0004's "incompleteness is never silent" posture (issue
-#110). Both commands now print a dedicated notice on stderr the first time
-a spawned sidecar fails to answer a request — whether that is the opening
-handshake or a request encountered later in an otherwise-successful run —
-worded differently from the "no `php` on `PATH`" notice above because the
-cause and the fix differ:
+**`check` and `annotate` say so.** Both commands print a dedicated notice on
+stderr, once per run, the first time a spawned sidecar fails to boot or
+answer, whether at the handshake or later. It is worded differently from the
+"no `php` on `PATH`" notice above because the cause and the fix differ
+(issue #110):
 
 ```
 $ env PATH=/path/to/broken-php-wrapper steins check .
@@ -315,17 +310,18 @@ $ echo $?
 1
 ```
 
-The notice prints **once per run**, the first time any request fails this
-way — not once per widened fold, and not only when the very first request
-fails. A run that keeps hitting the same dead sidecar on every argument
-would otherwise drown its own findings in a repeated line, and a sidecar
-that answers its first few requests fine and then goes quiet is exactly as
-worth flagging as one that never answered at all: a lost reply is never
-retried, so that one finding is gone regardless of what the sidecar does
-afterward. The exit code is unaffected either way (ADR-0004): a degraded
-environment is surfaced, not failed. `steins doctor` remains the place to
-confirm the diagnosis and see the full posture, including the version-skew
-detail the one-line notice has no room for.
+The notice prints once, not once per widened fold. The exit code is
+unaffected (ADR-0004): a degraded environment is surfaced, not failed.
+`steins doctor` remains the place to confirm the diagnosis and see the full
+posture, including the version-skew detail the one-line notice has no room
+for.
+
+**A slow `php` is not this.** The boot budget is separate from the
+per-request one, so a `php` that takes a few seconds to start still works. If
+your runner is starved harder than 20 seconds, raise the budget with
+`STEINS_SIDECAR_BOOT_TIMEOUT_MS=<milliseconds>` in the environment (see the
+["A slow-starting PHP"](02-cli-reference.md#a-slow-starting-php) section of
+the CLI reference).
 
 **Fix.** Confirm `php -v` runs a working interpreter from a plain
 shell (not through whatever wrapper `PATH` resolves inside your CI runner
