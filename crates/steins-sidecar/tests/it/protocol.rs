@@ -1295,5 +1295,66 @@ fn a_descendant_that_escapes_the_group_cannot_hold_a_close() {
         .expect("a pid");
     let _ = std::process::Command::new("kill").args(["-9", &pid.to_string()]).status();
     assert!(is_boot_failure(&err), "a wrong answer is a boot failure, got {err:?}");
-    assert!(elapsed < Duration::from_secs(10), "the close gave up on the escapee, took {elapsed:?}");
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "the close gave up on the escapee, took {elapsed:?}"
+    );
+}
+
+/// The first close that has to give up its reader strands the instance: no
+/// replacement is spawned for the rest of its life, so an escapee costs one
+/// detached thread and one descriptor per run, not one per timeout. Every later
+/// request widens at once, and the instance reads as abandoned.
+#[cfg(unix)]
+#[test]
+fn a_detached_reader_strands_the_instance() {
+    let has_perl = std::process::Command::new("perl")
+        .arg("-e1")
+        .status()
+        .is_ok_and(|status| status.success());
+    if !has_perl {
+        eprintln!("SKIP a_detached_reader_strands_the_instance: no `perl` to leave the group with");
+        return;
+    }
+    // Every child leaves one escapee holding stdout, and appends its pid.
+    let Some(shim) = Shim::new("a_detached_reader_strands_the_instance", |marker| {
+        format!(
+            "perl -e 'setpgrp(0, 0); exec(\"sleep\", \"600\")' &\n\
+             echo $! >> '{marker}'\n\
+             exec \"$REAL\" \"$@\""
+        )
+    }) else {
+        return;
+    };
+    let php = shim.php();
+    let limit = Duration::from_secs(15);
+    let (sc, answers) = within(limit, "a run of timeouts behind escapees", move || {
+        let mut sc = Sidecar::spawn_with(&php).expect("it boots");
+        let mut answers = Vec::new();
+        for _ in 0..5 {
+            sc.set_timeout(Duration::from_millis(20));
+            let _ = sc.fold("usleep", &[int(1_000_000)], true);
+            sc.set_timeout(Duration::from_secs(2));
+            answers.push(sc.fold("strtoupper", &[s("a")], true));
+        }
+        (sc, answers)
+    });
+    let pids: Vec<u32> = std::fs::read_to_string(shim.dir.join("marker"))
+        .expect("each child recorded its escapee")
+        .lines()
+        .map(|line| line.trim().parse().expect("a pid"))
+        .collect();
+    for pid in &pids {
+        let _ = std::process::Command::new("kill").args(["-9", &pid.to_string()]).status();
+    }
+    assert_eq!(pids.len(), 1, "no child was spawned after the first detach");
+    assert!(
+        answers.iter().all(|answer| matches!(answer, FoldResult::Widen { .. })),
+        "a stranded instance widens every request, got {answers:?}"
+    );
+    assert!(sc.is_poisoned());
+    assert_eq!(sc.respawns(), 0, "the strand is not a respawn attempt");
+    assert_eq!(sc.strikes(), steins_sidecar::RESPAWN_CAP, "and reads as abandoned");
+    assert_eq!(sc.deaths(), 1, "only the first timeout reached a child");
+    within(limit, "the final close", move || drop(sc));
 }
