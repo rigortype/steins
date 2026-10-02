@@ -11,6 +11,7 @@ mod format_github;
 mod format_recorded;
 mod format_sarif;
 mod generation_capture_root;
+mod internal_panic;
 mod license;
 mod mcp;
 mod output_seam;
