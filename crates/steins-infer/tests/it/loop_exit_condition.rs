@@ -244,13 +244,15 @@ function f(): void {
 }
 
 /// How many `call.on-null` findings `$x->bar()` draws after `stmt`, with `$x`
-/// proven null before it and never written by it.
+/// proven null before it and never written by it. `$k` is an `int` for a `switch`
+/// subject: a call there would leave the switch `Opaque` and test nothing.
 fn on_null_after(stmt: &str) -> usize {
     let src = format!(
         "<?php
 final class Foo {{ public function bar(): void {{}} }}
 function f(): void {{
     $x = null;
+    $k = rand();
     {stmt}
     $x->bar();
 }}
@@ -272,9 +274,9 @@ fn a_do_while_body_that_terminates_on_every_path_makes_the_successor_unreachable
         // A jump that belongs to a nested construct does not come back to this loop.
         "do { while (rand() > 0) { break; } return; } while (rand() > 0);",
         "do { foreach ([1] as $ignored) { continue; } return; } while (rand() > 0);",
-        "do { switch (rand()) { case 1: echo 1; break; } return; } while (rand() > 0);",
+        "do { switch ($k) { case 1: echo 1; break; } return; } while (rand() > 0);",
         // A bare `continue` inside a `switch` acts on the switch and lands after it.
-        "do { switch (rand()) { case 1: continue; } return; } while (rand() > 0);",
+        "do { switch ($k) { case 1: continue; } return; } while (rand() > 0);",
     ] {
         assert_eq!(on_null_after(stmt), 0, "`{stmt}` never reaches its successor");
     }
@@ -294,7 +296,7 @@ fn a_do_while_whose_body_can_come_back_keeps_its_successor_live() {
         // The same two from inside a nested construct, one level further out.
         "do { while (rand() > 0) { break 2; } return; } while (rand() > 0);",
         "do { foreach ([1] as $ignored) { continue 2; } return; } while (rand() > 0);",
-        "do { switch (rand()) { case 1: continue 2; } return; } while (rand() > 0);",
+        "do { switch ($k) { case 1: continue 2; } return; } while (rand() > 0);",
     ] {
         assert_eq!(on_null_after(stmt), 1, "`{stmt}` can reach its successor");
     }
@@ -309,13 +311,81 @@ fn a_do_while_terminating_only_by_continue_is_not_terminated() {
 }
 
 #[test]
-fn a_do_while_whose_condition_can_never_fail_makes_the_successor_unreachable() {
-    // The `while (true)` rule (issue #651) on a `do`-`while`: the condition is read
-    // on the body's entry env, which holds at every test, so a `Yes` there means no
-    // test fails, and with no `break` nothing leaves. A `continue` only re-tests it.
-    assert_eq!(on_null_after("do { echo 1; } while (true);"), 0);
-    assert_eq!(on_null_after("do { if (rand() > 0) { continue; } echo 1; } while (true);"), 0);
-    assert_eq!(on_null_after("do { if (rand() > 0) { break; } echo 1; } while (true);"), 1);
+fn a_do_while_never_reads_its_condition_for_reachability() {
+    // Only the body decides (issue #679's review). The condition, read on the
+    // entry env, can miss a write through an alias the loop's sets do not name:
+    // at file scope `$GLOBALS['go']` IS `$go`, so this loop ends and the finding
+    // after it is true.
+    let file_scope = |stmt: &str| {
+        let src = format!(
+            "<?php
+final class Foo {{ public function bar(): void {{}} }}
+$go = true;
+{stmt}
+$x = null;
+$x->bar();
+"
+        );
+        let tree = SourceTree::parse(&src);
+        check(&tree, &[], "t.php").into_iter().filter(|d| d.id == "call.on-null").count()
+    };
+    assert_eq!(file_scope("do { $GLOBALS['go'] = false; } while ($go);"), 1);
+    assert_eq!(file_scope("do { unset($GLOBALS['go']); } while ($go);"), 1);
+    // The cost of not reading it: an infinite `do`-`while` keeps its successor live.
+    assert_eq!(on_null_after("do { echo 1; } while (true);"), 1);
+}
+
+#[test]
+fn a_jump_out_of_a_loop_nested_in_a_switch_case_reaches_the_switch_successor() {
+    // `break 2` / `continue 2` inside a loop inside a case leave the SWITCH and land
+    // after it, so that case does not end in its `return`. The switch must not be
+    // structured as if it did, which under a `do`-`while` would read the whole
+    // body as terminating.
+    for jump in ["break 2;", "continue 2;"] {
+        let body = format!(
+            "switch ($k) {{ case 1: foreach ([1] as $v) {{ {jump} }} return; default: return; }}"
+        );
+        assert_eq!(on_null_after(&body), 1, "straight-line `{jump}`");
+        let looped = format!("do {{ {body} }} while (rand() > 0);");
+        assert_eq!(on_null_after(&looped), 1, "`{jump}` under a `do`-`while`");
+    }
+    // The jump one level further out re-tests the `do`-`while` itself.
+    let three = "do { switch ($k) { case 1: foreach ([1] as $v) { continue 3; } return; \
+                 default: return; } } while (rand() > 0);";
+    assert_eq!(on_null_after(three), 1, "`continue 3` re-tests the `do`-`while`");
+    // A nested loop's own jump is its own: the case still ends in `return`.
+    let own = "do { switch ($k) { case 1: foreach ([1] as $v) { break; } return; \
+               default: return; } } while (rand() > 0);";
+    assert_eq!(on_null_after(own), 0, "the `foreach` owns its `break`");
+}
+
+#[test]
+fn a_terminating_do_while_in_an_if_arm_drops_out_of_the_join() {
+    // An arm that ends in a terminating `do`-`while` is an arm that ends in
+    // `return`: the join after the `if` is the other arm alone, where `$x` is
+    // proven null. Were the arm joined in, `$x` would be `Foo|null` and the
+    // finding would fall below the default floor.
+    let on_null = |loop_body: &str| {
+        let src = format!(
+            "<?php
+final class Foo {{ public function bar(): void {{}} }}
+function f(): void {{
+    $x = new Foo();
+    if (rand() > 0) {{
+        $x = null;
+    }} else {{
+        do {{ {loop_body} }} while (rand() > 0);
+    }}
+    $x->bar();
+}}
+"
+        );
+        let tree = SourceTree::parse(&src);
+        check(&tree, &[], "t.php").into_iter().filter(|d| d.id == "call.on-null").count()
+    };
+    assert_eq!(on_null("return;"), 1, "the `else` arm drops out of the join");
+    // The negative twin: a `continue` of the loop puts the `Foo` path back.
+    assert_eq!(on_null("if (rand() > 0) { continue; } return;"), 0, "both arms join");
 }
 
 #[test]
