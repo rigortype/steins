@@ -99,6 +99,24 @@
 //!   so `fetchAll(PDO::FETCH_COLUMN, 0)` is not told apart from either.
 //!   `PDOStatement::execute`'s `$params` converts an object value through
 //!   `__toString` in both modes, as the `Nested` derivation says.
+//! * **Registration is where a fetch's user code is attributed**
+//!   (ADR-0099 §4.5, issue #870). `PDOStatement::setFetchMode`'s `mixed
+//!   ...$args` (position 1 and up, the tail repeating) names the class of
+//!   `FETCH_CLASS`, which is autoloaded at the call whether or not it exists
+//!   (`TypeError` for a missing one, after the autoloader ran), or the object of
+//!   `FETCH_INTO`, whose `__set` every later `fetch` runs; both are `Autoload`.
+//!   `PDO::setAttribute`'s `mixed $value` is `Autoload` for
+//!   `ATTR_STATEMENT_CLASS => ['Name', $args]` (looked up at the call, a missing
+//!   name autoloads, and every later `prepare` and `query` constructs it) and
+//!   for `ATTR_DEFAULT_FETCH_MODE`, whose `FETCH_CLASS | FETCH_CLASSTYPE`
+//!   makes every later fetch construct the class a column names. The `fetch`
+//!   and `fetchAll` rows keep what they have (the mode position) and gain
+//!   nothing for a registered class: a fetch with no registration constructs
+//!   nothing. Witnessed on 8.5.11 in both calling modes. `setFetchMode`'s
+//!   `int $mode` is `Inert` here, so `setFetchMode(PDO::FETCH_CLASS |
+//!   PDO::FETCH_CLASSTYPE)` registers no class at this call and the class the
+//!   later `fetch()` constructs, named by a column, is charged to neither (a
+//!   residual of the constant-blind rule of [`ArgReach`]).
 //! * `SoapFault`'s `$details` and `$headerFault` (`mixed`) are stored:
 //!   `Inert`, with an object, a lazy object, a closure and an array of
 //!   objects. A `$code` array's elements are checked, not converted
@@ -181,7 +199,9 @@ pub fn method_arg_reach(class: &str, method: &str) -> Option<MethodReachRow> {
         ("pdo", "query") => row(&["string", "?int", "mixed"], true, &[(1, Autoload), (2, Autoload)]),
         ("pdo", "exec") => row(&["string"], false, &[]),
         ("pdo", "prepare") => row(&["string", "array"], false, &[(1, Autoload)]),
+        ("pdo", "setattribute") => row(&["int", "mixed"], false, &[(1, Autoload)]),
         ("pdostatement", "execute") => row(&["?array"], false, &[]),
+        ("pdostatement", "setfetchmode") => row(&["int", "mixed"], true, &[(1, Autoload)]),
         ("pdostatement", "fetch") => row(&["int", "int", "int"], false, &[(0, Autoload)]),
         ("pdostatement", "fetchall") => {
             row(&["int", "mixed"], true, &[(0, Autoload), (1, Callback)])
@@ -360,6 +380,21 @@ mod tests {
         assert_eq!(at("PDOStatement", "fetchAll", 4), ArgReach::Callback);
     }
 
+    /// A class or object a call registers is charged at the registration, and
+    /// the fetches that use it keep the rows they had (ADR-0099 §4.5, #870).
+    #[test]
+    fn pdo_charges_the_class_or_object_at_the_call_that_registers_it() {
+        assert_eq!(at("PDOStatement", "setFetchMode", 0), ArgReach::Inert, "int $mode");
+        assert_eq!(at("PDOStatement", "setFetchMode", 1), ArgReach::Autoload, "FETCH_CLASS name");
+        assert_eq!(at("PDOStatement", "setFetchMode", 2), ArgReach::Autoload, "ctor args repeat");
+        assert_eq!(at("PDOStatement", "setFetchMode", 5), ArgReach::Autoload, "the tail repeats");
+        assert_eq!(at("PDO", "setAttribute", 0), ArgReach::Inert, "int $attribute");
+        assert_eq!(at("PDO", "setAttribute", 1), ArgReach::Autoload, "ATTR_STATEMENT_CLASS");
+        assert_eq!(at("PDO", "setAttribute", 2), ArgReach::Inert, "past the list");
+        assert!(method_arg_reach("PDOStatement", "setFetchMode").expect("row").reaches_blind(true));
+        assert!(method_arg_reach("PDO", "setAttribute").expect("row").reaches_blind(true));
+    }
+
     #[test]
     fn the_containers_reach_only_through_a_class_name() {
         assert_eq!(at("ArrayObject", "__construct", 0), ArgReach::Inert);
@@ -376,8 +411,9 @@ mod tests {
 
     #[test]
     fn a_method_without_a_row_is_blind_not_inert() {
-        assert!(method_arg_reach("PDO", "setAttribute").is_none());
         assert!(method_arg_reach("PDOStatement", "bindValue").is_none());
+        assert!(method_arg_reach("PDO", "setFetchMode").is_none(), "a PDOStatement method");
+        assert!(method_arg_reach("PDOStatement", "setAttribute").is_none(), "a PDO method");
         assert!(method_arg_reach("Foo", "__construct").is_none(), "not an engine class");
         assert!(method_arg_reach("DateTime", "modify").is_none());
     }
@@ -398,7 +434,7 @@ mod tests {
     fn the_reach_rows_are_the_effect_and_throw_rows() {
         const METHODS: &[&str] = &[
             "__construct", "__toString", "query", "exec", "prepare", "execute", "fetch",
-            "fetchAll", "setAttribute", "createFromFormat", "createFromImmutable",
+            "fetchAll", "setAttribute", "setFetchMode", "createFromFormat", "createFromImmutable",
             "createFromMutable", "createFromInterface", "modify", "format", "getMessage",
             "getCode", "getFile", "getLine", "getPrevious", "getTrace", "getTraceAsString",
         ];
