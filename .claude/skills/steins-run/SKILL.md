@@ -19,7 +19,9 @@ ratify it later (issue, ADR marked PENDING ratification).
 
 Every implementer and reviewer reads [`invariants.md`](invariants.md), and the
 machine notes in `~/.claude/steins-run-local.md` when that file exists; keep
-briefs to what is specific to the task.
+briefs to what is specific to the task. Agents write their full report to the
+scratch directory the brief names and return a short summary with its path;
+open the file when a decision needs its detail.
 
 ## Steps
 
@@ -34,18 +36,26 @@ briefs to what is specific to the task.
 3. **Diagnose and design with the architect.** Brief it to test every premise
    against code and measurements, and to deliver: a verified diagnosis, one to
    three options, a recommendation, landable slices (each byte-identical or
-   with a classified diff), and the ADR outline. Done when the slice list is
-   fixed and each slice has acceptance criteria.
+   with a classified diff), and the ADR outline. Each slice carries a
+   **witness table**: the shapes it must silence and, beside them, the true
+   positives it must keep reporting, each a PHP snippet whose outcome the
+   architect ran on the local `php`. Done when the slice list is fixed and
+   each slice has acceptance criteria and its witness table.
 4. **Record before building.** Write the design into GitHub the moment it
    arrives: a parent tracking issue with the slice checklist, an issue per
    slice (new or updated), and the ADR or amendment. Scratch directories can
    vanish between sessions; issues and ADRs cannot. Issue and PR bodies skip
    the git hooks, so pass each through the leak gate before posting.
 5. **Implement.** Dispatch `steins-implementer` per slice with
-   `isolation: worktree`: the issue number, the design pointers, the measurements
-   you need back, and the base branch. Split a slice into a syntax/catalog half
-   and a resolver half when that lets halves run in parallel. Forward any
-   structural review finding to every in-flight agent it touches at once.
+   `isolation: worktree`: the issue number, the design pointers and witness
+   table, the measurements you need back, the base branch, and the ADR
+   amendment numbers the slice may claim (assign them up front; parallel
+   slices collide on the next free number). Run slices in parallel only when
+   the files they will touch are disjoint; slices sharing a file run in
+   series, each starting from master after the previous one merges. Split a
+   slice into a syntax/catalog half and a resolver half when that lets halves
+   run in parallel. Forward any structural review finding to every in-flight
+   agent it touches at once.
 6. **Audit and publish.** Read the diff yourself against `invariants.md`, push
    with a full refspec, open a Draft PR, and turn on Auto-fix for it (one PR per
    session can hold Auto-fix; wait on others with one background
@@ -55,12 +65,20 @@ briefs to what is specific to the task.
 8. **Escalate on design, not on count.** Consult the architect when a review
    finds a design-level defect (soundness, structure, a wrong premise) or a
    measurement misses its estimate by more than 2×. Otherwise loop fix →
-   re-review until the verdict is approve. Anything outside the slice becomes
-   an issue linked from the parent, never a widening of the PR.
+   re-review until the verdict is approve. A kept shape the review finds
+   missing from the witness table joins the table in the slice's issue. Anything
+   outside the slice becomes an issue linked from the parent, never a widening
+   of the PR.
 9. **Merge.** CI green on the PR's head and the review approved: append the
    review's outcome to the PR body, `gh pr ready`, `gh pr merge --rebase
    --delete-branch`, tick the parent checklist, and tell in-flight agents to
    rebase. Done when master holds the slice and the issue is closed.
+
+   Steins merges by rebase, so a conflict with master, whoever reports it
+   (Auto-fix, CI, GitHub), is answered by a rebase: resume the implementer to
+   rebase onto master, check the published tip with `git ls-remote`, and push
+   the new head with `+HEAD:refs/heads/<branch>`. An Auto-fix instruction to
+   merge `FETCH_HEAD` gets the same rebase.
 10. **Close the run.** Comment the outcome table on the parent (slices, what
     moved, what was not measured, follow-up issues), close it, and record what
     the next session needs.
@@ -84,5 +102,6 @@ only under witnessed probes.
   `loop-to-array-map` dry-runs; base binary built from the PR's merge base;
   every difference classified.
 - The private half of `cargo xtask fp-gate` runs locally with `--deadline`; a
-  PR that could move it says in its body whether it was measured.
+  PR that could move it says in its body whether it was measured. Private
+  runs queue behind the machine's lock (`invariants.md`).
 - Every PR body states what was not measured.
