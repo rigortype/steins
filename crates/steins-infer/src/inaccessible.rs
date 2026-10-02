@@ -161,18 +161,22 @@ impl<'a> MemberChain<'a> {
 /// function's own), not against the class that redeclares it. With
 /// `class Base { protected function h() {} } class A extends Base { protected function
 /// h() {} } class B extends Base {}`, `(new A)->h()` from `B` is legal: the root is
-/// `Base`, and `B` is in its hierarchy (witnessed at 8.4 and 8.5; the issue #942
-/// shape). Judging against `A` blamed `B` for a sibling relationship PHP never asks
-/// about.
+/// `Base`, and `B` is in its hierarchy (the issue #942 shape). Judging against `A`
+/// blamed `B` for a sibling relationship PHP never asks about.
+///
+/// The root rule holds for **methods** on every minor 7.4 to 8.5 (witnessed). For
+/// **properties** it holds only from PHP 8.4, which checks the prototype's class;
+/// 7.4 to 8.3 check the redeclaring class, so the property caller takes this root
+/// only where the target does not rule 8.4 out. A constructor's root is
+/// [`method_root`]'s business.
 ///
 /// `declares` answers, for one node, whether it declares the member at all, and when
 /// it does, whether that declaration is a prototype the nearer one inherits from. A
 /// **private** ancestor declaration is a different member that the nearer one does
-/// not override, so it ends the walk (`Some(false)`); so does a constructor that is
-/// not abstract, whose prototype link PHP only forms to an abstract parent
-/// constructor. A node declaring nothing is walked through. Class constants do not use
-/// this walk: PHP 8.4 and 8.5 fatal on a protected constant redeclared and fetched
-/// from a sibling scope (witnessed), so a constant keeps its declaring class.
+/// not override, so it ends the walk (`Some(false)`). A node declaring nothing is
+/// walked through. Class constants do not use this walk: PHP fatals on a protected
+/// constant redeclared and fetched from a sibling scope on every minor 7.4 to 8.5
+/// (witnessed), so a constant keeps its declaring class.
 fn member_root<'a>(
     chain: &MemberChain<'a>,
     from: usize,
@@ -341,25 +345,29 @@ fn inaccessible_call_subject(
 
 /// The root class of the resolved method `r` in `chain` (see [`member_root`]).
 ///
-/// A constructor has no prototype link to an ordinary parent constructor, so its walk
-/// continues only through an `abstract` one.
-fn method_root<'a>(
-    chain: &MemberChain<'a>,
-    r: &ResolvedMethod<'a>,
-    kind: CallSiteKind,
-) -> &'a ClassDecl {
+/// A constructor is the one method whose prototype link is conditional
+/// (`zend_inheritance.c`: the parent's prototype, else the parent itself, is linked
+/// only when that **is abstract**). The ordinary walk finds the topmost non-private
+/// constructor `top`; when `top` is abstract the link holds all the way down and `top`
+/// is the root, and otherwise there is no link anywhere on the line and the root is
+/// the declaring class itself. That is exact because an abstract constructor can only
+/// sit at the top of a declaration line (PHP fatals on a concrete one above an
+/// abstract one). It keys on the method being `__construct`, not on the site's kind:
+/// `$a->__construct()` reaches the same declaration.
+fn method_root<'a>(chain: &MemberChain<'a>, r: &ResolvedMethod<'a>) -> &'a ClassDecl {
     let Some(from) =
         chain.nodes.iter().position(|(_, cd)| cd.fqn.eq_ignore_ascii_case(&r.declaring_class.fqn))
     else {
         return r.declaring_class;
     };
-    member_root(chain, from, |cd| {
-        let m = cd.methods.iter().find(|m| m.name.eq_ignore_ascii_case(&r.method.name))?;
-        Some(
-            m.visibility != Visibility::Private
-                && (kind != CallSiteKind::Construct || m.is_abstract),
-        )
-    })
+    let named = |cd: &'a ClassDecl| {
+        cd.methods.iter().find(|m| m.name.eq_ignore_ascii_case(&r.method.name))
+    };
+    let top = member_root(chain, from, |cd| Some(named(cd)?.visibility != Visibility::Private));
+    if r.method.is_constructor && !named(top).is_some_and(|m| m.is_abstract) {
+        return r.declaring_class;
+    }
+    top
 }
 
 /// `call.inaccessible-method` (ADR-0078, issue #185): a call to a method whose
@@ -410,7 +418,7 @@ pub(crate) fn check_inaccessible_method(
     let vis = match r.method.visibility {
         Visibility::Private => private_blocked(&r, scope).then_some("private"),
         v => {
-            let root = method_root(&chain, &r, kind);
+            let root = method_root(&chain, &r);
             member_inaccessible(cx, v, &root.fqn, scope)
         }
     };
@@ -535,13 +543,21 @@ pub(crate) fn check_inaccessible_property(
     if decl.visibility == Visibility::Private && at != 0 {
         return; // absence, not inaccessibility — see `declared_in_chain`.
     }
-    // A protected property is judged against its root class (`member_root`), as a
-    // method is; a class constant below is not.
-    let root = member_root(&chain, at, |cd| {
-        let p = cd.properties.iter().find(|p| !p.is_static && p.name == prop)?;
-        Some(p.visibility != Visibility::Private)
-    });
-    let Some(vis) = member_inaccessible(cx, decl.visibility, &root.fqn, w.enclosing_class) else {
+    // From PHP 8.4 a protected property is judged against its root class
+    // (`member_root`), as a method is; 7.4 to 8.3 judge it against the redeclaring
+    // class (witnessed). Only a target whose whole interval is below 8.4 keeps the
+    // redeclaring class: an undeclared or straddling target takes the root, which
+    // only reports less. A class constant is never judged against a root.
+    let pre_84 = cx.php_target.is_some_and(|t| t.ceiling.is_some_and(|c| c < (8, 4)));
+    let judged = if pre_84 {
+        declaring
+    } else {
+        member_root(&chain, at, |cd| {
+            let p = cd.properties.iter().find(|p| !p.is_static && p.name == prop)?;
+            Some(p.visibility != Visibility::Private)
+        })
+    };
+    let Some(vis) = member_inaccessible(cx, decl.visibility, &judged.fqn, w.enclosing_class) else {
         return;
     };
     if chain.any_conditional && !cx.dam.is_clear() {
