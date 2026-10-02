@@ -165,28 +165,18 @@ that declares what a dynamic call provides, `@steins-ignore` with a reason, the
 baseline. The fp-gate's `THROW_EXPECTED` is reseeded to the measured counts
 (`xtask/fp-gate/throw_expected.toml`, with the triage by kind).
 
-**Writers.** `effects-envelope` writes only where its lane is exhaustive, so a
-tag it writes draws no effect sibling (measured: 0 findings over 169 tags on
-nikic/PHP-Parser, 0 over 723 across the corpus). `throws-envelope` seeds the
-escapes it *proved* whether or not the body's throw set is exhaustive, so the
-`@throws` it writes is, on a `…?` body, an envelope nothing verified, and the
-floor says so. Applying it to a scratch copy of `symfony/process` writes 11
-tags and every one of them lands on a unit with a gap; applying it to the ten
-public packages (1,934 tags in all) multiplies the sibling's count (PHP-Parser
-4 to 276, monolog 174 to 936, composer 3,170 to 13,595). That is the floor working as designed, but it is
-a consequence a reader of the transform should know. Making `throws-envelope`
-refuse a non-exhaustive body (as `effects-envelope` does, reason
-`effects-not-exhaustive`) is a separate decision, not taken here: it would
-remove almost all of the transform's output.
+**Writers.** `effects-envelope` writes only from an exhaustive summary (ADR-0082 §7), so a tag it writes draws no effect sibling (measured: 0 over 723 tags across the public corpora). `throws-envelope` writes the escapes it *proved*, in lockstep with `throw.undeclared`'s fire set (`proven && !covered`, whether or not the body is `…?`; ADR-0040 §1, ADR-0037), and `throw.undeclared` itself reads certainty, never the exhaustiveness bit. On the declaring side that is also PHPStan's reading: `missingCheckedExceptionInThrows` skips implicit throw points. But a callee's `@throws` is consumed as its throw type at PHPStan call sites (absent, the call is an implicit `Throwable`), so on a `…?` body the written tag is a verified lower bound the consumer reads as an upper one. The floor names the difference, at `strict` only: a tag written on a `…?` body draws `throw.maybe-undeclared` for the body's gaps. Measured on scratch copies of the ten public packages: 1,934 tags; PHP-Parser 4 → 276, monolog 174 → 936, composer 3,170 → 13,595; all 11 tags on symfony/process land on gapped units. The writer is unchanged here; whether it should refuse a `…?` body, write and report the gap in its own report, or keep writing, is #921, decided after S2–S8 have narrowed the gaps the count depends on.
+
+The slice's stated acceptance, "zero sibling findings on written tags", holds for `effects-envelope` and was wrong for `throws-envelope`, for the reason above.
+
+**Known gaps.** #922: the fp-gate's throw table conflates the definite and the sibling counts in one number. #923: a `Maybe`-certainty escape that carries no gap kind is not reported by the floor.
 
 ## 6. What this does not change
 
 The `effect.liskov-widened`, `throw.liskov-widened` and every proof-layer id;
 the exhaustiveness bit and the gap kinds' codec numbering; `annotate`'s margin
 and JSON; the effect baseline and `effect-diff`; the three transforms' plans;
-`SCHEMA_VERSION`. `vendor_suppressed` in `check`'s summary counts findings under
-vendor paths before the profile surface is applied (ADR-0015's order), so the
-two new ids raise it at every profile; no finding appears.
+`SCHEMA_VERSION`. `vendor_suppressed` in `check`'s summary moves: the count is tallied before the profile surface (ADR-0015 order, `crates/steins-cli/src/check.rs`), a pre-existing overstatement every strict-only id already causes; #920.
 
 ## 7. Destructors: decided here, lands in S6
 

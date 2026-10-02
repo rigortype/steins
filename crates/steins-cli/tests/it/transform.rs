@@ -614,10 +614,11 @@ fn effects_envelope_json_format_emits_report_and_postcheck() {
 
 // The strict floor (ADR-0100): a tag a transform writes is verifiable
 
-/// The two envelope writers only write a tag where the lane is exhaustive, and the
-/// strict floor only names a gap where it is not: so a project the writers have
-/// annotated checks clean of the `maybe-` siblings at `--profile strict`, on the
-/// very tags they wrote.
+/// A project whose bodies are exhaustive in both lanes, annotated by both writers,
+/// checks clean of the `maybe-` siblings at `--profile strict`, on the very tags
+/// they wrote. That holds because the fixture's bodies are exhaustive: only
+/// `effects-envelope` writes solely from an exhaustive summary, and
+/// `throws-envelope` also writes on a `…?` body, which the next test pins.
 #[test]
 fn written_envelopes_leave_no_sibling_finding_at_strict() {
     let proj = TempProject::new("floor-written-tags");
@@ -652,7 +653,7 @@ fn written_envelopes_leave_no_sibling_finding_at_strict() {
     );
 }
 
-/// The other half, pinned rather than hidden (ADR-0100 §6): `throws-envelope` seeds
+/// The other half, pinned rather than hidden (ADR-0100 §5): `throws-envelope` seeds
 /// the escapes it **proved**, whether or not the body's throw set is exhaustive, so
 /// the `@throws` it writes on a `…?` body is an envelope nothing verified, and the
 /// strict floor says so. `effects-envelope` writes only where its lane is
