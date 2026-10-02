@@ -388,7 +388,7 @@ fn stmt_end_walk(s: &Statement<'_>) -> BodyEnd {
 /// earlier. Kept separate from [`body_end`] (which reads lowered [`Stmt`]s) because
 /// a branch body is judged here *before* it is lowered, and the two must agree by
 /// sharing this shape rather than by coincidence.
-fn block_end(statements: &[Statement<'_>]) -> BodyEnd {
+pub(crate) fn block_end(statements: &[Statement<'_>]) -> BodyEnd {
     let mut undecided = false;
     for s in statements {
         match stmt_end(s) {

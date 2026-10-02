@@ -633,7 +633,7 @@ fn a_guarded_if_shields_only_the_name_it_tests() {
     // `$other` (inside the guarded body, not the tested name) still fires; `$x`
     // fires only outside — pinning the shield's two dimensions: which name, which subtree.
     let d = diags(
-        "<?php\nfunction f(): mixed {\n    if (isset($x)) {\n        return $other;\n    }\n    return $x;\n}\n",
+        "<?php\nfunction f(): mixed {\n    if (isset($x)) {\n        echo $other;\n    }\n    return $x;\n}\n",
     );
     assert_eq!(d.len(), 2, "{d:#?}");
     assert!(d.iter().any(|d| d.line == 4 && d.message.contains("$other")), "{d:#?}");
@@ -641,11 +641,123 @@ fn a_guarded_if_shields_only_the_name_it_tests() {
 }
 
 #[test]
-fn a_conjunction_guard_shields_nothing() {
-    // Carve-out kept to the corpus shape: only a bare `isset`/`empty` test,
-    // optionally negated or parenthesized, casts a shield.
+fn a_conjunction_guard_shields_the_names_it_tests() {
+    // Issue #929 retires the old carve-out: the arms run only when the whole
+    // conjunction held, so `isset($x)` in it is as good a test as a bare one. php -r
+    // witness (8.5.9): silent, the condition is false on every run.
+    silent("<?php\nfunction f(bool $c): mixed {\n    return isset($x) && $c ? $x : null;\n}\n");
+    // The shield is still only for the name the conjunction tests.
     fires(
-        "<?php\nfunction f(bool $c): mixed {\n    return isset($x) && $c ? $x : null;\n}\n",
+        "<?php\nfunction f(bool $c): mixed {\n    return isset($x) && $c ? $other : null;\n}\n",
+        "other",
+    );
+}
+
+// Issue #929: the guard's reach inside its own condition, after a terminating `if`, and
+// through a disjunction. Every shape below runs clean in php -r (8.5.9), `$x` never bound.
+
+#[test]
+fn the_right_operand_of_a_short_circuit_is_shielded_by_the_names_the_left_tests() {
+    silent("<?php\nfunction f(): void { if (isset($x) && $x > 1) {} }\n");
+    silent("<?php\nfunction f(): void { print(isset($x) && $x > 1 ? 1 : 0); }\n");
+    silent("<?php\nfunction f(): void { if (!isset($x) || $x > 1) {} }\n");
+    silent("<?php\nfunction f(): void { !isset($x) || print($x); }\n");
+    silent("<?php\nfunction f(): void { empty($x) || print($x); }\n");
+    // The low-precedence spellings are the same operators.
+    silent("<?php\nfunction f(): void { isset($x) and print($x); }\n");
+    silent("<?php\nfunction f(): void { !isset($x) or print($x); }\n");
+    // A longer chain keeps the shield for every later operand.
+    silent("<?php\nfunction f(): void { if (isset($x) && $x > 1 && $x < 5 && $x !== 3) {} }\n");
+    // A loop condition is a condition like any other.
+    silent("<?php\nfunction f(): void { while (isset($x) && $x > 1) {} }\n");
+}
+
+#[test]
+fn a_short_circuit_shield_names_only_what_the_left_tests() {
+    // `$other` is judged, and so is a read on the LEFT of the operator, before any guard.
+    fires("<?php\nfunction f(): void { isset($x) && print($other); }\n", "other");
+    fires("<?php\nfunction f(): void { print($x) && isset($x); }\n", "x");
+    // Outside the operator the name is judged again.
+    let d = diags("<?php\nfunction f(): void {\n    isset($x) && print($x);\n    echo $x;\n}\n");
+    assert_eq!(d.len(), 1, "{d:#?}");
+    assert_eq!(d[0].line, 4, "{d:#?}");
+}
+
+#[test]
+fn a_terminating_if_shields_the_statements_after_it() {
+    silent("<?php\nfunction f(): void { if (!isset($x)) { return; } print($x); }\n");
+    silent("<?php\nfunction f(): void { if (empty($x)) return; print($x); }\n");
+    silent("<?php\nfunction f(): void { if (!isset($x)) { throw new Exception(); } print($x); echo $x; }\n");
+    silent("<?php\nfunction f(): void { if (!isset($x)): return; endif; print($x); }\n");
+    // Inside a nested list the shield reaches the rest of THAT list, and the guard's own
+    // disjunction counts when every disjunct tests a name.
+    silent(
+        "<?php\nfunction f(bool $c): void { if ($c) { if (!isset($x) || !isset($y)) { return; } print($x); } }\n",
+    );
+    // A loop body is a statement list too: `continue` ends the iteration.
+    silent("<?php\nfunction f(array $a): void { foreach ($a as $v) { if (!isset($x)) { continue; } print($x); } }\n");
+}
+
+#[test]
+fn a_terminating_if_stops_shielding_where_its_list_ends() {
+    // Firing controls: the shield is the *following* statements of the *same* list.
+    // Nothing terminates, so the read after the guard is reachable with `$x` unbound.
+    fires("<?php\nfunction f(): void { if (isset($x)) {} echo $x; }\n", "x");
+    fires("<?php\nfunction f(): void { if (!isset($x)) { echo 1; } echo $x; }\n", "x");
+    // An `else` or `elseif` makes the successor reachable another way.
+    fires(
+        "<?php\nfunction f(): void { if (!isset($x)) { return; } else { echo 1; } echo $x; }\n",
+        "x",
+    );
+    fires(
+        "<?php\nfunction f(bool $c): void { if (!isset($x)) { return; } elseif ($c) { echo 1; } echo $x; }\n",
+        "x",
+    );
+    // A `try` is `Unknown`, which is never a terminator.
+    fires(
+        "<?php\nfunction f(): void { if (!isset($x)) { try { return; } finally {} } echo $x; }\n",
+        "x",
+    );
+    // The guard names another variable.
+    fires("<?php\nfunction f(): void { if (!isset($y)) { return; } echo $x; }\n", "x");
+    // The shield does not climb out of the list the guard sits in.
+    fires(
+        "<?php\nfunction f(bool $c): void { if ($c) { if (!isset($x)) { return; } } echo $x; }\n",
+        "x",
+    );
+    // …nor reach back before it.
+    let d = diags("<?php\nfunction f(): void {\n    echo $x;\n    if (!isset($x)) { return; }\n}\n");
+    assert_eq!(d.len(), 1, "{d:#?}");
+    assert_eq!(d[0].line, 3, "{d:#?}");
+}
+
+#[test]
+fn a_disjunction_of_guards_shields_its_body_while_every_name_is_never_bound() {
+    silent("<?php\nfunction f(): void { if (isset($x) || isset($y)) { echo $x; } }\n");
+    silent("<?php\nfunction f(): void { if (isset($y) || isset($x)) { echo $x; } }\n");
+    silent("<?php\nfunction f(): void { if (isset($x) or isset($y)) { echo $x; } }\n");
+    silent("<?php\nfunction f(): void { print(isset($x) || empty($y) ? $x : 0); }\n");
+    // A conjunct inside a disjunct contributes its names too.
+    silent("<?php\nfunction f(): void { if (isset($x) || (isset($y) && isset($z))) { echo $x; } }\n");
+}
+
+#[test]
+fn a_disjunction_guard_fires_when_another_disjunct_can_hold() {
+    // `$y` is bound, so the body runs with `$x` unbound whenever `isset($y)` holds.
+    fires(
+        "<?php\nfunction f(int $y): void { if (isset($x) || isset($y)) { echo $x; } }\n",
+        "x",
+    );
+    fires(
+        "<?php\nfunction f(int $y): void { if (isset($y) || isset($x)) { echo $x; } }\n",
+        "x",
+    );
+    // A disjunct that tests no name can hold on its own: the disjunction guards nothing.
+    fires("<?php\nfunction f(int $y): void { if (isset($x) || $y > 0) { echo $x; } }\n", "x");
+    fires("<?php\nfunction f(): void { if (isset($x) || rand()) { echo $x; } }\n", "x");
+    // A name some path binds still counts as bound for the disjunction.
+    fires(
+        "<?php\nfunction f(bool $c): void { if ($c) { $y = 1; } if (isset($x) || isset($y)) { echo $x; } }\n",
         "x",
     );
 }

@@ -339,3 +339,54 @@ classes are subjects, so no new site is claimed. No static-property fetch (`A::$
 has an inaccessibility id; the rule would apply there from 8.4 if one is added. The
 change only removes findings: a protected member whose root is a common ancestor of
 the site's scope.
+
+## Amendment (2026-10-03): the never-bound guard reads its own condition, a terminating `if`, and a disjunction (issue #929)
+
+**Status: PENDING ratification.** `variable.undefined` (#194) shielded a
+read only under a bare `isset`/`empty` (optionally negated) that
+*enclosed* it: the arms of `isset($x) ? … : …`, the body of
+`if (empty($x)) { … }`. A name that is never bound makes every such test
+constant (`isset` false, `empty` true), so any read the test stands in
+front of is dead code, and PHP runs it without the warning. Three shapes
+stood in front of a read without enclosing it, and the id reported all
+three. Each rule below stays the containment rule the id already used: it
+asks what the condition spells, never which arm the guard protects, so an
+over-shield costs a finding and cannot manufacture one.
+
+1. **A short-circuit operand.** For `&&`, `and`, `||` and `or`, the names
+   the left operand tests through `isset`/`empty`, at either polarity,
+   shield the right operand. `!isset($x) || print($x)`, `empty($x) || …`
+   and `isset($x) && $x > 1` are silent.
+2. **A conjunction or disjunction as the condition.** The tested names
+   distribute through `&&`: `isset($x) && $c ? $x : null` shields the
+   arms with `x`. Through `||` the names of every disjunct are tested
+   *jointly*: the body of `if (isset($x) || isset($y))` runs when either
+   holds, so a read of `$x` in it is discharged only while every name any
+   disjunct tests is never bound. The decision waits for the scope's
+   binding set (`VarUsage::settle`), so `isset($x) || isset($y)` with a
+   bound `$y` still reports `$x`. A disjunct that tests nothing
+   (`isset($x) || $y > 0`) can hold on its own, so the disjunction tests
+   nothing and the read reports. This retires the old carve-out that a
+   conjunction shields nothing, which was kept to the corpus shape and
+   reported `isset($x) && $c ? $x : null`.
+3. **A terminating `if`.** An `if` with no `elseif` and no `else`, whose
+   body provably terminates (`BodyEnd::provably_terminates`, so a `try`,
+   a `goto` or a `switch` that cannot be structured never counts), and
+   whose condition tests names, shields the statements after it in the
+   same statement list: `if (!isset($x)) { return; } print($x);`. The
+   shield stops at the end of the list the `if` sits in and does not reach
+   a statement before it. `if (isset($x)) {} echo $x;` still reports,
+   because nothing terminates.
+
+**What the polarity-blindness costs, accepted.** Each rule withholds the
+finding on a shape where the read is reachable with the name unbound:
+`isset($x) || print($x)`, `!isset($x) && print($x)` and
+`if (isset($x)) { return; } echo $x;` all warn in PHP and are now silent
+for a never-bound `$x`. A polarity-aware reading would keep them (the
+presence pass's `guard_bound_names` already computes it); this amendment
+keeps the id's existing containment trade instead, and the finer reading
+is the follow-up.
+
+**What is not touched.** The presence pass (`variable.maybe-undefined`)
+judges each unit against the flowing state and already shields a unit by
+every name an `isset`/`empty` in it tests, so its findings do not move.

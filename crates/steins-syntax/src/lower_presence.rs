@@ -12,7 +12,7 @@ use mago_syntax::cst::{
 };
 
 use crate::ast::{Comment, CommentKind, UndefinedRead, UnsetSeedFacts, UnsetSeedRead};
-use crate::lower_scope::{VarUsage, bind_lvalue_roots, scan_var_usage};
+use crate::lower_scope::{Shield, VarUsage, bind_lvalue_roots, scan_var_usage};
 use crate::lower_stmt::{body_has_nested_jumps_only, expr_is_false, expr_is_true, stmt_end};
 use crate::memo;
 use crate::{bytes_to_string, strip_dollar, to_span};
@@ -182,8 +182,9 @@ fn presence_leaf(node: &Node<'_, '_>, state: &mut PresenceState, cx: &mut Presen
     // walk above it is cached too, on body and entry state (issue #793).
     let leaf = memo::presence_leaf(node, || {
         let mut acc = VarUsage::default();
-        let mut shield = Vec::new();
-        collect_presence_shield(node, &mut shield);
+        let mut names = Vec::new();
+        collect_presence_shield(node, &mut names);
+        let shield: Vec<Shield> = names.into_iter().map(Shield::plain).collect();
         scan_var_usage(node, false, &shield, &mut acc);
         memo::PresenceLeaf { reads: acc.reads, bound: acc.bound }
     });

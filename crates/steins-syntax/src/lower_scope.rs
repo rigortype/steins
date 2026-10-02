@@ -25,7 +25,7 @@ use crate::lower_expr::lower_arg_value;
 use crate::lower_presence::maybe_undefined_reads;
 use crate::lower_site::scan_owner_sites;
 use crate::lower_stmt::{
-    call_invalidation, expr_end, lower_expr_stmt, lower_stmt, named_call, node_poisons,
+    block_end, call_invalidation, expr_end, lower_expr_stmt, lower_stmt, named_call, node_poisons,
     push_byref_captures, scan_guard_chain_no_default, scan_opaque, scan_string_contexts,
     subtree_has_function_exit,
 };
@@ -719,6 +719,10 @@ pub(crate) struct VarUsage {
     /// See [`Scope::ref_arg_candidates`] — collected in the same walk but on its own
     /// terms, because a binding form must not depend on a read being recorded.
     pub(crate) arg_candidates: Vec<UndefinedRead>,
+    /// Reads a **disjunctive** shield covers: each is discharged only when every name in
+    /// its [`Shield::joint`] set is never bound, so [`Self::settle`] decides them once the
+    /// whole scope's bindings are known.
+    conditional: Vec<(UndefinedRead, Vec<String>)>,
     dammed: bool,
 }
 
@@ -741,13 +745,54 @@ impl VarUsage {
     }
 
     /// Record a read of `$x`, unless the engine binds the name unconditionally or
-    /// an enclosing same-variable guard shields it (see [`guard_tested_names`]).
-    fn read_direct(&mut self, dv: &mago_syntax::cst::DirectVariable<'_>, shielded: &[String]) {
+    /// an enclosing same-variable guard shields it (see [`guard_tested_names`]). A read
+    /// only a disjunctive shield covers is parked for [`Self::settle`].
+    fn read_direct(&mut self, dv: &mago_syntax::cst::DirectVariable<'_>, shielded: &[Shield]) {
         let name = strip_dollar(bytes_to_string(dv.name));
-        if always_bound(&name) || shielded.contains(&name) {
+        if always_bound(&name) {
             return;
         }
-        self.reads.push(UndefinedRead { name, span: to_span(dv.span()) });
+        let mut joint = None;
+        for shield in shielded.iter().filter(|s| s.name == name) {
+            if shield.joint.is_empty() {
+                return;
+            }
+            joint.get_or_insert(&shield.joint);
+        }
+        let read = UndefinedRead { name, span: to_span(dv.span()) };
+        match joint {
+            Some(joint) => self.conditional.push((read, joint.clone())),
+            None => self.reads.push(read),
+        }
+    }
+
+    /// Decide the parked reads, now that `bound` is complete: a disjunction guard
+    /// (`isset($x) || isset($y)`) leaves its body unreachable only when **no** disjunct
+    /// can hold, so a read stays discharged only while every name the guard tests is
+    /// never bound. Otherwise the read is recorded as if nothing shielded it, which is
+    /// what it was before the guard was read at all.
+    fn settle(&mut self) {
+        for (read, joint) in std::mem::take(&mut self.conditional) {
+            if joint.iter().any(|n| self.bound.contains(n)) {
+                self.reads.push(read);
+            }
+        }
+    }
+}
+
+/// A name a guard tests, and the names that must all be never-bound for the guard's
+/// silence to hold. `joint` is empty for a plain `isset($x)` / `empty($x)` test; a
+/// disjunction lists every name any disjunct tests, since the body it guards runs when
+/// *any* of them is bound (see [`VarUsage::settle`]).
+#[derive(Clone)]
+pub(crate) struct Shield {
+    name: String,
+    joint: Vec<String>,
+}
+
+impl Shield {
+    pub(crate) fn plain(name: String) -> Self {
+        Self { name, joint: Vec::new() }
     }
 }
 
@@ -763,43 +808,82 @@ impl VarUsage {
 /// the guard protects — costing a finding on a "wrong" polarity but never
 /// manufacturing one, letting a purely syntactic containment test stand in for a
 /// flow analysis Steins does not have (the `variable.maybe-undefined` foundation,
-/// issue #199). `!` and parentheses are transparent; a conjunction
-/// (`isset($x) && $y`) tests nothing here, matching the corpus's shapes.
-fn guard_tested_names(cond: &Expression<'_>) -> Vec<String> {
+/// issue #199). `!` and parentheses are transparent.
+///
+/// The condition's own logical operators are read too (issue #929), each as
+/// containment over the same two-valued fact:
+///
+/// * `&&` / `and` **distributes**: `isset($x) && $y > 0` tests `x`, because the arms
+///   it guards run only when the whole conjunction held.
+/// * `||` / `or` tests the names of its disjuncts **jointly**, and only when *every*
+///   disjunct tests something. `isset($x) || isset($y)` guards a body that runs when
+///   either is set, so a read of `$x` there is discharged only while `$y` is never
+///   bound too ([`VarUsage::settle`]); `isset($x) || $y > 0` runs with `$x` unbound
+///   whenever `$y > 0`, so the disjunction tests nothing.
+fn guard_tested_names(cond: &Expression<'_>) -> Vec<Shield> {
     let mut out = Vec::new();
-    collect_guard_tested_names(cond, &mut out);
+    // A left-nested chain re-enters this per link, so the visit budget bounds the
+    // quadratic worst case; running out only withholds a shield, never adds one.
+    collect_guard_tested_names(cond, &mut out, &mut 256);
     out
 }
 
-fn collect_guard_tested_names(cond: &Expression<'_>, out: &mut Vec<String>) {
+fn collect_guard_tested_names(cond: &Expression<'_>, out: &mut Vec<Shield>, budget: &mut u32) {
+    if stack_guard::exhausted() || *budget == 0 {
+        return;
+    }
+    *budget -= 1;
+    let direct = |value: &Expression<'_>| match value.unparenthesized() {
+        Expression::Variable(mago_syntax::cst::Variable::Direct(dv)) => {
+            Some(Shield::plain(strip_dollar(bytes_to_string(dv.name))))
+        }
+        _ => None,
+    };
     match cond.unparenthesized() {
         Expression::Construct(Construct::Isset(i)) => {
-            for value in i.values.iter() {
-                if let Expression::Variable(mago_syntax::cst::Variable::Direct(dv)) =
-                    value.unparenthesized()
-                {
-                    out.push(strip_dollar(bytes_to_string(dv.name)));
+            out.extend(i.values.iter().filter_map(|v| direct(v)));
+        }
+        Expression::Construct(Construct::Empty(e)) => out.extend(direct(e.value)),
+        Expression::UnaryPrefix(up) if matches!(up.operator, UnaryPrefixOperator::Not(_)) => {
+            collect_guard_tested_names(up.operand, out, budget);
+        }
+        Expression::Binary(b) if is_logical_and(&b.operator) => {
+            collect_guard_tested_names(b.lhs, out, budget);
+            collect_guard_tested_names(b.rhs, out, budget);
+        }
+        Expression::Binary(b) if is_logical_or(&b.operator) => {
+            let (mut lhs, mut rhs) = (Vec::new(), Vec::new());
+            collect_guard_tested_names(b.lhs, &mut lhs, budget);
+            collect_guard_tested_names(b.rhs, &mut rhs, budget);
+            if lhs.is_empty() || rhs.is_empty() {
+                return;
+            }
+            let mut joint: Vec<String> = Vec::new();
+            for shield in lhs.iter().chain(&rhs) {
+                for name in std::iter::once(&shield.name).chain(&shield.joint) {
+                    if !joint.contains(name) {
+                        joint.push(name.clone());
+                    }
                 }
             }
-        }
-        Expression::Construct(Construct::Empty(e)) => {
-            if let Expression::Variable(mago_syntax::cst::Variable::Direct(dv)) =
-                e.value.unparenthesized()
-            {
-                out.push(strip_dollar(bytes_to_string(dv.name)));
-            }
-        }
-        Expression::UnaryPrefix(up) if matches!(up.operator, UnaryPrefixOperator::Not(_)) => {
-            collect_guard_tested_names(up.operand, out);
+            out.extend(lhs.into_iter().chain(rhs).map(|s| Shield { name: s.name, joint: joint.clone() }));
         }
         _ => {}
     }
 }
 
+fn is_logical_and(op: &mago_syntax::cst::BinaryOperator<'_>) -> bool {
+    matches!(op, mago_syntax::cst::BinaryOperator::And(_) | mago_syntax::cst::BinaryOperator::LowAnd(_))
+}
+
+fn is_logical_or(op: &mago_syntax::cst::BinaryOperator<'_>) -> bool {
+    matches!(op, mago_syntax::cst::BinaryOperator::Or(_) | mago_syntax::cst::BinaryOperator::LowOr(_))
+}
+
 /// The shield in force inside a guarded construct's arms: `None` when the condition
 /// tests nothing, so the caller keeps borrowing its own slice and no allocation
 /// happens on the overwhelmingly common path.
-fn extend_shield(base: &[String], added: Vec<String>) -> Option<Vec<String>> {
+fn extend_shield(base: &[Shield], added: Vec<Shield>) -> Option<Vec<Shield>> {
     if added.is_empty() {
         return None;
     }
@@ -894,7 +978,7 @@ fn bind_partial_arguments(list: &mago_syntax::cst::PartialArgumentList<'_>, acc:
 fn scan_local_variable(
     var: &mago_syntax::cst::Variable<'_>,
     guarded: bool,
-    shielded: &[String],
+    shielded: &[Shield],
     acc: &mut VarUsage,
 ) {
     match var {
@@ -917,7 +1001,7 @@ fn scan_local_variable(
 /// left operand of `??`, and the `@` error-control operand — all witnessed silent at
 /// 8.5.9). Bindings are still collected there; only the read is withheld.
 #[expect(clippy::too_many_lines, reason = "predates the #778 ratchet; split when next reworked")]
-pub(crate) fn scan_var_usage(node: &Node<'_, '_>, guarded: bool, shielded: &[String], acc: &mut VarUsage) {
+pub(crate) fn scan_var_usage(node: &Node<'_, '_>, guarded: bool, shielded: &[Shield], acc: &mut VarUsage) {
     match node {
         // --- Nested scopes: their reads are their own scope's question. ---
         //
@@ -1040,6 +1124,22 @@ pub(crate) fn scan_var_usage(node: &Node<'_, '_>, guarded: bool, shielded: &[Str
             scan_var_usage(&Node::Expression(b.rhs), guarded, shielded, acc);
             return;
         }
+        // The operands of a short-circuit operator are the guard idiom in expression
+        // spelling (issue #929): `!isset($x) || print($x)` and `isset($x) && $x > 1`
+        // reach the right operand only through the left, so the names the left tests
+        // shield it. Either polarity, as for the arms of an `if` — see
+        // `guard_tested_names`. Walked directly rather than through `children`, so the
+        // stack guard is asked here.
+        Node::Binary(b) if is_logical_and(&b.operator) || is_logical_or(&b.operator) => {
+            if stack_guard::exhausted() {
+                return;
+            }
+            scan_var_usage(&Node::Expression(b.lhs), guarded, shielded, acc);
+            let extended = extend_shield(shielded, guard_tested_names(b.lhs));
+            let inner = extended.as_deref().unwrap_or(shielded);
+            scan_var_usage(&Node::Expression(b.rhs), guarded, inner, acc);
+            return;
+        }
 
         // --- Binding forms. None of these return: the main recursion may re-visit
         // the very same token as a read, which the final set difference discards. ---
@@ -1126,9 +1226,41 @@ pub(crate) fn scan_var_usage(node: &Node<'_, '_>, guarded: bool, shielded: &[Str
         Node::DirectVariable(dv) if !guarded => acc.read_direct(dv, shielded),
         _ => {}
     }
+    // The children of a statement list are its statements, in order — the one place a
+    // guard can speak for what *follows* it (issue #929); see `terminating_guard_names`.
+    let mut running: Option<Vec<Shield>> = None;
     for child in children(node) {
-        scan_var_usage(&child, guarded, shielded, acc);
+        // Only a later *statement* is reached through the guard: the `elseif`/`else`
+        // clauses that follow a colon-delimited body's statements are not.
+        let inner = match &child {
+            Node::Statement(_) => running.as_deref().unwrap_or(shielded),
+            _ => shielded,
+        };
+        scan_var_usage(&child, guarded, inner, acc);
+        if let Node::Statement(Statement::If(i)) = &child
+            && let Some(added) = terminating_guard_names(i)
+        {
+            running = extend_shield(inner, added);
+        }
     }
+}
+
+/// The shield an `if` casts over the statements **after** it in the same list: the
+/// names its condition tests, when it has no `elseif`/`else` and its body provably
+/// terminates. `if (!isset($x)) { return; } print($x);` reaches the `print` only with
+/// `$x` set, so the read is no `variable.undefined`.
+///
+/// The body's terminality is the CFG's own ([`block_end`]), so a `try` or a `goto` in
+/// it is `Unknown` and shields nothing. The condition is read the way an enclosing
+/// `if`'s is — either polarity, containment rather than reachability — which keeps
+/// `if (isset($x)) {} echo $x;` reporting (nothing terminates) and costs the recall of
+/// `if (isset($x)) { return; } echo $x;`.
+fn terminating_guard_names(i: &mago_syntax::cst::If<'_>) -> Option<Vec<Shield>> {
+    if !i.body.else_if_clauses().is_empty() || i.body.else_statements().is_some() {
+        return None;
+    }
+    let names = guard_tested_names(i.condition);
+    (!names.is_empty() && block_end(i.body.statements()).provably_terminates()).then_some(names)
 }
 
 /// The reads of names a scope never binds (issue #194) — the computation behind
@@ -1153,9 +1285,17 @@ fn undefined_variable_reads(
             acc.bind_direct(&v.variable);
         }
     }
+    let mut running: Option<Vec<Shield>> = None;
     for s in statements {
-        scan_var_usage(&Node::Statement(s), false, &[], &mut acc);
+        let shield = running.as_deref().unwrap_or(&[]);
+        scan_var_usage(&Node::Statement(s), false, shield, &mut acc);
+        if let Statement::If(i) = s
+            && let Some(added) = terminating_guard_names(i)
+        {
+            running = extend_shield(shield, added);
+        }
     }
+    acc.settle();
     if acc.dammed {
         return ScopeVarFacts::default();
     }
