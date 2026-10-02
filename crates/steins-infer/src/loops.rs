@@ -112,7 +112,7 @@ pub(crate) fn walk_loop(
                 &mut bstore,
             );
             loop_fallthrough_forget(w, writes, reads, *poisons, *may_return, env, store);
-            walk_loop_body(w, folder, body, benv, bstore, descent, facts, out);
+            let _ = walk_loop_body(w, folder, body, benv, bstore, descent, facts, out);
             Flow::FellThrough
         }
         // A structured `do`-`while` (issues #650 and #651): the condition
@@ -123,15 +123,25 @@ pub(crate) fn walk_loop(
         // takes `walk_loop_body`, the half of the `while` rule that is not the
         // header. The fall-through is the opposite case and needs no exception:
         // the condition is evaluated immediately before it, exactly as a
-        // `while`'s is.
-        StmtKind::DoWhile { cond, body, break_free, writes, reads, poisons, may_return } => {
+        // `while`'s is. Reachability is `do_while_flow`'s (issue #679).
+        StmtKind::DoWhile {
+            cond,
+            body,
+            break_free,
+            continue_free,
+            writes,
+            reads,
+            poisons,
+            may_return,
+        } => {
             let mut benv = env.clone();
             let mut bstore = store.clone();
             loop_entry_forget(writes, reads, &[], *poisons, &mut benv, &mut bstore);
             loop_fallthrough_forget(w, writes, reads, *poisons, *may_return, env, store);
             apply_loop_exit_negation(w, folder, cond, *break_free, env, store);
-            walk_loop_body(w, folder, body, benv, bstore, descent, facts, out);
-            Flow::FellThrough
+            let verdict = eval_cond(w, folder, cond, &benv, &bstore, w.scope.poisoned);
+            let body_flow = walk_loop_body(w, folder, body, benv, bstore, descent, facts, out);
+            do_while_flow(*break_free, *continue_free, verdict, body_flow)
         }
         _ => unreachable!("walk_trace hands walk_loop the four loop kinds only"),
     }
@@ -143,10 +153,38 @@ pub(crate) fn walk_loop(
 /// to leave the body either, the successor is unreachable — `while (true) { …;
 /// return; }` is the `if (true) { return; }` twin `walk_if` already terminates.
 /// Anything less than that pair falls through: an undecided header may fail, and a
-/// `break` leaves without failing it. A `do`-`while` is not this question (its body
-/// runs before any test; issue #679 owns its reachability).
+/// `break` leaves without failing it. A `do`-`while` asks this and one more question
+/// ([`do_while_flow`]).
 fn loop_flow(break_free: bool, verdict: Certainty) -> Flow {
     if break_free && verdict == Certainty::Yes { Flow::Terminated } else { Flow::FellThrough }
+}
+
+/// What a `do`-`while` does to the code after it (issue #679): [`loop_flow`]'s
+/// answer, or the one only this loop can give — its body runs at least once, so a
+/// body that terminates on every path decides the successor.
+///
+/// [`loop_flow`]'s half holds here on the same terms. `verdict` is the condition
+/// evaluated on the body's entry env, which holds at every point inside the loop
+/// (every name the loop can rebind is forgotten in it), so it holds at every test
+/// too; that is not the entry narrowing the variant forbids, which would state the
+/// test's outcome *before* the first one ran.
+///
+/// The body's half needs both jump gates. `body_flow` counts a `break` or
+/// `continue` as terminating its path — it leaves the block it is written in — but
+/// a `break` of this loop lands on the successor and a `continue` of it lands on the
+/// condition, which may fail. `break_free` rules out the first (and any jump out of
+/// the body past this loop), `continue_free` the second, and with both every jump
+/// the body walk stopped at belongs to a nested construct whose own walk already
+/// answered for it. What is left is `return`, `throw`, `exit` and a `never` call,
+/// none of which comes back.
+fn do_while_flow(
+    break_free: bool,
+    continue_free: bool,
+    verdict: Certainty,
+    body_flow: Flow,
+) -> Flow {
+    let body_decides = break_free && continue_free && body_flow == Flow::Terminated;
+    if body_decides { Flow::Terminated } else { loop_flow(break_free, verdict) }
 }
 
 /// The env a **structured loop's fall-through** starts in (issue #651) — the same
@@ -407,7 +445,7 @@ fn walk_while_body(
         return verdict;
     }
     apply_cond_side(w, folder, cond, true, &mut benv, &mut bstore);
-    walk_loop_body(w, folder, body, benv, bstore, descent, facts, out);
+    let _ = walk_loop_body(w, folder, body, benv, bstore, descent, facts, out);
     verdict
 }
 
@@ -421,6 +459,13 @@ fn walk_while_body(
 /// would state an untested fact, and reading it as false would skip a body that runs
 /// exactly once. Neither may take the `while` treatment, and neither loses anything
 /// else by it.
+///
+/// It answers the body's own [`Flow`], and only a `do`-`while` reads it (issue
+/// #679). A body that terminates on every path terminates an ITERATION, and a
+/// `while`, `for` or `foreach` whose condition is not decided may run none at all,
+/// so their successor stays reachable either way. A `do`-`while` body runs at least
+/// once, so there it decides the successor — under the jump gates
+/// [`do_while_flow`] spells out.
 #[allow(clippy::too_many_arguments)]
 fn walk_loop_body(
     w: &WalkCx,
@@ -431,13 +476,6 @@ fn walk_loop_body(
     descent: &mut Option<Descent<'_>>,
     facts: &mut Option<&mut Vec<LineFact>>,
     out: &mut Vec<Diagnostic>,
-) {
-    // The body's own `Flow` is discarded: a body that terminates on every path
-    // terminates an ITERATION, and a `while`, `for` or `foreach` whose condition is
-    // not decided may run none at all, so their successor stays reachable either
-    // way. A `do`-`while` body runs at least once, so there the discard is a
-    // widening — a successor the body provably never reaches is still walked
-    // (issue #679); it never under-reports, and it is the one caller for which
-    // the reasoning above does not hold.
-    let _ = walk_trace(w, folder, body, &mut benv, &mut bstore, descent, facts, true, out);
+) -> Flow {
+    walk_trace(w, folder, body, &mut benv, &mut bstore, descent, facts, true, out)
 }

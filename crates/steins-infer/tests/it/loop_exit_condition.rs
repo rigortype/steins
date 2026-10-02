@@ -243,6 +243,81 @@ function f(): void {
     );
 }
 
+/// How many `call.on-null` findings `$x->bar()` draws after `stmt`, with `$x`
+/// proven null before it and never written by it.
+fn on_null_after(stmt: &str) -> usize {
+    let src = format!(
+        "<?php
+final class Foo {{ public function bar(): void {{}} }}
+function f(): void {{
+    $x = null;
+    {stmt}
+    $x->bar();
+}}
+"
+    );
+    let tree = SourceTree::parse(&src);
+    check(&tree, &[], "t.php").into_iter().filter(|d| d.id == "call.on-null").count()
+}
+
+#[test]
+fn a_do_while_body_that_terminates_on_every_path_makes_the_successor_unreachable() {
+    // Issue #679. A `do`-`while` body runs at least once, so a body that returns or
+    // throws on every path leaves nothing after the loop to run, whatever the
+    // condition says — it is never even evaluated. PHPStan reports nothing here.
+    for stmt in [
+        "do { return; } while (false);",
+        "do { throw new \\RuntimeException(); } while (rand() > 0);",
+        "do { if (rand() > 0) { return; } else { exit; } } while (rand() > 0);",
+        // A jump that belongs to a nested construct does not come back to this loop.
+        "do { while (rand() > 0) { break; } return; } while (rand() > 0);",
+        "do { foreach ([1] as $ignored) { continue; } return; } while (rand() > 0);",
+        "do { switch (rand()) { case 1: echo 1; break; } return; } while (rand() > 0);",
+        // A bare `continue` inside a `switch` acts on the switch and lands after it.
+        "do { switch (rand()) { case 1: continue; } return; } while (rand() > 0);",
+    ] {
+        assert_eq!(on_null_after(stmt), 0, "`{stmt}` never reaches its successor");
+    }
+}
+
+#[test]
+fn a_do_while_whose_body_can_come_back_keeps_its_successor_live() {
+    // The negative controls: each body still ends in `return` on its straight-line
+    // path, but one path reaches the successor, so the finding is true and stays.
+    for stmt in [
+        // Nothing terminates the conditional path.
+        "do { if (rand() > 0) { return; } } while (rand() > 0);",
+        // A `break` of this loop lands on the successor.
+        "do { if (rand() > 0) { break; } return; } while (rand() > 0);",
+        // A `continue` of this loop lands on the condition, which may fail.
+        "do { if (rand() > 0) { continue; } return; } while (rand() > 0);",
+        // The same two from inside a nested construct, one level further out.
+        "do { while (rand() > 0) { break 2; } return; } while (rand() > 0);",
+        "do { foreach ([1] as $ignored) { continue 2; } return; } while (rand() > 0);",
+        "do { switch (rand()) { case 1: continue 2; } return; } while (rand() > 0);",
+    ] {
+        assert_eq!(on_null_after(stmt), 1, "`{stmt}` can reach its successor");
+    }
+}
+
+#[test]
+fn a_do_while_terminating_only_by_continue_is_not_terminated() {
+    // Every path through this body ends in a jump, and the jump is a `continue` of
+    // this loop: the condition runs and can fail, so the successor is live.
+    assert_eq!(on_null_after("do { continue; } while (rand() > 0);"), 1);
+    assert_eq!(on_null_after("do { if (rand() > 0) { continue; } continue; } while ($x);"), 1);
+}
+
+#[test]
+fn a_do_while_whose_condition_can_never_fail_makes_the_successor_unreachable() {
+    // The `while (true)` rule (issue #651) on a `do`-`while`: the condition is read
+    // on the body's entry env, which holds at every test, so a `Yes` there means no
+    // test fails, and with no `break` nothing leaves. A `continue` only re-tests it.
+    assert_eq!(on_null_after("do { echo 1; } while (true);"), 0);
+    assert_eq!(on_null_after("do { if (rand() > 0) { continue; } echo 1; } while (true);"), 0);
+    assert_eq!(on_null_after("do { if (rand() > 0) { break; } echo 1; } while (true);"), 1);
+}
+
 #[test]
 fn a_for_negates_only_the_last_of_its_conditions_at_the_exit() {
     // PHP tests the last comma-separated condition and evaluates the others for

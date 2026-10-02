@@ -2787,10 +2787,21 @@ pub enum StmtKind {
     ///
     /// A walker still gets everything else a `while` gives it: the same sets, the
     /// same entry forgetting, `break_free`, and a body to walk.
+    ///
+    /// `continue_free` is the one fact a `while` has no use for (issue #679). The
+    /// body runs at least once, so a body that terminates on every path decides the
+    /// construct's successor — provided none of those paths is a jump that comes
+    /// back to it. A `break` of this loop lands on the successor, and `break_free`
+    /// already rules that out; a `continue` of this loop lands on the condition,
+    /// which may then fail and fall through. `continue_free` is `true` when no
+    /// `continue` in the body targets THIS loop: `continue N` at `N == depth + 1`,
+    /// counting `depth` as `break_free` does (a bare `continue` inside a nested
+    /// `switch` is that switch's), and a non-literal level as the worst case.
     DoWhile {
         cond: CondExpr,
         body: Vec<Stmt>,
         break_free: bool,
+        continue_free: bool,
         writes: Vec<String>,
         reads: Vec<String>,
         poisons: bool,

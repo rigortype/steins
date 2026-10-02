@@ -75,6 +75,24 @@ fn an_unconditional_loop_with_no_break_terminates() {
 }
 
 #[test]
+fn a_do_while_whose_body_terminates_terminates() {
+    // Issue #679: the body runs at least once, so its own end is the construct's —
+    // the condition is never reached, let alone the successor.
+    assert_eq!(end_of("do { return 1; } while ($c);"), BodyEnd::Terminates);
+    assert_eq!(end_of("do { throw new E(); } while (false);"), BodyEnd::Terminates);
+    assert_eq!(
+        end_of("do { if ($c) { return 1; } else { exit; } } while ($c);"),
+        BodyEnd::Terminates
+    );
+    // A jump a nested construct owns does not come back to this loop.
+    assert_eq!(end_of("do { while ($c) { break; } return 1; } while ($c);"), BodyEnd::Terminates);
+    assert_eq!(
+        end_of("do { foreach ($xs as $x) { continue; } return 1; } while ($c);"),
+        BodyEnd::Terminates
+    );
+}
+
+#[test]
 fn a_match_with_no_default_counts_its_unhandled_throw() {
     // PHP throws `\UnhandledMatchError` on no match, so the implicit no-match arm
     // is itself a terminator — every arm terminating proves the whole terminal.
@@ -116,6 +134,21 @@ fn a_bounded_loop_falls_through_whatever_its_body_does() {
     assert_eq!(end_of("foreach ($xs as $x) { return $x; }"), BodyEnd::FallsThrough);
     assert_eq!(end_of("while ($c) { return 1; }"), BodyEnd::FallsThrough);
     assert_eq!(end_of("for ($i = 0; $i < 3; $i++) { return $i; }"), BodyEnd::FallsThrough);
+}
+
+#[test]
+fn a_do_while_whose_body_can_come_back_falls_through() {
+    // Each of these ends in `return` on its straight-line path, and `block_end`
+    // counts a `break`/`continue` as ending its list — but a `break` of this loop
+    // lands on the successor and a `continue` of it on the condition (issue #679).
+    assert_eq!(end_of("do { if ($c) { return 1; } } while ($c);"), BodyEnd::FallsThrough);
+    assert_eq!(end_of("do { if ($c) { break; } return 1; } while ($c);"), BodyEnd::FallsThrough);
+    assert_eq!(end_of("do { if ($c) { continue; } return 1; } while ($c);"), BodyEnd::FallsThrough);
+    assert_eq!(end_of("do { continue; } while ($c);"), BodyEnd::FallsThrough);
+    assert_eq!(
+        end_of("do { while ($c) { break 2; } return 1; } while ($c);"),
+        BodyEnd::FallsThrough
+    );
 }
 
 #[test]
