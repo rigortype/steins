@@ -127,6 +127,7 @@ mod param_refinement_over_native;
 mod parse_failure_dam;
 mod php_target_range;
 mod phpdoc_class_contract;
+mod phpdoc_class_resolution;
 mod phpdoc_contract;
 mod phpdoc_undefined_method;
 mod platform_constants;
