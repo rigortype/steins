@@ -222,3 +222,55 @@ fn descent_reads_the_callees_own_body() {
         assert_eq!(dumped(&src), "dumped type: 2");
     }
 }
+
+#[test]
+fn a_conditionally_declared_namespaced_function_does_not_veto_the_global_fallback() {
+    // `Two\stop` may never be defined (`getenv` decides), and then the unqualified `stop()`
+    // runs the global `: never` one and exits — witnessed 8.5.11, `run()` never returns.
+    let src = "<?php\nnamespace {\nfunction stop(): never { exit(0); }\n}\n\
+        namespace Two {\nif (getenv('NOPE')) {\nfunction stop(): int { return 1; }\n}\n\
+        function run(): int { stop(); }\n}\n";
+    assert_eq!(reports(src), Vec::<String>::new());
+}
+
+#[test]
+fn an_unqualified_call_in_a_namespace_is_also_vetoed_by_the_global_candidate() {
+    // `Two\stop` is always defined here, so PHP never reaches the global `: never` one; the
+    // veto still reads it, because the namespaced file may not be the one that was loaded.
+    // Silence only: the larger-silence direction, pinned so it stays deliberate.
+    let src = "<?php\nnamespace {\nfunction stop(): never { exit(0); }\n}\n\
+        namespace Two {\nfunction stop(): int { return 1; }\n\
+        function run(): int { stop(); }\n}\n";
+    assert_eq!(reports(src), Vec::<String>::new());
+}
+
+#[test]
+fn a_method_call_is_not_vetoed_by_a_namespaced_never_function_of_its_name() {
+    // `$c->stop()` is a method that returns; `App\stop(): never` is another callee entirely.
+    let src = "<?php\nnamespace App;\nfunction stop(): never { exit(1); }\n\
+        class C { public function stop(): void {} }\n\
+        function run(C $c): int { $c->stop(); }\n";
+    let ds = findings(src);
+    let missing: Vec<&Diagnostic> =
+        ds.iter().filter(|d| d.id == steins_infer::TYPE_RETURN_MISSING_ID).collect();
+    assert_eq!(missing.len(), 1, "{ds:?}");
+}
+
+#[test]
+fn an_imported_function_alias_resolves_to_its_target() {
+    // `use function One\stop as halt` — `halt()` is `One\stop`, a `: never`, so `run` never
+    // falls off its end; a simple-name key (`halt`) never matched it.
+    let src = "<?php\nnamespace One {\nfunction stop(): never { exit(0); }\n}\n\
+        namespace Two {\nuse function One\\stop as halt;\n\
+        function run(): int { halt(); }\n}\n";
+    assert_eq!(reports(src), Vec::<String>::new());
+}
+
+#[test]
+fn two_declarations_of_one_fqn_are_judged_by_neither() {
+    // `if (…) { function f(): int } else { function f(): string }` — the scopes cannot be
+    // told apart, so the second body is not checked against the first's return type.
+    let src = "<?php\nnamespace App;\nif (PHP_VERSION_ID >= 80000) {\n\
+        function f(): int { return 1; }\n} else {\nfunction f(): string { return \"x\"; }\n}\n";
+    assert_eq!(reports(src), Vec::<String>::new());
+}

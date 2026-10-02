@@ -1461,7 +1461,9 @@ impl<'a> Cx<'a> {
         let mut scopes = tree
             .scopes()
             .iter()
-            .filter(|s| s.function_name.as_deref().is_some_and(|n| n.eq_ignore_ascii_case(&decl.fqn)));
+            .filter(|s| {
+                s.function_name.as_deref().is_some_and(|n| n.eq_ignore_ascii_case(&decl.fqn))
+            });
         let scope = scopes.next()?;
         if scopes.next().is_some() || scope.poisoned {
             return None;
@@ -1648,9 +1650,15 @@ impl<'a> Cx<'a> {
     /// The declaration a [`ScopeOwner::Function`] scope's `fqn` names, in the file this
     /// `Cx` points at. By FQN rather than by simple name: a file of several namespaces may
     /// declare `One\f` and `Two\f`, and a simple-name search answers the first for both
-    /// (issue #925). [`FunctionDecl::fqn`] is lowercase, the owner's case-preserved.
+    /// (issue #925). [`FunctionDecl::fqn`] is lowercase, the owner's case-preserved. `None`
+    /// when two declarations share the FQN.
     fn scope_function(&self, fqn: &str) -> Option<&'a FunctionDecl> {
-        self.tree().functions().iter().find(|f| f.fqn.eq_ignore_ascii_case(fqn))
+        let mut it = self.tree().functions().iter().filter(|f| f.fqn.eq_ignore_ascii_case(fqn));
+        let decl = it.next()?;
+        // Two declarations of one FQN (`if (…) { function f(): int {} } else { function f():
+        // string {} }`) cannot be told apart by their scopes, so neither is judged, as
+        // `fn_scope` declines the same pair.
+        if it.next().is_some() { None } else { Some(decl) }
     }
 
     /// The parameter list of a scope's owning function or method (same file this
