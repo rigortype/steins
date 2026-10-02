@@ -22,7 +22,7 @@ use crate::lower_effect::{
     EffectScanCx, ReceiverWrites, body_aliased, collect_body_callables, scan_method_calls,
 };
 use crate::lower_expr::lower_arg_value;
-use crate::lower_presence::maybe_undefined_reads;
+use crate::lower_presence::{maybe_undefined_reads, push_guard_root};
 use crate::lower_site::scan_owner_sites;
 use crate::lower_stmt::{
     block_end, call_invalidation, expr_end, lower_expr_stmt, lower_stmt, named_call, node_poisons,
@@ -808,53 +808,103 @@ impl Shield {
 /// the guard protects — costing a finding on a "wrong" polarity but never
 /// manufacturing one, letting a purely syntactic containment test stand in for a
 /// flow analysis Steins does not have (the `variable.maybe-undefined` foundation,
-/// issue #199). `!` and parentheses are transparent.
-///
-/// The condition's own logical operators are read too (issue #929), each as
-/// containment over the same two-valued fact:
-///
-/// * `&&` / `and` **distributes**: `isset($x) && $y > 0` tests `x`, because the arms
-///   it guards run only when the whole conjunction held.
-/// * `||` / `or` tests the names of its disjuncts **jointly**, and only when *every*
-///   disjunct tests something. `isset($x) || isset($y)` guards a body that runs when
-///   either is set, so a read of `$x` there is discharged only while `$y` is never
-///   bound too ([`VarUsage::settle`]); `isset($x) || $y > 0` runs with `$x` unbound
-///   whenever `$y > 0`, so the disjunction tests nothing.
+/// issue #199). `!` and parentheses are transparent; a conjunction
+/// (`isset($x) && $y`) tests nothing here. A condition's logical operators are read
+/// by [`bound_when`] instead, which does ask which side a guard proves.
 fn guard_tested_names(cond: &Expression<'_>) -> Vec<Shield> {
+    let mut out = Vec::new();
+    collect_guard_tested_names(cond, &mut out);
+    out.into_iter().map(Shield::plain).collect()
+}
+
+fn collect_guard_tested_names(cond: &Expression<'_>, out: &mut Vec<String>) {
+    match cond.unparenthesized() {
+        Expression::Construct(Construct::Isset(i)) => {
+            for value in i.values.iter() {
+                if let Expression::Variable(mago_syntax::cst::Variable::Direct(dv)) =
+                    value.unparenthesized()
+                {
+                    out.push(strip_dollar(bytes_to_string(dv.name)));
+                }
+            }
+        }
+        Expression::Construct(Construct::Empty(e)) => {
+            if let Expression::Variable(mago_syntax::cst::Variable::Direct(dv)) =
+                e.value.unparenthesized()
+            {
+                out.push(strip_dollar(bytes_to_string(dv.name)));
+            }
+        }
+        Expression::UnaryPrefix(up) if matches!(up.operator, UnaryPrefixOperator::Not(_)) => {
+            collect_guard_tested_names(up.operand, out);
+        }
+        _ => {}
+    }
+}
+
+/// The names a condition **proves bound** where it evaluates to `want_true` — the
+/// shield for a region only that outcome reaches (issue #929). For a name nothing in
+/// the scope binds, "proved bound" is "unreachable": `isset` is false and `empty` is
+/// true on every run, so a read in such a region is dead code and PHP runs it without
+/// the warning. It is [`guard_bound_names`](crate::lower_presence)'s polarity, so a
+/// guard shields only the side it actually protects:
+///
+/// * `isset($x)` proves `$x` when true, and `empty($x)` when false; `!` flips the ask.
+///   An offset or property chain proves its root, as in the presence pass.
+/// * `&&` when true and `||` when false hold **both** operands, so their names add.
+/// * `&&` when false and `||` when true hold *either* operand, so one disjunct's names
+///   prove nothing alone: the region is reachable through whichever disjunct holds.
+///   Only when **every** disjunct proves something is the region dead for a name no
+///   disjunct's name can bind, and each name then carries the whole set as its
+///   [`Shield::joint`] — `isset($x) || isset($y)` with a bound `$y` runs its body with
+///   `$x` unbound. A disjunct that proves nothing (`$y > 0`) voids the whole.
+///
+/// The names a condition spells but does not prove on this side stay judged:
+/// `isset($x) || print($x)` and `if (isset($x)) { return 1; } return $x;` warn in PHP.
+fn bound_when(cond: &Expression<'_>, want_true: bool) -> Vec<Shield> {
     let mut out = Vec::new();
     // A left-nested chain re-enters this per link, so the visit budget bounds the
     // quadratic worst case; running out only withholds a shield, never adds one.
-    collect_guard_tested_names(cond, &mut out, &mut 256);
+    collect_bound_when(cond, want_true, &mut out, &mut 256);
     out
 }
 
-fn collect_guard_tested_names(cond: &Expression<'_>, out: &mut Vec<Shield>, budget: &mut u32) {
+fn collect_bound_when(
+    cond: &Expression<'_>,
+    want_true: bool,
+    out: &mut Vec<Shield>,
+    budget: &mut u32,
+) {
     if stack_guard::exhausted() || *budget == 0 {
         return;
     }
     *budget -= 1;
-    let direct = |value: &Expression<'_>| match value.unparenthesized() {
-        Expression::Variable(mago_syntax::cst::Variable::Direct(dv)) => {
-            Some(Shield::plain(strip_dollar(bytes_to_string(dv.name))))
-        }
-        _ => None,
-    };
     match cond.unparenthesized() {
-        Expression::Construct(Construct::Isset(i)) => {
-            out.extend(i.values.iter().filter_map(|v| direct(v)));
+        Expression::Construct(Construct::Isset(i)) if want_true => {
+            let mut roots = Vec::new();
+            for value in i.values.iter() {
+                push_guard_root(value, &mut roots);
+            }
+            out.extend(roots.into_iter().map(Shield::plain));
         }
-        Expression::Construct(Construct::Empty(e)) => out.extend(direct(e.value)),
+        Expression::Construct(Construct::Empty(e)) if !want_true => {
+            let mut roots = Vec::new();
+            push_guard_root(e.value, &mut roots);
+            out.extend(roots.into_iter().map(Shield::plain));
+        }
         Expression::UnaryPrefix(up) if matches!(up.operator, UnaryPrefixOperator::Not(_)) => {
-            collect_guard_tested_names(up.operand, out, budget);
+            collect_bound_when(up.operand, !want_true, out, budget);
         }
-        Expression::Binary(b) if is_logical_and(&b.operator) => {
-            collect_guard_tested_names(b.lhs, out, budget);
-            collect_guard_tested_names(b.rhs, out, budget);
-        }
-        Expression::Binary(b) if is_logical_or(&b.operator) => {
+        Expression::Binary(b) if is_logical_and(&b.operator) || is_logical_or(&b.operator) => {
+            // `&&` true and `||` false are conjunctive; the other two are disjunctive.
+            if is_logical_and(&b.operator) == want_true {
+                collect_bound_when(b.lhs, want_true, out, budget);
+                collect_bound_when(b.rhs, want_true, out, budget);
+                return;
+            }
             let (mut lhs, mut rhs) = (Vec::new(), Vec::new());
-            collect_guard_tested_names(b.lhs, &mut lhs, budget);
-            collect_guard_tested_names(b.rhs, &mut rhs, budget);
+            collect_bound_when(b.lhs, want_true, &mut lhs, budget);
+            collect_bound_when(b.rhs, want_true, &mut rhs, budget);
             if lhs.is_empty() || rhs.is_empty() {
                 return;
             }
@@ -866,18 +916,26 @@ fn collect_guard_tested_names(cond: &Expression<'_>, out: &mut Vec<Shield>, budg
                     }
                 }
             }
-            out.extend(lhs.into_iter().chain(rhs).map(|s| Shield { name: s.name, joint: joint.clone() }));
+            out.extend(
+                lhs.into_iter().chain(rhs).map(|s| Shield { name: s.name, joint: joint.clone() }),
+            );
         }
         _ => {}
     }
 }
 
 fn is_logical_and(op: &mago_syntax::cst::BinaryOperator<'_>) -> bool {
-    matches!(op, mago_syntax::cst::BinaryOperator::And(_) | mago_syntax::cst::BinaryOperator::LowAnd(_))
+    matches!(
+        op,
+        mago_syntax::cst::BinaryOperator::And(_) | mago_syntax::cst::BinaryOperator::LowAnd(_)
+    )
 }
 
 fn is_logical_or(op: &mago_syntax::cst::BinaryOperator<'_>) -> bool {
-    matches!(op, mago_syntax::cst::BinaryOperator::Or(_) | mago_syntax::cst::BinaryOperator::LowOr(_))
+    matches!(
+        op,
+        mago_syntax::cst::BinaryOperator::Or(_) | mago_syntax::cst::BinaryOperator::LowOr(_)
+    )
 }
 
 /// The shield in force inside a guarded construct's arms: `None` when the condition
@@ -1087,24 +1145,42 @@ pub(crate) fn scan_var_usage(node: &Node<'_, '_>, guarded: bool, shielded: &[Shi
         Node::Conditional(c) => {
             scan_var_usage(&Node::Expression(c.condition), guarded, shielded, acc);
             let extended = extend_shield(shielded, guard_tested_names(c.condition));
-            let inner = extended.as_deref().unwrap_or(shielded);
-            // `?:` has no `then` arm; its condition IS the value, already walked.
+            let base = extended.as_deref().unwrap_or(shielded);
+            // `?:` has no `then` arm; its condition IS the value, already walked. Each
+            // arm also takes what the condition proves on its own side (issue #929).
             if let Some(then) = c.then {
+                let proved = extend_shield(base, bound_when(c.condition, true));
+                let inner = proved.as_deref().unwrap_or(base);
                 scan_var_usage(&Node::Expression(then), guarded, inner, acc);
             }
+            let proved = extend_shield(base, bound_when(c.condition, false));
+            let inner = proved.as_deref().unwrap_or(base);
             scan_var_usage(&Node::Expression(c.r#else), guarded, inner, acc);
             return;
         }
-        // The statement spelling of the same idiom. It needs no block-scoped
-        // tracking: the `if`'s whole body — including its `elseif`/`else` clauses —
-        // is one subtree, and shielding all of it is the same silence-direction
-        // containment rule. A read AFTER the `if` is outside that subtree and is
-        // still judged.
+        // The statement spelling of the same idiom. The bare `isset`/`empty` tests need
+        // no block-scoped tracking: the `if`'s whole body — including its
+        // `elseif`/`else` clauses — is one subtree, and shielding all of it is the same
+        // silence-direction containment rule. A read AFTER the `if` is outside that
+        // subtree and is still judged. What the condition *proves* (issue #929) is
+        // sided: the then-body takes its true outcome, the `elseif`/`else` clauses
+        // its false one.
         Node::If(i) => {
             scan_var_usage(&Node::Expression(i.condition), guarded, shielded, acc);
             let extended = extend_shield(shielded, guard_tested_names(i.condition));
-            let inner = extended.as_deref().unwrap_or(shielded);
-            scan_var_usage(&Node::IfBody(&i.body), guarded, inner, acc);
+            let base = extended.as_deref().unwrap_or(shielded);
+            let proved = extend_shield(base, bound_when(i.condition, true));
+            let then = proved.as_deref().unwrap_or(base);
+            scan_statement_seq(i.body.statements().iter(), guarded, then, acc);
+            let proved = extend_shield(base, bound_when(i.condition, false));
+            let rest = proved.as_deref().unwrap_or(base);
+            for (cond, stmts) in i.body.else_if_clauses() {
+                scan_var_usage(&Node::Expression(cond), guarded, rest, acc);
+                scan_statement_seq(stmts.iter(), guarded, rest, acc);
+            }
+            if let Some(stmts) = i.body.else_statements() {
+                scan_statement_seq(stmts.iter(), guarded, rest, acc);
+            }
             return;
         }
 
@@ -1125,18 +1201,18 @@ pub(crate) fn scan_var_usage(node: &Node<'_, '_>, guarded: bool, shielded: &[Shi
             return;
         }
         // The operands of a short-circuit operator are the guard idiom in expression
-        // spelling (issue #929): `!isset($x) || print($x)` and `isset($x) && $x > 1`
-        // reach the right operand only through the left, so the names the left tests
-        // shield it. Either polarity, as for the arms of an `if` — see
-        // `guard_tested_names`. Walked directly rather than through `children`, so the
-        // stack guard is asked here.
+        // spelling (issue #929): the right operand is reached only where the left
+        // operand came out one way — true for `&&`, false for `||` — so it takes the
+        // names the left proves bound on that side. `isset($x) && $x > 1` and
+        // `!isset($x) || print($x)` are silent; `isset($x) || print($x)` is not. Walked
+        // directly rather than through `children`, so the stack guard is asked here.
         Node::Binary(b) if is_logical_and(&b.operator) || is_logical_or(&b.operator) => {
             if stack_guard::exhausted() {
                 return;
             }
             scan_var_usage(&Node::Expression(b.lhs), guarded, shielded, acc);
-            let extended = extend_shield(shielded, guard_tested_names(b.lhs));
-            let inner = extended.as_deref().unwrap_or(shielded);
+            let proved = extend_shield(shielded, bound_when(b.lhs, is_logical_and(&b.operator)));
+            let inner = proved.as_deref().unwrap_or(shielded);
             scan_var_usage(&Node::Expression(b.rhs), guarded, inner, acc);
             return;
         }
@@ -1246,21 +1322,46 @@ pub(crate) fn scan_var_usage(node: &Node<'_, '_>, guarded: bool, shielded: &[Shi
 }
 
 /// The shield an `if` casts over the statements **after** it in the same list: the
-/// names its condition tests, when it has no `elseif`/`else` and its body provably
-/// terminates. `if (!isset($x)) { return; } print($x);` reaches the `print` only with
-/// `$x` set, so the read is no `variable.undefined`.
+/// names its condition proves bound where it is **false**, when it has no
+/// `elseif`/`else` and its body provably terminates. Control reaches the next
+/// statement only by the condition coming out false, so
+/// `if (!isset($x)) { return; } print($x);` reads `$x` only with `$x` set, and the read
+/// is no `variable.undefined`.
 ///
 /// The body's terminality is the CFG's own ([`block_end`]), so a `try` or a `goto` in
-/// it is `Unknown` and shields nothing. The condition is read the way an enclosing
-/// `if`'s is — either polarity, containment rather than reachability — which keeps
-/// `if (isset($x)) {} echo $x;` reporting (nothing terminates) and costs the recall of
-/// `if (isset($x)) { return; } echo $x;`.
+/// it is `Unknown` and shields nothing. The false outcome is [`bound_when`]'s, so
+/// `if (isset($x)) {} echo $x;` (nothing terminates), `if (isset($x)) { return 1; }
+/// return $x;` (a false `isset` proves nothing) and
+/// `if (!isset($x) && $c) { return; } print($x);` (the other conjunct can be what
+/// came out false) all keep reporting.
 fn terminating_guard_names(i: &mago_syntax::cst::If<'_>) -> Option<Vec<Shield>> {
     if !i.body.else_if_clauses().is_empty() || i.body.else_statements().is_some() {
         return None;
     }
-    let names = guard_tested_names(i.condition);
+    let names = bound_when(i.condition, false);
     (!names.is_empty() && block_end(i.body.statements()).provably_terminates()).then_some(names)
+}
+
+/// Scan one statement list in order, letting a terminating `if` shield the statements
+/// after it (see [`terminating_guard_names`]).
+fn scan_statement_seq<'ast, 'arena>(
+    statements: impl Iterator<Item = &'ast Statement<'arena>>,
+    guarded: bool,
+    shielded: &[Shield],
+    acc: &mut VarUsage,
+) where
+    'arena: 'ast,
+{
+    let mut running: Option<Vec<Shield>> = None;
+    for s in statements {
+        let inner = running.as_deref().unwrap_or(shielded);
+        scan_var_usage(&Node::Statement(s), guarded, inner, acc);
+        if let Statement::If(i) = s
+            && let Some(added) = terminating_guard_names(i)
+        {
+            running = extend_shield(inner, added);
+        }
+    }
 }
 
 /// The reads of names a scope never binds (issue #194) — the computation behind
@@ -1285,16 +1386,7 @@ fn undefined_variable_reads(
             acc.bind_direct(&v.variable);
         }
     }
-    let mut running: Option<Vec<Shield>> = None;
-    for s in statements {
-        let shield = running.as_deref().unwrap_or(&[]);
-        scan_var_usage(&Node::Statement(s), false, shield, &mut acc);
-        if let Statement::If(i) = s
-            && let Some(added) = terminating_guard_names(i)
-        {
-            running = extend_shield(shield, added);
-        }
-    }
+    scan_statement_seq(statements.iter().copied(), false, &[], &mut acc);
     acc.settle();
     if acc.dammed {
         return ScopeVarFacts::default();

@@ -300,7 +300,7 @@ fn guard_bound_names(cond: &Expression<'_>, want_true: bool, out: &mut Vec<Strin
 /// would make it. This is the shape the corpus produces far more often than the bare
 /// one — reading only the bare spelling reported every read after the
 /// `if (!isset($info['subject']['commonName'])) { return null; }` prologue.
-fn push_guard_root(expr: &Expression<'_>, out: &mut Vec<String>) {
+pub(crate) fn push_guard_root(expr: &Expression<'_>, out: &mut Vec<String>) {
     match expr.unparenthesized() {
         Expression::Variable(Variable::Direct(dv)) => {
             out.push(strip_dollar(bytes_to_string(dv.name)));
