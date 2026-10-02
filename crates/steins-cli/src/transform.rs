@@ -26,7 +26,8 @@ use crate::{Format, profile};
 /// [--apply] [--asserted-subjects] [--format text|json] <paths...>` (ADR-0020/0034).
 /// Dry-run by default: diff + refusal report + post-check (ADR-0034 point 3a,
 /// zero new diagnostics; see [`PostCheckSurface`]). `--apply` writes only
-/// after post-check passes. Exit 2 usage error, 1 post-check fail, 0 else.
+/// after post-check passes. Exit 2 usage error or a panicked post-check (issue
+/// #895 D3), 1 post-check fail, 0 else.
 pub(crate) fn run_transform(args: &[String]) -> ExitCode {
     let mut format = Format::Text;
     let mut apply = false;
@@ -145,27 +146,30 @@ pub(crate) fn run_transform(args: &[String]) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    if apply {
-        let mut written = 0usize;
-        for path in report.plan.edited_paths() {
-            let Some(original) = texts.get(path) else { continue };
-            let updated = report.plan.apply_file(path, original);
-            if let Err(e) = std::fs::write(path, &updated) {
-                errln!("steins: cannot write {path}: {e}");
-                return ExitCode::FAILURE;
-            }
-            written += 1;
-        }
-        for nf in &report.plan.new_files {
-            if let Err(e) = std::fs::write(&nf.path, &nf.contents) {
-                errln!("steins: cannot create {}: {e}", nf.path);
-                return ExitCode::FAILURE;
-            }
-            written += 1;
-        }
-        errln!("steins: applied {written} file edit(s)");
-    }
+    if apply { write_plan(report, texts) } else { ExitCode::SUCCESS }
+}
 
+/// `--apply`'s write, once the post-check has passed: every edited file, then
+/// every new one. A write failure stops it, exit 1.
+fn write_plan(report: &TransformReport, texts: &HashMap<String, String>) -> ExitCode {
+    let mut written = 0usize;
+    for path in report.plan.edited_paths() {
+        let Some(original) = texts.get(path) else { continue };
+        let updated = report.plan.apply_file(path, original);
+        if let Err(e) = std::fs::write(path, &updated) {
+            errln!("steins: cannot write {path}: {e}");
+            return ExitCode::FAILURE;
+        }
+        written += 1;
+    }
+    for nf in &report.plan.new_files {
+        if let Err(e) = std::fs::write(&nf.path, &nf.contents) {
+            errln!("steins: cannot create {}: {e}", nf.path);
+            return ExitCode::FAILURE;
+        }
+        written += 1;
+    }
+    errln!("steins: applied {written} file edit(s)");
     ExitCode::SUCCESS
 }
 
