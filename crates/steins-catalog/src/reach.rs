@@ -231,6 +231,21 @@ pub fn printf_family(name: &str) -> Option<PrintfFamily> {
 /// up: far past any call's argument count, and a bound on the answer's size.
 const MAX_FORMAT_POSITIONS: usize = 1024;
 
+/// What one parse of a literal printf format answers ([`read_format`]): which
+/// user code each value reaches, and whether any conversion reads the locale.
+///
+/// Both verdicts come from the same walk of the bytes, so they cannot disagree
+/// about which specs the format holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FormatReading {
+    /// One [`ArgReach`] per value position, as [`format_reach`] answers it.
+    pub reach: Vec<ArgReach>,
+    /// Whether some conversion reads the locale's decimal point: `f`, `g` and
+    /// `G` do (ADR-0101 §3.1). `F`, `e`, `E`, `h`, `H`, every integer and
+    /// character conversion, `s` and `%%` never do.
+    pub reads_locale: bool,
+}
+
 /// What a literal printf `format` does with each value it is given: one
 /// [`ArgReach`] per value position, `0` being the first value after the
 /// format. [`ArgReach::Object`] where some conversion naming the value is
@@ -259,8 +274,23 @@ const MAX_FORMAT_POSITIONS: usize = 1024;
 /// the next value in order; a spec with one leaves that counter alone.
 #[must_use]
 pub fn format_reach(format: &str) -> Option<Vec<ArgReach>> {
+    read_format(format).map(|reading| reading.reach)
+}
+
+/// [`format_reach`]'s parse with its second verdict, whether the format reads
+/// the locale (ADR-0101 §3.1). `None` is the same "unreadable" as there, and an
+/// unreadable format keeps the read: [`format_reads_locale`] answers `true` for
+/// it. The grammar is php-src's `php_formatted_print`, described on
+/// [`format_reach`].
+///
+/// The locale verdict is over the whole format, never a prefix: a malformed
+/// format may have rendered an earlier spec before it fails, and `%%f` is no
+/// spec at all.
+#[must_use]
+pub fn read_format(format: &str) -> Option<FormatReading> {
     let bytes = format.as_bytes();
     let mut reach: Vec<ArgReach> = Vec::new();
+    let mut reads_locale = false;
     let mut next = 0_usize;
     let mut at = 0_usize;
     while let Some(offset) = bytes[at..].iter().position(|&b| b == b'%') {
@@ -269,7 +299,7 @@ pub fn format_reach(format: &str) -> Option<Vec<ArgReach>> {
             at += 1;
             continue;
         }
-        let (position, kind) = spec(bytes, &mut at, &mut next)?;
+        let (position, kind, locale) = spec(bytes, &mut at, &mut next)?;
         if position >= MAX_FORMAT_POSITIONS {
             return None;
         }
@@ -277,13 +307,24 @@ pub fn format_reach(format: &str) -> Option<Vec<ArgReach>> {
             reach.resize(position + 1, Inert);
         }
         reach[position] = reach[position].max(kind);
+        reads_locale |= locale;
     }
-    Some(reach)
+    Some(FormatReading { reach, reads_locale })
 }
 
-/// One conversion spec of [`format_reach`], `at` just past its `%`: the value
-/// position it names and the reach of its conversion, leaving `at` past it.
-fn spec(bytes: &[u8], at: &mut usize, next: &mut usize) -> Option<(usize, ArgReach)> {
+/// Whether a printf-family call with this literal `format` reads the locale:
+/// `true` when a conversion ends in `f`, `g` or `G`, and `true` for a format
+/// the parser cannot read as the engine does, since the row's read stands
+/// unless a format shows it away. `false` is the proof that none does.
+#[must_use]
+pub fn format_reads_locale(format: &str) -> bool {
+    read_format(format).is_none_or(|reading| reading.reads_locale)
+}
+
+/// One conversion spec of [`read_format`], `at` just past its `%`: the value
+/// position it names, the reach of its conversion and whether the conversion
+/// reads the locale, leaving `at` past it.
+fn spec(bytes: &[u8], at: &mut usize, next: &mut usize) -> Option<(usize, ArgReach, bool)> {
     let mut named = None;
     if !bytes.get(*at).is_some_and(u8::is_ascii_alphabetic) {
         let digits = digit_run(bytes, *at);
@@ -311,14 +352,18 @@ fn spec(bytes: &[u8], at: &mut usize, next: &mut usize) -> Option<(usize, ArgRea
         *next += 1;
         *next - 1
     });
-    let kind = match bytes.get(*at)? {
+    let conversion = *bytes.get(*at)?;
+    let kind = match conversion {
         b's' => Object,
         b'd' | b'u' | b'c' | b'o' | b'x' | b'X' | b'b' | b'e' | b'E' | b'f' | b'F' | b'g'
         | b'G' | b'h' | b'H' => Inert,
         _ => return None,
     };
     *at += 1;
-    Some((position, kind))
+    // `php_sprintf_appenddouble` hands `php_conv_fp` the locale's decimal point
+    // for `f`, and its `g`/`G` arm overrides `.` with it; `F`, `e`, `E`, `h`
+    // and `H` never consult it.
+    Some((position, kind, matches!(conversion, b'f' | b'g' | b'G')))
 }
 
 /// The length of the ASCII digit run at `at`.
@@ -461,7 +506,10 @@ const OVERRIDES: &[(&str, &[(usize, ArgReach)])] = &[
 
 #[cfg(test)]
 mod tests {
-    use super::{ArgReach, OVERRIDES, arg_reach, format_reach, printf_family};
+    use super::{
+        ArgReach, OVERRIDES, arg_reach, format_reach, format_reads_locale, printf_family,
+        read_format,
+    };
     use crate::{certified_at_call_site, effect_labels, foldable, knows, param_facts, throws_of};
 
     const I: ArgReach = ArgReach::Inert;
@@ -738,13 +786,16 @@ mod tests {
         assert!(arg_reach("array_search").expect("row").reaches_blind(true));
     }
 
-    /// `vsprintf` stays uncertified: `%f`, `%g` and `%G` read `LC_NUMERIC`
-    /// (issue #991, as `sprintf`'s do). Its reach answer is still right, and
-    /// `printf_family` still names it.
+    /// `vsprintf` is not certified pure: `%f`, `%g` and `%G` read `LC_NUMERIC`
+    /// (issue #991, as `sprintf`'s do), so it is not on the call-site list, and
+    /// ADR-0101 gives it the same locale-read row as `sprintf`. Its reach
+    /// answer is still right, and `printf_family` still names it.
     #[test]
     fn vsprintf_is_not_certified_but_keeps_its_reach() {
         assert!(!certified_at_call_site("vsprintf"));
-        assert!(knows("vsprintf") && effect_labels("vsprintf").is_none());
+        assert!(knows("vsprintf"));
+        assert_eq!(effect_labels("vsprintf"), effect_labels("sprintf"));
+        assert_eq!(effect_labels("vsprintf"), Some(&["global.read.setting.locale"][..]));
         assert!(printf_family("vsprintf").is_some());
     }
 
@@ -802,5 +853,156 @@ mod tests {
         for name in ["basename", "strnatcasecmp", "substr_compare", "htmlspecialchars"] {
             assert!(!certified_at_call_site(name), "{name} reads the locale or an ini setting");
         }
+    }
+
+    // ---- the locale verdict of the same parse (ADR-0101 §3.1, issue #991) ---
+
+    /// Which conversion letters read `LC_NUMERIC`: `f`, `g` and `G`. Every
+    /// other letter php-src's formatter knows does not, and the verdict does
+    /// not depend on flags, padding, width, precision, `n$` or `l`.
+    #[test]
+    fn only_f_g_and_capital_g_read_the_locale() {
+        let modifiers = ["", "5", "-8", "+", "05", ".0", ".2", "1$", "1$.3", "'*8", "+010.4", "l"];
+        for letter in ['f', 'g', 'G'] {
+            for m in modifiers {
+                let format = format!("%{m}{letter}");
+                assert!(format_reads_locale(&format), "{format} reads the locale");
+            }
+        }
+        for letter in ['F', 'e', 'E', 'h', 'H', 'd', 'u', 'c', 'o', 'x', 'X', 'b', 's'] {
+            for m in modifiers {
+                let format = format!("%{m}{letter}");
+                assert!(!format_reads_locale(&format), "{format} does not read the locale");
+            }
+        }
+    }
+
+    /// The verdict is over the whole format: one reading conversion anywhere
+    /// keeps the read, and text, `%%` and `%%f` (an escaped percent and a
+    /// letter) are not conversions.
+    #[test]
+    fn the_locale_verdict_is_over_the_whole_format() {
+        for format in ["%d %f", "%f %d", "%s-%d-%.2f-%s", "%%%f", "%1$s %1$.2f", "%d%%%G"] {
+            assert!(format_reads_locale(format), "{format}");
+        }
+        for format in
+            ["", "abc", "%d-%s", "%%f", "%%g%%G", "100%%", "%d%%f", "%s %d %F %e %E %h %H"]
+        {
+            assert!(!format_reads_locale(format), "{format:?}");
+        }
+    }
+
+    /// A format the parser cannot read as the engine does keeps the read, and
+    /// so does one whose readable prefix is clean: a malformed format may have
+    /// rendered an earlier conversion before it fails.
+    #[test]
+    fn a_format_the_parser_cannot_read_keeps_the_read() {
+        for format in ["%q", "%d %q", "%", "%'", "%0$f", "%*d", "%.*F", "%5%s", "%1025$d"] {
+            assert_eq!(read_format(format), None, "{format:?}");
+            assert!(format_reads_locale(format), "{format:?}");
+        }
+    }
+
+    /// One parse gives both verdicts: `format_reach` is `read_format`'s reach
+    /// on every format, readable or not, so the two cannot disagree about which
+    /// specs they saw.
+    #[test]
+    fn one_parse_gives_both_verdicts() {
+        for format in [
+            "", "%d", "%s", "%.2f", "%1$s %1$d", "%2$s %s %s", "%d %q", "%*d", "%5%s", "100%%",
+            "%'x5s", "%lf", "%H",
+        ] {
+            assert_eq!(format_reach(format), read_format(format).map(|r| r.reach), "{format:?}");
+        }
+        let both = read_format("%s %.1f").expect("readable");
+        assert_eq!(both.reach, [O, I]);
+        assert!(both.reads_locale);
+    }
+
+    /// The ADR-0101 witness table against the engine: a literal format reads
+    /// the locale exactly when its output moves between `C` and `de_DE.UTF-8`,
+    /// for `sprintf` and `vsprintf` alike. Skips without `php` or without the
+    /// locale installed.
+    ///
+    /// Soundness (a moved output must have been called a read) is asserted on
+    /// the whole grid. Precision (a read must have moved) is asserted wherever
+    /// the output shows a decimal point to move, which a precision of zero never
+    /// does. Two values are rendered, `1234.5` and `0.123456`, and a format
+    /// counts as moved when either moves, since `%.4g` of the first prints none.
+    #[test]
+    fn the_locale_verdict_matches_the_engine_under_de_de() {
+        let mut formats: Vec<String> = Vec::new();
+        for letter in "bcdeEfFgGosuxXhH".chars() {
+            for m in [
+                "", "5", "-8", "+", "05", ".0", ".1", ".2", ".10", "1$", "1$.3", "'*8", "+010.4",
+                " ",
+            ] {
+                formats.push(format!("%{m}{letter}"));
+            }
+        }
+        for format in ["%%f", "%d %f", "%d-%s", "%s%%f", "%1$s %1$.2f", "%%%g", "%5.1f%%", "a%G"] {
+            formats.push(format.to_owned());
+        }
+        let Some(moves) = engine_locale_moves(&formats) else { return };
+        assert_eq!(moves.len(), formats.len());
+        for (format, (moved, vector_agrees)) in formats.iter().zip(moves) {
+            let reads = format_reads_locale(format);
+            assert!(vector_agrees, "{format}: vsprintf did not follow sprintf");
+            assert!(reads || !moved, "{format} moved under de_DE and was called locale-free");
+            // A precision of zero prints no decimal point whatever the value.
+            let no_point = matches!(format.as_str(), "%.0f" | "%.0g" | "%.0G");
+            if reads && !no_point {
+                assert!(moved, "{format} was called a locale read and did not move");
+            }
+        }
+    }
+
+    /// For each format, whether `sprintf` of floats moves between `C` and
+    /// `de_DE.UTF-8`, and whether `vsprintf` gave `sprintf`'s answer in both
+    /// locales. `None` (a skip) without `php` or the locale.
+    fn engine_locale_moves(formats: &[String]) -> Option<Vec<(bool, bool)>> {
+        use std::io::Write as _;
+        use std::process::{Command, Stdio};
+
+        if Command::new("php").arg("--version").output().is_err() {
+            eprintln!("SKIP: php not on PATH; oracle comparison not run");
+            return None;
+        }
+        // One format per line: none of them holds a newline.
+        let script = r#"
+            $formats = explode("\n", rtrim(stream_get_contents(STDIN), "\n"));
+            if (setlocale(LC_ALL, 'de_DE.UTF-8') === false) { echo "NOLOCALE\n"; exit; }
+            $run = function (string $locale, string $format): array {
+                setlocale(LC_ALL, $locale);
+                $s = $v = '';
+                foreach ([1234.5, 0.123456] as $x) {
+                    $values = array_fill(0, 8, $x);
+                    try { $s .= @sprintf($format, ...$values) . '|'; } catch (\Throwable $e) { $s .= 'ERR'; }
+                    try { $v .= @vsprintf($format, $values) . '|'; } catch (\Throwable $e) { $v .= 'ERR'; }
+                }
+                return [$s, $v];
+            };
+            foreach ($formats as $format) {
+                [$cs, $cv] = $run('C', $format);
+                [$ds, $dv] = $run('de_DE.UTF-8', $format);
+                echo ($cs !== $ds ? '1' : '0'), ($cs === $cv && $ds === $dv ? '1' : '0'), "\n";
+            }
+        "#;
+        let mut child = Command::new("php")
+            .args(["-d", "display_errors=stderr", "-r", script])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("spawn php");
+        let payload = formats.join("\n");
+        child.stdin.take().expect("stdin").write_all(payload.as_bytes()).expect("write");
+        let out = child.wait_with_output().expect("php run");
+        assert!(out.status.success(), "php failed");
+        let text = String::from_utf8(out.stdout).expect("utf8");
+        if text.starts_with("NOLOCALE") {
+            eprintln!("SKIP: de_DE.UTF-8 is not installed; oracle comparison not run");
+            return None;
+        }
+        Some(text.lines().map(|l| (l.starts_with('1'), l.ends_with('1'))).collect())
     }
 }

@@ -32,8 +32,9 @@ pub fn known_labels() -> &'static [&'static str] {
 /// equal the plugin's composer vendor name (ADR-0068 §2), which is what the
 /// vendor-root rule checks against this list.
 ///
-/// `global` is a root even though only `global.read`/`global.write` are
-/// registry entries — root ownership applies to the namespace.
+/// `global` is a root even though only `global.read`/`global.write` and their
+/// `setting` children are registry entries — root ownership applies to the
+/// namespace.
 #[must_use]
 pub fn core_roots() -> &'static [&'static str] {
     &["eval", "exit", "failure", "ffi", "global", "io", "mutate", "nondet"]
@@ -65,7 +66,14 @@ const BUILTIN_LABELS: &[&str] = {
         // Opaque native boundary (FFI, effects_gaps.md §3): OO-only.
         "ffi",
         "global.read",
+        // Ambient settings (ADR-0101): process-owned cells a builtin reads
+        // implicitly and only the script's own calls rewrite. A cell's label is
+        // registered in the slice that colours its first row, never ahead of one.
+        "global.read.setting",
+        "global.read.setting.locale", // LC_* as `setlocale` leaves it.
         "global.write",
+        "global.write.setting",
+        "global.write.setting.locale",
         "io",
         "io.db",
         "io.fs",
@@ -335,7 +343,8 @@ mod tests {
         for label in [
             "io.output", "io", "io.fs", "io.fs.read", "io.fs.write", "io.net", "io.net.http",
             "io.db", "io.process", "global.read", "global.write", "nondet", "nondet.random",
-            "nondet.time", "exit", "mutate", "eval",
+            "nondet.time", "exit", "mutate", "eval", "global.read.setting",
+            "global.read.setting.locale", "global.write.setting", "global.write.setting.locale",
         ] {
             assert!(is_known_label(label), "{label} should be a known registry label");
         }
@@ -449,6 +458,28 @@ mod tests {
         assert!(is_core_label("eval"));
         assert!(is_core_label("eval.literal"));
         assert!(!is_core_label("evaluator"));
+    }
+
+    /// ADR-0101: the setting cells hang under the two `global` labels, so a
+    /// declared `global`, `global.read` or `global.write` admits them by prefix
+    /// and nothing else does.
+    #[test]
+    fn the_setting_labels_are_registered_and_ride_the_global_prefixes() {
+        for label in [
+            "global.read.setting", "global.read.setting.locale", "global.write.setting",
+            "global.write.setting.locale",
+        ] {
+            assert!(is_known_label(label), "{label}");
+            assert!(is_core_label(label), "{label} is under a core root");
+        }
+        assert!(subsumes("global.read", "global.read.setting.locale"));
+        assert!(subsumes("global.read.setting", "global.read.setting.locale"));
+        assert!(subsumes("global.write", "global.write.setting.locale"));
+        assert!(!subsumes("global.read", "global.write.setting.locale"), "a write is not a read");
+        assert!(!subsumes("global.write", "global.read.setting.locale"), "a read is not a write");
+        assert!(!subsumes("global.read.setting.locale", "global.read.setting"), "fine is not coarse");
+        assert!(!is_known_label("global.read.settings"), "a typo stays unknown");
+        assert!(!is_known_label("global.read.setting.timezone"), "no cell ahead of its first row");
     }
 
     #[test]

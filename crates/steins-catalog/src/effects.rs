@@ -39,6 +39,12 @@ use crate::fold::foldable;
 ///   away — see [`narrowed_output_labels`] (issue #352). `var_dump` has no such
 ///   mode and keeps the row at every call site.
 /// * `sleep`/`usleep` are `io`: an observable timing side effect.
+/// * The printf family reads the **locale cell** (ADR-0101): `sprintf` and
+///   `vsprintf` are `global.read.setting.locale` and `printf`/`vprintf` carry it
+///   beside `io.output.buffer`, because `%f`, `%g` and `%G` render the locale's
+///   decimal point. `localeconv`, `nl_langinfo` and `strcoll` read it, and
+///   `setlocale` is `global.write.setting.locale`. A literal format that shows
+///   no such conversion is read by [`format_reads_locale`](crate::format_reads_locale).
 /// * `curl_exec` keeps `io.output` arg-blind (only `CURLOPT_RETURNTRANSFER`
 ///   suppresses it); `system`/`passthru` take parent `io.output` since
 ///   OB-capturability evidence for a relayed child's output is split
@@ -55,6 +61,14 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
     const IO: &[&str] = &["io"];
     const GLOBAL_WRITE: &[&str] = &["global.write"];
     const GLOBAL_READ: &[&str] = &["global.read"];
+    // Ambient settings (ADR-0101): the locale cell, read implicitly by the
+    // printf family's `f`/`g`/`G` conversions and by the locale readers, and
+    // rewritten by `setlocale`.
+    const LOCALE_READ: &[&str] = &["global.read.setting.locale"];
+    const LOCALE_WRITE: &[&str] = &["global.write.setting.locale"];
+    // `printf`/`vprintf` write their rendering to the output channel AND read
+    // the locale while rendering.
+    const OUTPUT_BUFFER_LOCALE_READ: &[&str] = &["io.output.buffer", "global.read.setting.locale"];
     const IO_SIGNAL: &[&str] = &["io.signal"];
     const IO_OUTPUT_HEADER: &[&str] = &["io.output.header"];
     const IO_IPC: &[&str] = &["io.ipc"];
@@ -108,9 +122,21 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
         "file_get_contents" | "file_put_contents" | "fopen" | "copy" | "rename" | "readfile"
         | "fpassthru" | "fread" | "fgets" | "fwrite" | "fputs" | "unlink" | "mkdir" | "rmdir"
         | "touch" | "scandir" | "file_exists" | "is_file" | "is_dir" => Some(IO),
-        "print_r" | "var_dump" | "var_export" | "printf" | "vprintf" | "flush" | "ob_flush" => {
-            Some(IO_OUTPUT_BUFFER)
-        }
+        "print_r" | "var_dump" | "var_export" | "flush" | "ob_flush" => Some(IO_OUTPUT_BUFFER),
+        // The printf family reads the locale's decimal point under `%f`, `%g`
+        // and `%G` (issue #991, ADR-0101 §2.4). The row is argument-blind and
+        // keeps the read at every call; a literal format that shows no such
+        // conversion drops it where the call site reads the format
+        // ([`format_reads_locale`](crate::format_reads_locale)). `sprintf` is on
+        // the fold allowlist, which is permission and not a promise: this row
+        // answers ahead of the allowlist's empty one, and the fold seam refuses
+        // a format that keeps the read. `fprintf` and `vfprintf` have no row
+        // (issue #989).
+        "printf" | "vprintf" => Some(OUTPUT_BUFFER_LOCALE_READ),
+        "sprintf" | "vsprintf" => Some(LOCALE_READ),
+        // The other readers of the cell: `localeconv` and `nl_langinfo` report
+        // it, `strcoll` collates by it.
+        "localeconv" | "nl_langinfo" | "strcoll" => Some(LOCALE_READ),
         // Shell out and relay the child's output (ADR-0083).
         "system" | "passthru" => Some(PROCESS_TO_OUTPUT),
         // Shell out and DO NOT relay: `exec` captures into its by-ref array and
@@ -124,9 +150,13 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
         "exec" | "shell_exec" | "popen" | "proc_open" => Some(IO_PROCESS),
         "curl_exec" => Some(NET_TO_OUTPUT),
         "error_log" | "syslog" | "sleep" | "usleep" => Some(IO),
-        "date_default_timezone_set" | "mb_regex_encoding" | "setlocale" | "ini_set" | "putenv" => {
+        "date_default_timezone_set" | "mb_regex_encoding" | "ini_set" | "putenv" => {
             Some(GLOBAL_WRITE)
         }
+        // `setlocale` rewrites the locale cell and nothing else. `setlocale($c,
+        // '0')` only queries it; narrowing that call to the read waits for the
+        // call-site slice (ADR-0101 D6), and the argument-blind row is the write.
+        "setlocale" => Some(LOCALE_WRITE),
         // Process-global state, no channel: seeding pair replaces RNG state;
         // `clearstatcache` empties the stat cache. Drawing stays `nondet.random`.
         "srand" | "mt_srand" | "clearstatcache" => Some(GLOBAL_WRITE),
@@ -335,9 +365,9 @@ pub(crate) fn certified_pure(name: &str) -> bool {
 /// (C `isalpha`), `escapeshellarg` (`php_mblen`), `strip_tags` (C `isspace`),
 /// `number_format`, the `ctype_*` family, `htmlspecialchars` (`default_charset`)
 /// and the `mb_*` family (`mbstring` ini). `strtok` keeps its position in
-/// interpreter state. `vsprintf` (like `sprintf`, which the fold allowlist
-/// still certifies) stays out for the same reason: `%f`, `%g` and `%G` read
-/// `LC_NUMERIC`'s decimal point (issue #991).
+/// interpreter state. `vsprintf` and `sprintf` read `LC_NUMERIC`'s decimal
+/// point under `%f`, `%g` and `%G` (issue #991): they are not certified pure
+/// and carry the locale-read row of [`effect_labels`] instead (ADR-0101).
 const CERTIFIED_AT_CALL_SITE: &[&str] = &[
     "strcmp",
     "strncmp",
@@ -1735,13 +1765,63 @@ mod tests {
             super::narrowed_stream_labels("file_exists", Some(Literal("/tmp/x")), None),
             Some(vec!["io.fs.read"])
         );
-        assert_eq!(effect_labels("printf"), Some(&["io.output.buffer"][..]));
+        assert_eq!(
+            effect_labels("printf"),
+            Some(&["io.output.buffer", "global.read.setting.locale"][..])
+        );
         assert_eq!(effect_labels("error_log"), Some(&["io"][..]));
-        assert_eq!(effect_labels("setlocale"), Some(&["global.write"][..]));
+        assert_eq!(effect_labels("setlocale"), Some(&["global.write.setting.locale"][..]));
         assert_eq!(effect_labels("getenv"), Some(&["global.read"][..]));
         assert_eq!(effect_labels("srand"), Some(&["global.write"][..]));
         assert_eq!(effect_labels("mt_srand"), Some(&["global.write"][..]));
         assert_eq!(effect_labels("clearstatcache"), Some(&["global.write"][..]));
+    }
+
+    /// ADR-0101 §2.4: the locale cell's rows. The printf family reads it, the
+    /// `v` spellings follow their siblings, `printf` keeps its output label
+    /// beside the read, `setlocale` writes it, and the three readers report it.
+    #[test]
+    fn the_locale_cell_rows() {
+        const READ: Option<&[&str]> = Some(&["global.read.setting.locale"]);
+        for name in ["sprintf", "vsprintf", "localeconv", "nl_langinfo", "strcoll", "SPRINTF"] {
+            assert_eq!(effect_labels(name), READ, "{name}");
+        }
+        for name in ["printf", "vprintf"] {
+            assert_eq!(
+                effect_labels(name),
+                Some(&["io.output.buffer", "global.read.setting.locale"][..]),
+                "{name} keeps its output label beside the read"
+            );
+        }
+        assert_eq!(effect_labels("vsprintf"), effect_labels("sprintf"));
+        assert_eq!(effect_labels("vprintf"), effect_labels("printf"));
+        assert_eq!(effect_labels("setlocale"), Some(&["global.write.setting.locale"][..]));
+        // Every label the rows use is a registry entry.
+        for name in ["sprintf", "printf", "setlocale", "strcoll"] {
+            for label in effect_labels(name).expect(name) {
+                assert!(crate::is_known_label(label), "{label} is not registered");
+            }
+        }
+        // The stream writers of the same family have no row (issue #989).
+        for name in ["fprintf", "vfprintf"] {
+            assert_eq!(effect_labels(name), None, "{name}");
+        }
+    }
+
+    /// Sibling rows the locale slice must not move: the dumpers keep the plain
+    /// output label, the other global writers stay `global.write`, and the
+    /// reads of other cells stay `global.read`.
+    #[test]
+    fn the_locale_cell_leaves_its_neighbours_alone() {
+        for name in ["print_r", "var_dump", "var_export", "flush", "ob_flush"] {
+            assert_eq!(effect_labels(name), Some(&["io.output.buffer"][..]), "{name}");
+        }
+        for name in ["ini_set", "putenv", "date_default_timezone_set", "mb_regex_encoding"] {
+            assert_eq!(effect_labels(name), Some(&["global.write"][..]), "{name}");
+        }
+        for name in ["getenv", "ini_get", "date_default_timezone_get"] {
+            assert_eq!(effect_labels(name), Some(&["global.read"][..]), "{name}");
+        }
     }
 
     #[test]
