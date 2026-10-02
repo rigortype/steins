@@ -278,7 +278,12 @@
 # should, and whether a declared property read on `$this` ought to stay a gap is a separate
 # precision question. The 9 `offset.maybe-missing` are the strict-floor contract ids that
 # had no table until the posture routing.
-"phpstan/phpstan-src" = 889
+# 889 → 892  2026-10-03 (issues #880, #875; #992): +3 `throw.maybe-undeclared`, each an own-site
+# `operator-to-string` at an offset write whose container the scan cannot show holds no string
+# (`ResultCacheManager.php:2329`, `FixerApplication.php:273`, `StubPhpDocProvider.php:238`); five
+# inherited findings gained the kind without a count change. Measured by the local fp-gate on
+# 26699ed5 against 37d20aef, same revision.
+"phpstan/phpstan-src" = 892
 
 # New rows, 2026-10-02 (issues #915, #922): the strict-floor ids of the public packages that
 # had none. Measured under PHP 8.4.25 (CI's posture); the throw lane does not read the sidecar.
