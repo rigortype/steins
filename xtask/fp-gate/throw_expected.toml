@@ -3,9 +3,11 @@
 # package or local project, `"<name>" = <expected count>`; a name with no row
 # expects zero. A row's triage note is the comment block directly above it.
 #
-# Rows for local projects (the ones `corpus.local.toml` injects) do not live
-# here: they are in the gitignored `fp-gate.local.toml` at the repository root,
-# which the gate merges in when it is present (`xtask/src/gate/ledger.rs`).
+# Rows for private-corpus projects (the `corpus.local.toml` projects whose code
+# is not public) do not live here: they are in the gitignored
+# `fp-gate.local.toml` at the repository root, which the gate merges in
+# (`xtask/src/gate/ledger.rs`). `phpstan/phpstan-src` is listed in
+# `corpus.local.toml` too but is public code, so its rows stay here.
 #
 # Permanent gate policy for `throw.*` findings (ADR-0040/0007), identical in
 # spirit to [`PHPDOC_EXPECTED`]: an undeclared **checked** throw escaping a

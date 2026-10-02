@@ -399,10 +399,11 @@ fn is_effect_contract(d: &Diagnostic) -> bool {
 /// per-package count tables and the pinned proof-layer findings. The public
 /// half is data under `xtask/fp-gate/`, one TOML file per table, built into
 /// the binary with `include_str!` — so a malformed table stops the gate before
-/// any analysis runs. The private half (rows for the projects
-/// `corpus.local.toml` injects) is the gitignored `fp-gate.local.toml`, which
-/// [`Baselines::load_with_ledger`] merges in when the file exists; see
-/// [`ledger`] for the rules and for why those rows are not tracked.
+/// any analysis runs. The private half (rows for the private-corpus projects:
+/// `corpus.local.toml` projects whose code is not public) is the gitignored
+/// `fp-gate.local.toml`, which [`Baselines::load_with_ledger`] merges in; see
+/// [`ledger`] for the rules, and for why `phpstan/phpstan-src`, public code
+/// that `corpus.local.toml` also lists, keeps its rows in the tracked tables.
 ///
 /// Each table keeps the name it had as a Rust constant, which is also its file
 /// stem (`PHPDOC_EXPECTED` is `phpdoc_expected.toml`), so the triage notes,
@@ -454,9 +455,9 @@ impl Baselines {
         })
     }
 
-    /// The built-in tables merged with the local ledger (`fp-gate.local.toml`)
-    /// when it exists. `locals` are the projects `corpus.local.toml` lists —
-    /// the only names the ledger may carry rows for.
+    /// The built-in tables merged with the local ledger (`fp-gate.local.toml`).
+    /// `locals` are the projects `corpus.local.toml` lists; when there are any,
+    /// the ledger must exist (see [`ledger`]).
     fn load_with_ledger(locals: &[LocalProject]) -> Result<Self, String> {
         let base = Self::load()?;
         let text = ledger::read_overlay(&ledger::overlay_path())?;
@@ -615,7 +616,7 @@ pub fn run(args: &[String]) -> Result<bool, String> {
 
     // Measurement-mode regression tripwires (see `PHPDOC_EXPECTED` /
     // `THROW_EXPECTED`): a package regresses iff its count exceeds the baseline.
-    let regressions = measurement_regressions(
+    let phpdoc_regressions = measurement_regressions(
         &reports,
         &local_reports,
         "phpdoc",
@@ -647,27 +648,25 @@ pub fn run(args: &[String]) -> Result<bool, String> {
         &baselines.possibly,
     );
 
-    print_report(
-        &baselines,
-        &reports,
-        &local_reports,
-        &regressions,
-        &throw_regressions,
-        &effect_regressions,
-        &possibly_regressions,
-    );
+    let tripwires = Tripwires {
+        phpdoc: phpdoc_regressions,
+        throw: throw_regressions,
+        effect: effect_regressions,
+        possibly: possibly_regressions,
+    };
 
     // RED on any proof-layer finding (package + local non-vendor diagnostics;
     // vendor never gates, ADR-0015) OR any measurement-mode regression OR any
     // project whose warm re-check did not reproduce its cold pass (issue #525).
+    // One value, computed here and handed to the report, so the headline the
+    // report ends with and the exit code are the same verdict (issue #791).
     let total_diags: usize = reports.iter().map(|r| r.diagnostics.len()).sum::<usize>()
         + local_reports.iter().map(|r| r.diagnostics.len()).sum::<usize>();
     let parity_broken =
         reports.iter().chain(local_reports.iter()).filter(|r| !r.parity.is_green()).count();
-    let tripped = regressions.len()
-        + throw_regressions.len()
-        + effect_regressions.len()
-        + possibly_regressions.len();
+    let verdict = tripwires.verdict(total_diags, parity_broken);
+
+    print_report(&baselines, &reports, &local_reports, &tripwires, verdict);
 
     // Take the stores back off disk. The next run wipes them anyway, so nothing
     // depends on this — but 131 MB over the pinned corpus is 131 MB CI would
@@ -676,7 +675,30 @@ pub fn run(args: &[String]) -> Result<bool, String> {
     // is disk, not a verdict.
     let _ = std::fs::remove_dir_all(&stores);
 
-    Ok(headline(total_diags, tripped, parity_broken).is_green())
+    Ok(verdict.is_green())
+}
+
+/// The four measurement families' tripwire results, kept together so the
+/// verdict counts all of them by construction: a fifth family is a field here,
+/// and [`Tripwires::total`] is the one place a count of them is made.
+struct Tripwires {
+    phpdoc: Vec<PhpdocRegression>,
+    throw: Vec<PhpdocRegression>,
+    effect: Vec<PhpdocRegression>,
+    possibly: Vec<PhpdocRegression>,
+}
+
+impl Tripwires {
+    /// Package rows past their baseline, across every family.
+    fn total(&self) -> usize {
+        self.phpdoc.len() + self.throw.len() + self.effect.len() + self.possibly.len()
+    }
+
+    /// The run's verdict: the headline `print_report` ends with and `run`
+    /// exits on.
+    fn verdict(&self, diagnostics: usize, parity_broken: usize) -> Headline {
+        headline(diagnostics, self.total(), parity_broken)
+    }
 }
 
 /// One measurement-mode regression: a package whose count exceeds its expectation.
@@ -1067,13 +1089,17 @@ fn print_report(
     baselines: &Baselines,
     reports: &[PackageReport],
     local_reports: &[PackageReport],
-    regressions: &[PhpdocRegression],
-    throw_regressions: &[PhpdocRegression],
-    effect_regressions: &[PhpdocRegression],
-    possibly_regressions: &[PhpdocRegression],
+    tripwires: &Tripwires,
+    verdict: Headline,
 ) {
+    let Tripwires {
+        phpdoc: regressions,
+        throw: throw_regressions,
+        effect: effect_regressions,
+        possibly: possibly_regressions,
+    } = tripwires;
     println!("\n=== fp-gate: per-package findings ===\n");
-    println!("{}\n", baselines.overlay.report_line(local_reports.len()));
+    println!("{}\n", baselines.overlay.report_line());
     if !local_reports.is_empty() {
         println!(
             "note: {} local project(s) are UNPINNED live working trees (corpus.local.toml, \
@@ -1204,10 +1230,10 @@ fn print_report(
     print_tripwire("throw.*", throw_regressions, local_reports);
 
     // `effect.*` contract ids (ADR-0050 §9 delta). Suppressed while dormant —
-    // prints nothing unless a finding lands, the table is seeded, or a
-    // regression trips — kept the report byte-identical pre-convergence. Off
-    // since 2026-08-12, when #303's interop-envelope run made the private
-    // monorepo's purity tags fire (see [`EFFECT_EXPECTED`]'s seeded row).
+    // prints nothing unless a finding lands, a table (built-in or the local
+    // ledger's) holds a row, or a regression trips. The built-in table is empty,
+    // so on a checkout without private-corpus rows the section is absent
+    // unless a package starts producing the ids.
     let total_effect: usize = reports.iter().chain(local_reports.iter()).map(|r| r.effects.len()).sum();
     if total_effect > 0 || !baselines.effect.is_empty() || !effect_regressions.is_empty() {
         let total_effect_expected = baselines.effect.total();
@@ -1340,11 +1366,7 @@ fn print_report(
     );
 
     println!();
-    let tripped = regressions.len()
-        + throw_regressions.len()
-        + effect_regressions.len()
-        + possibly_regressions.len();
-    println!("{}", headline(td, tripped, broken.len()).message());
+    println!("{}", verdict.message());
 }
 
 /// The verdict `run` exits on and the line `print_report` ends with, chosen in
@@ -1430,10 +1452,12 @@ fn print_tripwire(family: &str, regressions: &[PhpdocRegression], local_reports:
 mod tests {
     use steins_infer::{is_vendor_path, layer};
 
+    use crate::corpus::PACKAGES;
+
     use super::{
-        Baselines, GateBucket, Headline, RevisionStatus, WorktreeState, classify_revision,
-        gate_bucket, headline, parse_pins, parse_table, revision_summary_line,
-        revision_tripwire_line,
+        Baselines, GateBucket, Headline, PhpdocRegression, RevisionStatus, Tripwires,
+        WorktreeState, classify_revision, gate_bucket, headline, parse_pins, parse_table,
+        revision_summary_line, revision_tripwire_line,
     };
 
     // Synthetic revisions only. A real private-corpus sha must never enter a
@@ -1501,6 +1525,32 @@ mod tests {
     }
 
     #[test]
+    fn the_tracked_tables_hold_only_public_rows() {
+        // The tracked tables are public: a row for a private-corpus project
+        // belongs in the local ledger. `phpstan/phpstan-src` is the one
+        // corpus.local.toml project whose code is public, so its rows stay.
+        const PUBLIC_LOCAL: &[&str] = &["phpstan/phpstan-src"];
+        let baselines = Baselines::load().unwrap_or_else(|e| panic!("{e}"));
+        let public = |name: &str| {
+            PACKAGES.iter().any(|p| p.name == name) || PUBLIC_LOCAL.contains(&name)
+        };
+        let tables = [
+            ("phpdoc", &baselines.phpdoc),
+            ("throw", &baselines.throw),
+            ("effect", &baselines.effect),
+            ("possibly", &baselines.possibly),
+        ];
+        for (family, table) in tables {
+            for name in table.0.keys() {
+                assert!(public(name), "[{family}] row `{name}` is not a public project");
+            }
+        }
+        for pin in &baselines.proof {
+            assert!(public(&pin.package), "pin for `{}` is not a public project", pin.package);
+        }
+    }
+
+    #[test]
     fn every_pin_is_a_registered_id_the_gate_reds_on_sight() {
         // Pins are consulted only once the contract and possibly-grade findings
         // are split off, so a pin on one of those ids could never match, and a
@@ -1535,6 +1585,25 @@ mod tests {
         assert_eq!(headline(3, 2, 1), Headline::Diagnostics(3));
         assert_eq!(headline(0, 2, 1), Headline::Regressed(2));
         assert_eq!(headline(0, 0, 1), Headline::ParityBroken(1));
+    }
+
+    #[test]
+    fn a_regression_in_any_one_family_makes_the_run_verdict_red() {
+        // `run` and `print_report` both take this verdict, so a family left out
+        // of `Tripwires::total` is the failing row here.
+        let one = || vec![PhpdocRegression { name: "p".to_owned(), actual: 2, expected: 1 }];
+        let none = Vec::new;
+        let cases = [
+            Tripwires { phpdoc: one(), throw: none(), effect: none(), possibly: none() },
+            Tripwires { phpdoc: none(), throw: one(), effect: none(), possibly: none() },
+            Tripwires { phpdoc: none(), throw: none(), effect: one(), possibly: none() },
+            Tripwires { phpdoc: none(), throw: none(), effect: none(), possibly: one() },
+        ];
+        for (family, t) in cases.iter().enumerate() {
+            assert_eq!(t.verdict(0, 0), Headline::Regressed(1), "family {family}");
+        }
+        let clear = Tripwires { phpdoc: none(), throw: none(), effect: none(), possibly: none() };
+        assert_eq!(clear.verdict(0, 0), Headline::Green);
     }
 
     #[test]

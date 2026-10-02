@@ -35,10 +35,11 @@
 //! nothing this repo can check out) and consumed only by `fp-gate`. `freq`
 //! ignores them entirely so the committed frequency report stays private-free.
 //!
-//! A local project's baselines (count rows and triage pins) are the same kind of
-//! private data and live beside this file in `fp-gate.local.toml` (also
-//! gitignored, merged over the tracked tables by `gate::ledger`), not in
-//! `xtask/fp-gate/`.
+//! A private-corpus project's baselines (count rows and triage pins; a project
+//! whose code is not public) are the same kind of private data and live beside
+//! this file in `fp-gate.local.toml` (also gitignored, merged over the tracked
+//! tables by `gate::ledger`), not in `xtask/fp-gate/`. When this file lists any
+//! project the gate requires that one to exist (an empty file is fine).
 //!
 //! `revision` does not *pin* the tree the way `corpus.lock.toml` pins a public
 //! package — nothing here moves the checkout. It records what state a

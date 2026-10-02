@@ -4,8 +4,9 @@
 # outside the repo so non-public codebases never land in git.
 /corpus.local.toml
 # The private half of the fp-gate's baselines (D11 on #895): count rows and triage
-# pins for the projects `corpus.local.toml` lists, merged over the tracked tables
-# under xtask/fp-gate/ when present. Private-corpus ledger entries never land in git.
+# pins for the private-corpus projects `corpus.local.toml` lists, merged over the
+# tracked tables under xtask/fp-gate/. Required whenever corpus.local.toml lists a
+# project (an empty file is fine). Private-corpus ledger entries never land in git.
 /fp-gate.local.toml
 # Machine-local perf baselines (`cargo xtask perf --bless`, ADR-0092 §5): the
 # timings are one machine's, so the file never lands in git.

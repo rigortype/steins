@@ -10,9 +10,11 @@ their commands; `.github/workflows/composer.yml` defines the Composer channel.
   checkout without it silently measures only the public packages. Treat that
   run as partial, and run the private half alongside CI when the change needs
   the full corpus claim. The private half of the baselines (count rows and
-  triage pins for those projects) is equally untracked: `fp-gate.local.toml` at
-  the repository root, merged in when present, and the first line of the
-  report says whether it was. Copy it into a worktree beside `corpus.local.toml`.
+  triage pins for the private-corpus projects) is equally untracked:
+  `fp-gate.local.toml` at the repository root. The gate refuses to run when
+  `corpus.local.toml` lists a project and that file is missing (an empty file
+  runs with no local rows), and the line under the report's header says whether
+  it was loaded. Copy both files into a worktree.
 - **`nsrt`:** `cargo xtask nsrt [DIR]` needs a local `phpstan-src` checkout and
   does not run in CI. Run it alongside CI when the change affects inference
   compatibility.
