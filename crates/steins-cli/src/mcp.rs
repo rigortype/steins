@@ -612,17 +612,6 @@ fn tool_apply_plan(session: &mut Session, args: &Value) -> Result<Reply, ToolErr
         let bytes = std::fs::read(path).map_err(|e| {
             ToolError::new("plan-target-unreadable", format!("cannot re-read {path}: {e}"))
         })?;
-        // The plan was spliced into a lossy decoding of a file that was not valid UTF-8
-        // (issue #927); writing it would replace that file's own bytes.
-        if let Err(e) = std::str::from_utf8(&bytes) {
-            return Err(ToolError::new(
-                "byte-lossy-source",
-                format!(
-                    "refusing to rewrite {path}: the file is not valid UTF-8 (first ill-formed byte at offset {}), so writing the plan would destroy its original bytes. Nothing was written.",
-                    e.valid_up_to()
-                ),
-            ));
-        }
         let current = String::from_utf8_lossy(&bytes).into_owned();
         if &current != planned {
             return Err(ToolError::new(
@@ -653,6 +642,19 @@ fn tool_apply_plan(session: &mut Session, args: &Value) -> Result<Reply, ToolErr
         allow.as_deref(),
         crate::effects_policy_from_disk(),
     );
+    // A plan spliced into a lossy decoding of a file that was not valid UTF-8 (issue #927)
+    // would replace that file's own bytes. `plan_transform` leaves such files out, so this
+    // only fires when the file turned lossy since the plan was made; read off the analyzed
+    // project, as the planner does.
+    let lossy = crate::project::byte_lossy_paths(&loaded.db, loaded.project);
+    if let Some(path) = stored.plan.edited_paths().into_iter().find(|p| lossy.contains(*p)) {
+        return Err(ToolError::new(
+            crate::project::BYTE_LOSSY_REASON,
+            format!(
+                "refusing to rewrite {path}: the file is not valid UTF-8, so the plan would destroy its original bytes. Nothing was written. Call plan_transform again."
+            ),
+        ));
+    }
     let postcheck = crate::post_check(
         &loaded.db,
         loaded.project,
