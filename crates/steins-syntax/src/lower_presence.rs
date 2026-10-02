@@ -186,6 +186,10 @@ fn presence_leaf(node: &Node<'_, '_>, state: &mut PresenceState, cx: &mut Presen
         collect_presence_shield(node, &mut names);
         let shield: Vec<Shield> = names.into_iter().map(Shield::plain).collect();
         scan_var_usage(node, false, &shield, &mut acc);
+        // The unit-wide shield above is plain for every name an `isset`/`empty` in the
+        // unit tests, which subsumes any disjunctive shield the scan raised, so nothing is
+        // parked; settling keeps that true if the two ever diverge.
+        acc.settle();
         memo::PresenceLeaf { reads: acc.reads, bound: acc.bound }
     });
     for read in &leaf.reads {
@@ -1132,7 +1136,7 @@ fn element_cannot_throw(element: &ArrayElement<'_>) -> bool {
 
 /// Whether a `goto` or a label stands anywhere in this subtree, without descending
 /// into a nested scope.
-fn subtree_has_goto(node: &Node<'_, '_>) -> bool {
+pub(crate) fn subtree_has_goto(node: &Node<'_, '_>) -> bool {
     match node {
         Node::Goto(_) | Node::Label(_) => true,
         Node::Function(_)

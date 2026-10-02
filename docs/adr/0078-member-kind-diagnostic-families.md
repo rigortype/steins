@@ -366,7 +366,12 @@ only where that outcome proves it bound. `bound_when(cond, outcome)`
   operand's names prove nothing alone. A name is then shielded only when
   **every** operand proves something, and only while every name any
   operand proves is never bound (`Shield::joint`, decided by
-  `VarUsage::settle` once the scope's bindings are known). This is the one
+  `VarUsage::settle` once the scope's bindings are known; a read under
+  several disjunctions is discharged by any one of them). "Never bound"
+  is the scope's syntactic binding set **widened** by what that set omits:
+  the root of every function-call argument (a callee can bind it by
+  reference: `preg_match($p, $s, $y)`, `parse_str($q, $y['k'])`) and the
+  names PHP supplies (the superglobals, `$GLOBALS`, `$this`). This is the one
   place the disjunction rule survives the move to polarity, and it is
   needed there: `if (isset($x) || isset($y)) { echo $x; }` runs its body
   when `$y` is bound, with `$x` unbound. An operand that proves nothing
@@ -391,6 +396,14 @@ The rules:
    `if (!isset($x)) { return; } print($x);`. The shield stops at the end
    of the list and does not reach a statement before the `if`.
 
+**The `goto` exception.** "Only this outcome reaches here" holds for a
+fall-through and not for a jump: a forward `goto` lands after a guard, or
+inside an `if` body, without evaluating the condition. A scope that holds
+any `goto` or label therefore takes neither rule 3 nor the sided arms of
+rule 2 for an `if` (a `?:` arm cannot be jumped into and keeps its side).
+Rule 1 needs no exception: its right operand is reached only by evaluating
+the left one.
+
 **What stays reported**, each witnessed to warn on PHP 8.5.11 with `$x`
 never bound: `isset($x) || print($x)`, `!isset($x) && print($x)`,
 `if (isset($x)) { return 1; } return $x;`,
@@ -398,6 +411,15 @@ never bound: `isset($x) || print($x)`, `!isset($x) && print($x)`,
 `isset($x) && $c ? null : $x`, `if (isset($x)) {} echo $x;`, and a
 disjunction one of whose names is bound.
 
-**What is not touched.** The presence pass (`variable.maybe-undefined`)
-judges each unit against the flowing state and already shields a unit by
-every name an `isset`/`empty` in it tests, so its findings do not move.
+**The presence pass, accurately.** `variable.maybe-undefined` judges each
+unit against the flowing state, and `presence_leaf` shields a unit by every
+name an `isset`/`empty` anywhere in it tests (`collect_presence_shield`).
+That subsumes the shields `scan_var_usage` now raises inside a unit, so the
+pass's own judgments do not move. What does move is its gate: the pass
+runs only when the definite pass's `reads` hold a read of a *bound* name
+(`has_presence_candidate`), and a read withheld by these shields is no
+longer in `reads`. A scope whose only such candidate sits in a shielded
+region therefore no longer runs the pass, which can withhold a
+`variable.maybe-undefined` finding the pass would have made (for example
+`unset($y); echo $y;` after `if (!isset($y)) { return; }`). The same was
+already true of the bare `if`/`?:` shield; the corpus A/B shows no movement.

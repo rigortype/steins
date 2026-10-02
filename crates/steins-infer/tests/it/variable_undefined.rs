@@ -806,6 +806,66 @@ fn a_disjunction_guard_fires_when_another_disjunct_can_hold() {
 }
 
 #[test]
+fn a_disjunction_name_a_callee_or_php_can_bind_counts_as_bound() {
+    // `bound` omits what a function call binds by reference through an argument, and the
+    // names PHP supplies, and either can make a disjunct hold. php -r witness (8.5.11):
+    // each of these warns on `$x`.
+    for body in [
+        "preg_match('/a/', 'a', $y); if (isset($x) || isset($y)) { echo $x; }",
+        "preg_match('/a/', 'a', $y); if (!isset($x) && !isset($y)) { return; } echo $x;",
+        "preg_match('/a/', 'a', $y); if (!isset($x) && !isset($y)) { } else { echo $x; }",
+        "parse_str('a=1', $y); if (!isset($x) && !isset($y['a'])) { return; } echo $x;",
+        "if (isset($x) || isset($_SERVER['argv'])) { echo $x; }",
+        "if (!isset($x) && !isset($_SERVER['argv'])) { return; } echo $x;",
+        "if (isset($x) || isset($GLOBALS['argv'])) { echo $x; }",
+        "echo isset($x) || isset($_SERVER['argv']) ? $x : null;",
+        "(isset($x) || isset($_SERVER['argv'])) && print($x);",
+    ] {
+        fires(&format!("<?php\nfunction f(): void {{ {body} }}\n"), "x");
+    }
+    // A dim-rooted argument is no out-parameter candidate, so its own read of `$y` still
+    // reports (as on the base); the guarded `$x` must report beside it.
+    let d = diags(
+        "<?php\nfunction f(): void { preg_match('/a/', 'a', $y['k']); if (isset($x) || isset($y)) { echo $x; } }\n",
+    );
+    assert!(d.iter().any(|d| d.message.contains("$x")), "{d:#?}");
+    fires(
+        "<?php\nclass K { public int $p = 1; function f(): void { if (isset($x) || isset($this->p)) { echo $x; } } }\n",
+        "x",
+    );
+    // Control: with no callee in sight the same shapes are dead code.
+    silent("<?php\nfunction f(): void { preg_match('/a/', 'a', $m); if (isset($x) || isset($y)) { echo $x; } }\n");
+}
+
+#[test]
+fn a_read_under_several_disjunctions_is_discharged_by_any_one_of_them() {
+    // The second disjunction alone proves the body dead: `$x` and `$w` are never bound,
+    // so `isset($x) || isset($w)` is false and the conjunction with it.
+    silent(
+        "<?php\nfunction f(): void { if ((isset($x) || isset($_SERVER['argv'])) && (isset($x) || isset($w))) { echo $x; } }\n",
+    );
+}
+
+#[test]
+fn a_goto_in_the_scope_stands_the_outcome_rules_down() {
+    // A forward `goto` lands after a guard, or inside an arm, without evaluating its
+    // condition, so "only this outcome reaches here" does not hold. php -r witness
+    // (8.5.11): each warns.
+    for body in [
+        "goto L; if (!isset($x)) { return; } L: echo $x;",
+        "if ($c) { goto L; } if (!isset($x)) { return; } L: echo $x;",
+        "goto L; if (isset($x) && $c) { L: echo $x; }",
+        "goto L; if (!isset($x) || $c) { } else { L: echo $x; }",
+        "goto L; if (!isset($x)) { return; } if (true) { L: echo $x; }",
+        "L: if ($c) { echo $x; } if (!isset($x)) { return; } if ($c) { goto L; }",
+    ] {
+        fires(&format!("<?php\nfunction f(bool $c): void {{ {body} }}\n"), "x");
+    }
+    // The right operand is reached only through the left, whatever jumps elsewhere.
+    silent("<?php\nfunction f(): void { goto L; L: !isset($x) || print($x); }\n");
+}
+
+#[test]
 fn error_control_is_not_a_read() {
     // php -r witness (8.5.9): `@$nope2` suppresses the warning entirely; the author
     // silenced it in the source, so reporting it would be crying wolf.
