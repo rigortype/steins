@@ -333,6 +333,8 @@ fn section_runtime(no_php: bool, layout: &ProjectLayout) -> (Section, RuntimeFac
                     sidecar: Some(sc),
                 }
             }
+            // Booted and answered its handshake, then the `env()` query itself
+            // failed: reachable only for a child lost between the two.
             None => {
                 line!(sec, "  PHP sidecar: spawned, but the env() query failed");
                 line!(
@@ -347,6 +349,21 @@ fn section_runtime(no_php: bool, layout: &ProjectLayout) -> (Section, RuntimeFac
                 }
             }
         },
+        Err(e) if steins_sidecar::is_boot_failure(&e) => {
+            // A child that started and never finished booting (issue #891) is
+            // not an absent `php`: the engine exists and failed.
+            line!(sec, "  PHP sidecar: spawned, but did not complete its boot handshake ({e})");
+            line!(
+                sec,
+                "  posture: sound subset (degraded) — findings that require executing PHP are omitted (exit 0, ADR-0004)"
+            );
+            RuntimeFacts {
+                sidecar_ok: false,
+                runtime_minor: None,
+                monkey_patch_present: false,
+                sidecar: None,
+            }
+        }
         Err(_) => {
             line!(sec, "  PHP sidecar: not spawnable (no `php` on PATH)");
             line!(sec, "  {SOUND_SUBSET_NOTICE}");

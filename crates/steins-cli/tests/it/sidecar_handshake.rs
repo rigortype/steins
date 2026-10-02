@@ -110,7 +110,10 @@ fn stub_php_dir_mid_run() -> PathBuf {
 /// Runs `steins` with `PATH` narrowed to `stub_dir` so the sidecar spawns the
 /// stub, not the host's real `php`. The opening stub never answers its boot
 /// handshake, which is charged `STEINS_SIDECAR_BOOT_TIMEOUT_MS` (issue #891,
-/// 20 s by default); it is set short here so the test does not wait that out.
+/// 20 s by default); `boot_ms` sets it short for that stub so the test does not
+/// wait that out. The mid-run stub passes its handshake at once and keeps the
+/// default, so a starved boot could never make its timeout test pass for the
+/// wrong reason.
 /// Per-request ADR-0024 timeouts for one foldable argument stay under ten
 /// seconds; the 30-second bound below only guards an actual hang.
 ///
@@ -119,17 +122,17 @@ fn stub_php_dir_mid_run() -> PathBuf {
 /// start warm from (issue #525 — see `tests/it/cli.rs`'s `uncached`, which states
 /// the rule in full). Nothing here is about the cache; it is about what a
 /// silent sidecar does to a run.
-fn run_against_stub(stub_dir: &Path, args: &[&str]) -> Run {
+fn run_against_stub(stub_dir: &Path, args: &[&str], boot_ms: Option<&str>) -> Run {
     let mut args: Vec<&str> = args.to_vec();
     if args.first() == Some(&"check") {
         args.insert(1, "--no-cache");
     }
-    let out = steins_cmd()
-        .args(&args)
-        .env("PATH", stub_dir)
-        .env("STEINS_SIDECAR_BOOT_TIMEOUT_MS", "1500")
-        .output()
-        .expect("run steins");
+    let mut cmd = steins_cmd();
+    cmd.args(&args).env("PATH", stub_dir);
+    if let Some(ms) = boot_ms {
+        cmd.env("STEINS_SIDECAR_BOOT_TIMEOUT_MS", ms);
+    }
+    let out = cmd.output().expect("run steins");
     let _ = std::fs::remove_dir_all(stub_dir);
     Run {
         code: out.status.code().unwrap_or(-1),
@@ -140,7 +143,7 @@ fn run_against_stub(stub_dir: &Path, args: &[&str]) -> Run {
 
 /// [`run_against_stub`] against the opening-handshake stub.
 fn run_against_hung_sidecar(args: &[&str]) -> Run {
-    run_against_stub(&stub_php_dir(), args)
+    run_against_stub(&stub_php_dir(), args, Some("1500"))
 }
 
 #[test]
@@ -205,7 +208,7 @@ fn check_surfaces_the_notice_when_the_sidecar_stops_answering_mid_run() {
     // mid-run failure after a genuinely successful handshake (stub_php_dir_mid_run).
     let path = fixture("fold_mixed.php");
     let start = std::time::Instant::now();
-    let r = run_against_stub(&stub_php_dir_mid_run(), &["check", path.to_str().unwrap()]);
+    let r = run_against_stub(&stub_php_dir_mid_run(), &["check", path.to_str().unwrap()], None);
     let elapsed = start.elapsed();
     assert!(
         elapsed < std::time::Duration::from_secs(30),
@@ -294,4 +297,19 @@ fn an_absent_php_still_publishes() {
     assert!(r.stderr.contains("no PHP sidecar"), "got stderr:\n{}", r.stderr);
     assert!(!r.stderr.contains("sound subset (degraded)"), "got stderr:\n{}", r.stderr);
     assert!(published, "an absent php is the engine-off posture and publishes:\n{}", r.stderr);
+}
+
+/// `doctor` says what happened to a `php` that started and never booted: not
+/// "no `php` on PATH", which is the other report (issue #891).
+#[test]
+fn doctor_reports_a_boot_failure_as_one_not_as_an_absent_php() {
+    let r = run_against_hung_sidecar(&["doctor"]);
+    assert!(
+        r.stdout.contains("PHP sidecar: spawned, but did not complete its boot handshake"),
+        "got stdout:\n{}",
+        r.stdout
+    );
+    assert!(r.stdout.contains("posture: sound subset (degraded)"), "got stdout:\n{}", r.stdout);
+    assert!(!r.stdout.contains("not spawnable"), "got stdout:\n{}", r.stdout);
+    assert_eq!(r.code, 0, "a degraded environment is not a failure, got:\n{}", r.stdout);
 }
