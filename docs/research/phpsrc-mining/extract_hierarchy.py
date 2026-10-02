@@ -25,7 +25,9 @@ def resolve(ref, cur_ns):
 
 def parse_file(path):
     with open(path, encoding='utf-8', errors='replace') as fh:
-        lines = fh.readlines()
+        return parse_lines(fh.readlines(), os.path.relpath(path, ROOT))
+
+def parse_lines(lines, relpath):
     out = []
     i = 0
     n = len(lines)
@@ -87,7 +89,7 @@ def parse_file(path):
                 'mods': mods,
                 'extends': extends,
                 'implements': implements,
-                'file': os.path.relpath(path, ROOT),
+                'file': relpath,
                 'line': i + 1,
             })
         i = j + 1
@@ -124,36 +126,71 @@ for d in seen.values():
             fixed.append(ref)
         d[field] = fixed
 
-# Which rows the pinned PHP declares. The stubs are php-src's, and the pinned PHP may be an
-# older minor (the stubs of a development branch name classes it has not got) or built
-# without an extension, so a row is a claim about the stubs, not about the engine. The
-# cross-check is `class_exists`-family with autoload off, run by the PHP in `PHP_BIN`
-# (default `php`); a row it does not find is marked `absent_on_pinned = true`, and the
-# catalog refuses to treat it as an engine class (#871). No PHP, no table.
+# Which rows the pinned release declares. The stubs above are php-src's development
+# branch; the pinned PHP is an older minor, so a row may name a class that release does not
+# have (`Io\Poll\PollException`, `StreamException`). Whether it does is a fact about php-src
+# at the release, not about the machine the miner runs on, so it is read from the release's
+# own stubs: the same parser, run over every `*.stub.php` at the tag `PINNED_TAG` (default:
+# the newest stable `php-<minor>.<n>` tag the checkout has, for the minor of `PHP_BIN`). A
+# row whose class is not declared there is marked `absent_on_pinned = true`, and the catalog
+# refuses to treat it as an engine class (#871). An extension a build lacks has nothing to do
+# with it: `EnchantBroker` is declared at the tag whether or not this PHP has ext-enchant.
 PHP_BIN = os.environ.get("PHP_BIN", "php")
-PROBE = (
-    '$n = json_decode(stream_get_contents(STDIN)); $o = [];'
-    'foreach ($n as $x) { $o[] = class_exists($x, false) || interface_exists($x, false)'
-    ' || enum_exists($x, false) || trait_exists($x, false); }'
-    'echo json_encode(["version" => PHP_VERSION, "present" => $o]);'
-)
 
-def cross_check(names):
+def run(cmd, **kw):
     try:
-        out = subprocess.run([PHP_BIN, "-r", PROBE], input=json.dumps(names), text=True,
-                             capture_output=True, check=True).stdout
+        return subprocess.run(cmd, capture_output=True, text=True, check=True, **kw).stdout
     except (OSError, subprocess.CalledProcessError) as e:
-        sys.exit(f"extract_hierarchy.py: the PHP cross-check needs a working `{PHP_BIN}` "
-                 f"(set PHP_BIN): {e}")
-    got = json.loads(out)
-    return got["version"], dict(zip(names, got["present"]))
+        sys.exit(f"extract_hierarchy.py: `{' '.join(cmd[:3])}` failed (PHP_BIN={PHP_BIN}, "
+                 f"PHP_SRC_ROOT={ROOT}): {e}")
+
+php_version = run([PHP_BIN, "-r", "echo PHP_VERSION;"]).strip()
+minor = ".".join(php_version.split(".")[:2])
+pinned_tag = os.environ.get("PINNED_TAG")
+if not pinned_tag:
+    tags = [t for t in run(["git", "tag", "-l", f"php-{minor}.*"], cwd=ROOT).split()
+            if re.fullmatch(r"php-\d+\.\d+\.\d+", t)]
+    if not tags:
+        sys.exit(f"extract_hierarchy.py: no php-{minor}.N tag in {ROOT} (set PINNED_TAG)")
+    pinned_tag = max(tags, key=lambda t: [int(x) for x in t[4:].split(".")])
+pinned_commit = run(["git", "rev-parse", pinned_tag + "^{commit}"], cwd=ROOT).strip()
+tag_names = set()
+for path in run(["git", "ls-tree", "-r", "--name-only", pinned_tag], cwd=ROOT).split("\n"):
+    if path.endswith(".stub.php"):
+        text = run(["git", "show", f"{pinned_tag}:{path}"], cwd=ROOT)
+        tag_names.update(d['name'].lower() for d in parse_lines(text.splitlines(True), path))
 
 TEST_PREFIXES = ("ext/zend_test/", "ext/skeleton/", "ext/dl_test/", "sapi/")
-php_version, present = cross_check(
-    [d['name'] for d in seen.values() if not d['file'].startswith(TEST_PREFIXES)])
-absent = sorted(n for n, ok in present.items() if not ok)
-print(f"# PHP {php_version}: {len(absent)} of {len(present)} rows are not declared: {absent}",
-      file=sys.stderr)
+production = [d for d in seen.values() if not d['file'].startswith(TEST_PREFIXES)]
+absent = {d['name'] for d in production if d['name'].lower() not in tag_names}
+print(f"# {pinned_tag} ({pinned_commit[:10]}): {len(absent)} of {len(production)} rows are not "
+      f"declared: {sorted(absent)}", file=sys.stderr)
+
+# Sanity check against the local PHP, never a source: `class_exists`-family, autoload off.
+# A row the tag declares, whose extension is loaded here and which this PHP lacks, or a row
+# the tag lacks that this PHP declares, says the tag, the parse or the build is off.
+PROBE = (
+    '$n = json_decode(stream_get_contents(STDIN)); $o = [];'
+    'foreach ($n as [$x, $e]) { $o[] = [class_exists($x, false) || interface_exists($x, false)'
+    ' || enum_exists($x, false) || trait_exists($x, false), extension_loaded($e)]; }'
+    'echo json_encode($o);'
+)
+
+def ext_of(source):
+    parts = source.split('/')
+    if parts[0] == 'ext':
+        return 'zend opcache' if parts[1] == 'opcache' else parts[1]
+    return 'core'
+
+local = json.loads(run([PHP_BIN, "-r", PROBE],
+                       input=json.dumps([[d['name'], ext_of(d['file'])] for d in production])))
+for d, (here, ext_loaded) in zip(production, local):
+    if d['name'] in absent and here:
+        print(f"# WARNING: `{d['name']}` is not at {pinned_tag} but PHP {php_version} declares it",
+              file=sys.stderr)
+    if d['name'] not in absent and not here and ext_loaded:
+        print(f"# WARNING: `{d['name']}` is at {pinned_tag} and `{ext_of(d['file'])}` is loaded, "
+              f"but PHP {php_version} lacks it", file=sys.stderr)
 
 print(f"# total declarations parsed: {len(all_decls)}, unique names: {len(seen)}", file=sys.stderr)
 if dups:
@@ -166,14 +203,15 @@ def toml_list(xs):
 rows = sorted(seen.values(), key=lambda d: (d['file'], d['line']))
 print('# hierarchy.toml — builtin class/interface/enum hierarchy mined from php-src stubs')
 print('# php-src commit: 6bc7c26cf67a9480b5ef9d6191aebe87fa931183 (Thu Jul 9 2026)')
-print(f'# Cross-checked against PHP {php_version} (cli): a row it does not declare carries')
-print('# `absent_on_pinned = true`, and the catalog does not treat it as an engine class.')
+print(f'# Pinned release: {pinned_tag} ({pinned_commit}). A row whose class is not declared')
+print('# by that release\'s own stubs carries `absent_on_pinned = true`, and the catalog does')
+print('# not treat it as an engine class. Extensions a build lacks do not enter into it.')
 print('# Names preserve declared casing; Steins lowercases at its seam.')
 print('# Namespaced names are fully-qualified (no leading backslash).')
 print('# Test-only extensions (ext/zend_test, ext/skeleton, ext/dl_test, sapi/*) are EXCLUDED.')
 print(f'# Total production declarations: {sum(1 for d in rows if not d["file"].startswith(TEST_PREFIXES))}')
 print()
-print(f"php_cross_check = '{php_version}'")
+print(f"pinned_tag = '{pinned_tag}'")
 print()
 for d in rows:
     if d['file'].startswith(TEST_PREFIXES):
@@ -193,7 +231,7 @@ for d in rows:
         for fl in flags:
             k, v = fl.split(' = ')
             print(f'{k} = {v}')
-    if not present[d['name']]:
+    if d['name'] in absent:
         print('absent_on_pinned = true')
     print(f"source = '{d['file']}:{d['line']}'")
     print()

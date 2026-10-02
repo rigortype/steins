@@ -73,26 +73,27 @@ pub fn builtin_class_display(name: &str) -> Option<&'static str> {
 }
 
 /// Whether the hierarchy lists `name` (class, interface or enum, case-insensitive, a leading
-/// backslash ignored) but the PHP it was cross-checked against ([`hierarchy_cross_checked_php`])
-/// does not declare it (issue #871).
+/// backslash ignored) but the pinned release's own stubs ([`hierarchy_pinned_tag`]) do not
+/// declare it (issue #871).
 ///
-/// The rows are php-src's stubs, a development branch that is later than the PHP the table is
-/// pinned to (`Io\Poll\PollException`, `StreamException`) and may name an extension that PHP is
-/// built without (`com_exception`). Such a row is a fact about the stubs, so the is-a walk and
-/// the display name keep it, but it is **no engine class**: `new` of it is an `Error` on the
-/// pinned PHP, and no catalog row may claim what the constructor of a class that is not there
-/// does. `false` for a name the hierarchy does not list.
+/// The rows are php-src's development stubs, later than the PHP the table is pinned to
+/// (`Io\Poll\PollException`, `StreamException`). Such a row is a fact about the development
+/// branch, so the is-a walk and the display name keep it, but it is **no engine class**: `new`
+/// of it is an `Error` on the pinned release, and no catalog row may claim what the constructor
+/// of a class that is not there does. Which extensions a build has does not enter into it: a
+/// row the release declares stays unmarked on a PHP built without it. `false` for a name the
+/// hierarchy does not list.
 #[must_use]
 pub fn builtin_class_absent_on_pinned(name: &str) -> bool {
     let key = name.trim_start_matches('\\').to_ascii_lowercase();
     hierarchy_generated::ABSENT_ON_PINNED.binary_search(&key.as_str()).is_ok()
 }
 
-/// The version of the PHP the hierarchy's rows were cross-checked against
-/// ([`builtin_class_absent_on_pinned`]): the one that declared or did not declare each.
+/// The php-src release tag (`php-8.5.6`) whose own stubs decided which rows are
+/// [`builtin_class_absent_on_pinned`].
 #[must_use]
-pub fn hierarchy_cross_checked_php() -> &'static str {
-    hierarchy_generated::CROSS_CHECKED_PHP
+pub fn hierarchy_pinned_tag() -> &'static str {
+    hierarchy_generated::PINNED_TAG
 }
 
 /// Every class-like the mined hierarchy declares (enums included) as `(key, declared
@@ -1323,24 +1324,29 @@ mod tests {
         assert_eq!(crate::method_effect_labels("Dom\\Element", "__construct"), None);
     }
 
-    /// Issue #871: a row the cross-check PHP does not declare is marked, and only those.
+    /// Issue #871: a row the pinned release's own stubs lack is marked, and only those; what a
+    /// build does not have loaded is not.
     #[test]
-    fn rows_the_cross_checked_php_lacks_are_marked() {
+    fn rows_the_pinned_release_lacks_are_marked() {
         use super::builtin_class_absent_on_pinned as absent;
-        assert!(super::hierarchy_cross_checked_php().starts_with("8."));
-        // Stubs of a later php-src than the pinned minor, and an extension not built in.
+        assert!(super::hierarchy_pinned_tag().starts_with("php-8."));
+        // A later php-src than the pinned release: the Io and Stream APIs, ext/uri's builder.
         for class in [
             "Io\\Poll\\PollException",
             "\\io\\ioexception",
             "Openssl\\OpensslException",
             "StreamException",
-            "com_exception",
             "SortDirection",
+            "Uri\\Rfc3986\\UriBuilder",
         ] {
             assert!(absent(class), "{class}");
             assert!(super::builtin_class_display(class).is_some(), "{class}: still a row");
         }
-        for class in ["Random\\RandomException", "PDO", "Exception", "Uri\\WhatWg\\Url", "NoSuch"] {
+        // Declared by the release and absent from builds without the extension: not marked.
+        for class in [
+            "EnchantBroker", "com_exception", "COMPersistHelper", "variant", "Pdo\\Firebird",
+            "Random\\RandomException", "PDO", "Exception", "Uri\\WhatWg\\Url", "NoSuch",
+        ] {
             assert!(!absent(class), "{class}");
         }
         let t = super::hierarchy_generated::ABSENT_ON_PINNED;

@@ -188,8 +188,8 @@ fn a_namespaced_engine_class_without_a_row_is_a_gap_of_its_own() {
     assert_eq!(s.throws_gaps, vec!["no-throw-row"], "{s:?}");
 }
 
-/// The hierarchy is mined from php-src's development stubs, which name classes the pinned PHP
-/// (8.5.11) does not have: `new \Io\Poll\PollException('x')` is "Class not found" there. A row
+/// The hierarchy is mined from php-src's development stubs, which name classes the pinned release
+/// (8.5.6) does not have: `new \Io\Poll\PollException('x')` is "Class not found" there. A row
 /// the pinned PHP does not declare is no engine class, so such a `new` or `throw new` stays a
 /// gap in both lanes, as it was before the namespaced rows were reachable.
 #[test]
@@ -199,9 +199,8 @@ fn a_class_the_pinned_php_does_not_declare_is_no_engine_class() {
         "\\Io\\IoException",
         "\\Io\\Poll\\FailedHandleAddException",
         "\\Openssl\\OpensslException",
-        // Global names the stubs declare and the pinned PHP lacks: refused too.
+        // A global name the stubs declare and the pinned release lacks: refused too.
         "\\StreamException",
-        "\\com_exception",
     ] {
         let made = format!("<?php\nfunction make(): object {{ return new {class}('x'); }}\n");
         assert_eq!(exhaustive(&made, "make"), (false, false), "new {class}");

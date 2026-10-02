@@ -392,18 +392,23 @@ that run add their own dated sections.
      rowed. The new gate keeps what the old one protected: a name the user's namespace made up
      (`App\PDO`, an unimported `PDO` inside `namespace App`) is no hierarchy row, so it is still no
      engine class and still refuses.
-   - **The stubs are not the engine.** The hierarchy is mined from php-src's development stubs,
-     and the pinned PHP is an older minor or is built without an extension, so a row may name a
-     class that PHP does not have: `Io\Poll\PollException`, `Openssl\OpensslException` and
-     `StreamException` are in the stubs, and `new` of any of them is "Class not found" on 8.5.11.
-     The miner cross-checks every row with `class_exists` and its siblings on the PHP in `PHP_BIN`
-     and writes `absent_on_pinned = true` on a row that PHP does not declare, with the version in
-     `php_cross_check`; the generated table carries both. A marked row keeps its place in the
-     is-a walk and the display names, and is **no engine class**: `engine_exit` refuses it, so a
-     `new` of it, a `throw new` of it and a project subclass of it stay gaps. Of the 42 rows marked
-     on 8.5.11, 12 are namespaced throwables (`Io\\IoException`, ten `Io\\Poll\\*` exceptions and
-     `Openssl\\OpensslException`) and 2 are global ones, `StreamException` and `com_exception`,
-     which master took for engine classes and answered exhaustively for a class that is not there.
+   - **The stubs are not the pinned release.** The hierarchy is mined from php-src's development
+     stubs, and the pinned PHP is an older minor, so a row may name a class that release does not
+     have: `Io\Poll\PollException`, `Openssl\OpensslException` and `StreamException` are in the
+     stubs, and `new` of any of them is "Class not found" on 8.5. The miner decides which rows
+     those are from php-src itself: it runs the same stub parser over every `*.stub.php` at the
+     release tag (`php-8.5.6`, the newest stable 8.5 tag in the checkout) and writes
+     `absent_on_pinned = true` on a row whose class that tag does not declare, with the tag in
+     `pinned_tag`; the generated table carries both. The mark does not depend on the machine: a
+     PHP built without ext-enchant or ext-com_dotnet marks the same rows as one built with them,
+     and `EnchantBroker` and `com_exception` are declared at the tag, so they are unmarked. A
+     marked row keeps its place in the is-a walk and the display names, and is **no engine class**:
+     `engine_exit` refuses it, so a `new` of it, a `throw new` of it and a project subclass of it
+     stay gaps. 31 rows are marked on 8.5.6: 12 namespaced throwables (`Io\IoException`, ten
+     `Io\Poll\*` exceptions and `Openssl\OpensslException`) and one global throwable,
+     `StreamException`, which master took for an engine class and answered exhaustively for a
+     class that is not there. The local PHP serves only as a sanity check: the miner warns when it
+     declares a marked row, or lacks an unmarked one whose extension it has loaded.
    - **A constructor row is the default only where the constructor is `Exception`'s or `Error`'s.**
      Every engine `Throwable` whose constructor is its own was audited with
      `ReflectionClass::getConstructor()` and a probe of each, and the rest take the default
@@ -435,10 +440,13 @@ that run add their own dated sections.
      `Exception`.
    - **The table is held to the engine.** A test offers every row of `hierarchy.toml` to a live
      PHP (`ReflectionClass`) and requires its `getName()` to lowercase to the key and carry the
-     stored casing. A row the engine lacks must say why: it is marked, its stub's extension is not
-     loaded, or this PHP is an older minor than the cross-check's. A marked row whose extension is
-     loaded must be on an explicit list a re-mine revisits. The converse, that every namespaced
-     class PHP 8.5.11 declares from php-src is a row under its FQN, is a static test in the catalog.
+     stored casing. A row the engine lacks must say why: its stub's extension is not loaded, it is
+     marked, this PHP is an older minor than the pinned release, or it is one of two stub-only
+     pseudo-classes no build registers. A marked row must in turn be absent from a PHP of the
+     pinned minor or older. A row mined under a wrong key is declared at the tag under that same
+     key, so it is unmarked and absent with its extension loaded, which nothing explains. The
+     converse, that every namespaced class PHP 8.5.11 declares from php-src is a row under its
+     FQN, is a static test in the catalog.
    - **Left open.** `Dom\DOMException` is a class alias of the global `DOMException` (the stub's
      `@alias`), not a class of its own: `ReflectionClass::getName()` answers `DOMException`. The
      hierarchy has no row for it, and that is not harmless on master: the alias already causes two

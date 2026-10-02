@@ -11,65 +11,28 @@
 //! key and carry the casing php-src declares. A row the engine lacks has to **say
 //! why**, and there is no floor that lets an unexplained absence through:
 //!
-//! * the row is marked `absent_on_pinned`, which the miner writes for a row the
-//!   PHP it cross-checked against did not declare (a php-src stub newer than that
-//!   minor, an extension it was built without); or
-//! * the extension its stub belongs to is not loaded here; or
-//! * this PHP is an older minor than the cross-check's, which may lack a class of
-//!   a loaded extension that the newer one added.
+//! * its extension is not loaded here (`extension_loaded` of the stub's extension);
+//! * the row is marked `absent_on_pinned`: the pinned release's own stubs do not declare
+//!   it. The miner reads that from php-src at the release tag, never from the PHP it
+//!   runs on, so a build with or without an extension marks the same rows. A marked row
+//!   must in turn be absent from any PHP whose minor is at most the pinned one;
+//! * this PHP is an older minor than the pinned release, which may lack a class of a
+//!   loaded extension that the release added; or
+//! * the row is one of [`STUB_ONLY`], declared in a stub and registered by no build.
 //!
-//! A mark is the miner's word for the same name it is being asked about, so it
-//! cannot catch a key the miner got wrong (a `Dom\Text` mined as `Text` would be
-//! marked absent as well). Two things do. A row marked although its extension is
-//! loaded must be one of [`NEWER_THAN_THE_CROSS_CHECK`], an explicit list a re-mine
-//! has to revisit. And the catalog holds the converse statically: every namespaced
-//! class PHP 8.5.11 declares is a row under its FQN
-//! (`every_namespaced_class_php_src_declares_is_keyed_by_fqn`).
+//! A row mined under a wrong key (`Dom\Text` as `Text`) is declared at the tag under that
+//! same wrong key, so it is unmarked, absent, and its extension loaded: unexplained. The
+//! catalog also holds the converse statically: every namespaced class PHP 8.5.11 declares
+//! is a row under its FQN (`every_namespaced_class_php_src_declares_is_keyed_by_fqn`).
 //!
 //! Skipped with a marker when no `php` answers.
 
 use steins_sidecar::Sidecar;
 
-/// Marked rows whose extension is loaded on a PHP that has them, because the stubs are
-/// a later php-src than the cross-check PHP: a new `Io` and `Stream*` API, `ext/uri`'s
-/// builder, `ext/openssl`'s session classes, `SortDirection`, `ext/intl`'s number range
-/// formatter (needs a newer ICU than the cross-check build's), and two stub-only PDO
-/// names (`PDO_PGSql_Ext`, `PDO_SQLite_Ext`) no build registers. Lowercased.
-const NEWER_THAN_THE_CROSS_CHECK: &[&str] = &[
-    "intlnumberrangeformatter",
-    "io\\ioexception",
-    "io\\poll\\backend",
-    "io\\poll\\backendunavailableexception",
-    "io\\poll\\context",
-    "io\\poll\\event",
-    "io\\poll\\failedcontextinitializationexception",
-    "io\\poll\\failedhandleaddexception",
-    "io\\poll\\failedpolloperationexception",
-    "io\\poll\\failedpollwaitexception",
-    "io\\poll\\failedwatchermodificationexception",
-    "io\\poll\\handle",
-    "io\\poll\\handlealreadywatchedexception",
-    "io\\poll\\inactivewatcherexception",
-    "io\\poll\\invalidhandleexception",
-    "io\\poll\\pollexception",
-    "io\\poll\\watcher",
-    "openssl\\opensslexception",
-    "openssl\\psk",
-    "openssl\\session",
-    "pdo_pgsql_ext",
-    "pdo_sqlite_ext",
-    "sortdirection",
-    "streamerror",
-    "streamerrorcode",
-    "streamerrormode",
-    "streamerrorstore",
-    "streamexception",
-    "streampollhandle",
-    "uri\\rfc3986\\uribuilder",
-    "uri\\rfc3986\\urihosttype",
-    "uri\\rfc3986\\uritype",
-    "uri\\whatwg\\urlhosttype",
-];
+/// Rows that are declared in a stub and registered by no build: the pseudo-classes
+/// `ext/pdo_pgsql` and `ext/pdo_sqlite` hang their driver methods on (`PDO_PGSql_Ext`,
+/// `PDO_SQLite_Ext`). Lowercased.
+const STUB_ONLY: &[&str] = &["pdo_pgsql_ext", "pdo_sqlite_ext"];
 
 /// One `[[class]]` row of `hierarchy.toml`, as far as this test reads it.
 struct Row {
@@ -128,8 +91,8 @@ fn every_hierarchy_key_resolves_under_the_key_it_is_stored_as() {
     };
     let env = sidecar.env().expect("a live engine answers `env`");
     let loaded: Vec<String> = env.extensions.iter().map(|e| e.to_ascii_lowercase()).collect();
-    let checked_against = minor_of(steins_catalog::hierarchy_cross_checked_php());
-    let older = minor_of(&env.php_version) < checked_against;
+    let pinned = minor_of(steins_catalog::hierarchy_pinned_tag().trim_start_matches("php-"));
+    let live = minor_of(&env.php_version);
 
     let rows = rows();
     assert!(rows.len() >= 300, "hierarchy.toml lists only {} rows", rows.len());
@@ -147,13 +110,12 @@ fn every_hierarchy_key_resolves_under_the_key_it_is_stored_as() {
         let answer = sidecar.reflect_class(&key).expect("a live engine answers");
         let Some(class) = answer.declaration else {
             let ext = extension_of(&row.source);
-            let ext_missing = !loaded.contains(&ext);
-            if !(row.marked || ext_missing || older) {
-                unexplained.push(row.name.clone());
-            }
-            if row.marked && !ext_missing && !NEWER_THAN_THE_CROSS_CHECK.contains(&key.as_str()) {
-                let why = "marked, its extension is loaded, and it is not a listed newer row";
-                unexplained.push(format!("{} ({why}; `{ext}`)", row.name));
+            let explained = row.marked
+                || !loaded.contains(&ext)
+                || live < pinned
+                || STUB_ONLY.contains(&key.as_str());
+            if !explained {
+                unexplained.push(format!("{} (extension `{ext}` is loaded)", row.name));
             }
             continue;
         };
@@ -165,7 +127,12 @@ fn every_hierarchy_key_resolves_under_the_key_it_is_stored_as() {
         );
         assert_eq!(class.name, row.name, "`{key}`: the engine's casing is not the stored one");
         assert!(class.internal, "`{key}` is a class of the engine, not the project's: {class:?}");
-        assert!(!row.marked, "`{key}` is marked absent_on_pinned and this PHP declares it");
+        assert!(
+            !(row.marked && live <= pinned),
+            "`{key}` is marked absent_on_pinned, and PHP {} (not newer than {}) declares it",
+            env.php_version,
+            steins_catalog::hierarchy_pinned_tag()
+        );
         resolved += 1;
     }
     assert!(

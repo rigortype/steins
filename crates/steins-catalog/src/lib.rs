@@ -189,7 +189,7 @@ pub use builtins::{
     engine_class_declarations,
     engine_constant_count,
     failure_arms,
-    hierarchy_cross_checked_php,
+    hierarchy_pinned_tag,
     hierarchy_entry_count,
     invocation_shape,
     is_migrated_resource_class,
