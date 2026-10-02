@@ -296,26 +296,20 @@ pub(crate) fn apply_inline_var_casts(
 /// phpdoc arm seeds `Asserted`.
 /// Resolve every class name in a contract arm against the declaring namespace.
 ///
-/// One level of intersection is walked and nothing else: `Foo&Bar` is the shape a
-/// declared conjunction has, and an arm list is already union-flattened
-/// ([`flatten_arms`]) by this point. Non-class intersection members (array, scalar)
-/// are left as-is.
+/// Every depth a class can stand at is walked ([`ContractTy::map_class_names`]):
+/// an intersection's members (`@param Foo&Bar`, issue #238), and since issue #699
+/// the element of `list<User>`, the key and value of `array<K, V>` and
+/// `iterable<K, V>`, shape fields and callable signatures too. Stopping at the top
+/// level left the `User` of `list<User>` in `namespace App` naming the global
+/// class, and the element a `foreach` bound out of it was that class.
+///
+/// A name the docblock wrote fully qualified reaches `resolve_class` with its
+/// leading `\` (see [`ContractTy::Class`]), so the resolver reads it as fully
+/// qualified instead of relative to the namespace.
 ///
 /// [`call_return_arms`]: crate::return_arms::call_return_arms
 fn resolve_class_arms(ty: ContractTy, resolve_class: &dyn Fn(&str) -> String) -> ContractTy {
-    match ty {
-        ContractTy::Class(n) => ContractTy::Class(resolve_class(&n)),
-        ContractTy::Inter(members) => ContractTy::Inter(
-            members
-                .into_iter()
-                .map(|m| match m {
-                    ContractTy::Class(n) => ContractTy::Class(resolve_class(&n)),
-                    other => other,
-                })
-                .collect(),
-        ),
-        other => other,
-    }
+    ty.map_class_names(&mut |n| resolve_class(n))
 }
 
 pub(crate) fn refine_contract_arms(
