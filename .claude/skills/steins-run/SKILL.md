@@ -39,7 +39,8 @@ briefs to what is specific to the task.
 4. **Record before building.** Write the design into GitHub the moment it
    arrives: a parent tracking issue with the slice checklist, an issue per
    slice (new or updated), and the ADR or amendment. Scratch directories can
-   vanish between sessions; issues and ADRs cannot.
+   vanish between sessions; issues and ADRs cannot. Issue and PR bodies skip
+   the git hooks, so pass each through the leak gate before posting.
 5. **Implement.** Dispatch `steins-implementer` per slice with
    `isolation: worktree`: the issue number, the design pointers, the measurements
    you need back, and the base branch. Split a slice into a syntax/catalog half
