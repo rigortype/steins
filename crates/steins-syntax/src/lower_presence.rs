@@ -17,6 +17,10 @@ use crate::lower_stmt::{expr_is_false, expr_is_true, stmt_end};
 use crate::memo;
 use crate::{bytes_to_string, strip_dollar, to_span};
 
+mod loop_memo;
+
+use loop_memo::{LoopMemo, presence_loop_body};
+
 // binding presence (ADR-0081, issue #267)
 
 /// Whether a name carries a binding at a program point, over the three-valued
@@ -28,7 +32,7 @@ use crate::{bytes_to_string, strip_dollar, to_span};
 /// has no stratum for — a parameter and an assignment bind identically. The join
 /// is the same relation with the same three outcomes: agreement survives,
 /// disagreement degrades to the middle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum BindingPresence {
     /// Every path from scope entry to this point carries a binding.
     Bound,
@@ -138,6 +142,9 @@ struct PresenceCx<'a> {
     /// The states carried out by `continue`, waiting for the enclosing loop's back
     /// edge — and, for a loop that can exit by its condition, its successor too.
     continues: Vec<PresenceState>,
+    /// The loop-body answers this run has already computed (issue #793), or `None`
+    /// when memoization is off. See [`LoopMemo`].
+    loop_memo: Option<LoopMemo>,
 }
 
 impl PresenceCx<'_> {
@@ -171,7 +178,8 @@ fn presence_leaf(node: &Node<'_, '_>, state: &mut PresenceState, cx: &mut Presen
     // loop body re-walks its units once per fixpoint round (up to two silent
     // rounds plus the reporting one, compounding under nesting), so the pair is
     // cached per node (issue #484). Only the judgment against the flowing
-    // state — which the rounds exist to change — runs per visit.
+    // state — which the rounds exist to change — runs per visit. The loop
+    // walk above it is cached too, on body and entry state (issue #793).
     let leaf = memo::presence_leaf(node, || {
         let mut acc = VarUsage::default();
         let mut shield = Vec::new();
@@ -677,6 +685,7 @@ fn presence_try(
 /// is the state at the back edge, which becomes the loop's successor only when the
 /// loop can exit by its condition, while `broke` is every `break` state, which
 /// reaches the successor unconditionally — including out of a `while (true)`.
+#[derive(Clone)]
 struct LoopExits {
     /// The state at the back edge: the body's fall-through end joined with every
     /// `continue`.
@@ -685,7 +694,10 @@ struct LoopExits {
     broke: Vec<PresenceState>,
 }
 
-fn presence_loop_body(
+/// The walk itself, uncached; [`presence_loop_body`] is the entry the statements
+/// call, and answers a repeat walk of the same body from the same entry from a
+/// table instead (issue #793).
+fn presence_loop_walk(
     body: &[Statement<'_>],
     entry: &PresenceState,
     cx: &mut PresenceCx,
@@ -791,6 +803,7 @@ pub(crate) fn maybe_undefined_reads(
         seen: HashSet::new(),
         breaks: Vec::new(),
         continues: Vec::new(),
+        loop_memo: LoopMemo::for_run(),
     };
     for s in statements {
         if presence_stmt(s, &mut state, &mut cx) != PresenceFlow::Fell {
@@ -897,6 +910,7 @@ pub(crate) fn unset_seed_facts(top: &[&Statement<'_>], source: &str, comments: &
         seen: HashSet::new(),
         breaks: Vec::new(),
         continues: Vec::new(),
+        loop_memo: LoopMemo::for_run(),
     };
     for s in top {
         if presence_stmt(s, &mut state, &mut cx) != PresenceFlow::Fell {
