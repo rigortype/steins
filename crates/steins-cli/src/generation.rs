@@ -41,7 +41,8 @@ use std::path::{Component, Path, PathBuf};
 
 use steins_db::{EffectsPolicy, PluginFacts, ProjectLayout};
 use steins_infer::{
-    Diagnostic, GenerationParams, INLINE_IGNORE, LazyTree, RuntimePostures, generation_check,
+    Diagnostic, GenerationParams, INLINE_IGNORE, LazyTree, Progress, RuntimePostures,
+    generation_check_reporting,
 };
 use steins_syntax::SourceTree;
 
@@ -92,6 +93,7 @@ pub(crate) fn try_generation_check(
     postures: &RuntimePostures,
     no_php: bool,
     runtime_warnings: &[String],
+    progress: &Progress,
 ) -> Option<CachedRun> {
     let cwd = std::env::current_dir().ok()?;
     let layout = resolve_layout(paths);
@@ -129,7 +131,7 @@ pub(crate) fn try_generation_check(
     // A failure here is cost, never meaning (ADR-0092 §2), so it degrades to
     // the ordinary cold path in silence — and having printed nothing yet is
     // what lets the cold path own stderr whole.
-    let outcome = generation_check(&params).ok()?;
+    let outcome = generation_check_reporting(&params, progress).ok()?;
     notices.extend(outcome.attribution_notices);
     notices.extend(runtime_warnings.iter().cloned());
 

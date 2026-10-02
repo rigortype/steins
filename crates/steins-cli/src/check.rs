@@ -26,7 +26,7 @@ use steins_db::{Project, SteinsDatabase, parse as parse_tree};
 use steins_edit::{ByteSpan, Edit, EditPlan};
 use steins_infer::{
     Diagnostic, InlineOutcome, SOUND_SUBSET_NOTICE, SidecarFolder, apply_inline_ignores,
-    check_project_under,
+    Progress, check_project_reporting,
 };
 use steins_syntax::SourceTree;
 
@@ -34,6 +34,7 @@ use crate::config::{
     allow_list, effects_from_config, profiles_from_config, read_steins_config, runtime_from_config,
 };
 use crate::generation::{consume_cached_run, try_generation_check};
+use crate::progress::progress_for;
 use crate::project::{LoadedProject, collect_files, load_project, reject_missing_paths};
 use crate::transform::{PostCheckSurface, post_check};
 use crate::{baseline, profile, render};
@@ -50,6 +51,7 @@ struct CheckArgs {
     no_tolerated_effects: bool,
     fix: bool,
     vendor_diagnostics: bool,
+    progress: bool,
     profile: Option<String>,
     set_baseline: bool,
     ignore_baseline: bool,
@@ -74,6 +76,10 @@ impl CheckArgs {
                 "--no-tolerated-effects" => parsed.no_tolerated_effects = true,
                 "--fix" => parsed.fix = true,
                 "--vendor-diagnostics" => parsed.vendor_diagnostics = true,
+                // The opt-in progress channel (issue #885): phase boundaries and
+                // slow files on stderr while the run is going. `STEINS_PROGRESS`
+                // turns it on the same way.
+                "--progress" => parsed.progress = true,
                 "--profile" => {
                     parsed.profile = Some(flag_value(arg, args.next(), "a name argument")?);
                 }
@@ -109,7 +115,7 @@ impl CheckArgs {
 
     /// The analysis this command line asks for over `files`. `check` says the
     /// `[runtime]` warnings on stderr, after the boundary notices.
-    fn request<'a>(&'a self, files: &'a [PathBuf]) -> CheckRequest<'a> {
+    fn request<'a>(&'a self, files: &'a [PathBuf], progress: Progress) -> CheckRequest<'a> {
         CheckRequest {
             files,
             paths: &self.paths,
@@ -119,6 +125,7 @@ impl CheckArgs {
             no_cache: self.no_cache,
             vendor_diagnostics: self.vendor_diagnostics,
             runtime_warnings_on_stderr: true,
+            progress,
         }
     }
 
@@ -162,7 +169,10 @@ pub(crate) fn run_check(args: &[String]) -> ExitCode {
         return code;
     }
 
+    // Built before the first file is read, so the run's clock covers it.
+    let progress = progress_for(args.progress);
     let files = collect_files(&args.paths);
+    progress.phase_with("discover", &format!("{} file(s)", files.len()));
 
     // Coverage posture (ADR-0004): `--no-php` runs the sound subset (notice up
     // front); otherwise folds via a lazily-spawned sidecar.
@@ -171,7 +181,7 @@ pub(crate) fn run_check(args: &[String]) -> ExitCode {
     }
 
     let CheckOutcome { surface, loaded, inline, vendor_suppressed, .. } =
-        match analyze_check(&args.request(&files)) {
+        match analyze_check(&args.request(&files, progress.clone())) {
             Ok(outcome) => outcome,
             Err(e) => {
                 errln!("steins: {e}");
@@ -222,6 +232,7 @@ pub(crate) fn run_check(args: &[String]) -> ExitCode {
         texts,
     };
     out!("{}", render::render(&report, args.format()));
+    progress.phase("output");
 
     if let Some(run) = &fix_run {
         report_fix_run(run, fixed.len());
@@ -250,6 +261,9 @@ pub(crate) struct CheckRequest<'a> {
     /// notices. `check` says them there; the MCP tool carries them in its reply
     /// document instead, and saying them on stderr too would say them twice.
     pub(crate) runtime_warnings_on_stderr: bool,
+    /// The opt-in progress channel (issue #885); off for the MCP surface, whose
+    /// stderr is a log rather than a progress display.
+    pub(crate) progress: Progress,
 }
 
 /// What a check hands its report: the surface it displays under, the
@@ -330,6 +344,7 @@ pub(crate) fn analyze_check(req: &CheckRequest<'_>) -> Result<CheckOutcome, Setu
             &postures,
             req.no_php,
             said,
+            &req.progress,
         )
     };
 
@@ -355,12 +370,19 @@ pub(crate) fn analyze_check(req: &CheckRequest<'_>) -> Result<CheckOutcome, Setu
                 errln!("steins: {w}");
             }
             let findings: Vec<Diagnostic> =
-                check_project_under(&loaded.db, loaded.project, &mut folder, postures);
+                check_project_reporting(
+                    &loaded.db,
+                    loaded.project,
+                    &mut folder,
+                    postures,
+                    &req.progress,
+                );
             let (inline, vendor_suppressed) =
                 suppression_pipeline(&loaded, findings, &surface, req.vendor_diagnostics);
             (loaded, inline, vendor_suppressed)
         }
     };
+    req.progress.phase("suppress");
     Ok(CheckOutcome { surface, runtime_warnings, loaded, inline, vendor_suppressed })
 }
 

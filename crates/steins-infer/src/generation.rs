@@ -153,6 +153,7 @@ pub use steins_gen::PackageKind;
 use crate::affected::{AffectedInputs, affected_files};
 use crate::facts::fill_rows;
 use crate::fold_persist::{FoldTableArtifact, RecordingEngine, fold_package};
+use crate::progress::Progress;
 use crate::project::{FileUnit, Index, LazyTree, Res};
 use crate::summaries::{Summaries as StoredSummaries, read_summaries};
 use crate::walk_fleet::{FolderFleet, WorkerBudget};
@@ -459,6 +460,16 @@ impl std::error::Error for GenerationError {
 /// or the decision to keep `CURRENT` (`publish_or_reuse`); and the outcome
 /// (`report`).
 pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, GenerationError> {
+    generation_check_reporting(p, &Progress::off())
+}
+
+/// [`generation_check`] reporting its phases and slow files through `progress`
+/// as it goes (issue #885). Cost reporting and nothing else: the outcome is
+/// the same whatever the handle.
+pub fn generation_check_reporting(
+    p: &GenerationParams<'_>,
+    progress: &Progress,
+) -> Result<GenerationOutcome, GenerationError> {
     let t_capture = Instant::now();
     let store = Store::open(p.store_root).map_err(GenerationError::Store)?;
     let mut notes: Vec<String> = Vec::new();
@@ -472,6 +483,7 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
     let mode = if current.is_some() { GenerationMode::Warm } else { GenerationMode::Cold };
     let (captured, inventories) = capture(p)?;
     let capture_ms = ms(t_capture.elapsed());
+    progress.phase("capture");
 
     let t_trees = Instant::now();
     // The walk blocks the published generation carries — the replay
@@ -493,6 +505,7 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
         block_index(&captured.plans, &captured.diag, published.as_ref(), &captured.contents);
     let delta = name_delta(current.as_ref(), &captured, &loaded, &blocks, &mut notes);
     let trees_ms = ms(t_trees.elapsed());
+    progress.phase("parse");
 
     let mut fold = fold_engine(p, current.as_ref(), &mut notes);
     let identity = RunIdentity::read(p, &fold.folder);
@@ -502,7 +515,8 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
         blocks,
         stamp: identity.stamp(p),
     };
-    let analysis = analyze(p, &captured, &mut loaded, &mut fold.folder, delta, &replay);
+    progress.phase("fold engine");
+    let analysis = analyze(p, &captured, &mut loaded, &mut fold.folder, delta, &replay, progress);
     walk_notes(&analysis, replay.candidates, &mut notes);
 
     // Identity, honestly filled (see the module docs for in/out reasoning).
@@ -528,6 +542,7 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
     let (generation, shared_artifacts) =
         publish_or_reuse(&store, current.as_ref(), publishable, fold.degraded, losses, &mut notes);
     let persist_ms = ms(t_persist.elapsed());
+    progress.phase("persist");
 
     Ok(report(captured, loaded, analysis, RunRecord {
         mode,
@@ -643,6 +658,7 @@ fn analyze(
     folder: &mut crate::RecordingFolder,
     delta: NameDelta,
     replay: &Replay<'_>,
+    progress: &Progress,
 ) -> Analysis {
     let t_analyze = Instant::now();
     let index = Index::from_merged(merge_shards(&loaded.shards));
@@ -723,6 +739,7 @@ fn analyze(
         p.plugins,
         p.effects,
         Some(&mut control),
+        progress,
     );
     drop(units);
     // Off the merged index: the gated path must not force a salsa parse just to

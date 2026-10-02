@@ -322,6 +322,7 @@ mod fan_out {
             &PluginFacts::none(),
             &EffectsPolicy::none(),
             Some(&mut control),
+            &crate::Progress::off(),
         );
         (findings, std::mem::take(&mut control.ledger), control.workers)
     }
