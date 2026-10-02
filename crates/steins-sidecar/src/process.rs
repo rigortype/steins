@@ -43,6 +43,28 @@ fn runner_code() -> &'static str {
 /// anything slower is treated as misbehavior and widened.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// How long a fresh child may take to answer its opening `env` handshake
+/// (issue #891), charged to [`Channel::open`] and to nothing else.
+///
+/// The per-request budget cannot be the boot budget. [`DEFAULT_TIMEOUT`] starts
+/// when a request is written, and a fresh child's first request waits out PHP's
+/// own startup: about 60 ms of CPU on an idle machine, but wall-clock time, so a
+/// loaded CI runner can stretch it past 2 s. That cost three respawns, a run
+/// degraded on stderr, and (ADR-0092's amendment for #784) a generation that was
+/// never published, where a missing `php` costs none of that.
+///
+/// 20 s is a few hundred times the idle boot, so only an interpreter that is
+/// wedged rather than starved fails it, and it is still short enough that the
+/// worst case stays bounded: one wait on the first spawn (the engine goes off,
+/// the sound subset), and [`RESPAWN_CAP`] waits across a revive storm, one minute
+/// in all. Real requests keep [`DEFAULT_TIMEOUT`], so hang detection on a
+/// running child is unchanged.
+const BOOT_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// The id the opening handshake carries. [`Sidecar`] numbers its requests from
+/// 1, so a reply that is not the handshake's can never pass for one.
+const HANDSHAKE_ID: u64 = 0;
+
 /// How many times in a row one [`Sidecar`] will replace a dead child with no
 /// answer in between before giving up.
 ///
@@ -63,6 +85,19 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(2);
 /// Public so a run's coverage report can say which side of the brake it ended
 /// on (issue #245) — see [`Sidecar::strikes`]. A reporting input, never a gate.
 pub const RESPAWN_CAP: u32 = 3;
+
+/// One NDJSON request line: the JSON-RPC envelope, newline included.
+fn frame(id: u64, method: &str, params: serde_json::Value) -> String {
+    let mut line = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": method,
+        "params": params,
+    })
+    .to_string();
+    line.push('\n');
+    line
+}
 
 /// One live child and the thread draining it — everything a respawn replaces.
 ///
@@ -96,7 +131,27 @@ impl Channel {
     ///
     /// Trade-offs: source is visible in `ps`/`/proc` (not a secret), and a
     /// parse error reports against "Command line code" (moot: stderr discarded).
+    ///
+    /// # The boot handshake
+    ///
+    /// Returns only a child that has answered an `env` request, under
+    /// [`BOOT_TIMEOUT`] rather than the request budget (issue #891). A child that
+    /// does not answer is killed and reaped here and reported as an `Err`, so a
+    /// slow boot is a failed spawn (the engine-off posture) or a strike on a
+    /// revive, never a lost real request.
     fn open(bin: &str) -> std::io::Result<Self> {
+        let mut chan = Self::launch(bin)?;
+        match chan.handshake() {
+            Ok(()) => Ok(chan),
+            Err(e) => {
+                chan.close();
+                Err(e)
+            }
+        }
+    }
+
+    /// Start the child and its reader thread, without waiting for it to answer.
+    fn launch(bin: &str) -> std::io::Result<Self> {
         let mut child = Command::new(bin)
             .arg("-r")
             .arg(runner_code())
@@ -131,6 +186,33 @@ impl Channel {
         });
 
         Ok(Self { child, stdin, lines: rx, reader: Some(reader), bin: bin.to_owned() })
+    }
+
+    /// Send the `env` request and wait [`BOOT_TIMEOUT`] for a well-formed answer.
+    /// The reply is checked and dropped: `env` is asked again, by the caller who
+    /// wants it, so the handshake feeds no state back into the [`Sidecar`].
+    fn handshake(&mut self) -> std::io::Result<()> {
+        use std::io::{Error, ErrorKind};
+        self.stdin.write_all(frame(HANDSHAKE_ID, "env", env_params()).as_bytes())?;
+        self.stdin.flush()?;
+        let line = match self.lines.recv_timeout(BOOT_TIMEOUT) {
+            Ok(line) => line?,
+            Err(RecvTimeoutError::Timeout) => {
+                return Err(Error::new(ErrorKind::TimedOut, "php did not answer its boot handshake"));
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err(Error::new(ErrorKind::UnexpectedEof, "php exited during its boot handshake"));
+            }
+        };
+        let answered = serde_json::from_str::<serde_json::Value>(line.trim()).ok().is_some_and(|v| {
+            v.get("id").and_then(serde_json::Value::as_u64) == Some(HANDSHAKE_ID)
+                && v.get("result").and_then(parse_env_result).is_some()
+        });
+        if answered {
+            Ok(())
+        } else {
+            Err(Error::new(ErrorKind::InvalidData, "php answered its boot handshake with garbage"))
+        }
     }
 
     /// Kill the child, **reap** it, and join the reader thread.
@@ -190,8 +272,9 @@ pub struct Sidecar {
 
 impl Sidecar {
     /// Spawn the sidecar: launch `php -r <runner source>`, resolving `php`
-    /// from `PATH`. Returns an error only when the process cannot be started
-    /// (missing `php`, IO failure) — the caller turns that into the
+    /// from `PATH`. Returns an error when the process cannot be started
+    /// (missing `php`, IO failure) or does not answer its boot handshake within
+    /// [`BOOT_TIMEOUT`] (issue #891) — the caller turns either into the
     /// sound-subset posture.
     pub fn spawn() -> std::io::Result<Self> {
         Self::spawn_with("php")
@@ -242,7 +325,10 @@ impl Sidecar {
                 true
             }
             // Still poisoned, one attempt poorer. `php` was on `PATH` moments
-            // ago, so this is a transient failure worth another try later.
+            // ago, so this is a transient failure worth another try later. A
+            // child that started but never finished booting (issue #891) is the
+            // same strike as one that would not start: the cap bounds how many
+            // boot waits a broken interpreter can cost.
             Err(_) => false,
         }
     }
@@ -410,14 +496,7 @@ impl Sidecar {
         let id = self.next_id;
         self.next_id += 1;
 
-        let req = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "method": method,
-            "params": params,
-        });
-        let mut line = req.to_string();
-        line.push('\n');
+        let line = frame(id, method, params);
 
         if self.chan.stdin.write_all(line.as_bytes()).is_err() || self.chan.stdin.flush().is_err() {
             self.poison();
