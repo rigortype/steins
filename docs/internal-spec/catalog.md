@@ -371,18 +371,19 @@ emit it. `prepare` takes the same coarse colour as the rest: whether it is a
 round trip to the server depends on PDO's emulated-prepares setting, which is
 runtime configuration the catalog cannot read, so the row takes the upper bound.
 
-`PDO::setAttribute` (`io.db`) and `PDOStatement::setFetchMode` (pure) are rowed
+`PDO::setAttribute` (`io.db`) and `PDOStatement::setFetchMode` (`mutate`: it
+stores on the statement what the next fetch observes) are rowed
 for what they **register** (issue #870). A class or object named by an earlier
 call is constructed or written through by a later fetch, and an argument-reach
 row cannot see it there, so the user code is attributed to the registration, as
 ADR-0099 §4.5 attributes a handler: `setFetchMode`'s `FETCH_CLASS` name and
 `FETCH_INTO` object, and `setAttribute`'s `ATTR_STATEMENT_CLASS` and
 `ATTR_DEFAULT_FETCH_MODE` value, have `Autoload` reach in `method_arg_reach`,
-and `fetch` and `fetchAll` stay as they are. A body that only fetches runs no
-user code by that route, and the body that registered the class holds the gap.
-One residual: `setFetchMode(FETCH_CLASS | FETCH_CLASSTYPE)` names no class at the
-call (a column names it at each fetch), and the reach rule does not read
-constants, so that registration is charged to neither call.
+and `fetch` and `fetchAll` stay as they are. So does `setFetchMode`'s `int
+$mode`: `FETCH_CLASS | FETCH_CLASSTYPE` names no class at the call, a column
+names it at each later fetch, and the reach rule does not read constants, so no
+`setFetchMode` call is complete. A body that only fetches runs no user code by
+that route, and the body that registered the class holds the gap.
 
 Constructor rows (`__construct`, issue #804) are what `new C(...)` and a
 subclass's `parent::__construct(...)` run: `PDO` is `io.db`, `DateTime` and
@@ -482,19 +483,25 @@ A third, mechanical witness is the generated note
 entry tables (aliases and the `FileFunction` macro family included) to its C
 function at the pinned php-src, lists the raise calls its call graph reaches and
 classifies the name as `none`, `argument-checking`, `destructor-hazard` or
-`needs-row`, and a test holds the table to that note. The audit found twelve
-names that raise an `Error` for a value their types admit, an array that
-contains itself by reference or a `DateTimeZone` subclass that never ran its
-parent's constructor, and they carry a row instead (`in_array`, `array_search`,
-`array_keys`, `array_unique`, `sort`, `rsort`, `asort`, `arsort`,
-`array_replace_recursive`, `array_walk_recursive`, `date_create`,
-`date_create_immutable`). Two consequences are call-site rules, not table
-facts: `array_keys` at one argument compares nothing and raises nothing
-(`pure_at_arity`), and a call whose arguments are all flat literals cannot pass
-such a value (`throws_of_literals`). The pin is php-src master (8.6.0-dev) and
-the table is the 8.5 line's, so a raise that exists only there (`array_filter`'s
-`$mode`, `pathinfo`'s `$flags`, the stream error mode) is recorded in the note
-and not given a row.
+`needs-row`, and a test holds the table to that note. It reads the `php-8.5.11`
+tag, enters function-like macros, and records a call through an object handler
+pointer, which no static walk resolves, as a name that needs a review where the
+reach table calls the operand `Inert`; two fuzzes beside it
+(`fuzz_throwless_values.php`, `fuzz_throwless_uninit.php`) are the run-time
+witness. The audit found fourteen names that raise an `Error` for a value their
+types admit, an array that contains itself by reference, a `DateTimeZone`
+subclass that never ran its parent's constructor, or a `SimpleXMLElement`
+subclass instance made without its constructor, and they carry a row instead
+(`in_array`, `array_search`, `array_keys`, `array_unique`, `sort`, `rsort`,
+`asort`, `arsort`, `array_replace_recursive`, `array_walk_recursive`,
+`date_create`, `date_create_immutable`, `boolval`, `array_filter`). Two
+consequences are call-site rules, not table facts: a call below the arity that
+carries the value raises less (`throws_at_arity`: `array_keys($a)`,
+`date_create('now')`, a `*_from_format` without its time zone), and a call whose
+arguments are all flat literals cannot pass such a value (`throws_of_literals`).
+A raise that php-src's development branch adds after 8.5 (`array_filter`'s
+`$mode`, `pathinfo`'s `$flags`, the stream error mode) is not visible to the
+audit and has no row.
 
 Converting an object argument to a string raises an `Error`, and that is not the
 table's business: every position that can hold an object is an `ArgReach`

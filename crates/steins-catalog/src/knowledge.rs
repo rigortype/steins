@@ -48,11 +48,15 @@
 //! php-src, and lists each raise it can reach. Its output,
 //! `docs/research/phpsrc-mining/throwless_audit.md`, classifies every name as
 //! `none`, `argument-checking` or `destructor-hazard`, or `needs-row` for a name
-//! that left the table, and a test below holds the table to it. The pin is
-//! php-src master (8.6.0-dev) and this table is the 8.5 line's, so a raise that
-//! exists only there is recorded as such in the note (`8.6:`), and not as a row:
-//! `array_filter`'s `$mode` and `pathinfo`'s `$flags` are a `ValueError` on 8.6
-//! and accepted on 8.5.11.
+//! that left the table, and a test below holds the table to it. The walk reads
+//! the `php-8.5.11` tag, the release the catalog is pinned to, so a raise that
+//! php-src's development branch adds after it is invisible to it (`array_filter`'s
+//! `$mode` and `pathinfo`'s `$flags` are a `ValueError` on 8.6.0-dev and accepted
+//! on 8.5.11). The static walk cannot resolve a call through an object handler
+//! pointer, so a name with one at a position the reach table calls `Inert` needs a
+//! recorded review, and the two fuzzes beside the note
+//! (`fuzz_throwless_values.php`, `fuzz_throwless_uninit.php`) are the run-time
+//! witness.
 //!
 //! **Argument checking is set aside**, as in ADR-0099 §3.3: a `TypeError` from a
 //! parameter type, an unknown named parameter, a spread or arity mismatch, and
@@ -72,9 +76,12 @@
 //! `Error` ("Nesting level too deep - recursive dependency?"): `in_array`,
 //! `array_search`, `array_keys`, `array_unique`, `sort`, `rsort`, `asort` and
 //! `arsort` compare their elements and carry a row, as do `array_replace_recursive`
-//! and `array_walk_recursive` ("Recursion detected"), and `date_create` and
+//! and `array_walk_recursive` ("Recursion detected"), `date_create` and
 //! `date_create_immutable`, which raise `Error` for a user subclass of
-//! `DateTimeZone` that never ran the parent's constructor (issue #881).
+//! `DateTimeZone` that never ran the parent's constructor, and `boolval` and
+//! `array_filter`, which raise it for a `SimpleXMLElement` subclass instance made
+//! without its constructor (issue #881). A call below the arity that carries
+//! the value raises less ([`throws_at_arity`]).
 //!
 //! **User code that only registration can attach** is attributed to the
 //! registration (ADR-0099 §4.5), not to the calls it later runs inside. A user
@@ -159,6 +166,27 @@ pub fn throws_of(name: &str) -> Option<&'static [&'static str]> {
     })
 }
 
+/// What a call with **`positional` positional arguments** to `name` raises when
+/// that is narrower than [`throws_of`]'s row, or `None` when the row holds.
+///
+/// A row is the union over a name's call shapes. `array_keys($a)` copies keys
+/// and compares nothing, so the `Error` of its search form is the calls with a
+/// search value's; `date_create('now')` and `date_create_immutable('now')` read
+/// no `DateTimeZone`, so the `Error` of an uninitialised one needs the second
+/// argument, and the same holds of the third argument of the two
+/// `*_from_format` spellings, whose `ValueError` for a NUL byte stays. A named
+/// or spread argument list has no count to read, and answers with the full row.
+#[must_use]
+pub fn throws_at_arity(name: &str, positional: usize) -> Option<&'static [&'static str]> {
+    match (lowercase(name).as_str(), positional) {
+        ("array_keys" | "date_create" | "date_create_immutable", 0 | 1) => Some(&[]),
+        ("date_create_from_format" | "date_create_immutable_from_format", 0..=2) => {
+            Some(&["ValueError"])
+        }
+        _ => None,
+    }
+}
+
 /// [`throws_of`] for a call whose every argument is a **flat literal** (a scalar,
 /// or an array literal of scalars): the one question where a value the row
 /// exists for cannot be passed.
@@ -183,9 +211,12 @@ pub fn throws_of_literals(name: &str) -> Option<&'static [&'static str]> {
 /// two distinct arrays that contain themselves compared (`in_array`,
 /// `array_search`, `array_keys`, `array_unique`, `sort`, `rsort`, `asort`,
 /// `arsort`), a recursive array walked (`array_replace_recursive`,
-/// `array_walk_recursive`) and an uninitialised `DateTimeZone` subclass
-/// (`date_create`, `date_create_immutable`). In byte order.
+/// `array_walk_recursive`), an uninitialised `DateTimeZone` subclass
+/// (`date_create`, `date_create_immutable`) and an uninitialised
+/// `SimpleXMLElement` subclass cast to `bool` (`boolval`, `array_filter`
+/// without a callback). In byte order.
 const REFERENCE_VALUE_ERROR: &[&str] = &[
+    "array_filter",
     "array_keys",
     "array_replace_recursive",
     "array_search",
@@ -193,6 +224,7 @@ const REFERENCE_VALUE_ERROR: &[&str] = &[
     "array_walk_recursive",
     "arsort",
     "asort",
+    "boolval",
     "date_create",
     "date_create_immutable",
     "in_array",
@@ -268,7 +300,6 @@ const THROWLESS_NAMES: &[&str] = &[
     "array_diff",
     "array_diff_key",
     "array_fill_keys",
-    "array_filter",
     "array_find",
     "array_find_key",
     "array_first",
@@ -299,7 +330,6 @@ const THROWLESS_NAMES: &[&str] = &[
     "basename",
     "bin2hex",
     "bindec",
-    "boolval",
     "call_user_func",
     "ceil",
     "checkdate",
@@ -530,12 +560,19 @@ mod tests {
         assert_eq!(throws_of("array_column"), Some(&["TypeError"][..]), "an array row value");
         // Audited throwless: an empty row, not a missing one.
         assert_eq!(throws_of("strlen"), Some(&[][..]));
-        assert_eq!(throws_of("ARRAY_FILTER"), Some(&[][..]));
+        assert_eq!(throws_of("STRTOLOWER"), Some(&[][..]));
         assert_eq!(throws_of("\\strtolower"), Some(&[][..]));
         // A row the audit added: recursive arrays compare to an `Error`.
-        assert_eq!(throws_of("ARRAY_KEYS"), Some(&["Error"][..]), "search form; see function_throws");
+        let keys = throws_of("ARRAY_KEYS");
+        assert_eq!(keys, Some(&["Error"][..]), "the search form's; see `throws_at_arity`");
         assert_eq!(throws_of("in_array"), Some(&["Error"][..]));
         assert_eq!(throws_of("date_create"), Some(&["Error"][..]), "an uninitialised tz subclass");
+        assert_eq!(throws_of("boolval"), Some(&["Error"][..]), "an uninitialised SimpleXMLElement");
+        assert_eq!(
+            throws_of("date_create_from_format"),
+            Some(&["ValueError", "Error"][..]),
+            "a NUL byte, and an uninitialised tz subclass"
+        );
         // Known, unaudited: unknown. `strlen` has a colour and `file_put_contents`
         // too, and neither row says what the other does not.
         assert_eq!(throws_of("file_put_contents"), Some(&["ValueError"][..]), "a path it refuses");
@@ -543,6 +580,21 @@ mod tests {
         assert_eq!(throws_of("class_exists"), None, "autoloads");
         assert_eq!(throws_of("serialize"), None);
         assert_eq!(throws_of("not_a_builtin"), None);
+    }
+
+    #[test]
+    fn a_call_below_the_arity_that_carries_the_value_raises_less() {
+        use super::throws_at_arity;
+        for name in ["array_keys", "date_create", "DATE_CREATE_IMMUTABLE"] {
+            assert_eq!(throws_at_arity(name, 1), Some(&[][..]), "{name}");
+            assert_eq!(throws_at_arity(name, 2), None, "{name}: the row holds");
+        }
+        for name in ["date_create_from_format", "date_create_immutable_from_format"] {
+            assert_eq!(throws_at_arity(name, 2), Some(&["ValueError"][..]), "{name}");
+            assert_eq!(throws_at_arity(name, 3), None, "{name}: the row holds");
+        }
+        assert_eq!(throws_at_arity("in_array", 1), None, "a comparison needs no third value");
+        assert_eq!(throws_at_arity("boolval", 1), None);
     }
 
     #[test]
@@ -678,6 +730,8 @@ mod tests {
             ("array_walk_recursive", "Error: Recursion detected"),
             ("date_create", "Error: an uninitialised DateTimeZone subclass"),
             ("date_create_immutable", "Error: an uninitialised DateTimeZone subclass"),
+            ("boolval", "Error: an uninitialised SimpleXMLElement subclass"),
+            ("array_filter", "Error: an uninitialised SimpleXMLElement subclass"),
         ];
         for (name, why) in refused {
             assert!(!THROWLESS_NAMES.contains(&name), "{name}: {why}");

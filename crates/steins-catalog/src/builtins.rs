@@ -97,6 +97,9 @@ pub fn builtin_throws(name: &str) -> Option<&'static [&'static str]> {
     const VALUE_ERROR: &[&str] = &["ValueError"];
     const TYPE_ERROR: &[&str] = &["TypeError"];
     const ERROR: &[&str] = &["Error"];
+    // `date_create_from_format`'s NUL byte, and the uninitialised `DateTimeZone`
+    // subclass `date_create` raises an `Error` for (see below).
+    const VALUE_ERROR_AND_ERROR: &[&str] = &["ValueError", "Error"];
     // `sprintf` has two input-determined arms on its FORMAT string alone: an
     // unknown conversion specifier is a `ValueError`, and a placeholder with no
     // argument behind it is an `ArgumentCountError` — the one arity error PHP
@@ -161,8 +164,13 @@ pub fn builtin_throws(name: &str) -> Option<&'static [&'static str]> {
         "unlink" | "mkdir" | "rmdir" | "touch" | "copy" | "rename" | "symlink" | "readlink"
         | "tempnam" | "file_put_contents" | "realpath" | "fopen" | "glob" | "chdir" | "chmod"
         | "putenv" | "flock" | "trigger_error" | "sleep" | "usleep" | "escapeshellarg"
-        | "escapeshellcmd" | "clearstatcache" | "date_create_from_format"
-        | "date_create_immutable_from_format" => Some(VALUE_ERROR),
+        | "escapeshellcmd" | "clearstatcache" => Some(VALUE_ERROR),
+        // The two `*_from_format` spellings take the same `DateTimeZone` as
+        // `date_create` and raise its `Error` for an uninitialised subclass
+        // (witnessed on 8.5.11), beside the NUL byte of `$datetime`.
+        "date_create_from_format" | "date_create_immutable_from_format" => {
+            Some(VALUE_ERROR_AND_ERROR)
+        }
         // The `Error` arms the throwless re-audit found (issue #881,
         // `docs/research/phpsrc-mining/throwless_audit.md`): each name is NOT
         // throwless, so it carries a row and has left that table. A comparison of
@@ -174,13 +182,20 @@ pub fn builtin_throws(name: &str) -> Option<&'static [&'static str]> {
         // `array_walk_recursive` raise `Error` "Recursion detected" for such an
         // array; and `date_create` and `date_create_immutable` raise `Error` for a
         // user subclass of `DateTimeZone` whose constructor never called the
-        // parent's. An `array` or a `DateTimeZone` parameter admits each of these
-        // values, so it is not argument checking. Every arm was reproduced on PHP
-        // 8.5.11, and a 3.2-million-call fuzz over a pool with those values
-        // found no other non-argument throw on the table.
+        // parent's; and `boolval` and `array_filter` (without a callback) raise
+        // `Error` "SimpleXMLElement is not properly initialized" for a
+        // `SimpleXMLElement` subclass instance made without its constructor
+        // (`ReflectionClass::newInstanceWithoutConstructor`), directly or as an
+        // element: the boolean cast reads the node. An `array`, a `mixed` or a
+        // `DateTimeZone` parameter admits each of these values, so it is not
+        // argument checking. Every arm was reproduced on PHP 8.5.11, and the two
+        // fuzzes under `docs/research/phpsrc-mining/` (`fuzz_throwless_*.php`:
+        // recursive arrays, and an uninitialised instance of every extensible
+        // internal class at every position the reach table calls `Inert`) found no
+        // other non-argument throw on the table.
         "in_array" | "array_search" | "array_keys" | "array_unique" | "sort" | "rsort" | "asort"
         | "arsort" | "array_replace_recursive" | "array_walk_recursive" | "date_create"
-        | "date_create_immutable" => Some(ERROR),
+        | "date_create_immutable" | "boolval" | "array_filter" => Some(ERROR),
         // `array_column`'s value-dependent `TypeError` (issue #864's review): a row
         // value that is an array or an object is no usable key, so the column or
         // index it names raises "Cannot access offset of type array on array"
