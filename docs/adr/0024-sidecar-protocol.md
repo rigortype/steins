@@ -42,7 +42,7 @@ Timeouts and the safe fallback to `widen` are part of the protocol spec:
 sidecar misbehavior must never surface as a wrong diagnostic — the zero-FP
 bulwark.
 
-## Amendment: the boot is not a request (issue #891)
+## Amendment (2026-10-02): the boot is not a request (issue #891) — PENDING ratification
 
 The per-request timeout is charged from the write, so on a fresh child it used
 to include PHP's own startup. On a loaded machine that cost the first answer,
