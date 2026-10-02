@@ -62,18 +62,29 @@ detail.
    session can hold Auto-fix; wait on others with one background
    `gh pr checks <n> --watch`).
 7. **Review by tier** (below). Send the reviewer's should-fixes back to the
-   implementer that built the slice; keep its context by resuming it.
+   implementer that built the slice; keep its context by resuming it. Fix a
+   wording or docs-only nit yourself, and record a residue the review names in
+   the ADR's left-open list with a follow-up issue, rather than spending a
+   round on either. A reviewer that returns without a verdict (a cut-off run)
+   is resumed, not replaced: its witnesses and builds are already in its
+   scratch directory.
 8. **Escalate on design, not on count.** Consult the architect when a review
    finds a design-level defect (soundness, structure, a wrong premise) or a
    measurement misses its estimate by more than 2×. Otherwise loop fix →
-   re-review until the verdict is approve. A kept shape the review finds
+   re-review until the verdict is approve; fixes confined to docs and wording
+   take your audit instead of a re-review. A kept shape the review finds
    missing from the witness table joins the table in the slice's issue. Anything
    outside the slice becomes an issue linked from the parent, never a widening
    of the PR.
 9. **Merge.** CI green on the PR's head and the review approved: append the
    review's outcome to the PR body, `gh pr ready`, `gh pr merge --rebase
    --delete-branch`, tick the parent checklist, and tell in-flight agents to
-   rebase. Done when master holds the slice and the issue is closed.
+   rebase. (A branch an agent's worktree still holds refuses
+   `--delete-branch`; delete the remote branch with `git push origin --delete`.)
+   Before merging, check every commit subject on the branch is still true:
+   a fix that reversed an earlier commit's claim leaves a false subject in
+   master's history, so reword that commit. Done when master holds the slice
+   and the issue is closed.
 
    Steins merges by rebase, so a conflict with master, whoever reports it
    (Auto-fix, CI, GitHub), is answered by a rebase: resume the implementer to
@@ -98,6 +109,10 @@ only under witnessed probes.
 
 ## Measurement
 
+- Every comparison runs under the posture of the gate that will judge it. For
+  the fp-gate rows that is `check --profile strict --no-php
+  --vendor-diagnostics --no-cache`; without `--vendor-diagnostics` vendored
+  copies drop out and CI goes red on counts no local run showed.
 - Public corpora: `check --profile strict --no-cache --format json`, the
   `effect-diff` baseline, and the `effects-envelope`, `throws-envelope` and
   `loop-to-array-map` dry-runs; base binary built from the PR's merge base;

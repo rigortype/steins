@@ -19,6 +19,8 @@ its routes), then the issue and design pointers in your brief.
   never by a merge commit.
 - Write ADR amendments only under the numbers the brief assigns.
 - Commit small and often. The orchestrator pushes; you keep the branch local.
+  Each commit subject stays true of the final branch: when a fix reverses a
+  claim an earlier subject makes, reword that commit before you report.
 - Do the work yourself in this session; sub-agents stay out of it.
 - Keep scratch output in the scratch directory the brief names (create it;
   it can be wiped between sessions) and leave other files there untouched.
