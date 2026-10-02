@@ -564,7 +564,7 @@ fn the_sprintf_format_scanner_matches_the_engine_on_every_probed_shape() {
     // cases below, all matching the engine. Issue #41 moved `%d`/`%b`/`%o`/`%05d`/
     // `%+d` from "claims nothing" to NUMERIC (the int cast never renders a
     // non-digit byte, even from a plain string); `%e`/`%f`/`%g` need a proven
-    // `int` first — see `sprintf_gates_the_float_trio_on_a_proven_int_value`.
+    // `int` first — see `sprintf_gates_the_float_formats_on_a_proven_int_value`.
     for claims in ["'abc'", "'100%%'", "'x%sy'", "'%s %s'", "'%2$s %1$s'", "'%s%%'"] {
         assert_eq!(
             dump("string", &format!("sprintf({claims}, $v, $v)")),
@@ -619,14 +619,16 @@ fn sprintf_admits_numeric_from_the_int_cast_trio_from_any_value_type() {
     }
 }
 
-/// Issue #41 — the float-format trio forces `NUMERIC` only when the value is
-/// provably `int`. A `string` value declines even though the scanner can't see
-/// through it: PHP's float formatter renders `NAN`/`INF` verbatim, and a numeric
-/// STRING can overflow its own `(float)` cast to `INF` — a native `int` can hold
-/// neither special value, closing both holes at once.
+/// Issue #41 — the locale-independent float formats (`e E F h H`) force
+/// `NUMERIC` only when the value is provably `int`. A `string` value declines
+/// even though the scanner can't see through it: PHP's float formatter renders
+/// `NAN`/`INF` verbatim, and a numeric STRING can overflow its own `(float)` cast
+/// to `INF` — a native `int` can hold neither special value, closing both holes
+/// at once. `f`, `g` and `G` are not in the set: see
+/// [`sprintf_never_forces_numeric_from_the_locale_dependent_conversions`].
 #[test]
-fn sprintf_gates_the_float_trio_on_a_proven_int_value() {
-    for f in ["'%e'", "'%f'", "'%g'", "'%14e'", "'%.2f'", "'%05.2f'"] {
+fn sprintf_gates_the_float_formats_on_a_proven_int_value() {
+    for f in ["'%e'", "'%E'", "'%F'", "'%h'", "'%H'", "'%14e'", "'%.2F'", "'%05.2F'", "'%+.3H'"] {
         assert_eq!(
             dump_int(&format!("sprintf({f}, $v)")),
             "dumped type: numeric-string",
@@ -638,6 +640,84 @@ fn sprintf_gates_the_float_trio_on_a_proven_int_value() {
             "{f} of an unproven string value declines"
         );
     }
+}
+
+/// ADR-0101 §3.4, issue #991 — `%f`, `%g` and `%G` render the locale's decimal
+/// point, so even a proven `int` value is no numeric string under every locale:
+/// `sprintf('%f', 1)` is `1,000000` under `de_DE.UTF-8` and `sprintf('%g',
+/// 1000000)` is `1,0e+6`. They never force `NUMERIC`, `sprintf` or `vsprintf`.
+#[test]
+fn sprintf_never_forces_numeric_from_the_locale_dependent_conversions() {
+    for f in ["'%f'", "'%g'", "'%G'", "'%.2f'", "'%05.2f'", "'%+.3g'", "'%14G'"] {
+        assert_eq!(
+            dump_int(&format!("sprintf({f}, $v)")),
+            "dumped type: string",
+            "{f} of a proven int value reads the locale"
+        );
+    }
+}
+
+/// The int-cast trio is unmoved by the locale restriction.
+#[test]
+fn the_int_cast_conversions_keep_numeric_under_the_locale_restriction() {
+    for f in ["'%b'", "'%d'", "'%o'", "'%05d'"] {
+        assert_eq!(dump_int(&format!("sprintf({f}, $v)")), "dumped type: numeric-string", "{f}");
+    }
+}
+
+/// The native `NUMERIC` claim against the engine under both locales: a whole-
+/// format conversion the analyzer calls `numeric-string` for a proven `int` must
+/// render a numeric string under `C` **and** under `de_DE.UTF-8` for every int
+/// the engine can hold, and the three conversions it declines are exactly the
+/// ones that stop being numeric there. Skips without `php` or the locale.
+#[test]
+fn the_numeric_claim_holds_under_de_de() {
+    let letters = ['e', 'E', 'f', 'F', 'g', 'G', 'h', 'H'];
+    let Some(numeric) = engine_numeric_under_both_locales(&letters) else { return };
+    for (letter, engine) in letters.iter().zip(numeric) {
+        let claimed = dump_int(&format!("sprintf('%{letter}', $v)")) == "dumped type: numeric-string";
+        assert!(!claimed || engine, "%{letter} was claimed numeric and is not under de_DE");
+        assert_eq!(claimed, engine, "%{letter}: the claim and the engine disagree");
+    }
+}
+
+/// For each conversion letter, whether `sprintf('%<letter>', $int)` is a numeric
+/// string for every int in a spread of magnitudes and flag shapes, under `C` and
+/// under `de_DE.UTF-8` alike. `None` (a skip) without `php` or the locale.
+fn engine_numeric_under_both_locales(letters: &[char]) -> Option<Vec<bool>> {
+    use std::process::Command;
+
+    if Command::new("php").arg("--version").output().is_err() {
+        eprintln!("SKIP: php not on PATH; oracle comparison not run");
+        return None;
+    }
+    let script = r#"
+        if (setlocale(LC_ALL, 'de_DE.UTF-8') === false) { echo "NOLOCALE\n"; exit; }
+        $ints = [0, 1, -1, 5, 42, 1000000, -1000000, PHP_INT_MAX, PHP_INT_MIN, 123456789012];
+        $shapes = ['', '+', '0', '-', ' ', '010', '-10', '+.3', '.2', '5.2', '020.5', '+020'];
+        foreach (str_split($argv[1]) as $letter) {
+            $all = true;
+            foreach (['C', 'de_DE.UTF-8'] as $locale) {
+                setlocale(LC_ALL, $locale);
+                foreach ($shapes as $shape) foreach ($ints as $i) {
+                    $all = $all && is_numeric(@sprintf("%$shape$letter", $i));
+                }
+            }
+            echo $all ? "1\n" : "0\n";
+        }
+    "#;
+    let arg: String = letters.iter().collect();
+    let out = Command::new("php")
+        .args(["-d", "display_errors=stderr", "-r", script, "--", &arg])
+        .output()
+        .expect("run php");
+    assert!(out.status.success(), "php failed: {}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8(out.stdout).expect("utf8");
+    if text.starts_with("NOLOCALE") {
+        eprintln!("SKIP: de_DE.UTF-8 is not installed; oracle comparison not run");
+        return None;
+    }
+    Some(text.lines().map(|l| l == "1").collect())
 }
 
 /// Issue #41 — `%x`/`%X` are int-cast conversions like `%d`/`%b`/`%o`, but their
@@ -697,7 +777,7 @@ fn vsprintf_admits_numeric_from_the_int_cast_trio_but_not_the_float_trio_or_the_
         );
     }
     // The float trio and the hex pair decline for `vsprintf`.
-    for f in ["'%e'", "'%f'", "'%g'", "'%x'", "'%X'"] {
+    for f in ["'%e'", "'%E'", "'%f'", "'%F'", "'%g'", "'%G'", "'%h'", "'%H'", "'%x'", "'%X'"] {
         assert_eq!(
             one_type_with(&src(f), &mut Mock::sidecar()),
             "dumped type: string",

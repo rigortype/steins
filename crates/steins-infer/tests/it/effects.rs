@@ -698,17 +698,19 @@ fn an_unproven_return_mode_keeps_the_output_row() {
 fn the_dumpers_without_a_return_mode_are_untouched() {
     // `var_dump`'s further arguments are more values to dump, never a flag;
     // `printf` returns a length and writes either way.
-    for (call, name) in [("var_dump($x, true)", "var_dump"), ("printf('%s', true)", "printf")] {
-        let src =
-            format!("<?php\n#[\\Steins\\Pure]\nfunction render($x): mixed {{ return {call}; }}\n");
-        assert_eq!(
-            one(&src).message,
-            format!(
-                "{name}() has effect io.output.buffer, but render() is declared #[\\Steins\\Pure]"
-            ),
-            "{name} has no return mode"
-        );
-    }
+    let message = |name: &str, label: &str| {
+        format!("{name}() has effect {label}, but render() is declared #[\\Steins\\Pure]")
+    };
+    let src = "<?php\n#[\\Steins\\Pure]\nfunction render($x): mixed { return var_dump($x, true); }\n";
+    assert_eq!(one(src).message, message("var_dump", "io.output.buffer"), "no return mode");
+    // `printf` also reads the locale (ADR-0101), which is a finding of its own.
+    let src = "<?php\n#[\\Steins\\Pure]\nfunction render($x): mixed { return printf('%s', true); }\n";
+    let found: Vec<String> = effects(src).into_iter().map(|d| d.message).collect();
+    assert_eq!(
+        found,
+        [message("printf", "io.output.buffer"), message("printf", "global.read.setting.locale")],
+        "printf has no return mode"
+    );
 }
 
 #[test]

@@ -94,6 +94,7 @@ mod interop_envelope_lane;
 mod interop_label_vocabulary;
 mod invalid_operand;
 mod isset_value;
+mod locale_cell;
 mod logical_value;
 mod loop_bodies;
 mod loop_exit_condition;

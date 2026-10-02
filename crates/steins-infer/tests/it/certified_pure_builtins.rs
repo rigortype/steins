@@ -81,16 +81,23 @@ fn a_framework_exception_constructor_is_exhaustive() {
     // operators on operands nothing is shown about (a `sprintf` result appended,
     // an element of an array, the keys of one): ADR-0099 §4.3 has no proof for
     // them yet, and they are the operator resolver's, not the catalog's.
+    //
+    // The one label is the `sprintf` call's locale read (ADR-0101, issue #991).
+    // It is the row's, kept at every printf-family call until the engine reads a
+    // literal format at the call site (§3.2): `' (code: %s)'` shows no `f`, `g`
+    // or `G` conversion, and that later slice drops the read here.
     let operator_only = |symbol: &str| {
         let s = summary(FRAMEWORK_EXCEPTION, symbol);
-        assert!(s.labels.is_empty(), "{symbol}: {s:?}");
+        assert_eq!(s.labels, ["global.read.setting.locale"], "{symbol}: {s:?}");
         assert!(s.gaps.iter().all(|kind| kind.starts_with("operator-")), "{symbol}: {s:?}");
     };
     operator_only("Failure::__construct");
     // `new` follows the inherited constructor, so the `#[Pure]` caller inherits its
-    // gaps, and the envelope has nothing to report.
+    // gaps and its read, and the envelope reports the read and nothing else.
     operator_only("skip");
-    assert!(exceeded(FRAMEWORK_EXCEPTION).is_empty(), "{:#?}", exceeded(FRAMEWORK_EXCEPTION));
+    let found: Vec<String> = exceeded(FRAMEWORK_EXCEPTION).into_iter().map(|d| d.message).collect();
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert!(found[0].contains("global.read.setting.locale"), "{found:#?}");
 }
 
 #[test]

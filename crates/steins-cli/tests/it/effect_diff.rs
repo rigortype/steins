@@ -68,7 +68,7 @@ const REPO: &str = concat!(
 #[test]
 fn capture_then_identical_run_reports_nothing() {
     let dir = workdir("identical");
-    let src = "<?php\nfunction report(): int { printf(\"x\"); return 1; }\n";
+    let src = "<?php\nfunction report(): int { echo \"x\"; return 1; }\n";
     let r = capture_then(&dir, src, src, &[]);
     assert_eq!(r.code, 0, "informational surface always exits 0");
     assert!(r.stdout.is_empty(), "no events, no footer, got:\n{}", r.stdout);
@@ -89,12 +89,28 @@ fn a_new_occurrence_reads_as_the_headline_line() {
     assert_eq!(r.stdout, "a.php Checkout::confirm: + io.db\n", "stderr:\n{}", r.stderr);
 }
 
+/// ADR-0101: a body that gains a `sprintf` gains the locale read, and the diff
+/// says so as a proven addition like any other label. The baseline of a build
+/// before the row answered `{}` for such a body.
+#[test]
+fn a_new_printf_family_call_reads_as_a_locale_read() {
+    let dir = workdir("locale");
+    let r = capture_then(
+        &dir,
+        "<?php\nfunction fmt(float $x): string { return 'x'; }\n",
+        "<?php\nfunction fmt(float $x): string { return sprintf('%f', $x); }\n",
+        &[],
+    );
+    assert_eq!(r.code, 0);
+    assert_eq!(r.stdout, "a.php fmt: + global.read.setting.locale\n", "stderr:\n{}", r.stderr);
+}
+
 #[test]
 fn a_removal_is_confident_when_the_current_summary_is_exhaustive() {
     let dir = workdir("removed");
     let r = capture_then(
         &dir,
-        "<?php\nfunction report(): int { printf(\"x\"); return 1; }\n",
+        "<?php\nfunction report(): int { echo \"x\"; return 1; }\n",
         "<?php\nfunction report(): int { return 1; }\n",
         &[],
     );
@@ -107,7 +123,7 @@ fn a_non_exhaustive_current_summary_hedges_the_removal() {
     let dir = workdir("hedged");
     let r = capture_then(
         &dir,
-        "<?php\nfunction report(): int { printf(\"x\"); return 1; }\n",
+        "<?php\nfunction report(): int { echo \"x\"; return 1; }\n",
         "<?php\nfunction report(): int { unknown_helper(); return 1; }\n",
         &[],
     );
@@ -191,8 +207,8 @@ fn a_renamed_function_produces_no_removal_noise() {
     let dir = workdir("renamed");
     let r = capture_then(
         &dir,
-        "<?php\nfunction report(): int { printf(\"x\"); return 1; }\n",
-        "<?php\nfunction summarize(): int { printf(\"x\"); return 1; }\n",
+        "<?php\nfunction report(): int { echo \"x\"; return 1; }\n",
+        "<?php\nfunction summarize(): int { echo \"x\"; return 1; }\n",
         &[],
     );
     assert_eq!(r.code, 0);
@@ -205,7 +221,7 @@ fn json_shape_is_pinned() {
     let r = capture_then(
         &dir,
         "<?php\nfunction report(): int { return 1; }\nfunction kept(): int { return 2; }\n",
-        "<?php\nfunction report(): int { printf(\"x\"); return 1; }\nfunction added(): int { return 3; }\n",
+        "<?php\nfunction report(): int { echo \"x\"; return 1; }\nfunction added(): int { return 3; }\n",
         &["--format", "json"],
     );
     assert_eq!(r.code, 0);
@@ -286,7 +302,7 @@ fn an_explicit_baseline_path_is_honored_and_a_missing_one_is_a_usage_error() {
     assert!(dir.join("effects.json").exists(), "the named file, not the default");
     assert!(!dir.join("steins-effects-baseline.json").exists());
 
-    write(&dir, "a.php", "<?php\nfunction report(): int { printf(\"x\"); return 1; }\n");
+    write(&dir, "a.php", "<?php\nfunction report(): int { echo \"x\"; return 1; }\n");
     let r = run_in(&dir, &["effect-diff", "--baseline", "effects.json", "a.php"]);
     assert_eq!(r.stdout, "a.php report: + io.output.buffer\n");
 }

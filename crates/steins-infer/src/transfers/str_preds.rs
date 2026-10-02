@@ -53,7 +53,7 @@ use crate::transfers::transfer_arg_fact;
 /// | `addslashes addcslashes escapeshellarg urlencode rawurlencode preg_quote` | length | — | casing |
 /// | `htmlspecialchars` / `htmlentities` | length, **only** under `ENT_SUBSTITUTE` | — | casing; everything under a non-constant flags argument |
 /// | `urldecode` / `rawurldecode` | `NON_EMPTY` only | — | `NON_FALSY` (`urldecode('%30') === '0'`) |
-/// | `sprintf` `vsprintf` | — | `NON_EMPTY` at a constant format with a literal byte; `NUMERIC` at a whole-format `%[flags][width][.precision]{b,d,o,e,f,g}` conversion (`e`/`f`/`g` gated on a proven `int` value — `sprintf` only, issue #41) | everything else |
+/// | `sprintf` `vsprintf` | — | `NON_EMPTY` at a constant format with a literal byte; `NUMERIC` at a whole-format `%[flags][width][.precision]{b,d,o,e,E,F,h,H}` conversion (`e`/`E`/`F`/`h`/`H` gated on a proven `int` value — `sprintf` only, issue #41; `f`/`g`/`G` read the locale and never force it, ADR-0101) | everything else |
 /// | `strlen` | — | `int<1, max>` at a non-empty subject | — |
 ///
 /// Only those five bits move (`NON_EMPTY`, `NON_FALSY`, `NUMERIC`, `LOWERCASE`,
@@ -79,11 +79,15 @@ use crate::transfers::transfer_arg_fact;
 /// * **`sprintf`'s `%x`/`%X`** — excluded from NUMERIC: `sprintf('%14x', 255)
 ///   === 'ff'` is not a numeric string, though upstream's `bug-7387.php` fixture
 ///   claims it is (ADR-0061 §2 again).
-/// * **`sprintf`'s `%e`/`%f`/`%g` away from a proven `int` value** — the float
+/// * **`sprintf`'s `%e %E %F %h %H` away from a proven `int` value** — the float
 ///   formatter renders `NAN`/`INF` verbatim and a numeric-string argument can
 ///   overflow to `INF`; `b`/`d`/`o` need no gate since PHP's int cast clamps.
-/// * **`sprintf`'s `%c %s %u %h %H %E %F %G`** — unmeasured for this slice.
-/// * **`vsprintf`'s `%e`/`%f`/`%g`** — the value sits inside the values array
+/// * **`sprintf`'s `%f %g %G` at any value** — they render the locale's decimal
+///   point: `sprintf('%f', 1)` is `'1,000000'` under `de_DE.UTF-8`, which is not
+///   numeric, and `sprintf('%g', 1000000)` is `'1,0e+6'` (ADR-0101 §3.4, issue
+///   #991).
+/// * **`sprintf`'s `%c %s %u`** — unmeasured for this slice.
+/// * **`vsprintf`'s `%e %E %F %h %H`** — the value sits inside the values array
 ///   rather than a fixed position; opening it is more machinery than needed.
 /// * **`str_replace`/`substr_replace`/`parse_str`** — need a second subject's
 ///   predicates or an out-parameter, not this table's single-subject shape.
@@ -382,10 +386,13 @@ fn str_pred_out(
         // the WHOLE format is one admitted conversion. `b`/`d`/`o` are forced
         // unconditionally (PHP's int cast cannot render anything but digits) for
         // EITHER name — issue #41's `vsprintf('%d', $array)` row (`bug-7387.php`)
-        // needs no look inside `$array` at all. `e`/`f`/`g` are forced only when
+        // needs no look inside `$array` at all. `e`/`E`/`F`/`h`/`H` are forced only when
         // the paired value argument is provably an `int` — a float value could BE
         // `NAN`/`INF` — and only `sprintf` exposes that argument positionally;
-        // `vsprintf`'s stays declined there.
+        // `vsprintf`'s stays declined there. The float set is `e`/`E`/`F`/`h`/`H`:
+        // `f`, `g` and `G` render the locale's decimal point (`sprintf('%f', 1)` is
+        // `'1,000000'` under `de_DE`, which is no numeric string), so they never
+        // force it (ADR-0101 §3.4, issue #991).
         "sprintf" | "vsprintf" => {
             let Some(Fact::Singleton(Val::Str(fmt))) = transfer_arg_fact(cx, folder, &args[0], env, store)
             else {
@@ -399,7 +406,7 @@ fn str_pred_out(
             if let Some(ty) = sprintf_whole_numeric_conversion(fmt.as_bytes()) {
                 let numeric_safe = match ty {
                     b'b' | b'd' | b'o' => true,
-                    b'e' | b'f' | b'g' if lower == "sprintf" => args
+                    b'e' | b'E' | b'F' | b'h' | b'H' if lower == "sprintf" => args
                         .get(1)
                         .and_then(|v| transfer_arg_fact(cx, folder, v, env, store))
                         .is_some_and(|f| fact_is_int(&f)),
@@ -564,7 +571,7 @@ fn fact_int_bits_all_set(f: &Fact, bits: i64) -> bool {
 /// lands in the same refusal — there is no return value to describe.
 fn sprintf_emits_a_literal(fmt: &[u8]) -> Option<bool> {
     /// php-src's `php_formatted_print` conversion characters.
-    const SPECIFIERS: &[u8] = b"bcdeEfFgGosuxX";
+    const SPECIFIERS: &[u8] = b"bcdeEfFgGhHosuxX";
 
     let mut i = 0;
     let mut literal = false;
@@ -605,7 +612,7 @@ fn sprintf_emits_a_literal(fmt: &[u8]) -> Option<bool> {
 /// Issue #41's sprintf `NUMERIC` slice: is this `sprintf`/`vsprintf` format EXACTLY
 /// one conversion — no literal byte anywhere, not even a `%%` escape, no second
 /// specifier, no explicit `%N$` position — built from admitted flags/width/
-/// precision and one of the six type characters this rule has probed sound?
+/// precision and one of the eight type characters this rule has probed sound?
 /// Returns that type character on a match.
 ///
 /// # Why a stricter grammar than [`sprintf_emits_a_literal`]
@@ -652,7 +659,7 @@ fn sprintf_emits_a_literal(fmt: &[u8]) -> Option<bool> {
 /// php -r 'var_dump(sprintf("%o", "1e400"));'    // "0"   (string->int; NUMERIC)
 /// ```
 ///
-/// `e`/`f`/`g` go through PHP's float FORMATTER instead, which renders a
+/// `e`/`E`/`F`/`h`/`H` go through PHP's float FORMATTER instead, which renders a
 /// non-finite float verbatim — and that rendering is not a numeric string:
 ///
 /// ```text
@@ -663,16 +670,22 @@ fn sprintf_emits_a_literal(fmt: &[u8]) -> Option<bool> {
 /// ```
 ///
 /// A native PHP `int` cannot hold `NAN`/`INF` at all (and `null`'s `(float)` cast
-/// is the finite `0.0`), so the call site admits `e`/`f`/`g` only when the value
+/// is the finite `0.0`), so the call site admits them only when the value
 /// argument's own fact is provably `int` (via [`fact_is_int`], `null`-immaterial)
 /// — the same boundary PHPStan's own `bug-7387.php` fixture draws by typing that
-/// argument `int $i` rather than `float`.
+/// argument `int $i` rather than `float`. `E`, `F`, `h` and `H` were measured
+/// for ADR-0101: over ten ints (`0`, `±1`, `42`, `±1000000`, both machine
+/// extremes, a twelve-digit one) and fifteen flag/width/precision shapes each,
+/// every rendering is a numeric string under `C` and under `de_DE.UTF-8`.
 ///
 /// # What stays out of this slice
 ///
-/// `%x`/`%X` are the excluded hex pair (`sprintf('%14x', 255) === 'ff'`, not a
-/// numeric string — upstream PHPStan's `bug-7387.php` claims `numeric-string` for
-/// both and is wrong at this pin). `%c`/`%s`/`%u`/`%h`/`%H`/`%E`/`%F`/`%G` are
+/// `%f`, `%g` and `%G` render the locale's decimal point, so no value makes them
+/// numeric under every locale: `sprintf('%f', 1)` is `1,000000` and
+/// `sprintf('%g', 1000000)` is `1,0e+6` under `de_DE.UTF-8` (ADR-0101 §3.4, issue
+/// #991). `%x`/`%X` are the excluded hex pair (`sprintf('%14x', 255) === 'ff'`,
+/// not a numeric string — upstream PHPStan's `bug-7387.php` claims
+/// `numeric-string` for both and is wrong at this pin). `%c`/`%s`/`%u` are
 /// unmeasured for this slice, left to a future slice rather than an unwitnessed
 /// guess.
 fn sprintf_whole_numeric_conversion(fmt: &[u8]) -> Option<u8> {
@@ -705,5 +718,5 @@ fn sprintf_whole_numeric_conversion(fmt: &[u8]) -> Option<u8> {
     if i + 1 != n {
         return None;
     }
-    matches!(fmt[i], b'b' | b'd' | b'o' | b'e' | b'f' | b'g').then_some(fmt[i])
+    matches!(fmt[i], b'b' | b'd' | b'o' | b'e' | b'E' | b'F' | b'h' | b'H').then_some(fmt[i])
 }
