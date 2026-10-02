@@ -38,7 +38,6 @@ fn a_new_of_a_namespaced_engine_exception_is_exhaustive_in_both_lanes() {
         "\\Random\\RandomException",
         "\\Random\\RandomError",
         "\\Random\\BrokenRandomEngineError",
-        "\\Uri\\WhatWg\\InvalidUrlException",
         "\\Uri\\InvalidUriException",
         "\\FFI\\ParserException",
         "\\Filter\\FilterFailedException",
@@ -56,9 +55,45 @@ fn a_throw_new_of_a_namespaced_engine_exception_is_exhaustive_and_names_the_clas
     let s = summary(src, "fail");
     assert_eq!(s.throws, vec!["RandomException".to_owned()], "{s:?}");
     assert!(s.throws_exhaustive && s.exhaustive, "{s:?}");
+}
 
-    let src = "<?php\nfunction fail(): never { throw new \\Uri\\WhatWg\\InvalidUrlException('no', []); }\n";
-    assert_eq!(exhaustive(src, "fail"), (true, true));
+/// The two engine Throwables whose constructor is not `Exception`'s check an argument's
+/// value and raise (witnessed on PHP 8.5.11): `new InvalidUrlException('x', [1])` and
+/// `new SoapFault(['a'], 'x')` are a `ValueError`, so the row says so and the body is
+/// exhaustive with that throw, not throwless.
+#[test]
+fn a_constructor_that_checks_a_value_throws_what_it_raises() {
+    for (ctor, thrown) in [
+        ("new \\Uri\\WhatWg\\InvalidUrlException('x', [1])", "InvalidUrlException"),
+        ("new \\Uri\\WhatWg\\InvalidUrlException('x', [])", "InvalidUrlException"),
+        ("new \\SoapFault(['a'], 'x')", "SoapFault"),
+        ("new \\SoapFault('Server', 'x')", "SoapFault"),
+    ] {
+        let made = format!("<?php\nfunction make(): object {{ return {ctor}; }}\n");
+        let s = summary(&made, "make");
+        assert_eq!(s.throws, vec!["ValueError".to_owned()], "{ctor}: {s:?}");
+        assert!(s.exhaustive && s.throws_exhaustive, "{ctor}: {s:?}");
+
+        let thrown_src = format!("<?php\nfunction fail(): never {{ throw {ctor}; }}\n");
+        let s = summary(&thrown_src, "fail");
+        assert_eq!(s.throws, vec![thrown.to_owned(), "ValueError".to_owned()], "{ctor}: {s:?}");
+        assert!(s.exhaustive && s.throws_exhaustive, "{ctor}: {s:?}");
+    }
+    // A project subclass forwarding to it carries the same throw.
+    let src = "<?php\nnamespace App;\nclass Oops extends \\Uri\\WhatWg\\InvalidUrlException {\n    \
+               public function __construct(array $e) { parent::__construct('x', $e); }\n}\n";
+    let s = summary(src, "Oops::__construct");
+    assert_eq!(s.throws, vec!["ValueError".to_owned()], "{s:?}");
+}
+
+/// `ErrorException`'s constructor is its own too, and raises nothing for any severity, file
+/// or line (audited with a probe on PHP 8.5.11), so it stays throwless.
+#[test]
+fn an_error_exception_constructor_raises_nothing() {
+    let src = "<?php\nfunction make(): object {\n\
+               return new \\ErrorException('x', 1, E_WARNING, 'f', 2);\n}\n";
+    let s = summary(src, "make");
+    assert!(s.throws.is_empty() && s.exhaustive && s.throws_exhaustive, "{s:?}");
 }
 
 /// A namespaced engine exception answers its accessors exactly as a global one
@@ -127,7 +162,8 @@ fn the_global_spelling_of_a_namespaced_engine_class_is_no_engine_class() {
 fn a_class_the_users_namespace_made_up_still_refuses() {
     let pdo = "<?php\nnamespace App;\nfunction f(): void { (new PDO('x'))->query('SELECT 1'); }\n";
     assert_eq!(exhaustive(pdo, "f"), (false, false), "App\\PDO is not PDO");
-    let twin = "<?php\nfunction make(): object { return new \\App\\Random\\RandomException('x'); }\n";
+    let twin = "<?php\nfunction make(): object {\n\
+                return new \\App\\Random\\RandomException('x');\n}\n";
     assert_eq!(exhaustive(twin, "make"), (false, false));
 }
 
@@ -150,4 +186,31 @@ fn a_namespaced_engine_class_without_a_row_is_a_gap_of_its_own() {
     assert!(!s.exhaustive && !s.throws_exhaustive, "{s:?}");
     assert_eq!(s.gaps, vec!["no-effect-row"], "{s:?}");
     assert_eq!(s.throws_gaps, vec!["no-throw-row"], "{s:?}");
+}
+
+/// The hierarchy is mined from php-src's development stubs, which name classes the pinned PHP
+/// (8.5.11) does not have: `new \Io\Poll\PollException('x')` is "Class not found" there. A row
+/// the pinned PHP does not declare is no engine class, so such a `new` or `throw new` stays a
+/// gap in both lanes, as it was before the namespaced rows were reachable.
+#[test]
+fn a_class_the_pinned_php_does_not_declare_is_no_engine_class() {
+    for class in [
+        "\\Io\\Poll\\PollException",
+        "\\Io\\IoException",
+        "\\Io\\Poll\\FailedHandleAddException",
+        "\\Openssl\\OpensslException",
+        // Global names the stubs declare and the pinned PHP lacks: refused too.
+        "\\StreamException",
+        "\\com_exception",
+    ] {
+        let made = format!("<?php\nfunction make(): object {{ return new {class}('x'); }}\n");
+        assert_eq!(exhaustive(&made, "make"), (false, false), "new {class}");
+        let thrown = format!("<?php\nfunction fail(): never {{ throw new {class}('x'); }}\n");
+        assert_eq!(exhaustive(&thrown, "fail"), (false, false), "throw new {class}");
+        let sub = format!(
+            "<?php\nclass Oops extends {class} {{}}\n\
+             function fail(): never {{ throw new Oops('x'); }}\n"
+        );
+        assert_eq!(exhaustive(&sub, "fail"), (false, false), "a subclass of {class}");
+    }
 }

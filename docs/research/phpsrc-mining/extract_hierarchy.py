@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Extract class/interface/enum declarations with extends/implements from php-src stubs."""
-import os, re, sys, glob
+import json, os, re, subprocess, sys, glob
 
 ROOT = os.environ.get("PHP_SRC_ROOT", os.path.expanduser("~/local/src/php-src"))
 stubs = sorted(glob.glob(os.path.join(ROOT, "**", "*.stub.php"), recursive=True))
@@ -118,10 +118,42 @@ for d in seen.values():
             tail = ref.rsplit('\\', 1)[-1]
             if ref.lower() not in seen and ref != tail and tail.lower() in seen \
                     and '\\' not in seen[tail.lower()]['name']:
-                print(f"# {d['name']}: `{ref}` is no declaration; recorded as `{tail}`", file=sys.stderr)
+                print(f"# {d['name']}: `{ref}` is no declaration; recorded as `{tail}`",
+                      file=sys.stderr)
                 ref = tail
             fixed.append(ref)
         d[field] = fixed
+
+# Which rows the pinned PHP declares. The stubs are php-src's, and the pinned PHP may be an
+# older minor (the stubs of a development branch name classes it has not got) or built
+# without an extension, so a row is a claim about the stubs, not about the engine. The
+# cross-check is `class_exists`-family with autoload off, run by the PHP in `PHP_BIN`
+# (default `php`); a row it does not find is marked `absent_on_pinned = true`, and the
+# catalog refuses to treat it as an engine class (#871). No PHP, no table.
+PHP_BIN = os.environ.get("PHP_BIN", "php")
+PROBE = (
+    '$n = json_decode(stream_get_contents(STDIN)); $o = [];'
+    'foreach ($n as $x) { $o[] = class_exists($x, false) || interface_exists($x, false)'
+    ' || enum_exists($x, false) || trait_exists($x, false); }'
+    'echo json_encode(["version" => PHP_VERSION, "present" => $o]);'
+)
+
+def cross_check(names):
+    try:
+        out = subprocess.run([PHP_BIN, "-r", PROBE], input=json.dumps(names), text=True,
+                             capture_output=True, check=True).stdout
+    except (OSError, subprocess.CalledProcessError) as e:
+        sys.exit(f"extract_hierarchy.py: the PHP cross-check needs a working `{PHP_BIN}` "
+                 f"(set PHP_BIN): {e}")
+    got = json.loads(out)
+    return got["version"], dict(zip(names, got["present"]))
+
+TEST_PREFIXES = ("ext/zend_test/", "ext/skeleton/", "ext/dl_test/", "sapi/")
+php_version, present = cross_check(
+    [d['name'] for d in seen.values() if not d['file'].startswith(TEST_PREFIXES)])
+absent = sorted(n for n, ok in present.items() if not ok)
+print(f"# PHP {php_version}: {len(absent)} of {len(present)} rows are not declared: {absent}",
+      file=sys.stderr)
 
 print(f"# total declarations parsed: {len(all_decls)}, unique names: {len(seen)}", file=sys.stderr)
 if dups:
@@ -131,15 +163,17 @@ if dups:
 def toml_list(xs):
     return "[" + ", ".join("'%s'" % x for x in xs) + "]"
 
-TEST_PREFIXES = ("ext/zend_test/", "ext/skeleton/", "ext/dl_test/", "sapi/")
 rows = sorted(seen.values(), key=lambda d: (d['file'], d['line']))
 print('# hierarchy.toml — builtin class/interface/enum hierarchy mined from php-src stubs')
 print('# php-src commit: 6bc7c26cf67a9480b5ef9d6191aebe87fa931183 (Thu Jul 9 2026)')
-print('# Cross-checked against PHP 8.5.8 (cli) at /opt/homebrew/bin/php where noted.')
+print(f'# Cross-checked against PHP {php_version} (cli): a row it does not declare carries')
+print('# `absent_on_pinned = true`, and the catalog does not treat it as an engine class.')
 print('# Names preserve declared casing; Steins lowercases at its seam.')
 print('# Namespaced names are fully-qualified (no leading backslash).')
 print('# Test-only extensions (ext/zend_test, ext/skeleton, ext/dl_test, sapi/*) are EXCLUDED.')
 print(f'# Total production declarations: {sum(1 for d in rows if not d["file"].startswith(TEST_PREFIXES))}')
+print()
+print(f"php_cross_check = '{php_version}'")
 print()
 for d in rows:
     if d['file'].startswith(TEST_PREFIXES):
@@ -159,5 +193,7 @@ for d in rows:
         for fl in flags:
             k, v = fl.split(' = ')
             print(f'{k} = {v}')
+    if not present[d['name']]:
+        print('absent_on_pinned = true')
     print(f"source = '{d['file']}:{d['line']}'")
     print()

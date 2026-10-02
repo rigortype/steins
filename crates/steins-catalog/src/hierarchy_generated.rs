@@ -2,7 +2,8 @@
 // docs/research/phpsrc-mining/hierarchy.toml — DO NOT EDIT BY HAND.
 //
 // php-src pin: 6bc7c26cf67a9480b5ef9d6191aebe87fa931183 (Thu Jul 9 2026),
-// cross-checked against PHP 8.5.8. Source of record is the TOML; run
+// cross-checked against PHP 8.5.8 and, for which rows exist, `CROSS_CHECKED_PHP`.
+// Source of record is the TOML; run
 // `cargo xtask gen-catalog` to regenerate after editing it.
 //
 // Each row: (lowercased class/interface name, DIRECT supertypes with declared
@@ -12,6 +13,10 @@
 // backing data — see gen_catalog.rs).
 //
 // Sorted by key for binary search.
+
+/// The PHP the rows were cross-checked against: `ABSENT_ON_PINNED` is what it did not
+/// declare.
+pub(crate) static CROSS_CHECKED_PHP: &str = "8.5.11";
 
 pub(crate) static HIERARCHY: &[(&str, &[&str])] = &[
     ("__php_incomplete_class", &[]),
@@ -366,4 +371,52 @@ pub(crate) static HIERARCHY: &[(&str, &[&str])] = &[
     ("xmlwriter", &[]),
     ("xsltprocessor", &[]),
     ("ziparchive", &["Countable"]),
+];
+
+/// Lowercased keys of the rows (enums included) the cross-check PHP does not declare,
+/// sorted. The stubs are a later php-src or the extension is not built in: such a
+/// row is the stubs' claim, not the engine's, and is no engine class (#871).
+pub(crate) static ABSENT_ON_PINNED: &[&str] = &[
+    "com",
+    "com_exception",
+    "com_safearray_proxy",
+    "compersisthelper",
+    "dotnet",
+    "enchantbroker",
+    "enchantdictionary",
+    "intlnumberrangeformatter",
+    "io\\ioexception",
+    "io\\poll\\backend",
+    "io\\poll\\backendunavailableexception",
+    "io\\poll\\context",
+    "io\\poll\\event",
+    "io\\poll\\failedcontextinitializationexception",
+    "io\\poll\\failedhandleaddexception",
+    "io\\poll\\failedpolloperationexception",
+    "io\\poll\\failedpollwaitexception",
+    "io\\poll\\failedwatchermodificationexception",
+    "io\\poll\\handle",
+    "io\\poll\\handlealreadywatchedexception",
+    "io\\poll\\inactivewatcherexception",
+    "io\\poll\\invalidhandleexception",
+    "io\\poll\\pollexception",
+    "io\\poll\\watcher",
+    "openssl\\opensslexception",
+    "openssl\\psk",
+    "openssl\\session",
+    "pdo\\firebird",
+    "pdo_pgsql_ext",
+    "pdo_sqlite_ext",
+    "sortdirection",
+    "streamerror",
+    "streamerrorcode",
+    "streamerrormode",
+    "streamerrorstore",
+    "streamexception",
+    "streampollhandle",
+    "uri\\rfc3986\\uribuilder",
+    "uri\\rfc3986\\urihosttype",
+    "uri\\rfc3986\\uritype",
+    "uri\\whatwg\\urlhosttype",
+    "variant",
 ];
