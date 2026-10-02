@@ -107,6 +107,14 @@ impl<'a> Chain<'a> {
         self.all().any(|cd| hooks(cd, member))
     }
 
+    /// Whether a class on the `extends` line hooks a property, or any property when
+    /// `member` is `None`: a hook with a body is user code. An interface's hook is a
+    /// declaration of the requirement (`{ get; }`) with no body to run, and the
+    /// implementing class carries its own, so the interfaces are not asked.
+    pub(super) fn lineage_hooks(&self) -> bool {
+        self.lineage.iter().any(|cd| !cd.is_interface && hooks(cd, None))
+    }
+
     /// Whether `fqn` is on the chain (the class itself included).
     pub(super) fn has(&self, fqn: &str) -> bool {
         self.all().any(|cd| cd.fqn.eq_ignore_ascii_case(fqn))
@@ -223,9 +231,10 @@ pub(super) fn lookup<'a>(
 /// (`Exception::__construct` sets `$message`, `$code`, `$previous`) and reads them
 /// in their accessors (`getMessage()`), so a hook a project subclass declares on
 /// one runs there (ADR-0099 §4.2, issue #875). Which property the engine touches
-/// is not read here: any hook on the chain counts.
+/// is not read here: any hook on the chain's classes counts (an interface's hook
+/// declaration has no body, [`Chain::lineage_hooks`]).
 pub(super) fn hooks_property(cx: &Cx, class: &str, exact: bool) -> bool {
-    Chain::of(cx, class).hooks(None) || (!exact && subclass_hooks_property(cx, class))
+    Chain::of(cx, class).lineage_hooks() || (!exact && subclass_hooks_property(cx, class))
 }
 
 /// [`subclass_adds_property_magic`] for a hook on any property, with the stand-in
@@ -247,7 +256,9 @@ fn subclass_hooks_property(cx: &Cx, class: &str) -> bool {
     };
     cx.index.magic_property_classes().iter().any(|sub| match cx.find_class(sub) {
         None => may_be(sub),
-        Some((_, cd)) => (hooks(cd, None) && may_be(sub)) || (cd.uses_traits && is(sub)),
+        Some((_, cd)) => {
+            (!cd.is_interface && hooks(cd, None) && may_be(sub)) || (cd.uses_traits && is(sub))
+        }
     }) || cx.index.anonymous_subclass_parents().iter().any(|parent| is(parent))
 }
 
