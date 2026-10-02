@@ -321,20 +321,34 @@ mod shard_oracle {
                 insert_unique(&mut idx.classes, &mut idx.ambiguous_classes, &c.fqn, site);
             }
         }
-        let mut resolved: Vec<(String, DeclSite)> = Vec::new();
+        // The fold is a fixpoint over rounds (class identity, #926): a round resolves
+        // every pending edge against the snapshot it began with and mints them together.
+        let mut pending: Vec<(String, String)> = Vec::new();
         for &file in project.files(db) {
             let tree = parse(db, file);
             for edge in tree.class_alias_edges() {
-                if idx.ambiguous_classes.contains(&edge.target_fqn) {
-                    continue;
-                }
-                if let Some(&target) = idx.classes.get(&edge.target_fqn) {
-                    resolved.push((edge.alias_fqn.clone(), target));
-                }
+                pending.push((edge.alias_fqn.clone(), edge.target_fqn.clone()));
             }
         }
-        for (alias_fqn, target) in resolved {
-            insert_unique(&mut idx.classes, &mut idx.ambiguous_classes, &alias_fqn, target);
+        loop {
+            let mut resolved: Vec<(String, DeclSite)> = Vec::new();
+            let mut waiting: Vec<(String, String)> = Vec::new();
+            for (alias_fqn, target_fqn) in pending {
+                if idx.ambiguous_classes.contains(&target_fqn) {
+                    continue;
+                }
+                match idx.classes.get(&target_fqn) {
+                    Some(&target) => resolved.push((alias_fqn, target)),
+                    None => waiting.push((alias_fqn, target_fqn)),
+                }
+            }
+            if resolved.is_empty() {
+                break;
+            }
+            for (alias_fqn, target) in resolved {
+                insert_unique(&mut idx.classes, &mut idx.ambiguous_classes, &alias_fqn, target);
+            }
+            pending = waiting;
         }
         idx
     }
@@ -360,7 +374,7 @@ mod shard_oracle {
             ),
             (
                 "vendor/lib/b/src/more.php",
-                "<?php\nclass Local {}\nclass Local {}\nclass_alias('app\\\\kernel', 'shim');\nclass_alias('lib\\\\a\\\\dup', 'never');\n",
+                "<?php\nclass Local {}\nclass Local {}\nclass_alias('app\\\\kernel', 'shim');\nclass_alias('lib\\\\a\\\\dup', 'never');\nclass_alias('deep', 'deeper');\nclass_alias('shim', 'deep');\nclass_alias('b1', 'b2');\nclass_alias('b2', 'b1');\n",
             ),
             ("vendor/autoload.php", "<?php\nfunction stray_helper() {}\n"),
         ]

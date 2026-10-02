@@ -4,7 +4,8 @@
 //! literals, or the `X::class` constant (issue #36) — makes `Alias` resolve — for
 //! existence — to `Target`'s declaration site. The edge shares textual declarations'
 //! duplicate-decl ambiguity discipline: a collision with a textual declaration, or
-//! two alias edges for one name, is `Ambiguous`. An unresolved target mints no edge.
+//! two alias edges for one name, is `Ambiguous`. An unresolved target mints no edge, and an
+//! alias of an alias resolves (a fixpoint over rounds, issue #926).
 //! These tests pin the index machinery directly.
 
 use steins_db::{Project, Resolve, SourceFile, SteinsDatabase, project_index};
@@ -154,4 +155,51 @@ fn alias_edge_folds_across_files() {
     ];
     assert_eq!(kind(resolve(files, "Modern")), Kind::Unique);
     assert!(same_unique(resolve(files, "Modern"), resolve(files, "Legacy")));
+}
+
+// Issue #926: the fold is a fixpoint, so an alias of an alias names the class too.
+
+#[test]
+fn a_chain_of_aliases_resolves_to_the_class_in_either_order() {
+    for calls in [
+        "class_alias('Legacy', 'A1'); class_alias('A1', 'A2'); class_alias('A2', 'A3');",
+        "class_alias('A2', 'A3'); class_alias('A1', 'A2'); class_alias('Legacy', 'A1');",
+    ] {
+        let src = format!("<?php\nclass Legacy {{}}\n{calls}\n");
+        let files = &[("a.php", src.as_str())];
+        for name in ["A1", "A2", "A3"] {
+            assert!(
+                same_unique(resolve(files, name), resolve(files, "Legacy")),
+                "{name} after `{calls}`"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_chain_folds_across_files() {
+    let files = &[
+        ("lib.php", "<?php\nclass Legacy {}\n"),
+        ("one.php", "<?php\nclass_alias('Legacy', 'Mid');\n"),
+        ("two.php", "<?php\nclass_alias('Mid', 'Top');\n"),
+    ];
+    assert!(same_unique(resolve(files, "Top"), resolve(files, "Legacy")));
+}
+
+#[test]
+fn a_cycle_of_aliases_mints_nothing_and_ends() {
+    let files = &[("a.php", "<?php\nclass_alias('B1', 'B2');\nclass_alias('B2', 'B1');\n")];
+    assert_eq!(kind(resolve(files, "B1")), Kind::Absent);
+    assert_eq!(kind(resolve(files, "B2")), Kind::Absent);
+}
+
+#[test]
+fn an_alias_of_an_ambiguous_alias_mints_nothing() {
+    // `X` is minted by two edges, so it is ambiguous, and nothing aliasing it is unique.
+    let files = &[(
+        "a.php",
+        "<?php\nclass A {}\nclass C {}\nclass_alias('A', 'X');\nclass_alias('C', 'X');\nclass_alias('X', 'Y');\n",
+    )];
+    assert_eq!(kind(resolve(files, "X")), Kind::Ambiguous);
+    assert_eq!(kind(resolve(files, "Y")), Kind::Absent);
 }

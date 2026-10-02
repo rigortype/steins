@@ -442,25 +442,41 @@ pub fn merge_shards(shards: &[PackageShard]) -> MergedTables {
         sites.sort_unstable();
     }
 
-    // The literal class_alias fold (ADR-0049 §2): resolve every edge against
-    // the merged **textual** snapshot (no alias-to-alias chaining, so the
-    // result is order-independent, ADR-0048), then mint the edges. An alias
-    // colliding with a textual decl of the same FQN, or two alias edges for
-    // one name, demotes to ambiguous; an absent or ambiguous target mints
-    // nothing.
-    let mut resolved: Vec<(String, ShardSite)> = Vec::new();
-    for s in shards {
-        for edge in &s.class_alias_edges {
+    // The literal class_alias fold (ADR-0049 §2): resolve the edges against
+    // the merged snapshot, then mint them. An alias colliding with a textual
+    // decl of the same FQN, or two alias edges for one name, demotes to
+    // ambiguous; an absent or ambiguous target mints nothing.
+    //
+    // The fold is a **fixpoint over rounds**, so an alias of an alias resolves
+    // (`class_alias(Real::class, 'A1'); class_alias('A1', 'A2');`): each round
+    // resolves every pending edge against the snapshot the round began with and
+    // mints them together, so the result is a fact about the edge multiset and
+    // never about visit order (ADR-0048), and a name two edges mint is
+    // ambiguous before any later round reads it. An edge whose target is
+    // ambiguous is dropped for good (ambiguity only grows); one whose target is
+    // absent waits for a round that may mint it. Every round resolves at least
+    // one edge or ends the loop, so a cycle of aliases no declaration stands
+    // under (`'B1'` ↔ `'B2'`) terminates having minted nothing.
+    let mut pending: Vec<&ShardAlias> = shards.iter().flat_map(|s| &s.class_alias_edges).collect();
+    while !pending.is_empty() {
+        let mut resolved: Vec<(&str, ShardSite)> = Vec::new();
+        let mut waiting: Vec<&ShardAlias> = Vec::new();
+        for edge in pending {
             if m.ambiguous_classes.contains(&edge.target_fqn) {
                 continue;
             }
-            if let Some(&target) = m.classes.get(&edge.target_fqn) {
-                resolved.push((edge.alias_fqn.clone(), target));
+            match m.classes.get(&edge.target_fqn) {
+                Some(&target) => resolved.push((&edge.alias_fqn, target)),
+                None => waiting.push(edge),
             }
         }
-    }
-    for (alias_fqn, target) in resolved {
-        insert_unique(&mut m.classes, &mut m.ambiguous_classes, &alias_fqn, target);
+        if resolved.is_empty() {
+            break;
+        }
+        for (alias_fqn, target) in resolved {
+            insert_unique(&mut m.classes, &mut m.ambiguous_classes, alias_fqn, target);
+        }
+        pending = waiting;
     }
 
     // The obstacle table: order the records by slot (stable, so one file's
