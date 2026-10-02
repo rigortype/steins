@@ -16,7 +16,7 @@ use steins_edit::{
     plan_loop_to_array_map, plan_phpdoc_honesty, plan_phpdoc_to_native, plan_throws_envelope,
     unified_diff,
 };
-use steins_infer::{Diagnostic, NoFold, check_project};
+use steins_infer::{Diagnostic, INTERNAL_PANIC_ID, NoFold, check_project};
 
 use crate::config::{allow_list_from_disk, effects_policy_from_disk, load_partitions, load_vouches};
 use crate::project::{collect_files, load_project, reject_missing_paths};
@@ -129,6 +129,12 @@ pub(crate) fn run_transform(args: &[String]) -> ExitCode {
         Format::Text => print_transform_text(report, postcheck, texts, kind.action()),
     }
 
+    // A panicked analysis on either side (issue #895 D3) is no verdict on the
+    // edit: nothing is written, and the run exits 2 like `check` does.
+    if !postcheck.panicked.is_empty() {
+        errln!("steins: {}", postcheck.panic_notice());
+        return ExitCode::from(2);
+    }
     if !postcheck.ok {
         if apply {
             errln!(
@@ -321,6 +327,31 @@ pub(crate) fn plan_transform_run(
 pub(crate) struct PostCheck {
     pub(crate) ok: bool,
     pub(crate) new_diagnostics: Vec<Diagnostic>,
+    /// The `internal.panic` findings of either side (issue #895 D3), vendor
+    /// files included, one per file. Any at all fails the post-check: a side
+    /// missing a file's findings cannot vouch that the edit added none.
+    pub(crate) panicked: Vec<Diagnostic>,
+}
+
+impl PostCheck {
+    /// The one sentence every surface refuses a panicked post-check with.
+    pub(crate) fn panic_notice(&self) -> String {
+        format!(
+            "{} file(s) panicked in analysis ({INTERNAL_PANIC_ID}) during the post-check; nothing was written — this is a bug in Steins, please report it",
+            self.panicked.len()
+        )
+    }
+}
+
+/// Take the `internal.panic` findings out of `ds` into `panicked`, one per
+/// file: they are the tool failing, so no surface or vendor filter hides them,
+/// and they never count as a regression of the edit.
+fn take_panics(ds: &mut Vec<Diagnostic>, panicked: &mut Vec<Diagnostic>) {
+    for d in ds.extract_if(.., |d| d.id == INTERNAL_PANIC_ID) {
+        if !panicked.iter().any(|p| p.path == d.path) {
+            panicked.push(d);
+        }
+    }
 }
 
 /// Which diagnostics a post-check counts as "new" (ADR-0034 point 3a). Not a
@@ -374,14 +405,13 @@ pub(crate) fn post_check(
     surface: PostCheckSurface,
 ) -> PostCheck {
     if plan.is_empty() {
-        return PostCheck { ok: true, new_diagnostics: Vec::new() };
+        return PostCheck { ok: true, new_diagnostics: Vec::new(), panicked: Vec::new() };
     }
     let display = surface.display();
-    let before = filtered_diagnostics(
-        project.layout(db),
-        display.as_ref(),
-        check_project(db, project, &mut NoFold),
-    );
+    let mut panicked = Vec::new();
+    let mut before = check_project(db, project, &mut NoFold);
+    take_panics(&mut before, &mut panicked);
+    let before = filtered_diagnostics(project.layout(db), display.as_ref(), before);
 
     // Fresh database avoids salsa mutation subtlety and keeps `before` intact.
     let edb = SteinsDatabase::default();
@@ -393,11 +423,9 @@ pub(crate) fn post_check(
     // Must classify vendor the same way, or before/after measures layout, not the edit.
     let eproject =
         Project::new(&edb, einputs, project.layout(db).clone(), project.plugins(db).clone());
-    let after = filtered_diagnostics(
-        eproject.layout(&edb),
-        display.as_ref(),
-        check_project(&edb, eproject, &mut NoFold),
-    );
+    let mut after = check_project(&edb, eproject, &mut NoFold);
+    take_panics(&mut after, &mut panicked);
+    let after = filtered_diagnostics(eproject.layout(&edb), display.as_ref(), after);
 
     let mut before_counts: HashMap<&str, usize> = HashMap::new();
     for d in &before {
@@ -415,7 +443,7 @@ pub(crate) fn post_check(
 
     let new_diagnostics: Vec<Diagnostic> =
         after.into_iter().filter(|d| regressed_ids.contains(&d.id)).collect();
-    PostCheck { ok: new_diagnostics.is_empty(), new_diagnostics }
+    PostCheck { ok: new_diagnostics.is_empty() && panicked.is_empty(), new_diagnostics, panicked }
 }
 
 /// The post-check's view of a diagnostic run: always vendor-filtered (ADR-0015),
@@ -499,7 +527,12 @@ fn print_transform_text(
         }
     }
 
-    if !postcheck.ok {
+    if !postcheck.panicked.is_empty() {
+        outln!("\nPost-check FAILED — {} file(s) panicked in analysis:", postcheck.panicked.len());
+        for d in &postcheck.panicked {
+            outln!("  {}:{}:{}: [{}] {}", d.path, d.line, d.column, d.id, d.message);
+        }
+    } else if !postcheck.ok {
         outln!("\nPost-check FAILED — {} new diagnostic(s):", postcheck.new_diagnostics.len());
         for d in &postcheck.new_diagnostics {
             outln!("  {}:{}:{}: [{}] {}", d.path, d.line, d.column, d.id, d.message);
@@ -516,16 +549,14 @@ pub(crate) fn transform_json(
     postcheck: &PostCheck,
     applied: bool,
 ) -> serde_json::Value {
-    let new_ds: Vec<serde_json::Value> = postcheck
-        .new_diagnostics
-        .iter()
-        .map(|d| {
-            serde_json::json!({
-                "id": d.id, "path": d.path, "line": d.line,
-                "column": d.column, "message": d.message,
-            })
+    let finding = |d: &Diagnostic| {
+        serde_json::json!({
+            "id": d.id, "path": d.path, "line": d.line,
+            "column": d.column, "message": d.message,
         })
-        .collect();
+    };
+    let new_ds: Vec<serde_json::Value> = postcheck.new_diagnostics.iter().map(finding).collect();
+    let panicked: Vec<serde_json::Value> = postcheck.panicked.iter().map(finding).collect();
     // Vouching downgrade (ADR-0046 §2): surfaced as a top-level note whenever
     // any site was vouched.
     let downgrade_note = (!report.vouched_exemptions.is_empty()).then(|| {
@@ -536,7 +567,7 @@ pub(crate) fn transform_json(
     });
     serde_json::json!({
         "report": report,
-        "postcheck": { "ok": postcheck.ok, "new_diagnostics": new_ds },
+        "postcheck": { "ok": postcheck.ok, "new_diagnostics": new_ds, "panicked": panicked },
         "applied": applied,
         "downgrade_note": downgrade_note,
     })

@@ -218,6 +218,12 @@ impl Matcher {
         }
     }
 
+    /// Forget every entry whose path `gone` names, so it is neither matched nor
+    /// counted stale — the entries of a file the run could not judge.
+    pub fn drop_paths(&mut self, gone: impl Fn(&str) -> bool) {
+        self.counts.retain(|(_, path, _), _| !gone(path));
+    }
+
     /// Surface-aware staleness (ADR-0050 §8, ADR-0062 A-G10): unconsumed entries
     /// `admits` accepts, given each entry's id and its capture rung. Bundles two
     /// independent conditions: the id is inside the current run's surface (else
