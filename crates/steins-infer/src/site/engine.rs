@@ -266,13 +266,14 @@ pub(crate) fn has_effect_row(name: &str) -> bool {
 
 /// Whether `class` (an FQN, case-insensitive) is an **engine class**: the mined hierarchy
 /// declares it (a class, interface or enum php-src's stubs declare, a namespaced one under its
-/// namespace, `Random\RandomException`, as a global one under its bare name) and the PHP the
-/// hierarchy was cross-checked against has it too.
+/// namespace, `Random\RandomException`, as a global one under its bare name) and the pinned
+/// release's own stubs declare it too.
 ///
 /// The hierarchy keys classes by FQN, so a name the user's namespace made up (`App\PDO`, or an
-/// unimported `PDO` inside `namespace App`) is not in it. A row the stubs declare and that PHP
-/// does not (`Io\Poll\PollException`, newer than the pinned minor) is the stubs' claim, not the
-/// engine's: `new` of it is an `Error`, so no row may answer for it and it stays a gap
+/// unimported `PDO` inside `namespace App`) is not in it. A row the mined stubs declare and the
+/// pinned release does not (`Io\Poll\PollException`, newer than the pinned minor) is the
+/// development branch's claim, not the engine's: `new` of it is an `Error`, so no row may
+/// answer for it and it stays a gap
 /// ([`steins_catalog::builtin_class_absent_on_pinned`], ADR-0099 §3).
 pub(crate) fn declares_engine_class(class: &str) -> bool {
     (steins_catalog::builtin_class_display(class).is_some()

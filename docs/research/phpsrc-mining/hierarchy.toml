@@ -1,13 +1,14 @@
 # hierarchy.toml — builtin class/interface/enum hierarchy mined from php-src stubs
 # php-src commit: 6bc7c26cf67a9480b5ef9d6191aebe87fa931183 (Thu Jul 9 2026)
-# Cross-checked against PHP 8.5.11 (cli): a row it does not declare carries
-# `absent_on_pinned = true`, and the catalog does not treat it as an engine class.
+# Pinned release: php-8.5.6 (fcc29c8d6d6ee6f5ba2d941f0a2a6ea6aa6ee633). A row whose class is not declared
+# by that release's own stubs carries `absent_on_pinned = true`, and the catalog does
+# not treat it as an engine class. Extensions a build lacks do not enter into it.
 # Names preserve declared casing; Steins lowercases at its seam.
 # Namespaced names are fully-qualified (no leading backslash).
 # Test-only extensions (ext/zend_test, ext/skeleton, ext/dl_test, sapi/*) are EXCLUDED.
 # Total production declarations: 368
 
-php_cross_check = '8.5.11'
+pinned_tag = 'php-8.5.6'
 
 [[class]]
 name = 'Attribute'
@@ -318,7 +319,6 @@ name = 'variant'
 kind = 'class'
 extends = []
 implements = []
-absent_on_pinned = true
 source = 'ext/com_dotnet/com_extension.stub.php:356'
 
 [[class]]
@@ -326,7 +326,6 @@ name = 'com'
 kind = 'class'
 extends = ['variant']
 implements = []
-absent_on_pinned = true
 source = 'ext/com_dotnet/com_extension.stub.php:361'
 
 [[class]]
@@ -334,7 +333,6 @@ name = 'dotnet'
 kind = 'class'
 extends = ['variant']
 implements = []
-absent_on_pinned = true
 source = 'ext/com_dotnet/com_extension.stub.php:367'
 
 [[class]]
@@ -343,7 +341,6 @@ kind = 'class'
 extends = []
 implements = []
 final = true
-absent_on_pinned = true
 source = 'ext/com_dotnet/com_extension.stub.php:373'
 
 [[class]]
@@ -352,7 +349,6 @@ kind = 'class'
 extends = ['Exception']
 implements = []
 final = true
-absent_on_pinned = true
 source = 'ext/com_dotnet/com_extension.stub.php:377'
 
 [[class]]
@@ -361,7 +357,6 @@ kind = 'class'
 extends = []
 implements = []
 final = true
-absent_on_pinned = true
 source = 'ext/com_dotnet/com_persist.stub.php:5'
 
 [[class]]
@@ -886,7 +881,6 @@ kind = 'class'
 extends = []
 implements = []
 final = true
-absent_on_pinned = true
 source = 'ext/enchant/enchant.stub.php:29'
 
 [[class]]
@@ -895,7 +889,6 @@ kind = 'class'
 extends = []
 implements = []
 final = true
-absent_on_pinned = true
 source = 'ext/enchant/enchant.stub.php:37'
 
 [[class]]
@@ -1364,7 +1357,6 @@ name = 'Pdo\Firebird'
 kind = 'class'
 extends = ['PDO']
 implements = []
-absent_on_pinned = true
 source = 'ext/pdo_firebird/pdo_firebird.stub.php:11'
 
 [[class]]
@@ -1393,7 +1385,6 @@ name = 'PDO_PGSql_Ext'
 kind = 'class'
 extends = []
 implements = []
-absent_on_pinned = true
 source = 'ext/pdo_pgsql/pgsql_driver.stub.php:9'
 
 [[class]]
@@ -1408,7 +1399,6 @@ name = 'PDO_SQLite_Ext'
 kind = 'class'
 extends = []
 implements = []
-absent_on_pinned = true
 source = 'ext/pdo_sqlite/sqlite_driver.stub.php:9'
 
 [[class]]

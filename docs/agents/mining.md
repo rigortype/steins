@@ -28,7 +28,7 @@ and `cargo xtask gen-catalog` turns it into `hierarchy_generated.rs` and
 `display_names_generated.rs`:
 
 ```sh
-PHP_SRC_ROOT=<php-src checkout> PHP_BIN=<the pinned php> \
+PHP_SRC_ROOT=<php-src checkout> PHP_BIN=<php of the pinned minor> \
   python3 docs/research/phpsrc-mining/extract_hierarchy.py \
   > docs/research/phpsrc-mining/hierarchy.toml
 cargo xtask gen-catalog
@@ -40,19 +40,23 @@ declaring namespace), and it says on stderr when a relative parent names no decl
 prints such a line has found a stub that spells a parent the engine does not read that way (#871);
 read the line before committing.
 
-**The stubs are not the engine.** php-src's stubs are a development branch and `PHP_BIN` is the
-pinned minor, built with whatever extensions it has, so a row can name a class that PHP lacks
-(`Io\Poll\PollException`, `StreamException`, `com_exception`). The script asks `PHP_BIN`
-(`class_exists` and siblings, autoload off) about every row, writes `absent_on_pinned = true` on the
-ones it does not declare and the version it asked in `php_cross_check`, and stops if `PHP_BIN` does
-not run. A marked row stays in the is-a walk and the display names, but the catalog does not treat
-it as an engine class, so a `new` of it stays a gap. A re-mine on another PHP, or one built with
-another extension set, moves the marks: read the stderr list of absent rows and the diff of the
-marked set, and revisit `NEWER_THAN_THE_CROSS_CHECK` in the `engine_hierarchy_keys` test.
+**The stubs are not the pinned release.** php-src's stubs are a development branch and the pinned
+PHP is an older minor, so a row can name a class that release lacks (`Io\Poll\PollException`,
+`StreamException`). The script parses every `*.stub.php` at the release tag (`PINNED_TAG`, default
+the newest stable `php-<minor>.<n>` tag in the checkout, for the minor of `PHP_BIN`) with the same
+parser, writes `absent_on_pinned = true` on the rows whose class that tag does not declare, and
+records the tag in `pinned_tag`. The mark is read from php-src, not from the PHP it runs on, so
+an extension a build lacks (`EnchantBroker`, `com_exception`) moves nothing. `PHP_BIN` is only the
+minor to pin and a sanity check: the script warns on stderr when `PHP_BIN` declares a marked row
+or lacks an unmarked one whose extension it has loaded (`PDO_PGSql_Ext` and `PDO_SQLite_Ext` are
+stub-only pseudo-classes and always warn). A marked row stays in the is-a walk and the display
+names, but the catalog does not treat it as an engine class, so a `new` of it stays a gap. The
+checkout has to hold the tag (`git fetch --tags` first).
 
-The test holds each row to a live PHP's `ReflectionClass`; a row the running PHP lacks has to say
-why (it is marked, its extension is not loaded, or the PHP is an older minor than the
-cross-check's), and no share of unexplained absences is tolerated.
+The `engine_hierarchy_keys` test holds each row to a live PHP's `ReflectionClass`; a row the
+running PHP lacks has to say why (its extension is not loaded, it is marked, the PHP is an older
+minor than the pinned release, or it is a stub-only pseudo-class), and no share of unexplained
+absences is tolerated.
 
 ## The engine set
 
