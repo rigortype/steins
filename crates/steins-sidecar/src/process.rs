@@ -122,6 +122,13 @@ pub fn is_boot_failure(error: &std::io::Error) -> bool {
 /// one that left the process group, and elsewhere any descendant at all. Waiting
 /// on that is waiting on a stranger, so the thread is detached instead, blocked on
 /// a pipe nobody reads, and the run goes on.
+///
+/// A detached thread keeps its pipe and its stack until the stranger exits,
+/// which may be never. One per close would add up over a run of timeouts, each
+/// costing a file descriptor, until the process ran out of them. So the first
+/// detach is also the last: the [`Sidecar`] that had to give up a reader stops
+/// replacing its child for the rest of the run ([`Sidecar::revive`]), like an
+/// engine past [`RESPAWN_CAP`].
 const READER_GRACE: Duration = Duration::from_millis(500);
 
 /// The id the opening handshake carries. [`Sidecar`] numbers its requests from
@@ -209,13 +216,13 @@ impl Channel {
     /// does not answer is killed and reaped here and reported as an `Err`, so a
     /// slow boot is a failed spawn (the engine-off posture) or a strike on a
     /// revive, never a lost real request.
-    fn open(bin: &str) -> std::io::Result<Self> {
-        let mut chan = Self::launch(bin)?;
+    fn open(bin: &str) -> Result<Self, OpenFailure> {
+        let mut chan = Self::launch(bin).map_err(|error| OpenFailure { error, stranded: false })?;
         match chan.handshake() {
             Ok(()) => Ok(chan),
-            Err(e) => {
-                chan.close();
-                Err(e)
+            Err(error) => {
+                let stranded = !chan.close();
+                Err(OpenFailure { error, stranded })
             }
         }
     }
@@ -227,6 +234,12 @@ impl Channel {
     /// manager, a container shim), and one that runs the interpreter without
     /// `exec` leaves the interpreter a grandchild that killing the child alone
     /// would miss (issue #894).
+    ///
+    /// The group kill reaches only descendants that stay in the group. An
+    /// interpreter that leaves it, as behind `exec setsid php "$@"` on Linux
+    /// (which forks, because the wrapper leads its group), survives the kill and
+    /// keeps stdout open. [`READER_GRACE`] keeps that from hanging a close, and
+    /// the strand it triggers keeps it from costing more than one.
     ///
     /// Its own group is not the terminal's foreground group, so a Ctrl-C reaches
     /// steins and not the child. Nothing is lost by that: steins does not catch
@@ -344,7 +357,8 @@ impl Channel {
     }
 
     /// Close stdin, kill the child, **reap** it, and wait a bounded time for the
-    /// reader thread. Idempotent.
+    /// reader thread. Idempotent. `false` when the reader had to be detached
+    /// (see [`READER_GRACE`] for what that obliges the caller to do).
     ///
     /// The reaping is the point: a respawn that only killed would leave a zombie
     /// per dead child. The rest is so that no close can block a run (issue #894).
@@ -353,20 +367,21 @@ impl Channel {
     /// not `exec`, the interpreter does. The group kill reaches it on Unix, the
     /// closed stdin lets it exit wherever the kill does not, and
     /// [`READER_GRACE`] bounds the wait when neither works.
-    fn close(&mut self) {
+    #[must_use]
+    fn close(&mut self) -> bool {
         drop(self.stdin.take());
         self.kill();
         let _ = self.child.wait();
         self.reaped = true;
-        self.finish_reader();
+        self.finish_reader()
     }
 
     /// Join the reader thread once it has ended, or detach it after
     /// [`READER_GRACE`]. The thread ends by dropping its sender, so the
     /// disconnect is the signal; a line still in flight is discarded, since no
-    /// one is waiting for it.
-    fn finish_reader(&mut self) {
-        let Some(reader) = self.reader.take() else { return };
+    /// one is waiting for it. `false` only for the call that detached it.
+    fn finish_reader(&mut self) -> bool {
+        let Some(reader) = self.reader.take() else { return true };
         let deadline = Instant::now() + READER_GRACE;
         loop {
             let wait = deadline.saturating_duration_since(Instant::now());
@@ -374,13 +389,20 @@ impl Channel {
                 Ok(_) if Instant::now() < deadline => {}
                 Err(RecvTimeoutError::Disconnected) => {
                     let _ = reader.join();
-                    return;
+                    return true;
                 }
                 // Out of grace: dropping the handle detaches the thread.
-                Ok(_) | Err(RecvTimeoutError::Timeout) => return,
+                Ok(_) | Err(RecvTimeoutError::Timeout) => return false,
             }
         }
     }
+}
+
+/// Why [`Channel::open`] failed, and whether closing the child that failed had
+/// to detach its reader, which strands a [`Sidecar`] (see [`READER_GRACE`]).
+struct OpenFailure {
+    error: std::io::Error,
+    stranded: bool,
 }
 
 /// `SIGKILL` to the process group `pid` leads (see [`Channel::launch`]).
@@ -464,7 +486,9 @@ impl Sidecar {
     /// several minors the same question and record which answered
     /// (`cargo xtask mine-function-map --php PATH`, issue #714).
     pub fn spawn_with(bin: &str) -> std::io::Result<Self> {
-        let chan = Channel::open(bin)?;
+        // A spawn that fails is the engine off for the run, so a detached
+        // reader here needs no strand: nothing will open another child.
+        let chan = Channel::open(bin).map_err(|failure| failure.error)?;
 
         Ok(Self {
             chan,
@@ -484,6 +508,12 @@ impl Sidecar {
     /// exists to bound. Only an answered request ([`Self::request`]) clears
     /// the strikes, so a replacement that dies before answering counts
     /// against the next one.
+    ///
+    /// A close that had to detach its reader (issue #894) strands the instance:
+    /// the strikes jump to the cap, so it reads, and reports, as an engine
+    /// abandoned for the run. A child is only closed here after a poison, so
+    /// the run has already lost an answer and is degraded either way; the strand
+    /// only stops it from leaking one thread and one descriptor per timeout.
     fn revive(&mut self) -> bool {
         if !self.poisoned {
             return true;
@@ -491,21 +521,28 @@ impl Sidecar {
         if self.strikes >= RESPAWN_CAP {
             return false;
         }
+        if !self.chan.close() {
+            self.strikes = RESPAWN_CAP;
+            return false;
+        }
         self.respawns += 1;
         self.strikes += 1;
-        self.chan.close();
         match Channel::open(&self.chan.bin) {
             Ok(chan) => {
                 self.chan = chan;
                 self.poisoned = false;
                 true
             }
+            Err(OpenFailure { stranded: true, .. }) => {
+                self.strikes = RESPAWN_CAP;
+                false
+            }
             // Still poisoned, one attempt poorer. `php` was on `PATH` moments
             // ago, so this is a transient failure worth another try later. A
             // child that started but never finished booting (issue #891) is the
             // same strike as one that would not start: the cap bounds how many
             // boot waits a broken interpreter can cost.
-            Err(_) => false,
+            Err(OpenFailure { stranded: false, .. }) => false,
         }
     }
 
@@ -725,7 +762,8 @@ impl Drop for Sidecar {
     fn drop(&mut self) {
         // Closing stdin lets a healthy runner exit; killing covers a hung or
         // poisoned child and, on Unix, anything it started. `Channel::close`
-        // also reaps it and waits a bounded time for the reader.
-        self.chan.close();
+        // also reaps it and waits a bounded time for the reader. A reader given
+        // up here strands nothing: the instance is gone.
+        let _ = self.chan.close();
     }
 }
