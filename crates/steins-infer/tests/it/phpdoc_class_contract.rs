@@ -431,3 +431,20 @@ fn template_shadows_real_class_return() {
     let control = "<?php final class Foo {}\n/** @return Foo */ function f() { return 5; }";
     assert_eq!(return_count(control), 1, "no template → @return Foo fires");
 }
+
+#[test]
+fn an_equality_assert_with_a_dollar_in_its_type_still_targets_its_parameter() {
+    // `@phpstan-assert =T $n` is an assert-helper tag (ADR-0030): its target is exempt
+    // from the `@param` check. The `$k` inside the shape is a key, not the target.
+    let helper = |assert: &str| {
+        format!(
+            "<?php\n/**\n * @param int $n\n * @phpstan-assert {assert} $n\n */\n\
+             function f(mixed $n): void {{}}\nf('x');"
+        )
+    };
+    assert_eq!(param_count(&helper("=int|array{'$k': int}")), 0, "equality assert exempts $n");
+    assert_eq!(param_count(&helper("int|array{'$k': int}")), 0, "plain assert exempts $n");
+    // Control: without the assert the `@param int` still fires on the string.
+    let control = "<?php\n/** @param int $n */\nfunction f(mixed $n): void {}\nf('x');";
+    assert_eq!(param_count(control), 1, "no assert → the @param check fires");
+}

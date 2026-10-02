@@ -34,7 +34,8 @@ fn parse_expected(line: &str) -> Verdict {
 fn rows() -> Vec<(&'static str, Verdict)> {
     let inputs = include_str!("../fixtures/doc-tags.txt");
     let expected = include_str!("../fixtures/doc-tags.expected");
-    let inputs: Vec<&str> = inputs.lines().filter(|l| !l.is_empty() && !l.starts_with('#')).collect();
+    let inputs: Vec<&str> =
+        inputs.lines().filter(|l| !l.is_empty() && !l.starts_with('#')).collect();
     let expected: Vec<Verdict> = expected
         .lines()
         .filter(|l| !l.is_empty() && !l.starts_with('#'))

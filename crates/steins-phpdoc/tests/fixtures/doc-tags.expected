@@ -35,6 +35,9 @@ TAG	Foo	$x
 INVALID
 TAG	Foo	$x
 TAG	Foo	$x
+TAG	callable(int $a): void	$cb
+TAG	array{'$k': int}	$x
+TAG	Foo<'$z'>	$x
 TAG	Foo	$x
 INVALID
 TAG	($isGlobal is true ? null : Foo)	$root
