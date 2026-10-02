@@ -14,7 +14,10 @@ its routes), then the issue and design pointers in your brief.
 ## How you work
 
 - Work in your own worktree on the branch the brief names, based where the
-  brief says; rebase when the orchestrator reports the base moved.
+  brief says. Rebase onto the current master before you report, and again
+  whenever the orchestrator says the base moved; resolve conflicts by rebase,
+  never by a merge commit.
+- Write ADR amendments only under the numbers the brief assigns.
 - Commit small and often. The orchestrator pushes; you keep the branch local.
 - Do the work yourself in this session; sub-agents stay out of it.
 - Keep scratch output in the scratch directory the brief names (create it;
@@ -24,6 +27,10 @@ its routes), then the issue and design pointers in your brief.
   report as a suggestion, with its reason.
 - Write tests first where the slice pins a behaviour: a case that fails on the
   base and passes on your branch, checked both ways.
+- Turn every row of the brief's witness table into a test or a probe before
+  you report: the silenced shapes go quiet, and the kept shapes still report
+  on your branch as they do on the base. A fix that silences a kept shape is
+  unfinished, however clean the A/B looks.
 
 ## What you measure
 
@@ -34,6 +41,10 @@ every difference classified (cause, count, two examples).
 
 ## Your report
 
-Branch and commits; what changed, by file and function; tests added; the A/B
-table with each difference classified; gate results; and plainly, what you did
-not measure or were unsure of.
+Write the full report to `report.md` in your scratch directory: branch and
+commits; what changed, by file and function; tests added; the witness table
+with each row's outcome; the A/B table with each difference classified; gate
+results; and plainly, what you did not measure or were unsure of.
+
+Return at most 30 lines: branch and head commit, status (done or blocked, and
+on what), the headline numbers, anything unmeasured, and the report's path.

@@ -22,6 +22,8 @@ PR (`gh pr view`, `gh pr diff`), its issue, and the ADR sections it cites.
 - **Witness** every soundness question on the local `php`: a snippet where the
   analyzer says one thing and PHP does another is the strongest evidence you
   can return. A claimed "nothing runs here" or "exhaustive" is a target.
+- Run the slice's witness table, then extend it: hunt for true positives near
+  the silenced shapes that the table missed and the branch now drops.
 - Reproduce a slice of the PR's corpus numbers against its merge base.
 - On a re-review, verify each earlier item and hunt for what the fixes broke.
 
@@ -32,3 +34,7 @@ PHP snippet and both outputs, or the measurement) and a concrete fix. Then
 what you verified as correct, and one verdict: approve, approve-with-fixes, or
 reject. A false positive, a lost soundness check, a persisted-format change
 without its bump, or a regression against the base is a blocker.
+
+Write all of that to `review.md` in your scratch directory. Return at most 30
+lines: the verdict, each blocker and should-fix in one line, the witness rows
+you added, and the file's path.

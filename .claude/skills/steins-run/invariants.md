@@ -41,6 +41,9 @@ that changes one of these says so in its PR body.
 - A comparison asserts the binaries differ and the B side is non-empty.
 - One `steins check` per path at a time; `--no-cache` for A/B; `timeout` on
   long runs; a separate `CARGO_TARGET_DIR` per worktree.
+- A private-corpus run takes ~24 GB, so the machine holds one at a time: every
+  run, base or head, goes through the lock command in the machine notes,
+  which waits its turn.
 - Public corpora live under `corpus/` (read-only); never symlink
   `corpus.lock.toml`.
 
