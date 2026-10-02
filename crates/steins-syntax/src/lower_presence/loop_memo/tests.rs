@@ -15,6 +15,8 @@ use crate::{SourceTree, UnsetSeedFacts};
 thread_local! {
     static OFF: Cell<bool> = const { Cell::new(false) };
     static HITS: Cell<usize> = const { Cell::new(0) };
+    /// The most records the table held at once.
+    static PEAK: Cell<usize> = const { Cell::new(0) };
 }
 
 pub(super) fn forced_off() -> bool {
@@ -23,6 +25,10 @@ pub(super) fn forced_off() -> bool {
 
 pub(super) fn count_hit() {
     HITS.set(HITS.get() + 1);
+}
+
+pub(super) fn note_records(live: usize) {
+    PEAK.set(PEAK.get().max(live));
 }
 
 /// What one lowering answered: every function scope's `variable.maybe-undefined`
@@ -75,6 +81,30 @@ fn the_cache_is_off_when_forced_and_answers_otherwise() {
     let (on, _, hits) = both(&src);
     assert!(hits > 0, "a three-deep nest repeats its inner bodies and must hit");
     assert_eq!(on.maybe_undefined.len(), 1, "the read before the bind is `Maybe`: {on:?}");
+}
+
+/// The table is dropped when the outermost loop's reporting walk returns, so it holds
+/// one top-level loop's silent walks and not every loop in the function: 2,000
+/// sequential `while { for { } }` pairs once held a record each for the whole run,
+/// 2.1 GB where the function itself is 61 MB.
+#[test]
+fn sequential_loops_do_not_accumulate_records() {
+    let peak_for = |pairs: usize| {
+        let body: String = (0..pairs)
+            .map(|i| {
+                format!(
+                    "while ($c) {{ for ($j = 0; $j < 3; $j++) {{ $v{i} = $j; echo $v{i}; }} }}\n"
+                )
+            })
+            .collect();
+        PEAK.set(0);
+        let (answer, _) = assert_same(&in_function(&body));
+        assert!(answer.maybe_undefined.is_empty(), "{answer:?}");
+        PEAK.get()
+    };
+    let (few, many) = (peak_for(5), peak_for(200));
+    assert!(few > 0, "the table must have been used");
+    assert_eq!(few, many, "the peak must not grow with the number of sequential loops");
 }
 
 #[test]
