@@ -30,6 +30,10 @@ pub struct ProcessEngine {
     sidecar: Option<Sidecar>,
     disabled: bool,
     spawn_failed: bool,
+    /// The spawn that failed was a child that started and did not finish
+    /// booting (issue #891), not a `php` that could not be started. Read by
+    /// [`Self::posture`]: that run lost the answers its engine never gave.
+    boot_failed: bool,
     notified: bool,
     /// Whether [`SIDECAR_HANDSHAKE_NOTICE`] has already been printed this run —
     /// the issue #110 latch, sibling to `notified` above but for "spawned, then
@@ -76,6 +80,7 @@ impl ProcessEngine {
             sidecar: None,
             disabled,
             spawn_failed: false,
+            boot_failed: false,
             notified: true, // suppress our own notice; only spawn-failure re-arms it.
             unresponsive_notified: true, // suppress; only enabled() re-arms it (mirrors `notified`).
             quarantined: HashSet::new(),
@@ -98,6 +103,15 @@ impl ProcessEngine {
         if self.sidecar.is_none() {
             match Sidecar::spawn() {
                 Ok(sc) => self.sidecar = Some(sc),
+                Err(e) if steins_sidecar::is_boot_failure(&e) => {
+                    // `php` started and did not answer (issue #110, #891): the
+                    // engine exists and failed, which is the degraded notice,
+                    // not "no PHP sidecar". Off for the run either way.
+                    self.spawn_failed = true;
+                    self.boot_failed = true;
+                    self.note_unresponsive();
+                    return None;
+                }
                 Err(_) => {
                     self.spawn_failed = true;
                     if !self.notified {
@@ -203,7 +217,17 @@ impl ProcessEngine {
     #[must_use]
     pub fn posture(&self) -> FoldPosture {
         let Some(sc) = &self.sidecar else {
-            return FoldPosture::default();
+            // A `php` that started and never booted lost every answer it was
+            // asked for: one, as far as the publish gate (ADR-0092, #784) is
+            // concerned, so the run that met it publishes nothing. A `php` that
+            // could not be started at all is the plain sound subset, which the
+            // engine-off stamp already says.
+            return FoldPosture {
+                engaged: self.boot_failed,
+                losses: u32::from(self.boot_failed),
+                restarts: 0,
+                abandoned: self.boot_failed,
+            };
         };
         FoldPosture {
             engaged: true,
