@@ -169,6 +169,44 @@ fn frame(id: u64, method: &str, params: serde_json::Value) -> String {
     line
 }
 
+/// Attempts at a spawn that `exec` refuses with `ETXTBSY`, the first included.
+const SPAWN_BUSY_ATTEMPTS: u32 = 5;
+
+/// The wait after the first busy refusal; it doubles after each later one, so
+/// the four waits total 150 ms, far inside [`BOOT_TIMEOUT`]'s budget.
+const SPAWN_BUSY_BACKOFF: Duration = Duration::from_millis(10);
+
+/// Runs `spawn`, retrying while it fails with
+/// [`std::io::ErrorKind::ExecutableFileBusy`] (issue #910).
+///
+/// On Linux `execve` refuses an executable that some process still holds open
+/// for writing. A thread that has just written a script and closed it can still
+/// lose to a concurrent `fork` on another thread: the forked child inherits the
+/// write descriptor and drops it only at its own `exec`, so for that window the
+/// script is busy. The same refusal meets a package manager that is replacing
+/// the `php` binary. Both clear within milliseconds, so a few short retries turn
+/// a spurious engine-off into a slightly later start. Any other error, and a
+/// busy one that outlasts the attempts, is returned as it came, so a spawn that
+/// really fails still fails exactly as before.
+///
+/// Generic over the spawner so the policy is testable without a real `exec`.
+fn spawn_retrying_busy<T>(
+    mut spawn: impl FnMut() -> std::io::Result<T>,
+    first_backoff: Duration,
+) -> std::io::Result<T> {
+    let mut backoff = first_backoff;
+    for _ in 1..SPAWN_BUSY_ATTEMPTS {
+        match spawn() {
+            Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                std::thread::sleep(backoff);
+                backoff *= 2;
+            }
+            outcome => return outcome,
+        }
+    }
+    spawn()
+}
+
 /// One live child and the thread draining it — everything a respawn replaces.
 ///
 /// Grouped so replacing a dead child is a single assignment: there is no state
@@ -257,7 +295,7 @@ impl Channel {
             .stderr(Stdio::null());
         #[cfg(unix)]
         std::os::unix::process::CommandExt::process_group(&mut command, 0);
-        let mut child = command.spawn()?;
+        let mut child = spawn_retrying_busy(|| command.spawn(), SPAWN_BUSY_BACKOFF)?;
 
         let stdin = child.stdin.take().expect("piped stdin");
         let stdout = child.stdout.take().expect("piped stdout");
@@ -765,5 +803,57 @@ impl Drop for Sidecar {
         // also reaps it and waits a bounded time for the reader. A reader given
         // up here strands nothing: the instance is gone.
         let _ = self.chan.close();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Error, ErrorKind};
+
+    use super::*;
+
+    fn busy() -> Error {
+        Error::from(ErrorKind::ExecutableFileBusy)
+    }
+
+    #[test]
+    fn a_busy_spawn_is_retried_until_it_succeeds() {
+        let mut calls = 0;
+        let outcome = spawn_retrying_busy(
+            || {
+                calls += 1;
+                if calls <= 3 { Err(busy()) } else { Ok(calls) }
+            },
+            Duration::ZERO,
+        );
+        assert_eq!(outcome.expect("the fourth attempt succeeds"), 4);
+    }
+
+    #[test]
+    fn a_spawn_that_stays_busy_fails_after_the_attempt_cap() {
+        let mut calls = 0;
+        let outcome: std::io::Result<()> = spawn_retrying_busy(
+            || {
+                calls += 1;
+                Err(busy())
+            },
+            Duration::ZERO,
+        );
+        assert_eq!(outcome.expect_err("still busy").kind(), ErrorKind::ExecutableFileBusy);
+        assert_eq!(calls, SPAWN_BUSY_ATTEMPTS);
+    }
+
+    #[test]
+    fn any_other_error_is_not_retried() {
+        let mut calls = 0;
+        let outcome: std::io::Result<()> = spawn_retrying_busy(
+            || {
+                calls += 1;
+                Err(Error::from(ErrorKind::NotFound))
+            },
+            Duration::ZERO,
+        );
+        assert_eq!(outcome.expect_err("not found").kind(), ErrorKind::NotFound);
+        assert_eq!(calls, 1);
     }
 }
