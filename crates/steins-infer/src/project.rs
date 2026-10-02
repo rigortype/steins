@@ -228,6 +228,17 @@ pub(crate) enum Res {
 /// here unchanged, where its consumers live.
 pub use steins_db::MagicObstacle;
 
+/// A table built on first use from the rest of the index. It carries no fact of
+/// its own, so two indexes are equal whatever either has built.
+#[derive(Default)]
+struct Lazy<T>(std::sync::OnceLock<T>);
+
+impl<T> PartialEq for Lazy<T> {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
 /// The project symbol index in the analysis's own `Site` terms (a file *index*,
 /// not a salsa handle). Built either directly from the [`FileUnit`] slice
 /// (single-file / test paths) or adapted from the salsa [`ProjectIndex`]
@@ -273,6 +284,10 @@ pub(crate) struct Index {
     /// FQN: the table the drop sites read to rule out a subclass that runs a
     /// destructor (ADR-0100 §7).
     destructor_classes: HashSet<String>,
+    /// Every name that has a class of [`Self::destructor_classes`], or an anonymous
+    /// class's parent, at or under it: built on the first drop site that asks
+    /// ([`Self::destructor_ancestors`]).
+    destructor_ancestors: Lazy<HashSet<String>>,
     /// The classes and interfaces the universe's anonymous classes extend or
     /// implement, as resolved in their files (ADR-0099 §4.4).
     anonymous_subclass_parents: HashSet<String>,
@@ -356,6 +371,7 @@ impl Index {
             property_writes: m.property_writes,
             magic_property_classes: m.magic_property_classes,
             destructor_classes: m.destructor_classes,
+            destructor_ancestors: Lazy::default(),
             anonymous_subclass_parents: m.anonymous_subclass_parents,
             constants: m.constants,
             files: m.files,
@@ -459,9 +475,20 @@ impl Index {
 
     /// The lowercase FQNs of the class-likes that declare `__destruct` or import a
     /// trait (ADR-0100 §7).
-    #[expect(dead_code, reason = "read by the drop sites of #882's second slice")]
     pub(crate) fn destructor_classes(&self) -> &HashSet<String> {
         &self.destructor_classes
+    }
+
+    /// The lowercase names that are, or are an ancestor of, a class of
+    /// [`Self::destructor_classes`] or an anonymous class's parent: the question
+    /// "may a subclass run a destructor" for a bound class is one lookup. The
+    /// closure is a fact of the universe, so it is built once, by whichever
+    /// caller asks first, with `build`.
+    pub(crate) fn destructor_ancestors(
+        &self,
+        build: impl FnOnce() -> HashSet<String>,
+    ) -> &HashSet<String> {
+        self.destructor_ancestors.0.get_or_init(build)
     }
 
     /// The classes and interfaces some anonymous class extends or implements.

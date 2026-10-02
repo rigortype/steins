@@ -573,3 +573,244 @@ fn a_hooked_promoted_parameter_is_a_magic_property_write_on_this_in_the_construc
     let plain = SourceTree::parse("<?php\nclass K { public function m(int $p) {} }\n");
     assert!(plain.classes()[0].methods[0].sites.is_empty());
 }
+
+// ---- Drop sites (ADR-0100 §7, issue #882) -------------------------------------
+
+/// One drop site of `function f(params) { body }`: its construct, the receivers it
+/// carries (`C` for the exact class `C`, `$p` for the parameter `p`, `?` for a class
+/// the lowering knows runs user code), and the source text its span covers.
+type Drop = (C, Vec<String>, String);
+
+fn drops(params: &str, body: &str) -> Vec<Drop> {
+    let src = format!("<?php\nfunction f({params}) {{ {body} }}\n");
+    let tree = SourceTree::parse(&src);
+    assert!(tree.parse_errors().is_empty(), "{body}: {:?}", tree.parse_errors());
+    tree.functions()[0]
+        .sites
+        .iter()
+        .filter_map(|site| match &site.kind {
+            SiteKind::Operator { family: F::Drop, construct, receivers, member } => {
+                assert_eq!(*member, None);
+                // One operand per receiver, none of which names a shape of its own.
+                let operands = site.operands.as_ref().expect("a drop site carries operands");
+                assert_eq!(operands, &vec![ArgShape::Unknown; receivers.len()]);
+                let receivers = receivers
+                    .iter()
+                    .map(|r| match r {
+                        Some(EffectRecv::ClassName(name)) => name.raw.clone(),
+                        Some(EffectRecv::Var(name)) => format!("${name}"),
+                        None => "?".to_owned(),
+                        other => panic!("{other:?}"),
+                    })
+                    .collect();
+                let text = src[site.span.start as usize..site.span.end as usize].to_owned();
+                Some((*construct, receivers, text))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn drop_site(construct: C, receivers: &[&str], text: &str) -> Drop {
+    (construct, receivers.iter().map(|r| (*r).to_owned()).collect(), text.to_owned())
+}
+
+#[test]
+fn a_local_first_written_with_new_drops_at_unset_reassignment_and_scope_exit() {
+    let sites = drops("", "$f = new D; unset($f); $f = null; echo 'x';");
+    assert_eq!(
+        sites,
+        [
+            drop_site(C::DropUnset, &["D"], "$f"),
+            drop_site(C::DropReassign, &["D"], "$f = null"),
+            drop_site(C::DropScopeExit, &["D"], "}"),
+        ]
+    );
+    // Every form is of the one family.
+    for construct in [C::DropUnset, C::DropReassign, C::DropScopeExit, C::DropTemporary] {
+        assert_eq!(construct.family_hint(), Some(F::Drop));
+    }
+}
+
+#[test]
+fn the_first_write_releases_nothing_unless_a_loop_or_goto_runs_it_again() {
+    assert_eq!(drops("", "$f = new D;"), [drop_site(C::DropScopeExit, &["D"], "}")]);
+    for body in [
+        "while ($c) { $f = new D; }",
+        "foreach ($xs as $x) { $f = new D; }",
+        "for (;;) { $f = new D; }",
+        "do { $f = new D; } while ($c);",
+        "a: $f = new D; goto a;",
+    ] {
+        let sites = drops("", body);
+        assert!(
+            sites.iter().any(|s| s.0 == C::DropReassign && s.2 == "$f = new D"),
+            "{body}: {sites:?}"
+        );
+    }
+}
+
+#[test]
+fn a_local_remembers_every_class_it_is_written_with_a_new() {
+    let sites = drops("", "$f = new D; $f = new E; $f = new D; $f = new E;");
+    let reassign = |text: &str| drop_site(C::DropReassign, &["D", "E"], text);
+    assert_eq!(sites[0], reassign("$f = new E"));
+    assert_eq!(sites[3], drop_site(C::DropScopeExit, &["D", "E"], "}"));
+    assert_eq!(sites.len(), 4, "{sites:?}");
+}
+
+#[test]
+fn a_local_first_written_with_anything_but_a_new_is_no_subject() {
+    for body in [
+        "$f = make(); unset($f); $f = new D;",
+        "$f = null; $f = new D; unset($f);",
+        "$f = new $c; unset($f);",
+        "$f = new static; unset($f);",
+        "$f = new self; unset($f);",
+    ] {
+        let sites = drops("", body);
+        assert!(!sites.iter().any(|s| s.2 == "$f" || s.0 == C::DropScopeExit), "{body}: {sites:?}");
+    }
+    // The inner write of a chain is a write of its own variable, not of the outer one.
+    assert_eq!(
+        drops("", "$a = $f = new D; unset($a);"),
+        [drop_site(C::DropScopeExit, &["D"], "}")]
+    );
+    // `??=` assigns only an unset variable, so it is no write of a value to drop.
+    assert_eq!(drops("", "$f ??= new D; unset($f);"), []);
+}
+
+#[test]
+fn a_parameter_is_a_subject_by_its_hint_even_where_the_frame_writes_it() {
+    let sites = drops("D $d", "$d = null; unset($d);");
+    assert_eq!(
+        sites,
+        [
+            drop_site(C::DropReassign, &["$d"], "$d = null"),
+            drop_site(C::DropUnset, &["$d"], "$d"),
+            drop_site(C::DropScopeExit, &["$d"], "}"),
+        ]
+    );
+    // Every hint that can name a class: nullable, union, intersection.
+    for hint in ["?D", "D|int", "D&E", "int|D|null"] {
+        assert_eq!(drops(&format!("{hint} $d"), "").len(), 1, "{hint}");
+    }
+}
+
+#[test]
+fn a_parameter_that_cannot_name_a_class_or_is_not_dropped_by_value_is_no_subject() {
+    for params in [
+        "int $i",
+        "array $a",
+        "mixed $m",
+        "iterable $i",
+        "callable $c",
+        "object $o",
+        "$u",
+        "self $s",
+        "string|int $s",
+        "&$r",
+        "D &$r",
+        "D ...$ds",
+    ] {
+        assert_eq!(drops(params, "").len(), 0, "{params}");
+    }
+    // A promoted parameter lives on in its property.
+    let src = "<?php\nclass K { public function __construct(private D $d) {} }\n";
+    let tree = SourceTree::parse(src);
+    let sites = &tree.classes()[0].methods[0].sites;
+    assert!(sites.iter().all(|s| !matches!(s.kind, SiteKind::Operator { family: F::Drop, .. })));
+}
+
+#[test]
+fn a_new_temporary_is_a_site_in_statement_receiver_and_argument_position() {
+    assert_eq!(drops("", "new D;"), [drop_site(C::DropTemporary, &["D"], "new D")]);
+    assert_eq!(drops("", "(new R)->m();"), [drop_site(C::DropTemporary, &["R"], "new R")]);
+    assert_eq!(drops("", "foo(new D, 1);"), [drop_site(C::DropTemporary, &["D"], "new D")]);
+    assert_eq!(drops("", "$o->m(x: new D());"), [drop_site(C::DropTemporary, &["D"], "new D()")]);
+    assert_eq!(drops("", "K::m(new D);"), [drop_site(C::DropTemporary, &["D"], "new D")]);
+    assert_eq!(
+        drops("", "new X(new D);"),
+        [
+            drop_site(C::DropTemporary, &["X"], "new X(new D)"),
+            drop_site(C::DropTemporary, &["D"], "new D"),
+        ]
+    );
+    assert_eq!(drops("", "$x = foo(new D);"), [drop_site(C::DropTemporary, &["D"], "new D")]);
+}
+
+#[test]
+fn a_new_that_escapes_is_no_temporary() {
+    for body in [
+        "$x = new D;",
+        "return new D;",
+        "$this->d = new D;",
+        "yield new D;",
+        "$a = [new D];",
+        "$c = function () { return new D; };",
+        "echo new D;",
+        "foo(...[new D]);",
+        "$o = new $c;",
+        "new static;",
+    ] {
+        let sites = drops("", body);
+        assert!(!sites.iter().any(|s| s.0 == C::DropTemporary), "{body}: {sites:?}");
+    }
+}
+
+#[test]
+fn an_anonymous_class_carries_what_its_body_declares() {
+    // A destructor of its own, or a trait whose body is unread: user code at the drop.
+    for class in ["{ function __destruct() {} }", "{ use T; }"] {
+        let body = format!("$x = new class {class}; unset($x);");
+        assert_eq!(
+            drops("", &body),
+            [drop_site(C::DropUnset, &["?"], "$x"), drop_site(C::DropScopeExit, &["?"], "}")],
+            "{class}"
+        );
+    }
+    // A parent is the class for the chain's sake; no parent and no destructor runs nothing.
+    assert_eq!(
+        drops("", "new class extends P {};"),
+        [drop_site(C::DropTemporary, &["P"], "new class extends P {}")]
+    );
+    assert_eq!(drops("", "new class {}; $x = new class {}; unset($x);"), []);
+    assert_eq!(
+        drops("", "foo(new class { function __destruct() {} });"),
+        [drop_site(C::DropTemporary, &["?"], "new class { function __destruct() {} }")]
+    );
+}
+
+#[test]
+fn a_closure_has_its_own_subjects() {
+    let src = "<?php\nfunction f() { $g = function () { $x = new D; }; $x = new E; }\n";
+    let tree = SourceTree::parse(src);
+    let sites = &tree.functions()[0].sites;
+    let drop_exits = |sites: &[steins_syntax::SiteOrigin]| {
+        sites
+            .iter()
+            .filter(|s| {
+                matches!(s.kind, SiteKind::Operator { construct: C::DropScopeExit, .. })
+            })
+            .count()
+    };
+    // The frame holds `$x = new E` only; the closure's `$x` is the closure's.
+    assert_eq!(drop_exits(sites), 1);
+    let closure = tree
+        .scopes()
+        .iter()
+        .find(|s| matches!(s.owner, steins_syntax::ScopeOwner::Closure { .. }))
+        .expect("a closure scope");
+    assert_eq!(drop_exits(&closure.sites), 1);
+}
+
+#[test]
+fn drop_sites_are_neither_lanes_origins() {
+    let src = "<?php\nfunction f(D $d) { $x = new E; unset($x); new F; }\n";
+    let tree = SourceTree::parse(src);
+    let sites = &tree.functions()[0].sites;
+    assert!(sites.iter().any(|s| matches!(s.kind, SiteKind::Operator { family: F::Drop, .. })));
+    let origins = format!("{:?}", derive_effect_origins(sites));
+    assert!(!origins.contains("Operator") && !origins.contains("Drop"), "{origins}");
+    assert!(!format!("{:?}", derive_throw_origins(sites)).contains("Drop"));
+}

@@ -35,6 +35,8 @@ impl<'a> Operator<'a, '_> {
             F::ArrayAccess => self.array_access(bound),
             F::Iterate => self.iterate(bound, depth),
             F::Clone => self.clone_object(bound),
+            // A drop has no operand to read a class off: it resolves apart (`drops`).
+            F::Drop => self.gap(),
         }
     }
 
