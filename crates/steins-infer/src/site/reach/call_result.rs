@@ -77,7 +77,7 @@ pub(super) fn method_result(
         Resolution::Found(found) => project_method_held(cx, frame, &start, &found),
         // `__call` may answer a name no class of a wholly project chain declares.
         Resolution::NotFoundChainComplete => Held::Unknown,
-        Resolution::Unknown => engine_method_held(cx, &start, method, exact),
+        Resolution::Unknown => engine_method_held(cx, frame, (&start, exact), method),
     }
 }
 
@@ -141,15 +141,30 @@ fn project_method_held(cx: &Cx, frame: &Frame, start: &str, found: &ResolvedMeth
 /// `start`'s chain leaves the project at ([`engine_exit`]): an exact receiver reads
 /// the row of the method it runs; a bound one only that of a final `Throwable`
 /// accessor, which no subclass replaces.
-fn engine_method_held(cx: &Cx, start: &str, method: &str, exact: bool) -> Held {
+fn engine_method_held(
+    cx: &Cx,
+    frame: &Frame,
+    (start, exact): (&str, bool),
+    method: &str,
+) -> Held {
     let Some(exit) = engine_exit(cx, start, method) else { return Held::Unknown };
     // `getMessage()` and `getCode()` read an untyped property (`protected $message`,
     // `protected $code`) a subclass may fill with an object, which the return then
     // converts (`__toString` runs in the accessor) or hands back: no receiver is shown
     // to hold a string, `parent::` and `Foo::` run on `$this` and `new` is not told
-    // apart from them. `getFile()` and `getLine()` read typed properties, and
-    // `getTrace()` and `getTraceAsString()` a private typed one.
-    if ["getmessage", "getcode"].contains(&method.to_ascii_lowercase().as_str()) {
+    // apart from them. `getFile()` and `getLine()` read typed properties, which hold a string
+    // or an int unless a subclass unsets one and declares `__get`: the engine then reads the
+    // property through it (`unset($this->file)`, `__get` returning an object whose `__toString`
+    // runs in the accessor, witnessed on PHP 8.5.11), so they are read only where no such
+    // subclass can exist (see [`property_read_is_direct`]). `getTrace()` and
+    // `getTraceAsString()` read a private typed property no subclass reaches.
+    let accessor = method.to_ascii_lowercase();
+    if ["getmessage", "getcode"].contains(&accessor.as_str()) {
+        return Held::Unknown;
+    }
+    if ["getfile", "getline"].contains(&accessor.as_str())
+        && !property_read_is_direct(cx, frame, (start, exact))
+    {
         return Held::Unknown;
     }
     if !exact && steins_catalog::final_method_effect_labels(&exit, method).is_none() {
@@ -157,6 +172,29 @@ fn engine_method_held(cx: &Cx, start: &str, method: &str, exact: bool) -> Held {
     }
     builtin_method_row(&exit, method, cx.php_target)
         .map_or(Held::Unknown, |(declared, _)| declared_held(declared))
+}
+
+/// Whether an engine accessor called on an object of `start`'s class reads its property
+/// directly, where no class can declare `__get` for it to fall back on once a subclass
+/// `unset`s the property. No project class on the chain from `start` declares `__get`, and
+/// no subclass can: the class is final, or the receiver is exactly `start` and the enclosing
+/// class is no instance of it (`parent::` and `Foo::` run on `$this`, which a subclass of the
+/// enclosing class may be).
+fn property_read_is_direct(cx: &Cx, frame: &Frame, (start, exact): (&str, bool)) -> bool {
+    let mut cur = start.to_owned();
+    let mut seen: HashSet<String> = HashSet::new();
+    while seen.insert(cur.to_ascii_lowercase()) {
+        let Some((file, cd)) = cx.find_class(&cur) else { break };
+        if cd.methods.iter().any(|m| m.name.eq_ignore_ascii_case("__get")) {
+            return false;
+        }
+        match &cd.parent {
+            Some(parent) => cur = cx.units[file].tree.resolve_class_fqn(parent),
+            None => break,
+        }
+    }
+    cx.class_has_no_subclass(start)
+        || (exact && frame.class_fqn.is_none_or(|own| cx.is_a(own, start) == IsA::No))
 }
 
 /// What a value of the native type written at `ret` in `file` holds.
