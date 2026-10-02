@@ -79,7 +79,8 @@ var_dump($a === $b, strlen($a));\n$map = [\"\x82\xA0\" => 1, \"\x82\xA2\" => 2];
 var_dump(count($map));\n";
 
 /// Two properties whose names differ only in a byte the decode replaces.
-const PROPS: &[u8] = b"<?php\nclass Bag { public int $field\xC9 = 1; public string $field\xFF = \"a\"; }\n\
+const PROPS: &[u8] = b"<?php\n\
+class Bag { public int $field\xC9 = 1; public string $field\xFF = \"a\"; }\n\
 $b = new Bag();\n$b->field\xFF = \"hello\";\n$b->field\xC9 = 2;\n";
 
 /// The dump lines of a run, `line:col: …: dumped type: T` reduced to `T`, in order.
@@ -112,6 +113,27 @@ fn two_properties_the_decode_made_alike_are_no_claim() {
         assert_eq!(r.code, 0, "{profile}: stdout:\n{}\nstderr:\n{}", r.stdout, r.stderr);
         assert!(r.stdout.is_empty(), "{profile}: a collapsed name claims nothing:\n{}", r.stdout);
     }
+}
+
+#[test]
+fn a_body_whose_names_collapsed_is_not_descended_into_from_another_file() {
+    // `h(null)` binds the callee's parameter to `null` and walks its body: the clean twin
+    // reports `$x->m()` at the callee's line. When a variable in that body is spelled with a
+    // byte the decode replaces, the body's names cannot be told apart and nothing is said.
+    let body = |name: &[u8]| {
+        [b"<?php\nfunction h($x) { $v".as_slice(), name, b" = 1; return $x->m(); }\n"].concat()
+    };
+    let clean = TempProject::new("descent-clean");
+    clean.write("a.php", &body(b"X"));
+    clean.write("b.php", b"<?php\nh(null);\n");
+    let r = run(&["check", "--no-cache", clean.path()]);
+    assert!(r.stdout.contains("error[call.on-null]"), "the control reports:\n{}", r.stdout);
+
+    let lossy = TempProject::new("descent-lossy");
+    lossy.write("a.php", &body(b"\xC9"));
+    lossy.write("b.php", b"<?php\nh(null);\n");
+    let r = run(&["check", "--no-cache", lossy.path()]);
+    assert!(r.stdout.is_empty(), "no claim from a collapsed body:\n{}", r.stdout);
 }
 
 #[test]
@@ -191,9 +213,9 @@ fn transform_refuses_a_byte_lossy_file_before_planning_it() {
     let lib = b"<?php\n// \x82\xA0\n/** @param int $x */\nfunction f($x) { return $x; }\n";
     proj.write("lib.php", lib);
     proj.write("main.php", b"<?php\nf(1);\n");
-    for args in [&["transform", "phpdoc-to-native"][..], &["transform", "phpdoc-to-native", "--apply"]]
-    {
-        let mut args = args.to_vec();
+    for flags in [&[] as &[&str], &["--apply"]] {
+        let mut args = vec!["transform", "phpdoc-to-native"];
+        args.extend_from_slice(flags);
         args.push(proj.path());
         let r = run(&args);
         assert_eq!(r.code, 2, "{args:?}: stderr:\n{}", r.stderr);

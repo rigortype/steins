@@ -1358,7 +1358,9 @@ fn effect_attr_labels(attr: &Attribute<'_>) -> Option<Vec<String>> {
         }
         match p.value.unparenthesized() {
             // `?` widens an undecodable literal to unrecognized, like a non-string arg.
-            Expression::Literal(Literal::String(ls)) => labels.push(utf8_loss::string_name(ls.value?)),
+            Expression::Literal(Literal::String(ls)) => {
+                labels.push(utf8_loss::string_name(ls.value?));
+            }
             _ => return None, // constant / concatenation / non-string literal → unrecognized
         }
     }

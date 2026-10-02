@@ -1048,9 +1048,8 @@ fn lower_literal(lit: &Literal<'_>) -> ArgValue {
         // ill-formed sequence before the parser sees it; `restore_literal` puts the bytes the
         // file actually spells back, so the literal is a byte string of its own rather than
         // the same `"\u{FFFD}"` as every other.
-        Literal::String(ls) => {
-            utf8_loss::restore_literal(ls).map_or(ArgValue::Other, |bytes| ArgValue::Str(php_str_of(bytes)))
-        }
+        Literal::String(ls) => utf8_loss::restore_literal(ls)
+            .map_or(ArgValue::Other, |bytes| ArgValue::Str(php_str_of(bytes))),
         Literal::True(_) => ArgValue::Bool(true),
         Literal::False(_) => ArgValue::Bool(false),
         Literal::Null(_) => ArgValue::Null,

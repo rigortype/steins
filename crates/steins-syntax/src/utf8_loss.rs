@@ -238,7 +238,12 @@ enum Spelling {
 ///
 /// The splice is checked, not trusted: the same walk with U+FFFD at each point must give
 /// `value` back exactly, or the answer is `None` and the literal declines.
-fn restore<'a>(span: Span, raw: &[u8], value: &'a [u8], spelling: Spelling) -> Option<Cow<'a, [u8]>> {
+fn restore<'a>(
+    span: Span,
+    raw: &[u8],
+    value: &'a [u8],
+    spelling: Spelling,
+) -> Option<Cow<'a, [u8]>> {
     let points = ACTIVE.with_borrow(|active| {
         active.as_ref().map(|a| a.within(span.start, span.end).to_vec()).unwrap_or_default()
     });
