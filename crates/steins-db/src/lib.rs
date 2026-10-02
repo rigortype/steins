@@ -30,7 +30,7 @@ pub use partition::PackagePartition;
 pub use plugins::PluginFacts;
 pub use shard::{
     MagicObstacle, MergedTables, PackageShard, ShardSite, class_magic_obstacles,
-    fallback_package_key, merge_shards,
+    fallback_package_key, fold_class_aliases, merge_shards,
 };
 
 /// The database trait analysis queries are written against. Downstream crates
@@ -137,6 +137,9 @@ pub struct ProjectIndex {
     ambiguous_functions: HashSet<String>,
     /// Class FQNs defined in more than one file (ambiguous → never resolved).
     ambiguous_classes: HashSet<String>,
+    /// For each class name the `class_alias` fold left ambiguous, the sorted lowercase
+    /// textual FQNs it may bind to (see [`shard::fold_class_aliases`]).
+    alias_candidates: HashMap<String, Vec<String>>,
     /// Lowercased simple function name → every definition site. Used where only
     /// the last segment is available at the use site (constant-function
     /// resolution, fold shadowing).
@@ -208,6 +211,20 @@ impl ProjectIndex {
         &self.ambiguous_classes
     }
 
+    /// The textual classes an **ambiguous** name the `class_alias` fold touched may bind
+    /// to (sorted, lowercase), empty for any other name. `key` is matched
+    /// case-insensitively.
+    #[must_use]
+    pub fn alias_candidates(&self, key: &str) -> &[String] {
+        self.alias_candidates.get(&key.to_ascii_lowercase()).map_or(&[], Vec::as_slice)
+    }
+
+    /// The whole candidate table, for the index adapter on the analysis side.
+    #[must_use]
+    pub fn alias_candidates_table(&self) -> &HashMap<String, Vec<String>> {
+        &self.alias_candidates
+    }
+
     /// Read access to the simple-name → sites map.
     #[must_use]
     pub fn fn_by_simple(&self) -> &HashMap<String, Vec<DeclSite>> {
@@ -258,6 +275,7 @@ impl ProjectIndex {
             classes: m.classes.into_iter().map(|(fqn, s)| (fqn, site(s))).collect(),
             ambiguous_functions: m.ambiguous_functions,
             ambiguous_classes: m.ambiguous_classes,
+            alias_candidates: m.alias_candidates,
             fn_by_simple: m
                 .fn_by_simple
                 .into_iter()
@@ -321,35 +339,18 @@ mod shard_oracle {
                 insert_unique(&mut idx.classes, &mut idx.ambiguous_classes, &c.fqn, site);
             }
         }
-        // The fold is a fixpoint over rounds (class identity, #926): a round resolves
-        // every pending edge against the snapshot it began with and mints them together.
-        let mut pending: Vec<(String, String)> = Vec::new();
+        // The fold is the one candidate-set fixpoint (class identity, #926); the
+        // oracle's own job is the single-pass textual tables around it.
+        let mut edges: Vec<(String, String)> = Vec::new();
         for &file in project.files(db) {
             let tree = parse(db, file);
             for edge in tree.class_alias_edges() {
-                pending.push((edge.alias_fqn.clone(), edge.target_fqn.clone()));
+                edges.push((edge.alias_fqn.clone(), edge.target_fqn.clone()));
             }
         }
-        loop {
-            let mut resolved: Vec<(String, DeclSite)> = Vec::new();
-            let mut waiting: Vec<(String, String)> = Vec::new();
-            for (alias_fqn, target_fqn) in pending {
-                if idx.ambiguous_classes.contains(&target_fqn) {
-                    continue;
-                }
-                match idx.classes.get(&target_fqn) {
-                    Some(&target) => resolved.push((alias_fqn, target)),
-                    None => waiting.push((alias_fqn, target_fqn)),
-                }
-            }
-            if resolved.is_empty() {
-                break;
-            }
-            for (alias_fqn, target) in resolved {
-                insert_unique(&mut idx.classes, &mut idx.ambiguous_classes, &alias_fqn, target);
-            }
-            pending = waiting;
-        }
+        let edges: Vec<(&str, &str)> = edges.iter().map(|(a, t)| (a.as_str(), t.as_str())).collect();
+        idx.alias_candidates =
+            fold_class_aliases(&mut idx.classes, &mut idx.ambiguous_classes, &edges);
         idx
     }
 
@@ -397,7 +398,14 @@ mod shard_oracle {
         assert!(via_shards.ambiguous_classes.contains("local"), "within-shard duplicate survives");
         assert!(via_shards.classes.contains_key("app\\widget"), "cross-shard alias minted");
         assert!(via_shards.classes.contains_key("shim"), "vendor alias of a root target minted");
-        assert!(!via_shards.classes.contains_key("never"), "ambiguous target mints no edge");
+        assert!(!via_shards.classes.contains_key("never"), "ambiguous target mints no site");
+        assert!(via_shards.ambiguous_classes.contains("never"), "an alias of an ambiguous class is ambiguous");
+        assert_eq!(via_shards.alias_candidates("never"), ["lib\\a\\dup"]);
+        assert!(via_shards.alias_candidates("lib\\a\\dup").is_empty(), "a plain duplicate has none");
+        let kernel = via_shards.classes["app\\kernel"];
+        assert!(via_shards.classes["deep"] == kernel && via_shards.classes["deeper"] == kernel);
+        assert!(!via_shards.classes.contains_key("b1") && !via_shards.ambiguous_classes.contains("b1"));
+        assert!(!via_shards.classes.contains_key("b2") && !via_shards.ambiguous_classes.contains("b2"));
         assert_eq!(via_shards.fn_by_simple["helper"].len(), 3);
     }
 }

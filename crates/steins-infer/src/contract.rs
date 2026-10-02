@@ -1571,6 +1571,20 @@ impl<'a> Cx<'a> {
         if stringable_target && maybe_stringable {
             walk.verdict = IsA::Unknown;
         }
+        if walk.verdict == IsA::No
+            && self
+                .index
+                .alias_candidates(&target.to_ascii_lowercase())
+                .iter()
+                .any(|candidate| seen.contains(candidate))
+        {
+            // The target is ambiguous because a `class_alias` names it beside another
+            // declaration (the BC shim `class_alias(NewItem::class, OldItem::class)` next
+            // to `if (false) { class OldItem extends NewItem {} }`), or because its edges
+            // reach two classes, and the walk enumerated one of the classes it may be.
+            // A target no enumerated class can be keeps its `No`.
+            walk.verdict = IsA::Unknown;
+        }
         if walk.verdict == IsA::No && self.target_unseen(target) {
             // The target names nothing the analysis can see, and a runtime-minted class
             // (a dynamic `class_alias`, an `eval`, an include) could be what it names —

@@ -12,18 +12,6 @@
 # Triaged TRUE proof-layer positives (ADR-0043 §5). Each row's triage is in
 # the comment beside it; adding a row is a conscious, orchestrator-visible act.
 
-# monolog's own test deliberately constructs `new MongoDBHandler(new
-# \stdClass, …)` and asserts the TypeError; `stdClass` is a mined root with
-# no supers (ADR-0043), so it is-a-NOs the `Client|Manager` union. TRUE.
-[[finding]]
-package = "Seldaek/monolog"
-id = "type.argument-mismatch"
-path_suffix = "tests/Monolog/Handler/MongoDBHandlerTest.php"
-line = 27
-# Source-cased since `TypeMember::Instance` grew its `display` field
-# (diagnostics render the declared casing; matching stays lowercased).
-message_contains = "cannot become MongoDB\\Client|MongoDB\\Driver\\Manager"
-
 # ADR-0078 #190: `dataProviderThatTriggersPhpError` (`$foo = []; $foo->bar();`)
 # is issue 5451's reproduction fixture — genuinely fatals by design. TRUE.
 [[finding]]
