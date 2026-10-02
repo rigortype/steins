@@ -75,6 +75,7 @@ mod offsets;
 mod operands;
 mod out_params;
 mod overrides;
+mod panic_guard;
 mod predicates;
 pub mod profile;
 mod progress;
@@ -200,6 +201,7 @@ impl Default for RuntimePostures {
 /// The catalog's refusal axis, re-exported: a consumer of [`SurfaceSummary`]
 /// reads the classification without naming `steins-catalog`.
 pub use steins_catalog::{RefusalAxis, ResourceParam};
+pub use panic_guard::{TEST_PANIC_ENV, isolate_file_panics};
 pub use suppress::{
     DIAGNOSTIC_IDS, DIAGNOSTIC_REGISTRY, FACET_ORIGIN, Facet, Floor, INLINE_IGNORE, InlineOutcome,
     Layer, Origin, SUPPRESS_UNKNOWN_ID, SUPPRESS_UNMATCHED_ID, apply_inline_ignores,

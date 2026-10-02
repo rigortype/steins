@@ -1,6 +1,6 @@
 //! What a generation run writes after it analyzes: nothing, when this run is
 //! the published generation and nothing degraded, or when the fold surface lost
-//! an answer; otherwise a candidate — each unmoved package's artifact shared
+//! an answer or a walk panicked; otherwise a candidate — each unmoved package's artifact shared
 //! with the published generation, every other package's reassembled per file,
 //! this run's walk blocks in the one sidecar, the fold table — published over
 //! `CURRENT`. A failure here is a note and never the run's verdict: the findings
@@ -45,6 +45,31 @@ pub(super) struct Publishable<'a> {
     pub(super) summaries: Summaries<'a>,
 }
 
+/// What can withhold a run's publication outright, whatever else it did.
+pub(super) struct Withheld {
+    /// Fold requests that ended with the transport dead or silent.
+    pub(super) fold_losses: u32,
+    /// Files whose walk panicked, each reported as `internal.panic`.
+    pub(super) panics: usize,
+}
+
+impl Withheld {
+    /// Why nothing is published, or `None` when nothing withholds it.
+    fn note(&self) -> Option<String> {
+        let Withheld { fold_losses, panics } = *self;
+        if fold_losses > 0 {
+            return Some(format!(
+                "the PHP sidecar lost {fold_losses} answer(s) this run; nothing published, so no later run replays a finding computed without them"
+            ));
+        }
+        (panics > 0).then(|| {
+            format!(
+                "{panics} file(s) panicked in their walk this run; nothing published, so no later run replays an internal.panic in place of a file's analysis"
+            )
+        })
+    }
+}
+
 /// Publish — or keep CURRENT when this run *is* the published generation
 /// and nothing degraded (a degradation republishes to repair the artifact).
 /// Returns the published (or confirmed-current) generation id, lowercase hex,
@@ -66,19 +91,24 @@ pub(super) struct Publishable<'a> {
 /// from the fold table alone, or a `--no-php` run, fails without having lost
 /// anything: their blocks are exactly what their stamp says.
 ///
+/// **A run whose walk panicked publishes nothing either** (issue #895 D3), by
+/// the same reasoning one step further: the panicked file's block is its
+/// `internal.panic` finding, and published it would replay on every later run
+/// — the panic reported forever, and the file never analyzed again, after
+/// whatever caused it is fixed. Withholding the candidate keeps the panic a
+/// property of this run.
+///
 /// [`FoldPosture::sidecar_backed_throughout`]: crate::FoldPosture::sidecar_backed_throughout
 pub(super) fn publish_or_reuse(
     store: &Store,
     current: Option<&Generation>,
     run: Publishable<'_>,
     fold_degraded: bool,
-    fold_losses: u32,
+    withheld: Withheld,
     notes: &mut Vec<String>,
 ) -> (Option<String>, usize) {
-    if fold_losses > 0 {
-        notes.push(format!(
-            "the PHP sidecar lost {fold_losses} answer(s) this run; nothing published, so no later run replays a finding computed without them"
-        ));
+    if let Some(note) = withheld.note() {
+        notes.push(note);
         return (None, 0);
     }
     let states = &run.loaded.states;

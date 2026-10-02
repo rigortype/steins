@@ -66,11 +66,13 @@
 //! its package's reparse until any identity input moves — ADR-0092 §8's
 //! recovery story ("throw the cache away") is the unclever repair.
 //!
-//! The one degradation that withholds publication is a **lost fold answer**
-//! (issue #784): a run whose sidecar died or went silent computed some walk
-//! blocks without replies it asked for, and nothing in a block's stamp says
-//! so. Such a run publishes nothing and leaves `CURRENT` as it was; see
-//! `publish_or_reuse`.
+//! Two degradations withhold publication. A **lost fold answer** (issue
+//! #784): a run whose sidecar died or went silent computed some walk blocks
+//! without replies it asked for, and nothing in a block's stamp says so. And a
+//! **panicked walk** (issue #895 D3): the file's block is its `internal.panic`
+//! finding, which a later run must not replay as if it were the file's
+//! analysis. Either way the run publishes nothing and leaves `CURRENT` as it
+//! was; see `publish_or_reuse`.
 //!
 //! **What the generation identity covers** ([`GenerationInputs`], filled in
 //! [`generation_check`]): the analyzer's own version (`CARGO_PKG_VERSION` —
@@ -162,7 +164,7 @@ use crate::{Diagnostic, Divergence, EngineFolder, ProcessEngine, RuntimePostures
 
 use self::identity::{RunIdentity, universe_digest};
 use self::load::{Captured, Loaded, NameDelta, block_index, capture, load_or_parse, name_delta};
-use self::publish::{Fold, Publishable, Summaries, publish_or_reuse};
+use self::publish::{Fold, Publishable, Summaries, Withheld, publish_or_reuse};
 
 // ---------------------------------------------------------------------------
 // The orchestrator's own section: which sources an artifact was built from.
@@ -534,8 +536,9 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
     // Read after the walk, whose workers ask through this same child, so a
     // death anywhere in the run is counted here.
     let losses = fold.folder.posture().losses;
+    let withheld = Withheld { fold_losses: losses, panics: panicked_files(&analysis.findings) };
     let (generation, shared_artifacts) =
-        publish_or_reuse(&store, current.as_ref(), publishable, fold.degraded, losses, &mut notes);
+        publish_or_reuse(&store, current.as_ref(), publishable, fold.degraded, withheld, &mut notes);
     let persist_ms = ms(t_persist.elapsed());
     progress.phase("persist");
 
@@ -765,6 +768,12 @@ fn analyze(
     }
     let universe = universe.expect("the planner runs before the first file is walked");
     Analysis { findings, attribution_notices, walk, ledger, universe, passes, merge_ms, analyze_ms }
+}
+
+/// How many files of this run panicked in their walk: each left exactly one
+/// `internal.panic` finding.
+fn panicked_files(findings: &[Diagnostic]) -> usize {
+    findings.iter().filter(|d| d.id == crate::INTERNAL_PANIC_ID).count()
 }
 
 /// The walk's own notes: every paranoid divergence, the replay count whenever

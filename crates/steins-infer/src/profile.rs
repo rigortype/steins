@@ -69,8 +69,8 @@ use std::fmt;
 use crate::project::Diagnostic;
 use crate::{
     DEBUG_PHPDOC_TYPE_ID, DEBUG_TRACE_ID, DEBUG_TYPE_ID, DEBUG_VAR_DUMP_ID, DIAGNOSTIC_REGISTRY,
-    Facet, Floor, Layer, Origin, THROW_UNDECLARED_ID, UNTYPED_CLASS_CONSTANT_ID, layer,
-    pattern_is_known, pattern_matches, surface_floor,
+    Facet, Floor, INTERNAL_PANIC_ID, Layer, Origin, THROW_UNDECLARED_ID,
+    UNTYPED_CLASS_CONSTANT_ID, layer, pattern_is_known, pattern_matches, surface_floor,
 };
 
 /// The default profile name, used when neither `--profile` nor `[check] profile`
@@ -273,6 +273,14 @@ impl Surface {
         if l == Layer::Debug {
             return false;
         }
+        // `internal.panic` (issue #895 D3) is never captured either: it reports
+        // the tool failing, never code a baseline could hold, and a run that
+        // reports one refuses `--set-baseline`. Counting it here would only make
+        // every baseline written before it existed announce an id it can never
+        // carry. Its display is decided in [`Surface::is_surfaced`].
+        if id == INTERNAL_PANIC_ID {
+            return false;
+        }
         if layer_always_on(l) {
             return true;
         }
@@ -298,6 +306,10 @@ impl Surface {
     /// `throw.undeclared` finding is kept only when its origin facet is `direct`.
     #[must_use]
     pub fn is_surfaced(&self, d: &Diagnostic) -> bool {
+        // `internal.panic` displays on every surface and no profile reaches it.
+        if d.id == INTERNAL_PANIC_ID {
+            return true;
+        }
         // Debug (ADR-0053 §4) is default-ON on every profile, never in
         // `surfaces_id` (baseline-exempt, §8). The explicit pair is profile-inert;
         // `debug.var-dump` is the ONE profile-disableable dump (ADR-0074 §8:
