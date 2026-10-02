@@ -63,14 +63,16 @@ designed and not yet shipped.
 
 ### Exit codes
 
-`2` always means "the invocation or the configuration is wrong" — a bad
-flag, a missing flag argument, an unknown profile, an unparseable
-`steins.toml`, a path that names nothing. It never means "your code has a
-problem". The other two codes vary by subcommand:
+`2` always means "this run is no verdict on your code": the invocation or
+the configuration is wrong — a bad flag, a missing flag argument, an
+unknown profile, an unparseable `steins.toml`, a path that names nothing —
+or, for `check`, Steins itself failed on a file (`internal.panic`). It
+never means "your code has a problem". The other two codes vary by
+subcommand:
 
 | Subcommand | `0` | `1` | `2` |
 | --- | --- | --- | --- |
-| `check` | nothing fail-level displayed | a fail-level finding displayed | usage or config error |
+| `check` | nothing fail-level displayed | a fail-level finding displayed | usage or config error, or an `internal.panic` displayed |
 | `annotate` | file printed | — | usage or read error |
 | `transform` | plan produced (and written, under `--apply`) | post-check found new diagnostics, or a write failed | usage error |
 | `effect-diff` | report produced, deltas or none | — | usage error, or an unreadable/unparseable baseline |
@@ -79,6 +81,11 @@ problem". The other two codes vary by subcommand:
 | `triage` | report produced, whatever the counts | — | usage error, an unreadable or non-JSON input, or a `check` run that exited `2` |
 | `version` | always | — | — |
 | `license` | always | — | — |
+
+`check` exits `2` on an `internal.panic` whatever else it displays, and
+still prints its whole report, because the other files' findings are real
+(see [findings](04-findings.md#internal--the-analyzer-failed-on-a-file)).
+It is the one `2` that comes with a document.
 
 Two rules cut across all nine. A path argument that names nothing is a
 usage error everywhere, checked before any output, so a renamed directory

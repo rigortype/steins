@@ -120,7 +120,9 @@ in released code, which is why they are opt-in.
 **mechanics** — the analyzer's own hygiene. A stale `@steins-ignore`, a
 misspelled id, a typo'd effect label. Their absence would silently rot
 another channel, so they print in every profile and no suppression channel
-reaches them.
+reaches them. `internal.panic`, the analyzer failing on a file, is
+mechanics too, and goes further: not even the vendor filter or a baseline
+reaches it.
 
 **debug** — requested introspection (ADR-0053, ADR-0074). You wrote
 `dumpType()`, a `@psalm-trace` docblock, or `var_dump()`; Steins answers. A
@@ -164,12 +166,12 @@ facets, and suppression are in
 
 ## The catalogue
 
-The registry holds **79 ids**, 78 of them with a live emitter. It is a closed
+The registry holds **80 ids**, 79 of them with a live emitter. It is a closed
 set bound by a totality test, so an id that reaches your terminal is in it
 and an id outside it cannot be emitted (ADR-0022). Each id below is shown
 with the PHP that triggers it and the transcript it produces.
 
-**The catalogue covers twelve families and is behind the registry.** v0.1.4
+**The catalogue covers thirteen families and is behind the registry.** v0.1.4
 landed a large port wave — `property.*`, `variable.*`, `constant.*`,
 `class-const.*`, `override.*`, `string.*`, `preg.*`, `array.*`, `closure.*`
 and `syntax.*` — and those families have no section here yet. `steins doctor`
@@ -1207,6 +1209,37 @@ nothing on its target line. The second misspells `type.argument-mismatch`,
 so the ignore is rejected *and* the finding it meant to suppress prints
 underneath. Ignore syntax and placement rules are in
 [chapter 5](05-profiles-and-baseline.md).
+
+### `internal.*` — the analyzer failed on a file
+
+One id, `internal.panic`: the analysis of one file hit an internal error, a
+panic, in Steins itself. That file gets this one finding at its line 1, in
+place of everything it would have reported, and every other file is
+analyzed as usual. The run then exits `2`, not `1`: the report is
+incomplete, so it is no verdict on your code (see
+[the exit codes](02-cli-reference.md#exit-codes)).
+
+```
+$ steins check --no-php src
+src/Area.php:3:6: error[type.argument-mismatch]: argument null to area() cannot become int $a — proven TypeError (coercive mode)
+src/Width.php:1:1: error[internal.panic]: the analyzer panicked on this file: STEINS_TEST_PANIC_ON names this file (at crates/steins-infer/src/panic_guard.rs:184); its findings are missing from this run — this is a bug in Steins, please report it
+steins: 1 file(s) panicked in analysis (internal.panic); their findings are missing, so this run exits 2 — this is a bug in Steins, please report it
+```
+
+The transcript comes from a debug build's test hook, which panics on
+purpose; a real panic names its own message and its place in the analyzer
+in the same position. (The sound-subset notice line is omitted.)
+
+Nothing you configure reaches it: not a profile's `disable` or `warn`, not
+`@steins-ignore`, not the vendor filter, not the baseline. And a run that
+reports one refuses `--set-baseline`, because that baseline would be missing
+the panicked file's findings. The remedy is a bug report;
+[troubleshooting](07-troubleshooting.md#a-file-reports-internalpanic) says
+what to put in it.
+
+Only the per-file analysis is isolated this way. A panic in the
+whole-project phases (parsing, the project index, the effect and throw
+fixpoints) has no file to name, and still ends the run.
 
 ### `debug.*` — you asked, Steins answered
 
