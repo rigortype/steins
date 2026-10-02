@@ -230,7 +230,7 @@ fn method_start(cx: &Cx, class_fqn: Option<&str>, callee: &Callee) -> Option<Str
         EffectRecv::This | EffectRecv::SelfKw => class_fqn.map(str::to_owned),
         EffectRecv::Parent => cx.parent_fqn(class_fqn?),
         EffectRecv::ClassName(name) => Some(cx.class_fqn(name)),
-        EffectRecv::Var(_) | EffectRecv::PropRead(_) => None,
+        EffectRecv::Var(_) | EffectRecv::PropRead(_) | EffectRecv::Bound(_) => None,
     }
 }
 

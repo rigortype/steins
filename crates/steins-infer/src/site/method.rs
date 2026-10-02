@@ -48,7 +48,10 @@ pub(super) fn method_edge(
             (cx.parent_fqn(own).ok_or(GapKind::UnknownClass)?, true)
         }
         EffectRecv::ClassName(name) => (cx.class_fqn(name), true),
-        EffectRecv::Var(_) | EffectRecv::PropRead(_) => return Err(GapKind::DeclaredReceiver),
+        // `Bound` is a drop site's receiver, never a call's.
+        EffectRecv::Var(_) | EffectRecv::PropRead(_) | EffectRecv::Bound(_) => {
+            return Err(GapKind::DeclaredReceiver);
+        }
     };
     let r = match resolve_in_chain(cx, &start, method) {
         Resolution::Found(r) => r,
@@ -339,6 +342,7 @@ fn engine_start(
             let fqn = declared_receiver_fqn(cx, enclosing, params, receiver)?;
             (fqn, false, format!("$this->{prop}->{method}"))
         }
+        EffectRecv::Bound(_) => return None,
     })
 }
 
@@ -407,7 +411,11 @@ pub(crate) fn declared_receiver_type<'a>(
         EffectRecv::PropRead(prop) => {
             cx.class_props(enclosing?).into_iter().find(|p| &p.name == prop)?.ty.as_ref()?
         }
-        EffectRecv::This | EffectRecv::SelfKw | EffectRecv::Parent | EffectRecv::ClassName(_) => {
+        EffectRecv::This
+        | EffectRecv::SelfKw
+        | EffectRecv::Parent
+        | EffectRecv::ClassName(_)
+        | EffectRecv::Bound(_) => {
             return None;
         }
     };

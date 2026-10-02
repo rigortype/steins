@@ -659,6 +659,11 @@ pub enum EffectRecv {
     /// `$this->repo->m()` where `repo` is a never-written property — the
     /// property-read twin of [`Self::Var`], same declared-lane rules.
     PropRead(String),
+    /// A value of this class or of a subclass: a class named by a parameter's
+    /// native hint, which [`ClassName`](Self::ClassName) (exactly this class) is
+    /// not. Only the drop sites carry it (ADR-0100 §7); appended last so no
+    /// persisted variant index moves.
+    Bound(NameRef),
 }
 
 /// One `catch` clause's caught types + bound variable, for the throw damming

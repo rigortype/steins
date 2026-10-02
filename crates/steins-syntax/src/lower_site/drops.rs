@@ -10,22 +10,23 @@
 //!   (anonymous classes included: the syntax layer reads their bodies), which
 //!   remembers every `new` class it is later written with;
 //! * a by-value, non-variadic, non-promoted parameter whose native hint names a
-//!   class, read by its declared hint even where the frame writes it;
+//!   class, as a bound ([`EffectRecv::Bound`]), even where the frame writes it;
 //! * a `new C` whose value nothing keeps: a statement, a method call's
 //!   receiver, or a call's argument. A `new` that is assigned, returned, stored,
 //!   yielded, captured or put in an array literal escapes, and is no site here.
 //!
-//! A class named by `self`, `static`, `parent` or a variable has no subject: a
-//! recorded residue, as is everything else a frame holds (an array, a call
-//! result, an untyped value).
+//! A `new` of a class named by `self`, `static`, `parent` or a variable has no
+//! subject: a recorded residue, as is everything else a frame holds (an array, a
+//! call result, an untyped value).
 //!
 //! **Forms.** `unset($v)`, an assignment over `$v`, one scope-exit site per
 //! subject at the end of the body, and the temporary's own expression. The first
 //! write to a local drops nothing unless a loop runs it again, so it is no
 //! reassignment outside a loop. A site carries one operand per class the
 //! subject may hold, as a receiver: [`EffectRecv::ClassName`] for a named class
-//! (exact), [`EffectRecv::Var`] for a parameter, `None` for a class the lowering
-//! already knows declares a destructor.
+//! (exact), [`EffectRecv::Bound`], [`EffectRecv::SelfKw`] and [`EffectRecv::Parent`]
+//! for a parameter's hint, `None` for a class the lowering already knows declares
+//! a destructor.
 
 use std::collections::BTreeMap;
 
@@ -46,9 +47,9 @@ use crate::{bytes_to_string, children, strip_dollar, to_span};
 /// What one variable of a frame may hold when it is dropped.
 #[derive(Debug, Default)]
 pub(crate) struct DropSubject {
-    /// The classes it may hold, one receiver per class ([`EffectRecv::ClassName`],
-    /// [`EffectRecv::Var`] for a parameter, `None` for a class that declares a
-    /// destructor itself).
+    /// The classes it may hold, one receiver per class ([`EffectRecv::ClassName`]
+    /// for a `new`, the hint's bounds for a parameter, `None` for a class that
+    /// declares a destructor itself).
     receivers: Vec<Option<EffectRecv>>,
     /// The start of the first write to a local when no loop and no `goto` can run
     /// it twice: it releases nothing, so it is not a reassignment. `None` for a
@@ -102,16 +103,33 @@ fn anonymous(ac: &AnonymousClass<'_>) -> Created {
     }
 }
 
-/// Whether a native hint can name a class: a class-like name anywhere in it.
-/// `array`, `mixed`, `self` and the scalars name none.
-fn hint_names_class(hint: &Hint<'_>) -> bool {
+/// The classes a native hint names, as bounds: a value of the class or of a
+/// subclass. Every class member of a union, an intersection or a nullable counts
+/// whatever else the hint holds (`array|D` names `D`); `self` and `parent` name the
+/// enclosing class and its parent, which the resolver reads. `array`, `mixed`,
+/// `object`, `iterable`, `callable` and the scalars name none.
+fn hint_receivers(hint: &Hint<'_>, out: &mut Vec<Option<EffectRecv>>) {
+    let mut push = |r: EffectRecv| {
+        let r = Some(r);
+        if !out.contains(&r) {
+            out.push(r);
+        }
+    };
     match hint {
-        Hint::Identifier(_) => true,
-        Hint::Nullable(n) => hint_names_class(n.hint),
-        Hint::Parenthesized(p) => hint_names_class(p.hint),
-        Hint::Union(u) => hint_names_class(u.left) || hint_names_class(u.right),
-        Hint::Intersection(i) => hint_names_class(i.left) || hint_names_class(i.right),
-        _ => false,
+        Hint::Identifier(id) => push(EffectRecv::Bound(name_ref(id))),
+        Hint::Self_(_) => push(EffectRecv::SelfKw),
+        Hint::Parent(_) => push(EffectRecv::Parent),
+        Hint::Nullable(n) => hint_receivers(n.hint, out),
+        Hint::Parenthesized(p) => hint_receivers(p.hint, out),
+        Hint::Union(u) => {
+            hint_receivers(u.left, out);
+            hint_receivers(u.right, out);
+        }
+        Hint::Intersection(i) => {
+            hint_receivers(i.left, out);
+            hint_receivers(i.right, out);
+        }
+        _ => {}
     }
 }
 
@@ -126,9 +144,12 @@ pub(crate) fn subjects<'a, 'arena: 'a>(
         let name = strip_dollar(bytes_to_string(p.variable.name));
         walk.params.push(name.clone());
         let by_value = !p.is_reference() && !p.is_variadic() && !p.is_promoted_property();
-        if by_value && p.hint.as_ref().is_some_and(hint_names_class) {
-            let receivers = vec![Some(EffectRecv::Var(name.clone()))];
-            walk.subjects.insert(name, DropSubject { receivers, clean_first: None });
+        if by_value && let Some(hint) = &p.hint {
+            let mut receivers = Vec::new();
+            hint_receivers(hint, &mut receivers);
+            if !receivers.is_empty() {
+                walk.subjects.insert(name, DropSubject { receivers, clean_first: None });
+            }
         }
     }
     for node in body {
