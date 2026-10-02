@@ -38,7 +38,9 @@ that changes one of these says so in its PR body.
 
 ## Measurement hygiene
 
-- A comparison asserts the binaries differ and the B side is non-empty.
+- A comparison asserts the binaries differ and the B side is non-empty, and
+  runs under the posture of the gate that judges it (for the fp-gate:
+  `--profile strict --no-php --vendor-diagnostics`).
 - One `steins check` per path at a time; `--no-cache` for A/B; `timeout` on
   long runs; a separate `CARGO_TARGET_DIR` per worktree.
 - A private-corpus run takes ~24 GB, so the machine holds one at a time: every
