@@ -452,3 +452,7 @@ finding instead.
      the one finding that says so.
    - **Retrying the walk.** The analysis is deterministic, so a retry
      panics again and doubles the cost of the report.
+
+## Amendment (2026-10-02): the strict floor of the envelope checks (issue #915) — PENDING ratification
+
+Two ids join the registry as `(Layer::Contract, Floor::Strict)`: `effect.maybe-envelope-exceeded` and `throw.maybe-undeclared`, the `maybe-` siblings of `effect.envelope-exceeded` and `throw.undeclared` (ADR-0100). They add findings at `strict` only; the `default` and `contracts` surfaces and every other id are unchanged.

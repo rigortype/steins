@@ -107,7 +107,10 @@ can hold ids at two rungs, which is what the contract layer does today
   *weaker* claim than their default-surface siblings, because they hold on
   some paths rather than all. `offset.maybe-missing` is the shape — a read
   of a key the declared shape marks *optional*, on a path where no guard
-  discharges it. This stage asks you to prove presence.
+  discharges it. This stage asks you to prove presence. The envelope checks
+  have their own strict leg: `effect.maybe-envelope-exceeded` and
+  `throw.maybe-undeclared` name the sites a declared envelope could not be
+  verified at.
 - **`pedantic`** — contracts plus the **house-style** asks: rules about how
   code should be written, where Steins itself has no finding to make. Today
   that is `untyped.class-constant`, a class constant with no native type and
@@ -186,12 +189,12 @@ $ steins doctor --no-php .
 | `default` | — | — | 48 |
 | `throws-direct` | `default` | `throw.undeclared`, direct escapes only | 49 |
 | `contracts` | `default` | the contract layer, except the strict and pedantic rungs | 66 |
-| `strict` | `contracts` | the some-paths-only claims — `offset.maybe-missing`, `variable.maybe-undefined`, `property.maybe-undefined`, `type.return-maybe-missing`, `type.maybe-argument-mismatch`, `phpdoc.maybe-argument-mismatch`, `type.maybe-return-mismatch`, `phpdoc.maybe-return-mismatch` | 74 |
+| `strict` | `contracts` | the some-paths-only claims — `offset.maybe-missing`, `variable.maybe-undefined`, `property.maybe-undefined`, `type.return-maybe-missing`, `type.maybe-argument-mismatch`, `phpdoc.maybe-argument-mismatch`, `type.maybe-return-mismatch`, `phpdoc.maybe-return-mismatch`, `effect.maybe-envelope-exceeded`, `throw.maybe-undeclared` | 76 |
 | `pedantic` | `contracts` | the house-style asks — `untyped.class-constant` | 67 |
 
 Only the `default` / `contracts` / `strict` rows nest. `throws-direct` and
 `pedantic` branch off their base, so neither contains nor is contained by
-`strict` — 67 and 74 are not steps on one scale, they are two different
+`strict` — 67 and 76 are not steps on one scale, they are two different
 supersets of the same 66.
 
 `boundary` is a reserved name (ADR-0050 §5, deferred to ADR-0042). Selecting
