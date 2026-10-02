@@ -23,9 +23,10 @@
 //!
 //! The way those tables are: by the **engine class the call resolves to**, by
 //! its FQN (`PDO`, `Random\RandomException`), case-insensitively (a leading `\`
-//! is ignored), never by walking up the hierarchy here. A caller that sees `new MyException($o)` with a
-//! project class resolves it to its nearest engine ancestor first, as it does
-//! for the effect and throw rows, and asks for that class. The one family
+//! is ignored), never by walking up the hierarchy here. A caller that sees
+//! `new MyException($o)` with a project class resolves it to its nearest engine
+//! ancestor first, as it does for the effect and throw rows, and asks for that
+//! class. The one family
 //! answered by ancestry is the engine `Throwable`s: all 60 of them (PHP
 //! 8.5.11, `Random\RandomException` and the other namespaced ones among them)
 //! are rowed by [`is_builtin_throwable`], and 56 share

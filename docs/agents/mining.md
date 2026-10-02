@@ -22,12 +22,14 @@ artefact.
 
 ## The class hierarchy
 
-`phpsrc-mining/hierarchy.toml` is the odd one out: no xtask, no engine. It is the output of
-`extract_hierarchy.py` over the pinned php-src checkout's stubs, and `cargo xtask gen-catalog`
-turns it into `hierarchy_generated.rs` and `display_names_generated.rs`:
+`phpsrc-mining/hierarchy.toml` is the odd one out: no xtask, and the engine is a cross-check rather
+than a source. It is the output of `extract_hierarchy.py` over the pinned php-src checkout's stubs,
+and `cargo xtask gen-catalog` turns it into `hierarchy_generated.rs` and
+`display_names_generated.rs`:
 
 ```sh
-PHP_SRC_ROOT=<php-src checkout> python3 docs/research/phpsrc-mining/extract_hierarchy.py \
+PHP_SRC_ROOT=<php-src checkout> PHP_BIN=<the pinned php> \
+  python3 docs/research/phpsrc-mining/extract_hierarchy.py \
   > docs/research/phpsrc-mining/hierarchy.toml
 cargo xtask gen-catalog
 ```
@@ -36,9 +38,21 @@ Every key is the class's FQN: the script reads a `namespace` statement across li
 parent the way PHP does (a leading backslash is fully qualified, anything else is relative to the
 declaring namespace), and it says on stderr when a relative parent names no declaration. A run that
 prints such a line has found a stub that spells a parent the engine does not read that way (#871);
-read the line before committing. The pin in the file's header is the checkout's commit; the
-`engine_hierarchy_keys` test holds each row to a live PHP's `ReflectionClass`, and rows the running
-PHP lacks (an unloaded extension, a class newer than that minor) are skipped, not failed.
+read the line before committing.
+
+**The stubs are not the engine.** php-src's stubs are a development branch and `PHP_BIN` is the
+pinned minor, built with whatever extensions it has, so a row can name a class that PHP lacks
+(`Io\Poll\PollException`, `StreamException`, `com_exception`). The script asks `PHP_BIN`
+(`class_exists` and siblings, autoload off) about every row, writes `absent_on_pinned = true` on the
+ones it does not declare and the version it asked in `php_cross_check`, and stops if `PHP_BIN` does
+not run. A marked row stays in the is-a walk and the display names, but the catalog does not treat
+it as an engine class, so a `new` of it stays a gap. A re-mine on another PHP, or one built with
+another extension set, moves the marks: read the stderr list of absent rows and the diff of the
+marked set, and revisit `NEWER_THAN_THE_CROSS_CHECK` in the `engine_hierarchy_keys` test.
+
+The test holds each row to a live PHP's `ReflectionClass`; a row the running PHP lacks has to say
+why (it is marked, its extension is not loaded, or the PHP is an older minor than the
+cross-check's), and no share of unexplained absences is tolerated.
 
 ## The engine set
 

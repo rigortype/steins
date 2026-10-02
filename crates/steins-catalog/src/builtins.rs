@@ -72,6 +72,29 @@ pub fn builtin_class_display(name: &str) -> Option<&'static str> {
         .map(|i| display_names_generated::DISPLAY_NAMES[i].1)
 }
 
+/// Whether the hierarchy lists `name` (class, interface or enum, case-insensitive, a leading
+/// backslash ignored) but the PHP it was cross-checked against ([`hierarchy_cross_checked_php`])
+/// does not declare it (issue #871).
+///
+/// The rows are php-src's stubs, a development branch that is later than the PHP the table is
+/// pinned to (`Io\Poll\PollException`, `StreamException`) and may name an extension that PHP is
+/// built without (`com_exception`). Such a row is a fact about the stubs, so the is-a walk and
+/// the display name keep it, but it is **no engine class**: `new` of it is an `Error` on the
+/// pinned PHP, and no catalog row may claim what the constructor of a class that is not there
+/// does. `false` for a name the hierarchy does not list.
+#[must_use]
+pub fn builtin_class_absent_on_pinned(name: &str) -> bool {
+    let key = name.trim_start_matches('\\').to_ascii_lowercase();
+    hierarchy_generated::ABSENT_ON_PINNED.binary_search(&key.as_str()).is_ok()
+}
+
+/// The version of the PHP the hierarchy's rows were cross-checked against
+/// ([`builtin_class_absent_on_pinned`]): the one that declared or did not declare each.
+#[must_use]
+pub fn hierarchy_cross_checked_php() -> &'static str {
+    hierarchy_generated::CROSS_CHECKED_PHP
+}
+
 /// Every class-like the mined hierarchy declares (enums included) as `(key, declared
 /// name)`: the lowercased FQN [`builtin_class_supers`] and [`builtin_class_display`] are
 /// keyed by, and the casing php-src declares. For a tripwire that asks a live engine
@@ -194,8 +217,18 @@ pub fn builtin_throws(name: &str) -> Option<&'static [&'static str]> {
 ///   overloaded properties with an `InvalidArgumentException`, and
 ///   `ArrayObject` an `$iteratorClass` that is not an `ArrayIterator` with a
 ///   `TypeError`.
-/// * `FiberError` refuses to be constructed at all, with an `Error`. Every
-///   other engine `Throwable`'s constructor only stores its arguments.
+/// * `FiberError` refuses to be constructed at all, with an `Error`.
+/// * `new SoapFault($code, ...)` raises a `ValueError` for a `$code` that is not a
+///   fault code (`['a']`, `''`), and
+///   `new Uri\WhatWg\InvalidUrlException($m, $errors)` one for an `$errors` array
+///   holding anything but `UrlValidationError`s. Both are checks on an admitted
+///   argument's *value*, which ADR-0099 §3.3 gives a row.
+/// * Every other engine `Throwable`'s constructor only stores its arguments. That
+///   holds for the constructors that are `Exception`'s or `Error`'s own, and was
+///   audited, with `ReflectionClass::getConstructor()` and a probe of each, for the
+///   four whose constructor is not: `ErrorException` (nothing raises, whatever the
+///   severity, file or line), `FiberError`, `SoapFault` and `InvalidUrlException`.
+///   A Throwable added with a constructor of its own needs the same audit.
 /// * `stdClass`, the SPL lists, heaps and `SplObjectStorage`, and `WeakMap`
 ///   declare no constructor, so nothing runs.
 ///
@@ -216,6 +249,9 @@ pub fn method_throws(class: &str, method: &str) -> Option<&'static [&'static str
         ("arrayobject", "__construct") => Some(&["InvalidArgumentException", "TypeError"]),
         ("arrayiterator", "__construct") => Some(&["InvalidArgumentException"]),
         ("fibererror", "__construct") => Some(&["Error"]),
+        ("soapfault" | "uri\\whatwg\\invalidurlexception", "__construct") => {
+            Some(&["ValueError"])
+        }
         (
             "stdclass" | "spldoublylinkedlist" | "splstack" | "splqueue" | "splobjectstorage"
             | "splpriorityqueue" | "splminheap" | "splmaxheap" | "weakmap",
@@ -1257,15 +1293,26 @@ mod tests {
     /// Issue #871: a namespaced engine `Throwable` is rowed as the global ones are.
     #[test]
     fn a_namespaced_engine_throwable_is_rowed_like_a_global_one() {
+        for class in ["Random\\RandomException", "Random\\BrokenRandomEngineError"] {
+            assert_eq!(super::method_throws(class, "__construct"), Some(&[][..]), "{class}");
+        }
+        // The constructors that are not `Exception`'s or `Error`'s own check an argument's
+        // value, and raise: `new InvalidUrlException('x', [1])` is a `ValueError`.
+        for class in ["Uri\\WhatWg\\InvalidUrlException", "SoapFault"] {
+            let row = super::method_throws(class, "__construct");
+            assert_eq!(row, Some(&["ValueError"][..]), "{class}");
+        }
         for class in [
             "Random\\RandomException",
             "Random\\BrokenRandomEngineError",
             "Uri\\WhatWg\\InvalidUrlException",
         ] {
-            assert_eq!(super::method_throws(class, "__construct"), Some(&[][..]), "{class}");
-            assert_eq!(crate::method_effect_labels(class, "__construct"), Some(&[][..]), "{class}");
-            assert_eq!(crate::method_effect_labels(class, "getMessage"), Some(&[][..]), "{class}");
-            assert_eq!(crate::final_method_effect_labels(class, "getCode"), Some(&[][..]), "{class}");
+            let ctor = crate::method_effect_labels(class, "__construct");
+            assert_eq!(ctor, Some(&[][..]), "{class}");
+            let get = crate::method_effect_labels(class, "getMessage");
+            assert_eq!(get, Some(&[][..]), "{class}");
+            let code = crate::final_method_effect_labels(class, "getCode");
+            assert_eq!(code, Some(&[][..]), "{class}");
         }
         // The class is the engine's by its FQN: a user namespace's twin is not.
         let twin = "App\\Random\\RandomException";
@@ -1274,6 +1321,34 @@ mod tests {
         // A namespaced engine class with no row stays blind, as a global one does.
         assert_eq!(crate::method_effect_labels("Random\\Randomizer", "getInt"), None);
         assert_eq!(crate::method_effect_labels("Dom\\Element", "__construct"), None);
+    }
+
+    /// Issue #871: a row the cross-check PHP does not declare is marked, and only those.
+    #[test]
+    fn rows_the_cross_checked_php_lacks_are_marked() {
+        use super::builtin_class_absent_on_pinned as absent;
+        assert!(super::hierarchy_cross_checked_php().starts_with("8."));
+        // Stubs of a later php-src than the pinned minor, and an extension not built in.
+        for class in [
+            "Io\\Poll\\PollException",
+            "\\io\\ioexception",
+            "Openssl\\OpensslException",
+            "StreamException",
+            "com_exception",
+            "SortDirection",
+        ] {
+            assert!(absent(class), "{class}");
+            assert!(super::builtin_class_display(class).is_some(), "{class}: still a row");
+        }
+        for class in ["Random\\RandomException", "PDO", "Exception", "Uri\\WhatWg\\Url", "NoSuch"] {
+            assert!(!absent(class), "{class}");
+        }
+        let t = super::hierarchy_generated::ABSENT_ON_PINNED;
+        assert!(t.windows(2).all(|w| w[0] < w[1]), "ABSENT_ON_PINNED must be strictly sorted");
+        assert!(!t.is_empty() && t.len() < 100, "{} marked rows", t.len());
+        for key in t {
+            assert!(super::builtin_class_display(key).is_some(), "`{key}` is not a hierarchy row");
+        }
     }
 
     /// Issue #871's converse: every namespaced class a PHP 8.5.11 build declares

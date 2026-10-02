@@ -1,10 +1,13 @@
 # hierarchy.toml — builtin class/interface/enum hierarchy mined from php-src stubs
 # php-src commit: 6bc7c26cf67a9480b5ef9d6191aebe87fa931183 (Thu Jul 9 2026)
-# Cross-checked against PHP 8.5.8 (cli) at /opt/homebrew/bin/php where noted.
+# Cross-checked against PHP 8.5.11 (cli): a row it does not declare carries
+# `absent_on_pinned = true`, and the catalog does not treat it as an engine class.
 # Names preserve declared casing; Steins lowercases at its seam.
 # Namespaced names are fully-qualified (no leading backslash).
 # Test-only extensions (ext/zend_test, ext/skeleton, ext/dl_test, sapi/*) are EXCLUDED.
 # Total production declarations: 368
+
+php_cross_check = '8.5.11'
 
 [[class]]
 name = 'Attribute'
@@ -315,6 +318,7 @@ name = 'variant'
 kind = 'class'
 extends = []
 implements = []
+absent_on_pinned = true
 source = 'ext/com_dotnet/com_extension.stub.php:356'
 
 [[class]]
@@ -322,6 +326,7 @@ name = 'com'
 kind = 'class'
 extends = ['variant']
 implements = []
+absent_on_pinned = true
 source = 'ext/com_dotnet/com_extension.stub.php:361'
 
 [[class]]
@@ -329,6 +334,7 @@ name = 'dotnet'
 kind = 'class'
 extends = ['variant']
 implements = []
+absent_on_pinned = true
 source = 'ext/com_dotnet/com_extension.stub.php:367'
 
 [[class]]
@@ -337,6 +343,7 @@ kind = 'class'
 extends = []
 implements = []
 final = true
+absent_on_pinned = true
 source = 'ext/com_dotnet/com_extension.stub.php:373'
 
 [[class]]
@@ -345,6 +352,7 @@ kind = 'class'
 extends = ['Exception']
 implements = []
 final = true
+absent_on_pinned = true
 source = 'ext/com_dotnet/com_extension.stub.php:377'
 
 [[class]]
@@ -353,6 +361,7 @@ kind = 'class'
 extends = []
 implements = []
 final = true
+absent_on_pinned = true
 source = 'ext/com_dotnet/com_persist.stub.php:5'
 
 [[class]]
@@ -877,6 +886,7 @@ kind = 'class'
 extends = []
 implements = []
 final = true
+absent_on_pinned = true
 source = 'ext/enchant/enchant.stub.php:29'
 
 [[class]]
@@ -885,6 +895,7 @@ kind = 'class'
 extends = []
 implements = []
 final = true
+absent_on_pinned = true
 source = 'ext/enchant/enchant.stub.php:37'
 
 [[class]]
@@ -1113,6 +1124,7 @@ kind = 'class'
 extends = []
 implements = []
 final = true
+absent_on_pinned = true
 source = 'ext/intl/rangeformatter/rangeformatter.stub.php:9'
 
 [[class]]
@@ -1259,6 +1271,7 @@ name = 'Openssl\OpensslException'
 kind = 'class'
 extends = ['Exception']
 implements = []
+absent_on_pinned = true
 source = 'ext/openssl/openssl.stub.php:7'
 
 [[class]]
@@ -1267,6 +1280,7 @@ kind = 'class'
 extends = []
 implements = []
 final = true
+absent_on_pinned = true
 source = 'ext/openssl/openssl.stub.php:14'
 
 [[class]]
@@ -1275,6 +1289,7 @@ kind = 'class'
 extends = []
 implements = []
 final = true
+absent_on_pinned = true
 source = 'ext/openssl/openssl.stub.php:35'
 
 [[class]]
@@ -1349,6 +1364,7 @@ name = 'Pdo\Firebird'
 kind = 'class'
 extends = ['PDO']
 implements = []
+absent_on_pinned = true
 source = 'ext/pdo_firebird/pdo_firebird.stub.php:11'
 
 [[class]]
@@ -1377,6 +1393,7 @@ name = 'PDO_PGSql_Ext'
 kind = 'class'
 extends = []
 implements = []
+absent_on_pinned = true
 source = 'ext/pdo_pgsql/pgsql_driver.stub.php:9'
 
 [[class]]
@@ -1391,6 +1408,7 @@ name = 'PDO_SQLite_Ext'
 kind = 'class'
 extends = []
 implements = []
+absent_on_pinned = true
 source = 'ext/pdo_sqlite/sqlite_driver.stub.php:9'
 
 [[class]]
@@ -2280,6 +2298,7 @@ name = 'SortDirection'
 kind = 'enum'
 extends = []
 implements = []
+absent_on_pinned = true
 source = 'ext/standard/basic_functions.stub.php:93'
 
 [[class]]
@@ -2317,6 +2336,7 @@ name = 'Io\IoException'
 kind = 'class'
 extends = ['Exception']
 implements = []
+absent_on_pinned = true
 source = 'ext/standard/io_poll.stub.php:9'
 
 [[class]]
@@ -2324,6 +2344,7 @@ name = 'Io\Poll\Backend'
 kind = 'enum'
 extends = []
 implements = []
+absent_on_pinned = true
 source = 'ext/standard/io_poll.stub.php:15'
 
 [[class]]
@@ -2331,6 +2352,7 @@ name = 'Io\Poll\Event'
 kind = 'enum'
 extends = []
 implements = []
+absent_on_pinned = true
 source = 'ext/standard/io_poll.stub.php:33'
 
 [[class]]
@@ -2338,6 +2360,7 @@ name = 'Io\Poll\Handle'
 kind = 'interface'
 extends = []
 implements = []
+absent_on_pinned = true
 source = 'ext/standard/io_poll.stub.php:43'
 
 [[class]]
@@ -2346,6 +2369,7 @@ kind = 'class'
 extends = []
 implements = []
 final = true
+absent_on_pinned = true
 source = 'ext/standard/io_poll.stub.php:51'
 
 [[class]]
@@ -2354,6 +2378,7 @@ kind = 'class'
 extends = []
 implements = []
 final = true
+absent_on_pinned = true
 source = 'ext/standard/io_poll.stub.php:82'
 
 [[class]]
@@ -2361,6 +2386,7 @@ name = 'Io\Poll\PollException'
 kind = 'class'
 extends = ['Io\IoException']
 implements = []
+absent_on_pinned = true
 source = 'ext/standard/io_poll.stub.php:94'
 
 [[class]]
@@ -2369,6 +2395,7 @@ kind = 'class'
 extends = ['Io\Poll\PollException']
 implements = []
 abstract = true
+absent_on_pinned = true
 source = 'ext/standard/io_poll.stub.php:96'
 
 [[class]]
@@ -2376,6 +2403,7 @@ name = 'Io\Poll\FailedContextInitializationException'
 kind = 'class'
 extends = ['Io\Poll\FailedPollOperationException']
 implements = []
+absent_on_pinned = true
 source = 'ext/standard/io_poll.stub.php:135'
 
 [[class]]
@@ -2383,6 +2411,7 @@ name = 'Io\Poll\FailedHandleAddException'
 kind = 'class'
 extends = ['Io\Poll\FailedPollOperationException']
 implements = []
+absent_on_pinned = true
 source = 'ext/standard/io_poll.stub.php:137'
 
 [[class]]
@@ -2390,6 +2419,7 @@ name = 'Io\Poll\FailedWatcherModificationException'
 kind = 'class'
 extends = ['Io\Poll\FailedPollOperationException']
 implements = []
+absent_on_pinned = true
 source = 'ext/standard/io_poll.stub.php:139'
 
 [[class]]
@@ -2397,6 +2427,7 @@ name = 'Io\Poll\FailedPollWaitException'
 kind = 'class'
 extends = ['Io\Poll\FailedPollOperationException']
 implements = []
+absent_on_pinned = true
 source = 'ext/standard/io_poll.stub.php:141'
 
 [[class]]
@@ -2404,6 +2435,7 @@ name = 'Io\Poll\BackendUnavailableException'
 kind = 'class'
 extends = ['Io\Poll\PollException']
 implements = []
+absent_on_pinned = true
 source = 'ext/standard/io_poll.stub.php:143'
 
 [[class]]
@@ -2411,6 +2443,7 @@ name = 'Io\Poll\InactiveWatcherException'
 kind = 'class'
 extends = ['Io\Poll\PollException']
 implements = []
+absent_on_pinned = true
 source = 'ext/standard/io_poll.stub.php:145'
 
 [[class]]
@@ -2418,6 +2451,7 @@ name = 'Io\Poll\HandleAlreadyWatchedException'
 kind = 'class'
 extends = ['Io\Poll\PollException']
 implements = []
+absent_on_pinned = true
 source = 'ext/standard/io_poll.stub.php:147'
 
 [[class]]
@@ -2425,6 +2459,7 @@ name = 'Io\Poll\InvalidHandleException'
 kind = 'class'
 extends = ['Io\Poll\PollException']
 implements = []
+absent_on_pinned = true
 source = 'ext/standard/io_poll.stub.php:149'
 
 [[class]]
@@ -2433,6 +2468,7 @@ kind = 'class'
 extends = []
 implements = ['Io\Poll\Handle']
 final = true
+absent_on_pinned = true
 source = 'ext/standard/io_poll.stub.php:157'
 
 [[class]]
@@ -2529,6 +2565,7 @@ name = 'Uri\Rfc3986\UriType'
 kind = 'enum'
 extends = []
 implements = []
+absent_on_pinned = true
 source = 'ext/uri/php_uri.stub.php:32'
 
 [[class]]
@@ -2536,6 +2573,7 @@ name = 'Uri\Rfc3986\UriHostType'
 kind = 'enum'
 extends = []
 implements = []
+absent_on_pinned = true
 source = 'ext/uri/php_uri.stub.php:40'
 
 [[class]]
@@ -2544,6 +2582,7 @@ kind = 'class'
 extends = []
 implements = []
 final = true
+absent_on_pinned = true
 source = 'ext/uri/php_uri.stub.php:48'
 
 [[class]]
@@ -2581,6 +2620,7 @@ name = 'Uri\WhatWg\UrlHostType'
 kind = 'enum'
 extends = []
 implements = []
+absent_on_pinned = true
 source = 'ext/uri/php_uri.stub.php:204'
 
 [[class]]
@@ -2648,6 +2688,7 @@ name = 'StreamErrorCode'
 kind = 'enum'
 extends = []
 implements = []
+absent_on_pinned = true
 source = 'main/streams/stream_errors.stub.php:9'
 
 [[class]]
@@ -2655,6 +2696,7 @@ name = 'StreamErrorMode'
 kind = 'enum'
 extends = []
 implements = []
+absent_on_pinned = true
 source = 'main/streams/stream_errors.stub.php:112'
 
 [[class]]
@@ -2662,6 +2704,7 @@ name = 'StreamErrorStore'
 kind = 'enum'
 extends = []
 implements = []
+absent_on_pinned = true
 source = 'main/streams/stream_errors.stub.php:119'
 
 [[class]]
@@ -2670,6 +2713,7 @@ kind = 'class'
 extends = []
 implements = []
 final = true
+absent_on_pinned = true
 source = 'main/streams/stream_errors.stub.php:128'
 
 [[class]]
@@ -2677,5 +2721,6 @@ name = 'StreamException'
 kind = 'class'
 extends = ['Exception']
 implements = []
+absent_on_pinned = true
 source = 'main/streams/stream_errors.stub.php:138'
 
