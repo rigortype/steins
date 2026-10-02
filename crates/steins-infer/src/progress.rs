@@ -148,20 +148,22 @@ impl Progress {
         Some(since)
     }
 
-    /// A file's walk is done: it is no longer in flight, and it is named if it
-    /// was slow. `path` is the file's diagnostic path.
+    /// A file's walk is done: it is named if it was slow, and then it is no
+    /// longer in flight. `path` is the file's diagnostic path.
+    ///
+    /// The file leaves the in-flight list *after* its slow-file line is handed
+    /// over, so a reader that sees the line can still see the file, and a sink
+    /// that waits for a reader (a watchdog's test) has something to read.
     pub(crate) fn file_done(&self, path: &str, started: Option<Instant>) {
         let (Some(channel), Some(started)) = (&self.inner, started) else { return };
-        let thread = std::thread::current().id();
-        {
-            let mut walking = channel.in_flight.lock().unwrap_or_else(PoisonError::into_inner);
-            if let Some(at) = walking.iter().position(|w| w.thread == thread && w.path == path) {
-                walking.swap_remove(at);
-            }
-        }
         let took = started.elapsed();
         if took >= channel.slow_file {
             (channel.sink)(&format!("slow file: {path} walked in {}", span(took)));
+        }
+        let thread = std::thread::current().id();
+        let mut walking = channel.in_flight.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(at) = walking.iter().position(|w| w.thread == thread && w.path == path) {
+            walking.swap_remove(at);
         }
     }
 

@@ -7,7 +7,9 @@
 //!                            where a package artifact's bytes go (issue #504)
 //!   corpus-sync [--update]   materialize the pinned FP-gate corpus into corpus/
 //!   fold-probe [--names …]   differential 32/64-bit width probe over the fold allowlist
-//!   fp-gate                  run the proof-layer pipeline over the corpus (gate)
+//!   fp-gate [--deadline SECS]
+//!                            run the proof-layer pipeline over the corpus (gate); a project
+//!                            past the deadline (default 1200, 0 = none) fails it with exit 3
 //!   freq                     builtin-call frequency, written to docs/notes/
 //!   gen-catalog [--check]    regenerate the builtin tables from mining TOML (--check: verify only)
 //!   lean-check [--bless]     check the committed Lean 4 vectors against the spec
@@ -99,7 +101,9 @@ const COMMANDS: &[Command] = &[
         run: |args| outcome(fold_probe::run(args)),
     },
     // ADR-0013: any diagnostic on clean code blocks release.
-    Command { name: "fp-gate", usage: "", run: |_| verdict(gate::run()) },
+    // Exit 3 is a project that outlived `--deadline` (issue #658), apart from
+    // a red verdict (1) and a command that could not run (2).
+    Command { name: "fp-gate", usage: "[--deadline SECS]", run: |args| verdict(gate::run(args)) },
     Command { name: "freq", usage: "", run: |_| outcome(freq::run()) },
     Command {
         name: "gen-catalog",

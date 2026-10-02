@@ -46,6 +46,14 @@
 //! `check_project`: `cargo xtask perf --warm` already pins those two against
 //! one findings hash over a corpus target, and duplicating it here would buy a
 //! third full analysis per package for a property that already has an owner.
+//!
+//! # Progress and the deadline (issue #658)
+//!
+//! Each project reports its start and its end on stderr, and `--deadline SECS`
+//! fails the gate, naming the project and every file in flight, when one
+//! outlives it; see [`watch`]. Stdout stays the report, byte for byte.
+
+mod watch;
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -55,12 +63,13 @@ use rayon::prelude::*;
 use steins_db::composer;
 use steins_db::{EffectsPolicy, PluginFacts, ProjectLayout};
 use steins_infer::{
-    Diagnostic, Floor, GenerationMode, GenerationParams, Layer, Progress, RuntimePostures,
-    generation_check, layer, surface_floor,
+    Diagnostic, Floor, GenerationMode, GenerationParams, Layer, RuntimePostures, generation_check,
+    layer, surface_floor,
 };
 
 use crate::corpus::{PACKAGES, checkout_dir, collect_php_files, read_lock, repo_root};
 use crate::corpus_local::{self, LocalProject};
+use watch::{Running, Watch};
 
 /// Per-project result of the gate run (a pinned corpus package or an unpinned
 /// local project). `diagnostics` holds only findings that count against the
@@ -525,9 +534,10 @@ fn is_expected_true_positive(pins: &[ExpectedProofFinding], package: &str, d: &D
     })
 }
 
-/// Entry point for `cargo xtask fp-gate`. Returns `true` if the gate is GREEN
-/// (no diagnostics on clean code).
-pub fn run() -> Result<bool, String> {
+/// Entry point for `cargo xtask fp-gate [--deadline SECS]`. Returns `true` if
+/// the gate is GREEN (no diagnostics on clean code).
+pub fn run(args: &[String]) -> Result<bool, String> {
+    let deadline = watch::deadline_from_args(args)?;
     // The baselines first: a malformed table stops the gate before it analyzes
     // anything.
     let baselines = Baselines::load()?;
@@ -536,6 +546,7 @@ pub fn run() -> Result<bool, String> {
         return Err("corpus.lock.toml is empty — run `cargo xtask corpus-sync` first".to_owned());
     }
     let root = repo_root();
+    let watch = Watch::start(deadline);
 
     // Wipe every scratch store before the first pass: "cold" has to mean cold,
     // and a store left by a previous run (or restored from a CI cache) would
@@ -561,7 +572,7 @@ pub fn run() -> Result<bool, String> {
                 ));
             }
             let tag = lock.get(pkg.name).map(|e| e.tag.clone()).unwrap_or_default();
-            Ok(analyze_package(pkg.name, &tag, &dir, &root, &baselines.proof))
+            Ok(analyze_package(pkg.name, &tag, &dir, &root, &baselines.proof, &watch))
         })
         .collect();
     let mut reports = reports?;
@@ -573,7 +584,7 @@ pub fn run() -> Result<bool, String> {
     // vendor files are indexed but their findings don't count.
     let locals = corpus_local::read_local()?;
     let mut local_reports: Vec<PackageReport> =
-        locals.par_iter().map(|p| analyze_local(p, &baselines.proof)).collect();
+        locals.par_iter().map(|p| analyze_local(p, &baselines.proof, &watch)).collect();
     local_reports.sort_by(|a, b| a.name.cmp(&b.name));
 
     // Measurement-mode regression tripwires (see `PHPDOC_EXPECTED` /
@@ -722,6 +733,7 @@ fn analyze_through_generations(
     capture_root: &Path,
     layout: &ProjectLayout,
     root: &Path,
+    running: &Running<'_>,
 ) -> GenerationOutcome {
     let failed = |detail: String, cold: Duration, warm: Duration| GenerationOutcome {
         diagnostics: Vec::new(),
@@ -737,7 +749,8 @@ fn analyze_through_generations(
     // `check_project`'s own defaults, which is what the gate has always
     // measured under: no `steins.toml` governs a corpus checkout.
     let effects = EffectsPolicy::none();
-    let params = GenerationParams {
+    let cold_progress = running.pass("cold");
+    let mut params = GenerationParams {
         store_root: &store,
         capture_root,
         files,
@@ -751,7 +764,7 @@ fn analyze_through_generations(
         // (`STEINS_GENERATIONS_PARANOID=1`) — it walks every file and would
         // more than double the gate on every PR.
         paranoid: false,
-        progress: &Progress::off(),
+        progress: &cold_progress,
     };
 
     let t = Instant::now();
@@ -776,6 +789,8 @@ fn analyze_through_generations(
         .map(|(path, _)| path.clone())
         .collect();
 
+    let warm_progress = running.pass("warm");
+    params.progress = &warm_progress;
     let t = Instant::now();
     let warm = match generation_check(&params) {
         Ok(outcome) => outcome,
@@ -849,8 +864,10 @@ fn analyze_package(
     dir: &Path,
     root: &Path,
     pins: &[ExpectedProofFinding],
+    watch: &Watch,
 ) -> PackageReport {
     let files = collect_php_files(dir);
+    let running = watch.begin(name, files.len());
     // Diagnostic paths are `root`-relative, as they have always been, and the
     // seal keys them against `root` — the same spelling-plus-root pairing the
     // CLI derives (issue #506).
@@ -863,7 +880,8 @@ fn analyze_package(
     // gates curated-fact admission and the absence family; the orchestrator
     // reads it off this layout for itself.
     let layout = composer::discover(&[dir.to_path_buf()], root);
-    let run = analyze_through_generations(name, &rel, root, &layout, root);
+    let run = analyze_through_generations(name, &rel, root, &layout, root, &running);
+    running.finish(run.cold, run.warm);
 
     // Parse-error files: their diagnostics are excluded from the count.
     // ADR-0079 (#180): mostly redundant now (a failed-parse file emits only
@@ -927,7 +945,11 @@ fn analyze_package(
 /// Analyze one local project (ADR-0013 §4) as a single project. Paths are made
 /// project-relative so the `vendor/` predicate and the report read cleanly.
 /// Vendor findings are split out of the gate count (ADR-0015).
-fn analyze_local(proj: &LocalProject, pins: &[ExpectedProofFinding]) -> PackageReport {
+fn analyze_local(
+    proj: &LocalProject,
+    pins: &[ExpectedProofFinding],
+    watch: &Watch,
+) -> PackageReport {
     let root = Path::new(&proj.path);
 
     // Read the tree's state BEFORE walking it, so revision/cleanliness match
@@ -937,6 +959,7 @@ fn analyze_local(proj: &LocalProject, pins: &[ExpectedProofFinding]) -> PackageR
     let worktree = WorktreeState::from_dirty(corpus_local::checkout_is_dirty(root));
 
     let files = corpus_local::collect_php_files_in(root, &proj.paths, &proj.exclude);
+    let running = watch.begin(&proj.name, files.len());
     // Project-relative paths (falling back to the full path if a file is not
     // under `root`, which cannot normally happen). Keeps `vendor/` detection
     // and the printed rows readable, and gives the seal its root.
@@ -944,7 +967,8 @@ fn analyze_local(proj: &LocalProject, pins: &[ExpectedProofFinding]) -> PackageR
         files.iter().map(|f| f.strip_prefix(root).unwrap_or(f).to_path_buf()).collect();
 
     let layout = composer::discover(&[root.to_path_buf()], root);
-    let run = analyze_through_generations(&proj.name, &rel, root, &layout, &repo_root());
+    let run = analyze_through_generations(&proj.name, &rel, root, &layout, &repo_root(), &running);
+    running.finish(run.cold, run.warm);
 
     // Same exclusion/ADR-0079 reading as the corpus path above. Swept
     // 2026-08-08; the local root holds exactly three pre-existing unparsable
