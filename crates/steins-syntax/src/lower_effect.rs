@@ -49,7 +49,7 @@ fn callback_ref_of_arg(expr: &Expression<'_>) -> Option<CallbackRef> {
             }
         }
         Expression::Literal(Literal::String(ls)) => {
-            let raw = utf8_loss::string_name(ls.value?);
+            let raw = utf8_loss::literal_name(ls)?;
             // Method string callables (`Foo::m`) are not resolved.
             if raw.contains("::") || raw.is_empty() {
                 return None;

@@ -110,8 +110,8 @@ pub struct SourceTree {
     /// Byte offset of the start of each line (index 0 == line 1).
     line_starts: Vec<u32>,
     // byte-lossy source (issue #927, ADR-0080 §3.2 interim)
-    /// Whether a name token of the file spans a byte the UTF-8 decode replaced, or a string
-    /// read as a name does. See [`SourceTree::names_lossy`].
+    /// Whether a name token of the file spans a byte the UTF-8 decode replaced. See
+    /// [`SourceTree::names_lossy`].
     names_lossy: bool,
     // end byte-lossy source (issue #927, ADR-0080 §3.2 interim)
     text: String,
@@ -266,10 +266,9 @@ impl SourceTree {
         }
         drop(guard);
 
-        // A name token over a replaced byte, or a string read as a name, was seen by the
-        // walk above; the token pass catches the names no string-reading site passed through.
-        let names_lossy = lossy.is_lossy()
-            && (lossy.names_lossy() || utf8_loss::names_touch_a_loss(program));
+        // A name token over a replaced byte marks the tree. A string read as a name does not:
+        // it declines at its own site (`utf8_loss::literal_name`).
+        let names_lossy = lossy.is_lossy() && utf8_loss::names_touch_a_loss(program);
 
         Self {
             strict_types: lowered.strict_types,
@@ -475,9 +474,10 @@ impl SourceTree {
         &self.parse_errors
     }
 
-    /// Whether a name in this file — a class, function, method, property, constant or
-    /// variable token, or a string literal read as one — sits over a byte the UTF-8 decode
-    /// replaced (issue #927, ADR-0080 §3.2 interim).
+    /// Whether a name token in this file — a class, function, method, property, constant or
+    /// variable — sits over a byte the UTF-8 decode replaced (issue #927, ADR-0080 §3.2
+    /// interim). A string literal that is read as a name does not set it: it declines at its
+    /// own site.
     ///
     /// Two such names that differ only in the replaced bytes are spelled alike in the decoded
     /// text, so every claim the file's own walk would make from a name is unearned: the

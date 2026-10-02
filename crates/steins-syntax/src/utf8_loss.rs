@@ -28,8 +28,10 @@
 //!   spans a loss point cannot be told from another that differs in the replaced bytes, so
 //!   the file is marked ([`SourceTree::names_lossy`](crate::SourceTree::names_lossy)) and the
 //!   analyzer makes no claim from it (ADR-0080 §2.5, extended to names that are *lossily
-//!   decoded* rather than non-UTF-8 values). A string literal read *as* a name is the same
-//!   lane and marks the same way (`string_name`).
+//!   decoded* rather than non-UTF-8 values). A string literal read *as* a name (a callable,
+//!   an effect label) does **not** mark the file: it takes the per-site silence of §2.5
+//!   (`literal_name` answers `None` for non-UTF-8 bytes), because a non-UTF-8 name can only
+//!   name something whose own declaring token is lossy, and that file is marked already.
 //!
 //! A valid UTF-8 file has no loss, enters no scope, and is untouched — a genuine `U+FFFD`
 //! in one is an ordinary character, keyed and compared as it always was.
@@ -148,8 +150,6 @@ fn decode_lossy(bytes: &[u8]) -> (String, Option<Utf8Loss>) {
 
 struct Active {
     points: Vec<Point>,
-    /// Whether a name lane read a loss point this parse.
-    names: bool,
 }
 
 impl Active {
@@ -177,13 +177,8 @@ impl Scope {
     pub(crate) fn enter(loss: Option<&Utf8Loss>) -> Self {
         let next = loss
             .filter(|l| !l.is_empty())
-            .map(|l| Active { points: l.points.clone(), names: false });
+            .map(|l| Active { points: l.points.clone() });
         Self { previous: ACTIVE.with_borrow_mut(|a| std::mem::replace(a, next)) }
-    }
-
-    /// Whether a name lane read a loss point during this parse.
-    pub(crate) fn names_lossy(&self) -> bool {
-        ACTIVE.with_borrow(|a| a.as_ref().is_some_and(|a| a.names))
     }
 
     /// Whether this parse has a loss map at all.
@@ -212,6 +207,9 @@ pub(crate) fn restore_literal<'a>(ls: &'a LiteralString<'_>) -> Option<Cow<'a, [
 }
 
 /// [`restore_literal`] for one literal part of an interpolated string.
+///
+/// Reachable only from `lower_interpolation`, which handles the `"…$x…"` form alone: a
+/// heredoc or nowdoc lowers to `Other` and never gets here.
 #[must_use]
 pub(crate) fn restore_part<'a>(part: &'a LiteralStringPart<'_>) -> Option<Cow<'a, [u8]>> {
     restore(to_span(part.span), part.raw, part.value?, Spelling::Part)
@@ -252,8 +250,11 @@ fn restore<'a>(
     }
     let (lead, content, quote) = match spelling {
         Spelling::Quoted => quoted_content(raw)?,
-        // The parser decodes the parts of an interpolated string (and of a heredoc) as
-        // double-quoted content, so a segment is run through the same decode.
+        // The parser decodes the parts of an interpolated string as double-quoted content,
+        // so a segment is run through the same decode. Only an interpolated string reaches
+        // here today: a heredoc or nowdoc lowers to `Other`. If heredoc lowering lands, note
+        // that mago decodes a heredoc part with `\"` as an escape and PHP does not, so the
+        // check against `value` below would pass while both disagree with PHP.
         Spelling::Part => (0, raw, b'"'),
     };
     let arena = LocalArena::new();
@@ -293,21 +294,19 @@ fn quoted_content(raw: &[u8]) -> Option<(usize, &[u8], u8)> {
 // Names.
 // ---------------------------------------------------------------------------
 
-/// A string literal's bytes read *as a name* — a callable's, a constant's, an effect label
-/// — decoded lossily, and the file marked when the decode replaced anything.
+/// A string literal read *as* a name — a callable's, an effect label — or `None` when the
+/// bytes it spells are not valid UTF-8.
 ///
-/// The same lane as a name token: a name that came out of a replacement is not a name the
-/// source spells.
+/// The bytes come through [`restore_literal`], so a replaced byte is the byte the file
+/// spells and the name is non-UTF-8, not a U+FFFD that reads alike for two names. `None`
+/// takes the site's existing decline (an opaque callback, `RunArg::Other`, an unrecognized
+/// envelope) and does **not** mark the file: a non-UTF-8 name can only name something whose
+/// declaring token is itself over a replaced byte, and that file is marked by
+/// [`names_touch_a_loss`] (ADR-0080 §2.5, per-site silence).
 #[must_use]
-pub(crate) fn string_name(bytes: &[u8]) -> String {
-    if bytes.windows(REPLACEMENT.len()).any(|w| w == REPLACEMENT) {
-        ACTIVE.with_borrow_mut(|a| {
-            if let Some(a) = a {
-                a.names = true;
-            }
-        });
-    }
-    String::from_utf8_lossy(bytes).into_owned()
+pub(crate) fn literal_name(ls: &LiteralString<'_>) -> Option<String> {
+    let bytes = restore_literal(ls)?;
+    std::str::from_utf8(&bytes).ok().map(str::to_owned)
 }
 
 /// Whether any name token in `program` spans a loss point.

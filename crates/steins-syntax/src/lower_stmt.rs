@@ -280,7 +280,7 @@ fn run_arg(e: &Expression<'_>) -> RunArg {
     match e.unparenthesized() {
         Expression::Literal(mago_syntax::cst::Literal::Null(_)) => RunArg::Null,
         Expression::Literal(mago_syntax::cst::Literal::String(ls)) => {
-            match ls.value.map(utf8_loss::string_name) {
+            match utf8_loss::literal_name(ls) {
                 Some(name) if spells_function_name(&name) => RunArg::Name(name),
                 _ => RunArg::Other,
             }
