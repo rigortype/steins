@@ -21,13 +21,13 @@
 //!
 //! # How a row is keyed
 //!
-//! The way those tables are: by the **global engine class the call resolves
-//! to**, case-insensitively (a leading `\` is ignored), never by walking up
-//! the hierarchy here. A caller that sees `new MyException($o)` with a
+//! The way those tables are: by the **engine class the call resolves to**, by
+//! its FQN (`PDO`, `Random\RandomException`), case-insensitively (a leading `\`
+//! is ignored), never by walking up the hierarchy here. A caller that sees `new MyException($o)` with a
 //! project class resolves it to its nearest engine ancestor first, as it does
 //! for the effect and throw rows, and asks for that class. The one family
 //! answered by ancestry is the engine `Throwable`s: all 60 of them (PHP
-//! 8.5.11; `Random\RandomException` is keyed without its namespace, see #871)
+//! 8.5.11, `Random\RandomException` and the other namespaced ones among them)
 //! are rowed by [`is_builtin_throwable`], and 56 share
 //! `Exception::__construct`'s signature (`Error::__construct` has the same
 //! parameters), so `RuntimeException`, `TypeError` and `JsonException` all
@@ -162,7 +162,7 @@ impl MethodReachRow {
 }
 
 /// The reach row of the method `method` on the engine class `class` (both
-/// case-insensitive, `class` global and without a leading `\`), or `None`.
+/// case-insensitive, `class` an FQN with or without a leading `\`), or `None`.
 ///
 /// **`None` is "blind", not "inert".** A method the effect and throw tables
 /// row has a row here; a caller that gets `None` for one of them must treat
@@ -290,6 +290,26 @@ mod tests {
         assert_eq!(at(url, "__construct", 0), ArgReach::Coerced);
         assert_eq!(at(url, "__construct", 1), ArgReach::Nested, "$errors");
         assert_eq!(at(url, "__construct", 3), ArgReach::Inert);
+    }
+
+    /// Issue #871: the namespaced engine `Throwable`s take the default row, whose
+    /// mined key used to lose the namespace (`randomexception`).
+    #[test]
+    fn a_namespaced_engine_throwable_takes_the_default_constructor_row() {
+        for class in [
+            "Random\\RandomException",
+            "Random\\RandomError",
+            "Random\\BrokenRandomEngineError",
+            "Uri\\UriException",
+            "FFI\\ParserException",
+            "Filter\\FilterFailedException",
+        ] {
+            assert_eq!(at(class, "__construct", 0), ArgReach::Coerced, "{class}");
+            assert_eq!(at(class, "__construct", 1), ArgReach::Inert, "{class}");
+            assert!(is_builtin_throwable(class), "{class}");
+            assert!(method_arg_reach(class, "getMessage").is_some(), "{class}");
+        }
+        assert!(method_arg_reach("App\\Random\\RandomException", "__construct").is_none());
     }
 
     #[test]

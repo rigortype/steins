@@ -1246,6 +1246,28 @@ mod tests {
         assert_eq!(super::builtin_class_supers("PDOException"), Some(vec!["RuntimeException"]));
     }
 
+    /// Issue #871: a namespaced engine `Throwable` is rowed as the global ones are.
+    #[test]
+    fn a_namespaced_engine_throwable_is_rowed_like_a_global_one() {
+        for class in [
+            "Random\\RandomException",
+            "Random\\BrokenRandomEngineError",
+            "Uri\\WhatWg\\InvalidUrlException",
+        ] {
+            assert_eq!(super::method_throws(class, "__construct"), Some(&[][..]), "{class}");
+            assert_eq!(crate::method_effect_labels(class, "__construct"), Some(&[][..]), "{class}");
+            assert_eq!(crate::method_effect_labels(class, "getMessage"), Some(&[][..]), "{class}");
+            assert_eq!(crate::final_method_effect_labels(class, "getCode"), Some(&[][..]), "{class}");
+        }
+        // The class is the engine's by its FQN: a user namespace's twin is not.
+        let twin = "App\\Random\\RandomException";
+        assert_eq!(super::method_throws(twin, "__construct"), None);
+        assert_eq!(crate::method_effect_labels(twin, "__construct"), None);
+        // A namespaced engine class with no row stays blind, as a global one does.
+        assert_eq!(crate::method_effect_labels("Random\\Randomizer", "getInt"), None);
+        assert_eq!(crate::method_effect_labels("Dom\\Element", "__construct"), None);
+    }
+
     #[test]
     fn builtin_class_supers_tree() {
         use super::builtin_class_supers as s;
@@ -1270,11 +1292,45 @@ mod tests {
         );
         assert_eq!(s("IteratorAggregate"), Some(vec!["Traversable"]));
         assert_eq!(s("FFI\\Exception"), Some(vec!["Error"]));
-        assert_eq!(s("\\FFI\\ParserException"), Some(vec!["Exception"]));
+        // A relative parent resolves in the declaring namespace.
+        assert_eq!(s("\\FFI\\ParserException"), Some(vec!["FFI\\Exception"]));
         // Builtin enums are deliberately ABSENT: incomplete implicit-interface /
         // backing data → Unknown, never a spurious No.
         assert_eq!(s("RoundingMode"), None);
-        assert_eq!(s("IntervalBoundary"), None);
+        assert_eq!(s("Random\\IntervalBoundary"), None);
+    }
+
+    /// Issue #871: every class is keyed by its FQN. The miner once read only a
+    /// `namespace X {` with its brace on the same line, so `random.stub.php` and
+    /// `php_dom.stub.php` put their classes in the global namespace: `Random\RandomException`
+    /// was `randomexception` and `Dom\Text` was `text`.
+    #[test]
+    fn namespaced_classes_are_keyed_by_fqn() {
+        use super::builtin_class_supers as s;
+        assert_eq!(s("Random\\RandomException"), Some(vec!["Exception"]));
+        assert_eq!(s("Random\\BrokenRandomEngineError"), Some(vec!["Random\\RandomError"]));
+        assert_eq!(s("Random\\RandomError"), Some(vec!["Error"]));
+        assert_eq!(s("Random\\CryptoSafeEngine"), Some(vec!["Random\\Engine"]));
+        assert_eq!(s("Random\\Engine\\Secure"), Some(vec!["Random\\CryptoSafeEngine"]));
+        assert_eq!(
+            s("Uri\\WhatWg\\InvalidUrlException"),
+            Some(vec!["Uri\\InvalidUriException"])
+        );
+        assert_eq!(s("Dom\\Text"), Some(vec!["Dom\\CharacterData"]));
+        assert_eq!(
+            s("Dom\\Element"),
+            Some(vec!["Dom\\Node", "Dom\\ParentNode", "Dom\\ChildNode"])
+        );
+        assert_eq!(s("BcMath\\Number"), Some(vec!["Stringable"]));
+        // The bare spellings the miner used to emit name no engine class.
+        let stale = ["randomexception", "randomerror", "engine", "secure", "text", "node"];
+        for stale in stale {
+            assert_eq!(s(stale), None, "`{stale}` is no global engine class");
+            assert_eq!(super::builtin_class_display(stale), None, "`{stale}`");
+        }
+        // The one parent a stub spells relative to a namespace that has no such
+        // class: the engine registers it on the global one.
+        assert_eq!(s("Openssl\\OpensslException"), Some(vec!["Exception"]));
     }
 
     #[test]
