@@ -504,7 +504,8 @@ fn an_imported_body_keeps_naming_the_classes_it_named() {
         public function m($v): void { \\PHPStan\\dumpPhpDocType($v); }\n}\n";
     assert_eq!(
         one_dump(&format!("{src}{user}")),
-        "dumped phpdoc type: list<vendor\\row> (asserted)"
+        // Source-cased in the element too since issue #699.
+        "dumped phpdoc type: list<Vendor\\Row> (asserted)"
     );
 }
 
