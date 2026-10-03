@@ -145,9 +145,9 @@
 # Triage of the `throw.maybe-undeclared` that issue #882's precision slice (S6c) moves, 2026-10-03
 # (ADR-0100's amendment of that date), over the ten public packages, measured as `steins check
 # --profile strict --no-php --vendor-diagnostics --no-cache` on the merge base and on the head,
-# the three changes taken one at a time (8,122 findings on the base, 8,077 on the head): (a) an
+# the four changes taken one at a time (8,122 findings on the base, 8,104 on the head): (a) an
 # anonymous class lists its parent in the destructor closure only when its own body declares a
-# destructor or imports a trait that may: -92 (phpunit 84, console 8; 607 drop sites go: phpunit's
+# destructor or imports a trait that may (the form (d) widens): -92 (phpunit 84, console 8; 607 drop sites go: phpunit's
 # `Constraint`, `Operator` and `Printer` trees, which its tests subclass anonymously, and
 # flysystem's adapters); (b) a class imports a trait into the closure only when the trait
 # declares or aliases a destructor, transitively, or cannot be read, and a trait's typed
@@ -161,11 +161,17 @@
 # functions were already `…?` for another reason). A `new` of a class no file declares is left to
 # the unknown-class gap it records already, which kept 1,510 sites out. (c) is the incompleteness
 # of a checkout with no `vendor/` (PSR types, Symfony contracts): with the tree indexed the names
-# resolve and the rule reads as it does for any class. Over the whole change 70 functions stop
-# being effect-exhaustive and 58 become so (the three changes one at a time: (a) 53 gained, (b) 11
-# gained, (c) 76 lost); the findings go from 8,122 to 8,077.
-# `phpstan/phpstan-src` is not remeasured: it has no public checkout here and its row keeps the
-# base value, so the local fp-gate decides it.
+# resolve and the rule reads as it does for any class; (d) the review of #1006 seeds the
+# closure from every class that reaches a destructor, an anonymous class by its parent's chain,
+# its imports and its properties, a named class by the typed properties it declares or imports
+# from a trait (`self` and `parent` hints in a trait read the importing class and its parent),
+# so a bound parent or interface of such a class is a gap: +27 (console 17, phpunit 6, Carbon 4;
+# 825 drop sites, 750 of them a body's end, 403 a parameter's hint, 341 a `new` of a class whose
+# chain reaches a holder, 504 in a test directory). Over the whole change 89 functions stop
+# being effect-exhaustive and 55 become so (the changes one at a time: (a) 53 gained, (b) 11
+# gained, (c) 76 lost, (d) 22 lost); the findings go from 8,122 to 8,104.
+# `phpstan/phpstan-src` has no public checkout here: its row is the local fp-gate's of the
+# previous head and is not remeasured for (d).
 
 # Triage of the `throw.maybe-undeclared` that the call-site read of a literal printf format and a
 # literal strict flag removes, 2026-10-03 (issues #860 and #991, ADR-0101 §3.8, slice S3), over the
@@ -264,8 +270,8 @@
 # 3281 → 3207  2026-10-03 (issue #877): -74 throw.maybe-undeclared (user-code-reach 27, operator-to-string 18, operator-iteration 18, operator-array-access 10, dynamic-callee 1; 6 in fixtures); the triage is above the composer row.
 # 3207 → 3314  2026-10-03 (issue #882): +107 throw.maybe-undeclared (103 at a drop site, 4 a callee's), 244 more gained `destructor`; the triage is above the composer row.
 # 3314 → 3277  2026-10-03 (issues #860, #991): -37 throw.maybe-undeclared (an `in_array` or `array_search` with a literal `true` 30, a printf literal format 7); the local fp-gate measures 3292 → 3255 here, the 22 of slack the row already carried (3292 against 3314 on master) is kept; the triage is above the composer row.
-# 3277 → 3200  2026-10-03 (issue #882, S6c): -77 throw.maybe-undeclared ((a) -84, (b) -4, (c) +11); the local fp-gate measures 3255 → 3178 here, the 22 of slack the row already carried is kept; the triage is above the composer row.
-"sebastianbergmann/phpunit" = 3200
+# 3277 → 3206  2026-10-03 (issue #882, S6c): -71 throw.maybe-undeclared ((a) -84, (b) -4, (c) +11, (d) +6); the local fp-gate measures 3255 → 3184 here, the 22 of slack the row already carried is kept; the triage is above the composer row.
+"sebastianbergmann/phpunit" = 3206
 
 # 10 — six class 1/2/3 in `Application.php`, `CompletionInput.php` and
 # `SymfonyStyle.php`; four class 5 in `Tests/`.
@@ -288,8 +294,8 @@
 # 551 → 489  2026-10-03 (issue #877): -62 throw.maybe-undeclared (user-code-reach 51, operator-to-string 6, operator-iteration 3, operator-array-access 2); the triage is above the composer row.
 # 489 → 497  2026-10-03 (issue #882): +8 throw.maybe-undeclared, each a callee's (`CommandNotFoundException::__construct()`, whose `Throwable` parameter an anonymous class in the universe may stand in for); the triage is above the composer row.
 # 497 → 493  2026-10-03 (issues #860, #991): -4 throw.maybe-undeclared (`in_array` with a literal `true`), 1 more lost `user-code-reach` from its kind list; the triage is above the composer row.
-# 493 → 486  2026-10-03 (issue #882, S6c): -7 throw.maybe-undeclared ((a) -8, (c) +1); the triage is above the composer row.
-"symfony/console" = 486
+# 493 → 503  2026-10-03 (issue #882, S6c): +10 throw.maybe-undeclared ((a) -8, (c) +1, (d) +17: `OutputInterface` bounds of classes that hold a class this checkout lacks); the triage is above the composer row.
+"symfony/console" = 503
 
 # 6 — every row class 4 (`$this->fail()` in `ProcessTest.php`).
 # Unmoved by issue #599 leg 1 (2026-09-01), and twice over. Every row is
@@ -345,8 +351,8 @@
 # 463 → 458  2026-10-03 (issue #877): -5 throw.maybe-undeclared (user-code-reach 2, operator-array-access 2, operator-to-string 1); the triage is above the composer row.
 # 458 → 462  2026-10-03 (issue #882): +4 throw.maybe-undeclared at the end of a body (`CarbonInterval::roundUnit()`, `floor()`, `ceil()`, `CarbonTimeZone::instance()`); the triage is above the composer row.
 # 462 → 461  2026-10-03 (issues #860, #991): -1 throw.maybe-undeclared (`in_array` with a literal `true`); the triage is above the composer row.
-# 461 → 457  2026-10-03 (issue #882, S6c): -4 throw.maybe-undeclared ((b) a class whose traits are all read and clean); the triage is above the composer row.
-"briannesbitt/Carbon" = 457
+# 461 → 461  2026-10-03 (issue #882, S6c): no net change ((b) -4, a class whose traits are all read and clean; (d) +4, a `CarbonInterface` bound of a class that holds one); the triage is above the composer row.
+"briannesbitt/Carbon" = 461
 
 # 0 → 1, 2026-08-16 with issue #391 — and a sixth class, the first that is not
 # a binding claim at all: `type.maybe-argument-mismatch` on
