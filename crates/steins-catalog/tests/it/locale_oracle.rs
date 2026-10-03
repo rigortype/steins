@@ -11,7 +11,7 @@ use std::process::{Command, Stdio};
 use steins_catalog::format_reads_locale;
 
 /// Whether the oracle cannot run: a loud skip off CI, a failure on CI.
-fn oracle_unavailable(reason: &str) {
+pub(super) fn oracle_unavailable(reason: &str) {
     assert!(
         std::env::var_os("CI").is_none(),
         "the locale oracle cannot run on CI: {reason}; the test job installs php and generates de_DE.UTF-8"

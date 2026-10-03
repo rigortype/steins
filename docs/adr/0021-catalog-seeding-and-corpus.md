@@ -4,7 +4,9 @@
 > an **empty** row ("reads only its arguments: no ini setting, locale, …"), and
 > a builtin that fails the bar only by reading a setting is now catalogued with
 > that read, `global.read.setting.<cell>`, instead of being refused. `sprintf`
-> and `vsprintf` carry `global.read.setting.locale` (issue #991).
+> and `vsprintf` carry `global.read.setting.locale` (issue #991). The second
+> amendment's §5 list of refused locale readers is coloured by ADR-0101 §3.9
+> (S4), and `number_format` is certified at the call site.
 
 **Catalog (ADR-0014) seeding order**: type signatures are generated
 mechanically from php-src stubs in bulk; **effect coloring follows measured
@@ -527,6 +529,21 @@ date). `transform effects-envelope` goes from 723 to 740 edits, 14 `@phpstan-imp
 tags and 3 class-wide `@phpstan-all-methods-pure` tags that were refused as not exhaustive, with
 none lost and no new diagnostic after the edit; `throws-envelope` (1,934) and `loop-to-array-map`
 (0) are byte-identical.
+
+### Note (2026-10-03): the locale readers of the §5 refusal list are rows, and `number_format` is certified — PENDING ratification
+
+ADR-0101 §3.9 (issue #1000, S4) spends the refusal list of §5 of this amendment, "each reading the locale or an ini setting", apart from the
+encoding cell. Each name was audited against php-src `php-8.5.11` and against the engine under `C`, `de_DE.UTF-8`, a Latin-1 locale and
+`ja_JP.eucJP` (`locale_readers_oracle.rs`): `ctype_*` but `ctype_digit` and `ctype_xdigit` (C fixes those two sets in every locale, no byte
+moved, and they stay as they were), `basename`, `strnatcmp`, `strnatcasecmp`, `escapeshellarg`, `strip_tags`, `parse_url`, `strftime` and
+`gmstrftime` carry `global.read.setting.locale` (the last two beside `nondet.time`); the sorts under `SORT_LOCALE_STRING`, `SORT_NATURAL`
+(and, for `ksort` and `krsort`, `SORT_STRING | SORT_FLAG_CASE`), `substr_compare` when case-insensitive and `pathinfo` unless only the
+directory is asked for carry it as the upper bound a literal argument decides, an omitted one defaults and a non-literal one is
+`value-dependent-read`; `number_format` reads no setting (`%.*F`, witnessed on 8.1 and 8.5) and joins `CERTIFIED_AT_CALL_SITE`, so its
+`string` separators are the reach rule's and nothing else. Decision 2's bar for an empty row is unchanged: none of the coloured names is
+certified pure. `htmlspecialchars` and the `mb_*` family stay refused until the encoding cell registers. On the ten public packages `check` is
+byte-identical under both profiles, five bodies become exhaustive (each with the read) and `transform effects-envelope` writes five more
+`@phpstan-impure global.read.setting.locale` tags and removes none.
 
 ## Amendment (2026-10-02): the call-site rule holds at every site — ratified 2026-10-02
 

@@ -147,14 +147,16 @@ fn setlocale_writes_the_cell_and_its_readers_read_it() {
         "setlocale(LC_ALL, '')",
         "setlocale(LC_ALL, null)",
         "setlocale(LC_ALL, $l)",
-        "setlocale(LC_ALL, '0')",
+        "setlocale(LC_ALL, '0', 'C')",
         "setlocale(LC_ALL, 'xx_XX', '')",
         "setlocale(LC_ALL, ['C', ''])",
         "setlocale(LC_ALL)",
-        // C stops at the NUL, so these name `''` (the environment) and `'0'`.
+        // C stops at the NUL, so these name `''` (the environment) and a locale called `0`; only
+        // the whole string `'0'` is the query (`locale_readers.rs`).
         "setlocale(LC_ALL, \"\\0\")",
         "setlocale(LC_ALL, \"\\0C\")",
         "setlocale(LC_ALL, \"\\x00\")",
+        "setlocale(LC_ALL, \"0\\0x\")",
     ] {
         let s = summary(&body("string $l", &format!("return {call};")), "f");
         assert_eq!(s.labels, ["global.read", "global.write.setting.locale"], "{call}: {s:?}");

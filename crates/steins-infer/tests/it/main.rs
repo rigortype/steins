@@ -96,6 +96,7 @@ mod invalid_operand;
 mod isset_value;
 mod locale_cell;
 mod locale_fix;
+mod locale_readers;
 mod logical_value;
 mod loop_bodies;
 mod loop_exit_condition;

@@ -22,6 +22,7 @@
 
 mod contract;
 pub(crate) mod engine;
+mod locale;
 pub(crate) mod method;
 mod operator;
 mod printf;
@@ -166,7 +167,9 @@ pub(crate) enum GapKind {
     /// A setting read that depends on a value the site cannot see (ADR-0101 §3): a
     /// printf call whose `%s` consumes a value not shown to be a float or not one (a
     /// float renders through the `precision` ini), or whose format is not a literal
-    /// the parser reads (a `%f`, `%g` or `%G` reads the locale). A label is proven only
+    /// the parser reads (a `%f`, `%g` or `%G` reads the locale), or a locale reader
+    /// whose mode argument is not a literal (a sort's `$flags`, `substr_compare`'s
+    /// `$case_insensitive`, `pathinfo`'s `$flags`, §3.9). A label is proven only
     /// where the read is unconditional for the call as written, so a read conditional on
     /// a value is this gap until the site rules it in or out. Effect lane only. Appended
     /// last, so no earlier kind's codec number moved.
@@ -274,7 +277,7 @@ impl GapKind {
             Self::Destructor => "a dropped value may run `__destruct`",
             Self::ValueDependentRead => {
                 "a setting read depends on a value the site cannot see (a `%s` of a value that \
-                 may be a float, or a format that is not literal)"
+                 may be a float, a format that is not literal, or a flag that is not literal)"
             }
         }
     }

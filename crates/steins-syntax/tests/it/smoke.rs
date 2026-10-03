@@ -487,8 +487,9 @@ fn scans_the_constant_leading_arguments_of_a_named_call() {
         const_args("fread($h, 8);"),
         ConstArgs { ints: vec![(1, ConstInt::Int(8))], ..ConstArgs::default() }
     );
-    // A literal boolean at position 2 or 3 is a flag the catalog reads (`in_array`'s strict
-    // flag); anything else there, or at position 1, is not one.
+    // A literal boolean at position 2 to 4 is a flag the catalog reads (`in_array`'s strict
+    // flag, `substr_compare`'s case-insensitivity switch at 4); anything else there, or at
+    // position 1 or past 4, is not one.
     assert_eq!(
         const_args("in_array($p, $h, true);"),
         ConstArgs { bools: vec![(2, true)], ..ConstArgs::default() }
@@ -496,6 +497,9 @@ fn scans_the_constant_leading_arguments_of_a_named_call() {
     assert_eq!(const_args("in_array($p, $h, FALSE);").bools, [(2, false)]);
     assert_eq!(const_args("array_keys($h, $p, true);").bools, [(2, true)]);
     assert_eq!(const_args("f2($p, $h, $p, false);").bools, [(3, false)]);
+    assert_eq!(const_args("substr_compare($a, $b, 0, null, true);").bools, [(4, true)]);
+    assert_eq!(const_args("f2($p, $h, $p, $p, false, true);").bools, [(4, false)]);
+    assert_eq!(const_args("f2($p, $h, $p, $p, $p, true);").bools, [], "position 5 is not read");
     assert_eq!(const_args("in_array($p, $h, $p);").bools, []);
     assert_eq!(const_args("in_array($p, $h, 1);").bools, []);
     assert_eq!(const_args("in_array($p, $h, \\true);").bools, [], "a namespaced fetch is not one");
