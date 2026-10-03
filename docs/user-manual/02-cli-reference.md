@@ -684,12 +684,17 @@ are `operator-to-string`, and a property hook the engine's own code can run, in
 an inherited exception constructor or `getMessage()`, or that a promoted
 constructor parameter declares, is `operator-magic-property`; `destructor` is a
 value that may run `__destruct` when dropped, at an `unset`, a reassignment,
-the end of the body or a `new` that dies in the expression holding it: the
-class declares `__destruct`, imports a trait that declares one (or that no file
-declares, or that is declared twice, under a condition or through a
-`class_alias`), extends or is hinted as a class no file declares, has a
-subclass that may, or holds such a class in a typed property; an untyped
-value, an array and a closure's captures are not covered; `value-dependent-read`, effect lane only, is a setting read
+the end of the body, a `new` that dies in the expression holding it (a
+statement, an argument, a receiver, or an operand: `clone new D`,
+`(new D)->p`, `echo new D`, `new D instanceof D`) or a write to or `unset` of a
+typed property (`$this->d = null`, `self::$d = null`): the class declares
+`__destruct`, imports a trait that declares one (or that no file declares, or
+that is declared twice, under a condition or through a `class_alias`), extends
+or is hinted as a class no file declares, has a subclass that may, or holds such
+a class in a typed property; a local counts by any write that stores a `new`
+into it, a ternary or `match` arm included, and a constructor's first write of
+its own uninitialized property drops nothing; an untyped value or property, an
+array, another object's property and a closure's captures are not covered; `value-dependent-read`, effect lane only, is a setting read
 that depends on a value the site cannot see: a printf call's `%s` of a value not shown to be a
 float, which reads the `precision` ini only for a float, or a format that is not a literal, which
 reads the locale only if it holds an `f`, `g` or `G`; a read the call as written makes on every run
