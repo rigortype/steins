@@ -97,8 +97,10 @@ fn anonymous(ac: &AnonymousClass<'_>) -> Created {
         return Created::Class(vec![None]);
     }
     let parent = ac.extends.as_ref().and_then(|e| e.types.iter().next()).map(name_ref);
+    // A trait is a bound, not a `new`: one no file declares records no unknown-class gap.
+    let traits = body.used_traits.into_iter().map(|t| Some(EffectRecv::Bound(t)));
     let receivers: Vec<Option<EffectRecv>> =
-        body.used_traits.into_iter().chain(parent).map(|c| Some(EffectRecv::ClassName(c))).collect();
+        traits.chain(parent.map(|c| Some(EffectRecv::ClassName(c)))).collect();
     if receivers.is_empty() { Created::Harmless } else { Created::Class(receivers) }
 }
 

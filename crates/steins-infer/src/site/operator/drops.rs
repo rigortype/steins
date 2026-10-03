@@ -19,6 +19,13 @@
 //!    class that reaches one, recursively, each class once for each exactness it
 //!    is asked under.
 //!
+//! A class no file declares and the engine does not (a vendor class this checkout
+//! lacks: an `extends`, a parameter hint, a property hint) may declare one, and
+//! counts, as it does in every family that reads an unclosed chain; with the vendor
+//! tree present the names resolve and it reads as any class does. The one place it
+//! does not count is a `new` of such a class itself: that site records an
+//! unknown-class gap already, so the body is `…?` through the same name.
+//!
 //! A hint that is `array`, `mixed`, `object`, `iterable`, `callable`, absent or
 //! an engine class contributes nothing: those drops are recorded residue, and so
 //! the gap is a lower bound on the drops that run user code.
@@ -29,6 +36,7 @@ use std::collections::HashSet;
 
 use steins_syntax::{EffectRecv, TypeMember};
 
+use super::super::engine::declares_engine_class;
 use super::super::reach::Frame;
 use super::super::{GapKind, ResolvedSite};
 use crate::cx::Cx;
@@ -56,8 +64,13 @@ fn may_run(cx: &Cx<'_>, frame: &Frame<'_>, receiver: Option<&EffectRecv>) -> boo
     match receiver {
         // A class the lowering already read a destructor off.
         None => true,
-        // `new C`: the value is exactly a `C`.
-        Some(EffectRecv::ClassName(name)) => reaches(&cx.class_fqn(name), true),
+        // `new C`: the value is exactly a `C`. A `C` no file declares already records an
+        // unknown-class gap at the `new`, which makes the body `…?` through the same
+        // name; a second gap there would only repeat it.
+        Some(EffectRecv::ClassName(name)) => {
+            let class = cx.class_fqn(name);
+            !unseen(cx, &class) && reaches(&class, true)
+        }
         // A parameter's hint: the class or any subclass of it.
         Some(EffectRecv::Bound(name)) => bound(&cx.class_fqn(name)),
         // `self` and `parent` hints name the enclosing class and its parent; a trait's
@@ -92,10 +105,20 @@ fn reaches_destructor(
         || holds_one(cx, &id, seen)
 }
 
+/// Whether `class` is a name no file declares and the engine does not.
+fn unseen(cx: &Cx<'_>, class: &str) -> bool {
+    let id = cx.class_identity(class);
+    cx.find_class(&id).is_none() && cx.class_absent(&id) && !declares_engine_class(&id)
+}
+
 /// Whether `class` or an ancestor on its `extends` line is a class the shard
 /// lists as running a destructor: declaring one, or importing a trait that may.
 /// A class declared twice
-/// cannot be read, and may be any of its declarations: it counts.
+/// cannot be read, and may be any of its declarations: it counts. So does a name no
+/// file declares unless the engine does (the chain leaves the project at a class this
+/// checkout lacks, a vendor class whose destructor nothing here can read): the
+/// unclosed-chain rule every family reads (ADR-0099 §4.3). An engine class declares
+/// none that a project can observe, so a chain that ends at one is closed.
 fn chain_declares(cx: &Cx<'_>, class: &str) -> bool {
     let mut visited: HashSet<String> = HashSet::new();
     let mut current = class.to_owned();
@@ -104,7 +127,7 @@ fn chain_declares(cx: &Cx<'_>, class: &str) -> bool {
             return true;
         }
         if cx.find_class(&current).is_none() {
-            return !cx.class_absent(&current);
+            return !cx.class_absent(&current) || !declares_engine_class(&current);
         }
         let Some(parent) = cx.parent_fqn(&current) else { return false };
         current = cx.class_identity(&parent);
