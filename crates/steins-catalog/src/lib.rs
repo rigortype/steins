@@ -17,7 +17,8 @@
 //! * `mb_*` depends on `mbstring.internal_encoding`; php-wasm 0.1.0 lacks it.
 //! * `strcmp`/`strcasecmp` promise only a sign, not `memcmp`'s
 //!   implementation-defined magnitude.
-//! * `number_format` stays conservatively excluded despite no probed divergence.
+//! * `number_format` stays conservatively excluded despite no probed divergence; the effect
+//!   lane certifies it pure at a call site (ADR-0101 §4), which is not the fold's permission.
 //! * `bin2hex` is excluded per its ADR-0056 empty-in/empty-out return-fact
 //!   refusal (`docs/research/phpsrc-mining/return_facts.toml`).
 
@@ -142,6 +143,9 @@ pub use effects::{
     pure_at_arity,
     variadic_tail_is_data,
 };
+
+mod locale_reads;
+pub use locale_reads::{GateArg, LocaleReadGate, locale_read_gate};
 
 mod knowledge;
 pub use knowledge::{

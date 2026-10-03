@@ -539,11 +539,12 @@ pub struct ConstArgs {
     /// §3.3). An argument that is anything else is simply absent. Appended
     /// **after** the fields above so no persisted field index moves.
     pub ints: Vec<(u8, ConstInt)>,
-    /// The positions 2 and 3 whose argument is a literal `true` or `false`, as
+    /// The positions 2 to 4 whose argument is a literal `true` or `false`, as
     /// `(position, value)` in position order: a strict flag the catalog can read
-    /// (`in_array($v, $h, true)`, ADR-0021's call-site refinements). Position 1 is
-    /// [`Self::second`]'s [`CallTarget::Bool`]. Appended **after** the fields above
-    /// so no persisted field index moves.
+    /// (`in_array($v, $h, true)`, ADR-0021's call-site refinements) and a
+    /// case-insensitivity switch (`substr_compare($a, $b, 0, null, true)`, ADR-0101
+    /// §3.9). Position 1 is [`Self::second`]'s [`CallTarget::Bool`]. Appended
+    /// **after** the fields above so no persisted field index moves.
     pub bools: Vec<(u8, bool)>,
     /// For a call to `sprintf` or `printf` only (by the spelling's last segment): what the
     /// scan shows of each argument from position 1 on, as `(position, evidence)`, for the
