@@ -52,6 +52,14 @@ use crate::fold::foldable;
 ///   ([`format_reads_locale`](crate::format_reads_locale)) drops it, and a `%s` of a value
 ///   shown a float proves the precision read where one shown no float drops it. What the site
 ///   cannot decide is the `value-dependent-read` gap and never a label (ADR-0101 §3.2).
+/// * The locale readers beyond printf (ADR-0101 §3.9, S4): `ctype_*` but `ctype_digit` and
+///   `ctype_xdigit`, `basename`, `strnatcmp`, `strnatcasecmp`, `escapeshellarg`, `strip_tags`
+///   and `parse_url` read the locale on every call, and `strftime` and `gmstrftime` read it
+///   beside the time family's `nondet.time`. The sorts, `substr_compare` and `pathinfo` read it
+///   only under a mode argument ([`locale_read_gate`](crate::locale_read_gate)): their row is
+///   the upper bound and a call site proves, drops or gaps it as the printf family's is.
+///   `number_format` reads no setting and is certified at the call site
+///   ([`certified_at_call_site`]).
 /// * `curl_exec` keeps `io.output` arg-blind (only `CURLOPT_RETURNTRANSFER`
 ///   suppresses it); `system`/`passthru` take parent `io.output` since
 ///   OB-capturability evidence for a relayed child's output is split
@@ -72,6 +80,10 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
     // printf family's `f`/`g`/`G` conversions and by the locale readers, and
     // rewritten by `setlocale`.
     const LOCALE_READ: &[&str] = &["global.read.setting.locale"];
+    // `strftime` and `gmstrftime` name the days and months by the locale (`LC_TIME`) and, with
+    // no timestamp, read the clock: the locale read beside the time family's argument-blind
+    // `nondet.time` (ADR-0101 §3.9; the timezone cell sharpens the clock half later).
+    const LOCALE_READ_CLOCK: &[&str] = &["global.read.setting.locale", "nondet.time"];
     // The printf family also reads the `precision` ini when a `%s` renders a float
     // (`ini_set('precision', '3')` turns `1234.5678` into `1.23E+3`), the first
     // row to colour that cell (ADR-0101 D4, S3). Both reads are conditional on the
@@ -159,6 +171,27 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
         // The other readers of the cell: `localeconv` and `nl_langinfo` report
         // it, `strcoll` collates by it.
         "localeconv" | "nl_langinfo" | "strcoll" => Some(LOCALE_READ),
+        // The readers php-src shows consulting the C library's locale tables or the engine's
+        // locale-derived state on every call (ADR-0101 §3.9, issue #1000, S4): the character
+        // class of each byte (`ctype_*`, `strnatcmp`'s `isspace` and `isdigit`, `strnatcasecmp`'s
+        // `toupper`, `strip_tags`'s `isspace` after a `<`, `parse_url`'s `isalpha` in a scheme),
+        // the multibyte state (`php_mblen` in `escapeshellarg`; `basename` selects its algorithm
+        // by `CG(ascii_compatible_locale)`, which `setlocale` sets). `ctype_digit` and
+        // `ctype_xdigit` are absent: C fixes their sets in every locale and none moved. A
+        // per-byte reader reads nothing of an empty string, which the row does not model: the
+        // read is the call's, as `mb_strlen`'s of the default encoding is.
+        "ctype_alnum" | "ctype_alpha" | "ctype_cntrl" | "ctype_graph" | "ctype_lower"
+        | "ctype_print" | "ctype_punct" | "ctype_space" | "ctype_upper" | "basename"
+        | "strnatcmp" | "strnatcasecmp" | "escapeshellarg" | "strip_tags" | "parse_url" => {
+            Some(LOCALE_READ)
+        }
+        // The readers whose read a mode argument decides (`locale_read_gate`): the row is the
+        // upper bound, and the call site proves, drops or gaps it. The sorts read under
+        // `SORT_LOCALE_STRING` and `SORT_NATURAL`, `substr_compare` when case-insensitive,
+        // `pathinfo` unless only the directory name is asked for.
+        "sort" | "rsort" | "asort" | "arsort" | "ksort" | "krsort" | "substr_compare"
+        | "pathinfo" => Some(LOCALE_READ),
+        "strftime" | "gmstrftime" => Some(LOCALE_READ_CLOCK),
         // Shell out and relay the child's output (ADR-0083).
         "system" | "passthru" => Some(PROCESS_TO_OUTPUT),
         // Shell out and DO NOT relay: `exec` captures into its by-ref array and
@@ -183,8 +216,7 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
         // environment, and [`narrowed_setlocale_labels`] drops the coarse read
         // there. The environment read narrows to its own label when the env cell
         // lands (issue #1000, S6), and `setlocale($c, '0')`, which only queries
-        // the cell, narrows to the locale read in S4 with the other call-site
-        // narrowings (ADR-0101 D6).
+        // the cell, narrows to the locale read alone (ADR-0101 D6, S4).
         "setlocale" => Some(LOCALE_WRITE_ENV_READ),
         // Process-global state, no channel: seeding pair replaces RNG state;
         // `clearstatcache` empties the stat cache. Drawing stays `nondet.random`.
@@ -385,18 +417,26 @@ pub(crate) fn certified_pure(name: &str) -> bool {
 ///   compares the needle with each element, by `fast_is_identical_function`
 ///   when the strict flag is true and by `fast_equal_check_function` when it is
 ///   not, and writes nothing. A loose comparison of an object with a string
-///   runs `__toString`, which is the reach the call-site rule holds it to.
+///   runs `__toString`, which is the reach the call-site rule holds it to;
+/// * `number_format` (ADR-0101 §4, S4): `_php_math_number_format_ex` renders with
+///   `%.*F`, whose decimal point is a literal `.` (`xbuf_format_converter` in
+///   `main/spprintf.c` takes `LCONV_DECIMAL_POINT` for `f` alone), splits at either
+///   `.` or `,`, and takes the separators from its own arguments; its one C `isdigit`
+///   tests the first character of the rendering, a set C fixes in every locale.
+///   Witnessed on 8.1 and 8.5, `C` against `de_DE.UTF-8`, over values, precisions and
+///   separators. It reads no setting, so it is certified here rather than coloured,
+///   and its `string` separators are the reach the call-site rule holds it to.
 ///
-/// Deliberately absent, each reading the locale or an ini setting: `basename`
-/// and `pathinfo` (`php_basename` consults `ascii_compatible_locale` and
-/// `php_mblen`), `strnatcmp` and `strnatcasecmp` (C `isdigit`, `isspace`,
-/// `toupper`), `substr_compare` (`zend_binary_strncasecmp_l`), `parse_url`
-/// (C `isalpha`), `escapeshellarg` (`php_mblen`), `strip_tags` (C `isspace`),
-/// `number_format`, the `ctype_*` family, `htmlspecialchars` (`default_charset`)
-/// and the `mb_*` family (`mbstring` ini). `strtok` keeps its position in
-/// interpreter state. `vsprintf` and `sprintf` read `LC_NUMERIC`'s decimal
-/// point under `%f`, `%g` and `%G` (issue #991): they are not certified pure
-/// and carry the locale-read row of [`effect_labels`] instead (ADR-0101).
+/// Deliberately absent: `htmlspecialchars` (`default_charset`) and the `mb_*` family
+/// (`mbstring` ini) read the encoding cell, which a later slice registers. `strtok` keeps
+/// its position in interpreter state. `vsprintf` and `sprintf` read `LC_NUMERIC`'s decimal
+/// point under `%f`, `%g` and `%G` (issue #991), and `basename`, `pathinfo`, `strnatcmp`,
+/// `strnatcasecmp`, `substr_compare`, `parse_url`, `escapeshellarg`, `strip_tags` and the
+/// `ctype_*` family consult the locale's tables or its multibyte state in php-src (S4): none of
+/// them is certified pure, and each carries the locale-read row of [`effect_labels`] instead
+/// (ADR-0101). `ctype_digit` and `ctype_xdigit` are on neither list: their sets are fixed by C
+/// in every locale and none moved, so they read no setting that changes an answer, and no row
+/// has been written for them.
 const CERTIFIED_AT_CALL_SITE: &[&str] = &[
     "strcmp",
     "strncmp",
@@ -412,6 +452,7 @@ const CERTIFIED_AT_CALL_SITE: &[&str] = &[
     "dirname",
     "unpack",
     "array_search",
+    "number_format",
 ];
 
 /// Whether `name` is certified pure at a call site that rules out its
@@ -473,19 +514,24 @@ pub fn narrowed_output_labels(name: &str, return_mode: bool) -> Option<&'static 
     }
 }
 
-/// The **narrowed** labels of a `setlocale` call that proves it reads no
-/// environment, or `None`: the caller keeps [`effect_labels`]' row, which is the
-/// locale write beside a coarse `global.read` (ADR-0101).
+/// The **narrowed** labels of a `setlocale` call that proves what it does to the cell, or
+/// `None`: the caller keeps [`effect_labels`]' row, which is the locale write beside a coarse
+/// `global.read` (ADR-0101).
 ///
-/// `setlocale($category, $locales)` takes the locale's name from the
-/// environment block only when it is `''` or `null` (`putenv("LC_ALL=fr_FR.…");
-/// setlocale(LC_ALL, "")` answers `fr_FR`), so a call whose **only** locale is a
-/// written, non-empty string literal reads none. `positional` is the call's
-/// argument count, which must be exactly two: a third argument is a fallback
-/// locale tried when the first fails, and it may be `''`. The name is the
-/// literal up to its first NUL byte, as C reads it. `'0'` stays on the
-/// row, since it is the query form and narrows to the read in a later slice
-/// (ADR-0101 D6). An array of locales, a variable and a constant fetch are not
+/// `setlocale($category, $locales)` takes the locale's name from the environment block only
+/// when it is `''` or `null` (`putenv("LC_ALL=fr_FR.…"); setlocale(LC_ALL, "")` answers
+/// `fr_FR`), so a call whose **only** locale is a written, non-empty string literal reads
+/// none, and is the locale write alone. `positional` is the call's argument count, which must
+/// be exactly two: a third argument is a fallback locale tried when the first fails, and it
+/// may be `''`. The name is the literal up to its first NUL byte, as C reads it, so `"C\0x"`
+/// is `C` and `"\0C"` is `''`.
+///
+/// The exact string `"0"` is the **query form** (ADR-0101 D6): `try_setlocale_str` compares
+/// the whole string with `"0"` and passes `NULL` to the C `setlocale`, which answers the
+/// current locale and changes nothing, so the call is the locale read alone. The test is on
+/// the whole string and not on what C would read: `"0\0x"` is not the query (witnessed: it
+/// answers `false` where `'0'` answers the locale), it asks C for a locale named `0`, and
+/// keeps the row. An array of locales, an integer `0`, a variable and a constant fetch are not
 /// read here and keep the row.
 #[must_use]
 pub fn narrowed_setlocale_labels(
@@ -493,17 +539,18 @@ pub fn narrowed_setlocale_labels(
     locale: &str,
     positional: usize,
 ) -> Option<&'static [&'static str]> {
-    // C reads the name up to its first NUL, so `"\0C"` is `''` (the environment)
-    // and `"0\0x"` is the query.
-    let locale = locale.split('\0').next().unwrap_or_default();
-    if positional != 2
-        || locale.is_empty()
-        || locale == "0"
-        || !name.eq_ignore_ascii_case("setlocale")
-    {
+    if positional != 2 || !name.eq_ignore_ascii_case("setlocale") {
         return None;
     }
-    Some(&["global.write.setting.locale"])
+    if locale == "0" {
+        return Some(&["global.read.setting.locale"]);
+    }
+    // C reads the name up to its first NUL, so `"\0C"` is `''` (the environment) and `"0\0x"`
+    // is a locale named `0`.
+    match locale.split('\0').next().unwrap_or_default() {
+        "" | "0" => None,
+        _ => Some(&["global.write.setting.locale"]),
+    }
 }
 
 /// A call argument a **call site** proved constant (issue #318) — the evidence
@@ -1882,9 +1929,42 @@ mod tests {
         }
     }
 
+    /// ADR-0101 §3.9, S4: the locale readers beyond printf. Each name php-src shows consulting
+    /// the locale on every call carries the read, the mode-conditional ones carry it as the upper
+    /// bound their gate narrows, `strftime` carries it beside the clock, `ctype_digit` and
+    /// `ctype_xdigit` carry nothing, and `number_format` is certified with no row.
+    #[test]
+    fn the_locale_readers_beyond_printf() {
+        const READ: Option<&[&str]> = Some(&["global.read.setting.locale"]);
+        for name in [
+            "ctype_alnum", "ctype_alpha", "ctype_cntrl", "ctype_graph", "ctype_lower",
+            "ctype_print", "ctype_punct", "ctype_space", "ctype_upper", "basename", "BaseName",
+            "strnatcmp", "strnatcasecmp", "escapeshellarg", "strip_tags", "parse_url", "pathinfo",
+            "substr_compare", "sort", "rsort", "asort", "arsort", "ksort", "krsort",
+        ] {
+            assert_eq!(effect_labels(name), READ, "{name}");
+        }
+        for name in ["strftime", "gmstrftime"] {
+            assert_eq!(
+                effect_labels(name),
+                Some(&["global.read.setting.locale", "nondet.time"][..]),
+                "{name}"
+            );
+        }
+        for name in ["ctype_digit", "ctype_xdigit", "natsort", "usort", "array_multisort"] {
+            assert_eq!(effect_labels(name), None, "{name} has no row");
+        }
+        assert_eq!(effect_labels("number_format"), None);
+        assert!(super::certified_at_call_site("number_format"));
+        // Names that read nothing keep the row they had.
+        assert_eq!(effect_labels("strcasecmp"), None);
+        assert_eq!(effect_labels("strtoupper").map(<[_]>::len), Some(0));
+    }
+
     /// A `setlocale` call whose only locale is a written non-empty string reads
-    /// no environment, so it narrows to the write; `''`, `'0'`, a third argument
-    /// and any other name keep the row.
+    /// no environment, so it narrows to the write; `''`, a third argument
+    /// and any other name keep the row, and the exact string `'0'` is the query,
+    /// which reads the cell and writes nothing.
     #[test]
     fn a_literal_locale_narrows_setlocale_to_the_write() {
         let write = Some(&["global.write.setting.locale"][..]);
@@ -1893,7 +1973,13 @@ mod tests {
             assert_eq!(super::narrowed_setlocale_labels("SetLocale", locale, 2), write);
         }
         assert_eq!(super::narrowed_setlocale_labels("setlocale", "", 2), None, "the environment");
-        assert_eq!(super::narrowed_setlocale_labels("setlocale", "0", 2), None, "the query form");
+        let read = Some(&["global.read.setting.locale"][..]);
+        assert_eq!(super::narrowed_setlocale_labels("setlocale", "0", 2), read, "the query form");
+        assert_eq!(super::narrowed_setlocale_labels("SETLOCALE", "0", 2), read);
+        assert_eq!(super::narrowed_setlocale_labels("setlocale", "0", 3), None, "a fallback locale");
+        assert_eq!(super::narrowed_setlocale_labels("setlocale", "0", 1), None);
+        assert_eq!(super::narrowed_setlocale_labels("putenv", "0", 2), None, "only setlocale");
+        // php-src compares the whole string with "0": `"0\0x"` is a locale named `0`, not the query.
         for nul in ["\0", "\0C", "0\0x"] {
             assert_eq!(super::narrowed_setlocale_labels("setlocale", nul, 2), None, "{nul:?}");
         }

@@ -120,6 +120,21 @@ const REFUSED_ON_LITERALS: &[(&str, &str)] = &[
     // `mixed $key` admits both literals.
     ("array_key_exists", "deprecation on a null or fractional-float key"),
     ("key_exists", "deprecation on a null or fractional-float key"),
+    // The locale readers of ADR-0101 §3.9 that raise a diagnostic on a literal the declared
+    // `mixed` or `string` admits. `ctype_*` takes `mixed` and, since 8.1, deprecates anything
+    // that is not a string (`ctype_alpha(65)`), and `strftime` and `gmstrftime` are deprecated
+    // outright, so every call raises one. The rest of the readers raise none on a literal.
+    ("ctype_alnum", "deprecation on a non-string literal (8.1)"),
+    ("ctype_alpha", "deprecation on a non-string literal (8.1)"),
+    ("ctype_cntrl", "deprecation on a non-string literal (8.1)"),
+    ("ctype_graph", "deprecation on a non-string literal (8.1)"),
+    ("ctype_lower", "deprecation on a non-string literal (8.1)"),
+    ("ctype_print", "deprecation on a non-string literal (8.1)"),
+    ("ctype_punct", "deprecation on a non-string literal (8.1)"),
+    ("ctype_space", "deprecation on a non-string literal (8.1)"),
+    ("ctype_upper", "deprecation on a non-string literal (8.1)"),
+    ("strftime", "deprecated since 8.1: every call raises E_DEPRECATED"),
+    ("gmstrftime", "deprecated since 8.1: every call raises E_DEPRECATED"),
 ];
 
 /// Names whose admitted argument counts are not an interval, so the engine's

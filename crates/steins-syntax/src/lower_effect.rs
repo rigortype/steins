@@ -114,7 +114,7 @@ pub(crate) fn arg_targets_of_call(fc: &FunctionCall<'_>, cx: &EffectScanCx) -> O
 
 /// The proven-constant form of a named call's first two positional arguments
 /// ([`ConstArgs`], issue #318), its flag-like integers and its literal booleans at
-/// positions 2 and 3. Empty when a named or spread argument defeats
+/// positions 2 to 4. Empty when a named or spread argument defeats
 /// positional mapping — the same list shapes [`arg_targets_of_call`] withholds.
 pub(crate) fn const_args_of_call(fc: &FunctionCall<'_>) -> ConstArgs {
     let mut out = ConstArgs::default();
@@ -126,7 +126,7 @@ pub(crate) fn const_args_of_call(fc: &FunctionCall<'_>) -> ConstArgs {
         match pos {
             0 => out.first = const_arg_of(p.value),
             1 => out.second = const_arg_of(p.value),
-            // Nothing past position 3 is read; the loop runs on only to catch a
+            // Nothing past position 4 is read; the loop runs on only to catch a
             // named/spread argument further along.
             _ => {}
         }
@@ -135,10 +135,10 @@ pub(crate) fn const_args_of_call(fc: &FunctionCall<'_>) -> ConstArgs {
         {
             out.ints.push((u8::try_from(pos).expect("a position of 1 to 3"), int));
         }
-        if (2..=3).contains(&pos)
+        if (2..=4).contains(&pos)
             && let Some(CallTarget::Bool(flag)) = const_arg_of(p.value)
         {
-            out.bools.push((u8::try_from(pos).expect("a position of 2 or 3"), flag));
+            out.bools.push((u8::try_from(pos).expect("a position of 2 to 4"), flag));
         }
     }
     out

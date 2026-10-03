@@ -190,7 +190,7 @@ pub(crate) fn function_throws(
 /// constant the catalog states ([`steins_catalog::engine_constant`]), and their
 /// `|`. `None` for a constant the catalog does not state an integer for (a user
 /// `const`, an extension this build lacks): the flags are then unreadable.
-fn eval_const_int(expr: &ConstInt) -> Option<i64> {
+pub(super) fn eval_const_int(expr: &ConstInt) -> Option<i64> {
     match expr {
         ConstInt::Int(v) => Some(*v),
         ConstInt::Const(name) => match steins_catalog::engine_constant(name)?.value? {
