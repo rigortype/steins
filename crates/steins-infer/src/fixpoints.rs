@@ -78,6 +78,10 @@ pub(crate) struct Fixpoints<'a> {
     /// goes, and "analyze" was one undifferentiated number). Zero for a
     /// fixpoint no consumer's gate ever forced.
     spent: std::cell::Cell<(f64, f64)>,
+    /// The lowest PHP `(major, minor)` the run is about: the declared target's floor, else
+    /// the runtime's minor, `None` when neither is known. Read only by the locale fix-it,
+    /// which offers the `h` and `H` conversions (PHP 8.0) only where the floor reaches them.
+    php_floor: Option<(u16, u16)>,
 }
 
 impl<'a> Fixpoints<'a> {
@@ -97,7 +101,19 @@ impl<'a> Fixpoints<'a> {
             effects: std::cell::OnceCell::new(),
             throws: std::cell::OnceCell::new(),
             spent: std::cell::Cell::new((0.0, 0.0)),
+            php_floor: None,
         }
+    }
+
+    /// This holder with the run's PHP floor ([`Self::php_floor`]).
+    pub(crate) fn with_php_floor(mut self, floor: Option<(u16, u16)>) -> Self {
+        self.php_floor = floor;
+        self
+    }
+
+    /// The lowest PHP minor the run is about, where one is known.
+    pub(crate) fn php_floor(&self) -> Option<(u16, u16)> {
+        self.php_floor
     }
 
     /// `(effects, throws)` fixpoint milliseconds — see [`Self::spent`].

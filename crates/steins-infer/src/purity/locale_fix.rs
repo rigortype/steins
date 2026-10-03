@@ -9,32 +9,44 @@
 //!
 //! The scan starts at the callee's name, which both a plain call's site and a higher-order
 //! one's are anchored at, so it is exactly the text the parser read the first argument from:
-//! the name, optional trivia, `(`, optional trivia, the literal, optional trivia, then `,` or `)`. A literal
-//! followed by anything else (`'%f' . $x`) is not the whole argument and is left alone. A
-//! conversion letter written as an escape (`"%\x66"`) is edited exactly: the whole escape is
-//! replaced by the plain letter of its twin.
+//! the name, optional trivia, `(`, optional trivia, the literal, optional trivia, then `,` or
+//! `)`. A literal followed by anything else (`'%f' . $x`) is not the whole argument and is left
+//! alone. A conversion letter written as an escape (`"%\x66"`) is edited exactly: the whole
+//! escape is replaced by the plain letter of its twin. An octal escape PHP truncates (`\546`)
+//! is refused, since the rewrite would lose its warning.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
-use steins_db::{EffectsPolicy, PluginFacts};
+use steins_db::PluginFacts;
 use steins_syntax::{SiteKind, SiteOrigin};
 
-use super::{EffectFinding, finding_groups};
+use super::EffectSet;
+use crate::Sym;
 use crate::cx::Cx;
 use crate::project::{Fix, FixEdit};
 use crate::site::reach::{Frame, literal_format};
 use crate::site::{Hit, HitKind, Knowledge, Lane, Target, resolve_site};
 
-/// The title of the fix, which is also its message: the output moves under a non-`C` locale.
-pub(crate) const FIX_TITLE: &str = "use the locale-independent conversion (F, h, H): under a non-C locale the output changes, the decimal point becomes '.' always";
+/// The title of the fix, which is also its message: under a locale whose decimal point is not
+/// `.` the output changes.
+pub(crate) const FIX_TITLE: &str = concat!(
+    "use the locale-independent conversion (F, h, H): under a locale whose decimal point is ",
+    "not '.' the output changes, the decimal point becomes '.' always"
+);
 
 /// The label the fix removes.
 pub(crate) const LOCALE: &str = "global.read.setting.locale";
 
 /// The edits that spell every locale-reading conversion of `hit`'s literal format
 /// locale-independent, or `None` where the site is not a plain printf-family call with a literal
-/// format the source can be edited at byte-exactly.
-pub(crate) fn locale_edits(cx: &Cx, site: &SiteOrigin, hit: &Hit) -> Option<Vec<FixEdit>> {
+/// format the source can be edited at byte-exactly, or where a `g` or `G` conversion needs the
+/// `h` or `H` a PHP below 8.0 lacks (`h_ok` is whether the run's floor reaches 8.0).
+pub(crate) fn locale_edits(
+    cx: &Cx,
+    site: &SiteOrigin,
+    hit: &Hit,
+    h_ok: bool,
+) -> Option<Vec<FixEdit>> {
     if !matches!(hit.kind, HitKind::Function) || !hit.labels.contains(&LOCALE) {
         return None;
     }
@@ -48,7 +60,9 @@ pub(crate) fn locale_edits(cx: &Cx, site: &SiteOrigin, hit: &Hit) -> Option<Vec<
     let family = steins_catalog::printf_family(&hit.callee)?;
     let format = literal_format(&site.const_args, &family)?;
     let conversions = steins_catalog::read_format(format)?.locale_conversions;
-    if conversions.is_empty() {
+    // `h` and `H` are PHP 8.0's: below it the call gets no fix at all, since the `f` edits alone
+    // would leave the `g` read standing and the `g` edits would print nothing.
+    if conversions.is_empty() || (!h_ok && conversions.iter().any(|&(_, twin)| twin != b'F')) {
         return None;
     }
     let literal = Literal::read(cx.tree().source_from(site.span.start)?, site.span.start)?;
@@ -71,57 +85,47 @@ pub(crate) fn locale_edits(cx: &Cx, site: &SiteOrigin, hit: &Hit) -> Option<Vec<
 }
 
 /// The edits that take **every** proven locale read out of one method body, or `None` when some
-/// origin of the read (`findings` are the unit's proven effects, the transitive ones included)
-/// is not a printf call of its own body that [`locale_edits`] can edit. A fix that left a finding
-/// of the same label standing would not be the remedy of the Liskov finding it rides.
+/// origin of the read is not a printf call of its own body that [`locale_edits`] can edit. A fix
+/// that left a finding of the same label standing would not be the remedy of the Liskov finding
+/// it rides.
 ///
-/// A body's origin is told from a callee's by its provenance alone (the origin's name, its line
-/// and the file), so a callee's `sprintf` on the very line of one of the body's own is counted as
-/// the body's: the edits then leave that finding standing, and the post-check does not see it.
+/// The body's own sites are told from everything else structurally and not by where a finding
+/// says it arose: a callee, a closure or a `new` the body reaches is an edge, and an edge whose
+/// proven effects hold the read means an origin the edits cannot reach, so the method gets no fix
+/// (a finding's provenance is a name and a line, which a callee on the same line shares).
 pub(super) fn method_edits(
     cx: &Cx,
     frame: &Frame,
-    plugins: &PluginFacts,
-    findings: &HashSet<EffectFinding>,
-    policy: &EffectsPolicy,
+    (effects, plugins, h_ok): (&HashMap<Sym, EffectSet>, &PluginFacts, bool),
 ) -> Option<Vec<FixEdit>> {
-    let mut wanted: HashSet<(&str, u32)> = HashSet::new();
-    for (f, discharged) in finding_groups(findings, &[], policy) {
-        if discharged || f.label != LOCALE {
-            continue;
-        }
-        if f.path != cx.path() {
-            return None;
-        }
-        wanted.insert((f.origin.as_str(), f.line));
-    }
-    // Per origin and line: how many of the body's sites read the locale, and how many of those
-    // the source can be edited at.
-    let mut counts: HashMap<(String, u32), (usize, usize)> = HashMap::new();
+    let (mut reads, mut editable) = (0_usize, 0_usize);
     let mut edits = Vec::new();
     let knowledge = Knowledge::Catalog { lane: Lane::Effects, plugins: Some(plugins) };
     for site in frame.sites {
         for target in resolve_site(cx, frame, site, &knowledge).targets {
-            let Target::Engine(hit) = target else { continue };
-            if !hit.labels.contains(&LOCALE) {
-                continue;
-            }
-            let line = cx.tree().position(site.span.start).line;
-            let slot = counts.entry((hit.origin.clone(), line)).or_default();
-            slot.0 += 1;
-            if let Some(found) = locale_edits(cx, site, &hit) {
-                slot.1 += 1;
-                edits.extend(found);
+            match target {
+                Target::Engine(hit) if hit.labels.contains(&LOCALE) => {
+                    reads += 1;
+                    if let Some(found) = locale_edits(cx, site, &hit, h_ok) {
+                        editable += 1;
+                        edits.extend(found);
+                    }
+                }
+                Target::Edge(edge) => {
+                    let reaches = effects
+                        .get(&edge.sym)
+                        .is_some_and(|set| set.findings.iter().any(|f| f.label == LOCALE));
+                    if reaches {
+                        return None;
+                    }
+                }
+                _ => {}
             }
         }
     }
-    let covered = !wanted.is_empty()
-        && wanted.iter().all(|&(origin, line)| {
-            counts.get(&(origin.to_owned(), line)).is_some_and(|&(all, edited)| all == edited)
-        });
     edits.sort_by_key(|e| (e.start, e.end));
     edits.dedup();
-    covered.then_some(edits)
+    (reads > 0 && reads == editable).then_some(edits)
 }
 
 /// A [`Fix`] of `edits`, or `None` for none.
@@ -220,7 +224,8 @@ impl<'a> Literal<'a> {
             b'0'..=b'7' => {
                 let digits = rest.iter().take(3).take_while(|b| (b'0'..=b'7').contains(b)).count();
                 let value = rest[..digits].iter().fold(0_u32, |n, d| n * 8 + u32::from(d - b'0'));
-                (1 + digits, vec![u8::try_from(value & 0xFF).ok()?])
+                // `\400` and above are truncated by PHP with a warning: refused (`try_from`).
+                (1 + digits, vec![u8::try_from(value).ok()?])
             }
             b'x' if rest.get(1).is_some_and(u8::is_ascii_hexdigit) => {
                 let digits = rest[1..].iter().take(2).take_while(|b| b.is_ascii_hexdigit()).count();

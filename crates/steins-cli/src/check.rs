@@ -504,30 +504,38 @@ fn apply_fixes(
         return none;
     }
     let mut plan = EditPlan::new();
-    for fix in &fixes {
-        for e in &fix.edits {
-            let edit = Edit {
-                path: e.path.clone(),
-                span: ByteSpan::new(e.start, e.end),
-                replacement: e.replacement.clone(),
+    let wanted: Vec<Edit> = fixes
+        .iter()
+        .flat_map(|fix| &fix.edits)
+        .map(|e| Edit {
+            path: e.path.clone(),
+            span: ByteSpan::new(e.start, e.end),
+            replacement: e.replacement.clone(),
+        })
+        .collect();
+    for edit in &wanted {
+        // Findings may share an edit; dedupe rather than collide as overlaps.
+        if plan.edits.contains(edit) {
+            continue;
+        }
+        // An edit wholly inside a larger one is the larger edit's to make: the finding it
+        // fixes sits in the text the other rewrites (a locale read in a dumped argument whose
+        // statement is deleted), and the post-check judges the result.
+        if wanted.iter().any(|outer| encloses(outer, edit)) {
+            continue;
+        }
+        if let Err(err) = plan.add_edit(edit.clone()) {
+            // Overlapping edits can't be one atomic transaction; refuse rather than guess.
+            return FixRun {
+                applied: false,
+                files_written: 0,
+                skipped: Vec::new(),
+                refusal: Some(FixRefusal {
+                    reason: "overlapping-fix-edits",
+                    detail: format!("cannot combine this run's fixes into one plan: {err}"),
+                    new_diagnostics: Vec::new(),
+                }),
             };
-            // Findings may share an edit; dedupe rather than collide as overlaps.
-            if plan.edits.contains(&edit) {
-                continue;
-            }
-            if let Err(err) = plan.add_edit(edit) {
-                // Overlapping edits can't be one atomic transaction; refuse rather than guess.
-                return FixRun {
-                    applied: false,
-                    files_written: 0,
-                    skipped: Vec::new(),
-                    refusal: Some(FixRefusal {
-                        reason: "overlapping-fix-edits",
-                        detail: format!("cannot combine this run's fixes into one plan: {err}"),
-                        new_diagnostics: Vec::new(),
-                    }),
-                };
-            }
         }
     }
 
@@ -543,6 +551,14 @@ fn apply_fixes(
     };
     run.skipped = skipped;
     run
+}
+
+/// Whether `outer` is a different edit of the same file whose span holds all of `inner`'s.
+fn encloses(outer: &Edit, inner: &Edit) -> bool {
+    outer.path == inner.path
+        && outer.span.start <= inner.span.start
+        && inner.span.end <= outer.span.end
+        && outer.span != inner.span
 }
 
 /// The post-check and the write of an assembled plan (ADR-0034 point 3a).

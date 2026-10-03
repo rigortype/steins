@@ -373,9 +373,24 @@ run (#1000). What it decides beyond the text above:
   edited at the source piece that spelled it, so `"%\x66"` becomes `"%F"` (the whole escape is the
   piece) and the escapes around it keep their bytes.
 - **The title is the message.** A `Fix` has a title and edits and no other text, so the registered
-  title says what changes: `use the locale-independent conversion (F, h, H): under a non-C locale
-  the output changes, the decimal point becomes '.' always`. It is interned in the summaries table;
-  the stored types are unchanged, so no schema bump.
+  title says what changes: `use the locale-independent conversion (F, h, H): under a locale whose
+  decimal point is not '.' the output changes, the decimal point becomes '.' always` (a locale
+  whose decimal point already is `.` does not change). It is interned in the summaries table; the
+  stored types are unchanged, so no schema bump, and a stored generation naming an older spelling
+  of the title misses and walks, as any unregistered title does.
+- **The PHP floor.** `h` and `H` are PHP 8.0's (on 7.4 `%h` prints nothing), so a call with a `g`
+  or `G` conversion gets no fix where the declared target's floor, or the runtime's minor when
+  none is declared, is below 8.0 (an unknown floor admits); a partial edit of the `f` conversions
+  alone would leave the read. `F` is offered on any floor. The floor is `Fixpoints::php_floor`,
+  read by the effects pass only.
+- **Liskov origins are structural.** The method's own printf sites are the body's resolved sites;
+  a callee, a closure or a method the body reaches is an edge, and an edge whose proven effects
+  hold the read means an origin the edits cannot reach, so no fix. A finding's provenance (a name
+  and a line) is not used, since a callee's `sprintf` on the same line shares it.
+- **Overlapping fixes.** `check --fix` leaves an edit wholly inside a different, larger edit of the
+  same file to the larger one (a printf in the argument of a deleted `dumpType` statement), and
+  still refuses partial overlaps. An octal escape above `\377` is refused: PHP truncates it with a
+  warning the rewrite would lose.
 - **Witnessed** on PHP 8.5.11: the 1,488 pairs of §3.1 and the literals the fix writes (flags,
   width, `n$`, `'c` padding, `l`, an escape-spelled letter) are byte-identical under `C`, and
   `%.2f` is `2,50` where `%.2F` is `2.50` under `de_DE`.

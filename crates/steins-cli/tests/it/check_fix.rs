@@ -241,10 +241,14 @@ fn multi_argument_dump_is_fixed_once() {
     assert_eq!(proj.read("app.php"), "<?php\n$x = 1;\n$y = 2;\n");
 }
 
-const LOCALE_SRC: &str = "<?php\n#[\\Steins\\Pure]\nfunction fmt(float $x): string {\n    return sprintf('%.2f', $x);\n}\n";
+const LOCALE_SRC: &str = concat!(
+    "<?php\n#[\\Steins\\Pure]\nfunction fmt(float $x): string {\n",
+    "    return sprintf('%.2f', $x);\n}\n"
+);
 
-/// ADR-0101 §3.6, on the contracts surface the envelope findings live on: the locale-independent conversion is the remedy of the envelope finding a
-/// literal `%f` raises, and the post-check sees the locale read gone.
+/// ADR-0101 §3.6, on the contracts surface the envelope findings live on: the
+/// locale-independent conversion is the remedy of the envelope finding a literal `%f` raises,
+/// and a rerun shows the locale read gone.
 #[test]
 fn fix_spells_a_percent_f_under_a_pure_envelope_as_capital_f_and_a_rerun_is_clean() {
     let proj = TempProject::new("locale");
@@ -275,10 +279,14 @@ fn fix_spells_a_percent_f_under_a_pure_envelope_as_capital_f_and_a_rerun_is_clea
 #[test]
 fn the_locale_fix_leaves_a_second_exceeding_label_standing() {
     let proj = TempProject::new("locale-two");
-    let src = "<?php\n#[\\Steins\\Pure]\nfunction f(float $x): string {\n    $r = rand();\n    return sprintf('%g', $x);\n}\n";
+    let src = concat!(
+        "<?php\n#[\\Steins\\Pure]\nfunction f(float $x): string {\n",
+        "    $r = rand();\n    return sprintf('%g', $x);\n}\n"
+    );
     proj.write("f.php", src);
 
-    let json = run(&["check", "--no-php", "--profile", "contracts", "--format", "json", proj.path()]);
+    let json =
+        run(&["check", "--no-php", "--profile", "contracts", "--format", "json", proj.path()]);
     assert!(json.stdout.contains("use the locale-independent conversion"), "{}", json.stdout);
     assert!(json.stdout.contains("\"replacement\": \"h\""), "{}", json.stdout);
 
@@ -290,4 +298,64 @@ fn the_locale_fix_leaves_a_second_exceeding_label_standing() {
     let rerun = run(&["check", "--no-php", "--profile", "contracts", proj.path()]);
     assert!(rerun.stdout.contains("rand()"), "{}", rerun.stdout);
     assert!(!rerun.stdout.contains("setting.locale"), "{}", rerun.stdout);
+}
+
+const G_SRC: &str = "<?php\n/** @phpstan-pure */\nfunction f(float $x): string {\n    return sprintf('%.3g|%G', $x, $x);\n}\n";
+
+/// `h` and `H` exist from PHP 8.0 (on 7.4 `%h` prints nothing): a project whose declared floor is
+/// below it gets no fix for a `g` or `G` conversion, and nothing is written; at 8.0 it does.
+#[test]
+fn the_locale_fix_offers_h_and_capital_h_only_from_php_8() {
+    let on = |constraint: &str| {
+        let proj = TempProject::new("locale-target");
+        proj.write("composer.json", &format!("{{\"require\": {{\"php\": \"{constraint}\"}}}}"));
+        proj.write("a.php", G_SRC);
+        let fixed =
+            run(&["check", "--no-php", "--profile", "contracts", "--fix", proj.path()]);
+        (fixed, proj.read("a.php"))
+    };
+    for constraint in ["^7.4", ">=7.4 <9", "^7.4 || ^8.0"] {
+        let (fixed, after) = on(constraint);
+        assert_eq!(fixed.code, 1, "{constraint}:\n{}\n{}", fixed.stdout, fixed.stderr);
+        assert_eq!(after, G_SRC, "{constraint}: nothing written");
+        assert!(fixed.stdout.contains("error[effect.envelope-exceeded]"), "{}", fixed.stdout);
+    }
+    let (fixed, after) = on("^8.0");
+    assert_eq!(fixed.code, 0, "{}\n{}", fixed.stdout, fixed.stderr);
+    assert_eq!(after, G_SRC.replace("'%.3g|%G'", "'%.3h|%H'"));
+}
+
+/// `F` is PHP 5.0's, so a format with only `f` conversions is fixed on any floor.
+#[test]
+fn the_locale_fix_offers_capital_f_on_php_7() {
+    let proj = TempProject::new("locale-target-f");
+    proj.write("composer.json", "{\"require\": {\"php\": \"^7.4\"}}");
+    proj.write("fmt.php", LOCALE_SRC);
+    let fixed = run(&["check", "--no-php", "--profile", "contracts", "--fix", proj.path()]);
+    assert_eq!(fixed.code, 0, "{}\n{}", fixed.stdout, fixed.stderr);
+    assert_eq!(proj.read("fmt.php"), LOCALE_SRC.replace("'%.2f'", "'%.2F'"));
+}
+
+/// A locale fix inside a statement another fix deletes does not collide with it: the dump
+/// statement is removed whole, with the printf in its argument, and the rest of the run is fixed
+/// as it would be without the dump (it refused with `overlapping-fix-edits` before).
+#[test]
+fn the_locale_fix_inside_a_deleted_dump_statement_does_not_overlap_it() {
+    let proj = TempProject::new("locale-dump");
+    let src = concat!(
+        "<?php\n#[\\Steins\\Pure]\nfunction f(float $x): string {\n",
+        "    \\PHPStan\\dumpType(sprintf('%.2f', $x));\n    return sprintf('%g', $x);\n}\n",
+        "function g(): void { \\PHPStan\\dumpType(1); }\n"
+    );
+    proj.write("a.php", src);
+    let fixed = run(&["check", "--no-php", "--profile", "contracts", "--fix", proj.path()]);
+    assert_eq!(fixed.code, 0, "{}\n{}", fixed.stdout, fixed.stderr);
+    let expected = concat!(
+        "<?php\n#[\\Steins\\Pure]\nfunction f(float $x): string {\n",
+        "    return sprintf('%h', $x);\n}\n",
+        "function g(): void {  }\n"
+    );
+    assert_eq!(proj.read("a.php"), expected);
+    let rerun = run(&["check", "--no-php", "--profile", "contracts", proj.path()]);
+    assert_eq!(rerun.code, 0, "{}", rerun.stdout);
 }
