@@ -4131,6 +4131,9 @@ pub struct AnonClassEdge {
     pub held_classes: Vec<NameRef>,
     /// Whether one of those hints is `parent`, which names the class's own `extends` parent.
     pub holds_parent: bool,
+    /// Each property and promoted constructor parameter of the body by name and hint, which
+    /// the property drops read for a subclass of the enclosing class (ADR-0100 §7).
+    pub props: Vec<TraitProp>,
     /// The `new class` construct's source span.
     pub span: Span,
 }
