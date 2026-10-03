@@ -142,20 +142,23 @@ jobs:
           php-version: ${{ matrix.php }}
           coverage: none
 
-      # The locale oracles compare the printf family and the `sprintf` NUMERIC
-      # claim against the engine under `de_DE.UTF-8` (ADR-0101: `locale_oracle`
-      # in steins-catalog, `the_numeric_claim_holds_under_de_de` in steins-infer).
-      # A runner without the locale used to skip them silently; under `CI` they
-      # now fail instead, so the locale is generated here and then proven to be
-      # one PHP can select. macOS ships it.
-      - name: Provide the de_DE.UTF-8 locale
+      # The locale oracles compare the printf family, the `sprintf` NUMERIC claim
+      # and the locale readers of ADR-0101 §3.9 against the engine under
+      # `de_DE.UTF-8` and a Latin-1 locale, where a byte of 0x80 to 0xFF is a
+      # letter (ADR-0101: `locale_oracle` and `locale_readers_oracle` in
+      # steins-catalog, `the_numeric_claim_holds_under_de_de` in steins-infer).
+      # A runner without them used to skip them silently; under `CI` they now
+      # fail instead, so the locales are generated here and then proven to be
+      # ones PHP can select. macOS ships both.
+      - name: Provide the de_DE.UTF-8 and de_DE Latin-1 locales
         run: |
           if [ "$RUNNER_OS" = "Linux" ]; then
             sudo apt-get update
             sudo apt-get install -y --no-install-recommends locales
-            sudo locale-gen de_DE.UTF-8
+            sudo locale-gen de_DE.UTF-8 de_DE.ISO-8859-1
           fi
           php -r 'if (setlocale(LC_ALL, "de_DE.UTF-8") === false) { fwrite(STDERR, "de_DE.UTF-8 is not selectable\n"); exit(1); } echo setlocale(LC_ALL, "0"), "\n";'
+          php -r 'foreach (["de_DE.ISO8859-1", "de_DE.ISO-8859-1", "de_DE.iso88591"] as $l) { if (setlocale(LC_ALL, $l) !== false) { echo setlocale(LC_ALL, "0"), "\n"; exit(0); } } fwrite(STDERR, "no de_DE Latin-1 locale is selectable\n"); exit(1);'
 
       - name: Install Rust toolchain (MSRV)
         uses: dtolnay/rust-toolchain@master

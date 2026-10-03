@@ -40,6 +40,7 @@ use steins_syntax::{
 
 use super::contract::{conditional_purity, eval_conditional_purity};
 use super::engine;
+use super::locale;
 use super::method::{
     EngineMethod, engine_class_of, engine_method, method_edge, new_hooks, parent_constructor_hooks,
     throwable_creation_hooks,
@@ -276,6 +277,10 @@ impl<'a> Resolver<'a, '_, '_> {
         if let Some(gap) = printf::narrow_labels(self.cx, self.frame, builtin, call, &mut labels) {
             self.gap(gap);
         }
+        let positional = args.targets.map(<[_]>::len);
+        if let Some(gap) = locale::narrow_labels(builtin, positional, args.consts, &mut labels) {
+            self.gap(gap);
+        }
         self.function_hit(builtin, name.simple(), labels, &[]);
         let reach =
             builtin_reach(self.cx, self.frame, builtin, (args.shapes, Some(args.consts)), &[]);
@@ -431,6 +436,11 @@ impl<'a> Resolver<'a, '_, '_> {
                 if steins_catalog::printf_family(builtin).is_some()
                     && let Some(gap) = printf::unreadable_format(&mut labels)
                 {
+                    self.gap(gap);
+                }
+                // A reader whose read a mode argument decides is called with one of the
+                // invoker's choosing.
+                if let Some(gap) = locale::unreadable_mode(builtin, &mut labels) {
                     self.gap(gap);
                 }
                 self.function_hit(builtin, name.simple(), labels, &[]);
