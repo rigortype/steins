@@ -30,12 +30,17 @@
 //! an engine class contributes nothing: those drops are recorded residue, and so
 //! the gap is a lower bound on the drops that run user code.
 //!
+//! A write to or an `unset` of a property is a drop of what the property held: its
+//! declared hint stands for the value, and [`property`] reads it (issue #1003).
+//!
 //! [`Index::destructor_ancestors`]: crate::project::Index::destructor_ancestors
+
+mod property;
 
 use std::collections::HashSet;
 
 use steins_db::AnonymousClass;
-use steins_syntax::{EffectRecv, TypeMember};
+use steins_syntax::{EffectRecv, OperatorConstruct as C, TypeMember};
 
 use super::super::engine::declares_engine_class;
 use super::super::reach::Frame;
@@ -43,14 +48,24 @@ use super::super::{GapKind, ResolvedSite};
 use crate::cx::Cx;
 
 /// Resolve a drop site: a gap when some class the dropped variable may hold
-/// reaches a destructor. `receivers` has one entry per such class.
+/// reaches a destructor. `receivers` has one entry per such class. A property site
+/// names the class that holds the property and the property, and what it may hold is
+/// the property's declared hint ([`property`]).
 pub(super) fn resolve(
     cx: &Cx<'_>,
     frame: &Frame<'_>,
+    construct: C,
     receivers: &[Option<EffectRecv>],
+    member: Option<&str>,
 ) -> ResolvedSite {
     let mut out = ResolvedSite::default();
-    if receivers.iter().any(|receiver| may_run(cx, frame, receiver.as_ref())) {
+    let may = match (construct, member) {
+        (C::DropPropWrite | C::DropPropInit | C::DropPropUnset, Some(member)) => {
+            property::may_run(cx, frame, construct, receivers.first().and_then(Option::as_ref), member)
+        }
+        _ => receivers.iter().any(|receiver| may_run(cx, frame, receiver.as_ref())),
+    };
+    if may {
         out.gaps.insert(GapKind::Destructor);
     }
     out

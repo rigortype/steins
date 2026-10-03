@@ -37,7 +37,7 @@ use mago_syntax::cst::{
     Literal, Node, StringPart, SwitchCase, UnaryPrefix, UnaryPrefixOperator, Variable,
 };
 
-use super::{SiteScope, scan_sites};
+use super::{SiteScope, drops, scan_sites};
 use crate::ast::{
     ArgShape, ConstArgs, EffectRecv, OperatorConstruct as C, OperatorFamily as F, SiteKind,
     SiteOrigin,
@@ -380,21 +380,25 @@ fn chain(expr: &Expression<'_>, role: C, sx: &SiteScope<'_>, out: &mut Vec<SiteO
     match expr.unparenthesized() {
         Expression::Access(Access::Property(pa)) => {
             property_site(pa.object, &pa.property, to_span(pa.span()), role, sx, out);
+            drops::temporary(pa.object, sx, out);
             chain(pa.object, inner(role), sx, out);
             selector(&pa.property, sx, out);
         }
         Expression::Access(Access::NullSafeProperty(pa)) => {
             property_site(pa.object, &pa.property, to_span(pa.span()), role, sx, out);
+            drops::temporary(pa.object, sx, out);
             chain(pa.object, inner(role), sx, out);
             selector(&pa.property, sx, out);
         }
         Expression::ArrayAccess(aa) => {
             offset_site(aa.array, to_span(aa.span()), role, sx, out);
+            drops::temporary(aa.array, sx, out);
             chain(aa.array, inner(role), sx, out);
             scan_sites(&Node::Expression(aa.index), sx, out);
         }
         Expression::ArrayAppend(ap) => {
             offset_site(ap.array, to_span(ap.span()), role, sx, out);
+            drops::temporary(ap.array, sx, out);
             chain(ap.array, inner(role), sx, out);
         }
         other => scan_sites(&Node::Expression(other), sx, out),

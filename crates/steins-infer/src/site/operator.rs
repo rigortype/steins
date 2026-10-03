@@ -48,7 +48,7 @@ pub(super) fn resolve<'a>(
     member: Option<&str>,
 ) -> ResolvedSite {
     if family == F::Drop {
-        return drops::resolve(cx, frame, receivers);
+        return drops::resolve(cx, frame, construct, receivers, member);
     }
     let mut op = Operator {
         cx,

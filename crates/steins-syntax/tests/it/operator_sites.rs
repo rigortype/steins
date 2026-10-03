@@ -35,7 +35,9 @@ fn ops(body: &str) -> Vec<Op> {
     method
         .sites
         .iter()
+        // The drop family has its own tests, below.
         .filter_map(|site| match &site.kind {
+            SiteKind::Operator { family: F::Drop, .. } => None,
             SiteKind::Operator { family, construct, receivers, member } => Some(Op {
                 family: *family,
                 construct: *construct,
@@ -590,6 +592,10 @@ fn drops(params: &str, body: &str) -> Vec<Drop> {
         .sites
         .iter()
         .filter_map(|site| match &site.kind {
+            // A property drop is not a variable's: it has its own tests.
+            SiteKind::Operator { construct: C::DropPropWrite | C::DropPropInit | C::DropPropUnset, .. } => {
+                None
+            }
             SiteKind::Operator { family: F::Drop, construct, receivers, member } => {
                 assert_eq!(*member, None);
                 // One operand per receiver, none of which names a shape of its own.
@@ -663,24 +669,97 @@ fn a_local_remembers_every_class_it_is_written_with_a_new() {
 }
 
 #[test]
-fn a_local_first_written_with_anything_but_a_new_is_no_subject() {
+fn a_local_no_write_stores_a_new_into_is_no_subject() {
     for body in [
-        "$f = make(); unset($f); $f = new D;",
-        "$f = null; $f = new D; unset($f);",
+        "$f = make(); unset($f);",
+        "$f = null; unset($f);",
         "$f = new $c; unset($f);",
         "$f = new static; unset($f);",
         "$f = new self; unset($f);",
+        // An array holds the object, not the variable.
+        "$f = [new D]; unset($f);",
     ] {
         let sites = drops("", body);
         assert!(!sites.iter().any(|s| s.2 == "$f" || s.0 == C::DropScopeExit), "{body}: {sites:?}");
     }
-    // The inner write of a chain is a write of its own variable, not of the outer one.
+    // The inner write of a chain is a write of its own variable, and the outer variable
+    // holds the same object.
     assert_eq!(
         drops("", "$a = $f = new D; unset($a);"),
-        [drop_site(C::DropScopeExit, &["D"], "}")]
+        [drop_site(C::DropUnset, &["D"], "$a"), drop_site(C::DropScopeExit, &["D"], "}"), drop_site(C::DropScopeExit, &["D"], "}")]
     );
     // `??=` assigns only an unset variable, so it is no write of a value to drop.
     assert_eq!(drops("", "$f ??= new D; unset($f);"), []);
+}
+
+/// Issue #1003: any plain write that stores a `new` makes the local a subject, not only its
+/// first; a write drops nothing only while no earlier write could have stored an object.
+#[test]
+fn a_local_is_a_subject_by_any_write_that_stores_a_new() {
+    // Witnessed: `<body>[D]`. The `null` before it is no object, so neither write drops.
+    assert_eq!(
+        drops("", "$x = null; $x = new D;"),
+        [drop_site(C::DropScopeExit, &["D"], "}")]
+    );
+    // An earlier write of a call result may have held an object, so the `new` drops it.
+    assert_eq!(
+        drops("", "$x = make(); $x = new D;"),
+        [
+            drop_site(C::DropReassign, &["D"], "$x = new D"),
+            drop_site(C::DropScopeExit, &["D"], "}"),
+        ]
+    );
+    // Once a write stored a `new`, a later `null` drops it.
+    assert_eq!(
+        drops("", "$x = null; $x = new D; $x = null;"),
+        [
+            drop_site(C::DropReassign, &["D"], "$x = null"),
+            drop_site(C::DropScopeExit, &["D"], "}"),
+        ]
+    );
+    // A write in a loop may run twice; a `goto` anywhere may run any write twice.
+    let looped = drops("", "$x = null; while ($c) { $x = new D; }");
+    assert!(looped.contains(&drop_site(C::DropReassign, &["D"], "$x = new D")), "{looped:?}");
+    let goto = drops("", "$x = null; a: $x = new D; goto a;");
+    assert!(goto.contains(&drop_site(C::DropReassign, &["D"], "$x = new D")), "{goto:?}");
+}
+
+/// Issue #1003: a `new` that reaches the variable through a ternary, `?:`, `??`, a
+/// `match` arm, a nested assignment or a `clone` is a write of its class (witnessed
+/// `<body>[D]` for the first three, `<body>[D][D]` for the clone of a parameter).
+#[test]
+fn a_new_in_an_arm_or_a_clone_is_a_write_of_its_class() {
+    let exit = |receivers: &[&str]| [drop_site(C::DropScopeExit, receivers, "}")];
+    assert_eq!(drops("", "$x = $c ? new D : null;"), exit(&["D"]));
+    assert_eq!(drops("", "$x = $c ? null : new D;"), exit(&["D"]));
+    assert_eq!(drops("", "$x = $c ? new D : new E;"), exit(&["D", "E"]));
+    assert_eq!(drops("", "$x = $y ?: new D;"), exit(&["D"]));
+    assert_eq!(drops("", "$x = $y ?? new D;"), exit(&["D"]));
+    assert_eq!(drops("", "$x = match ($k) { 1 => new D, 2 => new E, default => null };"), exit(&["D", "E"]));
+    assert_eq!(drops("", "$x = ($c ? new D : null);"), exit(&["D"]));
+    assert_eq!(drops("", "$x = clone new D;").last(), Some(&exit(&["D"])[0]));
+    // A condition is not an arm: `$x` holds what the other arms hold, not `new D`.
+    assert_eq!(drops("", "$x = (new D) ? 1 : 2;").iter().filter(|s| s.0 == C::DropScopeExit).count(), 0);
+}
+
+/// Issue #1003: a parameter the body overwrites with a `new` is a subject, whatever its hint.
+#[test]
+fn a_parameter_overwritten_with_a_new_is_a_subject() {
+    // Witnessed `<body>[D]`: the parameter holds the value on entry, so the write is a reassignment.
+    assert_eq!(
+        drops("$x = null", "$x = new D;"),
+        [drop_site(C::DropReassign, &["D"], "$x = new D"), drop_site(C::DropScopeExit, &["D"], "}")]
+    );
+    // A hinted parameter keeps its bound and adds the class it is written with.
+    assert_eq!(
+        drops("B $b", "$b = new D;"),
+        [
+            drop_site(C::DropReassign, &["~B", "D"], "$b = new D"),
+            drop_site(C::DropScopeExit, &["~B", "D"], "}"),
+        ]
+    );
+    // A by-reference parameter is the caller's variable, and still no subject.
+    assert_eq!(drops("&$r", "$r = new D;"), []);
 }
 
 #[test]
@@ -766,8 +845,12 @@ fn a_new_that_escapes_is_no_temporary() {
         "yield new D;",
         "$a = [new D];",
         "$c = function () { return new D; };",
-        "echo new D;",
         "foo(...[new D]);",
+        "return $c ? new D : null;",
+        "$x = (object) new D;",
+        "$x = new D ?? 1;",
+        "$x = @new D;",
+        "return (object) new D;",
         "$o = new $c;",
         "new static;",
     ] {
@@ -839,4 +922,269 @@ fn drop_sites_are_neither_lanes_origins() {
     let origins = format!("{:?}", derive_effect_origins(sites));
     assert!(!origins.contains("Operator") && !origins.contains("Drop"), "{origins}");
     assert!(!format!("{:?}", derive_throw_origins(sites)).contains("Drop"));
+}
+
+/// Issue #1003: a `new` is a temporary in every position that does not keep the value, not
+/// only a statement, a receiver or an argument (witnessed on PHP 8.5: `clone new D` two
+/// drops, `(new D)->p` and `new D instanceof D` `[D]<body>`, `echo new D` `s[D]<body>`).
+#[test]
+fn a_new_an_expression_consumes_is_a_temporary() {
+    let temp = |text: &str| [drop_site(C::DropTemporary, &["D"], text)];
+    for body in [
+        "(new D)->p;",
+        "(new D)?->p;",
+        "$v = (new D)->p;",
+        "$v = (new D)[0];",
+        "echo new D;",
+        "print new D;",
+        "$s = (string) new D;",
+        "$b = !new D;",
+        "$b = new D instanceof D;",
+        "$b = new D == null;",
+        "$b = new D && true;",
+        "$s = 'a' . new D;",
+        "if (new D) {}",
+        "while (new D) {}",
+        "$v = isset((new D)->p);",
+        "$v = empty((new D)->p);",
+        "$v = (new D)->p ?? 1;",
+        "(new D)->p = 1;",
+        "unset((new D)->p);",
+        "$v = (new D)();",
+        "$v = (new D)::s();",
+        "foreach (new D as $x) {}",
+        "switch (new D) {}",
+        "$v = match (new D) { default => 1 };",
+        "$v = new D ? 1 : 2;",
+    ] {
+        let sites = drops("", body);
+        let temporaries: Vec<_> = sites.iter().filter(|s| s.0 == C::DropTemporary).collect();
+        assert_eq!(temporaries.len(), 1, "{body}: {sites:?}");
+        assert_eq!(temporaries[0].1, ["D"], "{body}");
+    }
+    // `clone new D` drops twice: the operand and the clone.
+    assert_eq!(
+        drops("", "clone new D;"),
+        [
+            drop_site(C::DropTemporary, &["D"], "clone new D"),
+            drop_site(C::DropTemporary, &["D"], "new D"),
+        ]
+    );
+    // A value that flows through a ternary, `??` or `match` arm to a consumer is judged there.
+    assert_eq!(drops("", "$c ? new D : null;"), temp("$c ? new D : null"));
+    assert_eq!(drops("", "foo($c ? new D : null);"), temp("$c ? new D : null"));
+    assert_eq!(drops("", "echo $c ? new D : null;"), temp("$c ? new D : null"));
+    // A class that reaches no destructor is still a site: the resolver reads the class.
+    assert_eq!(drops("", "echo new E;"), [drop_site(C::DropTemporary, &["E"], "new E")]);
+}
+
+/// One property drop site of `class K { … f() { body } }`: construct, the receiver (`this`,
+/// `self`, `parent`, or the class name), the property and the text its span covers.
+type PropDrop = (C, String, String, String);
+
+fn prop_drops(body: &str, constructor: bool) -> Vec<PropDrop> {
+    let name = if constructor { "__construct" } else { "f" };
+    let src = format!("<?php\nclass K {{ public function {name}() {{ {body} }} }}\n");
+    let tree = SourceTree::parse(&src);
+    assert!(tree.parse_errors().is_empty(), "{body}: {:?}", tree.parse_errors());
+    let method = &tree.classes()[0].methods[0];
+    method
+        .sites
+        .iter()
+        .filter_map(|site| match &site.kind {
+            SiteKind::Operator {
+                construct: construct @ (C::DropPropWrite | C::DropPropInit | C::DropPropUnset),
+                receivers,
+                member,
+                ..
+            } => {
+                assert_eq!(construct.family_hint(), Some(F::Drop));
+                assert_eq!(site.operands.as_ref(), Some(&vec![ArgShape::Unknown]));
+                let receiver = match receivers.as_slice() {
+                    [Some(EffectRecv::This)] => "this".to_owned(),
+                    [Some(EffectRecv::SelfKw)] => "self".to_owned(),
+                    [Some(EffectRecv::Parent)] => "parent".to_owned(),
+                    [Some(EffectRecv::ClassName(name))] => name.raw.clone(),
+                    other => panic!("{other:?}"),
+                };
+                let text = src[site.span.start as usize..site.span.end as usize].to_owned();
+                Some((*construct, receiver, member.clone().expect("it names the property"), text))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn prop_drop(construct: C, receiver: &str, member: &str, text: &str) -> PropDrop {
+    (construct, receiver.to_owned(), member.to_owned(), text.to_owned())
+}
+
+/// Issue #1003: a plain write to `$this->p` or to a static property of `self`, `static`,
+/// `parent` or a named class, and an `unset` of `$this->p`, are drop sites that name the
+/// property; the resolver reads its declared hint.
+#[test]
+fn a_property_write_or_unset_is_a_drop_site_naming_the_property() {
+    let write = |r: &str, m: &str, t: &str| prop_drop(C::DropPropWrite, r, m, t);
+    assert_eq!(prop_drops("$this->d = null;", false), [write("this", "d", "$this->d = null")]);
+    assert_eq!(prop_drops("self::$d = null;", false), [write("self", "d", "self::$d = null")]);
+    assert_eq!(prop_drops("static::$d = null;", false), [write("self", "d", "static::$d = null")]);
+    assert_eq!(
+        prop_drops("parent::$d = null;", false),
+        [write("parent", "d", "parent::$d = null")]
+    );
+    assert_eq!(prop_drops("Other::$d = null;", false), [write("Other", "d", "Other::$d = null")]);
+    assert_eq!(
+        prop_drops("unset($this->d);", false),
+        [prop_drop(C::DropPropUnset, "this", "d", "$this->d")]
+    );
+    // The value written is no matter, and a write inside another expression is still one.
+    assert_eq!(
+        prop_drops("$this->d = new D;", false),
+        [write("this", "d", "$this->d = new D")]
+    );
+    assert_eq!(prop_drops("foo($this->d = null);", false).len(), 1);
+}
+
+/// What is not a property drop: another object's property (residue), a compound write, an
+/// element write, a dynamic name and a read.
+#[test]
+fn a_write_the_lowering_cannot_name_is_no_property_drop() {
+    for body in [
+        "$o->d = null;",
+        "$this->d ??= new D;",
+        "$this->d .= 'x';",
+        "$this->d[] = 1;",
+        "$this->d['k'] = 1;",
+        "$this->d->e = 1;",
+        "$this->$n = null;",
+        "$this?->d = null;",
+        "$c::$d = null;",
+        "$x = $this->d;",
+        "unset($o->d);",
+        "unset($this->d['k']);",
+        "[$this->a, $this->b] = $v;",
+    ] {
+        assert_eq!(prop_drops(body, false), [], "{body}");
+    }
+}
+
+/// Issue #1003: the first thing a constructor does to a property is an initialization the
+/// resolver may read as dropping nothing (witnessed: `<set>` with no destructor); anything
+/// that could have written the object before, a later write, a write in a loop or a `goto`
+/// is a write.
+#[test]
+fn a_constructors_first_touch_of_a_property_is_an_initialization() {
+    let init = |m: &str, t: &str| prop_drop(C::DropPropInit, "this", m, t);
+    let write = |m: &str, t: &str| prop_drop(C::DropPropWrite, "this", m, t);
+    assert_eq!(prop_drops("$this->d = new D;", true), [init("d", "$this->d = new D")]);
+    // Another property first, and a read of another, are no touch of `d`.
+    assert_eq!(
+        prop_drops("$this->a = 1; $x = $this->b; $this->d = new D;", true),
+        [init("a", "$this->a = 1"), init("d", "$this->d = new D")]
+    );
+    // The second write to the same property is a write, even in another branch.
+    assert_eq!(
+        prop_drops("$this->d = new D; $this->d = new D;", true),
+        [init("d", "$this->d = new D"), write("d", "$this->d = new D")]
+    );
+    assert_eq!(
+        prop_drops("if ($c) { $this->d = new D; } $this->d = new D;", true),
+        [init("d", "$this->d = new D"), write("d", "$this->d = new D")]
+    );
+    // A read first, or a compound write first, touched it.
+    let read_first = prop_drops("$x = $this->d; $this->d = null;", true);
+    assert_eq!(read_first, [write("d", "$this->d = null")]);
+    let compound_first = prop_drops("$this->d ??= 1; $this->d = null;", true);
+    assert_eq!(compound_first, [write("d", "$this->d = null")]);
+    // Anything that could have run code on the object: a method, `$this` passed, a
+    // parent or own static call, a closure, a dynamic property name.
+    for before in [
+        "$this->init();",
+        "foo($this);",
+        "parent::__construct();",
+        "self::boot();",
+        "static::boot();",
+        "$f = function () {};",
+        "$f = fn() => 1;",
+        "$this->$n = 1;",
+        "$x = $this;",
+    ] {
+        let body = format!("{before} $this->d = new D;");
+        let sites = prop_drops(&body, true);
+        assert_eq!(sites.last(), Some(&write("d", "$this->d = new D")), "{before}: {sites:?}");
+    }
+    // The call on the right-hand side runs first.
+    assert_eq!(
+        prop_drops("$this->d = $this->make();", true),
+        [write("d", "$this->d = $this->make()")]
+    );
+    // A loop or a `goto` can run the write twice; the same body outside a constructor is a write.
+    assert_eq!(
+        prop_drops("foreach ($xs as $x) { $this->d = new D; }", true),
+        [write("d", "$this->d = new D")]
+    );
+    assert_eq!(prop_drops("a: $this->d = new D; goto a;", true), [write("d", "$this->d = new D")]);
+    assert_eq!(prop_drops("$this->d = new D;", false), [write("d", "$this->d = new D")]);
+    // A static property has no constructor to initialize it.
+    assert_eq!(
+        prop_drops("self::$d = new D;", true),
+        [prop_drop(C::DropPropWrite, "self", "d", "self::$d = new D")]
+    );
+}
+
+/// A property's native hint is recorded as written, for the classes the lowered type loses
+/// (`array|D`, `self`), and a promoted parameter's too.
+#[test]
+fn a_property_decl_records_the_classes_of_its_hint() {
+    let src = "<?php\nclass K { public array|D|null $a; private ?self $b; protected int $c; \
+        public $d; public static ?E $e; \
+        public function __construct(private ?F $f, public parent|G $g) {} }\n";
+    let tree = SourceTree::parse(src);
+    let props = &tree.classes()[0].properties;
+    let hint = |name: &str| {
+        let p = props.iter().find(|p| p.name == name).unwrap();
+        let names = p.hint_classes.iter().map(|r| r.raw.as_str()).collect::<Vec<_>>();
+        (names, p.hint_self, p.hint_parent)
+    };
+    assert_eq!(hint("a"), (vec!["D"], false, false));
+    assert_eq!(hint("b"), (vec![], true, false));
+    assert_eq!(hint("c"), (vec![], false, false));
+    assert_eq!(hint("d"), (vec![], false, false));
+    assert_eq!(hint("e"), (vec!["E"], false, false));
+    assert_eq!(hint("f"), (vec!["F"], false, false));
+    assert_eq!(hint("g"), (vec!["G"], false, true));
+}
+
+/// A trait's properties are not lowered, so each is recorded by name and hint on the trait's
+/// own declaration, for the classes that import it.
+#[test]
+fn a_trait_records_each_property_by_name_and_hint() {
+    let src = "<?php\ntrait T { private ?D $a = null, $b; protected static ?E $s; \
+        public readonly ?self $r; public int $n; public ?F $h { set => 1; } \
+        public function __construct(private ?G $p, public readonly parent|H $q) {} }\n";
+    let tree = SourceTree::parse(src);
+    assert!(tree.parse_errors().is_empty(), "{:?}", tree.parse_errors());
+    let props = &tree.classes()[0].trait_props;
+    let mut names: Vec<_> = props.iter().map(|p| p.name.as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(names, ["a", "b", "h", "n", "p", "q", "r", "s"]);
+    let get = |name: &str| props.iter().find(|p| p.name == name).unwrap();
+    let hint = |name: &str| {
+        let p = get(name);
+        let classes = p.hint_classes.iter().map(|r| r.raw.as_str()).collect::<Vec<_>>();
+        (classes, p.hint_self, p.hint_parent)
+    };
+    assert_eq!(hint("a"), (vec!["D"], false, false));
+    assert_eq!(hint("b"), (vec!["D"], false, false));
+    assert_eq!(hint("s"), (vec!["E"], false, false));
+    assert_eq!(hint("r"), (vec![], true, false));
+    assert_eq!(hint("n"), (vec![], false, false));
+    assert_eq!(hint("p"), (vec!["G"], false, false));
+    assert_eq!(hint("q"), (vec!["H"], false, true));
+    assert!(get("s").is_static && !get("a").is_static);
+    assert!(get("r").readonly && get("q").readonly && !get("a").readonly);
+    assert!(get("h").hooked && !get("a").hooked);
+    // Nothing but a trait carries them.
+    let class = SourceTree::parse("<?php\nclass K { private ?D $a; }\n");
+    assert!(class.classes()[0].trait_props.is_empty());
 }
