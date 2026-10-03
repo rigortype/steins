@@ -1052,9 +1052,10 @@ pub(crate) fn effect_diagnostics(fx: &Fixpoints<'_>) -> Vec<Diagnostic> {
     // discharge 4, ADR-0100 §4): read before the loop, because a callee may live in
     // a file the loop has not reached.
     let enveloped = floor::enveloped_syms(units, index, registry, policy);
-    // The `h` and `H` conversions exist from PHP 8.0; a floor below it, or an unknown one that
-    // the run's runtime does not answer, offers none (the locale fix-it).
-    let h_ok = fx.php_floor().is_none_or(|floor| floor >= (8, 0));
+    // The `h` and `H` conversions exist from PHP 8.0; only a known floor that reaches it offers
+    // them (the locale fix-it), so a floor below it, or one neither declared nor answered by the
+    // runtime, offers none.
+    let h_ok = fx.php_floor().is_some_and(|floor| floor >= (8, 0));
     let mut out = Vec::new();
     for fi in 0..units.len() {
         let cx = Cx::new(units, index, fi);

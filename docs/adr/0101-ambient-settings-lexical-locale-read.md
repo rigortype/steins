@@ -378,11 +378,12 @@ run (#1000). What it decides beyond the text above:
   whose decimal point already is `.` does not change). It is interned in the summaries table; the
   stored types are unchanged, so no schema bump, and a stored generation naming an older spelling
   of the title misses and walks, as any unregistered title does.
-- **The PHP floor.** `h` and `H` are PHP 8.0's (on 7.4 `%h` prints nothing), so a call with a `g`
-  or `G` conversion gets no fix where the declared target's floor, or the runtime's minor when
-  none is declared, is below 8.0 (an unknown floor admits); a partial edit of the `f` conversions
-  alone would leave the read. `F` is offered on any floor. The floor is `Fixpoints::php_floor`,
-  read by the effects pass only.
+- **The PHP floor.** `h` and `H` are PHP 8.0's (on 7.4 `%h` prints nothing), so only a known floor
+  of 8.0 or later (the declared target's floor, or the runtime's minor when none is declared)
+  offers them: a call with a `g` or `G` conversion gets no fix where the floor is below 8.0 or
+  unknown (nothing declared and no runtime answering, as under `--no-php`), since a partial edit of
+  the `f` conversions alone would leave the read. `F` is offered on any floor. The floor is
+  `Fixpoints::php_floor`, read by the effects pass only.
 - **Liskov origins are structural.** The method's own printf sites are the body's resolved sites;
   a callee, a closure or a method the body reaches is an edge, and an edge whose proven effects
   hold the read means an origin the edits cannot reach, so no fix. A finding's provenance (a name

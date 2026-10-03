@@ -283,6 +283,7 @@ fn the_locale_fix_leaves_a_second_exceeding_label_standing() {
         "<?php\n#[\\Steins\\Pure]\nfunction f(float $x): string {\n",
         "    $r = rand();\n    return sprintf('%g', $x);\n}\n"
     );
+    proj.write("composer.json", "{\"require\": {\"php\": \"^8.0\"}}");
     proj.write("f.php", src);
 
     let json =
@@ -320,6 +321,13 @@ fn the_locale_fix_offers_h_and_capital_h_only_from_php_8() {
         assert_eq!(after, G_SRC, "{constraint}: nothing written");
         assert!(fixed.stdout.contains("error[effect.envelope-exceeded]"), "{}", fixed.stdout);
     }
+    // No declared target and no PHP to ask (`--no-php`): the floor is unknown, and `h` is not
+    // offered on a guess.
+    let proj = TempProject::new("locale-target-unknown");
+    proj.write("a.php", G_SRC);
+    let fixed = run(&["check", "--no-php", "--profile", "contracts", "--fix", proj.path()]);
+    assert_eq!(fixed.code, 1, "{}\n{}", fixed.stdout, fixed.stderr);
+    assert_eq!(proj.read("a.php"), G_SRC, "nothing written");
     let (fixed, after) = on("^8.0");
     assert_eq!(fixed.code, 0, "{}\n{}", fixed.stdout, fixed.stderr);
     assert_eq!(after, G_SRC.replace("'%.3g|%G'", "'%.3h|%H'"));
@@ -347,6 +355,7 @@ fn the_locale_fix_inside_a_deleted_dump_statement_does_not_overlap_it() {
         "    \\PHPStan\\dumpType(sprintf('%.2f', $x));\n    return sprintf('%g', $x);\n}\n",
         "function g(): void { \\PHPStan\\dumpType(1); }\n"
     );
+    proj.write("composer.json", "{\"require\": {\"php\": \"^8.0\"}}");
     proj.write("a.php", src);
     let fixed = run(&["check", "--no-php", "--profile", "contracts", "--fix", proj.path()]);
     assert_eq!(fixed.code, 0, "{}\n{}", fixed.stdout, fixed.stderr);

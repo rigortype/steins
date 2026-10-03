@@ -339,7 +339,7 @@ conversion letter written as an escape, `"%\x66"`, is replaced whole) and only
 where it takes the read out of the body; a format that is not a literal, a
 callee's printf and a heredoc get none. `h` and `H` are PHP 8.0's, so a
 format with a `g` or `G` gets no fix when the project's declared PHP floor (the
-runtime's minor when none is declared) is below 8.0; `F` is offered on any
+runtime's minor when none is declared) is below 8.0 or unknown; `F` is offered on any
 floor. There is no bulk transform: a function with no envelope has no finding
 and no fix.
 
