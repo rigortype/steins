@@ -20,7 +20,7 @@ use crate::ast::{
     GlobalConstDecl,
     IncludePath, MethodDecl, NameRef, NativeType, Param, PropertyDecl, ReflectionKind,
     ReflectionSite, RetBoundKeyword, RetBoundKind, ScalarType, Span, StaticClass, TypeMember,
-    Visibility, normalize_const_fqn,
+    TraitProp, Visibility, normalize_const_fqn,
 };
 use crate::lower_arg_shape::Captures;
 use crate::lower_effect::{
@@ -775,6 +775,23 @@ pub(crate) struct BodyDestructor {
     /// Whether one of those hints is `self`, or `parent`.
     pub(crate) holds_self: bool,
     pub(crate) holds_parent: bool,
+    /// Each property and promoted constructor parameter by name and hint, which a trait
+    /// carries to the classes that import it.
+    pub(crate) props: Vec<TraitProp>,
+}
+
+/// One property of a body, read off its member list.
+fn trait_prop(name: String, hint: Option<&mago_syntax::cst::Hint<'_>>, modifiers: &[Modifier<'_>], hooked: bool) -> TraitProp {
+    let held = held_by(hint);
+    TraitProp {
+        name,
+        hint_classes: held.names,
+        hint_self: held.has_self,
+        hint_parent: held.has_parent,
+        is_static: modifiers.iter().any(Modifier::is_static),
+        readonly: modifiers.iter().any(Modifier::is_readonly),
+        hooked,
+    }
 }
 
 /// Read a body's members for [`BodyDestructor`]. Nested class-likes are other
@@ -791,6 +808,11 @@ pub(crate) fn scan_body<'a, 'arena: 'a>(
                 out.declares_destructor |= name.eq_ignore_ascii_case("__destruct");
                 if name.eq_ignore_ascii_case("__construct") {
                     for p in m.parameter_list.parameters.iter() {
+                        if p.is_promoted_property() {
+                            let mods: Vec<Modifier<'_>> = p.modifiers.iter().cloned().collect();
+                            let var = strip_dollar(bytes_to_string(p.variable.name));
+                            out.props.push(trait_prop(var, p.hint.as_ref(), &mods, p.hooks.is_some()));
+                        }
                         if let Some(hint) = &p.hint
                             && p.is_promoted_property()
                             && !p.modifiers.iter().any(Modifier::is_static)
@@ -801,6 +823,14 @@ pub(crate) fn scan_body<'a, 'arena: 'a>(
                 }
             }
             ClassLikeMember::Property(Property::Plain(p)) => {
+                let mods: Vec<Modifier<'_>> = p.modifiers.iter().cloned().collect();
+                for item in p.items.iter() {
+                    let var = match item {
+                        PropertyItem::Abstract(a) => a.variable.name,
+                        PropertyItem::Concrete(c) => c.variable.name,
+                    };
+                    out.props.push(trait_prop(strip_dollar(bytes_to_string(var)), p.hint.as_ref(), &mods, false));
+                }
                 if let Some(hint) = &p.hint
                     && !p.modifiers.iter().any(Modifier::is_static)
                 {
@@ -808,6 +838,13 @@ pub(crate) fn scan_body<'a, 'arena: 'a>(
                 }
             }
             ClassLikeMember::Property(Property::Hooked(h)) => {
+                let mods: Vec<Modifier<'_>> = h.modifiers.iter().cloned().collect();
+                let name = match &h.item {
+                    PropertyItem::Abstract(a) => a.variable.name,
+                    PropertyItem::Concrete(c) => c.variable.name,
+                };
+                let var = strip_dollar(bytes_to_string(name));
+                out.props.push(trait_prop(var, h.hint.as_ref(), &mods, true));
                 if let Some(hint) = &h.hint
                     && !h.modifiers.iter().any(Modifier::is_static)
                 {
@@ -867,6 +904,7 @@ fn lower_trait(t: &mago_syntax::cst::Trait<'_>, conditional: bool) -> ClassDecl 
         held_classes: body.held_classes,
         holds_self: body.holds_self,
         holds_parent: body.holds_parent,
+        trait_props: body.props,
         // No member docblock can observe a trait-level `@template`.
         docblock: None,
         docblock_span: None,
@@ -952,6 +990,7 @@ fn lower_class(c: &Class<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex, rc: 
         held_classes: Vec::new(),
         holds_self: false,
         holds_parent: false,
+        trait_props: Vec::new(),
         // Class-level docblock (whole declaration incl. attributes/modifiers) — read
         // for `@template` names that shadow same-named classes in member docblocks (issue #5).
         docblock: docs.preceding(to_span(c.span()).start),
@@ -1005,6 +1044,16 @@ fn visibility_of(modifiers: &mago_syntax::cst::Sequence<'_, Modifier<'_>>) -> Vi
     }
 }
 
+/// The classes a property's native hint names, which the drop sites read apart from
+/// the lowered type (ADR-0100 §7).
+fn held_by(hint: Option<&mago_syntax::cst::Hint<'_>>) -> HintClasses {
+    let mut held = HintClasses::default();
+    if let Some(hint) = hint {
+        held.read(hint);
+    }
+    held
+}
+
 /// Lower a plain property declaration (possibly multi-item `public int $a, $b;`)
 /// into one [`PropertyDecl`] per declared variable (ADR-0036).
 fn lower_plain_property(p: &PlainProperty<'_>, docs: &DocIndex, rc: &RefResolver, out: &mut Vec<PropertyDecl>) {
@@ -1013,6 +1062,7 @@ fn lower_plain_property(p: &PlainProperty<'_>, docs: &DocIndex, rc: &RefResolver
     let visibility = visibility_of(&p.modifiers);
     let ty = p.hint.as_ref().and_then(|h| lower_hint(h, rc));
     let hint_span = p.hint.as_ref().map(|h| to_span(h.span()));
+    let held = held_by(p.hint.as_ref());
     let docblock = docs.preceding(to_span(p.span()).start);
     let span = to_span(p.span());
     for item in p.items.iter() {
@@ -1028,6 +1078,9 @@ fn lower_plain_property(p: &PlainProperty<'_>, docs: &DocIndex, rc: &RefResolver
             name,
             ty: ty.clone(),
             hint_span,
+            hint_classes: held.names.clone(),
+            hint_self: held.has_self,
+            hint_parent: held.has_parent,
             readonly,
             is_static,
             visibility,
@@ -1051,6 +1104,7 @@ fn lower_promoted_params(m: &Method<'_>, rc: &RefResolver, out: &mut Vec<Propert
         let readonly = p.modifiers.iter().any(Modifier::is_readonly);
         let visibility = visibility_of(&p.modifiers);
         let ty = p.hint.as_ref().and_then(|h| lower_hint(h, rc));
+        let held = held_by(p.hint.as_ref());
         let has_default = p.default_value.is_some();
         let default = p
             .default_value
@@ -1061,6 +1115,9 @@ fn lower_promoted_params(m: &Method<'_>, rc: &RefResolver, out: &mut Vec<Propert
             name: strip_dollar(bytes_to_string(p.variable.name)),
             ty,
             hint_span: p.hint.as_ref().map(|h| to_span(h.span())),
+            hint_classes: held.names,
+            hint_self: held.has_self,
+            hint_parent: held.has_parent,
             readonly,
             is_static: false,
             visibility,
@@ -1127,6 +1184,7 @@ fn lower_interface(i: &mago_syntax::cst::Interface<'_>, aliases: &SteinsAttrAlia
         held_classes: Vec::new(),
         holds_self: false,
         holds_parent: false,
+        trait_props: Vec::new(),
         // Class-level docblock — `@template` names shadow same-named classes in the
         // interface's method docblocks (issue #5).
         docblock: docs.preceding(to_span(i.span()).start),
@@ -1212,6 +1270,7 @@ fn lower_enum(e: &mago_syntax::cst::Enum<'_>, _aliases: &SteinsAttrAliases, docs
         held_classes: Vec::new(),
         holds_self: false,
         holds_parent: false,
+        trait_props: Vec::new(),
         // No analyzed member can observe an enum-level `@template`.
         docblock: None,
         docblock_span: None,

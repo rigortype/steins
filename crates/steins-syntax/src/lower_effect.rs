@@ -284,7 +284,7 @@ impl EffectScanCx {
         captures: Captures<'_>,
         body: impl Iterator<Item = Node<'a, 'arena>> + Clone,
     ) -> Self {
-        self.drops = crate::lower_site::drop_subjects(params, body.clone());
+        self.drops = crate::lower_site::drop_subjects(params, body.clone(), self.constructor);
         if !self.frame_aliased {
             self.bindings = FrameBindings::new(params, captures, body);
         }

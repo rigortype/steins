@@ -895,7 +895,9 @@ fn s6_a_class_that_reaches_no_destructor_runs_nothing() {
     // The over-reporting guard: a parameter that cannot name a destructor class is no gap.
     dtor_none("function f(array $a, mixed $m, object $o, iterable $i, callable $c) { $a = null; }", "f");
     dtor_none("function f(\\Closure $c, \\Generator $g, \\stdClass $s, \\Throwable $t) { $c = null; }", "f");
-    dtor_none("function f($x) { unset($x); $x = new D; }", "f");
+    // An untyped parameter holds no named class until the body writes a `new` into it
+    // (S6d, `a04`); one it never writes is residue.
+    dtor_none("function f($x) { unset($x); $x = new Empty_; }", "f");
 }
 
 /// Row 6.9: an unknown-class value is recorded residue, not a gap.
@@ -1672,4 +1674,359 @@ fn s6c_an_anonymous_class_reads_a_parent_hint_as_its_own_parent() {
          public ?parent $q = null; public ?self $r = null; }; }",
         &[("f", CLEAN)],
     );
+}
+
+// ---- Wider drop subjects (ADR-0100 §7, issue #1003, slice S6d) ------------------
+//
+// Three shapes S6b recorded as residue, each a witness run on PHP 8.5 (the output beside
+// each row): a `new` that reaches a local through a write that is not its first, a `new`
+// temporary an expression consumes, and a write to or an `unset` of a property whose
+// declared hint reaches a destructor. The must-stay rows read as they did before.
+
+/// `D` runs a destructor, `E` runs nothing.
+const WIDE: &str = "final class D { public int $p = 1; public function __invoke(): int { return 1; } \
+    public function __toString(): string { return 's'; } \
+    public function __destruct() { echo '[D]'; } }\n\
+    final class E { public int $p = 1; public function __invoke(): int { return 1; } \
+    public function __toString(): string { return 's'; } }\n";
+
+fn wide(src: &str, rows: &[(&str, bool)]) {
+    reads(&format!("{WIDE}{src}"), rows);
+}
+
+/// Group 1: any write that stores a `new` makes the local a subject. a01 `<body>[D]`
+/// (ternary), a02 `<body>[D]` (`null` first), a04 `<body>[D]` (untyped parameter), a05
+/// `<body>[D]` (`match` arm), a21 (`??`), a22 (a parameter hinted with a clean class), a23 (a
+/// call result first), a24 `<it0>[D]<it1><body>[D]` (a loop).
+#[test]
+fn s6d_a_write_that_is_not_the_first_stores_a_new_the_local_is_a_subject() {
+    wide(
+        "function a01(bool $c): void { $x = $c ? new D() : null; echo '<body>'; }\n\
+         function a02(): void { $x = null; $x = new D(); echo '<body>'; }\n\
+         function a04($x = null): void { $x = new D(); echo '<body>'; }\n\
+         function a05(int $k): void { $x = match ($k) { 1 => new D(), default => null }; echo '<body>'; }\n\
+         function a21($y): void { $x = $y ?? new D(); echo '<body>'; }\n\
+         function a21b($y): void { $x = $y ?: new D(); echo '<body>'; }\n\
+         class Base {}\n\
+         function a22(Base $b): void { $b = new D(); echo '<body>'; }\n\
+         function mk() { return new E(); }\n\
+         function a23(): void { $x = mk(); $x = new D(); echo '<body>'; }\n\
+         function a24(): void { $x = null; for ($i = 0; $i < 2; $i++) { $x = new D(); } }\n\
+         function a26(): void { $x = make(); $x = clone new D(); }",
+        &[
+            ("a01", GAP),
+            ("a02", GAP),
+            ("a04", GAP),
+            ("a05", GAP),
+            ("a21", GAP),
+            ("a21b", GAP),
+            ("a22", GAP),
+            ("a23", GAP),
+            ("a24", GAP),
+            ("a26", GAP),
+        ],
+    );
+}
+
+/// Group 1, must stay: a class that reaches no destructor, a `new` that escapes, a variable
+/// no write stores a `new` into, and a by-reference parameter (the caller's variable) are
+/// no subject. m06, m07 `<body>` with no destructor, m11 `[D][D]` after the caller's `unset`.
+#[test]
+fn s6d_a_write_of_a_class_that_runs_nothing_or_a_new_that_escapes_is_no_subject() {
+    wide(
+        "function m06(): void { $x = null; $x = new E(); echo '<body>'; }\n\
+         function m07($x = null): void { $x = new E(); echo '<body>'; }\n\
+         function m06b(bool $c): void { $x = $c ? new E() : null; $x = $c ? null : new E(); }\n\
+         function m01(): D { return new D(); }\n\
+         function m11a(): array { return [new D()]; }\n\
+         function m11b() { yield new D(); }\n\
+         function m11c(bool $c): ?D { return $c ? new D() : null; }\n\
+         function m11d(bool $c) { return $c ? new D() : new D(); }\n\
+         function m17(&$out): void { $out = new D(); }\n\
+         function m18(): void { $x = make(); $x = null; }\n\
+         function m19(): void { $x = [new D()]; $x = null; }\n\
+         function m20($x): void { $x = null; $x = [new D()]; }",
+        &[
+            ("m06", CLEAN),
+            ("m07", CLEAN),
+            ("m06b", CLEAN),
+            ("m01", CLEAN),
+            ("m11a", CLEAN),
+            ("m11b", CLEAN),
+            ("m11c", CLEAN),
+            ("m11d", CLEAN),
+            ("m17", CLEAN),
+            ("m18", CLEAN),
+            ("m19", CLEAN),
+            ("m20", CLEAN),
+        ],
+    );
+}
+
+/// Group 2: a `new` in a position that keeps nothing. a06 `[D]<body>[D]` (`clone new D`: two
+/// drops), a07 `[D]<body>`, a08 `s[D]<body>`, a16 `[D]<body>`, t01 to t10 the same.
+#[test]
+fn s6d_a_new_an_expression_consumes_is_a_temporary() {
+    wide(
+        "function a06(): void { $x = clone new D(); echo '<body>'; }\n\
+         function a07(): int { $v = (new D())->p; echo '<body>'; return $v; }\n\
+         function a08(): void { echo new D(); echo '<body>'; }\n\
+         function a16(): void { if (new D() instanceof D) { echo '<body>'; } }\n\
+         function t01(): void { print new D(); echo '<body>'; }\n\
+         function t02(): string { $s = (string) new D(); echo '<body>'; return $s; }\n\
+         function t03(): void { if (new D()) { echo '<body>'; } }\n\
+         function t04(): void { $b = !new D(); echo '<body>'; }\n\
+         function t05(bool $c): void { $c ? new D() : null; echo '<body>'; }\n\
+         function sink($o): void { echo '<sink>'; }\n\
+         function t06(bool $c): void { sink($c ? new D() : null); echo '<body>'; }\n\
+         function t08(): bool { $v = isset((new D())->p); echo '<body>'; return $v; }\n\
+         function t09(): bool { $v = new D() == null; echo '<body>'; return $v; }\n\
+         function t11(): void { (new D())->p = 2; echo '<body>'; }\n\
+         function t12(): int { $v = (new D())->p ?? 1; echo '<body>'; return $v; }",
+        &[
+            ("a06", GAP),
+            ("a07", GAP),
+            ("a08", GAP),
+            ("a16", GAP),
+            ("t01", GAP),
+            ("t02", GAP),
+            ("t03", GAP),
+            ("t04", GAP),
+            ("t05", GAP),
+            ("t06", GAP),
+            ("t08", GAP),
+            ("t09", GAP),
+            ("t11", GAP),
+            ("t12", GAP),
+        ],
+    );
+}
+
+/// Group 2, must stay: a class that runs nothing in each of those positions is no gap
+/// (m05, m08 `<body>` with no destructor); the `(object)` cast and `@` hand the value on.
+#[test]
+fn s6d_a_consumed_new_of_a_class_that_runs_nothing_is_no_gap() {
+    wide(
+        "function m05(): void { $x = clone new E(); echo '<body>'; }\n\
+         function m08(): void { echo new E(); echo '<body>'; }\n\
+         function m21(): int { $v = (new E())->p; $b = new E() instanceof E; return $v; }\n\
+         function m22(): void { $x = (object) new E(); $y = @new E(); }",
+        &[("m05", CLEAN), ("m08", CLEAN), ("m21", CLEAN), ("m22", CLEAN)],
+    );
+    // The cast and `@` keep the value: it is the variable's, dropped at the scope's end.
+    wide(
+        "function m13(): void { $x = (object) new D(); echo '<body>'; }\n\
+         function m23(): void { $x = @new D(); echo '<body>'; }",
+        &[("m13", GAP), ("m23", GAP)],
+    );
+}
+
+/// Group 3: a write to, or an `unset` of, a property whose declared hint reaches a
+/// destructor. p01 `[D]<close>[D]<drop>` (overwrite and unset), p02 `[D]<close>` (static),
+/// p06 `<caught: from destructor>` at the assignment (both lanes: a throwing destructor),
+/// p10 (`static::`), p11 (an inherited property), p12 (`parent::`), p13 (a trait's property),
+/// p14 (`array|D|null`), p15 `[N]<cut>` (`?self`), p17 `<unset><set>[D]<unset>` (a typed
+/// property no constructor initialized), p29 (a named class's static), p33 (`unset` of an
+/// inherited one), p34 (an abstract holder).
+#[test]
+fn s6d_a_write_or_unset_of_a_property_whose_hint_reaches_a_destructor_is_a_gap() {
+    wide(
+        "final class H { private ?D $d = null;\n\
+           public function open(): void { $this->d = new D(); }\n\
+           public function close(): void { $this->d = null; echo '<close>'; }\n\
+           public function drop(): void { unset($this->d); echo '<drop>'; } }\n\
+         final class S { private static ?D $d = null;\n\
+           public static function open(): void { self::$d = new D(); }\n\
+           public static function close(): void { self::$d = null; echo '<close>'; } }\n\
+         class SK { protected static ?D $d = null;\n\
+           public static function close(): void { static::$d = null; } }\n\
+         class SP { protected static ?D $d = null; }\n\
+         final class SC extends SP { public static function close(): void { parent::$d = null; } }\n\
+         final class SO { public static ?D $d = null; }\n\
+         function p29(): void { SO::$d = new D(); SO::$d = null; echo '<body>'; }\n\
+         class P { protected ?D $d = null; }\n\
+         final class PI extends P { public function close(): void { $this->d = null; }\n\
+           public function drop(): void { unset($this->d); } }\n\
+         abstract class A { protected ?D $d = null; public function close(): void { $this->d = null; } }\n\
+         trait TT { private ?D $d = null; }\n\
+         final class UT { use TT; public function close(): void { $this->d = null; } }\n\
+         final class UN { private array|D|null $d = null; public function close(): void { $this->d = null; } }\n\
+         final class N { private ?self $next = null; public function __destruct() { echo '[N]'; }\n\
+           public function cut(): void { $this->next = null; } }\n\
+         final class UI { private D $d; public function open(): void { $this->d = new D(); }\n\
+           public function reset(): void { unset($this->d); } }",
+        &[
+            ("H::open", GAP),
+            ("H::close", GAP),
+            ("H::drop", GAP),
+            ("S::open", GAP),
+            ("S::close", GAP),
+            ("SK::close", GAP),
+            ("SC::close", GAP),
+            ("p29", GAP),
+            ("PI::close", GAP),
+            ("PI::drop", GAP),
+            ("A::close", GAP),
+            ("UT::close", GAP),
+            ("UN::close", GAP),
+            ("N::cut", GAP),
+            ("UI::open", GAP),
+            ("UI::reset", GAP),
+        ],
+    );
+}
+
+/// p06: a destructor that throws surfaces at the assignment, so the throw lane carries the
+/// gap there as the effect lane does (the lanes read one resolution).
+#[test]
+fn s6d_a_property_overwrite_is_a_gap_in_the_throw_lane_too() {
+    let src = format!(
+        "<?php\n{WIDE}final class T {{ public function __destruct() {{ throw new \\LogicException('x'); }} }}\n\
+         final class H {{ private ?T $d = null;\n\
+           public function __construct() {{ $this->d = new T(); }}\n\
+           public function close(): void {{ $this->d = null; }} }}\n"
+    );
+    let close = summary(&src, "H::close");
+    assert!(close.throws_gaps.contains(&DESTRUCTOR) && close.gaps.contains(&DESTRUCTOR), "{close:?}");
+    assert!(!summary(&src, "H::__construct").gaps.contains(&DESTRUCTOR));
+}
+
+/// Group 3, must stay: a hint that reaches no destructor, an untyped property (residue: what
+/// it holds is whatever the class stores into it, p16 `[D]<close>` on PHP), a static property
+/// of a class with no destructor in its hint, a property written through another object
+/// (p25, residue), `??=` (p26: nothing runs at the assignment), a readonly property, and an
+/// undeclared one of a class whose chain is closed.
+#[test]
+fn s6d_a_property_whose_hint_names_no_destructor_is_no_gap() {
+    wide(
+        "final class H { private ?E $e = null;\n\
+           public function open(): void { $this->e = new E(); }\n\
+           public function close(): void { $this->e = null; unset($this->e); } }\n\
+         final class S { private static ?E $e = null; private static int $n = 0; private static ?array $a = null;\n\
+           public static function close(): void { self::$e = null; self::$n = 1; self::$a = null; } }\n\
+         final class UP { private $d;\n\
+           public function open(): void { $this->d = new D(); }\n\
+           public function close(): void { $this->d = null; } }\n\
+         final class CO { private ?D $d = null;\n\
+           public function get(): D { $this->d ??= new D(); return $this->d; } }\n\
+         final class RO { private readonly ?D $d;\n\
+           public function __construct() { $this->d = new D(); } }\n\
+         final class DY { public function close(): void { $this->dyn = null; } }\n\
+         final class AR { private array $a = []; private mixed $m = null; private object $o;\n\
+           public function close(): void { $this->a = []; $this->m = null; } }\n\
+         function p25(): void { $o = new stdClass; $o->d = null; unset($o->d); }",
+        &[
+            ("H::open", CLEAN),
+            ("H::close", CLEAN),
+            ("S::close", CLEAN),
+            ("UP::close", CLEAN),
+            ("CO::get", CLEAN),
+            ("RO::__construct", CLEAN),
+            ("DY::close", CLEAN),
+            ("AR::close", CLEAN),
+            ("p25", CLEAN),
+        ],
+    );
+}
+
+/// The constructor's first touch of its own property initializes it. m02 `<set><after>`
+/// (nothing runs at the write), m09 (another property first), m10 (readonly), m12 (the value
+/// a parameter), m15 (a `null` first), p20 (over a `null` default); but p18 `<set1>[D]<set2>`
+/// (a second write), p19 `<p>[D]<c>` (an inherited property), p21 `<init>[D]<set>` (a method
+/// ran first), p22 `<c>[D]<p>` (a subclass wrote first: its own write is the gap), p24
+/// `<ctor>[D]` (a promoted parameter), p31 `<it1>[D]<it2>` (a loop) and p32 are writes.
+#[test]
+fn s6d_a_constructors_first_write_initializes_and_the_others_are_writes() {
+    wide(
+        "final class M02 { private D $d; public function __construct() { $this->d = new D(); } }\n\
+         final class M09 { private int $a; private D $d;\n\
+           public function __construct() { $this->a = 1; $this->d = new D(); } }\n\
+         final class M10 { private readonly D $d; public function __construct() { $this->d = new D(); } }\n\
+         final class M12 { private D $d; public function __construct(object $d) { $this->d = $d; } }\n\
+         final class M15 { private ?D $d; public function __construct() { $this->d = null; } }\n\
+         final class P20 { private ?D $d = null; public function __construct() { $this->d = new D(); } }\n\
+         final class P18 { private D $d;\n\
+           public function __construct() { $this->d = new D(); $this->d = new D(); } }\n\
+         class P19P { protected D $d; }\n\
+         final class P19 extends P19P { public function __construct() { $this->d = new D(); } }\n\
+         final class P21 { private D $d;\n\
+           public function __construct() { $this->init(); $this->d = new D(); }\n\
+           private function init(): void {} }\n\
+         final class P24 { public function __construct(private ?D $d = null) { $this->d = null; } }\n\
+         final class P31 { private D $d;\n\
+           public function __construct() { foreach ([1, 2] as $i) { $this->d = new D(); } } }\n\
+         final class P32 { private D $d;\n\
+           public function __construct(bool $c) { if ($c) { $this->d = new D(); } $this->d = new D(); } }\n\
+         final class P22P { protected D $d; public function __construct() { $this->d = new D(); } }\n\
+         final class P22 extends P22P { public function __construct() { $this->d = new D(); parent::__construct(); } }\n\
+         final class P23 { private D $d; public function __construct() { $this->d = new D(); } }",
+        &[
+            ("M02::__construct", CLEAN),
+            ("M09::__construct", CLEAN),
+            ("M10::__construct", CLEAN),
+            ("M12::__construct", CLEAN),
+            ("M15::__construct", CLEAN),
+            ("P20::__construct", CLEAN),
+            ("P22P::__construct", CLEAN),
+            ("P23::__construct", CLEAN),
+            ("P18::__construct", GAP),
+            ("P19::__construct", GAP),
+            ("P21::__construct", GAP),
+            ("P22::__construct", GAP),
+            ("P24::__construct", GAP),
+            ("P31::__construct", GAP),
+            ("P32::__construct", GAP),
+        ],
+    );
+}
+
+/// A property no class of the chain declares may be one a class no file declares declares (the
+/// unclosed-chain rule); one a closed chain does not declare is dynamic and untyped. A trait's
+/// property is read by name and hint, so a class that imports a trait holding a `D` is a gap
+/// only for the property that trait declares, or for a trait nobody declares.
+#[test]
+fn s6d_an_undeclared_property_reads_the_chain_it_could_come_from() {
+    wide(
+        "class Open extends VendorBase { public function close(): void { $this->p = null; } }\n\
+         final class Dyn { public function close(): void { $this->p = null; } }\n\
+         trait Holds { private ?D $d = null; protected static ?D $sd = null; public int $n = 0; }\n\
+         final class ViaTrait { use Holds; public function close(): void { $this->d = null; }\n\
+           public function other(): void { $this->other = null; $this->n = 1; }\n\
+           public static function reset(): void { self::$sd = null; } }\n\
+         trait Outer { use Holds; }\n\
+         final class ViaNested { use Outer; public function close(): void { $this->d = null; } }\n\
+         trait Clean { private ?E $e = null; }\n\
+         final class ViaClean { use Clean; public function close(): void { $this->e = null; } }\n\
+         final class ViaMissing { use VendorTrait; public function close(): void { $this->q = null; } }\n\
+         final class Engine extends \\DateInterval { use Holds; public function close(): void { $this->y = 1; } }\n\
+         trait SelfHeld { private ?self $next = null; public function __destruct() { echo '[S]'; } }\n\
+         final class UsesSelfHeld { use SelfHeld; public function cut(): void { $this->next = null; } }",
+        &[
+            ("Open::close", GAP),
+            ("Dyn::close", CLEAN),
+            ("ViaTrait::close", GAP),
+            ("ViaTrait::other", CLEAN),
+            ("ViaTrait::reset", GAP),
+            ("ViaNested::close", GAP),
+            ("ViaClean::close", CLEAN),
+            ("ViaMissing::close", GAP),
+            ("Engine::close", CLEAN),
+            ("UsesSelfHeld::cut", GAP),
+        ],
+    );
+}
+
+/// A class declared more than once may be any of its declarations, so the property is read in
+/// each: one that holds a `D` makes the write a gap, and copies that declare it untyped do not.
+#[test]
+fn s6d_a_class_declared_twice_is_asked_in_every_declaration() {
+    let copies = |a: &str, b: &str| {
+        format!(
+            "if (PHP_VERSION_ID >= 80000) {{ class Amb {{ {a} public function close(): void {{ $this->x = null; }} }} }} \
+             else {{ class Amb {{ {b} public function close(): void {{ $this->x = null; }} }} }}"
+        )
+    };
+    wide(&copies("private $x;", "private $x = [];"), &[("Amb::close", CLEAN)]);
+    wide(&copies("private $x;", "private ?D $x = null;"), &[("Amb::close", GAP)]);
+    wide(&copies("private ?E $x = null;", "private ?E $x = null;"), &[("Amb::close", CLEAN)]);
 }

@@ -951,8 +951,21 @@ pub enum OperatorConstruct {
     /// The end of the frame's body, for each variable that may still hold a value.
     DropScopeExit,
     /// A `new C` whose value nothing keeps: a statement, a method call's
-    /// receiver, or a call's argument.
+    /// receiver, a call's argument, or an operand a form consumes (`clone`, a
+    /// property fetch, `echo`, a condition, `instanceof`).
     DropTemporary,
+    /// A plain write `$this->p = …`, `self::$p = …`, `static::$p = …`, `parent::$p = …` or
+    /// `C::$p = …` over a property that may hold a value to drop. One receiver names the
+    /// class that holds the property and [`SiteKind::Operator::member`] the property;
+    /// the resolver reads the property's declared hint.
+    DropPropWrite,
+    /// The first write to `$this->p` in a constructor body, before anything that could
+    /// have initialized it: it drops nothing when the property is declared in this class,
+    /// is uninitialized or null, and is not promoted. The resolver decides that; any
+    /// other property reads as [`Self::DropPropWrite`].
+    DropPropInit,
+    /// `unset($this->p)` of a property that may hold a value to drop.
+    DropPropUnset,
 }
 
 impl OperatorFamily {
@@ -963,7 +976,7 @@ impl OperatorFamily {
 
 impl OperatorConstruct {
     /// Every form, in declaration order, which is the order the payload codec numbers them by.
-    pub const ALL: [Self; 31] = [
+    pub const ALL: [Self; 34] = [
         Self::Concat,
         Self::ConcatAssign,
         Self::Interpolation,
@@ -995,6 +1008,9 @@ impl OperatorConstruct {
         Self::DropReassign,
         Self::DropScopeExit,
         Self::DropTemporary,
+        Self::DropPropWrite,
+        Self::DropPropInit,
+        Self::DropPropUnset,
     ];
 
     /// The family a form belongs to, or `None` for the forms
@@ -1017,9 +1033,13 @@ impl OperatorConstruct {
             Self::Destructure => Some(OperatorFamily::ArrayAccess),
             Self::Foreach | Self::YieldFrom | Self::Spread => Some(OperatorFamily::Iterate),
             Self::Clone | Self::CloneWith => Some(OperatorFamily::Clone),
-            Self::DropUnset | Self::DropReassign | Self::DropScopeExit | Self::DropTemporary => {
-                Some(OperatorFamily::Drop)
-            }
+            Self::DropUnset
+            | Self::DropReassign
+            | Self::DropScopeExit
+            | Self::DropTemporary
+            | Self::DropPropWrite
+            | Self::DropPropInit
+            | Self::DropPropUnset => Some(OperatorFamily::Drop),
             Self::Read
             | Self::Write
             | Self::ReadWrite
@@ -1326,6 +1346,15 @@ pub struct PropertyDecl {
     /// property-world twin of [`Param::hint_span`] (promoted param's own hint span).
     pub hint_span: Option<Span>,
     // end untyped surface (ADR-0078, issue #200)
+    /// The classes the native hint names, as written, by every member of a union, an
+    /// intersection or a nullable whatever else the hint holds (`array|D` names `D`;
+    /// `self` and `parent` excluded, see [`Self::hint_self`]): what [`Self::ty`] loses
+    /// for a hint it cannot lower. The drop sites read it (ADR-0100 §7).
+    pub hint_classes: Vec<NameRef>,
+    /// Whether a member of the hint is `self`, the class that declares the property.
+    pub hint_self: bool,
+    /// Whether a member of the hint is `parent`, the declaring class's parent.
+    pub hint_parent: bool,
     /// `true` when declared `readonly` (or promoted `readonly` ctor param); once established, sweep-immune (ADR-0036).
     pub readonly: bool,
     /// `true` for a `static` property — lowered but never heap-tracked.
@@ -1477,6 +1506,11 @@ pub struct ClassDecl {
     pub holds_self: bool,
     /// A **trait** only: the same for `parent`, the importing class's parent.
     pub holds_parent: bool,
+    /// A **trait** only: each property, and each promoted constructor parameter, by name and
+    /// declared hint. A trait's properties are not lowered, so the property drops (ADR-0100 §7)
+    /// read the one a class imports from here. Empty for every other class-like, whose
+    /// properties are [`Self::properties`].
+    pub trait_props: Vec<TraitProp>,
     /// Raw `/** … */` docblock preceding the class-like, if any — read for
     /// class-level `@template` names shadowing same-named classes (issue #5). `None` for a trait.
     pub docblock: Option<String>,
@@ -1485,6 +1519,25 @@ pub struct ClassDecl {
     pub docblock_span: Option<Span>,
     /// The span of the class name identifier.
     pub span: Span,
+}
+
+/// One property a trait declares, read off its member list by name and native hint (a
+/// trait's body is not lowered). See [`ClassDecl::trait_props`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
+pub struct TraitProp {
+    /// The property name without the leading `$`.
+    pub name: String,
+    /// The classes the hint names, as written; `self` and `parent` apart, as
+    /// [`PropertyDecl::hint_classes`] reads them (here they name the importing class and
+    /// its parent).
+    pub hint_classes: Vec<NameRef>,
+    pub hint_self: bool,
+    pub hint_parent: bool,
+    pub is_static: bool,
+    pub readonly: bool,
+    /// A property with a hook, or a promoted parameter with one.
+    pub hooked: bool,
 }
 
 /// A representable call argument or assignment right-hand side. The first five
