@@ -4035,6 +4035,12 @@ pub struct AnonClassEdge {
     pub parent: Option<NameRef>,
     /// The interfaces the anonymous class `implements`.
     pub implements: Vec<NameRef>,
+    /// Whether the body declares a `__destruct` method, or aliases an imported trait's
+    /// method `as __destruct` (ADR-0100 §7): the destructor the class runs itself.
+    pub declares_destructor: bool,
+    /// The traits the body imports, as written (resolved by
+    /// [`crate::SourceTree::resolve_class_fqn`]): what the body brings in that is not lowered.
+    pub used_traits: Vec<NameRef>,
     /// The `new class` construct's source span.
     pub span: Span,
 }

@@ -127,6 +127,12 @@ pub struct PackageShard {
     /// the class index, and may add a property magic method to anything it
     /// extends (ADR-0099 §4.4; ADR-0049 A4 reads them the same way).
     anonymous_subclass_parents: HashSet<String>,
+    /// The classes and interfaces an anonymous class extends or implements when its
+    /// body runs user code on a drop itself: it declares `__destruct` or imports a
+    /// trait (ADR-0100 §7, issue #882). The destructor gate reads this set and not
+    /// [`Self::anonymous_subclass_parents`]: the body is visible at the `new class`,
+    /// so an anonymous class that declares nothing adds nothing to its parent.
+    anonymous_destructor_parents: HashSet<String>,
     /// Global constants the package declares (ADR-0078, issue #198), keyed by
     /// `steins_syntax::normalize_const_fqn`'s spelling, each with the slot of
     /// a file that declares it.
@@ -174,7 +180,10 @@ impl PackageShard {
         );
         for edge in tree.anonymous_class_edges() {
             let parents = edge.parent.iter().chain(&edge.implements);
-            self.anonymous_subclass_parents.extend(parents.map(|r| tree.resolve_class_fqn(r)));
+            self.anonymous_subclass_parents.extend(parents.clone().map(|r| tree.resolve_class_fqn(r)));
+            if edge.declares_destructor || !edge.used_traits.is_empty() {
+                self.anonymous_destructor_parents.extend(parents.map(|r| tree.resolve_class_fqn(r)));
+            }
         }
         self.property_writes.0.extend(tree.property_write_names().iter().cloned());
         self.property_writes.1 |= tree.writes_computed_property_name();
@@ -237,6 +246,7 @@ impl PackageShard {
         self.magic_property_classes.extend(one.magic_property_classes.iter().cloned());
         self.destructor_classes.extend(one.destructor_classes.iter().cloned());
         self.anonymous_subclass_parents.extend(one.anonymous_subclass_parents.iter().cloned());
+        self.anonymous_destructor_parents.extend(one.anonymous_destructor_parents.iter().cloned());
         self.property_writes.0.extend(one.property_writes.0.iter().cloned());
         self.property_writes.1 |= one.property_writes.1;
         self.constants.extend(one.constants.keys().map(|key| (key.clone(), slot)));
@@ -416,6 +426,9 @@ pub struct MergedTables {
     pub destructor_classes: HashSet<String>,
     /// Every class or interface an anonymous class of the universe extends or implements.
     pub anonymous_subclass_parents: HashSet<String>,
+    /// Every class or interface an anonymous class of the universe extends or implements
+    /// whose body runs user code on a drop itself.
+    pub anonymous_destructor_parents: HashSet<String>,
     /// Every global constant the universe declares.
     pub constants: HashSet<String>,
     /// Diagnostic path → file slot for every file in the universe.
@@ -560,6 +573,7 @@ pub fn merge_shards(shards: &[PackageShard]) -> MergedTables {
         m.magic_property_classes.extend(s.magic_property_classes.iter().cloned());
         m.destructor_classes.extend(s.destructor_classes.iter().cloned());
         m.anonymous_subclass_parents.extend(s.anonymous_subclass_parents.iter().cloned());
+        m.anonymous_destructor_parents.extend(s.anonymous_destructor_parents.iter().cloned());
         m.constants.extend(s.constants.keys().cloned());
         for (path, &slot) in &s.files {
             let entry = m.files.entry(path.clone()).or_insert(slot);
@@ -712,7 +726,7 @@ mod tests {
             (
                 1,
                 "src/b.php",
-                "<?php function dup() {} /** @method int m() */ class Twice {} class_alias('c', 'made'); $o->w = 1; class Lazy { public function __get($n) {} } class Used { use T; } $a = new class extends Lazy {}; class Dtor { public function __destruct() {} }",
+                "<?php function dup() {} /** @method int m() */ class Twice {} class_alias('c', 'made'); $o->w = 1; class Lazy { public function __get($n) {} } class Used { use T; } $a = new class extends Lazy {}; $z = new class extends Loud { public function __destruct() {} }; class Dtor { public function __destruct() {} }",
             ),
             (
                 2,
@@ -756,6 +770,13 @@ mod tests {
         assert!(direct.destructor_classes.contains("used"), "a class importing a trait");
         assert!(!direct.destructor_classes.contains("lazy"), "__get is not a destructor");
         assert_eq!(direct.destructor_classes, absorbed.destructor_classes);
+        assert!(direct.anonymous_subclass_parents.iter().any(|p| p.eq_ignore_ascii_case("loud")));
+        assert!(direct.anonymous_destructor_parents.iter().any(|p| p.eq_ignore_ascii_case("loud")));
+        assert!(
+            !direct.anonymous_destructor_parents.iter().any(|p| p.eq_ignore_ascii_case("lazy")),
+            "an anonymous body that declares nothing adds nothing to its parent",
+        );
+        assert_eq!(direct.anonymous_destructor_parents, absorbed.anonymous_destructor_parents);
         assert_eq!(direct.magic_property_classes, absorbed.magic_property_classes);
         assert_eq!(direct.anonymous_subclass_parents, absorbed.anonymous_subclass_parents);
     }

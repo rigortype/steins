@@ -1140,6 +1140,39 @@ fn s6_a_self_typed_property_on_an_exact_new_asks_the_bound_question() {
     assert!(!dtor_src(plain, "g"));
 }
 
+/// S6c (a), rows from the architect's consult on #915: an anonymous class lists its parent
+/// and interfaces in the destructor closure only when its own body declares a destructor
+/// (or imports a trait). The body is visible at the `new class`, so a clean one adds
+/// nothing to what its parent reaches, where the proxy "whatever the body declares" made
+/// every `Base $b` a gap as soon as one `new class extends Base {}` existed.
+#[test]
+fn s6c_an_anonymous_subclass_with_a_clean_body_adds_nothing_to_its_parent() {
+    let clean = "class Plain {}\ninterface Face {}\n\
+        function mk() { return new class extends Plain implements Face {}; }\n\
+        function g(Plain $p) { $p = null; }\nfunction h(Face $f) { $f = null; }";
+    assert!(!dtor_src(clean, "g"));
+    assert!(!dtor_src(clean, "h"));
+    // The anonymous class itself is its body's subject: a clean one runs nothing.
+    assert!(!dtor_src("class Plain {}\nfunction f() { $x = new class extends Plain {}; unset($x); }", "f"));
+}
+
+/// S6c (a): an anonymous class that declares `__destruct` keeps its parent, and its
+/// interfaces, in the closure, so a value typed to any of them may run it.
+#[test]
+fn s6c_an_anonymous_subclass_that_declares_a_destructor_keeps_its_parent_a_gap() {
+    let dtor = "class Plain {}\ninterface Face {}\n\
+        function mk() { return new class extends Plain implements Face { \
+        public function __destruct() { echo '[anon]'; } }; }\n\
+        function g(Plain $p) { $p = null; }\nfunction h(Face $f) { $f = null; }";
+    assert!(dtor_src(dtor, "g"));
+    assert!(dtor_src(dtor, "h"));
+    // One in a method body, and one nested in a trait's method, are collected the same.
+    let nested = "class Plain {}\ntrait Maker { public function mk() { \
+        return new class extends Plain { public function __destruct() {} }; } }\n\
+        function g(Plain $p) { $p = null; }";
+    assert!(dtor_src(nested, "g"));
+}
+
 /// S1: a hint's class members count whatever else the union holds, and `self` and
 /// `parent` name the class they stand in (witnessed: `[D]<body>`).
 #[test]

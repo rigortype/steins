@@ -10,7 +10,7 @@ use mago_syntax::cst::{
     Access, Argument, Attribute, Class, ClassLikeMember, ClassLikeMemberSelector, Expression,
     Function, FunctionCall, Hint, Identifier, Literal, MagicConstant, Method, MethodBody, Modifier,
     Node, PartialArgument, PlainProperty, Program, Property, PropertyItem, Statement,
-    TriviaKind,
+    TraitUseAdaptation, TraitUseSpecification, TriviaKind,
     UnaryPrefixOperator, UseItems,
 };
 
@@ -159,6 +159,7 @@ pub(crate) fn walk(
         // Anonymous class (ADR-0049 A4): edge-only lowering — inheritance refs, no
         // members/FQN. The S6 descendant-closure walk reads these to taint a closure.
         Node::AnonymousClass(ac) => {
+            let body = scan_body(ac.members.iter());
             out.anon_class_edges.push(AnonClassEdge {
                 parent: ac.extends.as_ref().and_then(|e| e.types.iter().next()).map(name_ref),
                 implements: ac
@@ -166,6 +167,8 @@ pub(crate) fn walk(
                     .as_ref()
                     .map(|i| i.types.iter().map(name_ref).collect())
                     .unwrap_or_default(),
+                declares_destructor: body.declares_destructor,
+                used_traits: body.used_traits,
                 span: to_span(ac.span()),
             });
             // …and the SAME names are hard refs too (issue #182): a missing parent/
@@ -750,6 +753,47 @@ fn is_decl_transparent(node: &Node<'_, '_>) -> bool {
             | Node::NamespaceBody(_)
             | Node::NamespaceImplicitBody(_)
     )
+}
+
+/// What a class-like body's members say, by name, about the destructor an instance
+/// runs when it is dropped and the traits it imports (ADR-0100 §7, issue #882). A
+/// trait's methods are not lowered, so this reads the member list itself.
+#[derive(Default)]
+pub(crate) struct BodyDestructor {
+    /// Every trait the body's `use` statements name, as written.
+    pub(crate) used_traits: Vec<NameRef>,
+    /// A `__destruct` method, or a trait adaptation that names a method `__destruct`
+    /// (`use T { bye as __destruct; }`, which makes `bye` the destructor).
+    pub(crate) declares_destructor: bool,
+}
+
+/// Read a body's members for [`BodyDestructor`]. Nested class-likes are other
+/// bodies; only this one's own members count.
+pub(crate) fn scan_body<'a, 'arena: 'a>(
+    members: impl Iterator<Item = &'a ClassLikeMember<'arena>>,
+) -> BodyDestructor {
+    let mut out = BodyDestructor::default();
+    for member in members {
+        match member {
+            ClassLikeMember::Method(m) => {
+                let name = bytes_to_string(m.name.value);
+                out.declares_destructor |= name.eq_ignore_ascii_case("__destruct");
+            }
+            ClassLikeMember::TraitUse(tu) => {
+                out.used_traits.extend(tu.trait_names.iter().map(name_ref));
+                if let TraitUseSpecification::Concrete(spec) = &tu.specification {
+                    out.declares_destructor |= spec.adaptations.iter().any(|a| {
+                        matches!(a, TraitUseAdaptation::Alias(alias)
+                            if alias.alias.as_ref().is_some_and(|name| {
+                                bytes_to_string(name.value).eq_ignore_ascii_case("__destruct")
+                            }))
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 /// Lower a `trait` declaration to a name-only [`ClassDecl`] (ADR-0049 §5, C8/A2i):
