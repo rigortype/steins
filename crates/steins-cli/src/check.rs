@@ -553,12 +553,17 @@ fn apply_fixes(
     run
 }
 
-/// Whether `outer` is a different edit of the same file whose span holds all of `inner`'s.
+/// Whether `outer` is a **deletion** of the same file that removes all of `inner`'s text: a
+/// different edit with an empty replacement whose span holds `inner`'s. An outer edit that keeps
+/// text of its own does not take the inner one with it, and a zero-width insertion at the outer
+/// span's boundary is outside it.
 fn encloses(outer: &Edit, inner: &Edit) -> bool {
-    outer.path == inner.path
-        && outer.span.start <= inner.span.start
-        && inner.span.end <= outer.span.end
-        && outer.span != inner.span
+    let inside = if inner.span.start == inner.span.end {
+        outer.span.start < inner.span.start && inner.span.start < outer.span.end
+    } else {
+        outer.span.start <= inner.span.start && inner.span.end <= outer.span.end
+    };
+    outer.path == inner.path && outer.replacement.is_empty() && inside && outer.span != inner.span
 }
 
 /// The post-check and the write of an assembled plan (ADR-0034 point 3a).
@@ -828,6 +833,33 @@ pub(crate) fn suppression_over(
 mod tests {
     use super::*;
     use steins_db::{ProjectLayout, SourceFile};
+
+    fn edit(start: u32, end: u32, replacement: &str) -> Edit {
+        Edit {
+            path: "a.php".to_owned(),
+            span: ByteSpan::new(start, end),
+            replacement: replacement.to_owned(),
+        }
+    }
+
+    /// An edit is left to another only when that one deletes the text it sits in; an outer edit
+    /// that keeps text, or one that only touches the inner edit's boundary, still overlaps it,
+    /// and `EditPlan` refuses the pair (`overlapping-fix-edits`).
+    #[test]
+    fn only_a_deletion_takes_an_enclosed_edit_with_it() {
+        let inner = edit(12, 13, "F");
+        assert!(encloses(&edit(10, 30, ""), &inner), "a deletion encloses");
+        assert!(!encloses(&edit(10, 30, "x"), &inner), "a rewrite that keeps text does not");
+        assert!(!encloses(&edit(12, 13, ""), &inner), "the same span is not enclosed");
+        assert!(!encloses(&edit(10, 30, ""), &Edit { path: "b.php".to_owned(), ..inner.clone() }));
+        // A zero-width insertion at either boundary of the deletion survives it.
+        assert!(!encloses(&edit(10, 30, ""), &edit(10, 10, "<")));
+        assert!(!encloses(&edit(10, 30, ""), &edit(30, 30, ">")));
+        assert!(encloses(&edit(10, 30, ""), &edit(20, 20, "=")));
+        let mut plan = EditPlan::new();
+        plan.add_edit(edit(10, 30, "x")).unwrap();
+        assert!(plan.add_edit(inner).is_err(), "the overlap is still refused");
+    }
 
     /// The `check --fix` post-check gate refuses a regressing fix by name,
     /// writing nothing (ADR-0034 point 3a); SYNTHETIC since a real dump is

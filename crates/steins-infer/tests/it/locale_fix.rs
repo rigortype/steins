@@ -4,16 +4,34 @@
 //! `effect.envelope-exceeded` and `effect.liskov-widened` and nothing else, and is offered only
 //! where the source can be edited byte-exactly and the edit takes the read out.
 
-use steins_infer::{Diagnostic, EFFECT_ID, EFFECT_LISKOV_ID, check};
-use steins_syntax::SourceTree;
+use steins_infer::{Diagnostic, EFFECT_ID, EFFECT_LISKOV_ID, Folder, check_with};
+use steins_syntax::{ArgValue, SourceTree};
 
 const TITLE: &str = "use the locale-independent conversion (F, h, H): under a locale whose decimal point is not '.' the output changes, the decimal point becomes '.' always";
 
-/// Every effect finding of `src`, the Liskov ones included.
+/// A folder that never folds and answers one PHP minor, or none: the run's floor when the project
+/// declares no target.
+struct Floor(Option<(u16, u16)>);
+
+impl Folder for Floor {
+    fn fold(&mut self, _name: &str, _args: &[ArgValue], _strict: bool) -> Option<ArgValue> {
+        None
+    }
+    fn php_minor(&mut self) -> Option<(u16, u16)> {
+        self.0
+    }
+}
+
+/// Every effect finding of `src` on PHP 8.5, the Liskov ones included.
 fn findings(src: &str) -> Vec<Diagnostic> {
+    findings_on(src, Some((8, 5)))
+}
+
+/// [`findings`] on a run whose PHP floor is `floor`.
+fn findings_on(src: &str, floor: Option<(u16, u16)>) -> Vec<Diagnostic> {
     let tree = SourceTree::parse(src);
     let functions = tree.functions().to_vec();
-    check(&tree, &functions, "test.php")
+    check_with(&tree, &functions, "test.php", &mut Floor(floor))
         .into_iter()
         .filter(|d| d.id == EFFECT_ID || d.id == EFFECT_LISKOV_ID)
         .collect()
@@ -298,4 +316,31 @@ fn a_transitive_finding_carries_no_fix() {
     let found = findings(src);
     assert_eq!(found.len(), 1, "{found:#?}");
     assert!(found[0].fix.is_none(), "{found:#?}");
+}
+
+/// `h` and `H` need a floor known to be PHP 8.0 or later: with a floor below it, or none known
+/// (nothing declared and no runtime answering), a call with a `g` or `G` conversion gets no fix,
+/// whatever else its format holds; `F` is offered on any floor.
+#[test]
+fn h_and_capital_h_are_offered_only_on_a_known_php_8_floor() {
+    let call = |format: &str| {
+        format!(
+            "<?php\n#[\\Steins\\Pure]\nfunction f(float $x): string {{ return sprintf('{format}', $x, $x); }}\n"
+        )
+    };
+    for floor in [None, Some((7, 4)), Some((5, 6))] {
+        for format in ["%.3g", "%G", "%f|%g"] {
+            let found = findings_on(&call(format), floor);
+            assert!(found.iter().any(|d| d.message.contains("setting.locale")), "{format}");
+            assert!(found.iter().all(|d| d.fix.is_none()), "{format} on {floor:?}: {found:#?}");
+        }
+        let f_only = call("%.2f");
+        let found = findings_on(&f_only, floor);
+        assert_eq!(fixed(&f_only, &found), f_only.replace("%.2f", "%.2F"), "{floor:?}");
+    }
+    for floor in [(8, 0), (8, 5)] {
+        let src = call("%.3g|%G");
+        let found = findings_on(&src, Some(floor));
+        assert_eq!(fixed(&src, &found), src.replace("%.3g|%G", "%.3h|%H"), "{floor:?}");
+    }
 }
