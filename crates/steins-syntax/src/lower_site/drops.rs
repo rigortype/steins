@@ -377,6 +377,12 @@ fn consumed(node: &Node<'_, '_>, sx: &SiteScope<'_>, out: &mut Vec<SiteOrigin>) 
     match node {
         Node::Clone(c) => temporary(c.object, sx, out),
         Node::PropertyAccess(p) => temporary(p.object, sx, out),
+        Node::ClassConstantAccess(a) => temporary(a.class, sx, out),
+        Node::StaticPropertyAccess(a) => temporary(a.class, sx, out),
+        Node::For(f) => {
+            let lists = [&f.initializations, &f.conditions, &f.increments];
+            lists.iter().for_each(|l| l.iter().for_each(|e| temporary(e, sx, out)));
+        }
         Node::NullSafePropertyAccess(p) => temporary(p.object, sx, out),
         Node::ArrayAccess(a) => temporary(a.array, sx, out),
         Node::Binary(b) if !matches!(b.operator, BinaryOperator::NullCoalesce(_)) => {

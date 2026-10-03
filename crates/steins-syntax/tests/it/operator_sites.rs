@@ -635,6 +635,14 @@ fn a_local_first_written_with_new_drops_at_unset_reassignment_and_scope_exit() {
             drop_site(C::DropScopeExit, &["D"], "}"),
         ]
     );
+    // `static $x = new D;` is the write that makes `$x` a subject (witnessed `[D]<body>`).
+    assert_eq!(
+        drops("", "static $x = new D; $x = null;"),
+        [
+            drop_site(C::DropReassign, &["D"], "$x = null"),
+            drop_site(C::DropScopeExit, &["D"], "}"),
+        ]
+    );
     // Every form is of the one family.
     for construct in [C::DropUnset, C::DropReassign, C::DropScopeExit, C::DropTemporary] {
         assert_eq!(construct.family_hint(), Some(F::Drop));
@@ -952,6 +960,11 @@ fn a_new_an_expression_consumes_is_a_temporary() {
         "unset((new D)->p);",
         "$v = (new D)();",
         "$v = (new D)::s();",
+        "$v = (new D)::X;",
+        "$v = (new D)::$s;",
+        "for (new D(); false;) {}",
+        "for (;; new D()) { break; }",
+        "for (; new D() instanceof D;) {}",
         "foreach (new D as $x) {}",
         "switch (new D) {}",
         "$v = match (new D) { default => 1 };",
@@ -1003,6 +1016,7 @@ fn prop_drops(body: &str, constructor: bool) -> Vec<PropDrop> {
                 let receiver = match receivers.as_slice() {
                     [Some(EffectRecv::This)] => "this".to_owned(),
                     [Some(EffectRecv::SelfKw)] => "self".to_owned(),
+                    [Some(EffectRecv::StaticKw)] => "static".to_owned(),
                     [Some(EffectRecv::Parent)] => "parent".to_owned(),
                     [Some(EffectRecv::ClassName(name))] => name.raw.clone(),
                     other => panic!("{other:?}"),
@@ -1027,7 +1041,7 @@ fn a_property_write_or_unset_is_a_drop_site_naming_the_property() {
     let write = |r: &str, m: &str, t: &str| prop_drop(C::DropPropWrite, r, m, t);
     assert_eq!(prop_drops("$this->d = null;", false), [write("this", "d", "$this->d = null")]);
     assert_eq!(prop_drops("self::$d = null;", false), [write("self", "d", "self::$d = null")]);
-    assert_eq!(prop_drops("static::$d = null;", false), [write("self", "d", "static::$d = null")]);
+    assert_eq!(prop_drops("static::$d = null;", false), [write("static", "d", "static::$d = null")]);
     assert_eq!(
         prop_drops("parent::$d = null;", false),
         [write("parent", "d", "parent::$d = null")]
@@ -1043,6 +1057,11 @@ fn a_property_write_or_unset_is_a_drop_site_naming_the_property() {
         [write("this", "d", "$this->d = new D")]
     );
     assert_eq!(prop_drops("foo($this->d = null);", false).len(), 1);
+    // A literal computed name is the property it names (witnessed: `[D]<close>`).
+    assert_eq!(
+        prop_drops("$this->{'d'} = null;", false),
+        [write("this", "d", "$this->{'d'} = null")]
+    );
 }
 
 /// What is not a property drop: another object's property (residue), a compound write, an
@@ -1187,4 +1206,15 @@ fn a_trait_records_each_property_by_name_and_hint() {
     // Nothing but a trait carries them.
     let class = SourceTree::parse("<?php\nclass K { private ?D $a; }\n");
     assert!(class.classes()[0].trait_props.is_empty());
+}
+
+/// A `readonly class` is recorded as one, and a trait's property as private or not.
+#[test]
+fn a_readonly_class_and_a_private_trait_property_are_recorded() {
+    let tree = SourceTree::parse("<?php\nreadonly class R { public ?D $d; }\nclass K { public ?D $d; }\n\
+        trait T { private ?D $a; protected ?D $b; public ?D $c; }\n");
+    let classes = tree.classes();
+    assert!(classes[0].is_readonly && !classes[1].is_readonly && !classes[2].is_readonly);
+    let private: Vec<_> = classes[2].trait_props.iter().map(|p| (p.name.as_str(), p.private)).collect();
+    assert_eq!(private, [("a", true), ("b", false), ("c", false)]);
 }

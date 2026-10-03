@@ -711,6 +711,10 @@ pub enum EffectRecv {
     /// not. Only the drop sites carry it (ADR-0100 §7); appended last so no
     /// persisted variant index moves.
     Bound(NameRef),
+    /// `static::` in a drop site's static-property holder: the late-bound class, a
+    /// subclass of the enclosing class that may be the one declaring the property.
+    /// Appended after [`Self::Bound`] for the same reason.
+    StaticKw,
 }
 
 /// One `catch` clause's caught types + bound variable, for the throw damming
@@ -1432,6 +1436,9 @@ pub struct ClassDecl {
     /// `true` for an `abstract class` — `new AbstractC()` raises `Error` before
     /// ctor `ArgumentCountError`, so the arity family (ADR-0049 §6) silences ctor claims.
     pub is_abstract: bool,
+    /// `true` for a `readonly class` (PHP 8.2): every property of it is readonly, which
+    /// [`PropertyDecl::readonly`] does not say (it records the modifier on the property).
+    pub is_readonly: bool,
     /// `true` for an `interface` (not a `class`). Interface methods are
     /// abstract; they carry envelopes/`@throws` but no bodies.
     pub is_interface: bool,
@@ -1538,6 +1545,8 @@ pub struct TraitProp {
     pub readonly: bool,
     /// A property with a hook, or a promoted parameter with one.
     pub hooked: bool,
+    /// Declared `private`: a class that imports the trait owns it, and no subclass sees it.
+    pub private: bool,
 }
 
 /// A representable call argument or assignment right-hand side. The first five

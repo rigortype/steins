@@ -6,7 +6,7 @@
 //! write is and, for a constructor, whether it is the first touch of its property.
 
 use mago_syntax::cst::{
-    Access, Assignment, ClassLikeMemberSelector, Expression, Variable,
+    Access, Assignment, ClassLikeMemberSelector, Expression, Literal, Variable,
 };
 
 use super::super::SiteScope;
@@ -16,7 +16,8 @@ use crate::lower_expr::method_name_of;
 use crate::names::name_ref;
 use crate::{bytes_to_string, strip_dollar, to_span};
 
-/// The property a `$this->p` fetch names, when `object` is `$this` and `p` is a literal.
+/// The property a `$this->p` or `$this->{'p'}` fetch names, when `object` is `$this` and the
+/// name is a literal.
 pub(super) fn this_property(
     object: &Expression<'_>,
     selector: &ClassLikeMemberSelector<'_>,
@@ -27,6 +28,11 @@ pub(super) fn this_property(
     }
     match selector {
         ClassLikeMemberSelector::Identifier(_) => method_name_of(selector),
+        // `$this->{'d'}` names `d` as plainly as `$this->d` does.
+        ClassLikeMemberSelector::Expression(e) => match e.expression.unparenthesized() {
+            Expression::Literal(Literal::String(s)) => s.value.map(bytes_to_string),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -40,8 +46,7 @@ pub(super) fn this_property_of(expr: &Expression<'_>) -> Option<String> {
 }
 
 /// The holder and name of a property `expr` names: `$this->p`, or `C::$p` for `self`,
-/// `static` (a static property's type is the same in every subclass), `parent` or a
-/// named class.
+/// `static` (late-bound), `parent` or a named class.
 fn holder(expr: &Expression<'_>) -> Option<(EffectRecv, String)> {
     match expr.unparenthesized() {
         Expression::Access(Access::Property(pa)) => {
@@ -50,7 +55,8 @@ fn holder(expr: &Expression<'_>) -> Option<(EffectRecv, String)> {
         Expression::Access(Access::StaticProperty(sp)) => {
             let Variable::Direct(dv) = &sp.property else { return None };
             let receiver = match sp.class.unparenthesized() {
-                Expression::Self_(_) | Expression::Static(_) => EffectRecv::SelfKw,
+                Expression::Self_(_) => EffectRecv::SelfKw,
+                Expression::Static(_) => EffectRecv::StaticKw,
                 Expression::Parent(_) => EffectRecv::Parent,
                 Expression::Identifier(id) => EffectRecv::ClassName(name_ref(id)),
                 _ => return None,

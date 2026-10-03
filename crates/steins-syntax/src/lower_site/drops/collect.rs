@@ -88,6 +88,13 @@ impl Collect {
                 self.visit(&Node::Expression(a.lhs));
                 return;
             }
+            // `static $x = new D;` is a write of `$x`, once per process.
+            Node::StaticConcreteItem(item) => {
+                self.visit(&Node::Expression(item.value));
+                let name = strip_dollar(bytes_to_string(item.variable.name));
+                self.assign_to(name, item.value, item.value.span());
+                return;
+            }
             Node::While(_) | Node::DoWhile(_) | Node::For(_) | Node::Foreach(_) => {
                 self.loops += 1;
                 children(node).iter().for_each(|c| self.visit(c));
@@ -136,7 +143,11 @@ impl Collect {
     /// A plain assignment `lhs = rhs` to a variable.
     fn assign(&mut self, lhs: &Expression<'_>, rhs: &Expression<'_>, span: mago_span::Span) {
         let Expression::Variable(Variable::Direct(dv)) = lhs.unparenthesized() else { return };
-        let name = strip_dollar(bytes_to_string(dv.name));
+        self.assign_to(strip_dollar(bytes_to_string(dv.name)), rhs, span);
+    }
+
+    /// A plain write of `rhs` to the variable `name`.
+    fn assign_to(&mut self, name: String, rhs: &Expression<'_>, span: mago_span::Span) {
         if name == "this" || self.by_ref.contains(&name) {
             return;
         }
