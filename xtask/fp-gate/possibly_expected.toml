@@ -187,9 +187,10 @@
 # that name an interface or an exception class a class reaching a destructor implements or extends
 # (guzzle `?ResponseInterface` and `?ResponseException` 5, Carbon `?CarbonInterface` 4, phpunit's rule and exception properties
 # 5), 2 are monolog's constructor writes after `parent::__construct()` over a class this checkout
-# lacks, and 2 are console's `?InvokableCommand`. No function changes exhaustiveness (a method that
-# writes a property is already `…?` for `state-construct`), `effect-diff` reports no event and the
-# three `transform` dry-runs plan the same edits. The 8,016 findings of the base go to 8,050.
+# lacks, and 2 are console's `?InvokableCommand`. No function changes exhaustiveness here (a method
+# that writes a property is already `…?` for `state-construct`; a constructor's second write or a
+# write after a use of `$this` flips it, which none of these packages has), `effect-diff` reports no
+# event and the three `transform` dry-runs plan the same edits. The 8,016 findings of the base go to 8,050.
 # `phpstan/phpstan-src` is not remeasured here: the local fp-gate decides its row.
 
 # Triage of the `throw.maybe-undeclared` that the call-site read of a literal printf format and a

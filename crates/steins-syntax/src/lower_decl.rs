@@ -791,6 +791,7 @@ fn trait_prop(name: String, hint: Option<&mago_syntax::cst::Hint<'_>>, modifiers
         is_static: modifiers.iter().any(Modifier::is_static),
         readonly: modifiers.iter().any(Modifier::is_readonly),
         hooked,
+        private: modifiers.iter().any(Modifier::is_private),
     }
 }
 
@@ -882,6 +883,7 @@ fn lower_trait(t: &mago_syntax::cst::Trait<'_>, conditional: bool) -> ClassDecl 
         display: String::new(),
         is_final: false,
         is_abstract: false,
+        is_readonly: false,
         is_interface: false,
         is_enum: false,
         is_trait: true,
@@ -967,6 +969,7 @@ fn lower_class(c: &Class<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex, rc: 
         display: String::new(),
         is_final: c.modifiers.iter().any(Modifier::is_final),
         is_abstract: c.modifiers.iter().any(Modifier::is_abstract),
+        is_readonly: c.modifiers.iter().any(Modifier::is_readonly),
         is_interface: false,
         is_enum: false,
         is_trait: false,
@@ -1162,6 +1165,7 @@ fn lower_interface(i: &mago_syntax::cst::Interface<'_>, aliases: &SteinsAttrAlia
         display: String::new(),
         is_final: false,
         is_abstract: false,
+        is_readonly: false,
         is_interface: true,
         is_enum: false,
         is_trait: false,
@@ -1247,6 +1251,7 @@ fn lower_enum(e: &mago_syntax::cst::Enum<'_>, _aliases: &SteinsAttrAliases, docs
         display: String::new(),
         is_final: true, // enums are implicitly final in PHP
         is_abstract: false,
+        is_readonly: false,
         is_interface: false,
         is_enum: true,
         is_trait: false,

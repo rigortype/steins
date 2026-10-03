@@ -2030,3 +2030,183 @@ fn s6d_a_class_declared_twice_is_asked_in_every_declaration() {
     wide(&copies("private $x;", "private ?D $x = null;"), &[("Amb::close", GAP)]);
     wide(&copies("private ?E $x = null;", "private ?E $x = null;"), &[("Amb::close", CLEAN)]);
 }
+
+// ---- Review of #1009 (rows r01 to r38 of its witnesses, PHP 8.5.11) -------------
+
+/// r02, r32: `static::$p` where only a subclass declares `$p` runs `[D]<reset>` and throws a
+/// destructor's exception at the assignment; r01: the same for `$this->p` in an abstract base
+/// whose subclass declares it. A subclass that declares a clean hint, or none, is no gap.
+#[test]
+fn s6d_a_property_only_a_subclass_declares_is_asked_in_the_subclass() {
+    wide(
+        "class R02 { public static function reset(): void { static::$d = null; } }\n\
+         final class K02 extends R02 { public static ?D $d = null; }\n\
+         abstract class R01 { public function close(): void { $this->d = null; } }\n\
+         final class K01 extends R01 { public ?D $d = null; }\n\
+         class C02 { public static function reset(): void { static::$e = null; } }\n\
+         final class CK02 extends C02 { public static ?E $e = null; }\n\
+         class N02 { public static function reset(): void { static::$x = null; } }\n\
+         abstract class N01 { public function close(): void { $this->x = null; } }\n\
+         final class NK01 extends N01 { public ?E $x = null; }\n\
+         class S02 { public static ?D $d = null; public static function reset(): void { static::$d = null; } }\n\
+         final class SK02 extends S02 { }",
+        &[
+            ("R02::reset", GAP),
+            ("R01::close", GAP),
+            ("C02::reset", CLEAN),
+            ("N02::reset", CLEAN),
+            ("N01::close", CLEAN),
+            ("S02::reset", GAP),
+        ],
+    );
+}
+
+/// r03, r38: a child that redeclares the property and writes it before `parent::__construct()`
+/// runs `<c>[D]<p>`: its write is a write (an ancestor declares the slot), and the parent's own
+/// first write stays an initialization.
+#[test]
+fn s6d_a_redeclared_property_is_not_initialized_by_the_child_constructor() {
+    wide(
+        "class P03 { public ?D $d; public function __construct() { $this->d = new D(); } }\n\
+         final class K03 extends P03 { public ?D $d;\n\
+           public function __construct() { $this->d = new D(); parent::__construct(); } }\n\
+         class P38 { protected ?D $d = null; public function __construct() { $this->d = new D(); } }\n\
+         final class K38 extends P38 { protected ?D $d = null;\n\
+           public function __construct() { $this->d = new D(); parent::__construct(); } }\n\
+         trait T39 { protected ?D $d = null; }\n\
+         class P39 { use T39; public function __construct() { $this->d = new D(); } }\n\
+         final class K39 extends P39 { protected ?D $d = null;\n\
+           public function __construct() { $this->d = new D(); parent::__construct(); } }\n\
+         class P40 { private ?D $d = null; }\n\
+         final class K40 extends P40 { private ?D $d = null;\n\
+           public function __construct() { $this->d = new D(); } }",
+        &[
+            ("P03::__construct", CLEAN),
+            ("K03::__construct", GAP),
+            ("P38::__construct", CLEAN),
+            ("K38::__construct", GAP),
+            ("K39::__construct", GAP),
+            // A private declaration above is another slot.
+            ("K40::__construct", CLEAN),
+        ],
+    );
+}
+
+/// r04: a subclass writing its parent's `private` property creates a dynamic property (a
+/// deprecation, and nothing drops); the parent's own write still does.
+#[test]
+fn s6d_a_private_property_of_another_class_is_invisible_to_a_subclass() {
+    wide(
+        "class P04 { private ?D $d = null; public function open(): void { $this->d = new D(); } }\n\
+         final class K04 extends P04 { public function clear(): void { $this->d = null; } }\n\
+         trait T04 { private ?D $d = null; }\n\
+         class P05 { use T04; public function reset(): void { $this->d = null; } }\n\
+         final class K05 extends P05 { public function clear(): void { $this->d = null; } }",
+        &[
+            ("P04::open", GAP),
+            ("K04::clear", CLEAN),
+            ("P05::reset", GAP),
+            ("K05::clear", CLEAN),
+        ],
+    );
+}
+
+/// r20, r35: every property of a `readonly class` is readonly, so no write of it drops (`__clone`
+/// reinitializes a clone's property while the original still holds the value).
+#[test]
+fn s6d_a_readonly_classs_properties_are_readonly() {
+    wide(
+        "readonly class RC { public ?D $d; public function __construct() { $this->d = new D(); }\n\
+           public function bad(): void { $this->d = null; }\n\
+           public function __clone() { $this->d = new D(); }\n\
+           public function drop(): void { unset($this->d); } }",
+        &[("RC::__construct", CLEAN), ("RC::bad", CLEAN), ("RC::__clone", CLEAN), ("RC::drop", CLEAN)],
+    );
+}
+
+/// r22, r24: the first write of a constructor over a default is not a drop, whatever the default
+/// (a property default is a constant expression, so no object it holds ends with the write);
+/// r23: a promoted parameter's `new` default is the last reference to its value, so the write
+/// over it still is.
+#[test]
+fn s6d_a_constructors_first_write_over_a_default_drops_nothing() {
+    wide(
+        "const G24 = new D();\n\
+         final class H22 { private array|D $d = []; public function __construct() { $this->d = new D(); } }\n\
+         final class H24 { public ?D $d = G24; public function __construct() { $this->d = null; } }\n\
+         final class H23 { public function __construct(public D $d = new D()) { $this->d = new D(); } }",
+        &[("H22::__construct", CLEAN), ("H24::__construct", CLEAN), ("H23::__construct", GAP)],
+    );
+}
+
+/// r06, r07, r31c: a `new` in a `for`'s initialization, condition or step, and as the class of a
+/// constant or static-property fetch, is consumed (`[D]<body>`).
+#[test]
+fn s6d_a_new_in_a_for_header_or_a_class_fetch_is_a_temporary() {
+    wide(
+        "final class DC { const X = 1; public static int $s = 1; public function __destruct() { echo '[D]'; } }\n\
+         function r06(): void { for (new DC(), $i = 0; $i < 1; $i++) { echo '<body>'; } }\n\
+         function r06b(): void { for ($i = 0; $i < 1; new DC()) { $i++; } }\n\
+         function r07(): int { $v = (new DC())::X; echo '<body>'; return $v; }\n\
+         function r31c(): int { $v = (new DC())::$s; echo '<body>'; return $v; }\n\
+         function m06(): void { for (new E(), $i = 0; $i < 1; $i++) {} $v = (new E())::class; }",
+        &[
+            ("r06", GAP),
+            ("r06b", GAP),
+            ("r07", GAP),
+            ("r31c", GAP),
+            ("m06", CLEAN),
+        ],
+    );
+}
+
+/// r08: `static $x = new D();` is a write of `$x` (`[D]<body>` for the `null` after it).
+#[test]
+fn s6d_a_static_variable_initializer_is_a_write() {
+    wide(
+        "function r08(): void { static $x = new D(); $x = null; echo '<body>'; }\n\
+         function m08(): void { static $x = new E(); $x = null; }",
+        &[("r08", GAP), ("m08", CLEAN)],
+    );
+}
+
+/// r27: `$this->{'d'}` names `d`; a name computed any other way stays untyped residue.
+#[test]
+fn s6d_a_literal_computed_property_name_is_the_property_it_names() {
+    wide(
+        "final class H27 { private ?D $d = null;\n\
+           public function close(): void { $this->{'d'} = null; }\n\
+           public function dyn(string $n): void { $this->{$n} = null; $this->$n = null; } }",
+        &[("H27::close", GAP), ("H27::dyn", CLEAN)],
+    );
+}
+
+/// r29, r37, r16, r34: `object`, `mixed`, `array` and `iterable` hints are residue (what they
+/// hold is whatever the class stores); a static property a trait declares is read; a constructor's
+/// second write and a write in a loop are drops, which is a gap in the constructor too.
+#[test]
+fn s6d_residue_and_the_constructor_cases_the_review_witnessed() {
+    wide(
+        "final class H29 { private ?object $o = null; private mixed $m = null; private array $a = [];\n\
+           private ?iterable $it = null;\n\
+           public function closeO(): void { $this->o = null; }\n\
+           public function closeM(): void { $this->m = null; }\n\
+           public function closeA(): void { $this->a = []; }\n\
+           public function closeI(): void { $this->it = null; } }\n\
+         trait Tr37 { public static ?D $d = null; }\n\
+         final class H37 { use Tr37; public static function clear(): void { self::$d = null; } }\n\
+         final class H16 { private D $d;\n\
+           public function __construct() { foreach ([1, 2] as $i) { $this->d = new D(); } } }\n\
+         final class H34 { private ?D $d = null;\n\
+           public function __construct(bool $c) { $this->d = new D(); if ($c) { $this->d = new D(); } } }",
+        &[
+            ("H29::closeO", CLEAN),
+            ("H29::closeM", CLEAN),
+            ("H29::closeA", CLEAN),
+            ("H29::closeI", CLEAN),
+            ("H37::clear", GAP),
+            ("H16::__construct", GAP),
+            ("H34::__construct", GAP),
+        ],
+    );
+}

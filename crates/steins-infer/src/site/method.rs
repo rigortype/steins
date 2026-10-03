@@ -49,7 +49,10 @@ pub(super) fn method_edge(
         }
         EffectRecv::ClassName(name) => (cx.class_fqn(name), true),
         // `Bound` is a drop site's receiver, never a call's.
-        EffectRecv::Var(_) | EffectRecv::PropRead(_) | EffectRecv::Bound(_) => {
+        EffectRecv::Var(_)
+        | EffectRecv::PropRead(_)
+        | EffectRecv::Bound(_)
+        | EffectRecv::StaticKw => {
             return Err(GapKind::DeclaredReceiver);
         }
     };
@@ -342,7 +345,7 @@ fn engine_start(
             let fqn = declared_receiver_fqn(cx, enclosing, params, receiver)?;
             (fqn, false, format!("$this->{prop}->{method}"))
         }
-        EffectRecv::Bound(_) => return None,
+        EffectRecv::Bound(_) | EffectRecv::StaticKw => return None,
     })
 }
 
@@ -415,7 +418,8 @@ pub(crate) fn declared_receiver_type<'a>(
         | EffectRecv::SelfKw
         | EffectRecv::Parent
         | EffectRecv::ClassName(_)
-        | EffectRecv::Bound(_) => {
+        | EffectRecv::Bound(_)
+        | EffectRecv::StaticKw => {
             return None;
         }
     };
