@@ -60,11 +60,12 @@ pub fn summaries_section() -> SectionName {
 }
 
 /// Every [`Fix::title`] an emitter can produce, for the decoder to intern
-/// against. One entry today — ADR-0010's dump removal is the only fix-it v1
-/// ships — and `a_fix_title_outside_the_table_is_a_miss` pins what happens to
-/// a title that is not here: the package's summaries miss and every one of its
-/// files walks. Cost, never meaning; adding a fix means adding its title.
-const FIX_TITLES: &[&str] = &["remove the dump statement"];
+/// against: ADR-0010's dump removal and ADR-0101 §3.6's locale-independent
+/// printf conversion. `a_fix_title_outside_the_table_is_a_miss` pins what
+/// happens to a title that is not here: the package's summaries miss and every
+/// one of its files walks. Cost, never meaning; adding a fix means adding its
+/// title.
+const FIX_TITLES: &[&str] = &["remove the dump statement", crate::purity::LOCALE_FIX_TITLE];
 
 // ---------------------------------------------------------------------------
 // The wire form.
@@ -417,6 +418,29 @@ mod tests {
         ]);
         let contents: Vec<&Fingerprint> = decoded.rows().map(|(_, c, _)| c).collect();
         assert_eq!(contents, vec![&fp("a"), &fp("b"), &fp("c")]);
+    }
+
+    /// The locale-independent printf fix (ADR-0101 §3.6) is interned: a warm run replays the
+    /// finding with its edit, and does not walk the file again for want of the title.
+    #[test]
+    fn the_locale_fix_title_survives_the_disk_boundary() {
+        let mut d = diagnostic();
+        d.id = crate::EFFECT_ID;
+        d.fix = Some(Fix {
+            title: crate::purity::LOCALE_FIX_TITLE,
+            edits: vec![FixEdit {
+                path: "src/app.php".to_owned(),
+                start: 31,
+                end: 32,
+                replacement: "F".to_owned(),
+            }],
+        });
+        let walk = FileWalk { diagnostics: vec![d], uncovered: None };
+        let rows = [SummaryRow { path: "src/app.php", slot: 0, content: fp("a"), walk: &walk }];
+        let decoded = round_trip(summaries_payload(&fp("stamp"), &fp("universe"), &rows))
+            .expect("the section decodes");
+        let read: Vec<&FileWalk> = decoded.rows().map(|(_, _, walk)| walk).collect();
+        assert_eq!(read, vec![&walk]);
     }
 
     /// Every way the bytes can be wrong is a `Miss` — never a panic, never a

@@ -10,6 +10,9 @@
 //! it too.
 
 mod floor;
+mod locale_fix;
+
+pub(crate) use self::locale_fix::FIX_TITLE as LOCALE_FIX_TITLE;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -1139,7 +1142,7 @@ pub(crate) fn effect_diagnostics(fx: &Fixpoints<'_>) -> Vec<Diagnostic> {
                 // only, and an interop-declared abstraction never yields
                 // `effect.liskov-widened`.
                 if !c.is_interface && !m.is_abstract {
-                    emit_effect_liskov(&mut out, &cx, c, m, effects, policy);
+                    emit_effect_liskov(&mut out, &cx, c, m, (effects, plugins), policy);
                 }
             }
         }
@@ -1156,7 +1159,7 @@ fn emit_effect_liskov(
     cx: &Cx,
     class: &ClassDecl,
     m: &MethodDecl,
-    effects: &HashMap<Sym, EffectSet>,
+    (effects, plugins): (&HashMap<Sym, EffectSet>, &PluginFacts),
     policy: &EffectsPolicy,
 ) {
     let abstractions = collect_abstraction_effects(cx, class, &m.name);
@@ -1179,6 +1182,13 @@ fn emit_effect_liskov(
     if proven.is_empty() {
         return;
     }
+    // The remedy of a proven locale read (ADR-0101 §3.6), offered only when it takes every
+    // origin of the read out of the body.
+    let locale_fix = proven.contains(&locale_fix::LOCALE).then(|| {
+        let frame = Frame::new(Some(&class.fqn), &m.params, &m.sites);
+        locale_fix::method_edits(cx, &frame, plugins, &set.findings, policy)
+            .and_then(locale_fix::fix_of)
+    });
     for (abs_display, labels) in abstractions {
         for label in &proven {
             if !exceeds(&labels, label, policy) {
@@ -1202,7 +1212,7 @@ fn emit_effect_liskov(
                 column: pos.column,
                 message: msg,
                 facet: None,
-                fix: None,
+                fix: if *label == locale_fix::LOCALE { locale_fix.clone().flatten() } else { None },
             });
         }
     }
@@ -1379,7 +1389,7 @@ fn report_unit(
     let knowledge = Knowledge::Catalog { lane: Lane::Effects, plugins: Some(plugins) };
     for site in frame.sites {
         let resolved = resolve_site(cx, frame, site, &knowledge);
-        report_site(out, cx, site.span, &resolved, effects, display, bound);
+        report_site(out, cx, site, &resolved, effects, display, bound);
         floor.report_site(out, cx, frame, site, &resolved, effects, display, bound);
     }
 }
@@ -1435,12 +1445,13 @@ fn report_unknown_labels(
 fn report_site(
     out: &mut Vec<Diagnostic>,
     cx: &Cx,
-    span: Span,
+    site: &SiteOrigin,
     resolved: &ResolvedSite,
     effects: &HashMap<Sym, EffectSet>,
     display: &str,
     bound: OperativeBound<'_>,
 ) {
+    let span = site.span;
     for target in &resolved.targets {
         match target {
             Target::Edge(edge) => {
@@ -1450,7 +1461,15 @@ fn report_site(
                 for f in hit_findings(cx, span, hit, bound.policy) {
                     if bound.reports(&f) {
                         let prefix = format!("{} has effect {}", hit.shown(), f.label);
-                        out.push(exceeded_diag(cx, span.start, &prefix, display, bound, &f.label));
+                        let mut diag =
+                            exceeded_diag(cx, span.start, &prefix, display, bound, &f.label);
+                        // The remedy of a proven locale read at a literal printf format
+                        // (ADR-0101 §3.6): it removes exactly this finding.
+                        if f.label == locale_fix::LOCALE {
+                            diag.fix = locale_fix::locale_edits(cx, site, hit)
+                                .and_then(locale_fix::fix_of);
+                        }
+                        out.push(diag);
                     }
                 }
             }

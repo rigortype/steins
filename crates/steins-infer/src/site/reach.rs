@@ -610,7 +610,7 @@ impl CallSiteReach {
 
 /// The literal format of a printf-family call, when the call site wrote one as a
 /// string literal: the argument at the family's format position.
-pub(super) fn literal_format<'c>(consts: &'c ConstArgs, family: &PrintfFamily) -> Option<&'c str> {
+pub(crate) fn literal_format<'c>(consts: &'c ConstArgs, family: &PrintfFamily) -> Option<&'c str> {
     let target = match family.format_position() {
         0 => consts.first.as_ref(),
         1 => consts.second.as_ref(),

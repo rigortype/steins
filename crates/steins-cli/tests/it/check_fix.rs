@@ -240,3 +240,54 @@ fn multi_argument_dump_is_fixed_once() {
     );
     assert_eq!(proj.read("app.php"), "<?php\n$x = 1;\n$y = 2;\n");
 }
+
+const LOCALE_SRC: &str = "<?php\n#[\\Steins\\Pure]\nfunction fmt(float $x): string {\n    return sprintf('%.2f', $x);\n}\n";
+
+/// ADR-0101 §3.6, on the contracts surface the envelope findings live on: the locale-independent conversion is the remedy of the envelope finding a
+/// literal `%f` raises, and the post-check sees the locale read gone.
+#[test]
+fn fix_spells_a_percent_f_under_a_pure_envelope_as_capital_f_and_a_rerun_is_clean() {
+    let proj = TempProject::new("locale");
+    proj.write("fmt.php", LOCALE_SRC);
+
+    let plain = run(&["check", "--no-php", "--profile", "contracts", proj.path()]);
+    assert_eq!(plain.code, 1, "stdout:\n{}", plain.stdout);
+    assert!(plain.stdout.contains("error[effect.envelope-exceeded]"), "{}", plain.stdout);
+    assert_eq!(proj.read("fmt.php"), LOCALE_SRC);
+
+    let fixed = run(&["check", "--no-php", "--profile", "contracts", "--fix", proj.path()]);
+    assert_eq!(fixed.code, 0, "stdout:\n{}\nstderr:\n{}", fixed.stdout, fixed.stderr);
+    assert!(fixed.stdout.contains("fixed[effect.envelope-exceeded]"), "{}", fixed.stdout);
+    assert!(
+        fixed.stderr.contains("steins: fixed 1 finding(s) (1 file(s) written)"),
+        "{}",
+        fixed.stderr
+    );
+    assert_eq!(proj.read("fmt.php"), LOCALE_SRC.replace("'%.2f'", "'%.2F'"));
+
+    let rerun = run(&["check", "--no-php", "--profile", "contracts", proj.path()]);
+    assert_eq!(rerun.code, 0, "rerun:\n{}", rerun.stdout);
+    assert!(rerun.stdout.is_empty(), "rerun output:\n{}", rerun.stdout);
+}
+
+/// A body that exceeds the envelope with another label too keeps that finding after `--fix`; the
+/// locale part is fixed and gone, and the JSON payload names the edit.
+#[test]
+fn the_locale_fix_leaves_a_second_exceeding_label_standing() {
+    let proj = TempProject::new("locale-two");
+    let src = "<?php\n#[\\Steins\\Pure]\nfunction f(float $x): string {\n    $r = rand();\n    return sprintf('%g', $x);\n}\n";
+    proj.write("f.php", src);
+
+    let json = run(&["check", "--no-php", "--profile", "contracts", "--format", "json", proj.path()]);
+    assert!(json.stdout.contains("use the locale-independent conversion"), "{}", json.stdout);
+    assert!(json.stdout.contains("\"replacement\": \"h\""), "{}", json.stdout);
+
+    let fixed = run(&["check", "--no-php", "--profile", "contracts", "--fix", proj.path()]);
+    assert_eq!(fixed.code, 1, "stdout:\n{}\nstderr:\n{}", fixed.stdout, fixed.stderr);
+    assert_eq!(proj.read("f.php"), src.replace("'%g'", "'%h'"));
+    assert!(fixed.stdout.contains("fixed[effect.envelope-exceeded]"), "{}", fixed.stdout);
+    assert!(fixed.stdout.contains("error[effect.envelope-exceeded]"), "{}", fixed.stdout);
+    let rerun = run(&["check", "--no-php", "--profile", "contracts", proj.path()]);
+    assert!(rerun.stdout.contains("rand()"), "{}", rerun.stdout);
+    assert!(!rerun.stdout.contains("setting.locale"), "{}", rerun.stdout);
+}

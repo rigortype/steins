@@ -554,6 +554,14 @@ impl SourceTree {
     }
     // end untyped surface (ADR-0078, issue #200)
 
+    /// The source text from byte `start` to the end of the file, or `None` when `start` is past
+    /// the end or off a `char` boundary. The tail a fix-it scans from a span's end to find the
+    /// text written after it (ADR-0101 §3.6).
+    #[must_use]
+    pub fn source_from(&self, start: u32) -> Option<&str> {
+        self.text.get(start as usize..)
+    }
+
     /// Whether a docblock trivium ending at `doc_end` has nothing an adoption rule could
     /// attach it to — the negative side of [`Self::stmt_docblock`]'s grammar (issue #186,
     /// `phpdoc.misplaced-var`).
