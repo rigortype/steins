@@ -7,7 +7,7 @@
 use steins_infer::{Diagnostic, EFFECT_ID, EFFECT_LISKOV_ID, check};
 use steins_syntax::SourceTree;
 
-const TITLE: &str = "use the locale-independent conversion (F, h, H): under a non-C locale the output changes, the decimal point becomes '.' always";
+const TITLE: &str = "use the locale-independent conversion (F, h, H): under a locale whose decimal point is not '.' the output changes, the decimal point becomes '.' always";
 
 /// Every effect finding of `src`, the Liskov ones included.
 fn findings(src: &str) -> Vec<Diagnostic> {
@@ -249,6 +249,44 @@ fn the_liskov_finding_carries_the_fix_when_the_edit_removes_every_origin() {
     assert_eq!(found.len(), 1, "{found:#?}");
     assert_eq!(found[0].id, EFFECT_LISKOV_ID);
     assert!(found[0].fix.is_none(), "{found:#?}");
+}
+
+/// An origin of the read that is not the method's own printf is told from it structurally, and
+/// not by the name and line a finding quotes: a callee, a private method or a closure that
+/// shares the line with the method's own `sprintf` leaves the read standing, so the Liskov
+/// finding carries no fix (each of these printed "fixed" and re-reported before).
+#[test]
+fn a_liskov_finding_carries_no_fix_when_another_origin_shares_its_line() {
+    let abs = "interface Fmt { #[\\Steins\\Pure] public function f(float $x): string; }\n";
+    for body in [
+        // A callee declared on the same line.
+        "function fmt(float $x): string { return sprintf('%.2f', $x); } class Impl implements Fmt { public function f(float $x): string { return fmt($x) . sprintf('%.1f', $x); } }",
+        // An arrow function in a one-line body.
+        "class Impl implements Fmt { public function f(float $x): string { $c = fn($y) => sprintf('%g', $y); return sprintf('%.1f', $x) . $c($x); } }",
+        // A private method on the same line.
+        "class Impl implements Fmt { private function h(float $x): string { return sprintf('%g', $x); } public function f(float $x): string { return $this->h($x) . sprintf('%.1f', $x); } }",
+        // A closure whose printf ends on the line of the method's own.
+        "class Impl implements Fmt { public function f(float $x): string {\n$c = function ($y) {\nreturn sprintf('%g', $y); }; return sprintf('%.1f', $x) . $c($x); } }",
+    ] {
+        let src = format!("<?php\n{abs}{body}\n");
+        let found = findings(&src);
+        let liskov: Vec<_> = found.iter().filter(|d| d.id == EFFECT_LISKOV_ID).collect();
+        assert_eq!(liskov.len(), 1, "{body}: {found:#?}");
+        assert!(liskov[0].fix.is_none(), "{body}: {found:#?}");
+    }
+}
+
+/// An octal escape PHP truncates (`\546` is `f` and a warning) is not rewritten, since the
+/// plain letter would lose the warning; one that fits a byte is.
+#[test]
+fn an_octal_escape_above_a_byte_gets_no_fix() {
+    let src = "<?php\n#[\\Steins\\Pure]\nfunction f(float $x): string { return sprintf(\"%.2\\546\", $x); }\n";
+    for d in findings(src) {
+        assert!(d.fix.is_none(), "{d:#?}");
+    }
+    let src = "<?php\n#[\\Steins\\Pure]\nfunction f(float $x): string { return sprintf(\"%.2\\146\", $x); }\n";
+    let after = fix_once(src);
+    assert_eq!(after, src.replace("\\146", "F"));
 }
 
 /// A callee's printf is not the caller's body: the transitive finding names an origin elsewhere

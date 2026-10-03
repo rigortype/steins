@@ -332,12 +332,16 @@ exceeding label is `global.read.setting.locale` and its origin is a `sprintf`,
 fix spells each `f` conversion `F`, each `g` `h` and each `G` `H`, in place,
 keeping flags, width, precision and `n$`; `%%f` is not a conversion and stays.
 The output is byte-identical under the `C` locale and always spells the decimal
-point `.` under any other, which is the point of the edit and what its title
-says. It is attached only where the source can be edited byte-exactly (a `'`-
-or `"`-quoted literal; a conversion letter written as an escape, `"%\x66"`, is
-replaced whole) and only where it takes the read out of the body; a format that
-is not a literal, a callee's printf and a heredoc get none. There is no bulk
-transform: a function with no envelope has no finding and no fix.
+point `.`, so it differs only under a locale whose decimal point is not `.`,
+which is the point of the edit and what its title says. It is attached only
+where the source can be edited byte-exactly (a `'`- or `"`-quoted literal; a
+conversion letter written as an escape, `"%\x66"`, is replaced whole) and only
+where it takes the read out of the body; a format that is not a literal, a
+callee's printf and a heredoc get none. `h` and `H` are PHP 8.0's, so a
+format with a `g` or `G` gets no fix when the project's declared PHP floor (the
+runtime's minor when none is declared) is below 8.0; `F` is offered on any
+floor. There is no bulk transform: a function with no envelope has no finding
+and no fix.
 
 ```
 $ steins check src/Dump.php

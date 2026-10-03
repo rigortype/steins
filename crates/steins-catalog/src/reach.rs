@@ -360,8 +360,8 @@ pub fn format_reads_locale(format: &str) -> bool {
 }
 
 /// What [`spec`] reads of one conversion: the value position it names, the reach of its
-/// conversion and, for a locale-reading one, `(offset, twin)` as [`FormatReading::locale_conversions`]
-/// holds them.
+/// conversion and, for a locale-reading one, `(offset, twin)` as
+/// [`FormatReading::locale_conversions`] holds them.
 type Spec = (usize, ArgReach, Option<(usize, u8)>);
 
 /// One conversion spec of [`read_format`], `at` just past its `%`: the value

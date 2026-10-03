@@ -105,7 +105,8 @@ pub(crate) fn check_units_controlled(
     // consumer — the purity oracle, `effect_diagnostics`, `throw_diagnostics` —
     // reads the same result. Each consumer keeps its own cheap gate, so a
     // project spelling none of the triggering constructs still pays nothing.
-    let fixpoints = Fixpoints::new(units, index, plugins, policy, facts);
+    let php_floor = layout.php_target().map(|t| t.floor).or_else(|| folder.php_minor());
+    let fixpoints = Fixpoints::new(units, index, plugins, policy, facts).with_php_floor(php_floor);
     passes.facts_ms = ms(t_facts);
     progress.phase("universe");
 

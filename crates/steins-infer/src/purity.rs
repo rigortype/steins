@@ -1052,6 +1052,9 @@ pub(crate) fn effect_diagnostics(fx: &Fixpoints<'_>) -> Vec<Diagnostic> {
     // discharge 4, ADR-0100 §4): read before the loop, because a callee may live in
     // a file the loop has not reached.
     let enveloped = floor::enveloped_syms(units, index, registry, policy);
+    // The `h` and `H` conversions exist from PHP 8.0; a floor below it, or an unknown one that
+    // the run's runtime does not answer, offers none (the locale fix-it).
+    let h_ok = fx.php_floor().is_none_or(|floor| floor >= (8, 0));
     let mut out = Vec::new();
     for fi in 0..units.len() {
         let cx = Cx::new(units, index, fi);
@@ -1083,6 +1086,7 @@ pub(crate) fn effect_diagnostics(fx: &Fixpoints<'_>) -> Vec<Diagnostic> {
             else {
                 continue;
             };
+            let bound = OperativeBound { h_ok, ..bound };
             let frame = Frame::new(None, &f.params, &f.sites);
             let floor = Floor::new(&enveloped, f.docblock.as_ref(), &f.params, true);
             report_unit(&mut out, &cx, &frame, plugins, &f.name, bound, (effects, registry, &floor));
@@ -1124,6 +1128,7 @@ pub(crate) fn effect_diagnostics(fx: &Fixpoints<'_>) -> Vec<Diagnostic> {
                     .flatten();
                 if let Some(bound) =
                     operative_bound(m.effect_envelope.as_ref(), interop.as_ref(), m.span, policy)
+                        .map(|bound| OperativeBound { h_ok, ..bound })
                 {
                     let display = format!("{}::{}", c.name, m.name);
                     let frame = Frame::new(Some(&c.fqn), &m.params, &m.sites);
@@ -1142,7 +1147,7 @@ pub(crate) fn effect_diagnostics(fx: &Fixpoints<'_>) -> Vec<Diagnostic> {
                 // only, and an interop-declared abstraction never yields
                 // `effect.liskov-widened`.
                 if !c.is_interface && !m.is_abstract {
-                    emit_effect_liskov(&mut out, &cx, c, m, (effects, plugins), policy);
+                    emit_effect_liskov(&mut out, &cx, c, m, (effects, plugins, h_ok), policy);
                 }
             }
         }
@@ -1159,7 +1164,7 @@ fn emit_effect_liskov(
     cx: &Cx,
     class: &ClassDecl,
     m: &MethodDecl,
-    (effects, plugins): (&HashMap<Sym, EffectSet>, &PluginFacts),
+    (effects, plugins, h_ok): (&HashMap<Sym, EffectSet>, &PluginFacts, bool),
     policy: &EffectsPolicy,
 ) {
     let abstractions = collect_abstraction_effects(cx, class, &m.name);
@@ -1186,7 +1191,7 @@ fn emit_effect_liskov(
     // origin of the read out of the body.
     let locale_fix = proven.contains(&locale_fix::LOCALE).then(|| {
         let frame = Frame::new(Some(&class.fqn), &m.params, &m.sites);
-        locale_fix::method_edits(cx, &frame, plugins, &set.findings, policy)
+        locale_fix::method_edits(cx, &frame, (effects, plugins, h_ok))
             .and_then(locale_fix::fix_of)
     });
     for (abs_display, labels) in abstractions {
@@ -1316,6 +1321,9 @@ struct OperativeBound<'a> {
     /// carrying it here is what makes that structural rather than a convention six
     /// call sites happen to keep.
     policy: &'a EffectsPolicy,
+    /// Whether the run's PHP floor reaches 8.0, where the `h` and `H` conversions exist: the
+    /// one thing the locale fix-it needs to know about the target ([`locale_fix`]).
+    h_ok: bool,
 }
 
 impl OperativeBound<'_> {
@@ -1466,7 +1474,7 @@ fn report_site(
                         // The remedy of a proven locale read at a literal printf format
                         // (ADR-0101 §3.6): it removes exactly this finding.
                         if f.label == locale_fix::LOCALE {
-                            diag.fix = locale_fix::locale_edits(cx, site, hit)
+                            diag.fix = locale_fix::locale_edits(cx, site, hit, bound.h_ok)
                                 .and_then(locale_fix::fix_of);
                         }
                         out.push(diag);
@@ -1815,6 +1823,7 @@ fn operative_bound<'a>(
             span: env.span,
             spelling: EnvelopeSpelling::Attribute,
             policy,
+            h_ok: true,
         });
     }
     let (tag, labels) = interop?;
@@ -1826,7 +1835,13 @@ fn operative_bound<'a>(
     if labels.is_empty() && matches!(tag, EnvelopeTag::AllMethodsImpure) {
         return None;
     }
-    Some(OperativeBound { labels, span: anchor, spelling: EnvelopeSpelling::Interop(*tag), policy })
+    Some(OperativeBound {
+        labels,
+        span: anchor,
+        spelling: EnvelopeSpelling::Interop(*tag),
+        policy,
+        h_ok: true,
+    })
 }
 
 /// What one docblock says about a declaration's interop envelope.
