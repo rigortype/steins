@@ -423,7 +423,10 @@
 # `destructor` gap the closure now seeds from a class that holds a destructor class through a
 # declared or trait-imported property (the project's vendor tree carries such classes). Net
 # against master 902: +1. Measured by the local fp-gate on 16e4f99f.
-"phpstan/phpstan-src" = 903
+# 903 → 904  2026-10-03 (issue #1003; #1009, Run 2 S6d): +1 `throw.maybe-undeclared`, a
+# `destructor` gap at a property write whose declared hint reaches a destructor class. Measured
+# by the local fp-gate on 41d820f9.
+"phpstan/phpstan-src" = 904
 
 # New rows, 2026-10-02 (issues #915, #922): the strict-floor ids of the public packages that
 # had none. Measured under PHP 8.4.25 (CI's posture); the throw lane does not read the sidecar.
