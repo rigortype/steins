@@ -144,6 +144,12 @@ const CASES: &[Case] = &[
          @@ function f(): int { $d = new D(); unset($d); return 1; }",
         "f",
     ),
+    case(
+        GapKind::ValueDependentRead,
+        EFFECTS,
+        "@@ function f($x): string { return sprintf('%s', $x); }",
+        "f",
+    ),
 ];
 
 /// What a lane can never produce, and why: the exclusions the totality test reads.
@@ -161,6 +167,8 @@ fn excluded(lane: Lane) -> &'static [GapKind] {
             GapKind::StateConstruct,
             GapKind::NoEffectRow,
             GapKind::ArgumentList,
+            // A setting read is an effect; the throw lane has none.
+            GapKind::ValueDependentRead,
         ],
     }
 }

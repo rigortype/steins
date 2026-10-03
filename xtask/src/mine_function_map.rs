@@ -209,7 +209,8 @@ pub fn run(checkout: Option<&str>, halves: Halves, php_bins: &[String]) -> Resul
     }
     let pin = git_head(&root)?;
 
-    let mined = run_miner(&root)?;
+    let mut mined = run_miner(&root)?;
+    apply_source_corrections(&mut mined.rows)?;
     println!(
         "mine-function-map: {} keys, {} `Class::method` keys, {} alternate-disagreement names, {} plain-function rows, {} method rows",
         mined.total_keys,
@@ -937,6 +938,40 @@ fn run_miner(root: &Path) -> Result<Mined, String> {
         ));
     }
     serde_json::from_slice(&out.stdout).map_err(|e| format!("parse miner JSON: {e}"))
+}
+
+/// Rows the pinned phpstan map states wrongly, with what php-src and the engines say instead:
+/// `(function, the map's spelling, the corrected one, the witness)`.
+///
+/// A row here is applied before the countersign, which still decides whether the corrected
+/// spelling enters the table. It is refused when the map no longer says `wrong`, so a row
+/// retires itself the day the pin is bumped past the upstream fix, and the run fails loudly
+/// rather than carry a stale correction.
+const SOURCE_CORRECTIONS: &[(&str, &str, &str, &str)] = &[(
+    "numfmt_get_attribute",
+    "int|false",
+    "int|float|false",
+    "`NumberFormatter::getAttribute` returns the float attributes (`ROUNDING_INCREMENT`) as a \
+     float: PHP 7.4.33, 8.4.25 and 8.5.x answer `float(0.5)` for `ROUNDING_INCREMENT` after \
+     `setAttribute(…, 0.5)`; the no-float evidence the setting-read calibration reads off a \
+     declared return (ADR-0101 §3.8) would otherwise drop `precision` from `%s` of it",
+)];
+
+/// Apply [`SOURCE_CORRECTIONS`] to the mined plain-function rows.
+fn apply_source_corrections(rows: &mut BTreeMap<String, String>) -> Result<(), String> {
+    for (name, wrong, right, why) in SOURCE_CORRECTIONS {
+        match rows.get_mut(*name) {
+            Some(ty) if ty == wrong => *ty = (*right).to_owned(),
+            Some(ty) => {
+                return Err(format!(
+                    "source correction for `{name}` expects the map to say `{wrong}` but it \
+                     says `{ty}`: retire it ({why})"
+                ));
+            }
+            None => {}
+        }
+    }
+    Ok(())
 }
 
 /// Flatten a lowered contract into a top-level arm list, dissolving nested unions — the
@@ -1907,10 +1942,28 @@ fn render_methods(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::{
-        builtin_ancestors, class_names_in, countersigned, engine_says_mixed, floor_row,
-        mentions_resource,
+        apply_source_corrections, builtin_ancestors, class_names_in, countersigned,
+        engine_says_mixed, floor_row, mentions_resource,
     };
+
+    /// A source correction rewrites the map's row, leaves every other row alone, and refuses
+    /// to run once the map says something else, so it cannot outlive the fix upstream.
+    #[test]
+    fn a_source_correction_rewrites_its_row_and_retires_itself() {
+        let mut rows = BTreeMap::from([
+            ("numfmt_get_attribute".to_owned(), "int|false".to_owned()),
+            ("strlen".to_owned(), "int".to_owned()),
+        ]);
+        apply_source_corrections(&mut rows).expect("the map says what the correction expects");
+        assert_eq!(rows["numfmt_get_attribute"], "int|float|false");
+        assert_eq!(rows["strlen"], "int");
+        assert!(apply_source_corrections(&mut rows).is_err(), "the row no longer says `int|false`");
+        let mut absent = BTreeMap::from([("strlen".to_owned(), "int".to_owned())]);
+        apply_source_corrections(&mut absent).expect("a correction for a missing name is idle");
+    }
 
     /// The migrated table's two classifiers (ADR-0097 §2.6): which functionMap
     /// rows are asked, and which members of the engine's answer are classes.

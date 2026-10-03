@@ -9,7 +9,7 @@ use mago_syntax::cst::{
 
 use super::SiteScope;
 use crate::ast::{ArgShape, DynamicSite, SiteKind, SiteOrigin, Span};
-use crate::lower_arg_shape::{arg_shapes_of, method_call_shapes};
+use crate::lower_arg_shape::{arg_shapes_of, float_evidence_of_args, method_call_shapes};
 use crate::lower_effect::{
     AnonymousConstructor, anonymous_class_constructor, arg_targets_of_call, const_args_of_call,
     direct_var_callee, higher_order_of_call,
@@ -34,9 +34,14 @@ pub(super) fn function_call(fc: &FunctionCall<'_>, sx: &SiteScope<'_>, out: &mut
         let ref_targets = arg_targets_of_call(fc, cx);
         // `derive` reads a higher-order call's arity off `ref_targets`.
         debug_assert!(callbacks.is_empty() || ref_targets.is_some());
-        let mut site = sx.site(span, SiteKind::Call { name: name_ref(id), callbacks });
+        let name = name_ref(id);
+        let printf = ["sprintf", "printf"].contains(&name.simple().to_ascii_lowercase().as_str());
+        let mut site = sx.site(span, SiteKind::Call { name, callbacks });
         site.ref_targets = ref_targets;
         site.const_args = const_args_of_call(fc);
+        if printf {
+            site.const_args.float_evidence = float_evidence_of_args(&fc.argument_list, cx);
+        }
         site.operands = arg_shapes_of(&fc.argument_list, cx);
         out.push(site);
     } else {

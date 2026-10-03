@@ -142,6 +142,7 @@ mod platform_constants;
 mod preg_invalid_pattern;
 mod preg_match_all_seed;
 mod printf_arity;
+mod printf_call_site;
 mod prop_fetch_subjects;
 mod property_hook_bodies;
 mod property_maybe_undefined;

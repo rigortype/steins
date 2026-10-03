@@ -1393,7 +1393,12 @@ impl<'a> Cx<'a> {
     ///   class (never its backing scalar — an enum case is an object).
     /// - A class constant with a literal initializer → that literal, resolved
     ///   through the class/interface hierarchy (child overrides parent).
-    fn resolve_class_const(&self, sc: &StaticClass, name: &str, enclosing: Option<&str>) -> Option<ArgValue> {
+    pub(crate) fn resolve_class_const(
+        &self,
+        sc: &StaticClass,
+        name: &str,
+        enclosing: Option<&str>,
+    ) -> Option<ArgValue> {
         if name.eq_ignore_ascii_case("class") {
             return match sc {
                 StaticClass::Named(r) => {

@@ -539,6 +539,53 @@ pub struct ConstArgs {
     /// §3.3). An argument that is anything else is simply absent. Appended
     /// **after** the fields above so no persisted field index moves.
     pub ints: Vec<(u8, ConstInt)>,
+    /// The positions 2 and 3 whose argument is a literal `true` or `false`, as
+    /// `(position, value)` in position order: a strict flag the catalog can read
+    /// (`in_array($v, $h, true)`, ADR-0021's call-site refinements). Position 1 is
+    /// [`Self::second`]'s [`CallTarget::Bool`]. Appended **after** the fields above
+    /// so no persisted field index moves.
+    pub bools: Vec<(u8, bool)>,
+    /// For a call to `sprintf` or `printf` only (by the spelling's last segment): what the
+    /// scan shows of each argument from position 1 on, as `(position, evidence)`, for the
+    /// engine to decide whether a `%s` renders a float (ADR-0101 §3.8: a float renders through
+    /// the `precision` ini). An argument the scan can say nothing about is simply absent.
+    /// Appended after [`Self::bools`].
+    pub float_evidence: Vec<(u8, FloatEvidence)>,
+}
+
+/// What a structural scan shows of whether one printf value is a float (issue #1000,
+/// ADR-0101 §3.8): the evidence the engine reads a `%s` conversion against. The scan names
+/// the form or the declaration; the engine, which holds the catalog and the project, says
+/// what the declaration admits.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
+pub enum FloatEvidence {
+    /// A form that is no float whatever its operands hold: a string, integer, boolean or
+    /// `null` literal, a magic constant, an interpolated string, a concatenation, a
+    /// comparison or logical connective, `!`, `isset`, `empty`, a cast to `int`, `bool`,
+    /// `string` or `array`, an array literal. Arithmetic is not one (integers overflow into
+    /// a float).
+    NoFloat,
+    /// A form that is a float: a float literal or an integer literal wider than `int`, a
+    /// cast to `float`, and a negation of one.
+    Float,
+    /// A bare variable, `$this->name` or a call, for the engine to read the declared type of.
+    /// A variable appears only while no write of the frame may leave a float in it that the
+    /// scan cannot name: `unwritten` says the frame never writes it at all, and `writes`
+    /// lists the evidence of every write that is not itself a [`Self::NoFloat`] form, so a
+    /// local assigned from calls is judged by what they return.
+    Shape { shape: ArgShape, unwritten: bool, writes: Vec<FloatEvidence> },
+    /// A global constant fetch (`PHP_EOL`, `\M_PI`), by the reference as written: the
+    /// engine resolves it as PHP does (the namespace, then the global fallback) and reads its
+    /// value from the catalog or the project.
+    GlobalConst(NameRef),
+    /// A class constant `Foo::BAR`, `self::BAR`, `parent::BAR`: the project states its
+    /// literal value.
+    ClassConst { class: StaticClass, name: String },
+    /// A static property `self::$p`, `Foo::$p`: the declared type of the property decides.
+    StaticProperty { class: StaticClass, name: String },
+    /// A conditional (`c ? a : b`, `a ?: b`, `a ?? b`): the value is one of these.
+    OneOf(Vec<FloatEvidence>),
 }
 
 /// A constant integer expression a **structural** scan can evaluate: an integer

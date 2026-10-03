@@ -40,12 +40,18 @@ use crate::fold::foldable;
 ///   mode and keeps the row at every call site.
 /// * `sleep`/`usleep` are `io`: an observable timing side effect.
 /// * The printf family reads the **locale cell** (ADR-0101): `sprintf` and
-///   `vsprintf` are `global.read.setting.locale` and `printf`/`vprintf` carry it
+///   `vsprintf` are `global.read.setting.locale`, and `printf`/`vprintf` carry it
 ///   beside `io.output.buffer`, because `%f`, `%g` and `%G` render the locale's
-///   decimal point. `localeconv`, `nl_langinfo` and `strcoll` read it, and
-///   `setlocale` is `global.write.setting.locale` with a coarse `global.read` for
-///   the environment block it consults for `''` or `null`. A literal format that shows
-///   no such conversion is read by [`format_reads_locale`](crate::format_reads_locale).
+///   decimal point; all four also read `global.read.setting.precision`, which a
+///   `%s` of a float renders through. `localeconv`, `nl_langinfo` and `strcoll`
+///   read the locale, and `setlocale` is `global.write.setting.locale` with a coarse
+///   `global.read` for the environment block it consults for `''` or `null`. Both reads of
+///   the printf family are **conditional on the call** (a `'%d'` reads neither), so the row
+///   is the upper bound a call site narrows and not a claim about every call: a literal
+///   format with an `f`/`g`/`G` conversion proves the locale read, a literal that shows none
+///   ([`format_reads_locale`](crate::format_reads_locale)) drops it, and a `%s` of a value
+///   shown a float proves the precision read where one shown no float drops it. What the site
+///   cannot decide is the `value-dependent-read` gap and never a label (ADR-0101 §3.2).
 /// * `curl_exec` keeps `io.output` arg-blind (only `CURLOPT_RETURNTRANSFER`
 ///   suppresses it); `system`/`passthru` take parent `io.output` since
 ///   OB-capturability evidence for a relayed child's output is split
@@ -66,13 +72,23 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
     // printf family's `f`/`g`/`G` conversions and by the locale readers, and
     // rewritten by `setlocale`.
     const LOCALE_READ: &[&str] = &["global.read.setting.locale"];
+    // The printf family also reads the `precision` ini when a `%s` renders a float
+    // (`ini_set('precision', '3')` turns `1234.5678` into `1.23E+3`), the first
+    // row to colour that cell (ADR-0101 D4, S3). Both reads are conditional on the
+    // call, so the row is only the upper bound: the call site proves, drops or
+    // gaps each of them (`format_reach`'s reading, `Frame::float_class`).
+    const PRINTF_READS: &[&str] = &["global.read.setting.locale", "global.read.setting.precision"];
     // `setlocale` also reads the environment block when its locale is `''` or
     // `null` (`putenv("LC_ALL=fr_FR.ISO8859-1"); setlocale(LC_ALL, "")` answers
     // `fr_FR`), so the row carries the coarse `global.read` beside the write.
     const LOCALE_WRITE_ENV_READ: &[&str] = &["global.write.setting.locale", "global.read"];
     // `printf`/`vprintf` write their rendering to the output channel AND read
     // the locale while rendering.
-    const OUTPUT_BUFFER_LOCALE_READ: &[&str] = &["io.output.buffer", "global.read.setting.locale"];
+    const OUTPUT_BUFFER_PRINTF_READS: &[&str] = &[
+        "io.output.buffer",
+        "global.read.setting.locale",
+        "global.read.setting.precision",
+    ];
     const IO_SIGNAL: &[&str] = &["io.signal"];
     const IO_OUTPUT_HEADER: &[&str] = &["io.output.header"];
     const IO_IPC: &[&str] = &["io.ipc"];
@@ -128,16 +144,18 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
         | "touch" | "scandir" | "file_exists" | "is_file" | "is_dir" => Some(IO),
         "print_r" | "var_dump" | "var_export" | "flush" | "ob_flush" => Some(IO_OUTPUT_BUFFER),
         // The printf family reads the locale's decimal point under `%f`, `%g`
-        // and `%G` (issue #991, ADR-0101 §2.4). The row is argument-blind and
-        // keeps the read at every call; a literal format that shows no such
-        // conversion drops it where the call site reads the format
-        // ([`format_reads_locale`](crate::format_reads_locale)). `sprintf` is on
+        // and `%G` (issue #991, ADR-0101 §2.4), and the `precision` ini under a
+        // `%s` of a float (D4). The row is argument-blind and keeps both reads at
+        // every call; a literal format that shows no such conversion drops the
+        // locale read where the call site reads the format
+        // ([`format_reads_locale`](crate::format_reads_locale)), and `%s` values
+        // shown not to be floats drop the precision read. `sprintf` is on
         // the fold allowlist, which is permission and not a promise: this row
         // answers ahead of the allowlist's empty one, and the fold seam refuses
         // a format that keeps the read. `fprintf` and `vfprintf` have no row
         // (issue #989).
-        "printf" | "vprintf" => Some(OUTPUT_BUFFER_LOCALE_READ),
-        "sprintf" | "vsprintf" => Some(LOCALE_READ),
+        "printf" | "vprintf" => Some(OUTPUT_BUFFER_PRINTF_READS),
+        "sprintf" | "vsprintf" => Some(PRINTF_READS),
         // The other readers of the cell: `localeconv` and `nl_langinfo` report
         // it, `strcoll` collates by it.
         "localeconv" | "nl_langinfo" | "strcoll" => Some(LOCALE_READ),
@@ -1790,6 +1808,10 @@ mod tests {
         engine_constructor_by_value, out_param_written_when, out_params, variadic_tail_is_data,
     };
 
+    /// `printf` and `vprintf`: the output label beside the two setting reads of the family.
+    const PRINTF_OUTPUT: [&str; 3] =
+        ["io.output.buffer", "global.read.setting.locale", "global.read.setting.precision"];
+
     #[test]
     fn colored_builtins_carry_their_label() {
         assert_eq!(effect_labels("rand"), Some(&["nondet.random"][..]));
@@ -1809,10 +1831,7 @@ mod tests {
             super::narrowed_stream_labels("file_exists", Some(Literal("/tmp/x")), None),
             Some(vec!["io.fs.read"])
         );
-        assert_eq!(
-            effect_labels("printf"),
-            Some(&["io.output.buffer", "global.read.setting.locale"][..])
-        );
+        assert_eq!(effect_labels("printf"), Some(&PRINTF_OUTPUT[..]));
         assert_eq!(effect_labels("error_log"), Some(&["io"][..]));
         assert_eq!(
             effect_labels("setlocale"),
@@ -1824,22 +1843,25 @@ mod tests {
         assert_eq!(effect_labels("clearstatcache"), Some(&["global.write"][..]));
     }
 
-    /// ADR-0101 §2.4: the locale cell's rows. The printf family reads it, the
-    /// `v` spellings follow their siblings, `printf` keeps its output label
-    /// beside the read, `setlocale` writes it (and reads the environment for `''` and
+    /// ADR-0101 §2.4: the locale cell's rows. The printf family reads it (and, with
+    /// D4, the `precision` cell a `%s` of a float renders through), the `v`
+    /// spellings follow their siblings, `printf` keeps its output label beside the
+    /// reads, `setlocale` writes the locale (and reads the environment for `''` and
     /// `null`), and the three readers report it.
     #[test]
     fn the_locale_cell_rows() {
         const READ: Option<&[&str]> = Some(&["global.read.setting.locale"]);
-        for name in ["sprintf", "vsprintf", "localeconv", "nl_langinfo", "strcoll", "SPRINTF"] {
+        const PRINTF: Option<&[&str]> =
+            Some(&["global.read.setting.locale", "global.read.setting.precision"]);
+        let output = Some(&PRINTF_OUTPUT[..]);
+        for name in ["localeconv", "nl_langinfo", "strcoll"] {
             assert_eq!(effect_labels(name), READ, "{name}");
         }
+        for name in ["sprintf", "vsprintf", "SPRINTF"] {
+            assert_eq!(effect_labels(name), PRINTF, "{name}");
+        }
         for name in ["printf", "vprintf"] {
-            assert_eq!(
-                effect_labels(name),
-                Some(&["io.output.buffer", "global.read.setting.locale"][..]),
-                "{name} keeps its output label beside the read"
-            );
+            assert_eq!(effect_labels(name), output, "{name} keeps its output label");
         }
         assert_eq!(effect_labels("vsprintf"), effect_labels("sprintf"));
         assert_eq!(effect_labels("vprintf"), effect_labels("printf"));

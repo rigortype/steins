@@ -1164,6 +1164,11 @@ mod tests {
         assert_eq!(super::declared_return("array_search"), Some("int|string|false"));
         assert_eq!(super::declared_return("preg_match"), Some("0|1|false"));
         assert_eq!(super::declared_return("ctype_alpha"), Some("bool"));
+        // A row the pinned phpstan map states wrongly and the miner corrects at the source
+        // (`SOURCE_CORRECTIONS` in `xtask/src/mine_function_map.rs`): the float attributes
+        // (`ROUNDING_INCREMENT`) come back as a float on 7.4, 8.4 and 8.5. A reader that takes a
+        // declared return as proof of "no float" (ADR-0101 §3.8) must not read it as `int|false`.
+        assert_eq!(super::declared_return("numfmt_get_attribute"), Some("int|float|false"));
         // Scalar refinement reflection cannot state.
         assert_eq!(super::declared_return("mb_strtoupper"), Some("uppercase-string"));
         // ADR-0071 permits a bare array, list, keyed map, and full shape.

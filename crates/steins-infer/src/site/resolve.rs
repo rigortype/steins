@@ -45,6 +45,7 @@ use super::method::{
     throwable_creation_hooks,
 };
 use super::operator;
+use super::printf;
 use super::reach::{Frame, builtin_reach, callback_reaches_user_code, engine_method_reach};
 use super::{
     Edge, GapKind, Hit, HitKind, Knowledge, Lane, NewTarget, Reach, ResolvedSite, Target,
@@ -179,7 +180,7 @@ impl<'a> Resolver<'a, '_, '_> {
         if engine::pure_at_call_arity(builtin, args.targets.map(<[_]>::len)) {
             return Reach::RuledOut;
         }
-        builtin_reach(self.cx, self.frame, builtin, args.shapes, &[])
+        builtin_reach(self.cx, self.frame, builtin, (args.shapes, Some(args.consts)), &[])
     }
 
     /// Record an engine function's hit, if it carries anything on the lane's
@@ -270,9 +271,14 @@ impl<'a> Resolver<'a, '_, '_> {
             self.effect_unrowed(name, builtin, args);
             return;
         }
-        let labels = engine::function_effects(builtin, args.targets, Some(args.consts));
+        let mut labels = engine::function_effects(builtin, args.targets, Some(args.consts));
+        let call = (args.shapes, args.consts);
+        if let Some(gap) = printf::narrow_labels(self.cx, self.frame, builtin, call, &mut labels) {
+            self.gap(gap);
+        }
         self.function_hit(builtin, name.simple(), labels, &[]);
-        let reach = builtin_reach(self.cx, self.frame, builtin, args.shapes, &[]);
+        let reach =
+            builtin_reach(self.cx, self.frame, builtin, (args.shapes, Some(args.consts)), &[]);
         self.note_reach(reach);
     }
 
@@ -288,7 +294,8 @@ impl<'a> Resolver<'a, '_, '_> {
         }
         let mut gap = GapKind::NoEffectRow;
         if engine::certified_at_call_site(builtin) {
-            match builtin_reach(self.cx, self.frame, builtin, args.shapes, &[]) {
+            let call = (args.shapes, Some(args.consts));
+            match builtin_reach(self.cx, self.frame, builtin, call, &[]) {
                 Reach::RuledOut => return,
                 // Certifiable, but an operand may reach user code: that is the gap.
                 reach => {
@@ -386,7 +393,8 @@ impl<'a> Resolver<'a, '_, '_> {
         }
         // The invoker's other arguments can reach user code as a plain call's can
         // (`preg_replace_callback`'s subject).
-        self.note_reach(builtin_reach(self.cx, self.frame, &builtin, shapes, &handled));
+        let call = (shapes, Some(&site.const_args));
+        self.note_reach(builtin_reach(self.cx, self.frame, &builtin, call, &handled));
     }
 
     /// One resolved callback, wired into the lane's graph (ADR-0033): a closure or
@@ -418,7 +426,13 @@ impl<'a> Resolver<'a, '_, '_> {
     fn builtin_callback(&mut self, name: &NameRef, builtin: &str) {
         if self.effects() {
             if engine::has_effect_row(builtin) {
-                let labels = engine::function_effects(builtin, None, None);
+                let mut labels = engine::function_effects(builtin, None, None);
+                // Called with a format of the invoker's choosing: the setting reads depend on it.
+                if steins_catalog::printf_family(builtin).is_some()
+                    && let Some(gap) = printf::unreadable_format(&mut labels)
+                {
+                    self.gap(gap);
+                }
                 self.function_hit(builtin, name.simple(), labels, &[]);
             } else {
                 self.gap(GapKind::NoEffectRow);
