@@ -396,7 +396,11 @@
 # trait-user and anonymous-parent proxies of the destructor gate read as what the body
 # declares (the unseen-name rule adds none here: the project's vendor tree is present).
 # Measured by the local fp-gate on c1847dd4.
-"phpstan/phpstan-src" = 894
+# 894 → 903  2026-10-03 (same PR, after review): +9 `throw.maybe-undeclared`, each a
+# `destructor` gap the closure now seeds from a class that holds a destructor class through a
+# declared or trait-imported property (the project's vendor tree carries such classes). Net
+# against master 902: +1. Measured by the local fp-gate on 16e4f99f.
+"phpstan/phpstan-src" = 903
 
 # New rows, 2026-10-02 (issues #915, #922): the strict-floor ids of the public packages that
 # had none. Measured under PHP 8.4.25 (CI's posture); the throw lane does not read the sidecar.
