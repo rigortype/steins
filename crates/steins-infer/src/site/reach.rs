@@ -16,14 +16,17 @@ mod call_result;
 use std::cell::OnceCell;
 use std::collections::HashSet;
 
-use steins_catalog::ArgReach;
+use steins_catalog::{ArgReach, PrintfFamily};
 use steins_syntax::{
-    ArgShape, EffectRecv, NameRef, Param, SiteKind, SiteOrigin, StaticClass, Stored, Visibility,
+    ArgShape, ArgValue, CallTarget, ConstArgs, EffectRecv, FloatEvidence, NameRef, Param,
+    PropertyDecl, SiteKind, SiteOrigin, StaticClass, Stored, Visibility,
 };
 
 use super::{NewTarget, Reach, engine_exit, resolve_new};
 use crate::Sym;
 use crate::cx::Cx;
+use crate::global_consts::global_const_fact;
+use steins_domain::{Base, Fact, Val};
 use crate::dispatch::{ChainMode, Resolution, resolve_in_chain_mode};
 use crate::project::FnResolution;
 
@@ -84,6 +87,94 @@ impl<'a> Frame<'a> {
 }
 
 impl Frame<'_> {
+    /// Whether the value `evidence` describes is a float ([`FloatEvidence`], a printf call's
+    /// [`ConstArgs::float_evidence`]): [`FloatClass::Yes`] where every value it admits is a
+    /// float, [`FloatClass::No`] where none is, [`FloatClass::Unknown`] otherwise.
+    ///
+    /// The syntax layer names the form or the declaration and withholds a variable some write
+    /// of the frame may leave a float in that it cannot name; the declared types, the
+    /// constants and the by-reference question are read here. A parameter is as its declared
+    /// type says while no write rebinds it, and a local is as the writes the scan carried
+    /// say; a conditional is as its branches agree.
+    pub(crate) fn float_class(&self, cx: &Cx, evidence: &FloatEvidence) -> FloatClass {
+        match evidence {
+            FloatEvidence::NoFloat => FloatClass::No,
+            FloatEvidence::Float => FloatClass::Yes,
+            FloatEvidence::OneOf(branches) => {
+                FloatClass::agree(branches.iter().map(|b| self.float_class(cx, b)))
+            }
+            FloatEvidence::GlobalConst(name) => global_const_fact(cx, name)
+                .map_or(FloatClass::Unknown, |(fact, _)| fact_float_class(&fact)),
+            FloatEvidence::ClassConst { class, name } => {
+                match cx.resolve_class_const(class, name, self.class_fqn) {
+                    Some(ArgValue::Float(_)) => FloatClass::Yes,
+                    Some(
+                        ArgValue::Int(_) | ArgValue::Str(_) | ArgValue::Bool(_) | ArgValue::Null,
+                    ) => FloatClass::No,
+                    _ => FloatClass::Unknown,
+                }
+            }
+            FloatEvidence::StaticProperty { class, name } => {
+                let start = match class {
+                    StaticClass::Named(r) => Some(cx.class_fqn(r)),
+                    StaticClass::SelfKw => self.class_fqn.map(str::to_owned),
+                    StaticClass::Parent => self.class_fqn.and_then(|own| cx.parent_fqn(own)),
+                    StaticClass::Static => None,
+                };
+                start
+                    .and_then(|start| property_hint(cx, &start, (name, true), hint_float_class))
+                    .unwrap_or(FloatClass::Unknown)
+            }
+            FloatEvidence::Shape { shape, unwritten, writes } => {
+                self.shape_float_class(cx, (shape, *unwritten), writes)
+            }
+        }
+    }
+
+    /// [`Self::float_class`] of a variable, `$this->name` or call shape, with the evidence of
+    /// the writes the scan carried for a variable.
+    fn shape_float_class(
+        &self,
+        cx: &Cx,
+        (shape, unwritten): (&ArgShape, bool),
+        writes: &[FloatEvidence],
+    ) -> FloatClass {
+        let written = FloatClass::agree(writes.iter().map(|w| self.float_class(cx, w)));
+        match shape {
+            ArgShape::Param { name, .. } => {
+                if self.rebound_by_call(cx, name) {
+                    return FloatClass::Unknown;
+                }
+                let hint = self.params.iter().find(|p| &p.name == name).and_then(|p| p.hint_span);
+                match hint.and_then(|span| cx.tree().source_slice(span)).map(hint_float_class) {
+                    Some(FloatClass::No) if writes.is_empty() || written == FloatClass::No => {
+                        FloatClass::No
+                    }
+                    Some(FloatClass::Yes) if unwritten => FloatClass::Yes,
+                    _ => FloatClass::Unknown,
+                }
+            }
+            // A local starts `null`, so only what every write stores can show it no float.
+            ArgShape::Local { name, .. } => {
+                let no_float = writes.is_empty() || written == FloatClass::No;
+                if no_float && !self.rebound_by_call(cx, name) {
+                    FloatClass::No
+                } else {
+                    FloatClass::Unknown
+                }
+            }
+            ArgShape::ThisProperty(name) => {
+                this_property_hint(cx, self.class_fqn, name, hint_float_class)
+                    .unwrap_or(FloatClass::Unknown)
+            }
+            ArgShape::Call(name) => call_result::function_float_class(cx, name),
+            ArgShape::MethodCall { receiver, method } => {
+                call_result::method_float_class(cx, self, receiver, method)
+            }
+            ArgShape::ObjectFree | ArgShape::Array | ArgShape::Unknown => FloatClass::Unknown,
+        }
+    }
+
     /// Whether the container of an offset write is shown to hold no string, so the
     /// write stores an element (or calls `offsetSet`) and converts the value
     /// nothing. The syntax layer builds this operand's shape only for a variable
@@ -315,7 +406,17 @@ fn this_property_hint<T>(
     name: &str,
     read: impl Fn(&str) -> T,
 ) -> Option<T> {
-    let start = class_fqn?;
+    property_hint(cx, class_fqn?, (name, false), read)
+}
+
+/// [`this_property_hint`] for the property `name` (`is_static` or not) found from the class
+/// `start` up its parent chain.
+fn property_hint<T>(
+    cx: &Cx,
+    start: &str,
+    (name, is_static): (&str, bool),
+    read: impl Fn(&str) -> T,
+) -> Option<T> {
     let mut cur = start.to_owned();
     let mut seen: HashSet<String> = HashSet::new();
     while seen.insert(cur.to_ascii_lowercase()) {
@@ -323,7 +424,8 @@ fn this_property_hint<T>(
         if class.hooked_properties.iter().any(|p| p == name) {
             break;
         }
-        if let Some(prop) = class.properties.iter().find(|p| p.name == name && !p.is_static) {
+        let declared = |p: &&PropertyDecl| p.name == name && p.is_static == is_static;
+        if let Some(prop) = class.properties.iter().find(declared) {
             let private = prop.visibility == Visibility::Private;
             if (private && !cur.eq_ignore_ascii_case(start)) || prop.hooked {
                 break;
@@ -337,6 +439,75 @@ fn this_property_hint<T>(
         }
     }
     None
+}
+
+/// Whether a value is a float, as far as a declared type, a constant or a form shows
+/// ([`Frame::float_class`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FloatClass {
+    /// Every value it admits is a float.
+    Yes,
+    /// No value it admits is a float.
+    No,
+    /// Neither: it may or may not be.
+    Unknown,
+}
+
+impl FloatClass {
+    /// What a value is when it is one of `parts`: a float only if every part is, none only
+    /// if no part is. An empty list is [`Self::No`], the value of nothing written.
+    fn agree(parts: impl IntoIterator<Item = Self>) -> Self {
+        parts.into_iter().fold(None, |acc, part| match acc {
+            None => Some(part),
+            Some(acc) if acc == part => Some(acc),
+            Some(_) => Some(Self::Unknown),
+        })
+        .unwrap_or(Self::No)
+    }
+}
+
+/// Whether a value the fact `fact` describes is a float: a literal or a set of literals is as
+/// its members are, a scalar base as the base is (a nullable one may be `null`), and any other
+/// layer is not read.
+fn fact_float_class(fact: &Fact) -> FloatClass {
+    let of = |v: &Val| if matches!(v, Val::Float(_)) { FloatClass::Yes } else { FloatClass::No };
+    match fact {
+        Fact::Singleton(v) => of(v),
+        Fact::OneOf(vals) => FloatClass::agree(vals.iter().map(of)),
+        Fact::Refined { base, nullable: false, .. } | Fact::General { base, nullable: false } => {
+            if *base == Base::Float { FloatClass::Yes } else { FloatClass::No }
+        }
+        _ => FloatClass::Unknown,
+    }
+}
+
+/// Whether a value of the native type spelled `hint` is a float: [`FloatClass::Yes`] for
+/// exactly `float` (an integer is converted on the way in, in either calling mode),
+/// [`FloatClass::No`] where no member is `float` or `mixed`, otherwise
+/// [`FloatClass::Unknown`]. A nullable or union type with a float member may be
+/// something else.
+pub(crate) fn hint_float_class(hint: &str) -> FloatClass {
+    let hint = hint.trim();
+    if hint.eq_ignore_ascii_case("float") {
+        FloatClass::Yes
+    } else if hint_non_float(hint) {
+        FloatClass::No
+    } else {
+        FloatClass::Unknown
+    }
+}
+
+/// Whether the type spelled `hint` admits no float: no member is `float` or `mixed`.
+/// An integer, string or boolean parameter is bound as such (a float argument is
+/// converted or refused at the call), an object type holds no float, and a union
+/// holds one only through `float`.
+fn hint_non_float(hint: &str) -> bool {
+    let mut members = hint
+        .split(|c: char| matches!(c, '|' | '&' | '(' | ')' | '?') || c.is_whitespace())
+        .filter(|m| !m.is_empty())
+        .peekable();
+    members.peek().is_some()
+        && members.all(|m| !matches!(m.to_ascii_lowercase().as_str(), "float" | "mixed"))
 }
 
 /// Whether the type spelled `hint` admits no string: no member is `string`,
@@ -360,17 +531,73 @@ fn hint_non_string(hint: &str) -> bool {
 /// 8.5.11: `array_map('strlen', [$o])` runs `__toString` under
 /// `strict_types=1`). `handled` lists the positions the caller has already
 /// answered for, an invoker's resolved callback.
+///
+/// `consts` is the call's literal arguments, where the call has any to read
+/// ([`CallSiteReach`]): a literal printf format says which values reach `__toString`
+/// (only a `%s` does), and a literal `true` strict flag says `in_array` and
+/// `array_search` compare by identity, which runs no user code.
 pub(crate) fn reaches_user_code(
     cx: &Cx,
     frame: &Frame,
     name: &str,
-    shapes: Option<&[ArgShape]>,
+    (shapes, consts): (Option<&[ArgShape]>, Option<&ConstArgs>),
     strict: bool,
     handled: &[usize],
 ) -> bool {
     let Some(row) = steins_catalog::arg_reach(name) else { return true };
     let Some(shapes) = shapes else { return row.reaches_blind(strict) };
-    operands_reach(cx, frame, shapes, strict, handled, |position| row.at(position))
+    let refined = consts.and_then(|consts| CallSiteReach::of(name, consts));
+    operands_reach(cx, frame, shapes, strict, handled, |position| {
+        refined.as_ref().and_then(|r| r.at(position)).unwrap_or_else(|| row.at(position))
+    })
+}
+
+/// What a call's **literal arguments** say about the reach of its other positions,
+/// where the catalog's row cannot (ADR-0021's 2026-10-03 note on call-site
+/// refinements).
+enum CallSiteReach {
+    /// A printf-family call with a literal format the parser reads: each value reaches
+    /// what its conversions say ([`steins_catalog::format_reach`]).
+    Format { family: PrintfFamily, per_value: Vec<ArgReach> },
+    /// `in_array` or `array_search` with a literal `true` strict flag: the needle and the
+    /// haystack are compared by identity.
+    Strict,
+}
+
+impl CallSiteReach {
+    /// The refinement `consts` give a call to `name`, or `None` where the row stands.
+    fn of(name: &str, consts: &ConstArgs) -> Option<Self> {
+        if let Some(family) = steins_catalog::printf_family(name) {
+            let reading = steins_catalog::read_format(literal_format(consts, &family)?)?;
+            return Some(Self::Format { family, per_value: reading.reach });
+        }
+        let flag = steins_catalog::strict_flag_position(name)?;
+        let strict =
+            consts.bools.iter().any(|&(position, value)| usize::from(position) == flag && value);
+        strict.then_some(Self::Strict)
+    }
+
+    /// The reach at call `position`, or `None` where the row answers.
+    fn at(&self, position: usize) -> Option<ArgReach> {
+        match self {
+            Self::Format { family, per_value } => family.reach_at(per_value, position),
+            Self::Strict => (position < 2).then_some(ArgReach::Inert),
+        }
+    }
+}
+
+/// The literal format of a printf-family call, when the call site wrote one as a
+/// string literal: the argument at the family's format position.
+pub(super) fn literal_format<'c>(consts: &'c ConstArgs, family: &PrintfFamily) -> Option<&'c str> {
+    let target = match family.format_position() {
+        0 => consts.first.as_ref(),
+        1 => consts.second.as_ref(),
+        _ => None,
+    };
+    match target {
+        Some(CallTarget::Literal(format)) => Some(format),
+        _ => None,
+    }
 }
 
 /// Whether some operand of a call reaches user code, given what each position
@@ -434,10 +661,10 @@ pub(crate) fn builtin_reach(
     cx: &Cx,
     frame: &Frame,
     name: &str,
-    shapes: Option<&[ArgShape]>,
+    args: (Option<&[ArgShape]>, Option<&ConstArgs>),
     handled: &[usize],
 ) -> Reach {
-    if reaches_user_code(cx, frame, name, shapes, cx.strict(), handled) {
+    if reaches_user_code(cx, frame, name, args, cx.strict(), handled) {
         Reach::Possible
     } else {
         Reach::RuledOut

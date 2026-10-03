@@ -2,7 +2,9 @@
 //! `ArgShape` a call origin carries per positional argument, by the
 //! argument's form or by a flow-insensitive summary of the frame's writes.
 
-use steins_syntax::{ArgShape, EffectOrigin, SourceTree, Stored, derive_effect_origins};
+use steins_syntax::{
+    ArgShape, EffectOrigin, FloatEvidence, SourceTree, Stored, derive_effect_origins,
+};
 
 /// The shapes a call to `g` carries, if `origin` is one.
 fn g_shapes(origin: &EffectOrigin) -> Option<Vec<ArgShape>> {
@@ -160,4 +162,204 @@ fn a_this_property_and_a_resolvable_method_call_carry_their_shapes() {
         ("ctor", Some(vec![s.clone()])),
         ("new", Some(vec![s])),
     ]);
+}
+
+/// The evidence a `sprintf` call at the end of `f`'s body carries about whether its arguments
+/// are floats (`ConstArgs::float_evidence`, ADR-0101 §3.8).
+fn evidence(signature: &str, body: &str) -> Vec<(u8, FloatEvidence)> {
+    let src = format!("<?php\nfunction f({signature}) {{ {body} }}\n");
+    let tree = SourceTree::parse(&src);
+    let f = tree.functions().iter().find(|f| f.name == "f").expect("f").clone();
+    derive_effect_origins(&f.sites)
+        .iter()
+        .rev()
+        .find_map(|origin| match origin {
+            EffectOrigin::Call { name, const_args, .. }
+            | EffectOrigin::HigherOrder { callee: name, const_args, .. }
+                if matches!(name.simple(), "sprintf" | "printf" | "Sprintf" | "g") =>
+            {
+                Some(const_args.float_evidence.clone())
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no printf-family call in {:?}", derive_effect_origins(&f.sites)))
+}
+
+fn shape_of(shape: ArgShape) -> FloatEvidence {
+    FloatEvidence::Shape { shape, unwritten: false, writes: Vec::new() }
+}
+
+/// A form that is no float is `NoFloat`, one that is a float is `Float`; the format at
+/// position 0 is never recorded, and arithmetic is withheld.
+#[test]
+fn a_printf_argument_is_a_float_or_not_by_its_form() {
+    use FloatEvidence::{Float, NoFloat};
+    let args = "1, 'a', true, null, \"x{$v}\", 'a' . $v, $v === 1, !$v, (string) $v, (int) $v, [1], \
+                __LINE__, -1";
+    let shown: Vec<(u8, FloatEvidence)> = evidence("$v", &format!("sprintf('%s', {args});"));
+    assert_eq!(shown.len(), 13);
+    for (i, (position, ev)) in shown.iter().enumerate() {
+        assert_eq!(usize::from(*position), i + 1);
+        assert_eq!(*ev, NoFloat, "argument {position}");
+    }
+    // An integer literal is an `int` only while it fits one; past it, it is a float.
+    assert_eq!(evidence("$v", "sprintf('%s', 9223372036854775807);"), [(1, NoFloat)]);
+    for wide in ["9223372036854775808", "0xFFFFFFFFFFFFFFFF", "99999999999999999999", "-9223372036854775808"] {
+        assert_eq!(evidence("$v", &format!("sprintf('%s', {wide});")), [(1, Float)], "{wide}");
+    }
+    for float in ["1.5", "(float) $v", "(double) $v", "-1.5", "(1.5)", "@(float) $v", "1e3"] {
+        assert_eq!(evidence("$v", &format!("sprintf('%s', {float});")), [(1, Float)], "{float}");
+    }
+    for withheld in ["$v + 1", "$v * 2", "1 / 3", "-$v"] {
+        assert_eq!(evidence("$v", &format!("sprintf('%s', {withheld});")), [], "{withheld}");
+    }
+    // The family is `sprintf` and `printf`; another name records nothing.
+    assert_eq!(evidence("$v", "printf('%s', 'a');"), [(1, NoFloat)]);
+    assert_eq!(evidence("$v", "g('%s', 'a');"), []);
+    // A named or spread list defeats positional mapping.
+    assert_eq!(evidence("$v", "sprintf(...$v);"), []);
+    assert_eq!(evidence("$v", "sprintf(format: '%s', values: 'a');"), []);
+}
+
+/// A ternary or `??` is the join of its branches, each read as a top-level value.
+#[test]
+fn a_conditional_is_the_evidence_of_its_branches() {
+    use FloatEvidence::{Float, NoFloat, OneOf};
+    assert_eq!(evidence("$v", "sprintf('%s', $v ? 'a' : 1);"), [(1, NoFloat)]);
+    assert_eq!(evidence("$v", "sprintf('%s', $v ? 'a' : 1.5);"), [(1, OneOf(vec![NoFloat, Float]))]);
+    assert_eq!(evidence("$v", "sprintf('%s', 'a' ?: 'b');"), [(1, NoFloat)]);
+    assert_eq!(evidence("$v", "sprintf('%s', 'b' ?? 'a');"), [(1, NoFloat)]);
+    // A branch that shows nothing withholds the whole value.
+    assert_eq!(evidence("$v", "sprintf('%s', $v ? 'a' : $v + 1);"), []);
+    assert_eq!(evidence("$v", "sprintf('%s', $v ?: 'a');"), [(
+        1,
+        OneOf(vec![FloatEvidence::Shape {
+            shape: ArgShape::Param { name: "v".to_owned(), stores: Stored::ObjectFree },
+            unwritten: true,
+            writes: Vec::new()
+        }, NoFloat])
+    )]);
+    // The branches nest.
+    assert_eq!(
+        evidence("$v", "sprintf('%s', $v ? 'a' : ($v ? 1 : 2));"),
+        [(1, NoFloat)],
+    );
+}
+
+/// A bare variable carries its shape while no write of the frame may leave a float in it that
+/// the scan cannot name; the parameter's declared type and the by-reference question are the
+/// engine's.
+#[test]
+fn a_printf_variable_carries_its_shape_until_a_write_may_leave_a_float() {
+    use FloatEvidence::{Float, NoFloat};
+    let p = |name: &str, unwritten: bool, writes: Vec<FloatEvidence>| {
+        FloatEvidence::Shape {
+            shape: ArgShape::Param { name: name.to_owned(), stores: Stored::ObjectFree },
+            unwritten,
+            writes,
+        }
+    };
+    let l = |name: &str, writes: Vec<FloatEvidence>| FloatEvidence::Shape {
+        shape: ArgShape::Local { name: name.to_owned(), stores: Stored::ObjectFree },
+        unwritten: false,
+        writes,
+    };
+    assert_eq!(evidence("string $s", "sprintf('%s', $s);"), [(1, p("s", true, vec![]))]);
+    assert_eq!(
+        evidence("", "$a = 'x'; $b = 1; $c = $a . 'y'; sprintf('%s%s%s', $a, $b, $c);"),
+        [(1, l("a", vec![])), (2, l("b", vec![])), (3, l("c", vec![]))]
+    );
+    // A parameter nothing writes is `unwritten`; a no-float write keeps it no float.
+    assert_eq!(
+        evidence("int $i", "$i = (string) $i; sprintf('%s', $i);"),
+        [(1, p("i", false, vec![]))]
+    );
+    assert_eq!(evidence("$s", "$s .= 'x'; sprintf('%s', $s);"), [(1, p("s", false, vec![]))]);
+    assert_eq!(evidence("$s", "unset($s); sprintf('%s', $s);"), [(1, p("s", false, vec![]))]);
+    assert_eq!(evidence("", "$a = []; $a[] = 1.5; sprintf('%s', $a);"), [(1, l("a", vec![]))]);
+    // A write the scan can name but that is no plain no-float form is carried, and the engine
+    // reads what it is: a float, a call result, a constant, a ternary.
+    assert_eq!(evidence("$v", "$x = 1.5; sprintf('%s', $x);"), [(1, l("x", vec![Float]))]);
+    assert_eq!(
+        evidence("$v", "$x = 'a'; $x = $v ? 'b' : 'c'; sprintf('%s', $x);"),
+        [(1, l("x", vec![]))],
+    );
+    let call = |name: &str| {
+        shape_of(ArgShape::Call(steins_syntax::NameRef {
+            raw: name.to_owned(),
+            kind: steins_syntax::RefKind::Unqualified,
+            offset: 0,
+        }))
+    };
+    let got = evidence("$v", "$x = h(1); $x = strlen('a'); sprintf('%s', $x);");
+    assert_eq!(got.len(), 1);
+    let FloatEvidence::Shape { writes, .. } = &got[0].1 else { panic!("{got:?}") };
+    assert_eq!(writes.len(), 2);
+    assert!(matches!(&writes[0], FloatEvidence::Shape { shape: ArgShape::Call(n), .. } if n.simple() == "h"));
+    assert!(matches!(&writes[1], FloatEvidence::Shape { shape: ArgShape::Call(n), .. } if n.simple() == "strlen"));
+    let _ = (call("h"), NoFloat);
+    // Each of these may leave a float the scan cannot name: arithmetic (integers overflow), an
+    // increment (the greatest integer overflows), a loop or `catch` binding, a destructuring
+    // target, a by-ref argument, a reference, an unnamed value.
+    for write in [
+        "$x = 1; $x += 1;",
+        "$x = 1; $x++;",
+        "$x = 1; --$x;",
+        "foreach ($v as $x) {}",
+        "foreach ($v as $k => $x) {}",
+        "[$x] = $v;",
+        "list($x) = $v;",
+        "try {} catch (E $x) {}",
+        "$x = $y = 1.5;",
+        "h($x[0]);",
+        "$x = 'a'; $x *= 2;",
+        "$x = $v + 1;",
+        "$x = $v;",
+        "$x = $v ? 1 : $v;",
+    ] {
+        assert_eq!(evidence("$v", &format!("{write} sprintf('%s', $x);")), [], "{write}");
+    }
+    // A variable the frame imports or aliases shows nothing, and neither does `$this`.
+    assert_eq!(evidence("&$r", "sprintf('%s', $r);"), []);
+    assert_eq!(evidence("...$r", "sprintf('%s', $r);"), []);
+    assert_eq!(evidence("$v", "global $g; sprintf('%s', $g);"), []);
+    assert_eq!(evidence("$v", "$r = &$v; sprintf('%s', $v);"), []);
+    assert_eq!(evidence("$v", "sprintf('%s', $_GET);"), []);
+}
+
+/// A property, a constant and a call carry their name, for the engine to read the declared
+/// type or value of; any other property or callee is no evidence.
+#[test]
+fn a_printf_property_constant_or_call_carries_its_name() {
+    use steins_syntax::{NameRef, RefKind, StaticClass};
+    let shown = evidence(
+        "$v",
+        "sprintf('%s%s%s%s%s%s%s', $this->p, strlen($v), $o->q, self::$p, PHP_EOL, self::K, Foo::K);",
+    );
+    assert_eq!(shown[0], (1, shape_of(ArgShape::ThisProperty("p".to_owned()))));
+    let strlen = NameRef { raw: "strlen".to_owned(), kind: RefKind::Unqualified, offset: 0 };
+    assert_eq!(shown[1], (2, shape_of(ArgShape::Call(strlen))));
+    assert_eq!(
+        shown[2],
+        (4, FloatEvidence::StaticProperty { class: StaticClass::SelfKw, name: "p".to_owned() })
+    );
+    assert!(matches!(&shown[3], (5, FloatEvidence::GlobalConst(n)) if n.raw == "PHP_EOL"));
+    assert_eq!(
+        shown[4],
+        (6, FloatEvidence::ClassConst { class: StaticClass::SelfKw, name: "K".to_owned() })
+    );
+    assert!(matches!(&shown[5], (7, FloatEvidence::ClassConst { class: StaticClass::Named(_), .. })));
+    assert_eq!(shown.len(), 6, "`$o->q` shows nothing");
+    assert_eq!(evidence("$v", "sprintf('%s', $f());"), []);
+    assert!(matches!(
+        evidence("$v", "sprintf('%s', \\App\\K);").as_slice(),
+        [(1, FloatEvidence::GlobalConst(n))] if n.raw.ends_with("App\\K")
+    ));
+    assert_eq!(evidence("$v", "sprintf('%s', static::K);"), [(
+        1,
+        FloatEvidence::ClassConst { class: StaticClass::Static, name: "K".to_owned() }
+    )]);
+    // A method call names its receiver where the scan can: `$this`, `self`, a class.
+    let got = evidence("$v", "sprintf('%s%s', $this->m(), Foo::m());");
+    assert_eq!(got.len(), 2);
 }

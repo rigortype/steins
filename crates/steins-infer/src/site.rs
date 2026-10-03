@@ -24,6 +24,7 @@ mod contract;
 pub(crate) mod engine;
 pub(crate) mod method;
 mod operator;
+mod printf;
 pub(crate) mod reach;
 mod resolve;
 
@@ -162,11 +163,19 @@ pub(crate) enum GapKind {
     /// reference, and the caller may keep one. Source: the Drop family of the
     /// operator resolver.
     Destructor,
+    /// A setting read that depends on a value the site cannot see (ADR-0101 §3): a
+    /// printf call whose `%s` consumes a value not shown to be a float or not one (a
+    /// float renders through the `precision` ini), or whose format is not a literal
+    /// the parser reads (a `%f`, `%g` or `%G` reads the locale). A label is proven only
+    /// where the read is unconditional for the call as written, so a read conditional on
+    /// a value is this gap until the site rules it in or out. Effect lane only. Appended
+    /// last, so no earlier kind's codec number moved.
+    ValueDependentRead,
 }
 
 impl GapKind {
     /// Every kind, in the order the facts payload's codec numbers them.
-    pub(crate) const ALL: [Self; 23] = [
+    pub(crate) const ALL: [Self; 24] = [
         Self::DynamicCallee,
         Self::UnknownClass,
         Self::UnknownFunction,
@@ -190,6 +199,7 @@ impl GapKind {
         Self::OperatorIteration,
         Self::OperatorClone,
         Self::Destructor,
+        Self::ValueDependentRead,
     ];
 
     /// The kind's spelling on the surfaces that name it (`annotate --format
@@ -220,6 +230,7 @@ impl GapKind {
             Self::OperatorIteration => "operator-iteration",
             Self::OperatorClone => "operator-clone",
             Self::Destructor => "destructor",
+            Self::ValueDependentRead => "value-dependent-read",
         }
     }
 
@@ -261,6 +272,10 @@ impl GapKind {
             Self::OperatorIteration => "an iterated operand may run `Traversable` methods",
             Self::OperatorClone => "a cloned operand may run `__clone`",
             Self::Destructor => "a dropped value may run `__destruct`",
+            Self::ValueDependentRead => {
+                "a setting read depends on a value the site cannot see (a `%s` of a value that \
+                 may be a float, or a format that is not literal)"
+            }
         }
     }
 }

@@ -703,13 +703,25 @@ fn the_dumpers_without_a_return_mode_are_untouched() {
     };
     let src = "<?php\n#[\\Steins\\Pure]\nfunction render($x): mixed { return var_dump($x, true); }\n";
     assert_eq!(one(src).message, message("var_dump", "io.output.buffer"), "no return mode");
-    // `printf` also reads the locale (ADR-0101), which is a finding of its own.
+    // `printf`'s row also reads the locale and `precision` (ADR-0101), which a call site
+    // that reads its literal format and its `true` argument drops: `'%s'` has no `f`,
+    // `g` or `G`, and `true` is no float.
     let src = "<?php\n#[\\Steins\\Pure]\nfunction render($x): mixed { return printf('%s', true); }\n";
+    assert_eq!(one(src).message, message("printf", "io.output.buffer"), "printf has no return mode");
+    // A format the call does not show is `value-dependent-read`, not a label: the output
+    // label stands alone at the default floor, and the gap is a strict-floor finding.
+    let src = "<?php\n#[\\Steins\\Pure]\nfunction render($f, $x): mixed { return printf($f, $x); }\n";
+    let found: Vec<String> = effects(src).into_iter().map(|d| d.message).collect();
+    assert_eq!(found, [message("printf", "io.output.buffer")], "printf has no return mode");
+    // A literal `%f` is a proven read: the finding, whatever the value.
+    let src = "<?php\n#[\\Steins\\Pure]\nfunction render($x): mixed { return printf('%.1f', $x); }\n";
     let found: Vec<String> = effects(src).into_iter().map(|d| d.message).collect();
     assert_eq!(
         found,
-        [message("printf", "io.output.buffer"), message("printf", "global.read.setting.locale")],
-        "printf has no return mode"
+        [
+            message("printf", "io.output.buffer"),
+            message("printf", "global.read.setting.locale"),
+        ],
     );
 }
 

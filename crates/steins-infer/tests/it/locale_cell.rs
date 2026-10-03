@@ -3,10 +3,9 @@
 //! `global.read.setting.locale`; `setlocale` writes the cell; an envelope that
 //! does not admit the read is exceeded at the call.
 //!
-//! The label is the row's, at every call site. The literal-format read that
-//! drops it from `sprintf('%d', $x)` is the engine's later slice (ADR-0101
-//! §3.2), so until it lands the interim below is the intended answer, and the
-//! tests say so.
+//! The label is the row's, and a call site that reads a literal format drops it
+//! when no conversion is `f`, `g` or `G` (ADR-0101 §3.2, `printf_call_site.rs`
+//! holds that table); a format the call does not show keeps it.
 
 use steins_infer::{Diagnostic, EFFECT_ID, EffectSummary, check, effect_summary};
 use steins_syntax::SourceTree;
@@ -33,22 +32,82 @@ fn body(signature: &str, body: &str) -> String {
     format!("<?php\nfunction f({signature}) {{ {body} }}\n")
 }
 
-/// The row stands at every printf-family call, whatever the format: `%d`
-/// carries the read too, until the engine reads the literal (ADR-0101 §3.2).
-/// The body stays exhaustive: a setting read is a known label and never a gap.
+/// A printf-family call carries the locale read where its format reads it: a literal `f`, `g`
+/// or `G` conversion (flags, width, precision and `n$` included). The body stays exhaustive: a
+/// setting read is a known label and never a gap.
 #[test]
-fn a_printf_family_call_carries_the_locale_read_whatever_its_format() {
+fn a_printf_family_call_carries_the_locale_read_where_the_format_may_read_it() {
     for call in [
         "sprintf('%f', $x)",
-        "sprintf('%d', $x)",
-        "sprintf('%d-%s', 1, 'a')",
+        "sprintf('%.2f', $x)",
+        "sprintf('%05.1f', $x)",
+        "sprintf('%1$.3g', $x)",
+        "sprintf('%G', $x)",
+        "sprintf('%d %f', 1, $x)",
+        "sprintf('%%%f', $x)",
+        "vsprintf('%f', [1.5])",
+    ] {
+        let s = summary(&body("int $x, string $fmt, array $args", &format!("return {call};")), "f");
+        assert!(s.labels.iter().any(|l| l == READ), "{call}: {s:?}");
+        assert!(s.exhaustive, "{call} is a known row, not a gap: {s:?}");
+    }
+}
+
+/// A format the call does not show, or the parser cannot read, is the calibration's
+/// `value-dependent-read` gap for the locale read and never a label: `'%d'` reads nothing, so
+/// no label is true on every path (ADR-0101 §3.2). `printf` keeps its output label.
+#[test]
+fn a_format_the_site_cannot_read_is_a_gap_and_not_a_locale_label() {
+    for call in [
         "sprintf($fmt, $x)",
+        "sprintf($fmt)",
+        "sprintf('%' . $fmt, $x)",
+        "sprintf(\"%d{$fmt}\", $x)",
+        "sprintf('%*d', 3, $x)",
+        "sprintf('%q', $x)",
+        "sprintf('%d %q', $x)",
+        "vsprintf($fmt, ['a'])",
+        "sprintf(...$args)",
+        "sprintf(format: '%d', values: 1)",
+    ] {
+        let s = summary(&body("int $x, string $fmt, array $args", &format!("return {call};")), "f");
+        assert!(s.labels.is_empty(), "{call}: {s:?}");
+        assert!(s.gaps.contains(&"value-dependent-read"), "{call}: {s:?}");
+        assert!(!s.exhaustive, "{call}: {s:?}");
+    }
+    for call in ["printf($fmt, $x)", "vprintf($fmt, $args)"] {
+        let s = summary(&body("int $x, string $fmt, array $args", &format!("{call};")), "f");
+        assert_eq!(s.labels, ["io.output.buffer"], "{call}: {s:?}");
+        assert!(s.gaps.contains(&"value-dependent-read"), "{call}: {s:?}");
+    }
+}
+
+/// A literal format that shows no `f`, `g` or `G` drops the locale read (ADR-0101 §3.2,
+/// #991): `sprintf('%d-%s', 1, 'a')` is pure again, and every other conversion, `%%f`
+/// and a format with no spec stay silent. Dropping the locale read is not the claim that
+/// the call reads no setting: see `printf_call_site.rs` for `precision`.
+#[test]
+fn a_literal_format_with_no_f_g_or_capital_g_drops_the_locale_read() {
+    for call in [
+        "sprintf('%d-%s', 1, 'a')",
+        "sprintf('%F', $x)",
+        "sprintf('%.2F', $x)",
+        "sprintf('%e', $x)",
+        "sprintf('%E', $x)",
+        "sprintf('%h', $x)",
+        "sprintf('%H', $x)",
+        "sprintf('%d', $x)",
+        "sprintf('%5.1e|%u|%c|%o|%x|%X|%b', $x, $x, $x, $x, $x, $x, $x)",
+        "sprintf('%%f')",
+        "sprintf('100%%f')",
+        "sprintf('plain')",
+        "sprintf(\"%d\", $x)",
         "vsprintf('%F', [1.5])",
         "vsprintf('%d', ['a'])",
     ] {
         let s = summary(&body("int $x, string $fmt", &format!("return {call};")), "f");
-        assert_eq!(s.labels, [READ], "{call}: {s:?}");
-        assert!(s.exhaustive, "{call} is a known row, not a gap: {s:?}");
+        assert_eq!(s.labels, Vec::<String>::new(), "{call}: {s:?}");
+        assert!(s.exhaustive, "{call}: {s:?}");
     }
 }
 
@@ -63,6 +122,15 @@ fn the_v_spellings_follow_their_siblings_and_printf_keeps_its_output_label() {
         let s = summary(&body("int $x", &format!("{call};")), "f");
         assert_eq!(s.labels, [READ, "io.output.buffer"], "{call}: {s:?}");
     }
+    // A format that shows no read leaves `printf` its output label alone.
+    for call in ["printf('%d', $x)", "vprintf('%F', [$x])"] {
+        let s = summary(&body("int $x", &format!("{call};")), "f");
+        assert_eq!(s.labels, ["io.output.buffer"], "{call}: {s:?}");
+    }
+    // A `%s` over a vector may render a float, which a vector's elements do not show: the gap.
+    let s = summary(&body("array $x", "vprintf('%s', $x);"), "f");
+    assert_eq!(s.labels, ["io.output.buffer"], "{s:?}");
+    assert!(s.gaps.contains(&"value-dependent-read"), "{s:?}");
 }
 
 /// `setlocale` writes the cell; `localeconv`, `nl_langinfo` and `strcoll` read it.
@@ -111,9 +179,9 @@ fn a_caller_inherits_the_read_through_its_callee() {
 /// A body with no printf-family call carries no setting label: `(string) $f`,
 /// `strval`, `json_encode` and `round` of a float carry none, and a literal that
 /// merely contains a percent sign calls nothing. (The string cast and `strval`
-/// do read the `precision` ini, which is its own cell under D4, whose label comes
-/// with the printf call-site slice, so "no label" is the claim and not "reads no
-/// setting".)
+/// do read the `precision` ini, which is its own cell under D4 whose label only a
+/// printf `%s` colours so far (float-to-string operator sites wait for ADR-0008's
+/// opt-in), so "no label" is the claim and not "reads no setting".)
 #[test]
 fn a_body_with_no_printf_family_call_keeps_no_read() {
     for call in ["(string) $f", "strval($f)", "json_encode($f)", "round($f, 2)", "'%f'"] {
@@ -133,6 +201,9 @@ fn a_pure_envelope_over_the_read_is_exceeded_and_a_global_read_envelope_admits_i
         d[0].message,
         "sprintf() has effect global.read.setting.locale, but f() is declared #[\\Steins\\Pure]"
     );
+    // A format with no `f`, `g` or `G` leaves nothing to exceed.
+    let pure = "<?php\n#[\\Steins\\Pure]\nfunction f(float $x): string { return sprintf('%F', $x); }\n";
+    assert!(findings(pure).is_empty(), "{:#?}", findings(pure));
     for envelope in ["global.read", "global.read.setting", "global.read.setting.locale", "global"] {
         let src = format!(
             "<?php\n#[\\Steins\\Effect('{envelope}')]\nfunction f(float $x): string {{ return sprintf('%f', $x); }}\n"

@@ -1076,7 +1076,7 @@ pub(crate) static DECLARED_RETURNS: &[(&str, &str)] = &[
     ("number_format", "non-empty-string"),
     ("numfmt_format", "string|false"),
     ("numfmt_format_currency", "string|false"),
-    ("numfmt_get_attribute", "int|false"),
+    ("numfmt_get_attribute", "int|float|false"),
     ("numfmt_get_error_code", "int"),
     ("numfmt_get_error_message", "string"),
     ("numfmt_get_locale", "string|false"),

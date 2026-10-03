@@ -31,7 +31,7 @@ use std::collections::HashSet;
 use steins_contract::ContractTy;
 use steins_syntax::{EffectRecv, NameRef, Span, Visibility};
 
-use super::{Frame, Held, hint_held};
+use super::{FloatClass, Frame, Held, hint_float_class, hint_held};
 use crate::builtin_returns::{builtin_method_row, floor_target_admits};
 use crate::contract::IsA;
 use crate::cx::Cx;
@@ -41,14 +41,53 @@ use crate::site::engine_exit;
 use crate::site::method::declared_receiver_fqn;
 use crate::walk::namespace_binding_is_settled;
 
+/// A declared return type, in the spelling its source gives it: what the gates below
+/// let through, for a classifier to read ([`Self::held`], [`Self::float_class`]).
+#[derive(Debug, Clone, Copy)]
+enum Returned<'a> {
+    /// A native hint, read from the source as written.
+    Native(&'a str),
+    /// A mined row's phpdoc-shaped spelling.
+    Mined(&'a str),
+}
+
+impl Returned<'_> {
+    /// What a value of this type holds, objects-wise.
+    fn held(self) -> Held {
+        match self {
+            Self::Native(hint) => hint_held(hint),
+            Self::Mined(declared) => declared_held(declared),
+        }
+    }
+
+    /// Whether a value of this type is a float.
+    fn float_class(self) -> FloatClass {
+        match self {
+            Self::Native(hint) => hint_float_class(hint),
+            Self::Mined(declared) => steins_contract::lower_str(declared)
+                .map_or(FloatClass::Unknown, |ty| contract_float_class(&ty)),
+        }
+    }
+}
+
 /// What the result of the plain call `name(...)` is shown to hold.
 pub(super) fn function_result(cx: &Cx, name: &NameRef) -> Held {
+    function_return(cx, name).map_or(Held::Unknown, Returned::held)
+}
+
+/// Whether the result of the plain call `name(...)` is a float.
+pub(super) fn function_float_class(cx: &Cx, name: &NameRef) -> FloatClass {
+    function_return(cx, name).map_or(FloatClass::Unknown, Returned::float_class)
+}
+
+/// The declared return of the plain call `name(...)`, where a gate lets one answer.
+fn function_return<'a>(cx: &'a Cx<'_>, name: &NameRef) -> Option<Returned<'a>> {
     match cx.resolve_function(name) {
         FnResolution::Builtin(builtin) => {
             if !floor_target_admits(&builtin, cx.php_target) {
-                return Held::Unknown;
+                return None;
             }
-            steins_catalog::declared_return(&builtin).map_or(Held::Unknown, declared_held)
+            steins_catalog::declared_return(&builtin).map(Returned::Mined)
         }
         FnResolution::User(site) => {
             let decl = cx.fn_decl(site);
@@ -56,11 +95,11 @@ pub(super) fn function_result(cx: &Cx, name: &NameRef) -> Held {
             // order, and an unqualified name inside a namespace that only matched
             // the global function binds to a namespaced one if anything defines it.
             if decl.conditional || !namespace_binding_is_settled(cx, name, &decl.fqn) {
-                return Held::Unknown;
+                return None;
             }
-            native_held(cx, site.file, decl.ret_span)
+            native_return(cx, site.file, decl.ret_span)
         }
-        FnResolution::Unknown => Held::Unknown,
+        FnResolution::Unknown => None,
     }
 }
 
@@ -72,12 +111,33 @@ pub(super) fn method_result(
     receiver: &EffectRecv,
     method: &str,
 ) -> Held {
-    let Some((start, exact)) = receiver_start(cx, frame, receiver) else { return Held::Unknown };
+    method_return(cx, frame, receiver, method).map_or(Held::Unknown, Returned::held)
+}
+
+/// Whether the result of a method or static call `method` on `receiver`, written in
+/// `frame`, is a float.
+pub(super) fn method_float_class(
+    cx: &Cx,
+    frame: &Frame,
+    receiver: &EffectRecv,
+    method: &str,
+) -> FloatClass {
+    method_return(cx, frame, receiver, method).map_or(FloatClass::Unknown, Returned::float_class)
+}
+
+/// The declared return of a method or static call, where a gate lets one answer.
+fn method_return<'a>(
+    cx: &'a Cx<'_>,
+    frame: &Frame,
+    receiver: &EffectRecv,
+    method: &str,
+) -> Option<Returned<'a>> {
+    let (start, exact) = receiver_start(cx, frame, receiver)?;
     match resolve_in_chain_mode(cx, &start, method, ChainMode::Declaration) {
-        Resolution::Found(found) => project_method_held(cx, frame, &start, &found),
+        Resolution::Found(found) => project_method_return(cx, frame, &start, &found),
         // `__call` may answer a name no class of a wholly project chain declares.
-        Resolution::NotFoundChainComplete => Held::Unknown,
-        Resolution::Unknown => engine_method_held(cx, frame, (&start, exact), method),
+        Resolution::NotFoundChainComplete => None,
+        Resolution::Unknown => engine_method_return(cx, frame, (&start, exact), method),
     }
 }
 
@@ -100,10 +160,15 @@ fn receiver_start(cx: &Cx, frame: &Frame, receiver: &EffectRecv) -> Option<(Stri
     })
 }
 
-/// What the native return hint of a project method found on `start`'s chain holds,
-/// where the call can reach it: a conditional class binds by load order, and a
-/// method the enclosing scope cannot see is a call the engine hands to `__call`.
-fn project_method_held(cx: &Cx, frame: &Frame, start: &str, found: &ResolvedMethod) -> Held {
+/// The native return hint of a project method found on `start`'s chain, where the
+/// call can reach it: a conditional class binds by load order, and a method the
+/// enclosing scope cannot see is a call the engine hands to `__call`.
+fn project_method_return<'a>(
+    cx: &'a Cx<'_>,
+    frame: &Frame,
+    start: &str,
+    found: &ResolvedMethod,
+) -> Option<Returned<'a>> {
     let declaring = found.declaring_class;
     // A conditional class binds by load order, and so does the chain it sits on: any
     // class from the receiver's up to the declaring one may be a different declaration.
@@ -111,19 +176,16 @@ fn project_method_held(cx: &Cx, frame: &Frame, start: &str, found: &ResolvedMeth
     let mut seen: HashSet<String> = HashSet::new();
     loop {
         if !seen.insert(cur.to_ascii_lowercase()) {
-            return Held::Unknown;
+            return None;
         }
         match cx.find_class(&cur) {
             Some((_, cd)) if !cd.conditional => {}
-            _ => return Held::Unknown,
+            _ => return None,
         }
         if cur.eq_ignore_ascii_case(&declaring.fqn) {
             break;
         }
-        match cx.parent_fqn(&cur) {
-            Some(parent) => cur = parent,
-            None => return Held::Unknown,
-        }
+        cur = cx.parent_fqn(&cur)?;
     }
     let reachable = match found.method.visibility {
         Visibility::Public => true,
@@ -134,21 +196,21 @@ fn project_method_held(cx: &Cx, frame: &Frame, start: &str, found: &ResolvedMeth
             frame.class_fqn.is_some_and(|own| own.eq_ignore_ascii_case(&declaring.fqn))
         }
     };
-    let Some((file, _)) = cx.find_class(&declaring.fqn) else { return Held::Unknown };
-    if reachable { native_held(cx, file, found.method.ret_span) } else { Held::Unknown }
+    let (file, _) = cx.find_class(&declaring.fqn)?;
+    if reachable { native_return(cx, file, found.method.ret_span) } else { None }
 }
 
-/// What the mined return row of an engine method holds, for the engine class
-/// `start`'s chain leaves the project at ([`engine_exit`]): an exact receiver reads
-/// the row of the method it runs; a bound one only that of a final `Throwable`
-/// accessor, which no subclass replaces.
-fn engine_method_held(
-    cx: &Cx,
+/// The mined return row of an engine method, for the engine class `start`'s chain
+/// leaves the project at ([`engine_exit`]): an exact receiver reads the row of the
+/// method it runs; a bound one only that of a final `Throwable` accessor, which no
+/// subclass replaces.
+fn engine_method_return<'a>(
+    cx: &'a Cx<'_>,
     frame: &Frame,
     (start, exact): (&str, bool),
     method: &str,
-) -> Held {
-    let Some(exit) = engine_exit(cx, start, method) else { return Held::Unknown };
+) -> Option<Returned<'a>> {
+    let exit = engine_exit(cx, start, method)?;
     // `getMessage()` and `getCode()` read an untyped property (`protected $message`,
     // `protected $code`) a subclass may fill with an object, which the return then
     // converts (`__toString` runs in the accessor) or hands back: no receiver is shown
@@ -161,18 +223,17 @@ fn engine_method_held(
     // `getTraceAsString()` read a private typed property no subclass reaches.
     let accessor = method.to_ascii_lowercase();
     if ["getmessage", "getcode"].contains(&accessor.as_str()) {
-        return Held::Unknown;
+        return None;
     }
     if ["getfile", "getline"].contains(&accessor.as_str())
         && !property_read_is_direct(cx, frame, (start, exact))
     {
-        return Held::Unknown;
+        return None;
     }
     if !exact && steins_catalog::final_method_effect_labels(&exit, method).is_none() {
-        return Held::Unknown;
+        return None;
     }
-    builtin_method_row(&exit, method, cx.php_target)
-        .map_or(Held::Unknown, |(declared, _)| declared_held(declared))
+    builtin_method_row(&exit, method, cx.php_target).map(|(declared, _)| Returned::Mined(declared))
 }
 
 /// Whether an engine accessor called on an object of `start`'s class reads its property
@@ -198,9 +259,9 @@ fn property_read_is_direct(cx: &Cx, frame: &Frame, (start, exact): (&str, bool))
         || (exact && frame.class_fqn.is_none_or(|own| cx.is_a(own, start) == IsA::No))
 }
 
-/// What a value of the native type written at `ret` in `file` holds.
-fn native_held(cx: &Cx, file: usize, ret: Option<Span>) -> Held {
-    ret.and_then(|span| cx.units[file].tree.source_slice(span)).map_or(Held::Unknown, hint_held)
+/// The native type written at `ret` in `file`.
+fn native_return<'a>(cx: &'a Cx<'_>, file: usize, ret: Option<Span>) -> Option<Returned<'a>> {
+    ret.and_then(|span| cx.units[file].tree.source_slice(span)).map(Returned::Native)
 }
 
 /// What a value of the phpdoc-shaped type `declared` (a mined row) holds.
@@ -243,6 +304,40 @@ fn contract_held(ty: &ContractTy) -> Held {
             members.iter().map(contract_held).max().unwrap_or(Held::Unknown)
         }
         _ => Held::Unknown,
+    }
+}
+
+/// Whether a value of the lowered type `ty` is a float: [`FloatClass::Yes`] for `float` and a
+/// float literal alone, [`FloatClass::No`] where every member of a union, or some member of an
+/// intersection, is an integer, string, boolean, `null`, an array or an object type, and
+/// [`FloatClass::Unknown`] for `mixed`, a union that mixes the two, and any type not modeled.
+fn contract_float_class(ty: &ContractTy) -> FloatClass {
+    match ty {
+        ContractTy::Null
+        | ContractTy::Never
+        | ContractTy::IntIn(_)
+        | ContractTy::StrWith(_)
+        | ContractTy::StrOpaque
+        | ContractTy::LitInt(_)
+        | ContractTy::LitStr(_)
+        | ContractTy::LitBool(_)
+        | ContractTy::ArrayAny { .. }
+        | ContractTy::ListOf { .. }
+        | ContractTy::MapOf { .. }
+        | ContractTy::Shape { .. }
+        | ContractTy::Class(_)
+        | ContractTy::ObjectAny => FloatClass::No,
+        ContractTy::Base(steins_domain::Base::Float) | ContractTy::LitFloat(_) => FloatClass::Yes,
+        ContractTy::Base(_) => FloatClass::No,
+        ContractTy::Union(members) if !members.is_empty() => {
+            FloatClass::agree(members.iter().map(contract_float_class))
+        }
+        ContractTy::Inter(members)
+            if members.iter().any(|m| contract_float_class(m) == FloatClass::No) =>
+        {
+            FloatClass::No
+        }
+        _ => FloatClass::Unknown,
     }
 }
 

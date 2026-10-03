@@ -166,6 +166,7 @@ pub use reach::{
     method_arg_reach,
     printf_family,
     read_format,
+    strict_flag_position,
 };
 
 mod labels;

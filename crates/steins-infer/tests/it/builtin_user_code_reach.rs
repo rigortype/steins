@@ -216,11 +216,9 @@ fn s8_a_call_result_is_an_argument_shape() {
     let message = "return new \\RuntimeException(strtoupper($s));";
     proven_pure(&file(false, "string $s", message), "f");
     // `sprintf`'s result is just as much a `string`: the call is ruled out, and the
-    // only thing left is the locale read the row carries (ADR-0101).
+    // literal format reads no locale and renders a `string` (ADR-0101 §3.2, D4).
     let message = "return new \\RuntimeException(sprintf('%s!', $s));";
-    let s = summary(&file(false, "string $s", message), "f");
-    assert!(s.exhaustive && s.gaps.is_empty(), "{s:?}");
-    assert_eq!(s.labels, ["global.read.setting.locale"], "{s:?}");
+    proven_pure(&file(false, "string $s", message), "f");
     // `count()` reaches `Countable::count` through an object, never through a list.
     proven_pure(&file(false, "string $s", "return count(explode(',', $s));"), "f");
     proven_pure(&file(false, "string $s", "return strlen(strtoupper($s));"), "f");
@@ -236,21 +234,20 @@ fn s8_a_call_result_is_an_argument_shape() {
 }
 
 /// `sprintf` and `vsprintf` are held to the reach rule like the rest of the
-/// fold allowlist's rows, and carry the locale read beside it (issue #991,
-/// ADR-0101): `%f`, `%g` and `%G` read `LC_NUMERIC`, so neither is pure. An
-/// object-free call is exhaustive with the read and no gap; a `%s` over a value
-/// that may be an object is `user-code-reach`.
+/// fold allowlist's rows, and carry the setting reads beside it (issue #991,
+/// ADR-0101): a literal format with no `f`, `g` or `G` reads no locale, and a `%s`
+/// reads `precision` only for a float, so a value not shown either way is the
+/// `value-dependent-read` gap. An object-free call over values shown no float is exhaustive
+/// with no gap; a `%s` over a value that may be an object is `user-code-reach`. The per-row
+/// table is `printf_call_site.rs`.
 #[test]
-fn s7_the_printf_family_carries_the_locale_read_beside_the_reach_rule() {
-    for (signature, call) in [
-        ("string $s, int $i", "sprintf('%s-%d', $s, $i)"),
-        ("", "vsprintf('%s-%s', ['a', 'b'])"),
-    ] {
-        let s = summary(&file(false, signature, &format!("return {call};")), "f");
-        assert!(s.exhaustive && s.gaps.is_empty(), "{call}: {s:?}");
-        assert_eq!(s.labels, ["global.read.setting.locale"], "{call}");
-    }
+fn s7_the_printf_family_carries_its_setting_reads_beside_the_reach_rule() {
+    proven_pure(&file(false, "string $s, int $i", "return sprintf('%s-%d', $s, $i);"), "f");
+    // A vector's elements are not read, so a `%s` over one depends on them.
+    let s = summary(&file(false, "", "return vsprintf('%s-%s', ['a', 'b']);"), "f");
+    assert!(!s.exhaustive && s.gaps == ["value-dependent-read"], "{s:?}");
+    assert!(s.labels.is_empty(), "{s:?}");
     let s = summary(&file(false, "mixed $v", "return sprintf('%s', $v);"), "f");
-    assert!(!s.exhaustive && s.gaps == ["user-code-reach"], "{s:?}");
-    assert_eq!(s.labels, ["global.read.setting.locale"]);
+    assert!(!s.exhaustive && s.gaps == ["user-code-reach", "value-dependent-read"], "{s:?}");
+    assert!(s.labels.is_empty(), "{s:?}");
 }

@@ -71,6 +71,8 @@ const BUILTIN_LABELS: &[&str] = {
         // registered in the slice that colours its first row, never ahead of one.
         "global.read.setting",
         "global.read.setting.locale", // LC_* as `setlocale` leaves it.
+        // `precision`, as a `%s` of a float reads it (S3: the first row to colour it).
+        "global.read.setting.precision",
         "global.write",
         "global.write.setting",
         "global.write.setting.locale",
@@ -466,7 +468,8 @@ mod tests {
     #[test]
     fn the_setting_labels_are_registered_and_ride_the_global_prefixes() {
         for label in [
-            "global.read.setting", "global.read.setting.locale", "global.write.setting",
+            "global.read.setting", "global.read.setting.locale",
+            "global.read.setting.precision", "global.write.setting",
             "global.write.setting.locale",
         ] {
             assert!(is_known_label(label), "{label}");
@@ -480,6 +483,9 @@ mod tests {
         assert!(!subsumes("global.read.setting.locale", "global.read.setting"), "fine is not coarse");
         assert!(!is_known_label("global.read.settings"), "a typo stays unknown");
         assert!(!is_known_label("global.read.setting.timezone"), "no cell ahead of its first row");
+        assert!(is_known_label("global.read.setting.precision"), "registered with its first row");
+        assert!(subsumes("global.read.setting", "global.read.setting.precision"));
+        assert!(!subsumes("global.read.setting.locale", "global.read.setting.precision"));
     }
 
     #[test]

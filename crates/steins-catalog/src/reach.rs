@@ -227,6 +227,25 @@ pub fn printf_family(name: &str) -> Option<PrintfFamily> {
     }
 }
 
+/// The position of the **strict flag** of a builtin whose loose comparison runs
+/// user code and whose strict one does not, or `None`.
+///
+/// `in_array($needle, $haystack, $strict)` and `array_search(...)` compare with
+/// `==` unless the third argument is true, and a loose comparison converts an
+/// object through `__toString` (and compares arrays of objects recursively). With
+/// a true flag they compare with `===`, which runs nothing at any depth (PHP
+/// 8.5.11: `in_array($o, [$o2], true)` prints nothing, the loose call prints
+/// `[S::__toString]`). A call site that reads the flag as a literal `true` makes
+/// the needle and the haystack [`ArgReach::Inert`]; a flag that is not a literal
+/// `true` leaves the row's reach.
+#[must_use]
+pub fn strict_flag_position(name: &str) -> Option<usize> {
+    match name.trim_start_matches('\\').to_ascii_lowercase().as_str() {
+        "in_array" | "array_search" => Some(2),
+        _ => None,
+    }
+}
+
 /// The largest value position a format may name before [`format_reach`] gives
 /// up: far past any call's argument count, and a bound on the answer's size.
 const MAX_FORMAT_POSITIONS: usize = 1024;
@@ -251,10 +270,10 @@ pub struct FormatReading {
     /// give the same text at any `precision`, and none reads
     /// `serialize_precision` (witnessed, PHP 8.5, with variable arguments, since
     /// 8.4 folds a literal `sprintf('%s', 1.5)` at compile time). The `precision`
-    /// cell has no label in the first slice (ADR-0101 D4): the slice that reads
-    /// a literal format registers `global.read.setting.precision` and carries it
-    /// on a `%s` of a value that may be a float, so a caller that drops the
-    /// locale label on `!reads_locale` must not treat that as a pure call.
+    /// cell's label, `global.read.setting.precision` (ADR-0101 D4), is carried by
+    /// a `%s` of a value that may be a float, which the call site's argument
+    /// shapes decide, so a caller that drops the locale label on `!reads_locale`
+    /// must not treat that as a pure call.
     pub reads_locale: bool,
 }
 
@@ -520,7 +539,7 @@ const OVERRIDES: &[(&str, &[(usize, ArgReach)])] = &[
 mod tests {
     use super::{
         ArgReach, OVERRIDES, arg_reach, format_reach, format_reads_locale, printf_family,
-        read_format,
+        read_format, strict_flag_position,
     };
     use crate::{certified_at_call_site, effect_labels, foldable, knows, param_facts, throws_of};
 
@@ -800,14 +819,17 @@ mod tests {
 
     /// `vsprintf` is not certified pure: `%f`, `%g` and `%G` read `LC_NUMERIC`
     /// (issue #991, as `sprintf`'s do), so it is not on the call-site list, and
-    /// ADR-0101 gives it the same locale-read row as `sprintf`. Its reach
+    /// ADR-0101 gives it the same setting-read row as `sprintf`. Its reach
     /// answer is still right, and `printf_family` still names it.
     #[test]
     fn vsprintf_is_not_certified_but_keeps_its_reach() {
         assert!(!certified_at_call_site("vsprintf"));
         assert!(knows("vsprintf"));
         assert_eq!(effect_labels("vsprintf"), effect_labels("sprintf"));
-        assert_eq!(effect_labels("vsprintf"), Some(&["global.read.setting.locale"][..]));
+        assert_eq!(
+            effect_labels("vsprintf"),
+            Some(&["global.read.setting.locale", "global.read.setting.precision"][..])
+        );
         assert!(printf_family("vsprintf").is_some());
     }
 
@@ -821,6 +843,19 @@ mod tests {
             assert_eq!(at(name, 1), ArgReach::Nested, "{name}");
             assert_eq!(at(name, 2), ArgReach::Inert, "{name}");
             assert_eq!(at(name, 3), ArgReach::Inert, "{name}: past the list");
+        }
+    }
+
+    /// The strict flag a literal `true` reads is `in_array`'s and `array_search`'s, at
+    /// position 2, and only theirs here (`array_keys`'s third argument is the same flag
+    /// and is not read yet).
+    #[test]
+    fn the_strict_flag_is_in_arrays_and_array_searchs() {
+        for name in ["in_array", "IN_ARRAY", "\\in_array", "array_search"] {
+            assert_eq!(strict_flag_position(name), Some(2), "{name}");
+        }
+        for name in ["array_keys", "array_unique", "sprintf", "strcmp", "nope"] {
+            assert_eq!(strict_flag_position(name), None, "{name}");
         }
     }
 

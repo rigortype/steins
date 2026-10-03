@@ -17,11 +17,11 @@ use mago_syntax::cst::{
     UnaryPrefixOperator, Variable,
 };
 
-use crate::ast::{ArgShape, SUPERGLOBALS, Stored};
+use crate::ast::{ArgShape, ArgValue, EffectRecv, FloatEvidence, SUPERGLOBALS, Stored};
 use crate::lower_effect::EffectScanCx;
 use crate::lower_expr::{
-    effect_recv_of_class, effect_recv_of_object_declared, method_name_of, prop_fetch_of,
-    trace_static_class,
+    class_const_name, effect_recv_of_class, effect_recv_of_object, effect_recv_of_object_declared,
+    lower_int_literal, method_name_of, prop_fetch_of, trace_static_class,
 };
 use crate::names::name_ref;
 use crate::{bytes_to_string, children, strip_dollar};
@@ -205,6 +205,200 @@ fn element_object_free(element: &ArrayElement<'_>) -> bool {
     }
 }
 
+/// Whether an expression's value is **no float by its form alone**, whatever its
+/// operands hold ([`FloatEvidence::NoFloat`]): a string, boolean or `null` literal, an
+/// integer literal that fits `int` and its negation, a magic constant, an interpolated
+/// string, a concatenation, a comparison or logical connective, `!`, `isset`, `empty`, a
+/// cast to `int`, `bool`, `string` or `array`, an array literal, and a ternary or `??` whose
+/// results are. Arithmetic is left out (`$a + $b` of integers overflows into a float), as is
+/// a cast to `float`.
+pub(crate) fn no_float_form(expr: &Expression<'_>) -> bool {
+    match expr.unparenthesized() {
+        Expression::Literal(Literal::Float(_)) => false,
+        // An integer literal wider than `int` is a float.
+        Expression::Literal(Literal::Integer(li)) => {
+            matches!(lower_int_literal(li.raw), ArgValue::Int(_))
+        }
+        Expression::Literal(_)
+        | Expression::MagicConstant(_)
+        | Expression::CompositeString(_)
+        | Expression::Array(_)
+        | Expression::LegacyArray(_)
+        | Expression::Construct(Construct::Isset(_) | Construct::Empty(_)) => true,
+        Expression::Binary(b) => match b.operator {
+            BinaryOperator::NullCoalesce(_) => no_float_form(b.lhs) && no_float_form(b.rhs),
+            BinaryOperator::StringConcat(_)
+            | BinaryOperator::Equal(_)
+            | BinaryOperator::NotEqual(_)
+            | BinaryOperator::Identical(_)
+            | BinaryOperator::NotIdentical(_)
+            | BinaryOperator::AngledNotEqual(_)
+            | BinaryOperator::LessThan(_)
+            | BinaryOperator::LessThanOrEqual(_)
+            | BinaryOperator::GreaterThan(_)
+            | BinaryOperator::GreaterThanOrEqual(_)
+            | BinaryOperator::Spaceship(_)
+            | BinaryOperator::Instanceof(_)
+            | BinaryOperator::And(_)
+            | BinaryOperator::Or(_)
+            | BinaryOperator::LowAnd(_)
+            | BinaryOperator::LowOr(_)
+            | BinaryOperator::LowXor(_) => true,
+            _ => false,
+        },
+        Expression::UnaryPrefix(u) => match u.operator {
+            UnaryPrefixOperator::ErrorControl(_) => no_float_form(u.operand),
+            // `-1` is an integer; `-$x` is not shown.
+            UnaryPrefixOperator::Negation(_) => matches!(
+                u.operand.unparenthesized(),
+                Expression::Literal(Literal::Integer(_))
+            ) && no_float_form(u.operand),
+            UnaryPrefixOperator::Not(_)
+            | UnaryPrefixOperator::BoolCast(..)
+            | UnaryPrefixOperator::BooleanCast(..)
+            | UnaryPrefixOperator::IntCast(..)
+            | UnaryPrefixOperator::IntegerCast(..)
+            | UnaryPrefixOperator::StringCast(..)
+            | UnaryPrefixOperator::BinaryCast(..)
+            | UnaryPrefixOperator::ArrayCast(..) => true,
+            _ => false,
+        },
+        Expression::Conditional(c) => {
+            c.then.map_or_else(|| no_float_form(c.condition), |t| no_float_form(t))
+                && no_float_form(c.r#else)
+        }
+        _ => false,
+    }
+}
+
+/// Whether an expression's value is a float by its form alone ([`FloatEvidence::Float`]): a
+/// float literal, an integer literal wider than `int`, a cast to `float`, and the negation of
+/// one.
+fn float_form(expr: &Expression<'_>) -> bool {
+    match expr.unparenthesized() {
+        Expression::Literal(Literal::Float(_)) => true,
+        Expression::Literal(Literal::Integer(li)) => {
+            !matches!(lower_int_literal(li.raw), ArgValue::Int(_))
+        }
+        Expression::UnaryPrefix(u) => match u.operator {
+            UnaryPrefixOperator::FloatCast(..)
+            | UnaryPrefixOperator::DoubleCast(..)
+            | UnaryPrefixOperator::RealCast(..) => true,
+            UnaryPrefixOperator::Negation(_) | UnaryPrefixOperator::ErrorControl(_) => {
+                float_form(u.operand)
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+/// [`ConstArgs::float_evidence`] of a `sprintf` or `printf` call: the evidence of each
+/// argument from position 1 on ([`float_evidence`]). Empty for a named or spread argument
+/// list, whose positions cannot be read.
+///
+/// [`ConstArgs::float_evidence`]: crate::ast::ConstArgs::float_evidence
+pub(crate) fn float_evidence_of_args(
+    list: &ArgumentList<'_>,
+    cx: &EffectScanCx,
+) -> Vec<(u8, FloatEvidence)> {
+    let mut out = Vec::new();
+    for (position, arg) in list.arguments.iter().enumerate() {
+        let Argument::Positional(p) = arg else { return Vec::new() };
+        if p.ellipsis.is_some() {
+            return Vec::new();
+        }
+        let Ok(position) = u8::try_from(position) else { break };
+        if position > 0
+            && let Some(evidence) = float_evidence(p.value, Some(cx))
+        {
+            out.push((position, evidence));
+        }
+    }
+    out
+}
+
+/// What the scan shows of whether `expr` is a float ([`FloatEvidence`]), or `None` when it
+/// shows nothing. With `cx` the frame's variables and every receiver the effects pass can
+/// name are read; without it (a value written to a variable, read while the frame's own
+/// bindings are still being built) only the forms that need no frame are.
+pub(crate) fn float_evidence(
+    expr: &Expression<'_>,
+    cx: Option<&EffectScanCx>,
+) -> Option<FloatEvidence> {
+    let e = expr.unparenthesized();
+    if no_float_form(e) {
+        return Some(FloatEvidence::NoFloat);
+    }
+    if float_form(e) {
+        return Some(FloatEvidence::Float);
+    }
+    let shape = |shape| Some(FloatEvidence::Shape { shape, unwritten: false, writes: Vec::new() });
+    match e {
+        Expression::Variable(Variable::Direct(dv)) => {
+            cx?.bindings.float_shape(&strip_dollar(bytes_to_string(dv.name)))
+        }
+        Expression::Call(call) => {
+            let called = match cx {
+                Some(cx) => call_shape(call, cx),
+                None => call_shape_without_frame(call),
+            };
+            (called != ArgShape::Unknown).then_some(called).and_then(shape)
+        }
+        Expression::Access(Access::Property(pa)) => match prop_fetch_of(pa.object, &pa.property) {
+            Some((var, prop)) if var == "this" => shape(ArgShape::ThisProperty(prop)),
+            _ => None,
+        },
+        Expression::Access(Access::StaticProperty(sp)) => {
+            let Variable::Direct(dv) = &sp.property else { return None };
+            Some(FloatEvidence::StaticProperty {
+                class: trace_static_class(sp.class)?,
+                name: strip_dollar(bytes_to_string(dv.name)),
+            })
+        }
+        Expression::Access(Access::ClassConstant(cc)) => Some(FloatEvidence::ClassConst {
+            class: trace_static_class(cc.class)?,
+            name: class_const_name(&cc.constant)?,
+        }),
+        Expression::ConstantAccess(ca) => Some(FloatEvidence::GlobalConst(name_ref(&ca.name))),
+        Expression::Conditional(c) => Some(FloatEvidence::OneOf(vec![
+            float_evidence(c.then.unwrap_or(c.condition), cx)?,
+            float_evidence(c.r#else, cx)?,
+        ])),
+        Expression::Binary(b) if matches!(b.operator, BinaryOperator::NullCoalesce(_)) => {
+            Some(FloatEvidence::OneOf(vec![
+                float_evidence(b.lhs, cx)?,
+                float_evidence(b.rhs, cx)?,
+            ]))
+        }
+        _ => None,
+    }
+}
+
+/// [`call_shape`] for a call whose callee needs no frame to name: a function, a static call
+/// on a class, `self` or `parent`, and `$this->m()`.
+fn call_shape_without_frame(call: &Call<'_>) -> ArgShape {
+    match call {
+        Call::Function(fc) => match fc.function {
+            Expression::Identifier(id) => ArgShape::Call(name_ref(id)),
+            _ => ArgShape::Unknown,
+        },
+        Call::Method(mc) => match (effect_recv_of_object(mc.object), method_name_of(&mc.method)) {
+            (Some(receiver @ EffectRecv::This), Some(method)) => {
+                ArgShape::MethodCall { receiver, method }
+            }
+            _ => ArgShape::Unknown,
+        },
+        Call::StaticMethod(sc) => {
+            match (effect_recv_of_class(sc.class), method_name_of(&sc.method)) {
+                (Some(receiver), Some(method)) => ArgShape::MethodCall { receiver, method },
+                _ => ArgShape::Unknown,
+            }
+        }
+        Call::NullSafeMethod(_) => ArgShape::Unknown,
+    }
+}
+
 /// The variables of one frame an argument can name as an [`ArgShape::Param`]
 /// or an [`ArgShape::Local`], with what every write the frame makes to each
 /// stores. Built once per frame; an aliasing frame (`global`, `static`, `$$v`,
@@ -307,6 +501,36 @@ impl FrameBindings {
         .unwrap_or(ArgShape::Unknown)
     }
 
+    /// The evidence of a bare `$name` argument for whether it is a float
+    /// ([`FloatEvidence::Shape`]): a by-value parameter or a local of the frame, while no
+    /// write of the frame may leave a float in it that the scan cannot name. The shape is
+    /// [`ArgShape::Param`] or [`ArgShape::Local`] (its `stores` is a placeholder: the claim is
+    /// not about objects); the parameter's declared type and the by-reference question are
+    /// the engine's to read, as for any variable shape.
+    pub(crate) fn float_shape(&self, name: &str) -> Option<FloatEvidence> {
+        let foreign = name == "this" || SUPERGLOBALS.contains(&name);
+        if self.opaque
+            || foreign
+            || self.imported.contains(name)
+            || self.stores.maybe_float.contains(name)
+        {
+            return None;
+        }
+        let stores = Stored::ObjectFree;
+        let shape = if self.params.contains(name) {
+            ArgShape::Param { name: name.to_owned(), stores }
+        } else if self.captures_all {
+            return None;
+        } else {
+            ArgShape::Local { name: name.to_owned(), stores }
+        };
+        Some(FloatEvidence::Shape {
+            shape,
+            unwritten: !self.stores.contains_key(name),
+            writes: self.stores.carried.get(name).cloned().unwrap_or_default(),
+        })
+    }
+
     /// The shape of a bare `$name` argument.
     pub(crate) fn shape(&self, name: &str) -> ArgShape {
         let foreign = name == "this" || SUPERGLOBALS.contains(&name);
@@ -333,13 +557,21 @@ impl FrameBindings {
 type Stores = HashMap<String, Option<Stored>>;
 
 /// The writes a frame makes: what each variable stores ([`Stores`], which a
-/// `Writes` derefs to), and the variables some whole-variable write may leave a
+/// `Writes` derefs to), the variables some whole-variable write may leave a
 /// string (`$v = 'abc'`, `$v = f()`, `$v .= 'x'`, a destructuring target), which
-/// [`FrameBindings::container_shape`] reads.
+/// [`FrameBindings::container_shape`] reads, and the variables some write may leave
+/// a float, which [`FrameBindings::float_shape`] reads.
 #[derive(Debug, Default)]
 struct Writes {
     stores: Stores,
     maybe_string: HashSet<String>,
+    /// The variables some write may leave a float in ([`FrameBindings::float_shape`]).
+    /// A write counts unless the scan shows its value is no float or can name what it is,
+    /// so a write the scan cannot read is in here by default.
+    maybe_float: HashSet<String>,
+    /// The evidence of every whole-variable write the scan can name that is not a plain
+    /// no-float form (a call result, a ternary, a constant, a float), per variable.
+    carried: HashMap<String, Vec<FloatEvidence>>,
 }
 
 impl Deref for Writes {
@@ -411,6 +643,17 @@ fn string_free_value(value: &Expression<'_>) -> bool {
     }
 }
 
+/// Carry the evidence of a whole-variable write whose value the scan can name but that is
+/// no plain no-float form ([`Writes::carried`]); whether the write may leave a float is then
+/// the engine's to say. `false` when the target is not a bare variable or the value shows
+/// nothing.
+fn carry_write(a: &Assignment<'_>, out: &mut Writes) -> bool {
+    let Expression::Variable(Variable::Direct(dv)) = a.lhs.unparenthesized() else { return false };
+    let Some(evidence) = float_evidence(a.rhs, None) else { return false };
+    out.carried.entry(strip_dollar(bytes_to_string(dv.name))).or_default().push(evidence);
+    true
+}
+
 /// Whether an assignment stores into a bare variable a value shown no string that
 /// is neither object-free nor an array literal: an object (`new`, a closure).
 fn is_object_write(a: &Assignment<'_>) -> bool {
@@ -474,6 +717,16 @@ pub(crate) enum Captures<'a> {
 
 /// Fold what `value` holds into everything a variable has been shown to store.
 fn record(out: &mut Writes, name: String, value: Option<Stored>) {
+    record_with(out, name, value, false);
+}
+
+/// [`record`] for a write the scan can say whether it leaves a float: `float_free`
+/// is true when the value stored is no float, and a write that does not say so
+/// counts as one that may ([`Writes::maybe_float`]).
+fn record_with(out: &mut Writes, name: String, value: Option<Stored>, float_free: bool) {
+    if !float_free {
+        out.maybe_float.insert(name.clone());
+    }
     // A write nothing reads (a `foreach` or `catch` binding, a reference) may leave a string.
     if value.is_none() {
         out.maybe_string.insert(name.clone());
@@ -512,7 +765,17 @@ fn collect_stores(node: &Node<'_, '_>, out: &mut Writes) {
                 // object operand (GMP) makes an object.
                 _ => stored_of(a.rhs).filter(|s| *s == Stored::ObjectFree),
             };
-            store_into(a.lhs, value, out);
+            // A string is no float; `=` and `??=` store what the value's form says,
+            // and every other compound assignment may leave a float (`+=` of ints
+            // overflows into one).
+            let float_free = match a.operator {
+                AssignmentOperator::Assign(_) | AssignmentOperator::Coalesce(_) => {
+                    no_float_form(a.rhs) || carry_write(a, out)
+                }
+                AssignmentOperator::Concat(_) => true,
+                _ => false,
+            };
+            store_into(a.lhs, value, float_free, out);
         }
         Node::UnaryPrefix(u)
             if matches!(
@@ -520,25 +783,27 @@ fn collect_stores(node: &Node<'_, '_>, out: &mut Writes) {
                 UnaryPrefixOperator::PreIncrement(_) | UnaryPrefixOperator::PreDecrement(_)
             ) =>
         {
-            store_into(u.operand, Some(Stored::ObjectFree), out);
+            // `++` of the greatest integer is a float.
+            store_into(u.operand, Some(Stored::ObjectFree), false, out);
         }
-        Node::UnaryPostfix(u) => store_into(u.operand, Some(Stored::ObjectFree), out),
+        Node::UnaryPostfix(u) => store_into(u.operand, Some(Stored::ObjectFree), false, out),
         // `unset($v)` leaves `null`; unsetting an element or a property stores nothing.
         Node::Unset(u) => {
             for target in u.values.iter() {
                 if let Expression::Variable(Variable::Direct(dv)) = target.unparenthesized() {
-                    record(out, strip_dollar(bytes_to_string(dv.name)), Some(Stored::ObjectFree));
+                    let name = strip_dollar(bytes_to_string(dv.name));
+                    record_with(out, name, Some(Stored::ObjectFree), true);
                 }
             }
         }
         // `foreach ($it as &$v)` writes through its subject.
         Node::Foreach(fe) if fe.target.value().is_reference() => {
-            store_into(fe.expression, None, out);
+            store_into(fe.expression, None, false, out);
         }
-        Node::ForeachValueTarget(t) => store_into(t.value, None, out),
+        Node::ForeachValueTarget(t) => store_into(t.value, None, false, out),
         Node::ForeachKeyValueTarget(t) => {
-            store_into(t.key, None, out);
-            store_into(t.value, None, out);
+            store_into(t.key, None, false, out);
+            store_into(t.value, None, false, out);
         }
         Node::TryCatchClause(c) => {
             if let Some(v) = &c.variable {
@@ -586,15 +851,16 @@ fn collect_stores(node: &Node<'_, '_>, out: &mut Writes) {
     }
 }
 
-/// Record that the assignment target `lhs` receives `value`. A variable stores
+/// Record that the assignment target `lhs` receives `value`, `float_free` saying
+/// whether that value is shown to be no float. A variable stores
 /// it; an element write `$a[…] = …` keeps `$a` an array and stores into it an
 /// element holding `value`; a property write rebinds no variable; a
 /// destructuring hands each target an element of `value`. Any other target
 /// counts every variable in it as storing anything.
-fn store_into(lhs: &Expression<'_>, value: Option<Stored>, out: &mut Writes) {
+fn store_into(lhs: &Expression<'_>, value: Option<Stored>, float_free: bool, out: &mut Writes) {
     match lhs.unparenthesized() {
         Expression::Variable(Variable::Direct(dv)) => {
-            record(out, strip_dollar(bytes_to_string(dv.name)), value);
+            record_with(out, strip_dollar(bytes_to_string(dv.name)), value, float_free);
         }
         // The root stays an array (or a string, for an offset write into one),
         // and gains an element holding `value`. A chain through a property or
@@ -602,7 +868,8 @@ fn store_into(lhs: &Expression<'_>, value: Option<Stored>, out: &mut Writes) {
         Expression::ArrayAccess(_) | Expression::ArrayAppend(_) => {
             if let Some(root) = element_root(lhs) {
                 let stored = value.filter(|s| *s == Stored::ObjectFree).unwrap_or(Stored::Array);
-                record(out, root, Some(stored));
+                // The root stays an array or a string (or is an error, for a scalar).
+                record_with(out, root, Some(stored), true);
             }
         }
         Expression::Access(
@@ -623,8 +890,8 @@ fn store_into(lhs: &Expression<'_>, value: Option<Stored>, out: &mut Writes) {
 /// One element of a destructuring target ([`store_into`]).
 fn destructure(element: &ArrayElement<'_>, value: Option<Stored>, out: &mut Writes) {
     match element {
-        ArrayElement::KeyValue(kv) => store_into(kv.value, value, out),
-        ArrayElement::Value(v) => store_into(v.value, value, out),
+        ArrayElement::KeyValue(kv) => store_into(kv.value, value, false, out),
+        ArrayElement::Value(v) => store_into(v.value, value, false, out),
         ArrayElement::Variadic(_) | ArrayElement::Missing(_) => {}
     }
 }

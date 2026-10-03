@@ -1069,6 +1069,55 @@ mod tests {
         }
     }
 
+    /// A call's literal arguments are read by field position: the strict flags (`bools`) and
+    /// the float evidence of a printf call (`float_evidence`, ADR-0101 §3.8) are appended after
+    /// `ints`, and survive the payload codec.
+    #[test]
+    fn the_const_args_flags_and_float_evidence_round_trip() {
+        use steins_syntax::{
+            ArgShape, CallTarget, ConstArgs, ConstInt, FloatEvidence, StaticClass, Stored,
+        };
+        let param = ArgShape::Param { name: "s".to_owned(), stores: Stored::ObjectFree };
+        let args = ConstArgs {
+            first: Some(CallTarget::Literal("%s".to_owned())),
+            second: None,
+            ints: vec![(1, ConstInt::Int(8))],
+            bools: vec![(2, true), (3, false)],
+            float_evidence: vec![
+                (1, FloatEvidence::NoFloat),
+                (2, FloatEvidence::Float),
+                (
+                    3,
+                    FloatEvidence::Shape {
+                        shape: param,
+                        unwritten: false,
+                        writes: vec![FloatEvidence::GlobalConst(steins_syntax::NameRef {
+                            raw: "PHP_EOL".to_owned(),
+                            kind: steins_syntax::RefKind::Unqualified,
+                            offset: 3,
+                        })],
+                    },
+                ),
+                (4, FloatEvidence::ClassConst { class: StaticClass::SelfKw, name: "K".to_owned() }),
+                (
+                    5,
+                    FloatEvidence::StaticProperty {
+                        class: StaticClass::Parent,
+                        name: "p".to_owned(),
+                    },
+                ),
+                (6, FloatEvidence::OneOf(vec![FloatEvidence::NoFloat, FloatEvidence::Float])),
+            ],
+        };
+        let bytes = crate::wire::to_vec(&args).expect("const args serialize");
+        let back: ConstArgs = crate::wire::from_slice(&bytes).expect("const args round-trip");
+        assert_eq!(back, args);
+        assert_eq!(
+            serde_variants::<FloatEvidence>(),
+            ["NoFloat", "Float", "Shape", "GlobalConst", "ClassConst", "StaticProperty", "OneOf"]
+        );
+    }
+
     /// Every family and every construct of an operator site is in the fixture and
     /// round-trips through the payload codec with its receivers and member name.
     #[test]
