@@ -386,7 +386,11 @@
 # 26699ed5 against 37d20aef, same revision.
 # 892 → 888  2026-10-03 (issue #877): -4 throw.maybe-undeclared (871 → 867), a call result read off the callee's declared return; the triage is above the composer row. Measured by the local fp-gate on 0d280bca (the first form of S8), not remeasured on the head that withdrew `getMessage()`.
 # 888 → 902  2026-10-03 (issue #882): +14 throw.maybe-undeclared at a drop site, 8 more gained `destructor`; the triage is above the composer row. Measured as `src/` over an indexed `vendor/` with `steins check --profile strict --no-php --vendor-diagnostics` at 566c4326, base 888 and head 902.
-"phpstan/phpstan-src" = 902
+# 902 → 894  2026-10-03 (issue #882; #1006, Run 2 S6c): −8 `throw.maybe-undeclared`, the
+# trait-user and anonymous-parent proxies of the destructor gate read as what the body
+# declares (the unseen-name rule adds none here: the project's vendor tree is present).
+# Measured by the local fp-gate on c1847dd4.
+"phpstan/phpstan-src" = 894
 
 # New rows, 2026-10-02 (issues #915, #922): the strict-floor ids of the public packages that
 # had none. Measured under PHP 8.4.25 (CI's posture); the throw lane does not read the sidecar.
