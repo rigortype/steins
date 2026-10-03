@@ -34,6 +34,7 @@
 
 use std::collections::HashSet;
 
+use steins_db::AnonymousClass;
 use steins_syntax::{EffectRecv, TypeMember};
 
 use super::super::engine::declares_engine_class;
@@ -160,50 +161,155 @@ fn holds_one(cx: &Cx<'_>, class: &str, seen: &mut HashSet<(String, bool)>) -> bo
 
 /// The classes the properties that `class`, its ancestors and every trait they import
 /// (a trait's imports too) are hinted with, as the traits declare them: a trait's
-/// properties are not lowered, so the hint names are read off the declaration. A trait
-/// the index cannot place is not read here; the merge counted its users already.
+/// properties are not lowered, so the hint names are read off the declaration. A hint
+/// `self` in a trait names the class that imports it and `parent` that class's parent. A
+/// trait the index cannot place is not read here; the merge counted its users already.
 fn trait_held(cx: &Cx<'_>, class: &str) -> Vec<String> {
+    let id = cx.class_identity(class);
+    held_names(cx, vec![(id.clone(), Some(id))])
+}
+
+/// [`trait_held`] from several class-likes, each with the class that imports it: itself
+/// for a class, the importer for a trait, none for an anonymous class's.
+fn held_names(cx: &Cx<'_>, mut pending: Vec<(String, Option<String>)>) -> Vec<String> {
     let mut held = Vec::new();
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut pending = vec![cx.class_identity(class)];
-    while let Some(name) = pending.pop() {
-        if !seen.insert(name.clone()) {
+    let mut seen: HashSet<(String, Option<String>)> = HashSet::new();
+    while let Some((name, importer)) = pending.pop() {
+        if !seen.insert((name.clone(), importer.clone())) {
             continue;
         }
         let Some((file, cd)) = cx.find_class(&name) else { continue };
         let tree = cx.units[file].tree;
+        let importer = if cd.is_trait { importer } else { Some(name) };
         held.extend(cd.held_classes.iter().map(|r| tree.resolve_class_fqn(r)));
-        let imported = cd.used_traits.iter().chain(&cd.parent);
-        pending.extend(imported.map(|r| cx.class_identity(&tree.resolve_class_fqn(r))));
+        if cd.holds_self {
+            held.extend(importer.clone());
+        }
+        if cd.holds_parent {
+            held.extend(importer.as_deref().and_then(|own| cx.parent_fqn(own)));
+        }
+        let identity = |r| cx.class_identity(&tree.resolve_class_fqn(r));
+        pending.extend(cd.used_traits.iter().map(|r| (identity(r), importer.clone())));
+        pending.extend(cd.parent.iter().map(|r| (identity(r), Some(identity(r)))));
     }
     held
 }
 
-/// The names that are, or are an ancestor of, a class whose chain declares a
-/// destructor (or imports a trait that may), or the parent of an anonymous class
-/// whose body runs one, as identities.
-/// A subclass of such a class inherits its destructor, so what it implements is
-/// an ancestor too. Ancestors are the project's own declarations and the
-/// catalog's, through `extends` and `implements`.
-fn destructor_ancestors(cx: &Cx<'_>) -> HashSet<String> {
-    let index = cx.index;
-    let mut pending: Vec<String> = index
-        .destructor_classes()
-        .iter()
-        .chain(index.anonymous_destructor_parents())
-        .map(|name| cx.class_identity(name))
-        .collect();
-    pending.extend(
-        index.class_names().map(|name| cx.class_identity(name)).filter(|id| chain_declares(cx, id)),
-    );
-    let mut out: HashSet<String> = HashSet::new();
-    while let Some(name) = pending.pop() {
-        if !out.insert(name.clone()) {
-            continue;
-        }
-        if let Some(supers) = cx.ancestors_of(&name) {
-            pending.extend(supers.iter().map(|s| cx.class_identity(s)));
+/// What the closure of [`destructor_ancestors`] holds while it grows.
+#[derive(Default)]
+struct Closure {
+    /// The classes that, as exactly themselves, may run a destructor on a drop.
+    reach: HashSet<String>,
+    /// Every name that is, or is an ancestor of, a class of `reach`, or a parent or
+    /// interface of an anonymous class that reaches one.
+    ancestors: HashSet<String>,
+}
+
+impl Closure {
+    /// Add `name` and every ancestor of it.
+    fn add_ancestors(&mut self, cx: &Cx<'_>, name: String) {
+        let mut pending = vec![name];
+        while let Some(name) = pending.pop() {
+            if !self.ancestors.insert(name.clone()) {
+                continue;
+            }
+            if let Some(supers) = cx.ancestors_of(&name) {
+                pending.extend(supers.iter().map(|s| cx.class_identity(s)));
+            }
         }
     }
-    out
+
+    fn add_reaching(&mut self, cx: &Cx<'_>, class: String) {
+        self.reach.insert(class.clone());
+        self.add_ancestors(cx, class);
+    }
+
+    /// Whether a value hinted `class` may run a destructor as far as the closure knows:
+    /// its chain does, or, as the exact class when nothing extends it, it reaches one, or,
+    /// as a bound, it is a class that does or an ancestor of one.
+    fn hit(&self, cx: &Cx<'_>, class: &str) -> bool {
+        let id = cx.class_identity(class);
+        chain_declares(cx, &id)
+            || if cx.class_has_no_subclass(class) {
+                self.reach.contains(&id)
+            } else {
+                self.ancestors.contains(&id)
+            }
+    }
+
+    /// Whether a class holds, in a property of its chain or one a trait imports, a class
+    /// that the closure so far says may run a destructor.
+    fn holds(&self, cx: &Cx<'_>, class: &str) -> bool {
+        let typed = cx.class_props(class).into_iter().filter_map(|p| p.ty.as_ref());
+        let named = typed.flat_map(|ty| ty.members.iter()).flat_map(|member| match member {
+            TypeMember::Instance { fqn, .. } => vec![fqn.clone()],
+            TypeMember::InstanceInter(classes) => classes.iter().map(|c| c.fqn.clone()).collect(),
+            TypeMember::Scalar(_) | TypeMember::BoolLiteral(_) => Vec::new(),
+        });
+        named.chain(trait_held(cx, class)).any(|held| self.hit(cx, &held))
+    }
+
+    /// Whether an anonymous class reaches a destructor: it declares one, its parent's
+    /// chain does, a trait it imports may, or a property of it holds one.
+    fn anonymous_reaches(&self, cx: &Cx<'_>, anon: &AnonymousClass) -> bool {
+        let identity = |name: &String| cx.class_identity(name);
+        let traits: Vec<String> = anon.traits.iter().map(identity).collect();
+        anon.declares_destructor
+            || anon.parent.as_ref().is_some_and(|parent| {
+                let id = identity(parent);
+                chain_declares(cx, &id) || self.reach.contains(&id)
+            })
+            || traits.iter().any(|t| chain_declares(cx, t))
+            || anon.held.iter().any(|held| self.hit(cx, held))
+            || held_names(cx, traits.into_iter().map(|t| (t, None)).collect())
+                .iter()
+                .any(|held| self.hit(cx, held))
+    }
+}
+
+/// The names that are, or are an ancestor of, a class that reaches a destructor, or a
+/// parent or interface of an anonymous class that does, as identities. A subclass of such
+/// a class inherits its destructor, so what it implements is an ancestor too. A class
+/// reaches one when its chain declares it, or imports a trait that may, or holds in a
+/// typed property, its own or a trait's, a class that reaches one; an anonymous class by
+/// the same reading of its own body and its parent. Ancestors are the project's own
+/// declarations and the catalog's, through `extends` and `implements`.
+///
+/// A fixpoint: what a class holds may itself be an ancestor, so the closure grows until
+/// a round adds nothing. It only grows over a finite universe, so it ends, and it is a
+/// function of the universe's declarations, not of the order they are read in.
+fn destructor_ancestors(cx: &Cx<'_>) -> HashSet<String> {
+    let index = cx.index;
+    let mut ids: Vec<String> = index.class_names().map(|name| cx.class_identity(name)).collect();
+    ids.sort();
+    ids.dedup();
+    let mut closure = Closure::default();
+    for name in index.destructor_classes() {
+        closure.add_reaching(cx, cx.class_identity(name));
+    }
+    for id in &ids {
+        if chain_declares(cx, id) {
+            closure.add_reaching(cx, id.clone());
+        }
+    }
+    let mut anonymous: Vec<&AnonymousClass> = index.anonymous_classes().iter().collect();
+    loop {
+        let before = (closure.reach.len(), closure.ancestors.len());
+        for id in &ids {
+            if !closure.reach.contains(id) && closure.holds(cx, id) {
+                closure.add_reaching(cx, id.clone());
+            }
+        }
+        let (reaching, rest): (Vec<_>, Vec<_>) =
+            anonymous.into_iter().partition(|anon| closure.anonymous_reaches(cx, anon));
+        anonymous = rest;
+        for anon in reaching {
+            for name in anon.parent.iter().chain(&anon.interfaces) {
+                closure.add_ancestors(cx, cx.class_identity(name));
+            }
+        }
+        if before == (closure.reach.len(), closure.ancestors.len()) {
+            return closure.ancestors;
+        }
+    }
 }

@@ -38,7 +38,8 @@ use mago_syntax::cst::{
 
 use super::SiteScope;
 use crate::ast::{
-    ArgShape, EffectRecv, NameRef, OperatorConstruct as C, OperatorFamily as F, SiteKind, SiteOrigin, Span,
+    ArgShape, EffectRecv, NameRef, OperatorConstruct as C, OperatorFamily as F, SiteKind,
+    SiteOrigin, Span,
 };
 use crate::lower_decl::scan_body;
 use crate::lower_expr::instantiation_class;
@@ -134,24 +135,35 @@ fn hint_receivers(hint: &Hint<'_>, out: &mut Vec<Option<EffectRecv>>) {
     }
 }
 
-/// The classes a native hint names, as written: every `Identifier` member of a union,
-/// an intersection or a nullable, whatever else the hint holds. `self` and `parent`
-/// are not named; the scalars, `array`, `mixed`, `object`, `iterable` and `callable`
-/// are none.
-pub(crate) fn hint_class_names(hint: &Hint<'_>, out: &mut Vec<NameRef>) {
-    match hint {
-        Hint::Identifier(id) => out.push(name_ref(id)),
-        Hint::Nullable(n) => hint_class_names(n.hint, out),
-        Hint::Parenthesized(p) => hint_class_names(p.hint, out),
-        Hint::Union(u) => {
-            hint_class_names(u.left, out);
-            hint_class_names(u.right, out);
+/// What a property's native hint names: the classes, as written, by every `Identifier`
+/// member of a union, an intersection or a nullable, whatever else the hint holds, and
+/// whether a member is `self` or `parent`. The scalars, `array`, `mixed`, `object`,
+/// `iterable` and `callable` are none.
+#[derive(Default)]
+pub(crate) struct HintClasses {
+    pub(crate) names: Vec<NameRef>,
+    pub(crate) has_self: bool,
+    pub(crate) has_parent: bool,
+}
+
+impl HintClasses {
+    pub(crate) fn read(&mut self, hint: &Hint<'_>) {
+        match hint {
+            Hint::Identifier(id) => self.names.push(name_ref(id)),
+            Hint::Self_(_) => self.has_self = true,
+            Hint::Parent(_) => self.has_parent = true,
+            Hint::Nullable(n) => self.read(n.hint),
+            Hint::Parenthesized(p) => self.read(p.hint),
+            Hint::Union(u) => {
+                self.read(u.left);
+                self.read(u.right);
+            }
+            Hint::Intersection(i) => {
+                self.read(i.left);
+                self.read(i.right);
+            }
+            _ => {}
         }
-        Hint::Intersection(i) => {
-            hint_class_names(i.left, out);
-            hint_class_names(i.right, out);
-        }
-        _ => {}
     }
 }
 

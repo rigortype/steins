@@ -26,7 +26,7 @@ use crate::children;
 use crate::lower_effect::EffectScanCx;
 
 pub(crate) use drops::{
-    DropSubjects, body_end, hint_class_names, scope_exit_sites, subjects as drop_subjects,
+    DropSubjects, HintClasses, body_end, scope_exit_sites, subjects as drop_subjects,
 };
 pub(crate) use operator::promoted_hook_sites;
 pub use derive::{derive_effect_origins, derive_throw_origins};

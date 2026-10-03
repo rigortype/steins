@@ -31,7 +31,7 @@ pub use layout::{GoverningRoot, PhpTarget, PhpTargetSource, ProjectLayout, fallb
 pub use partition::PackagePartition;
 pub use plugins::PluginFacts;
 pub use shard::{
-    MagicObstacle, MergedTables, PackageShard, ShardSite, class_magic_obstacles,
+    AnonymousClass, MagicObstacle, MergedTables, PackageShard, ShardSite, class_magic_obstacles,
     fallback_package_key, fold_class_aliases, merge_shards,
 };
 
