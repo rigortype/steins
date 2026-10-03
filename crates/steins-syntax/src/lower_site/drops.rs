@@ -38,7 +38,7 @@ use mago_syntax::cst::{
 
 use super::SiteScope;
 use crate::ast::{
-    ArgShape, EffectRecv, OperatorConstruct as C, OperatorFamily as F, SiteKind, SiteOrigin, Span,
+    ArgShape, EffectRecv, NameRef, OperatorConstruct as C, OperatorFamily as F, SiteKind, SiteOrigin, Span,
 };
 use crate::lower_decl::scan_body;
 use crate::lower_expr::instantiation_class;
@@ -86,18 +86,20 @@ fn created(expr: &Expression<'_>) -> Created {
     }
 }
 
-/// An anonymous class's value: one declaring `__destruct`, or using a trait
-/// whose body is not lowered (as the shard's table counts a trait user), runs
-/// user code itself; one extending a class is that class for the chain's sake.
+/// An anonymous class's value: one declaring `__destruct`, or aliasing an imported
+/// trait's method as one, runs user code itself. Otherwise it is each trait it
+/// imports and the class it extends, which the resolver reads as classes (a
+/// trait's name answers whether the trait declares a destructor or cannot be
+/// read); one with neither runs nothing.
 fn anonymous(ac: &AnonymousClass<'_>) -> Created {
     let body = scan_body(ac.members.iter());
-    if body.declares_destructor || !body.used_traits.is_empty() {
+    if body.declares_destructor {
         return Created::Class(vec![None]);
     }
-    match ac.extends.as_ref().and_then(|e| e.types.iter().next()) {
-        Some(parent) => Created::Class(vec![Some(EffectRecv::ClassName(name_ref(parent)))]),
-        None => Created::Harmless,
-    }
+    let parent = ac.extends.as_ref().and_then(|e| e.types.iter().next()).map(name_ref);
+    let receivers: Vec<Option<EffectRecv>> =
+        body.used_traits.into_iter().chain(parent).map(|c| Some(EffectRecv::ClassName(c))).collect();
+    if receivers.is_empty() { Created::Harmless } else { Created::Class(receivers) }
 }
 
 /// The classes a native hint names, as bounds: a value of the class or of a
@@ -125,6 +127,27 @@ fn hint_receivers(hint: &Hint<'_>, out: &mut Vec<Option<EffectRecv>>) {
         Hint::Intersection(i) => {
             hint_receivers(i.left, out);
             hint_receivers(i.right, out);
+        }
+        _ => {}
+    }
+}
+
+/// The classes a native hint names, as written: every `Identifier` member of a union,
+/// an intersection or a nullable, whatever else the hint holds. `self` and `parent`
+/// are not named; the scalars, `array`, `mixed`, `object`, `iterable` and `callable`
+/// are none.
+pub(crate) fn hint_class_names(hint: &Hint<'_>, out: &mut Vec<NameRef>) {
+    match hint {
+        Hint::Identifier(id) => out.push(name_ref(id)),
+        Hint::Nullable(n) => hint_class_names(n.hint, out),
+        Hint::Parenthesized(p) => hint_class_names(p.hint, out),
+        Hint::Union(u) => {
+            hint_class_names(u.left, out);
+            hint_class_names(u.right, out);
+        }
+        Hint::Intersection(i) => {
+            hint_class_names(i.left, out);
+            hint_class_names(i.right, out);
         }
         _ => {}
     }
