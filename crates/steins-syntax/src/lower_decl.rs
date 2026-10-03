@@ -173,6 +173,7 @@ pub(crate) fn walk(
                 used_traits: body.used_traits,
                 held_classes: body.held_classes,
                 holds_parent: body.holds_parent,
+                props: body.props,
                 span: to_span(ac.span()),
             });
             // …and the SAME names are hard refs too (issue #182): a missing parent/

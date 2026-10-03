@@ -98,7 +98,13 @@ fn may_run(cx: &Cx<'_>, frame: &Frame<'_>, receiver: Option<&EffectRecv>) -> boo
         Some(EffectRecv::Parent) => {
             frame.class_fqn.and_then(|own| cx.parent_fqn(own)).is_some_and(|parent| bound(&parent))
         }
-        Some(_) => false,
+        // A property holder is no dropped value's class; the property sites read it apart.
+        Some(
+            EffectRecv::This
+            | EffectRecv::Var(_)
+            | EffectRecv::PropRead(_)
+            | EffectRecv::StaticKw,
+        ) => false,
     }
 }
 

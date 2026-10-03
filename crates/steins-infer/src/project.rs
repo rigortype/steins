@@ -214,6 +214,32 @@ pub(crate) struct Site {
     pub(crate) index: usize,
 }
 
+/// What declares a property, by name and static-ness (ADR-0100 §7, issue #1003): the
+/// question "may a subclass declare it" is one lookup instead of a walk over every class.
+/// Sorted and deduplicated, so the table is a function of the declarations and not of the
+/// order they were read in.
+#[derive(Debug, Default)]
+pub(crate) struct PropertyDeclarers {
+    /// `(property, is static)` to the class-likes (identities, a trait included) and the
+    /// anonymous classes that declare it.
+    pub(crate) declarers: HashMap<(String, bool), Vec<PropertyDeclarer>>,
+    /// A trait's identity to the class-likes that import it directly.
+    pub(crate) importers: HashMap<String, Vec<String>>,
+    /// A class-like name declared more than once (lowercase) to every declaration, as a file
+    /// slot and a class index: what the name may stand for.
+    pub(crate) duplicates: HashMap<String, Vec<(usize, usize)>>,
+}
+
+/// One declaration of a property.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum PropertyDeclarer {
+    /// A class-like, by identity: a class, or a trait whose importers declare it.
+    Named(String),
+    /// A property of an anonymous class's body, or one it imports from a trait, its hint
+    /// resolved: the `extends` parent and the classes the hint names.
+    Anonymous { parent: Option<String>, classes: Vec<String>, parent_hint: bool },
+}
+
 /// The outcome of resolving an FQN against the in-memory project index.
 #[derive(Clone, Copy)]
 pub(crate) enum Res {
@@ -289,6 +315,9 @@ pub(crate) struct Index {
     /// class's parent, at or under it: built on the first drop site that asks
     /// ([`Self::destructor_ancestors`]).
     destructor_ancestors: Lazy<HashSet<String>>,
+    /// Which class-likes declare each property, and which import each trait: built on the
+    /// first property drop that asks ([`Self::property_declarers`]).
+    property_declarers: Lazy<PropertyDeclarers>,
     /// The classes and interfaces the universe's anonymous classes extend or
     /// implement, as resolved in their files (ADR-0099 §4.4).
     anonymous_subclass_parents: HashSet<String>,
@@ -376,6 +405,7 @@ impl Index {
             magic_property_classes: m.magic_property_classes,
             destructor_classes: m.destructor_classes,
             destructor_ancestors: Lazy::default(),
+            property_declarers: Lazy::default(),
             anonymous_subclass_parents: m.anonymous_subclass_parents,
             anonymous_classes: m.anonymous_classes.into_iter().collect(),
             constants: m.constants,
@@ -506,6 +536,15 @@ impl Index {
     /// The classes and interfaces some anonymous class extends or implements.
     pub(crate) fn anonymous_subclass_parents(&self) -> &HashSet<String> {
         &self.anonymous_subclass_parents
+    }
+
+    /// The property declarers of the universe: a fact of its declarations, built once, by
+    /// whichever caller asks first, with `build`.
+    pub(crate) fn property_declarers(
+        &self,
+        build: impl FnOnce() -> PropertyDeclarers,
+    ) -> &PropertyDeclarers {
+        self.property_declarers.0.get_or_init(build)
     }
 
     /// The anonymous classes that have a parent or interfaces (ADR-0100 §7).

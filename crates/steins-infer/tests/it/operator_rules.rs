@@ -2210,3 +2210,39 @@ fn s6d_residue_and_the_constructor_cases_the_review_witnessed() {
         ],
     );
 }
+
+/// n01: a subclass that imports the trait declaring the property is a subclass that declares it
+/// (`<caught>` on PHP); a trait that declares a clean hint, or another property, is no gap. An
+/// anonymous subclass (n02, `new class extends P { public static ?D $t; }`), its own property or
+/// one it imports, is a subclass too.
+#[test]
+fn s6d_a_property_a_subclass_imports_from_a_trait_is_asked_too() {
+    wide(
+        "trait TrN { public static ?D $t = null; }\n\
+         class N01 { public static function reset(): void { static::$t = null; } }\n\
+         final class NK extends N01 { use TrN; }\n\
+         trait TrC { public static ?E $t = null; }\n\
+         class N03 { public static function reset(): void { static::$t = null; } }\n\
+         final class NK3 extends N03 { use TrC; }\n\
+         class N04 { public function close(): void { $this->t = null; } }\n\
+         final class NK4 extends N04 { use TrN2; }\n\
+         trait TrN2 { public ?D $u = null; }\n\
+         abstract class N02 { public static function reset(): void { static::$t = null; } }\n\
+         function mk(): object { return new class extends N02 { public static ?D $t = null; }; }\n\
+         abstract class N05 { public static function reset(): void { static::$t = null; } }\n\
+         function mk5(): object { return new class extends N05 { use TrN; }; }\n\
+         abstract class N06 { public static function reset(): void { static::$t = null; } }\n\
+         function mk6(): object { return new class extends N06 { public static ?E $t = null; }; }\n\
+         abstract class N07 { public static function reset(): void { static::$t = null; } }\n\
+         function mk7(): object { return new class { public static ?D $t = null; }; }",
+        &[
+            ("N01::reset", GAP),
+            ("N03::reset", CLEAN),
+            ("N04::close", CLEAN),
+            ("N02::reset", GAP),
+            ("N05::reset", GAP),
+            ("N06::reset", CLEAN),
+            ("N07::reset", CLEAN),
+        ],
+    );
+}
