@@ -111,7 +111,8 @@ pub(super) fn method_result(
     receiver: &EffectRecv,
     method: &str,
 ) -> Held {
-    method_return(cx, frame, receiver, method).map_or(Held::Unknown, Returned::held)
+    method_return(cx, frame, receiver, method, Reading::Objects)
+        .map_or(Held::Unknown, Returned::held)
 }
 
 /// Whether the result of a method or static call `method` on `receiver`, written in
@@ -122,7 +123,16 @@ pub(super) fn method_float_class(
     receiver: &EffectRecv,
     method: &str,
 ) -> FloatClass {
-    method_return(cx, frame, receiver, method).map_or(FloatClass::Unknown, Returned::float_class)
+    method_return(cx, frame, receiver, method, Reading::Float)
+        .map_or(FloatClass::Unknown, Returned::float_class)
+}
+
+/// What a declared return is read for: whether the value holds an object
+/// ([`Reading::Objects`]) or is a float ([`Reading::Float`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reading {
+    Objects,
+    Float,
 }
 
 /// The declared return of a method or static call, where a gate lets one answer.
@@ -131,13 +141,14 @@ fn method_return<'a>(
     frame: &Frame,
     receiver: &EffectRecv,
     method: &str,
+    reading: Reading,
 ) -> Option<Returned<'a>> {
     let (start, exact) = receiver_start(cx, frame, receiver)?;
     match resolve_in_chain_mode(cx, &start, method, ChainMode::Declaration) {
         Resolution::Found(found) => project_method_return(cx, frame, &start, &found),
         // `__call` may answer a name no class of a wholly project chain declares.
         Resolution::NotFoundChainComplete => None,
-        Resolution::Unknown => engine_method_return(cx, frame, (&start, exact), method),
+        Resolution::Unknown => engine_method_return(cx, frame, (&start, exact), method, reading),
     }
 }
 
@@ -204,11 +215,17 @@ fn project_method_return<'a>(
 /// leaves the project at ([`engine_exit`]): an exact receiver reads the row of the
 /// method it runs; a bound one only that of a final `Throwable` accessor, which no
 /// subclass replaces.
+///
+/// The accessor gates below are about **objects**: an accessor whose property may hold one
+/// runs its `__toString` inside the accessor. They say nothing of whether the result is a
+/// float, which the declared return (`string`, `int`) enforces whatever the property held, so a
+/// [`Reading::Float`] skips them.
 fn engine_method_return<'a>(
     cx: &'a Cx<'_>,
     frame: &Frame,
     (start, exact): (&str, bool),
     method: &str,
+    reading: Reading,
 ) -> Option<Returned<'a>> {
     let exit = engine_exit(cx, start, method)?;
     // `getMessage()` and `getCode()` read an untyped property (`protected $message`,
@@ -222,10 +239,11 @@ fn engine_method_return<'a>(
     // subclass can exist (see [`property_read_is_direct`]). `getTrace()` and
     // `getTraceAsString()` read a private typed property no subclass reaches.
     let accessor = method.to_ascii_lowercase();
-    if ["getmessage", "getcode"].contains(&accessor.as_str()) {
+    if reading == Reading::Objects && ["getmessage", "getcode"].contains(&accessor.as_str()) {
         return None;
     }
-    if ["getfile", "getline"].contains(&accessor.as_str())
+    if reading == Reading::Objects
+        && ["getfile", "getline"].contains(&accessor.as_str())
         && !property_read_is_direct(cx, frame, (start, exact))
     {
         return None;

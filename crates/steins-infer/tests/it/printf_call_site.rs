@@ -446,3 +446,17 @@ fn a_printf_name_handed_over_as_a_callback_is_the_gap() {
         assert!(!has(&s, LOCALE) && !has(&s, PRECISION), "{body}: {s:?}");
     }
 }
+
+/// The `Throwable` accessors are read for their declared return, which holds whatever the
+/// property did: `getMessage()` is a `string` and `getLine()` an `int`, so neither is a float,
+/// although the same accessors stay out of the object-free reading (ADR-0021's 2026-10-03 note on
+/// call results).
+#[test]
+fn a_throwable_accessor_result_is_no_float() {
+    for call in ["$e->getMessage()", "$e->getFile()", "$e->getLine()", "$e->getTraceAsString()"] {
+        let body = format!("return sprintf('%s', {call});");
+        assert_eq!(precision("\\RuntimeException $e", &body), "none", "{call}");
+    }
+    assert_eq!(precision("\\RuntimeException $e", "return sprintf('%s', $e->getPrevious());"), "none");
+    assert_eq!(precision("$e", "return sprintf('%s', $e->getMessage());"), "gap");
+}

@@ -17,8 +17,9 @@ writes a function whose only effect is a setting read as `@phpstan-impure
 global.read.setting.locale`, like any other label; D3 the `%F` remedy is a fix-it on the
 envelope findings only, with no bulk transform; D4 the `precision` cell is in the roster; its
 label `global.read.setting.precision` is registered with its first coloured builtin row,
-which is S3's `%s` of a value that may be a float, and float-to-string operator sites
-wait for ADR-0008's opt-in (recorded in `not-implemented.md`); D5 ADR-0102 follows slices S1–S2 and is independent of S4–S6;
+which is S3's `%s` of a value that is a float (landed, §3.8), and float-to-string operator sites
+wait for ADR-0008's opt-in (recorded in `not-implemented.md`); a builtin reader whose read is
+value-conditional follows the three-way rule of §3.2, never an argument-blind row; D5 ADR-0102 follows slices S1–S2 and is independent of S4–S6;
 D6 `setlocale($c, '0')` narrows to the read in S4 with the other call-site narrowings.
 
 ADR-0021 Decision 2 certifies a builtin pure only when php-src shows it "reads
@@ -151,9 +152,9 @@ global.write.setting
 global.write.setting.locale
 ```
 
-Four registry entries land with slice 1. The cell roster below names the
-later children (`timezone`, `env`, `encoding`, `precision`, `ini`); each is
-registered in the slice that colours its first row, never ahead of one, which
+Four registry entries land with slice 1, and a fifth, `global.read.setting.precision`,
+with slice S3 (§3.8). The cell roster below names the later children (`timezone`, `env`,
+`encoding`, `ini`); each is registered in the slice that colours its first row, never ahead of one, which
 is ADR-0083's "reserved with no rows" case inverted: a label with no row is
 noise in the registry table and a declaration nobody can discharge.
 
@@ -193,12 +194,19 @@ setting at all. Verified on PHP 8.5.11 and in php-src at the pinned commit.
 
 | name | row before | row after |
 | --- | --- | --- |
-| `sprintf`, `vsprintf` | `{}` (via the allowlist; `vsprintf` uncatalogued) | `{global.read.setting.locale}` |
-| `printf`, `vprintf` | `{io.output.buffer}` | `{io.output.buffer, global.read.setting.locale}` |
+| `sprintf`, `vsprintf` | `{}` (via the allowlist; `vsprintf` uncatalogued) | `{global.read.setting.locale}`, and with S3 `global.read.setting.precision` beside it (§3.8) |
+| `printf`, `vprintf` | `{io.output.buffer}` | `{io.output.buffer, global.read.setting.locale}`, and with S3 `global.read.setting.precision` beside them |
 | `fprintf`, `vfprintf` | none | none; a stream writer's row is issue #989 |
 | `setlocale` | `{global.write}` | `{global.write.setting.locale, global.read}` |
 | `localeconv`, `nl_langinfo` | none | `{global.read.setting.locale}` |
 | `strcoll` | none | `{global.read.setting.locale}` (a call-site certified `string` pair, ADR-0021 §3) |
+
+A row's setting read is **proven at a call only where the read is unconditional for the
+call as written**, by name, arity, a literal flag or a literal format. A read conditional on a
+value's runtime type or on a format the site cannot see is `value-dependent-read` until the
+call site rules it in or out (§3.2). `mb_strlen($s)` with one argument reads the encoding
+unconditionally and `date($f, $ts)` reads the timezone unconditionally; neither is a gap, and
+the printf family is the first row whose reads are conditional.
 
 `setlocale(LC_x, '0')` is a query. Narrowing it to the read at a literal `'0'`
 is cheap and is listed as D6; the argument-blind row is the write. A locale of
@@ -223,9 +231,12 @@ format alone: it is kept iff some conversion spec ends in `f`, `g` or `G`.
 `%%` never read the locale. A format the parser cannot read as the engine does
 (a `*` width or precision, an unknown conversion, a bare `'` pad, a position
 of `0` or past the bound — the `None` cases of ADR-0021's 2026-10-03 note)
-keeps the row. A **non-literal** format keeps the row. The verdict is over the
-whole format, never a prefix, for the reason that note gives: a malformed
-format may have rendered an earlier spec before it fails.
+and a **non-literal** format are `value-dependent-read` (§3.2): the row is the
+upper bound, and at a call the locale read is proven by a literal format naming
+`f`, `g` or `G`, absent at a literal naming none, and a coverage gap at the
+other two. The verdict is over the whole format, never a prefix, for the
+reason that note gives: a malformed format may have rendered an earlier spec
+before it fails.
 
 The rule is a second verdict of the same parse. `format_reach`
 (`crates/steins-catalog/src/reach.rs`) already matches the conversion letter
@@ -240,20 +251,43 @@ none; `%s` of a float and `number_format` in none.
 ### 3.2 Where the verdict is read
 
 At the call site, in the effects pass, at the point where the same literal
-format's reach verdict is read — the engine half of #860 (S7-engine), which
-has not landed: `format_reach` has no reader in `steins-infer` today, and
-`arity.rs`'s `printf_family_shape` is ADR-0078's slot counter. Until that seam
-exists, the row's label stands at every printf call, which is the sound side
-(a call reads the locale unless shown not to). When the seam lands, a literal
-`'%d-%s'` drops the read and is pure again, and `'%.2f'` keeps it. Dropping
-the *locale* label is not the claim that the call reads no setting: a `%s` of a
-value that may be a float renders it through `precision`, and no other
-conversion does (witnessed with variable arguments, since 8.4 folds a literal
-`sprintf('%s', 1.5)` at compile time). Under D4 that read is the `precision` cell's, and S3, which reads the
-literal format, carries `global.read.setting.precision` on a `%s` of a value
-that may be a float, registering the label with that row (§2.2). S1 registers
-no precision label and its rows do not carry the read, so S3 must not treat
-`!reads_locale` as purity of the call.
+format's reach verdict is read: the engine half of #860 (S7-engine), landed
+with slice S3 (§3.8). A literal `'%d-%s'` drops the locale read and is pure
+again, and `'%.2f'` keeps it. Dropping the *locale* label is not the claim that
+the call reads no setting: a `%s` of a float renders it through `precision`, and
+no other conversion does (witnessed with variable arguments, since 8.4 folds a
+literal `sprintf('%s', 1.5)` at compile time). Under D4 that read is the
+`precision` cell's, and the rows carry `global.read.setting.precision` beside the
+locale read, registered with them.
+
+**The criterion.** A row's label is *proven* at a call only where the read happens
+on every run of that call as written. A literal `%f` is that: the locale is read
+whatever the value is (an int is converted, an object becomes a number with a
+warning). A `%s` reads `precision` only if its value is a float at run time, and a
+printf call with a format the site cannot see reads the locale only if the format
+turns out to hold an `f`, `g` or `G`: neither is true on every path (`'%d'` reads
+nothing), so the argument-blind row is an upper bound and not a claim. `fopen($x)`
+is the counter-example that shows the difference: it opens something on every
+call, so `io` is true on every path and the argument decides only the child, which
+is why the parent is an honest proven label (ADR-0083); `date($f)` with no
+timestamp reads the clock on every such call for the same reason. For
+`sprintf($fmt, …)` there is no label true on every path. ADR-0021 §3 (the reach
+rule: `Coerced`, `Object` and `Nested` are ruled out by evidence or the call is
+`…?`) and Decision 4 (`array_keys($a, $v)` is a gap, not a coloured upper bound)
+already answer an unknown trigger with a gap and never with a proven label, because
+a proven label on a declared body is a default-floor finding and ADR-0002 admits
+only what is proven on a live path. ADR-0100 §2 is where the Maybe goes:
+`effect.maybe-envelope-exceeded` at `strict`, naming the gap. A read conditional on a
+value is therefore the gap kind `value-dependent-read`, recorded on the site beside any
+`user-code-reach` the same value carries, until the call site rules it in or out. Owner
+ruling O1 forbids silencing a *known* read and is untouched (a literal `%f` under a
+pure envelope reports at the default floor with the `%F` fix-it); ADR-0002 and
+ADR-0100 forbid *manufacturing* one where the trigger is unknown.
+
+The first calibration read the row as the sound side wherever the site could not
+decide, and put `precision` on 2,395 public summaries and 723 findings on one private
+project's pure envelopes, all from `%s` of values nothing showed to be floats; this
+paragraph replaces that reading.
 
 ### 3.3 The fold
 
@@ -300,6 +334,11 @@ ADR-0030's registry. A project that wants the old silence has ADR-0084:
 `--no-tolerated-effects` shows it again. No built-in tolerance is added and
 no new mechanism is needed, which is why O1 costs nothing to implement.
 
+Only a **proven** read is a default-floor finding. A body whose printf call has a
+`value-dependent-read` gap is `…?` in the effect lane, and under a declared envelope it
+reports at `strict` as `effect.maybe-envelope-exceeded` naming the gap, as every other
+effect whose trigger the site cannot see does.
+
 ### 3.6 The remedy: a fix-it to the locale-independent conversion
 
 The finding carries a **fix-it** (ADR-0010's `Fix { title, edits }`,
@@ -332,6 +371,120 @@ every format moved is cheap on the same parser and is D3.
   opposite movement is the win: a reader refused under ADR-0021 §5 becomes a
   known builtin when its slice lands, and its callers stop being `…?`.
 
+### 3.8 Slice S3: the call site reads the literal format (2026-10-03) — PENDING ratification
+
+Landed as S7-engine of Run 2 (#915, #860) and S3 of this run (#1000), and merged with S1,
+since S1 alone over-reports the locale read at every printf call. What it reads and decides:
+
+- **The reach of a literal format.** `reaches_user_code` reads the call's literal format
+  (`ConstArgs::first`) through `read_format` and maps its per-value reaches back onto call
+  positions (`PrintfFamily::reach_at`): a value no `%s` names is `Inert`, a vector is `Nested`
+  only when some conversion is `%s`, and a format the parser cannot read, or that is not a
+  string literal, leaves the row. The rows of the S7 witness table that this decides
+  (`sprintf('%d', $o)`, `'%s %d'` with a literal on the `%s`, `'%2$d %1$s'`, `'%.2f'`,
+  `printf("%05d\n", $o)`, `'100%% %d'`, `"%'*10d|%-5s|…"`, `'%d %d'` with one argument,
+  `vsprintf('%d-%d', $a)`) are exhaustive in both lanes, and the ones that must stay
+  (`'%s'`, `'%d %s'`, `'%2$s %1$d'`, `'%1$d|%1$s'`, a non-literal format, `'%q'`, the loose
+  `in_array`, `in_array` with a flag that is not a literal, `vsprintf('%s', $a)`, `fprintf`)
+  read as they did.
+- **The strict flag.** `ConstArgs::bools` carries a literal `true` or `false` at position 2 or 3;
+  `strict_flag_position` names `in_array` and `array_search` (position 2). A literal `true`
+  compares by identity, which runs no `__toString` at any depth, so needle and haystack are
+  `Inert`; no flag, `false` and a flag that is not a literal keep the loose comparison.
+- **The locale read** is proven at a literal format with an `f`, `g` or `G`, absent at a literal
+  with none, and `value-dependent-read` at a format that is not a literal or that the parser cannot
+  read (§3.1, §3.2), for `sprintf`, `printf`, `vsprintf` and `vprintf` alike, and for a printf name
+  handed over as a callback (the invoker chooses the format).
+- **The `precision` read** (D4) is three-way at each `%s` of a literal format, over a `FloatClass`
+  (`Frame::float_class`): a value **shown a float** (every value its fact admits is one) proves
+  `global.read.setting.precision`; values all **shown no float** drop it; any other value is the
+  `value-dependent-read` gap (`GapKind::ValueDependentRead`, appended last, effect lane only, strict
+  floor by ADR-0100 §2), recorded beside any `user-code-reach` the same value carries. A non-literal
+  or unreadable format and a vector's elements are the gap too. `printf` and `vprintf` keep
+  `io.output.buffer`, which is unconditional. A position the call does not supply renders nothing
+  (`ArgumentCountError`). The rows carry the label as the upper bound, and the call site decides.
+- **The evidence** is recorded per position for `sprintf` and `printf` (`ConstArgs::float_evidence`,
+  a `FloatEvidence`: trace payload, no schema bump) and read by `Frame::float_class`:
+  - *forms*: a float literal, an integer literal wider than `int`, a cast to `float` and a negation of
+    one are `Yes`; a string, integer, boolean or `null` literal, a magic constant, an interpolated
+    string, a concatenation, a comparison or logical connective, `!`, `isset`, `empty`, a cast to `int`,
+    `bool`, `string` or `array`, an array literal and a negated integer literal are `No`; arithmetic is
+    neither (integers overflow into a float);
+  - *conditionals*: a ternary, `?:` and `??` are as their branches agree, each branch read as a
+    top-level value;
+  - *variables*: a by-value parameter is as its declared type says (`float` alone is `Yes` while the
+    frame never writes it, a type with no `float` or `mixed` is `No`) and a local as the writes the scan
+    carried say (a plain no-float form is `No`; a call, a constant or a ternary written to it is carried
+    and judged as it would be alone), each only while no named call may rebind it, and withheld when a
+    write may leave a float the scan cannot name (arithmetic, `++` and `--`, a loop or `catch` binding,
+    a destructuring target, a by-reference argument);
+  - *properties*: a typed `$this->p` and `self::$p`, `Foo::$p`, `parent::$p` are as their declared type
+    says, on the rule of an operand shape's property (an ancestor's private property, a hooked one and
+    an untyped one answer nothing);
+  - *calls*: a plain, static or `$this` call, and a method on a declared receiver, is as its declared
+    return says (S8's classifier: a builtin's mined row, a project function or method's native hint,
+    on the same gates, the version gate included); the `Throwable` accessors are read for their
+    declared type here even though they stay out of the object-free reading, since the declared return
+    holds whatever the property did;
+  - *constants*: a global constant by ADR-0094's resolution (the mined table, the platform classes, a
+    project declaration) and a class constant by its literal initializer.
+  Float-to-string operator sites (`(string) $f`, `.`, `echo`) and the other float renderers (`strval`,
+  `implode`, `print_r`) still carry no `precision` read; that waits for ADR-0008's opt-in and the rows of
+  S4, and a builtin reader whose read is value-conditional follows this three-way rule when its row
+  lands.
+- The `numfmt_get_attribute` row stated `int|false`, which the evidence would have read as no float;
+  the function returns a float for the float attributes (PHP 7.4.33, 8.4.25 and 8.5), so the miner
+  corrects the row at its source (`SOURCE_CORRECTIONS` in `xtask/src/mine_function_map.rs`, which
+  refuses to run once the pinned map says anything else) and the table reads `int|float|false`.
+  A sweep of 2,192 functions and 3,584 engine methods found no other.
+- No persisted format changes: `ConstArgs` is trace payload, and its two new fields are appended
+  after `ints`.
+
+Measured on the ten public packages (`check --profile strict --no-php --vendor-diagnostics
+--no-cache`, `effect-diff`, the five transform dry-runs), head against `origin/master` (what
+lands), against the first S3 head (before the calibration) and against S1's head:
+
+- `check` against master moves only in `throw.maybe-undeclared`: 79 findings fewer (composer 30,
+  phpunit 37, console 4, process 3, monolog 2, guzzle 2, Carbon 1) and 8 reworded, each at a site
+  whose `user-code-reach` is gone (61 at an `in_array` or `array_search` with a literal `true`, 11 at
+  a printf call whose literal format reaches no value, 15 at a call of a function that lost the gap
+  inside); every other id and the default profile's findings are identical (composer's
+  vendor-suppressed count falls from 325 to 323, the two vendored `Filesystem.php` sites). The
+  calibration moves no strict finding against the first S3 head either: `value-dependent-read` is an
+  effect-lane gap and no public package declares an envelope over a printf call, so
+  `effect.maybe-envelope-exceeded` stays 0 and the possibly-grade rows of
+  `xtask/fp-gate/possibly_expected.toml` are unchanged by it.
+- `transform effects-envelope` against master: **+5** `@phpstan-all-methods-pure` class tags, none
+  removed, no `@phpstan-impure` tag written; S1's churn (95 `@phpstan-impure
+  global.read.setting.locale` tags written or extended, 35 class-wide pure tags lost) is retracted in
+  full. `throws-envelope`, `loop-to-array-map`, `phpdoc-honesty` and `phpdoc-to-native` are
+  byte-identical to every base.
+- `effect-diff` against master: `global.read.setting.locale` on **16** of 28,846 function summaries
+  (S1 alone: 4,184; the first S3 head: 352), each a function that contains, or reaches through a
+  callee, a literal `%f`, `%g` or `%G`; **no** `global.read.setting.precision` (the first S3 head: 2,395),
+  since no `%s` on the public packages is shown a float; and the 12 `setlocale` refinements, which are
+  S1's. The 336 summaries the first head kept a locale label on through a non-literal format and the
+  2,395 precision labels became `value-dependent-read` gaps or, where the evidence grew, nothing.
+- Per file (`annotate`, no cross-file edges), 801 of 29,444 summaries carry `value-dependent-read`,
+  every one already `…?` on master, so no function loses exhaustiveness to the calibration (5,687
+  exhaustive, 18 more than master) and no exhaustive function carries a setting read. The gap's call
+  sites, by what the evidence lacked (a token scan, an upper bound, since the engine proves some of
+  them): a method call result on a receiver the scan cannot name (186), a format that is not a
+  literal (92), a local assigned from a call the write summary does not carry (77), a local bound by
+  a `foreach`, `list`, `catch` or closure (54), a local assigned from something else (38), an untyped
+  `$this->p` (32), an array element (32), a function call result whose row the target's version gate
+  declines or that has none (25), a ternary or `??` with a branch that shows nothing (20), a property
+  of another object (18), a class or global constant the project does not state (12), an untyped
+  parameter (4).
+
+Left, the evidence queue, each with its reason: a method call on a receiver the scan cannot name
+(`$this->a->m()`, a `catch` variable, a result held in a variable), and a local assigned from one,
+need the frame's flow; a `foreach` or `catch` binding needs the iterated type; an array element
+and a property of another object need a shape and a class fact the syntax layer does not carry; a
+vector's elements (`vsprintf`) could be read element by element for an array literal; the declared
+return of a builtin is read only where the target's version gate admits it; `array_keys`' third
+argument is the same strict flag and is not read; `fprintf` and `vfprintf` have no row (#989).
+
 ## 4. Decision: ADR-0021 Decision 2 is amended
 
 Decision 2's bar — "reads only its arguments: no ini setting, locale, clock,
@@ -351,8 +504,8 @@ call-site certified `string`-parameter name under ADR-0021 §3, with nothing
 from this ADR on its row.
 
 #991 is resolved as: `sprintf('%f', $x)` is `{global.read.setting.locale}`
-and not exhaustive-pure; `sprintf('%d-%s', 1, 'a')` is `{}` once S7-engine
-reads the literal; a dynamic format keeps the read; `vsprintf` and `vprintf`
+and not exhaustive-pure; `sprintf('%d-%s', 1, 'a')` is `{}` (S7-engine reads
+the literal, §3.8); a dynamic format keeps the read; `vsprintf` and `vprintf`
 follow the same rule; `printf` keeps its output label beside it; a pure
 envelope over the read reports and offers `%F`.
 
@@ -453,9 +606,14 @@ effects-envelope` tags: a function whose only effect was the locale read now
 writes `@phpstan-impure global.read.setting.locale` where it wrote nothing
 or a class-level pure tag (D2); `transform throws-envelope` byte-identical.
 
+Gates S3 added with the calibration (§3.2): the private project's default-profile
+`effect.envelope-exceeded` equals S1's count (+0), because only a proven read is a
+default-floor finding; its strict `effect.maybe-envelope-exceeded` gains findings that each
+name `value-dependent-read`; and the public packages' default profile findings are identical.
+
 ## 7. Consequences
 
-- The registry grows four entries and the spec's label table with them;
+- The registry grows four entries (five with S3's `precision`) and the spec's label table with them;
   `effect.unknown-label` suggestions reach them by distance.
 - `effect_labels` answers a coloured row for `sprintf` ahead of the allowlist's
   empty one (the `colored.or_else(…)` order already does this); the test

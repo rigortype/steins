@@ -284,7 +284,10 @@ discardable set covers it by prefix. A read is an effect like any other: no
 envelope admits it by default, `Pure` included. A literal argument can decide
 it lexically — a printf format with no `f`/`g`/`G` conversion drops the
 locale read; `%F`, `%h` and `%H` are the locale-independent spellings a
-fix-it offers.
+fix-it offers. A read is a proven label only where it is unconditional for the
+call as written; one that depends on a value the site cannot see (a `%s` of a
+value not shown to be a float, a format that is not literal) is the
+`value-dependent-read` coverage gap until the site rules it in or out.
 _Avoid_: pure modulo ambient state / practically pure (the rejected
 convenience, owner ruling 2026-10-03), locale-sensitive as a catalog
 disposition (a reason to colour a row, not to refuse one), epoch-stable read
@@ -301,7 +304,8 @@ replaces)
 **Coverage gap** (ADR-0099):
 A recorded reason an effect or throw answer is incomplete — a dynamic
 callee, an unknown class, unseen code, user code an operand may reach, a
-missing row on an axis. A body is `…?` on a lane exactly when its sites, or a
+missing row on an axis, a setting read that depends on a value the site cannot
+see. A body is `…?` on a lane exactly when its sites, or a
 callee its edges reach, left a gap on that lane; exhaustive is modulo handlers
 attributed to their registration (ADR-0099 §4.5) and the drops ADR-0100 §7 lists
 as residue. Not a **Dischargeable

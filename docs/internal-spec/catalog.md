@@ -256,21 +256,24 @@ locale or an ini setting (`basename`, `pathinfo`, `strnatcmp`,
 
 **The locale cell** (ADR-0101, issue #991) has four registry labels,
 `global.read.setting`, `global.read.setting.locale`, `global.write.setting` and
-`global.write.setting.locale`, and these coloured rows. The coloured row answers
+`global.write.setting.locale`, and the `precision` cell has `global.read.setting.precision`,
+registered with its first coloured row (a `%s` of a float, ADR-0101 D4). These are the coloured rows. The coloured row answers
 ahead of the fold allowlist's empty one, so `sprintf` is on the allowlist and
 carries a read; the allowlist is permission to ask the engine, not a promise
 that a call is pure, and Decision 2's bar for an **empty** row is unchanged.
 
 | name | row |
 | --- | --- |
-| `sprintf`, `vsprintf` | `{global.read.setting.locale}` |
-| `printf`, `vprintf` | `{io.output.buffer, global.read.setting.locale}` |
+| `sprintf`, `vsprintf` | `{global.read.setting.locale, global.read.setting.precision}` |
+| `printf`, `vprintf` | `{io.output.buffer, global.read.setting.locale, global.read.setting.precision}` |
 | `localeconv`, `nl_langinfo`, `strcoll` | `{global.read.setting.locale}` |
 | `setlocale` | `{global.write.setting.locale, global.read}` (the argument-blind row: the write, and the environment block read for `''` and `null`, coarse until the env cell has a label; `setlocale($c, '0')` is a query, narrowed later; a call with exactly two arguments whose locale is a written non-empty string other than `'0'` narrows to `{global.write.setting.locale}`, `narrowed_setlocale_labels`) |
 
-`fprintf` and `vfprintf` still have no row. The rows are argument-blind and the
-read stands at every call until a call site reads a literal format with
-`format_reads_locale`; `strcoll` is a rowed name, so its `string` parameters are
+`fprintf` and `vfprintf` still have no row. Both reads of a printf row are **conditional on the
+call** (`'%d'` reads neither), so the row is an upper bound and not a claim about every call: the
+effects pass reads a literal format and the arguments at the call site, proves, drops or gaps each
+read (`site/printf.rs` in `steins-infer`, below), and never leaves a conditional read as a label it
+cannot show (ADR-0101 §3.2); `strcoll` is a rowed name, so its `string` parameters are
 held to the reach rule like any other coloured row. The fold seam refuses a
 printf-family call whose literal format keeps the read (`fold_reads_ambient_setting`
 in `steins-infer`'s `fold.rs`): the runner always answers under `LC_NUMERIC=C`,
@@ -298,9 +301,40 @@ one walk of the bytes answers both questions and they cannot disagree about
 which specs the format holds. `printf_family` names the format position (0 for `sprintf`, `printf`,
 `vsprintf`, `vprintf`) and whether the values are one array, which is `Nested`
 when some conversion is `%s` and `Inert` when none is. `fprintf` and
-`vfprintf` have no row of any kind and are not in it. The engine reads a
-literal format at the call site (a later slice); the catalog answers only for
-the format it is given.
+`vfprintf` have no row of any kind and are not in it. The catalog answers only for the
+format it is given; the effects pass reads the call's literal format
+(`ConstArgs::first`, a string literal with no interpolation) and does three things with
+the answer (ADR-0101 §3.2 and D4, ADR-0021's 2026-10-03 note on call-site refinements):
+
+- **Reach.** `reaches_user_code` maps `format_reach`'s per-value reaches back onto call
+  positions (`PrintfFamily::reach_at`), so a position no `%s` names is `Inert` and a
+  vector is `Nested` only when some conversion is `%s`. A format the parser cannot read, or
+  that is not a literal, leaves the row.
+- **The locale read.** A literal format with an `f`, `g` or `G` proves
+  `global.read.setting.locale`; one with none drops it; a format that is not a literal, or that the
+  parser cannot read, is the `value-dependent-read` gap and no label.
+- **The `precision` read** is three-way at each `%s` of a literal format. A value **shown a float**
+  proves `global.read.setting.precision`; values all **shown no float** drop it; any other value is
+  the `value-dependent-read` gap, recorded beside any `user-code-reach` the value carries. A
+  non-literal format, a callback use of a printf name and a vector's elements are the gap too. A
+  position the call does not supply renders nothing (`ArgumentCountError`).
+  The syntax layer records evidence per position for `sprintf` and `printf`
+  (`ConstArgs::float_evidence`, a `FloatEvidence`) and `Frame::float_class` reads it, as `Yes`, `No` or
+  `Unknown`: a float form (a float literal, an integer literal wider than `int`, a cast to `float`,
+  their negation) is `Yes` and a no-float form (a string, integer, boolean or `null` literal, a
+  concatenation, an interpolated string, a comparison, a cast to `int`, `string`, `bool` or `array`,
+  an array literal) is `No`; a ternary or `??` is as its two branches agree; a by-value parameter is
+  as its declared type says (`float` alone is `Yes` while the frame never writes it, a type with no
+  `float` or `mixed` is `No`, anything else `Unknown`) and a local as the writes the scan carried
+  say, each only while no named call may rebind it; a typed `$this->p` or `self::$p` is as its declared
+  type says; a call is as its declared return says (a builtin's mined row, a project function or
+  method's native hint); a global constant is as its value is (the catalog's table and
+  ADR-0094's platform classes), and a class constant as its literal initializer is.
+
+A literal `true` strict flag is the other call-site refinement of the reach rule
+(`strict_flag_position`, `ConstArgs::bools`): `in_array` and `array_search` compare by identity,
+which runs no `__toString`, so needle and haystack are `Inert`; no flag, `false` and a flag
+that is not a literal `true` keep the loose comparison.
 
 Coverage is frequency-seeded (`docs/notes/20260722-builtin-frequency.md`) plus
 the gaps identified in `docs/research/phpsrc-mining/effects_gaps.md`:
