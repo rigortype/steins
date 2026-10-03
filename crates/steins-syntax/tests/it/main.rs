@@ -7,6 +7,7 @@ mod byte_lossy_source;
 mod cast_value;
 mod closures;
 mod deep_nesting;
+mod destructor_body;
 mod docblock_assoc;
 mod dynamic_call_var;
 mod foreach_sites;

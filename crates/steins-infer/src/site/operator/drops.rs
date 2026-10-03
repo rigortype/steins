@@ -137,7 +137,7 @@ fn destructor_ancestors(cx: &Cx<'_>) -> HashSet<String> {
     let mut pending: Vec<String> = index
         .destructor_classes()
         .iter()
-        .chain(index.anonymous_subclass_parents())
+        .chain(index.anonymous_destructor_parents())
         .map(|name| cx.class_identity(name))
         .collect();
     pending.extend(

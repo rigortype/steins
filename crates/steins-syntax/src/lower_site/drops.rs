@@ -32,14 +32,15 @@ use std::collections::BTreeMap;
 
 use mago_span::HasSpan;
 use mago_syntax::cst::{
-    AnonymousClass, Argument, ArgumentList, ClassLikeMember, Expression, FunctionLikeParameterList,
-    Hint, Node, Variable,
+    AnonymousClass, Argument, ArgumentList, Expression, FunctionLikeParameterList, Hint, Node,
+    Variable,
 };
 
 use super::SiteScope;
 use crate::ast::{
     ArgShape, EffectRecv, OperatorConstruct as C, OperatorFamily as F, SiteKind, SiteOrigin, Span,
 };
+use crate::lower_decl::scan_body;
 use crate::lower_expr::instantiation_class;
 use crate::names::name_ref;
 use crate::{bytes_to_string, children, strip_dollar, to_span};
@@ -68,16 +69,16 @@ enum Created {
     /// An anonymous class with no destructor of its own and no parent: its value
     /// runs nothing when dropped.
     Harmless,
-    /// A class the drop may run a destructor of: `None` when the lowering
-    /// already knows the class declares one.
-    Class(Option<EffectRecv>),
+    /// The classes the drop may run a destructor of, one receiver each: `None`
+    /// when the lowering already knows the value declares one.
+    Class(Vec<Option<EffectRecv>>),
 }
 
 /// What `expr` creates when it is a `new`.
 fn created(expr: &Expression<'_>) -> Created {
     match expr.unparenthesized() {
         Expression::Instantiation(inst) => match instantiation_class(inst) {
-            Some(class) => Created::Class(Some(EffectRecv::ClassName(class))),
+            Some(class) => Created::Class(vec![Some(EffectRecv::ClassName(class))]),
             None => Created::NotNew,
         },
         Expression::AnonymousClass(ac) => anonymous(ac),
@@ -89,16 +90,12 @@ fn created(expr: &Expression<'_>) -> Created {
 /// whose body is not lowered (as the shard's table counts a trait user), runs
 /// user code itself; one extending a class is that class for the chain's sake.
 fn anonymous(ac: &AnonymousClass<'_>) -> Created {
-    let declares = ac.members.iter().any(|m| match m {
-        ClassLikeMember::Method(m) => bytes_to_string(m.name.value).eq_ignore_ascii_case("__destruct"),
-        ClassLikeMember::TraitUse(_) => true,
-        _ => false,
-    });
-    if declares {
-        return Created::Class(None);
+    let body = scan_body(ac.members.iter());
+    if body.declares_destructor || !body.used_traits.is_empty() {
+        return Created::Class(vec![None]);
     }
     match ac.extends.as_ref().and_then(|e| e.types.iter().next()) {
-        Some(parent) => Created::Class(Some(EffectRecv::ClassName(name_ref(parent)))),
+        Some(parent) => Created::Class(vec![Some(EffectRecv::ClassName(name_ref(parent)))]),
         None => Created::Harmless,
     }
 }
@@ -217,10 +214,12 @@ impl Collect {
         if first {
             subject.clean_first = (self.loops == 0).then(|| to_span(span).start);
         }
-        if let Created::Class(receiver) = created
-            && !subject.receivers.contains(&receiver)
-        {
-            subject.receivers.push(receiver);
+        if let Created::Class(receivers) = created {
+            for receiver in receivers {
+                if !subject.receivers.contains(&receiver) {
+                    subject.receivers.push(receiver);
+                }
+            }
         }
     }
 }
@@ -302,9 +301,9 @@ fn arguments(list: &ArgumentList<'_>, sx: &SiteScope<'_>, out: &mut Vec<SiteOrig
 /// A site for `expr` when it is a `new` whose value dies in the expression that
 /// holds it.
 fn temporary(expr: &Expression<'_>, sx: &SiteScope<'_>, out: &mut Vec<SiteOrigin>) {
-    if let Created::Class(receiver) = created(expr) {
+    if let Created::Class(receivers) = created(expr) {
         let span = to_span(expr.unparenthesized().span());
-        out.push(site(sx, span, C::DropTemporary, &[receiver]));
+        out.push(site(sx, span, C::DropTemporary, &receivers));
     }
 }
 
