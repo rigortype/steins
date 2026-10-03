@@ -315,10 +315,11 @@ _Avoid_: obstacle (taken by Dischargeable obstacle)
 
 **Drop site** (ADR-0100 §7):
 A place a frame releases a value — `unset`, a reassignment, the end of the
-body, a `new` that dies in the expression holding it — resolved to the
-`destructor` gap when the value's class reaches a `__destruct` (its chain, a
-trait it imports, a subclass, or a typed property's class; a class no file
-declares may declare one), and to nothing otherwise. Never an
+body, a `new` that dies in the expression holding it, a write to or `unset` of
+a property — resolved to the `destructor` gap when the value's class (for a
+property, its declared hint) reaches a `__destruct` (its chain, a trait it
+imports, a subclass, or a typed property's class; a class no file declares may
+declare one), and to nothing otherwise. Never an
 edge: the destructor runs in whichever frame frees the last reference.
 _Avoid_: destructor site, release site
 
