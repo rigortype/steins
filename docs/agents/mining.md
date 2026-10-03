@@ -16,6 +16,12 @@ can voice.
 | `phpsrc-mining/param_facts.toml` | `mine-param-facts` | a platform's own builtins, and a by-ref disagreement refused rather than merged (issue #703) |
 | `phpsrc-mining/resource_params.toml` | `mine-resource-params [--php-src DIR]` | no engine: the stubs at the pinned php-src checkout are the only record of a `@param resource` position (ADR-0097 §2.5); the engine's part is the tripwire at the call site. The curated columns (`accepts_closed`, `closes`, `kind`, `probe`) are carried forward from the committed file by `(function, index)`, never invented, and a run refuses to write when one is orphaned |
 
+A row the pinned phpstan map states wrongly is corrected at the source, in
+`SOURCE_CORRECTIONS` of `xtask/src/mine_function_map.rs` (the function, what the map says, what it
+should say, and the witness). The correction is applied before the countersign, and a run refuses to
+write once the map says anything else, so a re-mine neither loses it nor outlives the upstream fix.
+`numfmt_get_attribute` (`int|false`, really `int|float|false`) is the one so far.
+
 Run `cargo xtask gen-catalog` after any of them, and commit the TOML and the
 generated `.rs` together — `gen-catalog --check` is a CI gate and the two are one
 artefact.

@@ -409,6 +409,45 @@ change the kinds behind their `…?` (9 swap `no-effect-row` for
 4 gain `user-code-reach` beside a `no-effect-row` another call keeps), every
 one an `array_search` call.
 
+### Note (2026-10-03): a literal printf format and a literal strict flag refine the call-site rule — PENDING ratification
+
+Issue #860, engine half (run 2, S7-engine; slice S3 of the ambient-settings run, #1000).
+**Status: PENDING ratification.** Designed autonomously under the owner's standing delegation. The
+note above says what the catalog answers for a literal printf format; this one says where the call
+site reads it, and adds the strict flag of `in_array` and `array_search`. Decision 4's list of what
+the call site may use to rule a reaching argument out gains two forms of **literal argument**, both
+read off the call's own `ConstArgs` and neither needing a flow environment:
+
+- **A literal printf format.** `reaches_user_code` reads the string literal at the family's format
+  position (`printf_family`) through `read_format` and maps its per-value reaches back onto call
+  positions (`PrintfFamily::reach_at`): a position no `%s` names is `Inert` whatever it holds, a
+  vector is `Nested` only when some conversion is `%s`, and the strongest conversion of a value
+  wins. A format that is not a string literal (a variable, an interpolated string, a
+  concatenation, a spread or named list) or that the parser cannot read leaves the row's
+  reading. In the throw lane the same reach decides the same gap, since the rule is shared.
+- **A literal `true` strict flag.** `ConstArgs::bools` carries a literal boolean at position 2 or
+  3 (position 1 is `ConstArgs::second`'s `CallTarget::Bool`), and `strict_flag_position` names the
+  builtins whose strict comparison runs no user code: `in_array` and `array_search`, position 2.
+  With `true` there, needle and haystack are compared by identity (`===`), which converts nothing
+  and calls nothing at any depth (PHP 8.5.11: `in_array($o, [$o2], true)` prints nothing, the loose
+  call prints `[S::__toString]`), so both positions are `Inert`. No flag, a literal `false`, and a
+  flag that is not a literal `true` (`$f`, `1`, `!false`, a named `strict:`) keep the loose
+  reading. `array_keys`' third argument is the same flag and is left to a later amendment.
+
+The witnesses are rows 7.1 to 7.16 of the run's S7 table, read in both lanes (`printf_call_site.rs`
+in `steins-infer`): 7.1, 7.4, 7.6, 7.9, 7.11, 7.12 (with `array_search`) and 7.15's `%d` form become
+exhaustive; 7.2, 7.3, 7.5, 7.7, 7.8, 7.10, 7.13, 7.14, 7.15's `%s` form and 7.16 (`fprintf`, no row
+of any kind, #989) read as they did. The same call-site read decides the locale and `precision`
+reads of ADR-0101 (§3.2, §3.8), as a proven label where the read is unconditional for the call, nothing
+where the site shows there is none, and the `value-dependent-read` gap where it depends on a value or a
+format the site cannot see: the same answer this note's reach rule gives an unknown trigger. On the ten
+public corpus packages, `check` under `--profile strict
+--no-php --vendor-diagnostics` loses 79 `throw.maybe-undeclared` findings (61 at an `in_array` or
+`array_search` with a literal `true`, 11 at a printf call whose literal format reaches no value, 7 at
+the call of a function that lost the gap inside) and rewords 8 whose kind list lost
+`user-code-reach`; nothing else moves, and `transform effects-envelope` gains 5 class-wide pure tags
+and loses none.
+
 ### Note (2026-10-03): a call result is read off its declared return — PENDING ratification
 
 Issue #877, run 2 (S8). **Status: PENDING ratification.** Designed autonomously under the owner's

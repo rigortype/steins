@@ -658,7 +658,7 @@ the kinds that make it `…?`. The kinds are `dynamic-callee`, `unknown-class`,
 `unresolved-throw`, `no-effect-row`, `no-throw-row`, `argument-list`,
 `flag-dependent-throw`, `method-not-found`, `non-final-this`,
 `operator-to-string`, `operator-magic-property`, `operator-array-access`,
-`operator-iteration`, `operator-clone` and `destructor` (`operator-…` is an
+`operator-iteration`, `operator-clone`, `destructor` and `value-dependent-read` (`operator-…` is an
 operator whose operand's class the analysis cannot pin: `.`, `echo`, `$o->p`,
 `$o['k']`, `foreach`, `clone`; the name of a dynamic property, `$o->$n`, and
 the value of an offset write into something that may be a string, `$s[0] = $o`,
@@ -669,7 +669,11 @@ value that may run `__destruct` when dropped, at an `unset`, a reassignment,
 the end of the body or a `new` that dies in the expression holding it: the
 class declares `__destruct`, imports a trait, has a subclass that may, or
 holds such a class in a typed property; an untyped value, an array and a
-closure's captures are not covered).
+closure's captures are not covered; `value-dependent-read`, effect lane only, is a setting read
+that depends on a value the site cannot see: a printf call's `%s` of a value not shown to be a
+float, which reads the `precision` ini only for a float, or a format that is not a literal, which
+reads the locale only if it holds an `f`, `g` or `G`; a read the call as written makes on every run
+is a label and never this).
 
 > **If you know PHPStan or Psalm:** this is the batch answer to what you get
 > from sprinkling `\PHPStan\dumpType()` and rerunning — a whole file's

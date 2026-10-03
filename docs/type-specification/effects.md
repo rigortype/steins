@@ -42,7 +42,7 @@ eval
 exit
 ffi
 global.read   global.write
-     global.read.setting   global.read.setting.locale
+     global.read.setting   global.read.setting.locale   global.read.setting.precision
      global.write.setting  global.write.setting.locale
 io   io.db   io.fs   io.fs.read   io.fs.write   io.input   io.ipc
      io.net  io.net.http   io.process   io.signal
@@ -114,24 +114,36 @@ effect of reading a cell and a setting write the effect of rewriting one.
 | --- | --- | --- |
 | `global.read.setting` | a read of some setting; the parent of every cell's read | — (no row; the roster's later cells and a dynamic ini name hang here) |
 | `global.read.setting.locale` | a read of `LC_*` as `setlocale` leaves it | `sprintf`, `vsprintf`, `printf`, `vprintf` (`%f`, `%g`, `%G` render the locale's decimal point), `localeconv`, `nl_langinfo`, `strcoll` |
+| `global.read.setting.precision` | a read of the `precision` ini | `sprintf`, `vsprintf`, `printf`, `vprintf` (a `%s` of a float renders it through `precision`: `1234.5678` is `1.23E+3` at `precision=3`) |
 | `global.write.setting` | a rewrite of some setting | — |
 | `global.write.setting.locale` | a rewrite of the locale cell | `setlocale` (which also carries a coarse `global.read` for the environment block it consults when its locale is `''` or `null`, until the env cell has a label; a call whose only locale is a written non-empty string reads no environment and is the write alone) |
 
-The four are `global.read` and `global.write` children, so prefix subsumption carries
+The five are `global.read` and `global.write` children, so prefix subsumption carries
 every existing consumer: a declared `global.read` or `global` envelope admits a setting
 read, a declared `global.write` admits `setlocale`'s write (a locale of `''` or `null` also reads the environment, which needs `global.read` or `global` as well), and a discarded locale read is still a
 discardable read (ADR-0096). `global.read` without a child stays the row for a read the
 catalog cannot place in a cell. A cell's label is registered in the slice that colours its
-first row and never ahead of one, so the timezone, environment, encoding, `precision` and
-ini cells the ADR names are not in the registry yet. A `%s` of a float reads `precision`, whose label `global.read.setting.precision` is registered with the call-site slice that reads a literal format (ADR-0101 D4), so a printf call that drops the locale read is not thereby free of settings.
+first row and never ahead of one, so the timezone, environment, encoding and ini cells the
+ADR names are not in the registry yet. A `%s` of a float reads `precision`
+(`global.read.setting.precision`, registered with that first row, ADR-0101 D4), so a printf
+call that drops the locale read is not thereby free of settings; the float-to-string operator
+sites (`(string) $f`, `.`, `echo`) and the other float renderers (`strval`, `implode`,
+`print_r`) do not carry the read yet.
 
-The printf family's row is argument-blind and keeps the read at every call. A **literal**
-format settles it lexically once a call site reads the format: the read is kept iff some
-conversion ends in `f`, `g` or `G`, and `F`, `e`, `E`, `h`, `H`, every integer and
-character conversion, `s` and `%%` never read it. A format the parser cannot read as the
-engine does, and a non-literal format, keep the read. Until the call site reads the
-literal, `sprintf('%d', $x)` carries the row's label too, which is the sound side. The
-fold seam applies the same verdict: a printf-family call whose literal format keeps the
+Both reads of the printf family are **conditional on the call** (`sprintf('%d', $x)` reads
+neither), so the catalog row is an upper bound and a label is proven at a call only where the read
+is unconditional for the call as written (ADR-0101 §3.2). A **literal** format settles the locale
+read lexically: it is proven iff some conversion ends in `f`, `g` or `G`, and `F`, `e`, `E`, `h`,
+`H`, every integer and character conversion, `s` and `%%` never read it, so `sprintf('%d-%s', 1,
+'a')` is pure again and `sprintf('%.2f', $x)` reports its read. A `%s` reads `precision` only if its
+value is a float: a value shown a float proves the label, one shown no float (a string, integer,
+boolean or `null` literal, a concatenation, a comparison, a cast to one of those, a parameter or
+local nothing may leave a float in whose declared type admits none, a typed property, a call whose
+declared return admits none, a constant of such a value) is nothing, and a value the site cannot
+place either way, a format that is not a literal or that the parser cannot read, and a vector's
+elements are the coverage gap `value-dependent-read`, which reports at `strict` as
+`effect.maybe-envelope-exceeded` under a declared envelope and is never a default-floor finding.
+The fold seam applies the same locale verdict: a printf-family call whose literal format keeps the
 read is not folded, because the sidecar runs under `LC_NUMERIC=C` and a fold is a claim
 about the project's own runtime. `sprintf('%d-%s', 1, 'a')` still folds.
 
