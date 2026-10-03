@@ -142,6 +142,31 @@
 # `vendor/` indexed and its findings not counted: +14 `throw.maybe-undeclared`, all at a drop site,
 # and 8 more with the kind in their list; the base count reproduces 888.
 
+# Triage of the `throw.maybe-undeclared` that issue #882's precision slice (S6c) moves, 2026-10-03
+# (ADR-0100's amendment of that date), over the ten public packages, measured as `steins check
+# --profile strict --no-php --vendor-diagnostics --no-cache` on the merge base and on the head,
+# the three changes taken one at a time (8,122 findings on the base, 8,077 on the head): (a) an
+# anonymous class lists its parent in the destructor closure only when its own body declares a
+# destructor or imports a trait that may: -92 (phpunit 84, console 8; 607 drop sites go: phpunit's
+# `Constraint`, `Operator` and `Printer` trees, which its tests subclass anonymously, and
+# flysystem's adapters); (b) a class imports a trait into the closure only when the trait
+# declares or aliases a destructor, transitively, or cannot be read, and a trait's typed
+# properties are read off their hints: -14 (composer 5, phpunit 4, Carbon 4, guzzle 1; 1,117 more
+# drop sites go, Carbon's `Date` users above all with 640, which (c) brings back through the
+# `TranslatorInterface` property a trait imports, a name this checkout lacks); (c) a class no
+# file declares and the engine does not, as a parent, a parameter or property hint or an imported
+# trait, may declare one: +61 (composer 27, guzzle 19, phpunit 11, monolog 3, console 1; 2,774
+# drop sites, 1,156 of them a hint, 1,604 a `new` of a declared class whose chain or properties
+# reach a name nothing here declares; 1,873 of the 2,774 sit in a test directory, and all but 76
+# functions were already `…?` for another reason). A `new` of a class no file declares is left to
+# the unknown-class gap it records already, which kept 1,510 sites out. (c) is the incompleteness
+# of a checkout with no `vendor/` (PSR types, Symfony contracts): with the tree indexed the names
+# resolve and the rule reads as it does for any class. Over the whole change 70 functions stop
+# being effect-exhaustive and 58 become so (the three changes one at a time: (a) 53 gained, (b) 11
+# gained, (c) 76 lost); the findings go from 8,122 to 8,077.
+# `phpstan/phpstan-src` is not remeasured: it has no public checkout here and its row keeps the
+# base value, so the local fp-gate decides it.
+
 # Triage of the `throw.maybe-undeclared` that the call-site read of a literal printf format and a
 # literal strict flag removes, 2026-10-03 (issues #860 and #991, ADR-0101 §3.8, slice S3), over the
 # ten public packages: -79 findings in seven of them (phpunit 37, composer 30, console 4, process 3,
@@ -185,7 +210,8 @@
 # 3421 → 3301  2026-10-03 (issue #877): -120 throw.maybe-undeclared (operator-to-string 80, operator-array-access 19, user-code-reach 17, operator-iteration 4; 7 in vendored copies and fixtures); the triage is above the composer row.
 # 3301 → 3306  2026-10-03 (issue #882): +5 throw.maybe-undeclared at a drop site (a `new` temporary, or the end of a body whose class imports a trait), 2 more gained `destructor`; the triage is above the composer row.
 # 3306 → 3276  2026-10-03 (issues #860, #991): -30 throw.maybe-undeclared (an `in_array` or `array_search` with a literal `true` 22, a callee that lost `user-code-reach` 6, a printf literal format 2; 2 in vendored copies of `Filesystem.php`), 6 more lost `user-code-reach` from their kind list; the triage is above the composer row.
-"composer/composer" = 3276
+# 3276 → 3298  2026-10-03 (issue #882, S6c): +22 throw.maybe-undeclared ((b) -5, (c) +27: a parameter hinted with, or a `new` of a class whose chain reaches, a Composer or PSR name this checkout lacks); the triage is above the composer row.
+"composer/composer" = 3298
 
 # 1 — `Application.php:409`, class 4 (`exitWithErrorMessage`).
 # 1 → 2, 2026-09-01 with issue #589 (the cross-lane guard join; see
@@ -238,7 +264,8 @@
 # 3281 → 3207  2026-10-03 (issue #877): -74 throw.maybe-undeclared (user-code-reach 27, operator-to-string 18, operator-iteration 18, operator-array-access 10, dynamic-callee 1; 6 in fixtures); the triage is above the composer row.
 # 3207 → 3314  2026-10-03 (issue #882): +107 throw.maybe-undeclared (103 at a drop site, 4 a callee's), 244 more gained `destructor`; the triage is above the composer row.
 # 3314 → 3277  2026-10-03 (issues #860, #991): -37 throw.maybe-undeclared (an `in_array` or `array_search` with a literal `true` 30, a printf literal format 7); the local fp-gate measures 3292 → 3255 here, the 22 of slack the row already carried (3292 against 3314 on master) is kept; the triage is above the composer row.
-"sebastianbergmann/phpunit" = 3277
+# 3277 → 3200  2026-10-03 (issue #882, S6c): -77 throw.maybe-undeclared ((a) -84, (b) -4, (c) +11); the local fp-gate measures 3255 → 3178 here, the 22 of slack the row already carried is kept; the triage is above the composer row.
+"sebastianbergmann/phpunit" = 3200
 
 # 10 — six class 1/2/3 in `Application.php`, `CompletionInput.php` and
 # `SymfonyStyle.php`; four class 5 in `Tests/`.
@@ -261,7 +288,8 @@
 # 551 → 489  2026-10-03 (issue #877): -62 throw.maybe-undeclared (user-code-reach 51, operator-to-string 6, operator-iteration 3, operator-array-access 2); the triage is above the composer row.
 # 489 → 497  2026-10-03 (issue #882): +8 throw.maybe-undeclared, each a callee's (`CommandNotFoundException::__construct()`, whose `Throwable` parameter an anonymous class in the universe may stand in for); the triage is above the composer row.
 # 497 → 493  2026-10-03 (issues #860, #991): -4 throw.maybe-undeclared (`in_array` with a literal `true`), 1 more lost `user-code-reach` from its kind list; the triage is above the composer row.
-"symfony/console" = 493
+# 493 → 486  2026-10-03 (issue #882, S6c): -7 throw.maybe-undeclared ((a) -8, (c) +1); the triage is above the composer row.
+"symfony/console" = 486
 
 # 6 — every row class 4 (`$this->fail()` in `ProcessTest.php`).
 # Unmoved by issue #599 leg 1 (2026-09-01), and twice over. Every row is
@@ -317,7 +345,8 @@
 # 463 → 458  2026-10-03 (issue #877): -5 throw.maybe-undeclared (user-code-reach 2, operator-array-access 2, operator-to-string 1); the triage is above the composer row.
 # 458 → 462  2026-10-03 (issue #882): +4 throw.maybe-undeclared at the end of a body (`CarbonInterval::roundUnit()`, `floor()`, `ceil()`, `CarbonTimeZone::instance()`); the triage is above the composer row.
 # 462 → 461  2026-10-03 (issues #860, #991): -1 throw.maybe-undeclared (`in_array` with a literal `true`); the triage is above the composer row.
-"briannesbitt/Carbon" = 461
+# 461 → 457  2026-10-03 (issue #882, S6c): -4 throw.maybe-undeclared ((b) a class whose traits are all read and clean); the triage is above the composer row.
+"briannesbitt/Carbon" = 457
 
 # 0 → 1, 2026-08-16 with issue #391 — and a sixth class, the first that is not
 # a binding claim at all: `type.maybe-argument-mismatch` on
@@ -369,11 +398,13 @@
 # 259 → 254  2026-10-03 (issue #877): -5 throw.maybe-undeclared (operator-iteration 2, operator-to-string 2, operator-array-access 1); the triage is above the composer row.
 # 254 → 256  2026-10-03 (issue #882): +2 throw.maybe-undeclared at the end of a body (`StreamHandler::drain()`, `Pool::batch()`), 2 more gained `destructor`; the triage is above the composer row.
 # 256 → 254  2026-10-03 (issues #860, #991): -2 throw.maybe-undeclared (`in_array` with a literal `true` 1, a callee that lost `user-code-reach` 1); the triage is above the composer row.
-"guzzle/guzzle" = 254
+# 254 → 272  2026-10-03 (issue #882, S6c): +18 throw.maybe-undeclared ((b) -1, (c) +19, PSR-typed parameters and `new` of a PSR-7 class this checkout lacks); the triage is above the composer row.
+"guzzle/guzzle" = 272
 # 175 → 176  2026-10-03 (issues #880, #875): +1 throw.maybe-undeclared, 1 operator-to-string at an offset write; the triage by kind is above the composer row.
 # 176 → 172  2026-10-03 (issue #877): -4 throw.maybe-undeclared (operator-to-string 3, user-code-reach 1); the triage is above the composer row.
 # 172 → 170  2026-10-03 (issues #860, #991): -2 throw.maybe-undeclared (`in_array` with a literal `true`), 1 more lost `user-code-reach` from its kind list; the triage is above the composer row.
-"Seldaek/monolog" = 170
+# 170 → 173  2026-10-03 (issue #882, S6c): +3 throw.maybe-undeclared ((c) a PSR-typed parameter); the triage is above the composer row.
+"Seldaek/monolog" = 173
 "thephpleague/flysystem" = 38
 "cakephp/chronos" = 50
 

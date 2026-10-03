@@ -316,7 +316,8 @@ _Avoid_: obstacle (taken by Dischargeable obstacle)
 A place a frame releases a value — `unset`, a reassignment, the end of the
 body, a `new` that dies in the expression holding it — resolved to the
 `destructor` gap when the value's class reaches a `__destruct` (its chain, a
-subclass, or a typed property's class), and to nothing otherwise. Never an
+trait it imports, a subclass, or a typed property's class; a class no file
+declares may declare one), and to nothing otherwise. Never an
 edge: the destructor runs in whichever frame frees the last reference.
 _Avoid_: destructor site, release site
 

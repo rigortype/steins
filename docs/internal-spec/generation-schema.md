@@ -69,6 +69,7 @@ requires.
 | [22](#schema-22) | #654 | misdecode | `CondOperand::Other`, `CondExpr::Call` and `CondExpr::Opaque` grow `writes`. |
 | [23](#schema-23) | #859 (ADR-0099 §4.4) | misdecode, meaning | The `symbols` shard's `PackageShard` grows `magic_property_classes` and `anonymous_subclass_parents`. |
 | [24](#schema-24) | #882 (ADR-0100 §7) | misdecode, meaning | The `symbols` shard's `PackageShard` grows `destructor_classes`, between `magic_property_classes` and `anonymous_subclass_parents`. |
+| [25](#schema-25) | #882 (ADR-0100 §7) | misdecode, meaning | The `symbols` shard's `PackageShard` reads trait imports in the merge: `destructor_classes` becomes `destructor_declarers`, and `trait_users`, `anonymous_destructor_parents` and `anonymous_trait_users` are new. |
 
 ## Where the record and the code disagree
 
@@ -372,3 +373,35 @@ kind `destructor` that rides with it is appended to `GapKind`, a facts payload
 enum decoded past the gate, so that half is no bump. The sites themselves
 (`OperatorFamily::Drop`, its four forms and `EffectRecv::Bound`) are appended to the trace
 payload's enums, which are decoded past the gate too: no bump.
+
+### Schema 25
+
+`25` is the destructor gate's precision (issue #882, ADR-0100 §7). The
+`symbols` shard's `PackageShard` adds three fields and changes what a fourth
+holds, and the table the engine reads from the merge changes meaning.
+`destructor_classes` becomes `destructor_declarers`: a class-like that carries a destructor of its
+own (a `__destruct` method, or a used trait's method aliased to it, or a trait
+that is declared under a condition) and no longer one that merely imports a
+trait. `trait_users` (trait FQN to the
+class-likes that import it), `anonymous_destructor_parents` (the parents and
+interfaces of an anonymous class whose body declares a destructor) and
+`anonymous_trait_users` (trait FQN to the parents of the anonymous classes that
+import it) are new; `anonymous_subclass_parents` is unchanged, because
+ADR-0099 §4.4's property gate still reads every anonymous subclass. The merge
+resolves the trait graph into the `destructor_classes` and
+`anonymous_destructor_parents` the engine reads, so a class counts when a trait
+it imports declares a destructor, transitively, or cannot be read (no file
+declares it, two do, a condition guards it, a `class_alias` names it).
+
+The shard is decoded before the analyzer gate and the wire codec reads a
+struct's fields by position, so a schema-24 shard would be read with the
+declarers where the old set sat and the new tables where the next fields sit:
+the **misdecode** kind. It is a **meaning** bump as well: the same bytes in the
+old set listed every trait user as a destructor class, and a reader of the new
+build that took them for declarers would answer "may run a destructor" for
+every one of them, and a schema-25 shard read by the old build would answer
+"no" for a trait user whose trait declares one. The tables are in the shard
+and not in a facts payload, so the bump is the one place the change is
+recorded; the lowering that fills them (`ClassDecl::used_traits`,
+`declares_destructor`, `held_classes` and `AnonClassEdge`'s two fields)
+is in the trace payload, decoded past the gate, and takes no bump of its own.
