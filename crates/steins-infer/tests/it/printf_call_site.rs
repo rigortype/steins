@@ -269,6 +269,9 @@ fn a_percent_s_reads_precision_only_for_a_float() {
         ("", "return sprintf('%s', current([1]));"),
         ("float $x", "$x = 'a'; return sprintf('%s', $x);"),
         ("float $x", "$y = 1; $x += $y; return sprintf('%s', $x);"),
+        // Implicitly nullable: called with the default it holds `null`, as `?float` may.
+        ("float $x = null", "return sprintf('%s', $x);"),
+        ("?float $x = 1.5", "return sprintf('%s', $x);"),
     ] {
         assert_eq!(precision(signature, body), "gap", "{body}");
     }
@@ -369,6 +372,16 @@ fn a_percent_s_reads_the_declaration_of_a_property_constant_or_call_result() {
         ("private static ?float $p = null;", stat, "gap"),
         ("private static float $p = 0.5;", "return sprintf('%s', $this->p);", "gap"),
         ("const K = 1.5;", konst, "proven"),
+        // A typed constant holds its declared type: an integer literal under `float` is a float.
+        ("const float K = 123456789;", konst, "proven"),
+        ("const ?float K = 1;", konst, "proven"),
+        ("const float K = 1.5;", konst, "proven"),
+        ("const ?float K = null;", konst, "gap"),
+        ("const int K = 1;", konst, "none"),
+        ("const string K = 'a';", konst, "none"),
+        ("const int|float K = 1;", konst, "gap"),
+        ("const mixed K = 1.5;", konst, "gap"),
+        ("const K = 123456789;", konst, "none"),
         ("const K = 'a';", konst, "none"),
         ("const K = 2;", konst, "none"),
         ("const K = true;", konst, "none"),
