@@ -609,7 +609,9 @@ mod tests {
             ),
             (
                 "a class nobody declares",
-                "<?php function f() { new Nowhere(); }",
+                // Returned, so no drop site: a `new` that dies in its statement reads the
+                // unseen class a second time, as a destructor that may run (ADR-0100 §7).
+                "<?php function f() { return new Nowhere(); }",
                 func("f"),
                 &[UnknownClass],
                 &[UnknownClass],

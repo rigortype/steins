@@ -787,12 +787,12 @@ fn an_anonymous_class_carries_what_its_body_declares() {
             "{class}"
         );
     }
-    // A trait it imports is read as a class by the resolver, beside its parent.
+    // A trait it imports is a bound the resolver reads as a class, beside its parent.
     assert_eq!(
         drops("", "$x = new class extends P { use T, U; }; unset($x);"),
         [
-            drop_site(C::DropUnset, &["T", "U", "P"], "$x"),
-            drop_site(C::DropScopeExit, &["T", "U", "P"], "}"),
+            drop_site(C::DropUnset, &["~T", "~U", "P"], "$x"),
+            drop_site(C::DropScopeExit, &["~T", "~U", "P"], "}"),
         ]
     );
     // A parent is the class for the chain's sake; no parent and no destructor runs nothing.

@@ -1041,7 +1041,7 @@ fn s6_an_anonymous_class_carries_its_destructor_on_the_binding() {
     dtor_gap("function f() { $x = new class extends D {}; unset($x); }", "f");
     dtor_gap("function f() { $x = new class extends HoldsTyped {}; unset($x); }", "f");
     dtor_none("function f() { $x = new class { public int $n = 1; }; unset($x); }", "f");
-    // A parent no file declares reaches nothing the analysis can see.
+    // A parent no file declares records an unknown-class gap at the `new class` (S6c, below).
     dtor_none("function f() { $x = new class extends Nowhere {}; unset($x); }", "f");
 }
 
@@ -1193,7 +1193,7 @@ fn s6_a_union_with_an_array_and_a_self_hint_are_read_by_their_classes() {
 }
 
 /// S5: a class declared twice cannot be read, and may be the declaration that has the
-/// destructor; an absent one is residue (witnessed: `[P]<body>`).
+/// destructor; so may a name no file declares (witnessed: `[P]<body>`; S6c).
 #[test]
 fn s6_a_class_declared_twice_may_run_a_destructor() {
     let twice = "class P { public function __destruct() { echo '[P]'; } }\n\
@@ -1201,10 +1201,8 @@ fn s6_a_class_declared_twice_may_run_a_destructor() {
         function g(C $c) { $c = null; }\nfunction h() { $c = new C(); echo '<body>'; }";
     assert!(dtor_src(twice, "g"));
     assert!(dtor_src(twice, "h"));
-    let absent = "function g(\\Vendor\\Missing $m) { $m = null; }\n\
-        function h() { $m = new \\Vendor\\Missing(); }";
-    assert!(!dtor_src(absent, "g"));
-    assert!(!dtor_src(absent, "h"));
+    let absent = "function g(\\Vendor\\Missing $m) { $m = null; }";
+    assert!(dtor_src(absent, "g"));
 }
 
 /// S6c (b), rows from the consult on #915: a class that imports a trait counts only when
@@ -1363,4 +1361,111 @@ fn s6c_an_anonymous_class_importing_a_trait_follows_the_trait() {
     assert!(dtor_src("trait TD { function __destruct() {} }\nfunction f() { $x = new class { use TD; }; unset($x); }", "f"));
     assert!(dtor_src("trait T { function bye() {} }\nfunction f() { $x = new class { use T { bye as __destruct; } }; }", "f"));
     assert!(dtor_src("trait TD { function __destruct() {} }\nfunction f() { foo(new class { use TD; }); }\nfunction foo($x) {}", "f"));
+}
+
+/// S6c (c): a name no file declares and the engine does not may declare a destructor, as
+/// every family that reads an unclosed chain has it: an `extends`, a parameter hint, a
+/// typed property's hint, a `new`. Witnessed on PHP 8.5 with the vendor class loaded
+/// (`[Vendor]<after>`, `<body>[Vendor]`).
+#[test]
+fn s6c_a_class_no_file_declares_may_run_a_destructor() {
+    let gap = |src: &str, symbol: &str| assert!(dtor_src(src, symbol), "{symbol}: {src}");
+    // The parent.
+    let parent = "class C extends \\Vendor\\Base {}\nclass D2 extends C {}\n\
+        function a(C $c) { $c = null; }\nfunction b() { $c = new C; unset($c); }\n\
+        function c(D2 $c) { }";
+    for symbol in ["a", "b", "c"] {
+        gap(parent, symbol);
+    }
+    // The hint, by name and as a union member, and `new` of a class no file declares.
+    gap("function f(\\Vendor\\Thing $t) { $t = null; }", "f");
+    gap("function f(?\\Vendor\\Thing $t) { }", "f");
+    gap("function f(int|\\Vendor\\Thing $t) { }", "f");
+    // A `new` of a class whose chain ends at one: the `new` itself records no unknown-class gap.
+    gap("class C extends \\Vendor\\Base {}\nfunction f() { $c = new C; echo '<body>'; }", "f");
+    gap("class C extends \\Vendor\\Base {}\nfunction f() { foo(new C()); }\nfunction foo($x) {}", "f");
+    // The typed property's hint, on an exact class and a bound one.
+    let held = "final class H { private \\Vendor\\Thing $t; }\n\
+        class G { protected ?\\Vendor\\Thing $t = null; }\n\
+        function a(H $h) { $h = null; }\nfunction b() { $h = new H; }\nfunction c(G $g) { }";
+    for symbol in ["a", "b", "c"] {
+        gap(held, symbol);
+    }
+    // An unseen parent of an implementor: a value typed to the interface may be it.
+    gap("interface Face {}\nfinal class Impl extends \\Vendor\\Base implements Face {}\n\
+        function f(Face $f) { $f = null; }", "f");
+    // A trait no file declares, on an anonymous class's binding.
+    gap("function f() { $x = new class { use \\Vendor\\T; }; unset($x); }", "f");
+    // A property a trait imports is hinted with a class no file declares.
+    gap("trait T { private ?\\Vendor\\X $x = null; }\nclass A { use T; }\nfunction f(A $u) { $u = null; }", "f");
+    // The same names, once a file declares them, read as any class does.
+    let present = "namespace Vendor { class Base {} class Thing {} }\n\
+        namespace App { class C extends \\Vendor\\Base {}\n\
+        function a(C $c) { $c = null; }\nfunction b(\\Vendor\\Thing $t) { $t = null; } }";
+    assert!(!dtor_src(present, "a") && !dtor_src(present, "b"));
+}
+
+/// S6c (c): what the engine declares is a closed chain, and so is a class chain that
+/// ends at one. A name the namespace made up (`App\Exception` for an unimported
+/// `Exception`) is not the engine's, and is unseen.
+#[test]
+fn s6c_an_engine_class_closes_the_chain() {
+    let none = |src: &str, symbol: &str| assert!(!dtor_src(src, symbol), "{symbol}: {src}");
+    none("class E extends \\Exception {}\nfunction f(E $e) { $e = null; }", "f");
+    none("class A extends \\ArrayObject implements \\Countable {}\nfunction f(A $a) { }", "f");
+    none("function f(\\Closure|\\Traversable|\\Stringable|\\DateTimeInterface $x) { $x = null; }", "f");
+    none("function f() { $t = new \\ArrayObject([]); $d = new \\DateTimeImmutable(); }", "f");
+    none("final class H { private \\DateTimeImmutable $d; private ?\\Closure $c = null; }\n\
+        function f(H $h) { $h = null; }", "f");
+    assert!(dtor_src("namespace App;\nfunction f(Exception $e) { $e = null; }", "f"), "App\\Exception is unseen");
+}
+
+/// S6c (c): the answer follows the universe across files: a vendor tree that holds the
+/// class resolves it, and removing it makes it unseen.
+#[test]
+fn s6c_an_unseen_name_resolves_once_a_file_declares_it() {
+    let db = SteinsDatabase::default();
+    let answer = |files: &[(&str, &str)], at: usize, symbol: &str| {
+        let inputs: Vec<SourceFile> = files
+            .iter()
+            .map(|(path, text)| SourceFile::new(&db, (*path).to_owned(), (*text).to_owned()))
+            .collect();
+        let layout = steins_db::ProjectLayout::fallback();
+        let project = Project::new(&db, inputs.clone(), layout, steins_db::PluginFacts::none());
+        let found = effect_summaries_project(&db, project, inputs[at]);
+        let s = found.iter().find(|s| s.symbol == symbol).expect("a summary");
+        assert_eq!(s.gaps.contains(&DESTRUCTOR), s.throws_gaps.contains(&DESTRUCTOR));
+        s.gaps.contains(&DESTRUCTOR)
+    };
+    let user = ("u.php", "<?php\nfunction d(\\Lib\\Base $b) { $b = null; }\n");
+    let clean = ("b.php", "<?php\nnamespace Lib;\nclass Base {}\n");
+    let loud = ("b.php", "<?php\nnamespace Lib;\nclass Base { public function __destruct() {} }\n");
+    assert!(answer(&[user], 0, "d"), "no file declares Base");
+    assert!(!answer(&[user, clean], 0, "d"), "Base is declared and clean");
+    assert!(answer(&[user, loud], 0, "d"), "Base is declared and has one");
+}
+
+/// S6c (c), the line it stops at: a `new` of a class no file declares records an
+/// unknown-class gap at the `new` itself, so the body is `…?` through the same name and a
+/// `destructor` gap on its drops would only repeat it. A hint that names such a class, and a
+/// `new` of a declared class whose chain reaches one (which records no unknown-class gap), keep
+/// the gap: there it is the only signal.
+#[test]
+fn s6c_a_new_of_an_unseen_class_is_left_to_its_unknown_class_gap() {
+    let none = |src: &str| {
+        let src = format!("<?php\n{src}\n");
+        assert!(!dtor(&src, "f"), "{src}");
+        let s = summary(&src, "f");
+        assert!(s.gaps.contains(&"unknown-class") && !s.exhaustive, "unknown-class stays: {s:?}");
+    };
+    none("function f() { $t = new \\Vendor\\Thing(); echo '<body>'; }");
+    none("function f() { $t = new \\Vendor\\Thing(); unset($t); }");
+    none("function f() { foo(new \\Vendor\\Thing()); }\nfunction foo($x) {}");
+    none("function f() { new \\Vendor\\Thing(); }");
+    none("function f() { $x = new class extends Nowhere {}; unset($x); }");
+    // The same names kept: a hint, a declared class over an unseen parent, an unseen trait.
+    let gap = |src: &str| assert!(dtor_src(src, "f"), "{src}");
+    gap("function f(\\Vendor\\Thing $t) { $t = null; }");
+    gap("class C extends \\Vendor\\Base {}\nfunction f() { $c = new C; unset($c); }");
+    gap("function f() { $x = new class { use \\Vendor\\T; }; unset($x); }");
 }
