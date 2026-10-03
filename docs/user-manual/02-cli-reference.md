@@ -318,12 +318,26 @@ hung `php` fail quickly. It does not touch the 2-second per-request budget.
 ### `--fix`
 
 Some findings carry their remedy as a first-class payload (ADR-0010), and
-`--fix` applies it. One fix family exists today: a committed
+`--fix` applies it. Two fix families exist today. A committed
 `\PHPStan\dumpType()` / `\PHPStan\dumpPhpDocType()` statement — `debug.type`
 and `debug.phpdoc-type`, whose only remedy is deleting the call — is removed
 whole (the entire expression-statement, its line when nothing else shares
 it). `debug.var-dump` is deliberately not fixable: a `var_dump()` is legal
 working PHP, and deleting it is your call, not the tool's.
+
+The second rides the envelope findings (`effect.envelope-exceeded` and
+`effect.liskov-widened`, which live on the `contracts` surface): when the
+exceeding label is `global.read.setting.locale` and its origin is a `sprintf`,
+`printf`, `vsprintf` or `vprintf` call in the body with a literal format, the
+fix spells each `f` conversion `F`, each `g` `h` and each `G` `H`, in place,
+keeping flags, width, precision and `n$`; `%%f` is not a conversion and stays.
+The output is byte-identical under the `C` locale and always spells the decimal
+point `.` under any other, which is the point of the edit and what its title
+says. It is attached only where the source can be edited byte-exactly (a `'`-
+or `"`-quoted literal; a conversion letter written as an escape, `"%\x66"`, is
+replaced whole) and only where it takes the read out of the body; a format that
+is not a literal, a callee's printf and a heredoc get none. There is no bulk
+transform: a function with no envelope has no finding and no fix.
 
 ```
 $ steins check src/Dump.php
@@ -398,7 +412,7 @@ Per finding:
 | `line`, `column` | number | 1-based position. |
 | `message` | string | The same text the `text` mode prints after the id. |
 | `origin` | string | Present only on `throw.undeclared`: `direct` or `propagated`. |
-| `fix` | object | Present only on findings that carry a fix payload (today: `debug.type`, `debug.phpdoc-type`). |
+| `fix` | object | Present only on findings that carry a fix payload (today: `debug.type`, `debug.phpdoc-type`, and the locale read of `effect.envelope-exceeded` and `effect.liskov-widened`). |
 
 `origin` is the one facet v1 defines (ADR-0050 §4); a finding whose id
 declares no facet carries no such key at all. Under `--profile contracts`

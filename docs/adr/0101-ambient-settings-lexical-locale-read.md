@@ -357,6 +357,29 @@ envelope nothing is claimed about the function, and ADR-0017 keeps style out
 of Steins. A bulk `transform printf-locale-free` for a project that wants
 every format moved is cheap on the same parser and is D3.
 
+**Slice S2 (2026-10-03) — PENDING ratification.** The fix-it landed as S2 of the ambient-settings
+run (#1000). What it decides beyond the text above:
+
+- **Where it rides.** On the envelope finding the proven read raises at the printf call in the
+  enveloped body (`effect.envelope-exceeded`), and on `effect.liskov-widened` for the locale label
+  when every origin of the read in the method body is such a call. A finding about a callee's printf
+  (`via` another function) carries none: its origin is a different declaration, and the edit would
+  change a function nobody declared an envelope for. D3 is unchanged: no bulk transform and no
+  standalone id.
+- **Byte-exactness.** The scan starts at the callee's name, reads `(`, trivia and one `'` or `"`
+  literal that must be followed by `,` or `)`, decodes it as PHP does (`\\` and `\'`; `\n \r \t \v \e
+  \f \\ \$ \"`, octal, `\x`, `\u{}`) and compares the decode to the literal the tree holds. Any
+  difference, a heredoc, a concatenation or a named argument gets no fix. Each conversion letter is
+  edited at the source piece that spelled it, so `"%\x66"` becomes `"%F"` (the whole escape is the
+  piece) and the escapes around it keep their bytes.
+- **The title is the message.** A `Fix` has a title and edits and no other text, so the registered
+  title says what changes: `use the locale-independent conversion (F, h, H): under a non-C locale
+  the output changes, the decimal point becomes '.' always`. It is interned in the summaries table;
+  the stored types are unchanged, so no schema bump.
+- **Witnessed** on PHP 8.5.11: the 1,488 pairs of §3.1 and the literals the fix writes (flags,
+  width, `n$`, `'c` padding, `l`, an escape-spelled letter) are byte-identical under `C`, and
+  `%.2f` is `2,50` where `%.2F` is `2.50` under `de_DE`.
+
 ### 3.7 Consumers that keep their answer
 
 - `statement.no-effect`: `sprintf('%f', 1.5);` reports (§2.2).
