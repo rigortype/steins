@@ -275,6 +275,13 @@ pub struct FormatReading {
     /// shapes decide, so a caller that drops the locale label on `!reads_locale`
     /// must not treat that as a pure call.
     pub reads_locale: bool,
+    /// Where each locale-reading conversion's letter sits, as `(byte offset in the
+    /// format, the letter of its locale-independent twin)` in format order: `f` is
+    /// `F`, `g` is `h` and `G` is `H` (ADR-0101 §3.6). Empty exactly when
+    /// [`Self::reads_locale`] is `false`. The twin renders the same text under the
+    /// `C` locale and always spells the decimal point `.`; `h` and `H` exist since
+    /// PHP 8.0.
+    pub locale_conversions: Vec<(usize, u8)>,
 }
 
 /// What a literal printf `format` does with each value it is given: one
@@ -321,7 +328,7 @@ pub fn format_reach(format: &str) -> Option<Vec<ArgReach>> {
 pub fn read_format(format: &str) -> Option<FormatReading> {
     let bytes = format.as_bytes();
     let mut reach: Vec<ArgReach> = Vec::new();
-    let mut reads_locale = false;
+    let mut locale_conversions = Vec::new();
     let mut next = 0_usize;
     let mut at = 0_usize;
     while let Some(offset) = bytes[at..].iter().position(|&b| b == b'%') {
@@ -338,9 +345,9 @@ pub fn read_format(format: &str) -> Option<FormatReading> {
             reach.resize(position + 1, Inert);
         }
         reach[position] = reach[position].max(kind);
-        reads_locale |= locale;
+        locale_conversions.extend(locale);
     }
-    Some(FormatReading { reach, reads_locale })
+    Some(FormatReading { reach, reads_locale: !locale_conversions.is_empty(), locale_conversions })
 }
 
 /// Whether a printf-family call with this literal `format` reads the locale:
@@ -352,10 +359,15 @@ pub fn format_reads_locale(format: &str) -> bool {
     read_format(format).is_none_or(|reading| reading.reads_locale)
 }
 
+/// What [`spec`] reads of one conversion: the value position it names, the reach of its
+/// conversion and, for a locale-reading one, `(offset, twin)` as [`FormatReading::locale_conversions`]
+/// holds them.
+type Spec = (usize, ArgReach, Option<(usize, u8)>);
+
 /// One conversion spec of [`read_format`], `at` just past its `%`: the value
-/// position it names, the reach of its conversion and whether the conversion
-/// reads the locale, leaving `at` past it.
-fn spec(bytes: &[u8], at: &mut usize, next: &mut usize) -> Option<(usize, ArgReach, bool)> {
+/// position it names, the reach of its conversion and, when the conversion reads
+/// the locale, its offset with its locale-independent twin, leaving `at` past it.
+fn spec(bytes: &[u8], at: &mut usize, next: &mut usize) -> Option<Spec> {
     let mut named = None;
     if !bytes.get(*at).is_some_and(u8::is_ascii_alphabetic) {
         let digits = digit_run(bytes, *at);
@@ -384,6 +396,7 @@ fn spec(bytes: &[u8], at: &mut usize, next: &mut usize) -> Option<(usize, ArgRea
         *next - 1
     });
     let conversion = *bytes.get(*at)?;
+    let at_conversion = *at;
     let kind = match conversion {
         b's' => Object,
         b'd' | b'u' | b'c' | b'o' | b'x' | b'X' | b'b' | b'e' | b'E' | b'f' | b'F' | b'g'
@@ -394,7 +407,13 @@ fn spec(bytes: &[u8], at: &mut usize, next: &mut usize) -> Option<(usize, ArgRea
     // `php_sprintf_appenddouble` hands `php_conv_fp` the locale's decimal point
     // for `f`, and its `g`/`G` arm overrides `.` with it; `F`, `e`, `E`, `h`
     // and `H` never consult it.
-    Some((position, kind, matches!(conversion, b'f' | b'g' | b'G')))
+    let twin = match conversion {
+        b'f' => Some(b'F'),
+        b'g' => Some(b'h'),
+        b'G' => Some(b'H'),
+        _ => None,
+    };
+    Some((position, kind, twin.map(|twin| (at_conversion, twin))))
 }
 
 /// The length of the ASCII digit run at `at`.
@@ -964,5 +983,18 @@ mod tests {
         let both = read_format("%s %.1f").expect("readable");
         assert_eq!(both.reach, [O, I]);
         assert!(both.reads_locale);
+    }
+
+    /// The locale-reading letters are reported at their byte offsets with their
+    /// twins, through flags, width, precision, `n$` and `l`, and `%%f` is no spec.
+    #[test]
+    fn the_locale_conversions_name_their_letters_and_twins() {
+        let at = |format: &str| read_format(format).expect("readable").locale_conversions;
+        assert_eq!(at("%.2f"), [(3, b'F')]);
+        assert_eq!(at("%g|%G"), [(1, b'h'), (4, b'H')]);
+        assert_eq!(at("%1$f %1$s"), [(3, b'F')]);
+        assert_eq!(at("%'*12.2f%lg"), [(7, b'F'), (10, b'h')]);
+        assert_eq!(at("%%f %d %F %e %h %H %s"), []);
+        assert_eq!(at("%%%f"), [(3, b'F')]);
     }
 }
