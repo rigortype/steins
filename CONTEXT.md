@@ -65,15 +65,16 @@ inside one fact.
 _Avoid_: mirroring the contract lane's array split into the fact domain
 
 **Remembered call result** (ADR-0102, designed-not-implemented):
-A call's result held as a value-domain fact on the call itself — callee,
-argument places, receiver place — so a later call with the same key in the
-same scope answers the remembered fact until an **invalidating site**: a
-setting write to a cell the callee reads, any `io*` site for the stat family,
-a coverage gap or escape hatch, or a write to an argument or receiver place.
-A proof about what the engine returns, not about the world (`is_dir` after an
-external `rmdir` still answers from the stat cache; `file_exists` never does).
-The invalidation set is derived from effect labels (ADR-0101 §5.4), never from
-a purity bit.
+A call's result held as a value-domain fact on its **call key** — the resolved
+callee, its argument places (ADR-0098) and receiver place — so a later call with
+the same key in the same frame answers the remembered fact until an invalidating
+site: a write to an argument or receiver place, a setting write to a cell the
+callee reads, an escape hatch, or an effect-lane gap. Only a callee whose effect
+answer is exhaustive and whose labels are `{}` or setting reads produces one; a
+"possibly impure" call never does, and the stat family is never remembered (PHP
+caches only a successful stat of the last path, and `file_exists` never reads
+the cache). The invalidation set is derived from effect labels (ADR-0101 §5.4),
+never from a purity bit.
 _Avoid_: impure point / forgetting (PHPStan's mechanism and its trigger; ours
 is label-scoped), memoization (an optimisation, not a fact), CSE
 
