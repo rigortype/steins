@@ -15,12 +15,15 @@ their commands; `.github/workflows/composer.yml` defines the Composer channel.
   `corpus.local.toml` lists a project and that file is missing (an empty file
   runs with no local rows), and the line under the report's header says whether
   it was loaded. Copy both files into a worktree.
-- **The locale oracles:** `locale_oracle` (steins-catalog) and
-  `the_numeric_claim_holds_under_de_de` (steins-infer) compare against PHP under
-  `de_DE.UTF-8`. Off CI they skip, with a `SKIP:` line on stderr, when `php` or
-  the locale is missing, so a local green run may not have run them (`locale -a`
-  lists what is installed). Under `CI` they fail instead, and the test job
-  generates the locale before it runs.
+- **The locale oracles:** `locale_oracle` and `locale_readers_oracle`
+  (steins-catalog) and `the_numeric_claim_holds_under_de_de` (steins-infer)
+  compare against PHP under `de_DE.UTF-8`, and the readers oracle also under a
+  de_DE Latin-1 locale (and `ja_JP.eucJP` where installed). Off CI they skip, with
+  a `SKIP:` line on stderr, when `php` or a locale is missing, so a local green
+  run may not have run them (`locale -a` lists what is installed). Under `CI`
+  they fail instead, and the test job generates the locales before it runs. A
+  `MovesOnMacos` row of the readers oracle asserts its positive direction only on
+  macOS (a C-library table), so a Linux run checks those rows for soundness alone.
 - **`nsrt`:** `cargo xtask nsrt [DIR]` needs a local `phpstan-src` checkout and
   does not run in CI. Run it alongside CI when the change affects inference
   compatibility.
