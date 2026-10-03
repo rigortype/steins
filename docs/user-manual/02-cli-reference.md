@@ -667,9 +667,11 @@ an inherited exception constructor or `getMessage()`, or that a promoted
 constructor parameter declares, is `operator-magic-property`; `destructor` is a
 value that may run `__destruct` when dropped, at an `unset`, a reassignment,
 the end of the body or a `new` that dies in the expression holding it: the
-class declares `__destruct`, imports a trait, has a subclass that may, or
-holds such a class in a typed property; an untyped value, an array and a
-closure's captures are not covered; `value-dependent-read`, effect lane only, is a setting read
+class declares `__destruct`, imports a trait that declares one (or that no file
+declares, or that is declared twice, under a condition or through a
+`class_alias`), extends or is hinted as a class no file declares, has a
+subclass that may, or holds such a class in a typed property; an untyped
+value, an array and a closure's captures are not covered; `value-dependent-read`, effect lane only, is a setting read
 that depends on a value the site cannot see: a printf call's `%s` of a value not shown to be a
 float, which reads the `precision` ini only for a float, or a format that is not a literal, which
 reads the locale only if it holds an `f`, `g` or `G`; a read the call as written makes on every run
