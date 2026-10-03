@@ -1631,3 +1631,45 @@ fn s6c_a_trait_property_hinted_self_or_parent_reads_the_importing_class() {
         &[("f", CLEAN)],
     );
 }
+
+/// An anonymous class's `parent` property hint names its own `extends` parent, as a bound
+/// that a subclass declaring a destructor can fill, from the class's own property (r06) or an
+/// imported trait's (r05); `[Q]<body>` on PHP 8.5. `self` there is fine as it is: an
+/// anonymous class cannot be subclassed (r04). A clean parent stays clean.
+#[test]
+fn s6c_an_anonymous_class_reads_a_parent_hint_as_its_own_parent() {
+    let base = "interface I {}\nclass P {}\nclass Q extends P { public function __destruct() {} }\n";
+    reads(
+        &format!("{base}function r06(I $i): void {{ $i = null; }}\n\
+         function mk(): I {{ $o = new class extends P implements I {{ public ?parent $p = null; }}; \
+         $o->p = new Q(); return $o; }}"),
+        &[("r06", GAP)],
+    );
+    reads(
+        &format!("{base}trait T {{ public ?parent $p = null; }}\nfunction r05(I $i): void {{ $i = null; }}\n\
+         function mk(): I {{ $o = new class extends P implements I {{ use T; }}; \
+         $o->p = new Q(); return $o; }}"),
+        &[("r05", GAP)],
+    );
+    // Through a trait that imports it, and through a promoted parameter.
+    reads(
+        &format!("{base}trait T {{ public ?parent $p = null; }}\ntrait T2 {{ use T; }}\n\
+         function f(I $i): void {{ $i = null; }}\n\
+         function mk(): I {{ return new class extends P implements I {{ use T2; }}; }}"),
+        &[("f", GAP)],
+    );
+    reads(
+        &format!("{base}function f(I $i): void {{ $i = null; }}\n\
+         function mk(): I {{ return new class(new Q()) extends P implements I {{ \
+         public function __construct(private parent $p) {{}} }}; }}"),
+        &[("f", GAP)],
+    );
+    // Must stay: no subclass of the parent declares one, and `self` names the anonymous class.
+    reads(
+        "interface I {}\nclass P {}\ntrait T { public ?parent $p = null; public ?self $s = null; }\n\
+         function f(I $i): void { $i = null; }\n\
+         function mk(): I { return new class extends P implements I { use T; \
+         public ?parent $q = null; public ?self $r = null; }; }",
+        &[("f", CLEAN)],
+    );
+}

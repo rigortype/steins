@@ -166,12 +166,17 @@ fn holds_one(cx: &Cx<'_>, class: &str, seen: &mut HashSet<(String, bool)>) -> bo
 /// trait the index cannot place is not read here; the merge counted its users already.
 fn trait_held(cx: &Cx<'_>, class: &str) -> Vec<String> {
     let id = cx.class_identity(class);
-    held_names(cx, vec![(id.clone(), Some(id))])
+    held_names(cx, vec![(id.clone(), Some(id))], None)
 }
 
 /// [`trait_held`] from several class-likes, each with the class that imports it: itself
-/// for a class, the importer for a trait, none for an anonymous class's.
-fn held_names(cx: &Cx<'_>, mut pending: Vec<(String, Option<String>)>) -> Vec<String> {
+/// for a class, the importer for a trait, none for an anonymous class's, whose `parent`
+/// hints name `anonymous_parent`.
+fn held_names(
+    cx: &Cx<'_>,
+    mut pending: Vec<(String, Option<String>)>,
+    anonymous_parent: Option<&str>,
+) -> Vec<String> {
     let mut held = Vec::new();
     let mut seen: HashSet<(String, Option<String>)> = HashSet::new();
     while let Some((name, importer)) = pending.pop() {
@@ -186,7 +191,10 @@ fn held_names(cx: &Cx<'_>, mut pending: Vec<(String, Option<String>)>) -> Vec<St
             held.extend(importer.clone());
         }
         if cd.holds_parent {
-            held.extend(importer.as_deref().and_then(|own| cx.parent_fqn(own)));
+            held.extend(match &importer {
+                Some(own) => cx.parent_fqn(own),
+                None => anonymous_parent.map(str::to_owned),
+            });
         }
         let identity = |r| cx.class_identity(&tree.resolve_class_fqn(r));
         pending.extend(cd.used_traits.iter().map(|r| (identity(r), importer.clone())));
@@ -261,9 +269,14 @@ impl Closure {
             })
             || traits.iter().any(|t| chain_declares(cx, t))
             || anon.held.iter().any(|held| self.hit(cx, held))
-            || held_names(cx, traits.into_iter().map(|t| (t, None)).collect())
-                .iter()
-                .any(|held| self.hit(cx, held))
+            || (anon.holds_parent && anon.parent.as_ref().is_some_and(|p| self.hit(cx, p)))
+            || held_names(
+                cx,
+                traits.into_iter().map(|t| (t, None)).collect(),
+                anon.parent.as_deref(),
+            )
+            .iter()
+            .any(|held| self.hit(cx, held))
     }
 }
 

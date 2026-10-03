@@ -98,6 +98,8 @@ pub struct AnonymousClass {
     pub traits: Vec<String>,
     /// The classes its non-static properties and promoted parameters are hinted with.
     pub held: Vec<String>,
+    /// Whether one of those hints is `parent`: the `extends` parent, as a bound.
+    pub holds_parent: bool,
 }
 
 impl AnonymousClass {
@@ -109,6 +111,7 @@ impl AnonymousClass {
             declares_destructor: edge.declares_destructor,
             traits: resolve(&edge.used_traits),
             held: resolve(&edge.held_classes),
+            holds_parent: edge.holds_parent,
         }
     }
 }
