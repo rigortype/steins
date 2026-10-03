@@ -4067,6 +4067,8 @@ pub struct AnonClassEdge {
     /// The classes the body's non-static properties, and its constructor's promoted
     /// parameters, are hinted with, as written (`self` and `parent` excluded).
     pub held_classes: Vec<NameRef>,
+    /// Whether one of those hints is `parent`, which names the class's own `extends` parent.
+    pub holds_parent: bool,
     /// The `new class` construct's source span.
     pub span: Span,
 }

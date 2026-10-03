@@ -172,6 +172,7 @@ pub(crate) fn walk(
                 declares_destructor: body.declares_destructor,
                 used_traits: body.used_traits,
                 held_classes: body.held_classes,
+                holds_parent: body.holds_parent,
                 span: to_span(ac.span()),
             });
             // …and the SAME names are hard refs too (issue #182): a missing parent/
