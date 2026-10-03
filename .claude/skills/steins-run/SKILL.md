@@ -81,6 +81,10 @@ detail.
    --delete-branch`, tick the parent checklist, and tell in-flight agents to
    rebase. (A branch an agent's worktree still holds refuses
    `--delete-branch`; delete the remote branch with `git push origin --delete`.)
+   For a stacked pair, retarget the child to master (`gh pr edit <child> --base
+   master`) before the parent's branch is deleted: deleting a PR's base closes
+   it, and a closed PR whose head was force-pushed cannot be reopened. Then
+   rebase the child with `git rebase --onto origin/master <old-parent-tip>`.
    Before merging, check every commit subject on the branch is still true:
    a fix that reversed an earlier commit's claim leaves a false subject in
    master's history, so reword that commit. Done when master holds the slice
@@ -117,7 +121,10 @@ only under witnessed probes.
   `effect-diff` baseline, and the `effects-envelope`, `throws-envelope` and
   `loop-to-array-map` dry-runs; base binary built from the PR's merge base;
   every difference classified.
-- The private half of `cargo xtask fp-gate` runs locally with `--deadline`; a
-  PR that could move it says in its body whether it was measured. Private
-  runs queue behind the machine's lock (`invariants.md`).
+- The local half of `cargo xtask fp-gate` runs on the PR head before merge,
+  with `--deadline`, behind the machine's lock (`invariants.md`). Run the
+  whole gate, not a hand-rolled `steins check`: it covers every locally
+  listed project, including public ones CI never measures, and only its
+  posture matches the ledger. A PR that could move it says in its body what
+  it measured; reseed the local ledger after merge from that run.
 - Every PR body states what was not measured.
