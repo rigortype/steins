@@ -242,17 +242,18 @@ The **string family** is certified under the same rule rather than
 argument-blind (`certified_at_call_site(name)`): `strcmp`, `strncmp`,
 `strcasecmp`, `strncasecmp`, `strspn`, `strcspn`, `substr_count`, `ord`, `chr`,
 `bin2hex`, `hex2bin`, `dirname` and `unpack`, joined by `array_search` (issue
-#860): it is not on the fold allowlist, so without a place here the effect lane
+#860) and `number_format` (ADR-0101 §4, which reads no setting: it renders with `%.*F`,
+witnessed on 8.1 and 8.5): `array_search` is not on the fold allowlist, so without a place here the effect lane
 answered `no-effect-row` for it, which no proof at the call site can
 discharge. `vsprintf` stays out because `%f`, `%g` and `%G` read `LC_NUMERIC`
 (issue #991, as `sprintf`'s do); it is coloured instead, below. They are not on
 `effect_labels`, so no other pass reads them as known builtins; the effects
 pass resolves an otherwise unresolved call against the list and answers pure
 only where the call site rules the reaching arguments out. Names that read the
-locale or an ini setting (`basename`, `pathinfo`, `strnatcmp`,
-`strnatcasecmp`, `substr_compare`, `parse_url`, `escapeshellarg`,
-`strip_tags`, `number_format`, the `ctype_*` and `mb_*` families,
-`htmlspecialchars`) stay out.
+locale (`basename`, `pathinfo`, `strnatcmp`, `strnatcasecmp`, `substr_compare`,
+`parse_url`, `escapeshellarg`, `strip_tags`, the `ctype_*` family) are coloured with the read
+below (S4) and are not certified pure; names that read an ini setting (the `mb_*` family,
+`htmlspecialchars`) stay out until the encoding cell registers.
 
 **The locale cell** (ADR-0101, issue #991) has four registry labels,
 `global.read.setting`, `global.read.setting.locale`, `global.write.setting` and
@@ -267,7 +268,27 @@ that a call is pure, and Decision 2's bar for an **empty** row is unchanged.
 | `sprintf`, `vsprintf` | `{global.read.setting.locale, global.read.setting.precision}` |
 | `printf`, `vprintf` | `{io.output.buffer, global.read.setting.locale, global.read.setting.precision}` |
 | `localeconv`, `nl_langinfo`, `strcoll` | `{global.read.setting.locale}` |
-| `setlocale` | `{global.write.setting.locale, global.read}` (the argument-blind row: the write, and the environment block read for `''` and `null`, coarse until the env cell has a label; `setlocale($c, '0')` is a query, narrowed later; a call with exactly two arguments whose locale is a written non-empty string other than `'0'` narrows to `{global.write.setting.locale}`, `narrowed_setlocale_labels`) |
+| `ctype_alnum`, `ctype_alpha`, `ctype_cntrl`, `ctype_graph`, `ctype_lower`, `ctype_print`, `ctype_punct`, `ctype_space`, `ctype_upper`, `basename`, `strnatcmp`, `strnatcasecmp`, `escapeshellarg`, `strip_tags`, `parse_url` | `{global.read.setting.locale}` (S4: php-src consults the C library's tables or the engine's locale-derived state on every call) |
+| `strftime`, `gmstrftime` | `{global.read.setting.locale, nondet.time}` (the time family's argument-blind clock beside the day and month names; the timezone cell sharpens the clock half) |
+| `sort`, `rsort`, `asort`, `arsort`, `ksort`, `krsort`, `substr_compare`, `pathinfo` | `{global.read.setting.locale}` as the upper bound a **mode argument** decides (below) |
+| `ctype_digit`, `ctype_xdigit` | none: C fixes their sets in every locale and no byte moved, so they read no setting that changes an answer (left uncatalogued, not certified) |
+| `setlocale` | `{global.write.setting.locale, global.read}` (the argument-blind row: the write, and the environment block read for `''` and `null`, coarse until the env cell has a label; a call with exactly two arguments whose locale is a written non-empty string other than `'0'` narrows to `{global.write.setting.locale}`, and the exact string `'0'`, the query form, narrows to `{global.read.setting.locale}` with no write (ADR-0101 D6, `narrowed_setlocale_labels`; `"0\0x"` is not the query, php-src compares the whole string) |
+
+**Mode-gated readers** (S4, `locale_read_gate` in `steins-catalog`, `site/locale.rs` in `steins-infer`).
+The sorts, `substr_compare` and `pathinfo` read the locale only under an argument the caller
+chooses, so their row is the upper bound and the call site decides it as it does a printf format:
+a **sort**'s `$flags` (position 1) reads under the base type `SORT_LOCALE_STRING` (`strcoll`) or
+`SORT_NATURAL` (`strnatcmp`), with or without `SORT_FLAG_CASE`, and `ksort` and `krsort` also under
+`SORT_STRING | SORT_FLAG_CASE` (the key comparison folds case through `tolower`; the data sorts use
+the engine's ASCII table from 8.2); `substr_compare`'s `$case_insensitive` (position 4) reads when
+true; `pathinfo`'s `$flags` (position 1, default `PATHINFO_ALL`) reads unless it asks for
+`PATHINFO_DIRNAME` alone. An omitted argument is the parameter's default, a literal the scan evaluates
+(an integer, an engine constant, a `|` of such terms, a `true` or `false`; `ConstArgs::bools` reaches
+position 4 for this) decides, and anything else (a variable, an unevaluable expression, a named or spread
+argument list, the builtin handed over as a callback) is the `value-dependent-read` gap and no label.
+A per-byte reader (`ctype_*`, `strnatcmp`, `escapeshellarg`, `strip_tags`, `parse_url`) classifies the
+bytes it is given, so a call that is given none (an empty string, a string with no `<` for `strip_tags`)
+reads nothing; the row does not model that, and the read is the call's (ADR-0101 §3.9).
 
 `fprintf` and `vfprintf` still have no row. Both reads of a printf row are **conditional on the
 call** (`'%d'` reads neither), so the row is an upper bound and not a claim about every call: the
