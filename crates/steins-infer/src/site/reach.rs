@@ -106,11 +106,18 @@ impl Frame<'_> {
             FloatEvidence::GlobalConst(name) => global_const_fact(cx, name)
                 .map_or(FloatClass::Unknown, |(fact, _)| fact_float_class(&fact)),
             FloatEvidence::ClassConst { class, name } => {
-                match cx.resolve_class_const(class, name, self.class_fqn) {
-                    Some(ArgValue::Float(_)) => FloatClass::Yes,
-                    Some(
-                        ArgValue::Int(_) | ArgValue::Str(_) | ArgValue::Bool(_) | ArgValue::Null,
-                    ) => FloatClass::No,
+                // A typed constant holds its declared type, so `const float X = 1` is a float
+                // whatever the literal says: a typed one is read by its declaration first.
+                let literal = cx.resolve_class_const(class, name, self.class_fqn);
+                match (cx.class_const_declared_type(class, name, self.class_fqn), literal) {
+                    (Some(None), Some(ArgValue::Float(_))) => FloatClass::Yes,
+                    (Some(None), Some(v)) if scalar_not_float(&v) => FloatClass::No,
+                    (Some(Some(hint)), Some(ArgValue::Int(_) | ArgValue::Float(_)))
+                        if declared_float(hint) =>
+                    {
+                        FloatClass::Yes
+                    }
+                    (Some(Some(hint)), Some(_)) if hint_non_float(hint) => FloatClass::No,
                     _ => FloatClass::Unknown,
                 }
             }
@@ -145,12 +152,16 @@ impl Frame<'_> {
                 if self.rebound_by_call(cx, name) {
                     return FloatClass::Unknown;
                 }
-                let hint = self.params.iter().find(|p| &p.name == name).and_then(|p| p.hint_span);
+                let param = self.params.iter().find(|p| &p.name == name);
+                let hint = param.and_then(|p| p.hint_span);
+                let nullable_default = param.is_some_and(|p| p.has_null_default);
                 match hint.and_then(|span| cx.tree().source_slice(span)).map(hint_float_class) {
                     Some(FloatClass::No) if writes.is_empty() || written == FloatClass::No => {
                         FloatClass::No
                     }
-                    Some(FloatClass::Yes) if unwritten => FloatClass::Yes,
+                    // `float $f = null` is implicitly nullable: called with the default it
+                    // holds `null`, exactly as `?float` may.
+                    Some(FloatClass::Yes) if unwritten && !nullable_default => FloatClass::Yes,
                     _ => FloatClass::Unknown,
                 }
             }
@@ -464,6 +475,17 @@ impl FloatClass {
         })
         .unwrap_or(Self::No)
     }
+}
+
+/// Whether `v` is a scalar literal that is no float.
+fn scalar_not_float(v: &ArgValue) -> bool {
+    matches!(v, ArgValue::Int(_) | ArgValue::Str(_) | ArgValue::Bool(_) | ArgValue::Null)
+}
+
+/// Whether the declared type `hint` of a constant makes an integer or float literal a float:
+/// `float` or `?float` (PHP converts the integer on the way in).
+fn declared_float(hint: &str) -> bool {
+    matches!(hint.trim().to_ascii_lowercase().as_str(), "float" | "?float")
 }
 
 /// Whether a value the fact `fact` describes is a float: a literal or a set of literals is as

@@ -1464,6 +1464,46 @@ impl<'a> Cx<'a> {
         }
     }
 
+    /// The native type declared on the class constant `sc::name`, found where
+    /// [`Self::resolve_class_const`] finds its literal (the class, its implemented interfaces,
+    /// then the parent chain): `Some(Some(hint))` for a typed one (`const float X = 1;`),
+    /// `Some(None)` for an untyped one, `None` where no declaration is found. A typed
+    /// constant holds its **declared** type, so `const float X = 1` is `float(1)` at run time
+    /// whatever the literal says.
+    pub(crate) fn class_const_declared_type(
+        &self,
+        sc: &StaticClass,
+        name: &str,
+        enclosing: Option<&str>,
+    ) -> Option<Option<&str>> {
+        let mut cur = self.resolve_static_class_fqn(sc, enclosing)?;
+        let mut seen: HashSet<String> = HashSet::new();
+        loop {
+            if !seen.insert(cur.to_ascii_lowercase()) {
+                return None;
+            }
+            let (file, cd) = self.find_class(&cur)?;
+            let declared = |file: usize, cd: &steins_syntax::ClassDecl| {
+                cd.const_decls.iter().find(|d| d.name == name).map(|d| {
+                    d.hint_span.and_then(|span| self.units[file].tree.source_slice(span))
+                })
+            };
+            if let Some(found) = declared(file, cd) {
+                return Some(found);
+            }
+            for iref in &cd.implements {
+                let ifqn = self.units[file].tree.resolve_class_fqn(iref);
+                if let Some((ifile, icd)) = self.find_class(&ifqn)
+                    && let Some(found) = declared(ifile, icd)
+                {
+                    return Some(found);
+                }
+            }
+            let pref = cd.parent.as_ref()?;
+            cur = self.units[file].tree.resolve_class_fqn(pref);
+        }
+    }
+
     /// Resolve an [`ArgValue`] to a proven value **without an environment** — a
     /// self-evident literal, a proven object (`new` / enum case), or a resolved
     /// class constant (ADR-0043). Feeds the native definite-No checks at the

@@ -427,7 +427,13 @@ since S1 alone over-reports the locale read at every printf call. What it reads 
     declared type here even though they stay out of the object-free reading, since the declared return
     holds whatever the property did;
   - *constants*: a global constant by ADR-0094's resolution (the mined table, the platform classes, a
-    project declaration) and a class constant by its literal initializer.
+    project declaration) and a class constant by its literal initializer, or by its declared type where
+    it has one (`const float X = 123456789` holds `float(123456789)`, and any other typed constant
+    that is not plainly no-float is not read);
+  - *nullable defaults*: a parameter declared `float $f = null` is implicitly nullable, so it is read as
+    `?float` is, never as a float.
+  A fully literal `sprintf('%s', 1.5)` is folded at compile time on PHP 8.4 and later, against the
+  `precision` the ini holds when compiling; the proven label still stands, since the ini is read then.
   Float-to-string operator sites (`(string) $f`, `.`, `echo`) and the other float renderers (`strval`,
   `implode`, `print_r`) still carry no `precision` read; that waits for ADR-0008's opt-in and the rows of
   S4, and a builtin reader whose read is value-conditional follows this three-way rule when its row
