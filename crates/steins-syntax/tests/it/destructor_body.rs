@@ -96,3 +96,20 @@ fn a_trait_reports_the_classes_its_properties_are_hinted_with() {
     // Only a trait reports them: a class's own properties are lowered.
     assert!(decl("<?php\nclass C { private D $d; }\n", "C").held_classes.is_empty());
 }
+
+#[test]
+fn a_trait_property_hinted_self_or_parent_is_flagged_and_an_anonymous_class_reports_its_held_classes() {
+    let flags = |body: &str| {
+        let d = decl(&format!("<?php\ntrait T {{ {body} }}\n"), "T");
+        (d.holds_self, d.holds_parent)
+    };
+    assert_eq!(flags("public ?self $a = null;"), (true, false));
+    assert_eq!(flags("public ?parent $a = null;"), (false, true));
+    assert_eq!(flags("public self|parent|null $a = null; public static ?self $s = null;"), (true, true));
+    assert_eq!(flags("public ?D $a = null; public function m(self $x) {}"), (false, false));
+    let edges = anon(
+        "<?php\n$a = new class extends P { public ?D $d = null; \
+         public function __construct(private E $e, int $n) {} public static ?F $f = null; };\n",
+    );
+    assert_eq!(names(&edges[0].held_classes), ["D", "E"]);
+}

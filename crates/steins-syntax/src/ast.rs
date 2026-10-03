@@ -1472,6 +1472,11 @@ pub struct ClassDecl {
     /// (ADR-0100 §7). Empty for every other class-like, whose properties are
     /// [`Self::properties`].
     pub held_classes: Vec<NameRef>,
+    /// A **trait** only: whether a non-static property or promoted parameter of it is
+    /// hinted `self`, which names the class that imports the trait.
+    pub holds_self: bool,
+    /// A **trait** only: the same for `parent`, the importing class's parent.
+    pub holds_parent: bool,
     /// Raw `/** … */` docblock preceding the class-like, if any — read for
     /// class-level `@template` names shadowing same-named classes (issue #5). `None` for a trait.
     pub docblock: Option<String>,
@@ -4059,6 +4064,9 @@ pub struct AnonClassEdge {
     /// The traits the body imports, as written (resolved by
     /// [`crate::SourceTree::resolve_class_fqn`]): what the body brings in that is not lowered.
     pub used_traits: Vec<NameRef>,
+    /// The classes the body's non-static properties, and its constructor's promoted
+    /// parameters, are hinted with, as written (`self` and `parent` excluded).
+    pub held_classes: Vec<NameRef>,
     /// The `new class` construct's source span.
     pub span: Span,
 }

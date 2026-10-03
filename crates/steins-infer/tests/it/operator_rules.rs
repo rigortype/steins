@@ -1007,10 +1007,11 @@ fn s6_the_property_hop_ends_on_a_cycle_and_reads_the_inherited_chain() {
     assert!(dtor(&drops_in(union), "f"));
 }
 
-/// Row 6.22: a subclass's own property is residue when the subject is bound.
+/// Row 6.22: a subclass's own property was residue when the subject is bound; S6c closes it,
+/// since a class that holds a destructor class makes its ancestors a bound that may.
 #[test]
-fn s6_a_subclass_s_own_properties_are_residue_when_the_subject_is_bound() {
-    dtor_none("function f(Holder $h) { $h = null; }", "f");
+fn s6_a_subclass_s_own_properties_make_the_bound_a_gap() {
+    dtor_gap("function f(Holder $h) { $h = null; }", "f");
     // The exact class reads its own.
     dtor_gap("function f(SubHolder $h) { $h = null; }", "f");
     dtor_gap("function f() { $h = new SubHolder; unset($h); }", "f");
@@ -1468,4 +1469,165 @@ fn s6c_a_new_of_an_unseen_class_is_left_to_its_unknown_class_gap() {
     gap("function f(\\Vendor\\Thing $t) { $t = null; }");
     gap("class C extends \\Vendor\\Base {}\nfunction f() { $c = new C; unset($c); }");
     gap("function f() { $x = new class { use \\Vendor\\T; }; unset($x); }");
+}
+
+// ---- S6c review round: the closure is seeded by what a class reaches (PR #1006) -----
+//
+// A class reaches a destructor through its own declaration (a trait or alias included), its
+// parent chain, or a non-static class-typed property it declares or imports from a trait
+// whose hint reaches one, recursively. Every ancestor of such a class, and of an anonymous
+// class that reaches one by the same reading, is a bound that may run it. Each source below
+// is a witness run on PHP 8.5 (`[D]<after>`, `[P]<body><after>`, `[V]<after>`, `[B2]<after>`).
+
+const GAP: bool = true;
+const CLEAN: bool = false;
+
+fn reads(src: &str, rows: &[(&str, bool)]) {
+    for (symbol, gap) in rows {
+        assert_eq!(dtor_src(src, symbol), *gap, "{symbol}\n{src}");
+    }
+}
+
+/// Blocker 1: an anonymous class contributes its parent and interfaces to the closure
+/// whenever it reaches a destructor, by its parent's chain, an imported trait or a typed,
+/// plain, promoted or trait-imported property; an anonymous class that reaches none adds
+/// nothing. Rows g25, b01, b02, b04, a04, a04b, a05.
+#[test]
+fn s6c_an_anonymous_class_that_reaches_a_destructor_makes_its_parent_and_interfaces_a_gap() {
+    // g25 and b01: the parent's own destructor, seen through the interface.
+    reads(
+        "interface I {}\nclass P { public function __destruct() { echo '[P]'; } }\n\
+         function g25(I $i): void { $i = null; echo '<body>'; }\n\
+         function mk(): I { return new class extends P implements I {}; }",
+        &[("g25", GAP)],
+    );
+    // b02: the parent imports a trait that declares one.
+    reads(
+        "interface I {}\ntrait TD { public function __destruct() { echo '[TD]'; } }\nclass P { use TD; }\n\
+         function b02(I $i): void { $i = null; }\n\
+         function mk(): I { return new class extends P implements I {}; }",
+        &[("b02", GAP)],
+    );
+    // b04: the parent holds a typed property; the anonymous class implements the interface.
+    reads(
+        "interface I {}\nfinal class D { public function __destruct() { echo '[D]'; } }\n\
+         class P { public ?D $d = null; }\nfunction b04(I $i): void { $i = null; }\n\
+         function mk(): I { $o = new class extends P implements I {}; $o->d = new D(); return $o; }",
+        &[("b04", GAP)],
+    );
+    // a04: a promoted constructor parameter; a04b: a plain property; a05: a trait's.
+    let d = "final class D { public function __destruct() { echo '[D]'; } }\nclass P {}\n";
+    reads(
+        &format!("{d}function a04(P $p): void {{ $p = null; }}\n\
+         function mk(): P {{ return new class(new D()) extends P {{ \
+         public function __construct(private D $d) {{}} }}; }}"),
+        &[("a04", GAP)],
+    );
+    reads(
+        &format!("{d}function a04b(P $p): void {{ $p = null; }}\n\
+         function mk(): P {{ $o = new class extends P {{ public ?D $d = null; }}; \
+         $o->d = new D(); return $o; }}"),
+        &[("a04b", GAP)],
+    );
+    reads(
+        &format!("{d}trait T {{ public ?D $d = null; }}\nfunction a05(P $p): void {{ $p = null; }}\n\
+         function mk(): P {{ $o = new class extends P {{ use T; }}; $o->d = new D(); return $o; }}"),
+        &[("a05", GAP)],
+    );
+    // Must stay: nothing reached, so nothing added (a09; scalar, array and engine properties).
+    reads(
+        "interface I {}\nclass P {}\ntrait Clean {}\n\
+         function a09(P $p): void { $p = null; }\nfunction h(I $i): void { $i = null; }\n\
+         function mk(): I { return new class extends P implements I { use Clean; \
+         public int $n = 1; private ?\\Closure $c = null; public array $a = []; }; }",
+        &[("a09", CLEAN), ("h", CLEAN)],
+    );
+}
+
+/// Blocker 2: a class reaches a destructor through a property it imports from a trait or
+/// declares itself, and so does every ancestor that is a bound: rows t11, t11b and b03,
+/// with the nested and cyclic shapes.
+#[test]
+fn s6c_a_class_holding_a_destructor_class_makes_its_ancestors_a_gap() {
+    let d = "final class D { public function __destruct() { echo '[D]'; } }\nclass P {}\n";
+    // t11: the trait's property; t11b: the class's own, the hole S6b recorded as residue.
+    reads(
+        &format!("{d}trait T {{ public ?D $d = null; }}\nclass U extends P {{ use T; }}\n\
+         function t11(P $p): void {{ $p = null; }}"),
+        &[("t11", GAP)],
+    );
+    reads(
+        &format!("{d}class U extends P {{ public ?D $d = null; }}\n\
+         function t11c(P $p): void {{ $p = null; }}"),
+        &[("t11c", GAP)],
+    );
+    // b03: the interface variant, through the trait.
+    reads(
+        &format!("interface I {{}}\n{d}trait T {{ public ?D $d = null; }}\n\
+         class U implements I {{ use T; }}\nfunction b03(I $i): void {{ $i = null; }}"),
+        &[("b03", GAP)],
+    );
+    // Two hops: a holder of a holder, and a holder through a trait that imports a trait.
+    reads(
+        &format!("interface I {{}}\n{d}class H {{ public ?D $d = null; }}\n\
+         class HH extends P {{ public ?H $h = null; }}\nfunction f(P $p): void {{ $p = null; }}\n\
+         trait T1 {{ public ?D $d = null; }}\ntrait T2 {{ use T1; }}\n\
+         class U implements I {{ use T2; }}\nfunction g(I $i): void {{ $i = null; }}"),
+        &[("f", GAP), ("g", GAP)],
+    );
+    // A holder of a class that is a bound reaches through that bound's ancestors: `Node` is
+    // held as a `Node` or any subclass, and a subclass declares one.
+    reads(
+        &format!("{d}class Node {{}}\nclass DNode extends Node {{ public function __destruct() {{}} }}\n\
+         class List_ extends P {{ public ?Node $n = null; }}\n\
+         function f(P $p): void {{ $p = null; }}"),
+        &[("f", GAP)],
+    );
+    // Must stay: holders of nothing that reaches, and a cycle of holders, end the walk.
+    reads(
+        &format!("{d}class Q {{}}\nclass U extends P {{ public ?Q $q = null; public int $n = 0; \
+         public array $a = []; }}\nfunction f(P $p): void {{ $p = null; }}\n\
+         class A {{ public ?B $b = null; }}\nclass B extends A {{ public ?A $a = null; }}\n\
+         function g(A $a): void {{ $a = null; }}"),
+        &[("f", CLEAN), ("g", CLEAN)],
+    );
+}
+
+/// Blocker 3: a trait property hinted `self` or `parent` names the importing class and its
+/// parent. Rows t08 and t08c (`self`, with a subclass that declares one) and t09c (`parent`,
+/// a final importer whose parent has a subclass that does).
+#[test]
+fn s6c_a_trait_property_hinted_self_or_parent_reads_the_importing_class() {
+    reads(
+        "trait T { public ?self $next = null; }\nclass U { use T; }\n\
+         class V extends U { public function __destruct() { echo '[V]'; } }\n\
+         function t08(): void { $u = new U(); $u->next = new V(); unset($u); }",
+        &[("t08", GAP)],
+    );
+    reads(
+        "trait T { public ?self $next = null; }\n\
+         class U { use T; public function __construct() {} }\n\
+         class V extends U { public function __destruct() { echo '[V]'; } }\n\
+         function t08c(): void { $u = new U(); $u->next = new V(); unset($u); }",
+        &[("t08c", GAP)],
+    );
+    reads(
+        "trait T { public ?parent $p = null; }\nclass B {}\n\
+         class B2 extends B { public function __destruct() { echo '[B2]'; } }\n\
+         final class U extends B { use T; }\nfunction t09c(U $u): void { $u = null; }",
+        &[("t09c", GAP)],
+    );
+    // The same through a trait that imports it, and for a bound importer.
+    reads(
+        "trait T { public ?parent $p = null; }\ntrait T2 { use T; }\nclass B {}\n\
+         class B2 extends B { public function __destruct() {} }\n\
+         class U extends B { use T2; }\nfunction f(U $u): void { $u = null; }",
+        &[("f", GAP)],
+    );
+    // Must stay: nothing below the importing class or its parent runs one.
+    reads(
+        "trait T { public ?self $s = null; public ?parent $p = null; }\nclass B {}\n\
+         final class U extends B { use T; }\nfunction f(U $u): void { $u = null; }",
+        &[("f", CLEAN)],
+    );
 }

@@ -6,8 +6,8 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use steins_db::{
-    DeclSite, EffectsPolicy, MergedTables, PackageShard, ProjectIndex, Resolve, ShardSite,
-    SourceFile, fallback_package_key, merge_shards,
+    AnonymousClass, DeclSite, EffectsPolicy, MergedTables, PackageShard, ProjectIndex, Resolve,
+    ShardSite, SourceFile, fallback_package_key, merge_shards,
 };
 use steins_syntax::{NameRef, RefKind, SourceTree};
 
@@ -292,9 +292,9 @@ pub(crate) struct Index {
     /// The classes and interfaces the universe's anonymous classes extend or
     /// implement, as resolved in their files (ADR-0099 §4.4).
     anonymous_subclass_parents: HashSet<String>,
-    /// The same, for the anonymous classes whose body runs user code on a drop itself
-    /// (ADR-0100 §7): the ones that seed [`Self::destructor_ancestors`].
-    anonymous_destructor_parents: HashSet<String>,
+    /// The anonymous classes that have a parent or interfaces, as the destructor gate
+    /// reads them (ADR-0100 §7).
+    anonymous_classes: Vec<AnonymousClass>,
     // global constants (ADR-0078, issue #198)
     /// Every global constant the universe declares, keyed by
     /// [`steins_syntax::normalize_const_fqn`] (namespace lowercased, final segment
@@ -377,7 +377,7 @@ impl Index {
             destructor_classes: m.destructor_classes,
             destructor_ancestors: Lazy::default(),
             anonymous_subclass_parents: m.anonymous_subclass_parents,
-            anonymous_destructor_parents: m.anonymous_destructor_parents,
+            anonymous_classes: m.anonymous_classes.into_iter().collect(),
             constants: m.constants,
             files: m.files,
         }
@@ -414,7 +414,7 @@ impl Index {
         idx.magic_property_classes = m.magic_property_classes;
         idx.destructor_classes = m.destructor_classes;
         idx.anonymous_subclass_parents = m.anonymous_subclass_parents;
-        idx.anonymous_destructor_parents = m.anonymous_destructor_parents;
+        idx.anonymous_classes = m.anonymous_classes.into_iter().collect();
         idx.constants = m.constants;
         idx.files = m.files;
         idx
@@ -491,8 +491,8 @@ impl Index {
     }
 
     /// The lowercase names that are, or are an ancestor of, a class of
-    /// [`Self::destructor_classes`] or the parent of an anonymous class that runs a
-    /// destructor ([`Self::anonymous_destructor_parents`]): the question
+    /// [`Self::destructor_classes`], of a class that holds one in a property, or the
+    /// parent of an anonymous class that reaches one: the question
     /// "may a subclass run a destructor" for a bound class is one lookup. The
     /// closure is a fact of the universe, so it is built once, by whichever
     /// caller asks first, with `build`.
@@ -508,10 +508,9 @@ impl Index {
         &self.anonymous_subclass_parents
     }
 
-    /// The classes and interfaces some anonymous class extends or implements whose
-    /// body runs user code on a drop itself (ADR-0100 §7).
-    pub(crate) fn anonymous_destructor_parents(&self) -> &HashSet<String> {
-        &self.anonymous_destructor_parents
+    /// The anonymous classes that have a parent or interfaces (ADR-0100 §7).
+    pub(crate) fn anonymous_classes(&self) -> &[AnonymousClass] {
+        &self.anonymous_classes
     }
 
     pub(crate) fn resolve_function(&self, fqn: &str) -> Res {

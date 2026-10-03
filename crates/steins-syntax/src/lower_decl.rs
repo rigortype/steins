@@ -31,7 +31,7 @@ use crate::lower_expr::{
     method_name_of, trace_static_class,
 };
 use crate::lower_site::{
-    body_end, hint_class_names, promoted_hook_sites, scan_owner_sites, scope_exit_sites,
+    HintClasses, body_end, promoted_hook_sites, scan_owner_sites, scope_exit_sites,
 };
 use crate::names::{
     PREG_FLAG_CONST_NAMES, RefResolver, ctx_of, name_ref, use_binds_php_version_id,
@@ -171,6 +171,7 @@ pub(crate) fn walk(
                     .unwrap_or_default(),
                 declares_destructor: body.declares_destructor,
                 used_traits: body.used_traits,
+                held_classes: body.held_classes,
                 span: to_span(ac.span()),
             });
             // …and the SAME names are hard refs too (issue #182): a missing parent/
@@ -770,6 +771,9 @@ pub(crate) struct BodyDestructor {
     /// The classes the non-static properties, promoted constructor parameters
     /// included, are hinted with, as written.
     pub(crate) held_classes: Vec<NameRef>,
+    /// Whether one of those hints is `self`, or `parent`.
+    pub(crate) holds_self: bool,
+    pub(crate) holds_parent: bool,
 }
 
 /// Read a body's members for [`BodyDestructor`]. Nested class-likes are other
@@ -778,6 +782,7 @@ pub(crate) fn scan_body<'a, 'arena: 'a>(
     members: impl Iterator<Item = &'a ClassLikeMember<'arena>>,
 ) -> BodyDestructor {
     let mut out = BodyDestructor::default();
+    let mut held = HintClasses::default();
     for member in members {
         match member {
             ClassLikeMember::Method(m) => {
@@ -789,7 +794,7 @@ pub(crate) fn scan_body<'a, 'arena: 'a>(
                             && p.is_promoted_property()
                             && !p.modifiers.iter().any(Modifier::is_static)
                         {
-                            hint_class_names(hint, &mut out.held_classes);
+                            held.read(hint);
                         }
                     }
                 }
@@ -798,14 +803,14 @@ pub(crate) fn scan_body<'a, 'arena: 'a>(
                 if let Some(hint) = &p.hint
                     && !p.modifiers.iter().any(Modifier::is_static)
                 {
-                    hint_class_names(hint, &mut out.held_classes);
+                    held.read(hint);
                 }
             }
             ClassLikeMember::Property(Property::Hooked(h)) => {
                 if let Some(hint) = &h.hint
                     && !h.modifiers.iter().any(Modifier::is_static)
                 {
-                    hint_class_names(hint, &mut out.held_classes);
+                    held.read(hint);
                 }
             }
             ClassLikeMember::TraitUse(tu) => {
@@ -822,6 +827,9 @@ pub(crate) fn scan_body<'a, 'arena: 'a>(
             _ => {}
         }
     }
+    out.held_classes = held.names;
+    out.holds_self = held.has_self;
+    out.holds_parent = held.has_parent;
     out
 }
 
@@ -856,6 +864,8 @@ fn lower_trait(t: &mago_syntax::cst::Trait<'_>, conditional: bool) -> ClassDecl 
         used_traits: body.used_traits,
         declares_destructor: body.declares_destructor,
         held_classes: body.held_classes,
+        holds_self: body.holds_self,
+        holds_parent: body.holds_parent,
         // No member docblock can observe a trait-level `@template`.
         docblock: None,
         docblock_span: None,
@@ -939,6 +949,8 @@ fn lower_class(c: &Class<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex, rc: 
         used_traits: body.used_traits,
         declares_destructor: body.declares_destructor,
         held_classes: Vec::new(),
+        holds_self: false,
+        holds_parent: false,
         // Class-level docblock (whole declaration incl. attributes/modifiers) — read
         // for `@template` names that shadow same-named classes in member docblocks (issue #5).
         docblock: docs.preceding(to_span(c.span()).start),
@@ -1112,6 +1124,8 @@ fn lower_interface(i: &mago_syntax::cst::Interface<'_>, aliases: &SteinsAttrAlia
         used_traits: Vec::new(),
         declares_destructor,
         held_classes: Vec::new(),
+        holds_self: false,
+        holds_parent: false,
         // Class-level docblock — `@template` names shadow same-named classes in the
         // interface's method docblocks (issue #5).
         docblock: docs.preceding(to_span(i.span()).start),
@@ -1195,6 +1209,8 @@ fn lower_enum(e: &mago_syntax::cst::Enum<'_>, _aliases: &SteinsAttrAliases, docs
         used_traits: Vec::new(),
         declares_destructor: false,
         held_classes: Vec::new(),
+        holds_self: false,
+        holds_parent: false,
         // No analyzed member can observe an enum-level `@template`.
         docblock: None,
         docblock_span: None,
