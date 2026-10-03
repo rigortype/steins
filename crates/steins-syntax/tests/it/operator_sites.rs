@@ -778,8 +778,8 @@ fn a_new_that_escapes_is_no_temporary() {
 
 #[test]
 fn an_anonymous_class_carries_what_its_body_declares() {
-    // A destructor of its own, or a trait whose body is unread: user code at the drop.
-    for class in ["{ function __destruct() {} }", "{ use T; }"] {
+    // A destructor of its own, or an imported method aliased to one: user code at the drop.
+    for class in ["{ function __destruct() {} }", "{ use T { bye as __destruct; } }"] {
         let body = format!("$x = new class {class}; unset($x);");
         assert_eq!(
             drops("", &body),
@@ -787,6 +787,14 @@ fn an_anonymous_class_carries_what_its_body_declares() {
             "{class}"
         );
     }
+    // A trait it imports is read as a class by the resolver, beside its parent.
+    assert_eq!(
+        drops("", "$x = new class extends P { use T, U; }; unset($x);"),
+        [
+            drop_site(C::DropUnset, &["T", "U", "P"], "$x"),
+            drop_site(C::DropScopeExit, &["T", "U", "P"], "}"),
+        ]
+    );
     // A parent is the class for the chain's sake; no parent and no destructor runs nothing.
     assert_eq!(
         drops("", "new class extends P {};"),

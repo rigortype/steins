@@ -7,14 +7,17 @@
 //! `reaches_destructor(C)` is the gate (ADR-0100's amendment of 2026-10-03, item
 //! 5):
 //!
-//! 1. `C`'s chain declares `__destruct` (or imports a trait, whose body is not
-//!    lowered), or, for a class that is only a bound, a class in the universe
-//!    that can stand in for it does, an anonymous class's parent counted as the
-//!    anonymous class ([`Index::destructor_ancestors`]). A class declared twice
+//! 1. `C`'s chain declares `__destruct`, or imports a trait that does (a trait
+//!    is read by its member names; one no file declares, two do, a condition
+//!    guards or a `class_alias` names cannot be read, and counts), or, for a
+//!    class that is only a bound, a class in the universe that can stand in for
+//!    it does, an anonymous class's parent counted as the anonymous class when
+//!    its body does ([`Index::destructor_ancestors`]). A class declared twice
 //!    cannot be read, and counts;
-//! 2. or a typed, non-static property on `C`'s chain names a project class that
-//!    reaches one, recursively, each class once for each exactness it is asked
-//!    under.
+//! 2. or a typed, non-static property on `C`'s chain, or one a trait it imports
+//!    declares (a trait's properties are read off its hints), names a project
+//!    class that reaches one, recursively, each class once for each exactness it
+//!    is asked under.
 //!
 //! A hint that is `array`, `mixed`, `object`, `iterable`, `callable`, absent or
 //! an engine class contributes nothing: those drops are recorded residue, and so
@@ -90,7 +93,8 @@ fn reaches_destructor(
 }
 
 /// Whether `class` or an ancestor on its `extends` line is a class the shard
-/// lists as declaring a destructor or importing a trait. A class declared twice
+/// lists as running a destructor: declaring one, or importing a trait that may.
+/// A class declared twice
 /// cannot be read, and may be any of its declarations: it counts.
 fn chain_declares(cx: &Cx<'_>, class: &str) -> bool {
     let mut visited: HashSet<String> = HashSet::new();
@@ -111,10 +115,11 @@ fn chain_declares(cx: &Cx<'_>, class: &str) -> bool {
 }
 
 /// Whether a typed property on `class`'s chain names a class that reaches a
-/// destructor (clause 2). An untyped property, or one hinted `array`, `mixed`,
-/// `object`, `iterable`, `callable` or an engine class, names none.
+/// destructor (clause 2), a property a trait imports included. An untyped property, or
+/// one hinted `array`, `mixed`, `object`, `iterable`, `callable` or an engine class,
+/// names none.
 fn holds_one(cx: &Cx<'_>, class: &str, seen: &mut HashSet<(String, bool)>) -> bool {
-    cx.class_props(class).into_iter().filter_map(|p| p.ty.as_ref()).any(|ty| {
+    let own = cx.class_props(class).into_iter().filter_map(|p| p.ty.as_ref()).any(|ty| {
         ty.members.iter().any(|member| match member {
             TypeMember::Instance { fqn, .. } => {
                 reaches_destructor(cx, fqn, cx.class_has_no_subclass(fqn), seen)
@@ -124,11 +129,36 @@ fn holds_one(cx: &Cx<'_>, class: &str, seen: &mut HashSet<(String, bool)>) -> bo
             }),
             TypeMember::Scalar(_) | TypeMember::BoolLiteral(_) => false,
         })
+    });
+    own || trait_held(cx, class).iter().any(|held| {
+        reaches_destructor(cx, held, cx.class_has_no_subclass(held), seen)
     })
 }
 
+/// The classes the properties that `class`, its ancestors and every trait they import
+/// (a trait's imports too) are hinted with, as the traits declare them: a trait's
+/// properties are not lowered, so the hint names are read off the declaration. A trait
+/// the index cannot place is not read here; the merge counted its users already.
+fn trait_held(cx: &Cx<'_>, class: &str) -> Vec<String> {
+    let mut held = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut pending = vec![cx.class_identity(class)];
+    while let Some(name) = pending.pop() {
+        if !seen.insert(name.clone()) {
+            continue;
+        }
+        let Some((file, cd)) = cx.find_class(&name) else { continue };
+        let tree = cx.units[file].tree;
+        held.extend(cd.held_classes.iter().map(|r| tree.resolve_class_fqn(r)));
+        let imported = cd.used_traits.iter().chain(&cd.parent);
+        pending.extend(imported.map(|r| cx.class_identity(&tree.resolve_class_fqn(r))));
+    }
+    held
+}
+
 /// The names that are, or are an ancestor of, a class whose chain declares a
-/// destructor (or imports a trait), or an anonymous class's parent, as identities.
+/// destructor (or imports a trait that may), or the parent of an anonymous class
+/// whose body runs one, as identities.
 /// A subclass of such a class inherits its destructor, so what it implements is
 /// an ancestor too. Ancestors are the project's own declarations and the
 /// catalog's, through `extends` and `implements`.

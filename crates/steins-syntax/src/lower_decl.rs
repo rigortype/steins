@@ -30,7 +30,9 @@ use crate::lower_expr::{
     class_const_name, instantiation_class, is_strict_types_one, lower_arg_value, lower_call,
     method_name_of, trace_static_class,
 };
-use crate::lower_site::{body_end, promoted_hook_sites, scan_owner_sites, scope_exit_sites};
+use crate::lower_site::{
+    body_end, hint_class_names, promoted_hook_sites, scan_owner_sites, scope_exit_sites,
+};
 use crate::names::{
     PREG_FLAG_CONST_NAMES, RefResolver, ctx_of, name_ref, use_binds_php_version_id,
     use_binds_preg_flag_const,
@@ -765,6 +767,9 @@ pub(crate) struct BodyDestructor {
     /// A `__destruct` method, or a trait adaptation that names a method `__destruct`
     /// (`use T { bye as __destruct; }`, which makes `bye` the destructor).
     pub(crate) declares_destructor: bool,
+    /// The classes the non-static properties, promoted constructor parameters
+    /// included, are hinted with, as written.
+    pub(crate) held_classes: Vec<NameRef>,
 }
 
 /// Read a body's members for [`BodyDestructor`]. Nested class-likes are other
@@ -778,6 +783,30 @@ pub(crate) fn scan_body<'a, 'arena: 'a>(
             ClassLikeMember::Method(m) => {
                 let name = bytes_to_string(m.name.value);
                 out.declares_destructor |= name.eq_ignore_ascii_case("__destruct");
+                if name.eq_ignore_ascii_case("__construct") {
+                    for p in m.parameter_list.parameters.iter() {
+                        if let Some(hint) = &p.hint
+                            && p.is_promoted_property()
+                            && !p.modifiers.iter().any(Modifier::is_static)
+                        {
+                            hint_class_names(hint, &mut out.held_classes);
+                        }
+                    }
+                }
+            }
+            ClassLikeMember::Property(Property::Plain(p)) => {
+                if let Some(hint) = &p.hint
+                    && !p.modifiers.iter().any(Modifier::is_static)
+                {
+                    hint_class_names(hint, &mut out.held_classes);
+                }
+            }
+            ClassLikeMember::Property(Property::Hooked(h)) => {
+                if let Some(hint) = &h.hint
+                    && !h.modifiers.iter().any(Modifier::is_static)
+                {
+                    hint_class_names(hint, &mut out.held_classes);
+                }
             }
             ClassLikeMember::TraitUse(tu) => {
                 out.used_traits.extend(tu.trait_names.iter().map(name_ref));
@@ -799,6 +828,8 @@ pub(crate) fn scan_body<'a, 'arena: 'a>(
 /// Lower a `trait` declaration to a name-only [`ClassDecl`] (ADR-0049 §5, C8/A2i):
 /// it joins the class-like index but has no members/flattening, only its FQN.
 fn lower_trait(t: &mago_syntax::cst::Trait<'_>, conditional: bool) -> ClassDecl {
+    // The members are read by name only: nothing of a trait's body is lowered into a unit.
+    let body = scan_body(t.members.iter());
     ClassDecl {
         name: bytes_to_string(t.name.value),
         fqn: String::new(), // filled in `parse` from the enclosing namespace ctx
@@ -822,6 +853,9 @@ fn lower_trait(t: &mago_syntax::cst::Trait<'_>, conditional: bool) -> ClassDecl 
         // A trait is inert here — `uses_traits` on the using class already obstructs.
         allows_dynamic_properties: false,
         uses_traits: false,
+        used_traits: body.used_traits,
+        declares_destructor: body.declares_destructor,
+        held_classes: body.held_classes,
         // No member docblock can observe a trait-level `@template`.
         docblock: None,
         docblock_span: None,
@@ -848,6 +882,7 @@ fn lower_class(c: &Class<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex, rc: 
     let mut const_decls = Vec::new();
     let mut hooked_properties = Vec::new();
     let mut uses_traits = false;
+    let body = scan_body(c.members.iter());
     for member in c.members.iter() {
         match member {
             ClassLikeMember::Method(m) => {
@@ -901,6 +936,9 @@ fn lower_class(c: &Class<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex, rc: 
         allows_dynamic_properties: attrs_allow_dynamic_properties(&c.attribute_lists),
         // end member absence (ADR-0078, issue #197)
         uses_traits,
+        used_traits: body.used_traits,
+        declares_destructor: body.declares_destructor,
+        held_classes: Vec::new(),
         // Class-level docblock (whole declaration incl. attributes/modifiers) — read
         // for `@template` names that shadow same-named classes in member docblocks (issue #5).
         docblock: docs.preceding(to_span(c.span()).start),
@@ -1047,6 +1085,7 @@ fn lower_interface(i: &mago_syntax::cst::Interface<'_>, aliases: &SteinsAttrAlia
         }
     }
 
+    let declares_destructor = methods.iter().any(|m| m.name.eq_ignore_ascii_case("__destruct"));
     ClassDecl {
         name: bytes_to_string(i.name.value),
         fqn: String::new(),
@@ -1070,6 +1109,9 @@ fn lower_interface(i: &mago_syntax::cst::Interface<'_>, aliases: &SteinsAttrAlia
         // An interface declares no properties at all, so it can never be open.
         allows_dynamic_properties: false,
         uses_traits: false,
+        used_traits: Vec::new(),
+        declares_destructor,
+        held_classes: Vec::new(),
         // Class-level docblock — `@template` names shadow same-named classes in the
         // interface's method docblocks (issue #5).
         docblock: docs.preceding(to_span(i.span()).start),
@@ -1149,6 +1191,10 @@ fn lower_enum(e: &mago_syntax::cst::Enum<'_>, _aliases: &SteinsAttrAliases, docs
         // An enum cannot declare a property, dynamic or otherwise.
         allows_dynamic_properties: false,
         uses_traits: false,
+        // …nor a destructor: PHP refuses one on an enum, imported or declared.
+        used_traits: Vec::new(),
+        declares_destructor: false,
+        held_classes: Vec::new(),
         // No analyzed member can observe an enum-level `@template`.
         docblock: None,
         docblock_span: None,

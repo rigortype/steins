@@ -1454,6 +1454,24 @@ pub struct ClassDecl {
     /// `true` if the class `use`s any trait — trait bodies live elsewhere, so a
     /// trait-using class is treated as unresolvable (give up → silent).
     pub uses_traits: bool,
+    /// The traits the body imports, as written, from every `use` statement: a class's
+    /// and a trait's own (ADR-0100 §7, issue #882). [`Self::uses_traits`] stays the
+    /// obstacle bit the other analyses read and is `false` for a trait, whose body
+    /// is not lowered; this is what the destructor gate resolves instead.
+    pub used_traits: Vec<NameRef>,
+    /// Whether the body declares a `__destruct` method, or aliases an imported
+    /// trait's method `as __destruct` (`use T { bye as __destruct; }`, which runs
+    /// `bye` at a drop). Read by name, so a trait's counts though its methods are
+    /// not lowered.
+    pub declares_destructor: bool,
+    /// A **trait** only: the classes its non-static properties, and its constructor's
+    /// promoted parameters, are hinted with, as written, by every member of a hint
+    /// (`self` and `parent` excluded: they name the importing class and its parent,
+    /// which are asked anyway). A trait's properties are not lowered, so the
+    /// typed-property hop reads the importing class's traits through this list
+    /// (ADR-0100 §7). Empty for every other class-like, whose properties are
+    /// [`Self::properties`].
+    pub held_classes: Vec<NameRef>,
     /// Raw `/** … */` docblock preceding the class-like, if any — read for
     /// class-level `@template` names shadowing same-named classes (issue #5). `None` for a trait.
     pub docblock: Option<String>,

@@ -117,22 +117,32 @@ pub struct PackageShard {
     /// hooking a property (ADR-0099 §4.4, issue #859), keyed by the lowercase
     /// FQN the syntax layer gives ([`ClassDecl::fqn`]).
     magic_property_classes: HashSet<String>,
-    /// The class-likes the package declares that run user code when an instance
-    /// is dropped: one declaring `__destruct`, or importing a trait (whose body
-    /// is not lowered), keyed like [`Self::magic_property_classes`]
+    /// The class-likes the package declares that carry a destructor of their own: one
+    /// declaring `__destruct` or aliasing a used trait's method as one, and a trait
+    /// declared under a condition, whose body may be anything, keyed like
+    /// [`Self::magic_property_classes`]. A class that only imports a trait is not
+    /// here: [`Self::trait_users`] says what it imports, and the merge decides
     /// (ADR-0100 §7, issue #882).
-    destructor_classes: HashSet<String>,
+    destructor_declarers: HashSet<String>,
+    /// Trait FQN → the class-likes of the package that import it, a trait that uses
+    /// another included, in the lowercase FQN spelling. The merge resolves a trait
+    /// user's destructor through it, once every package's traits are known.
+    trait_users: BTreeMap<String, BTreeSet<String>>,
     /// The classes and interfaces the package's anonymous classes extend or
     /// implement, resolved in their own file. An anonymous class is invisible to
     /// the class index, and may add a property magic method to anything it
     /// extends (ADR-0099 §4.4; ADR-0049 A4 reads them the same way).
     anonymous_subclass_parents: HashSet<String>,
     /// The classes and interfaces an anonymous class extends or implements when its
-    /// body runs user code on a drop itself: it declares `__destruct` or imports a
-    /// trait (ADR-0100 §7, issue #882). The destructor gate reads this set and not
+    /// body runs user code on a drop itself: it declares `__destruct` (a trait's
+    /// imports are [`Self::anonymous_trait_users`]; ADR-0100 §7, issue #882). The destructor gate reads this set and not
     /// [`Self::anonymous_subclass_parents`]: the body is visible at the `new class`,
     /// so an anonymous class that declares nothing adds nothing to its parent.
     anonymous_destructor_parents: HashSet<String>,
+    /// Trait FQN → the parents and interfaces of the anonymous classes that import it
+    /// and declare no destructor of their own: they join
+    /// [`Self::anonymous_destructor_parents`] in the merge when the trait may carry one.
+    anonymous_trait_users: BTreeMap<String, BTreeSet<String>>,
     /// Global constants the package declares (ADR-0078, issue #198), keyed by
     /// `steins_syntax::normalize_const_fqn`'s spelling, each with the slot of
     /// a file that declares it.
@@ -175,15 +185,27 @@ impl PackageShard {
         self.magic_property_classes.extend(
             tree.classes().iter().filter(|cd| declares_property_magic(cd)).map(|cd| cd.fqn.clone()),
         );
-        self.destructor_classes.extend(
-            tree.classes().iter().filter(|cd| declares_destructor(cd)).map(|cd| cd.fqn.clone()),
-        );
+        for cd in tree.classes() {
+            if declares_destructor(cd) {
+                self.destructor_declarers.insert(cd.fqn.clone());
+            }
+            for used in &cd.used_traits {
+                let trait_fqn = trait_key(tree, used);
+                self.trait_users.entry(trait_fqn).or_default().insert(cd.fqn.clone());
+            }
+        }
         for edge in tree.anonymous_class_edges() {
             let parents = edge.parent.iter().chain(&edge.implements);
-            self.anonymous_subclass_parents.extend(parents.clone().map(|r| tree.resolve_class_fqn(r)));
-            if edge.declares_destructor || !edge.used_traits.is_empty() {
-                self.anonymous_destructor_parents.extend(parents.map(|r| tree.resolve_class_fqn(r)));
+            let parents: Vec<String> = parents.map(|r| tree.resolve_class_fqn(r)).collect();
+            if edge.declares_destructor {
+                self.anonymous_destructor_parents.extend(parents.iter().cloned());
+            } else {
+                for used in &edge.used_traits {
+                    let users = self.anonymous_trait_users.entry(trait_key(tree, used)).or_default();
+                    users.extend(parents.iter().cloned());
+                }
             }
+            self.anonymous_subclass_parents.extend(parents);
         }
         self.property_writes.0.extend(tree.property_write_names().iter().cloned());
         self.property_writes.1 |= tree.writes_computed_property_name();
@@ -244,9 +266,11 @@ impl PackageShard {
         self.magic_obstacles
             .extend(one.magic_obstacles.iter().map(|(_, o)| (slot, o.clone())));
         self.magic_property_classes.extend(one.magic_property_classes.iter().cloned());
-        self.destructor_classes.extend(one.destructor_classes.iter().cloned());
+        self.destructor_declarers.extend(one.destructor_declarers.iter().cloned());
+        merge_users(&mut self.trait_users, &one.trait_users);
         self.anonymous_subclass_parents.extend(one.anonymous_subclass_parents.iter().cloned());
         self.anonymous_destructor_parents.extend(one.anonymous_destructor_parents.iter().cloned());
+        merge_users(&mut self.anonymous_trait_users, &one.anonymous_trait_users);
         self.property_writes.0.extend(one.property_writes.0.iter().cloned());
         self.property_writes.1 |= one.property_writes.1;
         self.constants.extend(one.constants.keys().map(|key| (key.clone(), slot)));
@@ -422,12 +446,17 @@ pub struct MergedTables {
     pub property_writes: (HashSet<String>, bool),
     /// Every class-like that declares a property magic method or a property hook.
     pub magic_property_classes: HashSet<String>,
-    /// Every class-like that declares `__destruct` or imports a trait.
+    /// Every class-like that may run user code when an instance is dropped: one that
+    /// carries a destructor of its own (`__destruct`, or a trait method aliased to it),
+    /// or imports a trait that does, transitively, or that cannot be read: a trait no
+    /// file declares, declares twice, declares under a condition or names through a
+    /// `class_alias`, or one that itself imports such a trait (ADR-0100 §7).
     pub destructor_classes: HashSet<String>,
     /// Every class or interface an anonymous class of the universe extends or implements.
     pub anonymous_subclass_parents: HashSet<String>,
     /// Every class or interface an anonymous class of the universe extends or implements
-    /// whose body runs user code on a drop itself.
+    /// whose body runs user code on a drop itself: it declares a destructor, or imports
+    /// a trait that, as for [`Self::destructor_classes`], may carry one.
     pub anonymous_destructor_parents: HashSet<String>,
     /// Every global constant the universe declares.
     pub constants: HashSet<String>,
@@ -571,7 +600,6 @@ pub fn merge_shards(shards: &[PackageShard]) -> MergedTables {
         m.property_writes.0.extend(s.property_writes.0.iter().cloned());
         m.property_writes.1 |= s.property_writes.1;
         m.magic_property_classes.extend(s.magic_property_classes.iter().cloned());
-        m.destructor_classes.extend(s.destructor_classes.iter().cloned());
         m.anonymous_subclass_parents.extend(s.anonymous_subclass_parents.iter().cloned());
         m.anonymous_destructor_parents.extend(s.anonymous_destructor_parents.iter().cloned());
         m.constants.extend(s.constants.keys().cloned());
@@ -582,7 +610,52 @@ pub fn merge_shards(shards: &[PackageShard]) -> MergedTables {
             }
         }
     }
+    resolve_destructor_classes(shards, &mut m);
     m
+}
+
+/// Fill [`MergedTables::destructor_classes`], and add to
+/// [`MergedTables::anonymous_destructor_parents`], from the shards' declarers and trait
+/// imports, once the merged class tables are known (ADR-0100 §7, issue #882).
+///
+/// A class-like that imports a trait counts when the trait does: a declarer, or a trait
+/// that cannot be read, or one that imports a trait that counts. A trait is **unread**
+/// when no file declares it, two do, or a `class_alias` names it (the alias's identity
+/// is its target's, which a name here cannot say), so its body may be anything: a
+/// vendor trait the checkout lacks is the common case. A least fixpoint over the import
+/// graph, so a cycle of traits (which PHP rejects) ends.
+fn resolve_destructor_classes(shards: &[PackageShard], m: &mut MergedTables) {
+    let mut users: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    let mut anonymous: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    let mut aliases: HashSet<&str> = HashSet::new();
+    for s in shards {
+        m.destructor_classes.extend(s.destructor_declarers.iter().cloned());
+        for (table, into) in [(&s.trait_users, &mut users), (&s.anonymous_trait_users, &mut anonymous)] {
+            for (trait_fqn, who) in table {
+                into.entry(trait_fqn).or_default().extend(who.iter().map(String::as_str));
+            }
+        }
+        aliases.extend(s.class_alias_edges.iter().map(|edge| edge.alias_fqn.as_str()));
+    }
+    let unread = |name: &str| {
+        m.ambiguous_classes.contains(name) || !m.classes.contains_key(name) || aliases.contains(name)
+    };
+    let mut counts: Vec<String> = m.destructor_classes.iter().cloned().collect();
+    counts.extend(users.keys().chain(anonymous.keys()).filter(|name| unread(name)).map(|name| (*name).to_owned()));
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut parents: Vec<String> = Vec::new();
+    while let Some(name) = counts.pop() {
+        if !seen.insert(name.clone()) {
+            continue;
+        }
+        for user in users.get(name.as_str()).into_iter().flatten() {
+            if m.destructor_classes.insert((*user).to_owned()) {
+                counts.push((*user).to_owned());
+            }
+        }
+        parents.extend(anonymous.get(name.as_str()).into_iter().flatten().map(|p| (*p).to_owned()));
+    }
+    m.anonymous_destructor_parents.extend(parents);
 }
 
 /// Insert `fqn → site`, demoting to ambiguity on any collision. `fqn` is already
@@ -641,13 +714,25 @@ fn declares_property_magic(cd: &ClassDecl) -> bool {
         || cd.properties.iter().any(|p| p.hooked)
 }
 
-/// Whether a class-like declares `__destruct`: the classes whose instances run
-/// user code when dropped, so a drop of a value bound to one of them, or to a
-/// class one of them extends, cannot be called effect-free (ADR-0100 §7). A
-/// class using a trait counts, for the reason [`declares_property_magic`]
-/// gives.
+/// Whether a class-like carries a destructor of its own: it declares `__destruct`, or
+/// aliases a used trait's method as one; or it is a trait declared under a condition
+/// (the declaration that binds is decided at run time, so its body may be anything). The
+/// classes whose instances run user code when dropped (ADR-0100 §7); one that only
+/// imports a trait is the merge's to decide ([`PackageShard::trait_users`]).
 fn declares_destructor(cd: &ClassDecl) -> bool {
-    cd.uses_traits || cd.methods.iter().any(|m| m.name.eq_ignore_ascii_case("__destruct"))
+    cd.declares_destructor || (cd.is_trait && cd.conditional)
+}
+
+/// The key a used trait is recorded under: its FQN as the class tables spell it.
+fn trait_key(tree: &SourceTree, used: &NameRef) -> String {
+    tree.resolve_class_fqn(used).trim_start_matches('\\').to_ascii_lowercase()
+}
+
+/// Union `from` into `into`, the shape of the trait-user tables.
+fn merge_users(into: &mut BTreeMap<String, BTreeSet<String>>, from: &BTreeMap<String, BTreeSet<String>>) {
+    for (name, who) in from {
+        into.entry(name.clone()).or_default().extend(who.iter().cloned());
+    }
 }
 
 /// Append one class-like's own magic-member records to `out` (nothing appended
@@ -766,10 +851,12 @@ mod tests {
         assert!(direct.magic_property_classes.contains("lazy"), "a class declaring __get");
         assert!(direct.magic_property_classes.contains("used"), "a class importing a trait");
         assert!(direct.anonymous_subclass_parents.iter().any(|p| p.eq_ignore_ascii_case("lazy")));
-        assert!(direct.destructor_classes.contains("dtor"), "a class declaring __destruct");
-        assert!(direct.destructor_classes.contains("used"), "a class importing a trait");
-        assert!(!direct.destructor_classes.contains("lazy"), "__get is not a destructor");
-        assert_eq!(direct.destructor_classes, absorbed.destructor_classes);
+        assert!(direct.destructor_declarers.contains("dtor"), "a class declaring __destruct");
+        assert!(!direct.destructor_declarers.contains("used"), "importing a trait is the merge's");
+        assert!(!direct.destructor_declarers.contains("lazy"), "__get is not a destructor");
+        assert_eq!(direct.destructor_declarers, absorbed.destructor_declarers);
+        assert_eq!(direct.trait_users, absorbed.trait_users);
+        assert_eq!(direct.anonymous_trait_users, absorbed.anonymous_trait_users);
         assert!(direct.anonymous_subclass_parents.iter().any(|p| p.eq_ignore_ascii_case("loud")));
         assert!(direct.anonymous_destructor_parents.iter().any(|p| p.eq_ignore_ascii_case("loud")));
         assert!(
@@ -819,6 +906,68 @@ mod tests {
         assert!(forward.property_writes.0.contains("w"));
         assert!(forward.destructor_classes.contains("gone"), "a destructor class unions in");
         assert!(forward.constants.contains("K_A") && forward.constants.contains("K_B"));
+    }
+
+    /// The destructor table resolves trait imports in the merge, over every package
+    /// (ADR-0100 §7, issue #882): a user counts when a trait it imports declares or
+    /// aliases a destructor, transitively, or cannot be read; a clean trait, in this
+    /// package or another, leaves its users out. Order-independent like the rest.
+    #[test]
+    fn a_trait_user_counts_only_when_its_trait_may_run_a_destructor() {
+        let app = shard_over(&[(
+            0,
+            "src/app.php",
+            "<?php namespace App; \
+             class Quiet { use \\Lib\\Clean; } \
+             class Loud { use \\Lib\\Dtor; } \
+             class Nested { use \\Lib\\Outer; } \
+             class Unseen { use \\Vendor\\Missing; } \
+             class Twice { use Both; } trait Both {} \
+             class Aliased { use \\Lib\\Clean { x as __destruct; } } \
+             class Plain {} \
+             $a = new class extends Plain { use \\Lib\\Clean; }; \
+             $b = new class extends Quiet { use \\Lib\\Dtor; }; \
+             $c = new class implements \\Countable { use \\Vendor\\Missing; };",
+        )]);
+        let lib = shard_over(&[(
+            1,
+            "vendor/lib/src/t.php",
+            "<?php namespace Lib; \
+             trait Clean { public function x() {} } \
+             trait Dtor { public function __destruct() {} } \
+             trait Outer { use Dtor; }",
+        )]);
+        let other = shard_over(&[(2, "vendor/other/src/t.php", "<?php namespace App; trait Both {}")]);
+        let m = merge_shards(&[app.clone(), lib.clone(), other.clone()]);
+        let counts = |name: &str| m.destructor_classes.contains(name);
+        assert!(!counts("app\\quiet"), "a clean trait in another package");
+        assert!(counts("app\\loud"), "a trait that declares one");
+        assert!(counts("app\\nested"), "one a trait imports from another");
+        assert!(counts("app\\unseen"), "a trait no file declares");
+        assert!(counts("app\\twice"), "a trait two packages declare");
+        assert!(counts("app\\aliased"), "an alias named __destruct");
+        assert!(!counts("app\\plain"));
+        assert!(counts("lib\\dtor") && counts("lib\\outer") && !counts("lib\\clean"));
+        // The anonymous classes follow the traits they import.
+        let parents = &m.anonymous_destructor_parents;
+        assert!(!parents.iter().any(|p| p.eq_ignore_ascii_case("app\\plain")), "{parents:?}");
+        assert!(parents.iter().any(|p| p.eq_ignore_ascii_case("app\\quiet")), "{parents:?}");
+        assert!(parents.iter().any(|p| p.eq_ignore_ascii_case("countable")), "{parents:?}");
+        // Without the library the trait is unread: every importer counts.
+        let alone = merge_shards(std::slice::from_ref(&app));
+        assert!(alone.destructor_classes.contains("app\\quiet"));
+        assert!(alone.anonymous_destructor_parents.iter().any(|p| p.eq_ignore_ascii_case("app\\plain")));
+        // A trait declared under a condition counts as a declarer, and so do its users.
+        let odd = merge_shards(&[shard_over(&[(
+            0,
+            "a.php",
+            "<?php if ($c) { trait Cond {} } class UC { use Cond; } trait Fine {} class UF { use Fine; }",
+        )])]);
+        assert!(odd.destructor_classes.contains("cond") && odd.destructor_classes.contains("uc"));
+        assert!(!odd.destructor_classes.contains("fine") && !odd.destructor_classes.contains("uf"));
+        // Any order of the shards merges to the same tables.
+        assert_eq!(m, merge_shards(&[other.clone(), app.clone(), lib.clone()]));
+        assert_eq!(m, merge_shards(&[lib, other, app]));
     }
 
     /// The per-file delta (issue #510): one file's edit contributes only the

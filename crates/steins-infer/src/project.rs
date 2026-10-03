@@ -280,9 +280,10 @@ pub(crate) struct Index {
     /// by lowercase FQN: the table the operator resolver reads to rule out a
     /// subclass adding user code to a property access (ADR-0099 §4.4).
     magic_property_classes: HashSet<String>,
-    /// The class-likes declaring `__destruct` or importing a trait, by lowercase
-    /// FQN: the table the drop sites read to rule out a subclass that runs a
-    /// destructor (ADR-0100 §7).
+    /// The class-likes that run user code on a drop, by lowercase FQN: declaring
+    /// `__destruct`, or importing a trait that does or cannot be read, resolved over
+    /// the whole universe by the merge. The table the drop sites read to rule out a
+    /// subclass that runs a destructor (ADR-0100 §7).
     destructor_classes: HashSet<String>,
     /// Every name that has a class of [`Self::destructor_classes`], or an anonymous
     /// class's parent, at or under it: built on the first drop site that asks
@@ -478,8 +479,8 @@ impl Index {
         &self.magic_property_classes
     }
 
-    /// The lowercase FQNs of the class-likes that declare `__destruct` or import a
-    /// trait (ADR-0100 §7).
+    /// The lowercase FQNs of the class-likes that run user code on a drop: declare
+    /// `__destruct`, or import a trait that may (ADR-0100 §7).
     pub(crate) fn destructor_classes(&self) -> &HashSet<String> {
         &self.destructor_classes
     }

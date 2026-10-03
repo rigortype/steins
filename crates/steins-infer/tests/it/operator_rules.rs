@@ -1034,8 +1034,10 @@ fn s6_closures_generators_and_fibers_are_residue() {
 fn s6_an_anonymous_class_carries_its_destructor_on_the_binding() {
     dtor_gap("function f() { $x = new class { function __destruct() { echo '[anon]'; } }; unset($x); }", "f");
     dtor_gap("function f() { foo(new class { function __destruct() {} }); }", "f");
-    // A trait whose body is unread may bring one; a parent that reaches one is the class.
-    dtor_gap("function f() { $x = new class { use T; }; unset($x); }", "f");
+    // A trait that brings one counts, a clean one does not (S6c, below); a parent that
+    // reaches one is the class.
+    dtor_gap("function f() { $x = new class { use T2; }; unset($x); }", "f");
+    dtor_none("function f() { $x = new class { use T; }; unset($x); }", "f");
     dtor_gap("function f() { $x = new class extends D {}; unset($x); }", "f");
     dtor_gap("function f() { $x = new class extends HoldsTyped {}; unset($x); }", "f");
     dtor_none("function f() { $x = new class { public int $n = 1; }; unset($x); }", "f");
@@ -1203,4 +1205,162 @@ fn s6_a_class_declared_twice_may_run_a_destructor() {
         function h() { $m = new \\Vendor\\Missing(); }";
     assert!(!dtor_src(absent, "g"));
     assert!(!dtor_src(absent, "h"));
+}
+
+/// S6c (b), rows from the consult on #915: a class that imports a trait counts only when
+/// a trait it imports declares `__destruct`, aliases a method to it, or cannot be read.
+/// A clean trait is the proxy's casualty: nothing runs at the drop (witnessed `<after>`),
+/// so the drop reads as it would for a class with no trait.
+#[test]
+fn s6c_a_class_importing_only_clean_traits_runs_nothing() {
+    let clean = "trait Clean { public function hello() { echo '[hello]'; } }\n\
+        class U0 { use Clean; }\nclass U1 extends U0 {}\n\
+        function a(U0 $u) { $u = null; }\nfunction b() { $u = new U0; unset($u); }\n\
+        function c(U1 $u) { }\nfunction d() { $u = new U1; echo '<body>'; }";
+    for symbol in ["a", "b", "c", "d"] {
+        assert!(!dtor_src(clean, symbol), "{symbol}");
+    }
+    // A bound's subclass that imports only clean traits adds nothing to the closure.
+    let sub = "trait Clean {}\nclass Base {}\nfinal class Sub extends Base { use Clean; }\n\
+        interface Face {}\nfinal class Impl implements Face { use Clean; }\n\
+        function a(Base $b) { $b = null; }\nfunction b(Face $f) { $f = null; }";
+    assert!(!dtor_src(sub, "a"));
+    assert!(!dtor_src(sub, "b"));
+}
+
+/// S6c (b): the traits that do bring one, each witnessed on PHP 8.5: a declared
+/// `__destruct` (`[T2]<after>`), one a trait imports from another (`[T2]<after><caller>`),
+/// and an alias at the class or the trait level (`[bye]<after>`: a method named
+/// `__destruct` is the destructor wherever the alias is written).
+#[test]
+fn s6c_a_trait_that_declares_or_aliases_a_destructor_makes_its_users_a_gap() {
+    let direct = "trait TD { public function __destruct() { echo '[TD]'; } }\n\
+        class A { use TD; }\nclass A2 extends A {}\n\
+        function f(A $u) { $u = null; }\nfunction g(A2 $u) { }\nfunction h() { $u = new A; }";
+    for symbol in ["f", "g", "h"] {
+        assert!(dtor_src(direct, symbol), "{symbol}");
+    }
+    let chain = "trait T2 { public function __destruct() {} }\ntrait T1 { use T2; }\n\
+        trait T0 { use T1; }\nclass A { use T0; }\nfunction f(A $u) { $u = null; }";
+    assert!(dtor_src(chain, "f"));
+    let class_alias = "trait T { public function bye() { echo '[bye]'; } }\n\
+        class A { use T { bye as __destruct; } }\nfunction f(A $u) { $u = null; }";
+    assert!(dtor_src(class_alias, "f"));
+    let loud = "trait T { public function bye() {} }\n\
+        class A { use T { bye as protected __DESTRUCT; } }\nfunction f(A $u) { $u = null; }";
+    assert!(dtor_src(loud, "f"));
+    let trait_alias = "trait T { public function bye() {} }\ntrait T1 { use T { bye as __destruct; } }\n\
+        class A { use T1; }\nfunction f(A $u) { $u = null; }";
+    assert!(dtor_src(trait_alias, "f"));
+    // An alias of another name is no destructor, and neither is an `insteadof`.
+    let other = "trait T { public function bye() {} }\ntrait V { public function bye() {} }\n\
+        class A { use T, V { T::bye insteadof V; bye as hello; } }\nfunction f(A $u) { $u = null; }";
+    assert!(!dtor_src(other, "f"));
+    // The bound's subclass is what brings it.
+    let sub = "trait TD { public function __destruct() {} }\nclass Base {}\n\
+        final class Sub extends Base { use TD; }\nfunction f(Base $b) { $b = null; }";
+    assert!(dtor_src(sub, "f"));
+}
+
+/// S6c (b): a trait that cannot be read counts. The trait is declared nowhere (a vendor
+/// trait the checkout lacks), twice, under a condition or through a `class_alias`, or
+/// imports one of those, or holds a typed property (the hop reads a class's own only).
+#[test]
+fn s6c_a_trait_that_cannot_be_read_makes_its_users_a_gap() {
+    let gap = |src: &str| assert!(dtor_src(src, "f"), "{src}");
+    gap("class A { use \\Vendor\\T; }\nfunction f(A $u) { $u = null; }");
+    gap("class A { use Missing; }\nfunction f(A $u) { $u = null; }");
+    gap("trait T {}\ntrait T1 { use \\Vendor\\Inner; }\nclass A { use T1; }\nfunction f(A $u) { $u = null; }");
+    gap("trait T {}\nclass A { use T, \\Vendor\\Other; }\nfunction f(A $u) { $u = null; }");
+    // Declared twice: either may be the one that binds.
+    gap("trait T {}\ntrait T { function __destruct() {} }\nclass A { use T; }\nfunction f(A $u) { $u = null; }");
+    gap("trait T {}\ntrait T {}\nclass A { use T; }\nfunction f(A $u) { $u = null; }");
+    // Declared under a condition: the declaration that binds is decided at run time.
+    gap("if (PHP_VERSION_ID >= 80000) { trait T {} }\nclass A { use T; }\nfunction f(A $u) { $u = null; }");
+    // A name a `class_alias` makes is its target's, which a name cannot say.
+    gap("trait Real {}\nclass_alias('Real', 'Shadow');\nclass A { use Shadow; }\nfunction f(A $u) { $u = null; }");
+}
+
+/// S6c (b): a trait's properties are not lowered, so the typed-property hop reads their
+/// hints off the trait, and a class that imports one holds what it holds (witnessed:
+/// `[D]<after>` through `trait T { private ?D $d; }` and `class U { use T; }`). The hop
+/// ends on a clean class, a scalar, an array, a static property and an engine class.
+#[test]
+fn s6c_a_typed_property_a_trait_imports_hops_like_the_class_s_own() {
+    let hop = "class D { function __destruct() {} }\nclass Clean {}\n\
+        trait Holds { private ?D $d = null; }\ntrait Quiet { private ?Clean $c = null; }\n\
+        trait Nests { use Holds; }\n\
+        trait Promotes { public function __construct(private D $d) {} }\n\
+        class A { use Holds; }\nclass B extends A {}\nclass C { use Nests; }\n\
+        class E { use Promotes; }\nclass F { use Quiet; }\n\
+        function a(A $u) { $u = null; }\nfunction b(B $u) { }\nfunction c(C $u) { }\n\
+        function e(E $u) { }\nfunction f(F $u) { $u = null; }\nfunction g() { $u = new A; }";
+    for symbol in ["a", "b", "c", "e", "g"] {
+        assert!(dtor_src(hop, symbol), "{symbol}");
+    }
+    assert!(!dtor_src(hop, "f"), "a clean class is none");
+    let none = "trait T { private int $n = 0; private array $a = []; private static ?D $s = null;\n\
+        private ?\\Closure $c = null; private \\DateTimeImmutable $d; }\n\
+        class D { function __destruct() {} }\nclass A { use T; }\nfunction f(A $u) { $u = null; }";
+    assert!(!dtor_src(none, "f"));
+    // A property hinted with a class a cycle of traits and classes names ends the walk.
+    let cycle = "trait T { private ?A $a = null; }\nclass A { use T; }\nfunction f(A $u) { $u = null; }";
+    assert!(!dtor_src(cycle, "f"));
+}
+
+/// S6c (b): the trait graph resolves across files, and a trait another file adds or
+/// removes changes the answer.
+#[test]
+fn s6c_a_trait_is_resolved_across_files() {
+    let db = SteinsDatabase::default();
+    let answer = |files: &[(&str, &str)], at: usize, symbol: &str| {
+        let inputs: Vec<SourceFile> = files
+            .iter()
+            .map(|(path, text)| SourceFile::new(&db, (*path).to_owned(), (*text).to_owned()))
+            .collect();
+        let layout = steins_db::ProjectLayout::fallback();
+        let project = Project::new(&db, inputs.clone(), layout, steins_db::PluginFacts::none());
+        let found = effect_summaries_project(&db, project, inputs[at]);
+        let s = found.iter().find(|s| s.symbol == symbol).expect("a summary");
+        assert_eq!(s.gaps.contains(&DESTRUCTOR), s.throws_gaps.contains(&DESTRUCTOR));
+        s.gaps.contains(&DESTRUCTOR)
+    };
+    let user = ("u.php", "<?php\nclass U { use \\Lib\\T; }\nfunction d(U $u) { $u = null; }\n");
+    let clean = ("t.php", "<?php\nnamespace Lib;\ntrait T { public function x() {} }\n");
+    let loud = ("t.php", "<?php\nnamespace Lib;\ntrait T { public function __destruct() {} }\n");
+    assert!(answer(&[user], 0, "d"), "the trait is not in the universe");
+    assert!(!answer(&[user, clean], 0, "d"), "the trait is read, and clean");
+    assert!(answer(&[user, loud], 0, "d"), "the trait is read, and declares one");
+}
+
+/// S6c (b): an anonymous class that imports a trait follows the trait: a clean one adds
+/// nothing to its parent, a trait that declares a destructor or cannot be read does.
+#[test]
+fn s6c_an_anonymous_class_importing_a_trait_follows_the_trait() {
+    let clean = "class Plain {}\ntrait Clean {}\n\
+        function mk() { return new class extends Plain { use Clean; }; }\n\
+        function g(Plain $p) { $p = null; }";
+    assert!(!dtor_src(clean, "g"));
+    let loud = "class Plain {}\ntrait TD { function __destruct() {} }\n\
+        function mk() { return new class extends Plain { use TD; }; }\n\
+        function g(Plain $p) { $p = null; }";
+    assert!(dtor_src(loud, "g"));
+    let unseen = "class Plain {}\n\
+        function mk() { return new class extends Plain { use \\Vendor\\T; }; }\n\
+        function g(Plain $p) { $p = null; }";
+    assert!(dtor_src(unseen, "g"));
+    let aliased = "class Plain {}\ntrait T { function bye() {} }\n\
+        function mk() { return new class extends Plain { use T { bye as __destruct; } }; }\n\
+        function g(Plain $p) { $p = null; }";
+    assert!(dtor_src(aliased, "g"));
+    // A trait that itself imports an unread one.
+    let nested = "class Plain {}\ntrait Outer { use \\Vendor\\Inner; }\n\
+        function mk() { return new class extends Plain { use Outer; }; }\n\
+        function g(Plain $p) { $p = null; }";
+    assert!(dtor_src(nested, "g"));
+    // The anonymous class as a subject: it is its trait.
+    assert!(!dtor_src("trait Clean {}\nfunction f() { $x = new class { use Clean; }; unset($x); }", "f"));
+    assert!(dtor_src("trait TD { function __destruct() {} }\nfunction f() { $x = new class { use TD; }; unset($x); }", "f"));
+    assert!(dtor_src("trait T { function bye() {} }\nfunction f() { $x = new class { use T { bye as __destruct; } }; }", "f"));
+    assert!(dtor_src("trait TD { function __destruct() {} }\nfunction f() { foo(new class { use TD; }); }\nfunction foo($x) {}", "f"));
 }
