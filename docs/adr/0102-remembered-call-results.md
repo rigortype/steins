@@ -417,7 +417,14 @@ rows were measured on PHP 8.5.11 with a script of their own:
 | N14 | `number_format($x, 2)` across `setlocale` | same |
 
 **Measured.** On the ten public packages (`check --profile strict --no-php --vendor-diagnostics
---no-cache`, and the default profile) against the merge base: MEASURED_PLACEHOLDER
+--no-cache`, and the default profile) against the merge base: no finding appeared or
+disappeared on either profile, the effect lane (`effect-diff`) is byte-identical (no label, gap or
+exhaustiveness moved) and the five transforms' dry-runs are byte-identical. The first cut of this slice
+measured the same on the same packages, which is the reason the review's failures are witnessed in
+fixtures and not in the corpus: the idiom they break is rare in public code. The `nsrt` harness
+(phpstan-src, without the file #783 holds out; 18,228 measured) moves from 4,158 to 4,159 `match`:
+`bug-2648.php:40`, `count($list)` under `count($list) === 1`. The two rows the first cut won through
+`gettype` and a mode argument of `count` are out of the allowlist. Private corpus not run.
 
 **What it still assumes.** The gate's reading of a site is the effect lane's, and the allowlist is a
 claim about php-src 8.5; a name is added only with its php-src reading and a witness like
