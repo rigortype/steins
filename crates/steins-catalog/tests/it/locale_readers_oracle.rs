@@ -40,6 +40,10 @@ enum Expect {
     /// Under none on 8.2 and later, and the catalog leaves the read undecided: the read of an
     /// older engine depends on a PHP floor a per-file summary cannot know.
     Undecided,
+    /// The catalog proves the read by a lexical rule that is wider than any witness: the probe
+    /// stood still on every locale of this machine (a caseless ASCII pattern, where a glibc
+    /// `tr_TR` case map moves `I` and `i`), and a probe that did move is no contradiction.
+    ReadsByRule,
 }
 
 /// What the catalog says of the name a probe exercises.
@@ -229,6 +233,93 @@ fn rows() -> Vec<Row> {
     ]
 }
 
+/// The rows of the S5 witness table of ADR-0101 §3.10 (`s5-preg.php`, `s5-preg-2.php`): each
+/// literal pattern feature of `preg_*` against the engine, between `C` and a witness locale.
+/// Every compiling function reaches one compiler, so the function rows show that the verdict is
+/// the pattern's whichever function carries it.
+fn preg_rows() -> Vec<Row> {
+    use Expect::{Moves, MovesOnMacos, ReadsByRule, Stable};
+    use GateArg::Str;
+    use Verdict::{Gate, Row as Reads};
+    // The verdict of `preg_match` over a literal pattern; the argument slice lives for the run.
+    let m = |pattern: &'static str| {
+        Gate("preg_match", Box::leak(Box::new([Some(Str(pattern))])) as &'static [_])
+    };
+    vec![
+        // What the tables answer: `\w`, `\W`, `\b`, `\B`, `\s`, the POSIX classes.
+        row("preg P1 w", r#"var_export(preg_match('/^\w$/', "\xE4"), true)"#, m(r"/^\w$/"), Moves),
+        row("preg P3 W", r#"var_export(preg_match('/^\W$/', "\xE4"), true)"#, m(r"/^\W$/"), Moves),
+        row("preg P6 b", r#"var_export(preg_match('/\bx/', "\xE4x"), true)"#, m(r"/\bx/"), Moves),
+        row("preg S25 B", r#"var_export(preg_match('/a\B/', "a\xE4"), true)"#, m(r"/a\B/"), Moves),
+        row("preg S4 s", r#"var_export(preg_match('/^\s$/', "\xA0"), true)"#, m(r"/^\s$/"), MovesOnMacos),
+        row("preg P7 alpha", r#"var_export(preg_match('/^[[:alpha:]]$/', "\xE4"), true)"#, m("/^[[:alpha:]]$/"), Moves),
+        row("preg S16 upper", r#"var_export(preg_match('/^[[:upper:]]$/', "\xC4"), true)"#, m("/^[[:upper:]]$/"), Moves),
+        row("preg S6 blank", r#"var_export(preg_match('/^[[:blank:]]$/', "\xA0"), true)"#, m("/^[[:blank:]]$/"), MovesOnMacos),
+        // A caseless flag over a high byte folds through the tables, in every spelling.
+        row("preg P9 i", r#"var_export(preg_match('/^\xC4$/i', "\xE4"), true)"#, m(r"/^\xC4$/i"), Moves),
+        row("preg S14 inline group", r#"var_export(preg_match('/^(?i:\xC4)$/', "\xE4"), true)"#, m(r"/^(?i:\xC4)$/"), Moves),
+        row("preg P22 inline flag", r#"var_export(preg_match('/^(?i)\xC4$/', "\xE4"), true)"#, m(r"/^(?i)\xC4$/"), Moves),
+        row("preg S26 range under i", r#"var_export(preg_match("/^[\xC0-\xDE]$/i", "\xE4"), true)"#, m("/^[\u{c0}-\u{de}]$/i"), Moves),
+        // The `x` flag skips what the table calls a space: a raw byte, and under `u` too.
+        row("preg S10 x byte", r#"var_export(preg_match("/^a\xA0b$/x", 'ab'), true)"#, m("/^a\u{a0}b$/x"), MovesOnMacos),
+        row("preg x byte under u", r#"var_export(preg_match("/^a\xC2\xA0b$/xu", 'ab'), true)"#, m("/^a\u{a0}b$/xu"), MovesOnMacos),
+        row("preg x byte under UCP", r#"var_export(preg_match("/(*UCP)^a\xA0b$/x", 'ab'), true)"#, m("/(*UCP)^a\u{a0}b$/x"), MovesOnMacos),
+        // `(*UTF)` is not UCP.
+        row("preg P23 UTF only", r#"var_export(preg_match('/(*UTF)^\w$/', "\xC3\xA4"), true)"#, m(r"/(*UTF)^\w$/"), Moves),
+        // The same compiler behind every function (P18, P19, P28, S21, S22, and the two others).
+        row("preg P18 replace", r#"bin2hex(preg_replace('/\w/', '_', "a\xE4"))"#, Gate("preg_replace", &[Some(Str(r"/\w/"))]), Moves),
+        row("preg P19 split", r#"count(preg_split('/\W/', "a\xE4b"))"#, Gate("preg_split", &[Some(Str(r"/\W/"))]), Moves),
+        row("preg P28 grep", r#"count(preg_grep('/^\w$/', ["\xE4", 'a']))"#, Gate("preg_grep", &[Some(Str(r"/^\w$/"))]), Moves),
+        row(
+            "preg S21 callback array",
+            r#"bin2hex(preg_replace_callback_array(['/\w/' => fn($m) => '_'], "\xE4"))"#,
+            Gate("preg_replace_callback_array", &[Some(Str(r"/\w/"))]),
+            Moves,
+        ),
+        row("preg S22 filter", r#"var_export(preg_filter('/\w/', '_', "\xE4"), true)"#, Gate("preg_filter", &[Some(Str(r"/\w/"))]), Moves),
+        row("preg match_all", r#"var_export(preg_match_all('/\w/', "\xE4"), true)"#, Gate("preg_match_all", &[Some(Str(r"/\w/"))]), Moves),
+        row(
+            "preg replace callback",
+            r#"bin2hex(preg_replace_callback('/\w/', fn($m) => '_', "\xE4"))"#,
+            Gate("preg_replace_callback", &[Some(Str(r"/\w/"))]),
+            Moves,
+        ),
+        // The lexical rule's `i` over a letter: no witness moved on this machine (ASCII only, or
+        // UTF-8 bytes a Latin-1 table folds nowhere), the rule reads for the glibc `tr_TR` hazard.
+        row("preg P10 i ascii", r#"var_export(preg_match('/^A$/i', 'a'), true)"#, m("/^A$/i"), ReadsByRule),
+        row("preg P14 i range", r#"var_export(preg_match('/^[a-z]$/i', "\xC4"), true)"#, m("/^[a-z]$/i"), ReadsByRule),
+        row("preg S1 i", r#"var_export(preg_match('/^i$/i', 'I'), true)"#, m("/^i$/i"), ReadsByRule),
+        row("preg S2 I", r#"var_export(preg_match('/^I$/i', 'i'), true)"#, m("/^I$/i"), ReadsByRule),
+        row("preg S3 i class", r#"var_export(preg_match('/^[a-z]$/i', 'I'), true)"#, m("/^[a-z]$/i"), ReadsByRule),
+        row("preg S23 i word", r#"var_export(preg_match('/^ABC$/i', 'abc'), true)"#, m("/^ABC$/i"), ReadsByRule),
+        row("preg S9 i bytes", r#"var_export(preg_match("/^\xC3\x84$/i", "\xC3\xA4"), true)"#, m("/^\u{c3}\u{84}$/i"), ReadsByRule),
+        // `u` and a leading `(*UCP)` route the classes and the folding to Unicode properties.
+        row("preg P2 w under u", r#"var_export(preg_match('/^\w$/u', "\xC3\xA4"), true)"#, m(r"/^\w$/u"), Stable),
+        row("preg S8 iu", r#"var_export(preg_match("/^\xC3\x84$/iu", "\xC3\xA4"), true)"#, m("/^\u{c3}\u{84}$/iu"), Stable),
+        row("preg P20 iu", r#"var_export(preg_match('/^\xC3\x84$/iu', "\xC3\xA4"), true)"#, m(r"/^\xC3\x84$/iu"), Stable),
+        row("preg P21 alpha under u", r#"var_export(preg_match('/^[[:alpha:]]$/u', "\xC3\xA4"), true)"#, m("/^[[:alpha:]]$/u"), Stable),
+        row("preg S24 UCP and i", r#"var_export(preg_match('/(*UCP)^\xC4$/i', "\xE4"), true)"#, m(r"/(*UCP)^\xC4$/i"), Stable),
+        row("preg P24 UCP and w", r#"var_export(preg_match('/(*UCP)^\w$/', "\xE4"), true)"#, m(r"/(*UCP)^\w$/"), Stable),
+        // The sets C fixes, and the patterns that ask no table.
+        row("preg P4 d", r#"var_export(preg_match('/^\d$/', "\xB2"), true)"#, m(r"/^\d$/"), Stable),
+        row("preg P16 d ascii", r#"var_export(preg_match('/^\d$/', '5'), true)"#, m(r"/^\d$/"), Stable),
+        row("preg S18 digit", r#"var_export(preg_match('/^[[:digit:]]$/', "\xB2"), true)"#, m("/^[[:digit:]]$/"), Stable),
+        row("preg S19 xdigit", r#"var_export(preg_match('/^[[:xdigit:]]$/', "\xE4"), true)"#, m("/^[[:xdigit:]]$/"), Stable),
+        row("preg P11 byte", r#"var_export(preg_match("/^\xE4$/", "\xE4"), true)"#, m("/^\u{e4}$/"), Stable),
+        row("preg P12 byte range", r#"var_export(preg_match("/^[\xE0-\xEF]$/", "\xE4"), true)"#, m("/^[\u{e0}-\u{ef}]$/"), Stable),
+        row("preg S15 quoted", r#"var_export(preg_match("/^\\Q\xE4\\E$/", "\xE4"), true)"#, m("/^\\Q\u{e4}\\E$/"), Stable),
+        row("preg P13 ascii range", r#"var_export(preg_match('/^[a-z]$/', "\xE4"), true)"#, m("/^[a-z]$/"), Stable),
+        row("preg S12 property", r#"var_export(preg_match('/^\p{L}$/', "\xE4"), true)"#, m(r"/^\p{L}$/"), Stable),
+        row("preg S13 property under u", r#"var_export(preg_match('/^\p{L}$/u', "\xC3\xA4"), true)"#, m(r"/^\p{L}$/u"), Stable),
+        row("preg P25 h", r#"var_export(preg_match('/^\h$/', "\xA0"), true)"#, m(r"/^\h$/"), Stable),
+        row("preg P26 v", r#"var_export(preg_match('/^\v$/', "\x85"), true)"#, m(r"/^\v$/"), Stable),
+        row("preg P17 dot", r#"var_export(preg_match('/^.$/', "\xE4"), true)"#, m("/^.$/"), Stable),
+        row("preg S11 x ascii", r#"var_export(preg_match('/^a b$/x', 'ab'), true)"#, m("/^a b$/x"), Stable),
+        // `preg_quote` compiles nothing.
+        row("preg P27 quote", r#"bin2hex(preg_quote("\xE4."))"#, Reads("preg_quote"), Stable),
+    ]
+}
+
 /// The rows of what a call does not reach, and of the names that read no setting.
 fn silent_rows() -> Vec<Row> {
     use Expect::{Moves, MovesOnMacos, Stable};
@@ -346,6 +437,7 @@ fn run_php(script: &str) -> Option<String> {
 fn the_locale_readers_move_exactly_where_the_catalog_says() {
     let mut rows = rows();
     rows.extend(silent_rows());
+    rows.extend(preg_rows());
     let Some(text) = run_php(&script(&rows)) else { return };
     let mut lines = text.lines().filter_map(|l| l.split_once('\t'));
     let version: u32 = match lines.next() {
@@ -388,6 +480,9 @@ fn the_locale_readers_move_exactly_where_the_catalog_says() {
             Expect::Undecided => {
                 assert_eq!(verdict, None, "{label} is a version-dependent read");
                 assert!(!anywhere, "{label} moved");
+            }
+            Expect::ReadsByRule => {
+                assert!(claimed, "{label}: a row the rule reads is not coloured");
             }
         }
     }
