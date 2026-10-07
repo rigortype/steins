@@ -246,7 +246,8 @@ impl<'a> Resolver<'a, '_, '_> {
     /// callee `sig` (ADR-0099 §4.3's Coerce row, issue #868); `None` where no declaration
     /// was found for an edge.
     fn coerce_arguments(&mut self, sig: Option<operator::Signature<'_>>) {
-        let resolved = operator::coerce_arguments(self.cx, self.frame, &self.site.args, sig.as_ref());
+        let args = &self.site.args;
+        let resolved = operator::coerce_arguments(self.cx, self.frame, args, sig.as_ref());
         self.out.targets.extend(resolved.targets);
         self.out.gaps.extend(resolved.gaps);
     }
