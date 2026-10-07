@@ -581,3 +581,32 @@ function w50b(float $x): int {
 ";
     assert!(ids(w50).iter().any(|i| i == "offset.maybe-missing"), "{:?}", ids(w50));
 }
+
+/// A literal in a key is a type tag and its raw bytes, not a display spelling: the two-byte `'\n'` and
+/// the one-byte `"\n"` are different arguments (witness r07, r07c), and so are `"\\"` and a
+/// quote, `0.0` and `-0.0`, `1` and `1.0` and `'1'`, `null` and `''` (a `strpos` offset, `substr_count`
+/// would do too; the call under test only needs two argument lists to differ).
+#[test]
+fn a_literal_is_keyed_by_its_bytes_and_not_by_its_spelling() {
+    let r07 = "<?php
+function r07(string $h): void {
+    if (strpos($h, \"\\n\") !== 1) { return; }
+    $b = strpos($h, '\\n');
+    \\PHPStan\\dumpType($b);
+}
+function r07c(string $h): void {
+    if (strpos($h, \"\\n\") === 1) { if (strpos($h, '\\n') === 1) { \\PHPStan\\dumpType('inner'); } }
+    if (strpos($h, \"\\n\") === 1) { if (strpos($h, '\\n') !== 1) { \\PHPStan\\dumpType('inner2'); } }
+}
+";
+    // r07: the second call is another call, so it is the floor and not `1`.
+    let got = dumps(r07);
+    assert_eq!(got[0], "int<0, max>|false (asserted)", "{got:?}");
+    // r07c: neither inner branch is decided, so both report.
+    assert_eq!(&got[1..], ["'inner'", "'inner2'"], "{got:?}");
+    // Control: the same literal twice is the same call.
+    let same = r07.replace("strpos($h, '\\n')", "strpos($h, \"\\n\")");
+    let got = dumps(&same);
+    assert_eq!(got[0], "1", "{got:?}");
+    assert_eq!(&got[1..], ["'inner'"], "{got:?}");
+}
