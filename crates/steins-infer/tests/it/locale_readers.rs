@@ -20,8 +20,8 @@ fn summary(src: &str, symbol: &str) -> EffectSummary {
     let classes = tree.classes().to_vec();
     effect_summary(&tree, &functions, &classes)
         .into_iter()
-        .find(|s| s.symbol == symbol)
-        .unwrap_or_else(|| panic!("no summary for {symbol}"))
+        .find(|s| s.symbol == symbol || s.qualified == symbol)
+        .unwrap_or_else(|| panic!("no summary for {symbol} in {src}"))
 }
 
 fn findings(src: &str) -> Vec<Diagnostic> {
@@ -49,33 +49,152 @@ fn depends(signature: &str, call: &str, labels: &[&str]) {
     assert!(!s.exhaustive, "{call}: {s:?}");
 }
 
-/// The names whose read is unconditional for the call as written: a call to one is the read,
-/// whatever its argument holds. Each consults the locale in php-src and moved under a locale
-/// other than `C` on PHP 8.5.11 (`catalog/tests/it/locale_oracle.rs` holds the witnesses).
+/// `basename` reads the locale on every call: `php_basename` consults the locale-derived
+/// `CG(ascii_compatible_locale)` before it looks at a byte, the empty string included.
 #[test]
-fn an_unconditional_locale_reader_carries_the_read() {
-    for call in [
-        "ctype_alnum($s)",
-        "ctype_alpha($s)",
-        "ctype_cntrl($s)",
-        "ctype_graph($s)",
-        "ctype_lower($s)",
-        "ctype_print($s)",
-        "ctype_punct($s)",
-        "ctype_space($s)",
-        "ctype_upper($s)",
-        "\\ctype_alpha($s)",
-        "basename($s)",
-        "basename($s, '.php')",
-        "strnatcmp($s, 'a1')",
-        "strnatcasecmp($s, 'a1')",
-        "escapeshellarg($s)",
-        "strip_tags($s)",
-        "parse_url($s)",
-        "parse_url($s, PHP_URL_HOST)",
-    ] {
+fn basename_reads_the_locale_on_every_call() {
+    for call in ["basename($s)", "basename($s, '.php')", "basename('')", "\\basename('/a/b')"] {
         proves("string $s", call, &[READ]);
     }
+}
+
+/// A `ctype_*` predicate classifies the first byte of a non-empty string and an `int` in
+/// -128..=255, and returns `false` before it consults a table for every other type
+/// (`ctype_fallback`): a literal decides, a declared type that keeps a parameter from a string and
+/// an integer rules the read out, and anything else is the gap.
+#[test]
+fn a_ctype_predicate_reads_only_a_string_or_a_small_int() {
+    for name in [
+        "ctype_alnum", "ctype_alpha", "ctype_cntrl", "ctype_graph", "ctype_lower", "ctype_print",
+        "ctype_punct", "ctype_space", "ctype_upper",
+    ] {
+        for arg in ["'a'", "'12'", "\"\\xE4\"", "65", "0", "255"] {
+            proves("", &format!("{name}({arg})"), &[READ]);
+        }
+        for arg in ["''", "256", "1000", "true", "false", "null", "1.5", "[]", "[1, 'a']"] {
+            proves("", &format!("{name}({arg})"), &[]);
+        }
+        // A negative literal is an operator shape and an object a constructor the reach rule does
+        // not rule out, so the body stays `…?`; the read is decided all the same.
+        for (arg, labels) in [
+            ("-1", vec![READ]),
+            ("-128", vec![READ]),
+            ("-129", vec![]),
+            ("new \\stdClass", vec![]),
+        ] {
+            let s = row("", &format!("return {name}({arg});"));
+            assert_eq!(s.labels, labels, "{name}({arg}): {s:?}");
+            assert!(!s.gaps.contains(&DEPENDS), "{name}({arg}): {s:?}");
+        }
+    }
+    // The types that keep a by-value parameter from a string and an integer.
+    for hint in ["bool", "float", "?bool", "array", "iterable", "object", "null|bool", "\\Countable"] {
+        let s = row(&format!("{hint} $v"), "return ctype_alpha($v);");
+        assert!(s.labels.is_empty() && !s.gaps.contains(&DEPENDS), "{hint}: {s:?}");
+    }
+    let s = row("bool $b", "return ctype_alpha($b);");
+    assert!(s.exhaustive && s.labels.is_empty(), "{s:?}");
+    // Everything else may be a string or a small integer.
+    for hint in ["string", "int", "?int", "int|bool", "mixed", "callable", "string|array", ""] {
+        let signature = if hint.is_empty() { "$v".to_owned() } else { format!("{hint} $v") };
+        depends(&signature, "ctype_alpha($v)", &[]);
+    }
+    // The declaration holds only while the frame leaves the parameter alone.
+    depends("bool $b", "ctype_alpha($b . 'x')", &[]);
+    let rebound = row("bool $b", "$b = 'x'; return ctype_alpha($b);");
+    assert!(rebound.gaps.contains(&DEPENDS) && !rebound.labels.iter().any(|l| l == READ), "{rebound:?}");
+    let by_ref = row("bool $b", "settype($b, 'string'); return ctype_alpha($b);");
+    assert!(by_ref.gaps.contains(&DEPENDS) && !by_ref.labels.iter().any(|l| l == READ), "{by_ref:?}");
+    // A named or spread argument list shows no position.
+    depends("array $a", "ctype_alpha(...$a)", &[]);
+}
+
+/// `strnatcmp_ex` returns on a zero length before it consults a table: a literal empty operand
+/// settles the call whatever the other is, two non-empty literals read, and one the call does not
+/// show is the gap.
+#[test]
+fn strnatcmp_reads_only_over_two_non_empty_operands() {
+    for name in ["strnatcmp", "strnatcasecmp"] {
+        proves("", &format!("{name}('a1', 'a2')"), &[READ]);
+        proves("string $s", &format!("{name}('a', '')"), &[]);
+        proves("string $s", &format!("{name}('', $s)"), &[]);
+        proves("string $s", &format!("{name}($s, '')"), &[]);
+        depends("string $s", &format!("{name}($s, 'a')"), &[]);
+        depends("string $s", &format!("{name}($s, $s)"), &[]);
+    }
+}
+
+/// `escapeshellarg` classifies each byte of a non-empty string (and a NUL byte throws first);
+/// `strip_tags` calls `isspace` at the first `<` and reads nothing without one.
+#[test]
+fn escapeshellarg_and_strip_tags_read_by_content() {
+    proves("", "escapeshellarg('x')", &[READ]);
+    proves("", "escapeshellarg('')", &[]);
+    depends("string $s", "escapeshellarg($s)", &[]);
+    depends("", "escapeshellarg(\"a\\0b\")", &[]);
+    for call in ["strip_tags('<b>x</b>')", "strip_tags('a < b')", "strip_tags('x <p>', '<p>')"] {
+        proves("", call, &[READ]);
+    }
+    for call in ["strip_tags('plain > text')", "strip_tags('')", "strip_tags('a & b', '<p>')"] {
+        proves("", call, &[]);
+    }
+    depends("string $s", "strip_tags($s)", &[]);
+}
+
+/// `parse_url` calls `isalpha` over a scheme (the first colon is not at index 0) and `iscntrl`
+/// over each component it produces: a string with a scheme or a plain path reads, the empty
+/// string reads nothing, and a leading colon, a leading `//` and a string of only `?` and `#`
+/// may fail before any component, so they are the gap.
+#[test]
+fn parse_url_reads_by_the_shape_of_a_literal_url() {
+    for call in [
+        "parse_url('http://x/y')",
+        "parse_url('mailto:a@b')",
+        "parse_url('/path/to')",
+        "parse_url('a')",
+        "parse_url('?q=1')",
+        "parse_url('http://x/y', PHP_URL_HOST)",
+    ] {
+        proves("", call, &[READ]);
+    }
+    proves("", "parse_url('')", &[]);
+    for call in ["parse_url(':80')", "parse_url('//host/x')", "parse_url('?')", "parse_url($u)"] {
+        depends("string $u", call, &[]);
+    }
+}
+
+/// `strftime` names the locale only through some conversions; the clock stays on the row.
+#[test]
+fn strftime_reads_the_locale_only_for_the_conversions_that_name_it() {
+    for call in ["strftime('%A')", "strftime('%a %d %b', $t)", "gmstrftime('%c', 0)", "strftime('%x %X')"] {
+        proves("int $t", call, &[READ, "nondet.time"]);
+    }
+    for call in ["strftime('%Y-%m-%d %H:%M:%S', $t)", "strftime('%s', 0)", "gmstrftime('%%', $t)", "strftime('')"] {
+        proves("int $t", call, &["nondet.time"]);
+    }
+    for call in ["strftime($f)", "strftime($f, $t)", "strftime('%A %Q')", "strftime('%Ed')", "strftime('%')"] {
+        depends("string $f, int $t", call, &["nondet.time"]);
+    }
+}
+
+/// A bare constant is read as PHP resolves it: a namespaced twin the file declares shadows the
+/// global one, a fully qualified spelling does not, and a twin the scan cannot read is the gap.
+#[test]
+fn a_namespaced_constant_twin_shadows_the_global_flag() {
+    let file = |decl: &str, flag: &str| {
+        format!("<?php\nnamespace App;\n{decl}\nfunction f(string $p) {{ return pathinfo($p, {flag}); }}\n")
+    };
+    let shadowed = summary(&file("const PATHINFO_DIRNAME = 2;", "PATHINFO_DIRNAME"), "f");
+    assert_eq!(shadowed.labels, [READ], "{shadowed:?}");
+    let qualified = summary(&file("const PATHINFO_DIRNAME = 2;", "\\PATHINFO_DIRNAME"), "f");
+    assert!(qualified.labels.is_empty() && qualified.gaps.is_empty(), "{qualified:?}");
+    let plain = summary(&file("", "PATHINFO_DIRNAME"), "f");
+    assert!(plain.labels.is_empty() && plain.gaps.is_empty(), "{plain:?}");
+    let unreadable = summary(&file("const PATHINFO_DIRNAME = SOME_FLAG | 1;", "PATHINFO_DIRNAME"), "f");
+    assert!(unreadable.labels.is_empty() && unreadable.gaps.contains(&DEPENDS), "{unreadable:?}");
+    let sort = "<?php\nnamespace App;\nconst SORT_NATURAL = 0;\nfunction g(array $a) { sort($a, SORT_NATURAL); }\n";
+    let s = summary(sort, "g");
+    assert!(!s.labels.iter().any(|l| l == READ), "the twin is SORT_REGULAR here: {s:?}");
 }
 
 /// `ctype_digit` and `ctype_xdigit` stay as they were. C11 7.4.1.5 and 7.4.1.12 fix their sets
@@ -87,16 +206,6 @@ fn ctype_digit_and_xdigit_are_left_uncatalogued() {
         let s = row("string $s", &format!("return {call};"));
         assert!(s.labels.is_empty(), "{call}: {s:?}");
         assert!(s.gaps.contains(&"no-effect-row"), "{call}: {s:?}");
-    }
-}
-
-/// `strftime` and `gmstrftime` read the locale's day and month names beside the clock: the
-/// time family's argument-blind `nondet.time` (the timezone cell sharpens it later) and the
-/// locale read.
-#[test]
-fn strftime_reads_the_locale_beside_the_clock() {
-    for call in ["strftime('%A')", "strftime('%A', $t)", "gmstrftime('%A', $t)", "gmstrftime('%B')"] {
-        proves("int $t", call, &[READ, "nondet.time"]);
     }
 }
 
@@ -121,10 +230,7 @@ fn number_format_is_certified_with_no_setting_read() {
 #[test]
 fn a_sort_reads_the_locale_only_under_a_flag_that_does() {
     for name in ["sort", "rsort", "asort", "arsort", "ksort", "krsort"] {
-        for flags in ["", ", SORT_REGULAR", ", SORT_NUMERIC", ", SORT_STRING", ", 2", ", SORT_STRING | SORT_FLAG_CASE | 0"] {
-            if name.starts_with('k') && flags.contains("FLAG_CASE") {
-                continue;
-            }
+        for flags in ["", ", SORT_REGULAR", ", SORT_NUMERIC", ", SORT_STRING", ", 2", ", SORT_DESC | SORT_FLAG_CASE"] {
             let call = format!("{name}($a{flags})");
             let s = row("array $a", &format!("{call};"));
             assert_eq!(s.labels, ["mutate.local"], "{call}: {s:?}");
@@ -148,21 +254,23 @@ fn a_sort_reads_the_locale_only_under_a_flag_that_does() {
 }
 
 /// `ksort` and `krsort` compare string keys case-insensitively through `tolower`, a C-library
-/// call (`php_array_key_compare_string_case_unstable_i` uses `zend_binary_strcasecmp_l`),
-/// where the data sorts use the engine's ASCII folding: only the key sorts read under
-/// `SORT_STRING | SORT_FLAG_CASE` (witnessed: `krsort` of `"\xC4"` and `"\xE4"` moves under
-/// `de_DE.ISO8859-1`).
+/// call (`php_array_key_compare_string_case_unstable_i` uses `zend_binary_strcasecmp_l`), where
+/// the data sorts use the engine's ASCII folding from 8.2 and `tolower` before: only the key
+/// sorts read under `SORT_STRING | SORT_FLAG_CASE`, and a data sort is undecided there, since a
+/// per-file summary cannot know the project's PHP floor.
 #[test]
 fn the_key_sorts_read_under_a_case_folding_string_flag() {
     for name in ["ksort", "krsort"] {
         let call = format!("{name}($a, SORT_STRING | SORT_FLAG_CASE)");
         let s = row("array $a", &format!("{call};"));
         assert_eq!(s.labels, [READ, "mutate.local"], "{call}: {s:?}");
+        assert!(!s.gaps.contains(&DEPENDS), "{call}: {s:?}");
     }
     for name in ["sort", "rsort", "asort", "arsort"] {
         let call = format!("{name}($a, SORT_STRING | SORT_FLAG_CASE)");
         let s = row("array $a", &format!("{call};"));
         assert_eq!(s.labels, ["mutate.local"], "{call}: {s:?}");
+        assert!(s.gaps.contains(&DEPENDS), "{call}: {s:?}");
     }
 }
 
@@ -263,14 +371,12 @@ fn setlocale_with_a_literal_zero_is_a_read_and_no_write() {
 }
 
 /// A builtin handed over as a callback is called with arguments the invoker chooses: the
-/// unconditional readers keep the read, and the mode-conditional ones are the gap.
+/// unconditional reader keeps the read, and every reader the call decides is the gap.
 #[test]
 fn a_reader_handed_over_as_a_callback_follows_the_same_rule() {
-    let s = row("array $a", "usort($a, 'strnatcmp');");
-    assert!(s.labels.iter().any(|l| l == READ), "{s:?}");
     let s = row("array $a", "return array_map('basename', $a);");
     assert!(s.labels.iter().any(|l| l == READ), "{s:?}");
-    for callee in ["pathinfo", "substr_compare"] {
+    for callee in ["pathinfo", "substr_compare", "ctype_alpha", "strnatcmp", "strip_tags", "strftime"] {
         let s = row("array $a", &format!("return array_map('{callee}', $a);"));
         assert!(!s.labels.iter().any(|l| l == READ), "{callee}: {s:?}");
         assert!(s.gaps.contains(&DEPENDS), "{callee}: {s:?}");
@@ -281,12 +387,18 @@ fn a_reader_handed_over_as_a_callback_follows_the_same_rule() {
 /// prefix is not (ADR-0101 §3.5): a pure function over `ctype_alpha` reports.
 #[test]
 fn a_pure_envelope_over_a_locale_reader_is_exceeded() {
-    let pure = "<?php\n#[\\Steins\\Pure]\nfunction f(string $s): bool { return ctype_alpha($s); }\n";
+    let pure = "<?php\n#[\\Steins\\Pure]\nfunction f(): bool { return ctype_alpha('a'); }\n";
     let d = findings(pure);
     assert_eq!(d.len(), 1, "{d:#?}");
     assert!(d[0].message.contains("global.read.setting.locale"), "{}", d[0].message);
-    let admitted = "<?php\n#[\\Steins\\Effects('global.read')]\nfunction f(string $s): bool { return ctype_alpha($s); }\n";
+    let admitted = "<?php\n#[\\Steins\\Effects('global.read')]\nfunction f(): bool { return ctype_alpha('a'); }\n";
     assert!(findings(admitted).is_empty());
+    // A call that may or may not reach the table is no proven read, so no finding at the
+    // default floor: a `bool`, which never does, and a `string`, which may be empty.
+    for signature in ["bool $b", "string $s"] {
+        let src = format!("<?php\n#[\\Steins\\Pure]\nfunction f({signature}): bool {{ return ctype_alpha(${}); }}\n", &signature[signature.len() - 1..]);
+        assert!(findings(&src).is_empty(), "{signature}: {:#?}", findings(&src));
+    }
     // `ctype_digit` is no claim, and `number_format` is certified: neither exceeds.
     let digit = "<?php\n#[\\Steins\\Pure]\nfunction f(string $s): string { return number_format(1.5, 2); }\n";
     assert!(findings(digit).is_empty());

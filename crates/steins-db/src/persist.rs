@@ -1075,7 +1075,7 @@ mod tests {
     #[test]
     fn the_const_args_flags_and_float_evidence_round_trip() {
         use steins_syntax::{
-            ArgShape, CallTarget, ConstArgs, ConstInt, FloatEvidence, StaticClass, Stored,
+            ArgShape, CallTarget, ConstArgs, ConstInt, FloatEvidence, NotText, StaticClass, Stored,
         };
         let param = ArgShape::Param { name: "s".to_owned(), stores: Stored::ObjectFree };
         let args = ConstArgs {
@@ -1108,6 +1108,7 @@ mod tests {
                 ),
                 (6, FloatEvidence::OneOf(vec![FloatEvidence::NoFloat, FloatEvidence::Float])),
             ],
+            not_text: vec![(0, NotText::Literal), (1, NotText::Param("t".to_owned()))],
         };
         let bytes = crate::wire::to_vec(&args).expect("const args serialize");
         let back: ConstArgs = crate::wire::from_slice(&bytes).expect("const args round-trip");

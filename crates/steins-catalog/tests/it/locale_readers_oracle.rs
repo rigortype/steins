@@ -35,8 +35,11 @@ enum Expect {
     Moves,
     /// Under some witness locale, where the library is macOS's.
     MovesOnMacos,
-    /// Under none.
+    /// Under none, and the catalog proves no read.
     Stable,
+    /// Under none on 8.2 and later, and the catalog leaves the read undecided: the read of an
+    /// older engine depends on a PHP floor a per-file summary cannot know.
+    Undecided,
 }
 
 /// What the catalog says of the name a probe exercises.
@@ -45,7 +48,7 @@ enum Verdict {
     /// The row carries the read and nothing gates it.
     Row(&'static str),
     /// A gated name: the call as written decides, here by the argument shown.
-    Gate(&'static str, GateArg),
+    Gate(&'static str, &'static [Option<GateArg<'static>>]),
     /// Certified pure at a call site: no row, no read.
     Certified(&'static str),
     /// A known name with no setting row and no certification.
@@ -57,31 +60,33 @@ enum Verdict {
 }
 
 impl Verdict {
-    /// Whether the catalog claims the call reads the locale.
-    fn reads(self) -> bool {
+    /// Whether the catalog proves the call reads the locale (`Some(true)`), proves it does not
+    /// (`Some(false)`), or leaves it to a value the call does not show (`None`).
+    fn reads(self) -> Option<bool> {
         match self {
             Self::Row(name) => {
                 assert!(locale_read_gate(name).is_none(), "{name} is gated");
-                effect_labels(name).is_some_and(|l| l.contains(&READ))
+                Some(effect_labels(name).is_some_and(|l| l.contains(&READ)))
             }
-            Self::Gate(name, arg) => {
+            Self::Gate(name, args) => {
                 let gate = locale_read_gate(name).unwrap_or_else(|| panic!("{name} has no gate"));
                 assert!(effect_labels(name).is_some_and(|l| l.contains(&READ)), "{name}");
-                gate.reads(arg).unwrap_or_else(|| panic!("{name}: {arg:?} is undecided"))
+                assert_eq!(gate.positions().len(), args.len(), "{name}");
+                gate.reads(args)
             }
             Self::Certified(name) => {
                 assert!(certified_at_call_site(name), "{name} is not certified");
                 assert!(effect_labels(name).is_none(), "{name} has a row");
-                false
+                Some(false)
             }
             Self::Uncatalogued(name) => {
                 assert!(effect_labels(name).is_none() && !certified_at_call_site(name), "{name}");
-                false
+                Some(false)
             }
             Self::Narrowed(name, locale) => {
                 let labels = steins_catalog::narrowed_setlocale_labels(name, locale, 2);
                 assert!(labels.is_some_and(|l| !l.iter().any(|x| x.starts_with("global.write"))));
-                labels.is_some_and(|l| l.contains(&READ))
+                Some(labels.is_some_and(|l| l.contains(&READ)))
             }
             Self::NoSetting(name) => {
                 assert!(
@@ -89,7 +94,7 @@ impl Verdict {
                         .is_none_or(|labels| labels.iter().all(|l| !l.starts_with("global."))),
                     "{name} reads a setting on its row"
                 );
-                false
+                Some(false)
             }
         }
     }
@@ -114,9 +119,11 @@ const DIGIT_TABLE: &str =
 const XDIGIT_TABLE: &str =
     r#"implode(",", array_map(fn($b) => var_export(ctype_xdigit(chr($b)), true), range(0, 255)))"#;
 
+/// The rows of what the catalog colours, certifies or leaves out, name by name.
 fn rows() -> Vec<Row> {
-    use Expect::{Moves, MovesOnMacos, Stable};
-    use Verdict::{Certified, Gate, Narrowed, NoSetting, Row as Reads, Uncatalogued};
+    use Expect::{Moves, MovesOnMacos, Stable, Undecided};
+    use GateArg::Str;
+    use Verdict::{Certified, Gate, Row as Reads, Uncatalogued};
     let sort = |flags: &'static str| match flags {
         // `$a` holds `ä` in UTF-8, which `de_DE` collates beside `a`.
         "locale" => r#"(function () { $a = ["\xC3\xA4", "b", "a"]; sort($a, SORT_LOCALE_STRING); return implode(",", $a); })()"#,
@@ -130,67 +137,67 @@ fn rows() -> Vec<Row> {
     vec![
         // The character classes of a byte: a Latin-1 letter is a letter, and a byte that is no
         // character is nothing, whichever locale says so.
-        row("ctype_alpha", r#"var_export(ctype_alpha("\xE4"), true)"#, Reads("ctype_alpha"), Moves),
-        row("ctype_alnum", r#"var_export(ctype_alnum("\xE4"), true)"#, Reads("ctype_alnum"), Moves),
-        row("ctype_lower", r#"var_export(ctype_lower("\xE4"), true)"#, Reads("ctype_lower"), Moves),
-        row("ctype_upper", r#"var_export(ctype_upper("\xC4"), true)"#, Reads("ctype_upper"), Moves),
-        row("ctype_graph", r#"var_export(ctype_graph("\xE4"), true)"#, Reads("ctype_graph"), Moves),
-        row("ctype_print", r#"var_export(ctype_print("\xE4"), true)"#, Reads("ctype_print"), Moves),
-        row("ctype_punct", r#"var_export(ctype_punct("\xA1"), true)"#, Reads("ctype_punct"), MovesOnMacos),
-        row("ctype_cntrl", r#"var_export(ctype_cntrl("\x80"), true)"#, Reads("ctype_cntrl"), MovesOnMacos),
-        row("ctype_space", r#"var_export(ctype_space("\xA0"), true)"#, Reads("ctype_space"), MovesOnMacos),
+        row("ctype_alpha", r#"var_export(ctype_alpha("\xE4"), true)"#, Gate("ctype_alpha", &[Some(Str("\u{e4}"))]), Moves),
+        row("ctype_alnum", r#"var_export(ctype_alnum("\xE4"), true)"#, Gate("ctype_alnum", &[Some(Str("\u{e4}"))]), Moves),
+        row("ctype_lower", r#"var_export(ctype_lower("\xE4"), true)"#, Gate("ctype_lower", &[Some(Str("\u{e4}"))]), Moves),
+        row("ctype_upper", r#"var_export(ctype_upper("\xC4"), true)"#, Gate("ctype_upper", &[Some(Str("\u{c4}"))]), Moves),
+        row("ctype_graph", r#"var_export(ctype_graph("\xE4"), true)"#, Gate("ctype_graph", &[Some(Str("\u{e4}"))]), Moves),
+        row("ctype_print", r#"var_export(ctype_print("\xE4"), true)"#, Gate("ctype_print", &[Some(Str("\u{e4}"))]), Moves),
+        row("ctype_punct", r#"var_export(ctype_punct("\xA1"), true)"#, Gate("ctype_punct", &[Some(Str("\u{a1}"))]), MovesOnMacos),
+        row("ctype_cntrl", r#"var_export(ctype_cntrl("\x80"), true)"#, Gate("ctype_cntrl", &[Some(Str("\u{80}"))]), MovesOnMacos),
+        row("ctype_space", r#"var_export(ctype_space("\xA0"), true)"#, Gate("ctype_space", &[Some(Str("\u{a0}"))]), MovesOnMacos),
         // C fixes these two sets in every locale: no row, and no byte moved.
         row("ctype_digit", DIGIT_TABLE, Uncatalogued("ctype_digit"), Stable),
         row("ctype_xdigit", XDIGIT_TABLE, Uncatalogued("ctype_xdigit"), Stable),
         // `LC_TIME`.
-        row("strftime", r#"@strftime("%A %B", 86400 * 40)"#, Reads("strftime"), Moves),
-        row("gmstrftime", r#"@gmstrftime("%A %B", 86400 * 40)"#, Reads("gmstrftime"), Moves),
+        row("strftime", r#"@strftime("%A %B", 86400 * 40)"#, Gate("strftime", &[Some(Str("%A %B"))]), Moves),
+        row("gmstrftime", r#"@gmstrftime("%A %B", 86400 * 40)"#, Gate("gmstrftime", &[Some(Str("%A %B"))]), Moves),
         // `toupper`, `isspace`.
-        row("strnatcasecmp", r#"strnatcasecmp("\xE4", "\xC4")"#, Reads("strnatcasecmp"), Moves),
-        row("strnatcmp", r#"strnatcmp("\xA0", "a1")"#, Reads("strnatcmp"), MovesOnMacos),
+        row("strnatcasecmp", r#"strnatcasecmp("\xE4", "\xC4")"#, Gate("strnatcasecmp", &[Some(Str("\u{e4}")), Some(Str("\u{c4}"))]), Moves),
+        row("strnatcmp", r#"strnatcmp("\xA0", "a1")"#, Gate("strnatcmp", &[Some(Str("\u{a0}")), Some(Str("a1"))]), MovesOnMacos),
         // `tolower`, only when case-insensitive.
         row(
             "substr_compare, case-insensitive",
             r#"substr_compare("\xE4", "\xC4", 0, null, true)"#,
-            Gate("substr_compare", GateArg::Bool(true)),
+            Gate("substr_compare", &[Some(GateArg::Bool(true))]),
             Moves,
         ),
         row(
             "substr_compare, case-sensitive",
             r#"substr_compare("\xE4", "\xC4", 0, null, false)"#,
-            Gate("substr_compare", GateArg::Bool(false)),
+            Gate("substr_compare", &[Some(GateArg::Bool(false))]),
             Stable,
         ),
         row(
             "substr_compare, no switch",
             r#"substr_compare("\xE4", "\xC4", 0)"#,
-            Gate("substr_compare", GateArg::Omitted),
+            Gate("substr_compare", &[Some(GateArg::Omitted)]),
             Stable,
         ),
         // The sorts: `strcoll` under `SORT_LOCALE_STRING`, `strnatcmp` under `SORT_NATURAL`, and
         // nothing under the flags that compare bytes or fold ASCII case.
-        row("sort, SORT_LOCALE_STRING", sort("locale"), Gate("sort", GateArg::Int(5)), Moves),
-        row("sort, SORT_NATURAL", sort("natural"), Gate("sort", GateArg::Int(6)), MovesOnMacos),
-        row("sort, no flags", sort("regular"), Gate("sort", GateArg::Omitted), Stable),
-        row("sort, SORT_STRING", sort("string"), Gate("sort", GateArg::Int(2)), Stable),
-        row("asort, SORT_STRING | SORT_FLAG_CASE", sort("fold"), Gate("asort", GateArg::Int(10)), Stable),
+        row("sort, SORT_LOCALE_STRING", sort("locale"), Gate("sort", &[Some(GateArg::Int(5))]), Moves),
+        row("sort, SORT_NATURAL", sort("natural"), Gate("sort", &[Some(GateArg::Int(6))]), MovesOnMacos),
+        row("sort, no flags", sort("regular"), Gate("sort", &[Some(GateArg::Omitted)]), Stable),
+        row("sort, SORT_STRING", sort("string"), Gate("sort", &[Some(GateArg::Int(2))]), Stable),
+        row("asort, SORT_STRING | SORT_FLAG_CASE", sort("fold"), Gate("asort", &[Some(GateArg::Int(10))]), Undecided),
         row(
             "rsort, SORT_STRING | SORT_FLAG_CASE",
             r#"PHP_VERSION_ID < 80200 ? "skip" : (function () { $a = ["\xC4", "\xE4", "b"]; rsort($a, SORT_STRING | SORT_FLAG_CASE); return bin2hex(implode(",", $a)); })()"#,
-            Gate("rsort", GateArg::Int(10)),
-            Stable,
+            Gate("rsort", &[Some(GateArg::Int(10))]),
+            Undecided,
         ),
         // The key sorts fold case through `tolower`.
         row(
             "krsort, SORT_STRING | SORT_FLAG_CASE",
             r#"(function () { $a = ["\xC4" => 1, "\xE4" => 2, "b" => 3]; krsort($a, SORT_STRING | SORT_FLAG_CASE); return bin2hex(implode(",", array_keys($a))); })()"#,
-            Gate("krsort", GateArg::Int(10)),
+            Gate("krsort", &[Some(GateArg::Int(10))]),
             Moves,
         ),
         row(
             "ksort, SORT_STRING",
             r#"(function () { $a = ["\xC4" => 1, "\xE4" => 2, "b" => 3]; ksort($a, SORT_STRING); return bin2hex(implode(",", array_keys($a))); })()"#,
-            Gate("ksort", GateArg::Int(2)),
+            Gate("ksort", &[Some(GateArg::Int(2))]),
             Stable,
         ),
         // `php_basename`'s algorithm follows the locale's multibyte state.
@@ -198,26 +205,74 @@ fn rows() -> Vec<Row> {
         row(
             "pathinfo, PATHINFO_BASENAME",
             r#"bin2hex(serialize(pathinfo("\x8E/", PATHINFO_BASENAME)))"#,
-            Gate("pathinfo", GateArg::Int(2)),
+            Gate("pathinfo", &[Some(GateArg::Int(2))]),
             MovesOnMacos,
         ),
         row(
             "pathinfo, PATHINFO_DIRNAME",
             r#"bin2hex(serialize(pathinfo("\x8E/a", PATHINFO_DIRNAME)))"#,
-            Gate("pathinfo", GateArg::Int(1)),
+            Gate("pathinfo", &[Some(GateArg::Int(1))]),
             Stable,
         ),
         // `php_mblen` drops a byte that is no character of the locale.
-        row("escapeshellarg", r#"bin2hex(escapeshellarg("\xE4"))"#, Reads("escapeshellarg"), MovesOnMacos),
+        row("escapeshellarg", r#"bin2hex(escapeshellarg("\xE4"))"#, Gate("escapeshellarg", &[Some(Str("\u{e4}"))]), MovesOnMacos),
         // `isspace` after a `<`, `isalpha` in a scheme.
-        row("strip_tags", r#"strip_tags("<\xA0b>x")"#, Reads("strip_tags"), MovesOnMacos),
-        row("parse_url", r#"bin2hex(serialize(parse_url("a\xE4://x/y")))"#, Reads("parse_url"), Moves),
+        row("strip_tags", r#"strip_tags("<\xA0b>x")"#, Gate("strip_tags", &[Some(Str("<\u{a0}b>x"))]), MovesOnMacos),
+        row("parse_url", r#"bin2hex(serialize(parse_url("a\xE4://x/y")))"#, Gate("parse_url", &[Some(Str("a\u{e4}://x/y"))]), Moves),
         // `%.*F` never consults the locale: values, precisions, separators, the non-finite ones.
         row(
             "number_format",
             r#"implode("|", [number_format(1234.5), number_format(1234.5678, 2), number_format(-0.5), number_format(0.000001, 8), number_format(1e15, 3, ",", "."), number_format(1234567.891, 2, "\xE4", " "), number_format(-1234.567, 1), number_format(NAN), number_format(INF, 2), number_format(0.5), number_format(1.5, 0), number_format(1234.5, -2)])"#,
             Certified("number_format"),
             Stable,
+        ),
+    ]
+}
+
+/// The rows of what a call does not reach, and of the names that read no setting.
+fn silent_rows() -> Vec<Row> {
+    use Expect::{Moves, MovesOnMacos, Stable};
+    use GateArg::{Bool, Int, NotText, Str};
+    use Verdict::{Gate, Narrowed, NoSetting};
+    vec![
+        // What a call does not reach: the numeric conversions of `strftime`, a `ctype_*` argument
+        // that is no string and no small integer, an empty operand, a string with no `<`.
+        row(
+            "strftime, numeric conversions",
+            r#"@strftime("%Y-%m-%d %H:%M:%S", 86400 * 40)"#,
+            Gate("strftime", &[Some(Str("%Y-%m-%d %H:%M:%S"))]),
+            Stable,
+        ),
+        row("strftime, %s", r#"@strftime("%s", 86400 * 40)"#, Gate("strftime", &[Some(Str("%s"))]), Stable),
+        row("ctype_alpha, int 228", r#"var_export(ctype_alpha(228), true)"#, Gate("ctype_alpha", &[Some(Int(228))]), Moves),
+        row("ctype_alpha, int 300", r#"var_export(ctype_alpha(300), true)"#, Gate("ctype_alpha", &[Some(Int(300))]), Stable),
+        row("ctype_alpha, empty string", r#"var_export(ctype_alpha(""), true)"#, Gate("ctype_alpha", &[Some(Str(""))]), Stable),
+        row("ctype_alpha, bool", r#"var_export(ctype_alpha(true), true)"#, Gate("ctype_alpha", &[Some(Bool(true))]), Stable),
+        row("ctype_alpha, float", r#"var_export(ctype_alpha(228.0), true)"#, Gate("ctype_alpha", &[Some(NotText)]), Stable),
+        row("ctype_alpha, null", r#"var_export(ctype_alpha(null), true)"#, Gate("ctype_alpha", &[Some(NotText)]), Stable),
+        row("ctype_alpha, array", r#"var_export(ctype_alpha([228]), true)"#, Gate("ctype_alpha", &[Some(NotText)]), Stable),
+        row("ctype_alpha, object", r#"var_export(ctype_alpha(new stdClass), true)"#, Gate("ctype_alpha", &[Some(NotText)]), Stable),
+        row("ctype_alpha, int -28", r#"var_export(ctype_alpha(-28), true)"#, Gate("ctype_alpha", &[Some(Int(-28))]), Moves),
+        row("ctype_alpha, int -129", r#"var_export(ctype_alpha(-129), true)"#, Gate("ctype_alpha", &[Some(Int(-129))]), Stable),
+        row(
+            "strnatcmp, an empty operand",
+            r#"strnatcmp("\xA0", "")"#,
+            Gate("strnatcmp", &[Some(Str("\u{a0}")), Some(Str(""))]),
+            Stable,
+        ),
+        row(
+            "strip_tags, no tag",
+            r#"strip_tags("a\xA0 b > c")"#,
+            Gate("strip_tags", &[Some(Str("a\u{a0} b > c"))]),
+            Stable,
+        ),
+        row("escapeshellarg, empty", r#"bin2hex(escapeshellarg(""))"#, Gate("escapeshellarg", &[Some(Str(""))]), Stable),
+        row("parse_url, empty", r#"bin2hex(serialize(parse_url("")))"#, Gate("parse_url", &[Some(Str(""))]), Stable),
+        row(
+            "parse_url, a plain path",
+            r#"bin2hex(serialize(parse_url("\x80")))"#,
+            Gate("parse_url", &[Some(Str("\u{80}"))]),
+            MovesOnMacos,
         ),
         // The query form reads the cell.
         row("setlocale, '0'", r#"setlocale(LC_ALL, "0")"#, Narrowed("setlocale", "0"), Moves),
@@ -246,6 +301,7 @@ fn script(rows: &[Row]) -> String {
         }}
         if ($latin1 === null || setlocale(LC_ALL, 'de_DE.UTF-8') === false) {{ echo "NOLOCALE\n"; exit; }}
         $extra = setlocale(LC_ALL, 'ja_JP.eucJP') !== false ? 'ja_JP.eucJP' : null;
+        echo "PHPVERSION\t", PHP_VERSION_ID, "\n";
         $probes = [
 {probes}        ];
         $run = function (string $locale, callable $f): string {{
@@ -288,31 +344,49 @@ fn run_php(script: &str) -> Option<String> {
 /// certifies, gates away or leaves out does.
 #[test]
 fn the_locale_readers_move_exactly_where_the_catalog_says() {
-    let rows = rows();
+    let mut rows = rows();
+    rows.extend(silent_rows());
     let Some(text) = run_php(&script(&rows)) else { return };
-    let observed: Vec<(&str, &str)> =
-        text.lines().filter_map(|l| l.split_once('\t')).collect();
+    let mut lines = text.lines().filter_map(|l| l.split_once('\t'));
+    let version: u32 = match lines.next() {
+        Some(("PHPVERSION", id)) => id.parse().expect("a version id"),
+        other => panic!("no version line: {other:?}"),
+    };
+    // The catalog follows the 8.5 pin: before 8.2 the case folding of the data sorts and of
+    // `ucfirst` differs, and the 8.1 sources of `strip_tags` and `parse_url` hand `isspace` and
+    // `isalpha` a signed `char`, which no probe here moves. An older engine is held to the
+    // soundness direction and to the rows that stay stable, not to the positive one.
+    let modern = version >= 80200;
+    let observed: Vec<(&str, &str)> = lines.collect();
     assert_eq!(observed.len(), rows.len(), "{text}");
     for (r, (label, bits)) in rows.iter().zip(observed) {
         assert_eq!(r.label, label);
         let bits = bits.as_bytes();
         let standard = bits[..2].contains(&b'1');
         let anywhere = bits.contains(&b'1');
-        let claimed = r.verdict.reads();
-        assert!(claimed || !anywhere, "{label} moved under a locale and the catalog calls it silent");
+        let verdict = r.verdict.reads();
+        let (claimed, may_read) = (verdict == Some(true), verdict != Some(false));
+        assert!(may_read || !anywhere, "{label} moved under a locale and the catalog calls it silent");
         match r.expect {
             Expect::Moves => {
                 assert!(claimed, "{label}: a row that must move is not coloured");
-                assert!(standard, "{label} is coloured and did not move under de_DE or Latin-1");
+                assert!(
+                    standard || !modern,
+                    "{label} is coloured and did not move under de_DE or Latin-1"
+                );
             }
             Expect::MovesOnMacos => {
                 assert!(claimed, "{label}: a row that moves on macOS is not coloured");
-                if cfg!(target_os = "macos") {
+                if cfg!(target_os = "macos") && modern {
                     assert!(anywhere, "{label} is coloured and did not move on macOS");
                 }
             }
             Expect::Stable => {
-                assert!(!claimed, "{label} did not move and the catalog colours it");
+                assert_eq!(verdict, Some(false), "{label} did not move and the catalog colours it");
+                assert!(!anywhere, "{label} moved");
+            }
+            Expect::Undecided => {
+                assert_eq!(verdict, None, "{label} is a version-dependent read");
                 assert!(!anywhere, "{label} moved");
             }
         }

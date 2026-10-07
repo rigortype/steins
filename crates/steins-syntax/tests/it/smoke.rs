@@ -543,7 +543,11 @@ fn scans_the_constant_integer_arguments_a_flag_gate_reads() {
     let c = |s: &str| ConstInt::Const(s.to_owned());
 
     assert_eq!(ints("json_encode($v, JSON_THROW_ON_ERROR);"), vec![(1, c("JSON_THROW_ON_ERROR"))]);
-    assert_eq!(ints("json_encode($v, \\JSON_THROW_ON_ERROR);"), vec![(1, c("JSON_THROW_ON_ERROR"))]);
+    // A fully qualified spelling is the global constant whatever the namespace declares.
+    assert_eq!(
+        ints("json_encode($v, \\JSON_THROW_ON_ERROR);"),
+        vec![(1, ConstInt::Global("JSON_THROW_ON_ERROR".to_owned()))]
+    );
     // A `|` chain flattens into one node, parentheses and all.
     assert_eq!(
         ints("json_decode($v, true, 512, (JSON_BIGINT_AS_STRING | JSON_THROW_ON_ERROR) | 0x10);"),
@@ -555,11 +559,16 @@ fn scans_the_constant_integer_arguments_a_flag_gate_reads() {
             ),
         ]
     );
-    // Position 2 and 3 are read as well; position 0 and a fourth argument are not.
+    // Positions 1 to 3 are read; position 0 is, but for a `ctype_*` predicate, whose text is
+    // there, and a fifth argument never is.
     assert_eq!(
         ints("json_decode(1, true, 512, 0);"),
         vec![(2, ConstInt::Int(512)), (3, ConstInt::Int(0))]
     );
+    assert_eq!(ints("ctype_alpha(-65);"), vec![(0, ConstInt::Int(-65))]);
+    assert!(ints("strlen(65);").is_empty());
+    assert_eq!(ints("ctype_alpha(-(-65));"), vec![(0, ConstInt::Int(65))]);
+    assert!(ints("ctype_alpha(-$v);").is_empty());
     // Whatever needs dataflow is declined: a variable, a class constant,
     // arithmetic other than `|`, a namespaced constant, an overflowing literal.
     assert!(ints("json_encode($v, $o);").is_empty());
@@ -571,6 +580,39 @@ fn scans_the_constant_integer_arguments_a_flag_gate_reads() {
     // A named or spread list defeats positional mapping wholesale.
     assert!(ints("json_encode($v, flags: JSON_THROW_ON_ERROR);").is_empty());
     assert!(ints("json_decode(...$o);").is_empty());
+}
+
+/// ADR-0101 §3.9: what a `ctype_*` call's first argument is shown to be when it is neither a
+/// string nor an integer, which is when the predicate reads no table.
+#[test]
+fn scans_a_ctype_argument_that_is_neither_a_string_nor_an_integer() {
+    use steins_syntax::NotText;
+
+    fn not_text(params: &str, body: &str) -> Vec<(u8, NotText)> {
+        let src = format!("<?php function f({params}): void {{ {body} }}");
+        let tree = SourceTree::parse(&src);
+        let f = tree.functions().iter().find(|f| f.name == "f").expect("f").clone();
+        match derive_effect_origins(&f.sites).first().expect("one origin").clone() {
+            EffectOrigin::Call { const_args, .. } | EffectOrigin::HigherOrder { const_args, .. } => {
+                const_args.not_text
+            }
+            other => panic!("expected a named-call origin, got {other:?}"),
+        }
+    }
+    for arg in ["null", "true", "FALSE", "1.5", "[]", "[1, 'a']", "array()"] {
+        assert_eq!(not_text("$v", &format!("ctype_alpha({arg});")), [(0, NotText::Literal)], "{arg}");
+    }
+    assert_eq!(not_text("bool $b", "ctype_alpha($b);"), [(0, NotText::Param("b".to_owned()))]);
+    // A parameter the frame writes, a local, a string, an integer and any expression show nothing.
+    assert!(not_text("bool $b", "$b = 'x'; ctype_alpha($b);").is_empty());
+    assert!(not_text("bool $b", "$b++; ctype_alpha($b);").is_empty());
+    assert!(not_text("$v", "$l = 1; ctype_alpha($l);").is_empty());
+    assert!(not_text("$v", "ctype_alpha('a');").is_empty());
+    assert!(not_text("$v", "ctype_alpha(65);").is_empty());
+    assert!(not_text("$v", "ctype_alpha($v . 'x');").is_empty());
+    assert!(not_text("array $a", "ctype_alpha(...$a);").is_empty());
+    // Only a `ctype_*` call records it.
+    assert!(not_text("bool $b", "strlen($b);").is_empty());
 }
 
 // Class / method lowering (class-world extension)

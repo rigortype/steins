@@ -120,21 +120,18 @@ const REFUSED_ON_LITERALS: &[(&str, &str)] = &[
     // `mixed $key` admits both literals.
     ("array_key_exists", "deprecation on a null or fractional-float key"),
     ("key_exists", "deprecation on a null or fractional-float key"),
-    // The locale readers of ADR-0101 §3.9 that raise a diagnostic on a literal the declared
-    // `mixed` or `string` admits. `ctype_*` takes `mixed` and, since 8.1, deprecates anything
-    // that is not a string (`ctype_alpha(65)`), and `strftime` and `gmstrftime` are deprecated
-    // outright, so every call raises one. The rest of the readers raise none on a literal.
-    ("ctype_alnum", "deprecation on a non-string literal (8.1)"),
-    ("ctype_alpha", "deprecation on a non-string literal (8.1)"),
-    ("ctype_cntrl", "deprecation on a non-string literal (8.1)"),
-    ("ctype_graph", "deprecation on a non-string literal (8.1)"),
-    ("ctype_lower", "deprecation on a non-string literal (8.1)"),
-    ("ctype_print", "deprecation on a non-string literal (8.1)"),
-    ("ctype_punct", "deprecation on a non-string literal (8.1)"),
-    ("ctype_space", "deprecation on a non-string literal (8.1)"),
-    ("ctype_upper", "deprecation on a non-string literal (8.1)"),
+    // `strftime` and `gmstrftime` (ADR-0101 §3.9) are deprecated outright, so every call raises
+    // `E_DEPRECATED`.
     ("strftime", "deprecated since 8.1: every call raises E_DEPRECATED"),
     ("gmstrftime", "deprecated since 8.1: every call raises E_DEPRECATED"),
+];
+
+/// The `ctype_*` predicates (ADR-0101 §3.9) take `mixed $text` and, since 8.1, deprecate anything
+/// that is not a string (`ctype_alpha(65)`, `(null)`, `([])` raise `E_DEPRECATED`, which reaches
+/// `set_error_handler`): a literal call is a dead statement only over a string literal.
+const STRING_LITERAL_ONLY: &[&str] = &[
+    "ctype_alnum", "ctype_alpha", "ctype_cntrl", "ctype_graph", "ctype_lower", "ctype_print",
+    "ctype_punct", "ctype_space", "ctype_upper",
 ];
 
 /// Names whose admitted argument counts are not an interval, so the engine's
@@ -303,6 +300,11 @@ fn literal_call_shape(name: &str, call: &CallExpr) -> bool {
         return false;
     }
     let Some(facts) = steins_catalog::param_facts(name) else { return false };
+    if STRING_LITERAL_ONLY.contains(&name)
+        && !call.args.first().is_some_and(|a| matches!(a.value, ArgValue::Str(_)))
+    {
+        return false;
+    }
     let n = call.args.len();
     let variadic = facts.variadic.first().copied();
     if n < facts.params_required || (variadic.is_none() && n > facts.params.len()) {

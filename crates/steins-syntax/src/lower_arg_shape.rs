@@ -17,7 +17,7 @@ use mago_syntax::cst::{
     UnaryPrefixOperator, Variable,
 };
 
-use crate::ast::{ArgShape, ArgValue, EffectRecv, FloatEvidence, SUPERGLOBALS, Stored};
+use crate::ast::{ArgShape, ArgValue, EffectRecv, FloatEvidence, NotText, SUPERGLOBALS, Stored};
 use crate::lower_effect::EffectScanCx;
 use crate::lower_expr::{
     class_const_name, effect_recv_of_class, effect_recv_of_object, effect_recv_of_object_declared,
@@ -316,6 +316,37 @@ pub(crate) fn float_evidence_of_args(
         }
     }
     out
+}
+
+/// [`ConstArgs::not_text`] of a `ctype_*` call: the first argument, when it is a `null`, boolean,
+/// float or array literal, a `new` expression (an object), or a by-value parameter the frame
+/// never writes (whose declared type the engine reads). Empty for anything else, and for a named
+/// or spread argument list.
+///
+/// [`ConstArgs::not_text`]: crate::ast::ConstArgs::not_text
+pub(crate) fn not_text_of_args(list: &ArgumentList<'_>, cx: &EffectScanCx) -> Vec<(u8, NotText)> {
+    let mut args = list.arguments.iter();
+    let Some(Argument::Positional(first)) = args.next() else { return Vec::new() };
+    if first.ellipsis.is_some() || args.any(|a| !matches!(a, Argument::Positional(p) if p.ellipsis.is_none())) {
+        return Vec::new();
+    }
+    let evidence = match first.value.unparenthesized() {
+        Expression::Literal(
+            Literal::Null(_) | Literal::True(_) | Literal::False(_) | Literal::Float(_),
+        )
+        | Expression::Array(_)
+        | Expression::LegacyArray(_)
+        | Expression::Instantiation(_) => NotText::Literal,
+        Expression::Variable(Variable::Direct(dv)) => {
+            let name = strip_dollar(bytes_to_string(dv.name));
+            if !cx.bindings.unrebound_param(&name) {
+                return Vec::new();
+            }
+            NotText::Param(name)
+        }
+        _ => return Vec::new(),
+    };
+    vec![(0, evidence)]
 }
 
 /// What the scan shows of whether `expr` is a float ([`FloatEvidence`]), or `None` when it

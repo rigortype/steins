@@ -52,14 +52,14 @@ use crate::fold::foldable;
 ///   ([`format_reads_locale`](crate::format_reads_locale)) drops it, and a `%s` of a value
 ///   shown a float proves the precision read where one shown no float drops it. What the site
 ///   cannot decide is the `value-dependent-read` gap and never a label (ADR-0101 §3.2).
-/// * The locale readers beyond printf (ADR-0101 §3.9, S4): `ctype_*` but `ctype_digit` and
-///   `ctype_xdigit`, `basename`, `strnatcmp`, `strnatcasecmp`, `escapeshellarg`, `strip_tags`
-///   and `parse_url` read the locale on every call, and `strftime` and `gmstrftime` read it
-///   beside the time family's `nondet.time`. The sorts, `substr_compare` and `pathinfo` read it
-///   only under a mode argument ([`locale_read_gate`](crate::locale_read_gate)): their row is
-///   the upper bound and a call site proves, drops or gaps it as the printf family's is.
-///   `number_format` reads no setting and is certified at the call site
-///   ([`certified_at_call_site`]).
+/// * The locale readers beyond printf (ADR-0101 §3.9, S4): `basename` reads the locale on every
+///   call. `ctype_*` but `ctype_digit` and `ctype_xdigit`, `strnatcmp`, `strnatcasecmp`,
+///   `escapeshellarg`, `strip_tags`, `parse_url`, `strftime` and `gmstrftime` (which also carry
+///   the time family's `nondet.time`), the sorts, `substr_compare` and `pathinfo` read it only
+///   where the call reaches the routine that consults it: their row is the upper bound and a
+///   call site proves, drops or gaps it as the printf family's is
+///   ([`locale_read_gate`](crate::locale_read_gate)). `number_format` reads no setting and is
+///   certified at the call site ([`certified_at_call_site`]).
 /// * `curl_exec` keeps `io.output` arg-blind (only `CURLOPT_RETURNTRANSFER`
 ///   suppresses it); `system`/`passthru` take parent `io.output` since
 ///   OB-capturability evidence for a relayed child's output is split
@@ -171,26 +171,29 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
         // The other readers of the cell: `localeconv` and `nl_langinfo` report
         // it, `strcoll` collates by it.
         "localeconv" | "nl_langinfo" | "strcoll" => Some(LOCALE_READ),
-        // The readers php-src shows consulting the C library's locale tables or the engine's
-        // locale-derived state on every call (ADR-0101 §3.9, issue #1000, S4): the character
-        // class of each byte (`ctype_*`, `strnatcmp`'s `isspace` and `isdigit`, `strnatcasecmp`'s
-        // `toupper`, `strip_tags`'s `isspace` after a `<`, `parse_url`'s `isalpha` in a scheme),
-        // the multibyte state (`php_mblen` in `escapeshellarg`; `basename` selects its algorithm
-        // by `CG(ascii_compatible_locale)`, which `setlocale` sets). `ctype_digit` and
-        // `ctype_xdigit` are absent: C fixes their sets in every locale and none moved. A
-        // per-byte reader reads nothing of an empty string, which the row does not model: the
-        // read is the call's, as `mb_strlen`'s of the default encoding is.
+        // `basename` reads the locale on every call: `php_basename` consults the
+        // locale-derived `CG(ascii_compatible_locale)` before it looks at a byte, and walks
+        // `php_mblen` where it is false (ADR-0101 §3.9, issue #1000, S4).
+        "basename" => Some(LOCALE_READ),
+        // The readers whose read the call decides (`locale_read_gate`): the row is the upper
+        // bound, and the call site proves it, drops it or gaps it. A mode argument selects it
+        // (the sorts under `SORT_LOCALE_STRING` and `SORT_NATURAL`, `substr_compare` when
+        // case-insensitive, `pathinfo` unless only the directory name is asked for), or the
+        // content the call hands the routine does: `ctype_*` classify a non-empty string or a
+        // small `int` and return `false` for every other type before a table, `strnatcmp` and
+        // `strnatcasecmp` return on an empty operand, `escapeshellarg` walks `php_mblen` over
+        // a non-empty string, `strip_tags` calls `isspace` after a `<`, `parse_url` calls
+        // `isalpha` over a scheme and `iscntrl` over each component, and `strftime` reads the
+        // locale for the conversions that name it. `ctype_digit` and `ctype_xdigit` are absent:
+        // C fixes their sets in every locale and none moved.
         "ctype_alnum" | "ctype_alpha" | "ctype_cntrl" | "ctype_graph" | "ctype_lower"
-        | "ctype_print" | "ctype_punct" | "ctype_space" | "ctype_upper" | "basename"
-        | "strnatcmp" | "strnatcasecmp" | "escapeshellarg" | "strip_tags" | "parse_url" => {
+        | "ctype_print" | "ctype_punct" | "ctype_space" | "ctype_upper" | "strnatcmp"
+        | "strnatcasecmp" | "escapeshellarg" | "strip_tags" | "parse_url" | "sort" | "rsort"
+        | "asort" | "arsort" | "ksort" | "krsort" | "substr_compare" | "pathinfo" => {
             Some(LOCALE_READ)
         }
-        // The readers whose read a mode argument decides (`locale_read_gate`): the row is the
-        // upper bound, and the call site proves, drops or gaps it. The sorts read under
-        // `SORT_LOCALE_STRING` and `SORT_NATURAL`, `substr_compare` when case-insensitive,
-        // `pathinfo` unless only the directory name is asked for.
-        "sort" | "rsort" | "asort" | "arsort" | "ksort" | "krsort" | "substr_compare"
-        | "pathinfo" => Some(LOCALE_READ),
+        // The clock too, as the time family's argument-blind `nondet.time`; the locale half is
+        // decided by the format (`strftime_reads`).
         "strftime" | "gmstrftime" => Some(LOCALE_READ_CLOCK),
         // Shell out and relay the child's output (ADR-0083).
         "system" | "passthru" => Some(PROCESS_TO_OUTPUT),

@@ -3,16 +3,18 @@
 
 use mago_span::HasSpan;
 use mago_syntax::cst::{
-    AnonymousClass, ClassLikeMemberSelector, Expression, FunctionCall, Instantiation, MethodCall,
+    AnonymousClass, Argument, ClassLikeMemberSelector, Expression, FunctionCall, Instantiation, MethodCall,
     NullSafeMethodCall, StaticMethodCall,
 };
 
 use super::SiteScope;
 use crate::ast::{ArgShape, DynamicSite, SiteKind, SiteOrigin, Span};
-use crate::lower_arg_shape::{arg_shapes_of, float_evidence_of_args, method_call_shapes};
+use crate::lower_arg_shape::{
+    arg_shapes_of, float_evidence_of_args, method_call_shapes, not_text_of_args,
+};
 use crate::lower_effect::{
     AnonymousConstructor, anonymous_class_constructor, arg_targets_of_call, const_args_of_call,
-    direct_var_callee, higher_order_of_call,
+    const_int_of, direct_var_callee, higher_order_of_call,
 };
 use crate::lower_expr::{
     effect_recv_of_class, effect_recv_of_object_declared, method_name_of, trace_static_class,
@@ -35,12 +37,23 @@ pub(super) fn function_call(fc: &FunctionCall<'_>, sx: &SiteScope<'_>, out: &mut
         // `derive` reads a higher-order call's arity off `ref_targets`.
         debug_assert!(callbacks.is_empty() || ref_targets.is_some());
         let name = name_ref(id);
-        let printf = ["sprintf", "printf"].contains(&name.simple().to_ascii_lowercase().as_str());
+        let simple = name.simple().to_ascii_lowercase();
+        let printf = ["sprintf", "printf"].contains(&simple.as_str());
+        let ctype = simple.starts_with("ctype_");
         let mut site = sx.site(span, SiteKind::Call { name, callbacks });
         site.ref_targets = ref_targets;
         site.const_args = const_args_of_call(fc);
         if printf {
             site.const_args.float_evidence = float_evidence_of_args(&fc.argument_list, cx);
+        }
+        if ctype {
+            // A predicate's text is at position 0: an integer there is a character code.
+            if let Some(Argument::Positional(first)) = fc.argument_list.arguments.iter().next()
+                && let Some(int) = const_int_of(first.value)
+            {
+                site.const_args.ints.insert(0, (0, int));
+            }
+            site.const_args.not_text = not_text_of_args(&fc.argument_list, cx);
         }
         site.operands = arg_shapes_of(&fc.argument_list, cx);
         out.push(site);

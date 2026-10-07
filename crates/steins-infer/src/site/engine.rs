@@ -193,7 +193,7 @@ pub(crate) fn function_throws(
 pub(super) fn eval_const_int(expr: &ConstInt) -> Option<i64> {
     match expr {
         ConstInt::Int(v) => Some(*v),
-        ConstInt::Const(name) => match steins_catalog::engine_constant(name)?.value? {
+        ConstInt::Const(name) | ConstInt::Global(name) => match steins_catalog::engine_constant(name)?.value? {
             steins_catalog::ConstValue::Int(v) => Some(v),
             _ => None,
         },

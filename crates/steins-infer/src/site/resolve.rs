@@ -278,7 +278,10 @@ impl<'a> Resolver<'a, '_, '_> {
             self.gap(gap);
         }
         let positional = args.targets.map(<[_]>::len);
-        if let Some(gap) = locale::narrow_labels(builtin, positional, args.consts, &mut labels) {
+        let (read, spelled) = ((self.cx, self.frame), (name, builtin));
+        if let Some(gap) =
+            locale::narrow_labels(read, spelled, (positional, args.consts), &mut labels)
+        {
             self.gap(gap);
         }
         self.function_hit(builtin, name.simple(), labels, &[]);
