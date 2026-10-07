@@ -174,6 +174,16 @@ pub(crate) fn denotes_os_pinned_constant(cx: &Cx, r: &NameRef) -> bool {
     const_ref_candidates(cx, r).iter().any(|c| OS_PINNED_CONSTANTS.contains(&c.as_str()))
 }
 
+/// **Whether the engine defines the constant a reference denotes**, a name no project
+/// `const` or `define()` can take over (it only warns): the roster of §3's classes and the mined
+/// table. A project constant, on the other hand, can be defined at run time under a computed
+/// name before the file that declares it is included, and then wins.
+pub(crate) fn engine_defines(cx: &Cx, r: &NameRef) -> bool {
+    const_ref_candidates(cx, r)
+        .iter()
+        .any(|c| PLATFORM_RULED.contains(&c.as_str()) || steins_catalog::engine_constant(c).is_some())
+}
+
 /// The six values php-src closes `PHP_OS_FAMILY` over, in the order
 /// `Fact::OneOf` sorts them into.
 const OS_FAMILIES: &[&str] = &["BSD", "Darwin", "Linux", "Solaris", "Unknown", "Windows"];

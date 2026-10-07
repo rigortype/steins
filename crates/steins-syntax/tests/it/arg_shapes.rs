@@ -53,16 +53,27 @@ fn an_expression_qualifies_by_its_form() {
 }
 
 /// A class name is a string (`Foo::class`, `static::class`, `$o::class`); any other class
-/// constant or enum case is a shape of its own, and a `match` or a `throw` is object-free when
-/// its arms are (issue #868).
+/// constant or enum case by a class the scan names is a shape of its own, one by a computed class
+/// is unknown, and a `match` or a `throw` is object-free when its arms are (issue #868).
 #[test]
 fn a_class_constant_is_its_own_shape_and_a_class_name_holds_no_object() {
-    use ArgShape::{ClassConst, ObjectFree, Unknown};
+    use steins_syntax::{NameRef, RefKind, StaticClass};
+    use ArgShape::{ObjectFree, Unknown};
     let args = "Foo::class, static::class, $v::class, self::class";
     assert_eq!(shapes("$v", &format!("g({args});")), vec![ObjectFree; 4]);
-    let consts = "g(Foo::BAR, self::NAME, Suit::Hearts, static::X);";
-    assert_eq!(shapes("$v", consts), vec![ClassConst; 4]);
-    assert_eq!(shapes("$v", "g(Foo::{$v}, $v::BAR);"), [Unknown, ClassConst]);
+    let named = |name: &str| StaticClass::Named(NameRef {
+        raw: name.to_owned(),
+        kind: RefKind::Unqualified,
+        offset: 0,
+    });
+    let konst = |class, name: &str| ArgShape::ClassConst { class, name: name.to_owned() };
+    assert_eq!(shapes("$v", "g(Foo::BAR, self::NAME, Suit::Hearts, static::X);"), [
+        konst(named("Foo"), "BAR"),
+        konst(StaticClass::SelfKw, "NAME"),
+        konst(named("Suit"), "Hearts"),
+        konst(StaticClass::Static, "X"),
+    ]);
+    assert_eq!(shapes("$v", "g(Foo::{$v}, $v::BAR);"), [Unknown, Unknown]);
     let arms =
         "g(match ($v) { 1 => 'a', default => null }, match ($v) { 1 => $v, default => 'b' });";
     assert_eq!(shapes("$v", arms), [ObjectFree, Unknown]);

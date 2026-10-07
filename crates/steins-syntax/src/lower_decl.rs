@@ -1040,6 +1040,7 @@ fn lower_class_consts(
             hint_span,
             docblock: docblock.clone(),
             span: to_span(item.name.span()),
+            init: crate::lower_arg_shape::const_init(item.value),
         });
         let v = lower_arg_value(item.value);
         if !matches!(v, ArgValue::Other) {

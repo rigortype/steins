@@ -673,7 +673,10 @@ fn a_string_accessor_result_holds_no_object() {
     // witness: `getMessage()` converts a message an object was stored into inside the accessor
     // and returns a string; the conversion is the accessor call's own row (#997), not the
     // return's.
-    lacks_gap("function ex(): string { return (new \\RuntimeException('x'))->getMessage(); }", "ex");
+    lacks_gap(
+        "function ex(): string { return (new \\RuntimeException('x'))->getMessage(); }",
+        "ex",
+    );
     lacks_gap("function ex(\\Throwable $e): string { return $e->getMessage(); }", "ex");
     lacks_gap(
         "final class MyE extends \\RuntimeException {\n\
@@ -728,7 +731,10 @@ fn a_generators_return_converts_nothing() {
 #[test]
 fn to_string_without_a_declared_return_converts_what_it_returns() {
     // witness: `__toString() { return new S; }` prints `[S]`: the return type is implicit.
-    runs_to_string("final class W { public function __toString() { return new S; } }", "W::__toString");
+    runs_to_string(
+        "final class W { public function __toString() { return new S; } }",
+        "W::__toString",
+    );
     gap(
         "final class W { public $v; public function __toString() { return $this->v; } }",
         "W::__toString",
@@ -754,4 +760,85 @@ fn a_constructor_destructuring_a_foreach_a_reference_or_a_chain_converts_for_the
     // The same in a strict file converts nothing.
     let s = summary(&file(true, classes), "ListW::__construct");
     assert!(!s.gaps.contains(&TO_STRING) && s.labels.is_empty(), "{s:?}");
+}
+
+// ---- a class constant may name a constant that holds an object (second review of #1013) ----
+
+#[test]
+fn a_class_constant_that_names_an_object_constant_converts_it() {
+    // witness: `const GO = new S; class KG { const X = GO; } final class KH { const Z = KG::X; }`
+    // prints `[S]` for `'a' . KG::X`, `echo KG::X`, `(string) KG::X`, `takes(KG::X)`, a `: string`
+    // return of it, and the same through the chain `KH::Z`.
+    let classes = "const GO = new S;\n\
+        class KG { const X = GO; }\n\
+        final class KH { const Z = KG::X; const W = self::Z . 'a'; }\n";
+    for body in [
+        "return 'a' . KG::X;",
+        "echo KG::X;",
+        "return (string) KG::X;",
+        "return takes(KG::X);",
+        "return 'a' . KH::Z;",
+        "return takes(KH::Z);",
+    ] {
+        gap(&format!("{classes}function f() {{ {body} }}"), "f");
+    }
+    gap(&format!("{classes}function r(): string {{ return KG::X; }}"), "r");
+    gap(&format!("{classes}function r(): string {{ return KH::Z; }}"), "r");
+    // A string built from it is a string (the concatenation is the conversion).
+    let built = format!("{classes}function f() {{ return takes(KH::W); }}");
+    lacks_gap(&built, "f");
+}
+
+#[test]
+fn a_class_constant_that_ends_in_a_scalar_or_an_enum_case_converts_nothing() {
+    let classes = "enum Suit { case Hearts; }\n\
+        const GS = 'scalar';\n\
+        interface KI { const I = 'i'; }\n\
+        class KA implements KI {\n\
+            const X = GS; const Y = self::X . 'a'; const Z = [self::X, 2 * 3];\n\
+            const E = Suit::Hearts; const P = PHP_INT_MAX; const D = self::X ?: 'd'; }\n\
+        class KB extends KA { const Q = parent::Y; }\n";
+    for body in [
+        "takes(KA::X)",
+        "takes(KA::Y)",
+        "takes(KA::E)",
+        "takes(KA::P)",
+        "takes(KA::D)",
+        "takes(KB::Q)",
+        "takes(KB::X)",
+        "takes(KB::I)",
+        "takes(\\DateTimeInterface::ATOM)",
+    ] {
+        nothing(&format!("{classes}function f() {{ return {body}; }}"), "f");
+    }
+    // A name nothing reads is unproven: a class no file declares, `static::` in a class a
+    // subclass can extend, a constant a trait may supply, a constant nothing declares.
+    for (extra, body) in [
+        ("", "takes(Missing::X)"),
+        ("", "takes(KA::NOPE)"),
+        ("trait Tr { const T = 't'; } class KT { use Tr; }", "takes(KT::T)"),
+        ("class KO { const A = unknown_fn(); }", "takes(KO::A)"),
+        ("class KP { const A = Missing::B; }", "takes(KP::A)"),
+        ("class KU { const A = NO_SUCH_CONSTANT; }", "takes(KU::A)"),
+    ] {
+        gap(&format!("{classes}{extra}\nfunction f() {{ return {body}; }}"), "f");
+    }
+    let late = "class KS { public static function f() { return takes(static::X); } }";
+    gap(&format!("{classes}{late}"), "KS::f");
+}
+
+#[test]
+fn a_scalar_global_constant_is_not_proven_where_the_project_may_define_it_at_run_time() {
+    // witness: `define($n, new class { … })` with a computed name, run before the file is
+    // included, wins over a later `const DYN2 = 'scalar';`, which only warns: `takes(DYN2)` and
+    // `'a' . DYN2` convert the object.
+    let dynamic = "const DYN2 = 'scalar';\n$n = 'DYN' . '2'; define($n, new S);\n";
+    gap(&format!("{dynamic}function f() {{ return takes(DYN2); }}"), "f");
+    gap(&format!("{dynamic}function f() {{ return 'a' . DYN2; }}"), "f");
+    // The engine's own constants cannot be redefined, and a literal name defines what it names.
+    nothing(&format!("{dynamic}function f() {{ return takes(PHP_EOL); }}"), "f");
+    let literal = "const LIT2 = 'scalar';\ndefine('OTHER', new S);\n";
+    nothing(&format!("{literal}function f() {{ return takes(LIT2); }}"), "f");
+    // Without a computed define the same-file literal stands.
+    nothing("const DYN2 = 'scalar';\nfunction f() { return takes(DYN2); }", "f");
 }

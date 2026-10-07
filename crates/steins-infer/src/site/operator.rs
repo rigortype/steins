@@ -213,10 +213,15 @@ impl<'a> Operator<'a, '_> {
     /// What the operand `shape`, written `receiver`, may be.
     fn subject(&self, shape: &ArgShape, receiver: Option<&EffectRecv>) -> Subject {
         let comparison = matches!(self.construct, C::LooseCompare | C::OrderCompare | C::Switch);
-        // A class constant is a scalar, an array or an enum case, which cannot declare
-        // `__toString`: nothing is converted. A comparison is as it was, and so is every other
-        // family (an enum may be `Countable` or `ArrayAccess`).
-        if self.family == F::ToString && !comparison && *shape == ArgShape::ClassConst {
+        // A class constant that ends in a scalar, an array or an enum case (which cannot declare
+        // `__toString`) converts nothing; one that names a constant holding an object does.
+        // A comparison is as it was, and so is every other family (an enum may be `Countable`
+        // or `ArrayAccess`).
+        if let ArgShape::ClassConst { class, name } = shape
+            && self.family == F::ToString
+            && !comparison
+            && self.frame.class_const_no_object(self.cx, class, name)
+        {
             return Subject::NoObject;
         }
         match self.frame.held(self.cx, shape) {

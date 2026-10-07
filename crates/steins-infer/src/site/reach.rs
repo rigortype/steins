@@ -12,6 +12,7 @@
 //! `declare(strict_types=1)`.
 
 mod call_result;
+mod consts;
 
 use std::cell::OnceCell;
 use std::collections::HashSet;
@@ -54,6 +55,9 @@ pub(crate) struct Frame<'a> {
     /// The variables some named call of the frame may take by reference,
     /// computed on the first variable argument that asks.
     by_ref: OnceCell<HashSet<String>>,
+    /// Whether the project holds a `define()` with a computed name ([`consts`]), computed on
+    /// the first project constant that asks.
+    computed_define: OnceCell<bool>,
 }
 
 impl<'a> Frame<'a> {
@@ -62,7 +66,13 @@ impl<'a> Frame<'a> {
         params: &'a [Param],
         sites: &'a [SiteOrigin],
     ) -> Self {
-        Self { class_fqn, params, sites, by_ref: OnceCell::new() }
+        Self {
+            class_fqn,
+            params,
+            sites,
+            by_ref: OnceCell::new(),
+            computed_define: OnceCell::new(),
+        }
     }
 
     /// What the argument `shape` describes is shown to hold.
@@ -84,9 +94,8 @@ impl<'a> Frame<'a> {
             // A constant with a scalar value holds no object; one the catalog and the project
             // state nothing of may. A class constant is no object this answer can place: the
             // ToString family asks about it apart (`Operator::subject`).
-            ArgShape::GlobalConst(name) => global_const_fact(cx, name)
-                .map_or(Held::Unknown, |(fact, _)| fact_held(&fact)),
-            ArgShape::Unknown | ArgShape::ClassConst => Held::Unknown,
+            ArgShape::GlobalConst(name) => self.global_const_held(cx, name),
+            ArgShape::Unknown | ArgShape::ClassConst { .. } => Held::Unknown,
         }
     }
 }
@@ -191,7 +200,7 @@ impl Frame<'_> {
             | ArgShape::Array
             | ArgShape::Unknown
             | ArgShape::GlobalConst(_)
-            | ArgShape::ClassConst => FloatClass::Unknown,
+            | ArgShape::ClassConst { .. } => FloatClass::Unknown,
         }
     }
 

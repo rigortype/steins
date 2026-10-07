@@ -1051,7 +1051,7 @@ mod tests {
     /// payload holds moves, and both survive the payload codec.
     #[test]
     fn the_arg_shape_call_variants_are_appended_and_round_trip() {
-        use steins_syntax::{ArgShape, EffectRecv, NameRef, RefKind};
+        use steins_syntax::{ArgShape, EffectRecv, NameRef, RefKind, StaticClass};
         let variants = serde_variants::<ArgShape>();
         let expected = [
             "ObjectFree",
@@ -1075,7 +1075,7 @@ mod tests {
                 method: "n".into(),
             },
             ArgShape::GlobalConst(call),
-            ArgShape::ClassConst,
+            ArgShape::ClassConst { class: StaticClass::SelfKw, name: "K".to_owned() },
         ];
         for shape in shapes {
             let bytes = crate::wire::to_vec(&shape).expect("a shape serializes");
