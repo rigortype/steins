@@ -239,7 +239,7 @@ impl<'a> Resolver<'a, '_, '_> {
     fn user_call(&mut self, name: &NameRef, site: Site, args: &CallArgs<'_>) {
         self.user_edges(name, site, args);
         let params = &self.cx.fn_decl(site).params;
-        self.coerce_arguments(Some(operator::Signature { file: site.file, params }));
+        self.coerce_arguments(Some(operator::Signature { file: site.file, params, class: None }));
     }
 
     /// The conversions the call's arguments run on the parameter types of the project

@@ -43,6 +43,28 @@ use crate::site::ResolvedSite;
 pub(in crate::site) struct Signature<'a> {
     pub(in crate::site) file: usize,
     pub(in crate::site) params: &'a [Param],
+    /// The class declaring a method, for the `self` and `parent` its types name.
+    pub(in crate::site) class: Option<String>,
+}
+
+/// Where a declared type is spelled: the source its names resolve in, at a byte offset, and
+/// the class whose `self` and `parent` it may name.
+pub(super) struct Spelled<'a> {
+    tree: &'a SourceTree,
+    offset: u32,
+    class: Option<&'a str>,
+    parent: Option<String>,
+}
+
+impl<'a> Spelled<'a> {
+    pub(super) fn new(
+        cx: &Cx<'_>,
+        (tree, offset): (&'a SourceTree, u32),
+        class: Option<&'a str>,
+    ) -> Self {
+        let parent = class.and_then(|c| cx.parent_fqn(c));
+        Self { tree, offset, class, parent }
+    }
 }
 
 /// A member of a declared type that admits an object as it is, when the object is an
@@ -66,31 +88,38 @@ pub(super) struct Declared {
 }
 
 impl Declared {
-    /// Read the type spelled `text`, whose names resolve in the context of `tree` at
-    /// byte `offset`.
-    pub(super) fn parse(text: &str, tree: &SourceTree, offset: u32) -> Self {
+    /// Read the type spelled `text` at `spelled`.
+    pub(super) fn parse(text: &str, spelled: &Spelled<'_>) -> Self {
         let mut declared = Self { string: false, open: false, members: Vec::new() };
         for member in members_of(text) {
-            declared.add(member, tree, offset);
+            declared.add(member, spelled);
         }
         declared
     }
 
-    fn add(&mut self, member: &str, tree: &SourceTree, offset: u32) {
+    fn add(&mut self, member: &str, spelled: &Spelled<'_>) {
         match member.to_ascii_lowercase().as_str() {
             "string" => self.string = true,
             "object" | "mixed" => self.open = true,
             "iterable" => self.members.push(Member::Iterable),
             "callable" => self.members.push(Member::Callable),
-            // A scalar, an array, `null` or a keyword type admits no object. `self`, `static`
-            // and `parent` admit an object of the declaring class, which is not read here:
-            // such a type reads as converting, the over-approximation. An intersection
-            // member is no one class.
+            "self" | "parent" => {
+                let class = if member.eq_ignore_ascii_case("self") {
+                    spelled.class.map(str::to_owned)
+                } else {
+                    spelled.parent.clone()
+                };
+                self.members.extend(class.map(Member::Class));
+            }
+            // A scalar, an array, `null` or a keyword type admits no object. `static` admits
+            // an instance of the class the method was called on, which is not read here: such
+            // a type reads as converting, the over-approximation. An intersection member is
+            // no one class.
             "" | "int" | "float" | "bool" | "array" | "null" | "false" | "true" | "void"
-            | "never" | "self" | "static" | "parent" => {}
+            | "never" | "static" => {}
             _ if member.contains('&') => {}
             _ => {
-                let fqn = tree.resolve_class_fqn(&name_ref(member, offset));
+                let fqn = spelled.tree.resolve_class_fqn(&name_ref(member, spelled.offset));
                 if fqn.eq_ignore_ascii_case("Stringable") {
                     self.open = true;
                 } else {
@@ -229,7 +258,8 @@ pub(in crate::site) fn arguments<'a>(
         .iter()
         .map(|p| {
             let span = p.hint_span?;
-            let declared = Declared::parse(tree.source_slice(span)?, tree, span.start);
+            let spelled = Spelled::new(cx, (tree, span.start), sig.class.as_deref());
+            let declared = Declared::parse(tree.source_slice(span)?, &spelled);
             declared.converts().then_some(declared)
         })
         .collect();
@@ -285,7 +315,10 @@ pub(in crate::site) fn value(
     let receiver = receivers.first().and_then(Option::as_ref);
     let declared = match construct {
         C::PropertyValue => property_type(&op, member),
-        _ => Some(Declared::parse(member, cx.tree(), site.span.start)),
+        _ => {
+            let spelled = Spelled::new(cx, (cx.tree(), site.span.start), frame.class_fqn);
+            Some(Declared::parse(member, &spelled))
+        }
     };
     if let Some(declared) = declared {
         op.coerce(&declared, shape, receiver);
@@ -308,7 +341,8 @@ fn property_type(op: &Operator<'_, '_>, member: &str) -> Option<Declared> {
     let (file, _) = op.cx.find_class(&owner.fqn)?;
     let tree = op.cx.units[file].tree;
     let span = prop.hint_span?;
-    Some(Declared::parse(tree.source_slice(span)?, tree, span.start))
+    let spelled = Spelled::new(op.cx, (tree, span.start), Some(&owner.fqn));
+    Some(Declared::parse(tree.source_slice(span)?, &spelled))
 }
 
 /// The parameters of the project method or constructor `sym` names, and its file.
@@ -316,5 +350,5 @@ pub(in crate::site) fn method_signature<'a>(cx: &Cx<'a>, sym: &Sym) -> Option<Si
     let Sym::Method(class, method) = sym else { return None };
     let (file, class) = cx.find_class(class)?;
     let decl = class.methods.iter().find(|m| m.name.eq_ignore_ascii_case(method))?;
-    Some(Signature { file, params: &decl.params })
+    Some(Signature { file, params: &decl.params, class: Some(class.fqn.clone()) })
 }
