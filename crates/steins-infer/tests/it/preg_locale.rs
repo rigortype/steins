@@ -97,6 +97,15 @@ fn every_compiling_function_reaches_the_patterns_verdict() {
         r"'/^(?i:\xC4)$/'",
         r"'/(*UTF)^\w$/'",
         "\"/^a\\xA0b$/x\"",
+        // A caseless flag compares through the table under UCP too; a named back reference, an
+        // `x` comment's swallowed tokens, `[[:<:]]`, `[:ascii:]` and the `r` flag are readers.
+        r"'/(*UCP)^\xC4$/i'",
+        "'/^i$/iu'",
+        "'/^(?<a>.)(?P=a)$/i'",
+        "'/[[:<:]]a/'",
+        "'/^[[:ascii:]]$/u'",
+        "\"/^#\\Q\n\\w$/x\"",
+        r"'/^\w$/r'",
     ] {
         for call in calls(pattern) {
             reads(&call);
@@ -105,7 +114,6 @@ fn every_compiling_function_reaches_the_patterns_verdict() {
     for pattern in [
         r"'/^\w$/u'",
         "'/^[[:alpha:]]$/u'",
-        r"'/(*UCP)^\xC4$/i'",
         r"'/^\d$/'",
         "'/^[[:digit:]]$/'",
         "'/^[[:xdigit:]]$/'",

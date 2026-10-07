@@ -5,32 +5,46 @@
 //! process locale once a script has called `setlocale` with `LC_CTYPE` or `LC_ALL`, so a pattern
 //! reads the locale cell exactly when PCRE2 asks those tables something. The modifier `u` sets
 //! `PCRE2_UTF` **and** `PCRE2_UCP`, and UCP is what routes `\w`, `\s`, `\b`, the POSIX classes
-//! and caseless matching to Unicode properties instead of the tables; `(*UTF)` alone does not,
-//! so the exemption is UCP and not UTF.
+//! (but `[:ascii:]`) to Unicode properties instead of the tables; `(*UTF)` alone does not, so the
+//! exemption is UCP and not UTF.
 //!
 //! [`pattern_reads_locale`] decides lexically, with a byte scan of its own (the group-structure
 //! reader above declines on `x`, `n` and every `(*…)` verb, which is exactly where this one has
 //! to answer). Outside UCP a pattern reads iff it holds
 //!
-//! * `\w \W \s \S \b \B` or a POSIX class other than `[:digit:]` and `[:xdigit:]`, which C
-//!   fixes in every locale (C11 7.4.1.5);
-//! * a **caseless flag** (the modifier `i`, or an `i` that an inline option group sets) and a
-//!   byte the flag can fold: an ASCII letter, a byte of `0x80..=0xFF`, a numeric escape or a
-//!   back reference. The narrower reading (a high byte only) needs a glibc `tr_TR` witness,
-//!   since there the case map of ASCII `I` and `i` is not the C one;
-//! * the **`x` flag** and a byte of `0x80..=0xFF`: PCRE2 skips what the table's `isspace` says
-//!   in the pattern, and `0xA0` is a space in some locales;
+//! * `\w \W \s \S \b \B`, `[[:<:]]` or `[[:>:]]` (rewritten to `\b`), or a POSIX class other
+//!   than `[:digit:]` and `[:xdigit:]`, which C fixes in every locale (C11 7.4.1.5);
 //! * a group or reference name with a byte of `0x80..=0xFF`, whose validity the table decides.
 //!
-//! Everything else is exempt, and witnessed so: `\d`, `\p{..}`, literal bytes and ranges, `\h`,
-//! `\v`, `.`, `\Q..\E` and a `preg_quote`d literal. Under UCP the one table PCRE2 still asks is
-//! the `x` flag's whitespace (witnessed: `/^a\xC2\xA0b$/xu` skips the no-break space under
-//! `de_DE.UTF-8` and not under `C`), so a pattern with `u` or a leading `(*UCP)` reads iff it is
-//! extended and holds a byte of `0x80..=0xFF`.
+//! In **every** mode a pattern also reads iff it holds
+//!
+//! * a **caseless flag** (the modifier `i`, or an `i` that an inline option group sets) and a
+//!   character it can match that is a letter: a literal letter or byte of `0x80..=0xFF`, a
+//!   range whose span holds a letter (`[!-~]`), `.`, a negated class, `\w`, `\D`, `\S`, `\N`,
+//!   `\p{..}`, a POSIX class with letters, a numeric escape or a back reference (`\1`, `\k<n>`,
+//!   `(?P=n)`). Under UTF and UCP too, caseless matching of an ASCII pattern character compares
+//!   through the locale's lowercase table (`pcre2_match.c:1052-1056`, and the fcc table the
+//!   JIT builds from it), so on glibc's `tr_TR`, where the case map of `I` and `i` is not the
+//!   C one, `/^id$/iu` against `ID` moves. That cannot be witnessed on macOS; the rule extends
+//!   D-S5a to `u` on that evidence. The pattern reads nothing only where every character it can
+//!   match is provably no letter: digits, punctuation, or ranges confined to those;
+//! * the **`x` flag** and a byte of `0x80..=0xFF`: PCRE2 skips what the table's `isspace` says
+//!   in the pattern, and `0xA0` is a space in some locales (witnessed under `u` too);
+//! * `[[:ascii:]]` or `[[:^ascii:]]`, which PCRE2 keeps on the table under UCP
+//!   (`pcre2_compile.c:752`), and, under `(*UCP)` without `u`, a group name with a byte of
+//!   `0x80..=0xFF` (`read_name`).
+//!
+//! Everything else is exempt, and witnessed so: `\d`, `\h`, `\v`, `\R`, literal bytes and
+//! ranges without a caseless flag, `\Q..\E` and a `preg_quote`d literal. An `x`-mode `#` outside
+//! a class comments out the rest of its line, so what the comment holds is not scanned.
 //!
 //! A pattern this reader cannot parse as PCRE2 does (unbalanced, an unknown escape or verb, an
 //! unknown modifier) is `None`, never a verdict: the caller treats it as a read that depends on a
 //! value the site cannot see.
+
+mod scan;
+
+use scan::Scan;
 
 use super::split_pattern;
 
@@ -63,7 +77,8 @@ pub fn pattern_reads_locale(pattern: &str) -> Option<bool> {
     for &m in modifiers {
         match m {
             // PHP ignores space, LF and CR between modifiers.
-            b' ' | b'\n' | b'\r' | b'm' | b's' | b'A' | b'D' | b'S' | b'U' | b'X' | b'J' | b'n' => {}
+            b' ' | b'\n' | b'\r' | b'm' | b's' | b'A' | b'D' | b'S' | b'U' | b'X' | b'J' | b'n'
+            | b'r' => {}
             b'u' => unicode = true,
             b'i' => caseless = true,
             b'x' => extended = true,
@@ -72,19 +87,42 @@ pub fn pattern_reads_locale(pattern: &str) -> Option<bool> {
     }
     let src = body.as_bytes();
     let start = leading_options(src);
-    if unicode || start.ucp {
-        // UCP routes everything but the `x` flag's whitespace away from the tables.
+    let ucp = unicode || start.ucp;
+    if ucp {
+        // UCP leaves the tables but for the `x` flag's whitespace, a caseless flag, `[:ascii:]`
+        // and (without UTF) a name: only a pattern that may hold one of them is scanned.
         let high = src.iter().any(|b| *b >= 0x80);
-        return Some(high && (extended || sets_inline_flag(src, b'x')));
+        if high && (extended || sets_inline_flag(src, b'x')) {
+            return Some(true);
+        }
+        let ascii = src.windows(7).any(|w| w == b"ascii:]");
+        if !(caseless || sets_inline_flag(src, b'i') || ascii || (high && !unicode)) {
+            return Some(false);
+        }
     }
-    let mut scan = Scan { src, pos: start.end, caseless, extended, ..Scan::default() };
+    let mut scan = Scan {
+        src,
+        pos: start.end,
+        caseless,
+        extended,
+        x_now: extended,
+        any_newline: start.any_newline,
+        ..Scan::default()
+    };
     scan.run()?;
-    Some(scan.tables || (scan.caseless && scan.foldable) || (scan.extended && scan.high))
+    let folded = scan.caseless && scan.foldable;
+    let skipped = scan.extended && scan.high;
+    Some(if ucp {
+        scan.ascii_class || folded || skipped || (scan.names && !unicode)
+    } else {
+        scan.tables || scan.names || folded || skipped
+    })
 }
 
 /// The pattern-start options `(*UTF)(*UCP)(*CRLF)…` before the expression proper.
 struct Leading {
     ucp: bool,
+    any_newline: bool,
     end: usize,
 }
 
@@ -113,7 +151,7 @@ fn is_start_option(name: &[u8]) -> bool {
 }
 
 fn leading_options(src: &[u8]) -> Leading {
-    let mut out = Leading { ucp: false, end: 0 };
+    let mut out = Leading { ucp: false, any_newline: false, end: 0 };
     while src[out.end..].starts_with(b"(*") {
         let rest = &src[out.end + 2..];
         let Some(close) = rest.iter().position(|b| *b == b')') else { break };
@@ -122,6 +160,7 @@ fn leading_options(src: &[u8]) -> Leading {
             break;
         }
         out.ucp |= name == b"UCP";
+        out.any_newline |= name == b"ANY";
         out.end += 2 + close + 1;
     }
     out
@@ -137,339 +176,6 @@ fn sets_inline_flag(src: &[u8], flag: u8) -> bool {
         matches!(rest.get(flags.len()), Some(b')' | b':'))
             && flags.iter().take_while(|b| **b != b'-').any(|b| *b == flag)
     })
-}
-
-/// The tokens of a pattern that decide the verdict, collected by one pass.
-#[derive(Default)]
-struct Scan<'a> {
-    src: &'a [u8],
-    pos: usize,
-    /// A construct that asks the tables whatever the subject is: `\w`, a POSIX class, a name.
-    tables: bool,
-    /// A byte a caseless flag can fold: a letter, a high byte, a numeric escape, a reference.
-    foldable: bool,
-    /// A raw byte of `0x80..=0xFF` (or an escape spelling one), which the `x` flag may skip.
-    high: bool,
-    caseless: bool,
-    extended: bool,
-}
-
-const POSIX_READING: &[&[u8]] = &[
-    b"alnum", b"alpha", b"ascii", b"blank", b"cntrl", b"graph", b"lower", b"print", b"punct",
-    b"space", b"upper", b"word",
-];
-const POSIX_FIXED: &[&[u8]] = &[b"digit", b"xdigit"];
-
-/// The alphabetic spellings of a group that holds more pattern (PCRE2 10.34).
-const ALPHA_GROUPS: &[&[u8]] = &[
-    b"pla",
-    b"plb",
-    b"nla",
-    b"nlb",
-    b"napla",
-    b"naplb",
-    b"atomic",
-    b"sr",
-    b"asr",
-    b"positive_lookahead",
-    b"positive_lookbehind",
-    b"negative_lookahead",
-    b"negative_lookbehind",
-    b"non_atomic_positive_lookahead",
-    b"non_atomic_positive_lookbehind",
-    b"script_run",
-    b"atomic_script_run",
-];
-
-const BACKTRACKING_VERBS: &[&[u8]] =
-    &[b"ACCEPT", b"FAIL", b"F", b"COMMIT", b"PRUNE", b"SKIP", b"THEN"];
-
-impl Scan<'_> {
-    fn peek(&self) -> Option<u8> {
-        self.src.get(self.pos).copied()
-    }
-
-    fn next(&mut self) -> Option<u8> {
-        let b = self.peek()?;
-        self.pos += 1;
-        Some(b)
-    }
-
-    fn eat(&mut self, b: u8) -> bool {
-        let hit = self.peek() == Some(b);
-        self.pos += usize::from(hit);
-        hit
-    }
-
-    fn run(&mut self) -> Option<()> {
-        while let Some(b) = self.next() {
-            match b {
-                b'\\' => self.escape(false)?,
-                b'[' => self.class()?,
-                b'(' => self.group()?,
-                _ => self.literal(b),
-            }
-        }
-        Some(())
-    }
-
-    /// A byte that stands for itself.
-    fn literal(&mut self, b: u8) {
-        if b.is_ascii_alphabetic() {
-            self.foldable = true;
-        } else if b >= 0x80 {
-            self.foldable = true;
-            self.high = true;
-        }
-    }
-
-    /// A character spelled by a numeric escape: foldable when it is a letter or above ASCII.
-    fn spelled(&mut self, value: u32) {
-        if value >= 0x80 {
-            self.high = true;
-        }
-        if value >= 0x80 || u8::try_from(value).is_ok_and(|b| b.is_ascii_alphabetic()) {
-            self.foldable = true;
-        }
-    }
-
-    /// The bytes up to `close`, consumed with it: a name, whose validity the table decides when
-    /// a byte is above ASCII.
-    fn name(&mut self, close: u8) -> Option<()> {
-        loop {
-            let b = self.next()?;
-            if b == close {
-                return Some(());
-            }
-            self.tables |= b >= 0x80;
-        }
-    }
-
-    /// The body of `\Q…\E`, to the `\E` or the end: literal, so only a caseless flag reads it.
-    fn quoted(&mut self) {
-        while let Some(b) = self.next() {
-            if b == b'\\' && self.peek() == Some(b'E') {
-                self.pos += 1;
-                return;
-            }
-            self.foldable |= b.is_ascii_alphabetic() || b >= 0x80;
-        }
-    }
-
-    /// The digits of `radix` that follow, up to `max` of them, as a number.
-    fn digits(&mut self, radix: u32, max: usize) -> u32 {
-        let mut value = 0u32;
-        for _ in 0..max {
-            let Some(d) = self.peek().and_then(|b| char::from(b).to_digit(radix)) else { break };
-            value = value.saturating_mul(radix).saturating_add(d);
-            self.pos += 1;
-        }
-        value
-    }
-
-    /// `\` and what follows it, the backslash already read.
-    fn escape(&mut self, in_class: bool) -> Option<()> {
-        let c = self.next()?;
-        match c {
-            b'w' | b'W' | b's' | b'S' | b'B' => self.tables = true,
-            b'b' => self.tables |= !in_class,
-            b'Q' => self.quoted(),
-            b'p' | b'P' => {
-                if self.eat(b'{') {
-                    self.name(b'}')?;
-                } else {
-                    self.next()?;
-                }
-            }
-            b'c' => {
-                self.next()?;
-            }
-            b'x' => {
-                let value = if self.eat(b'{') {
-                    let value = self.digits(16, 8);
-                    self.eat(b'}').then_some(value)?
-                } else {
-                    self.digits(16, 2)
-                };
-                self.spelled(value);
-            }
-            b'o' => {
-                self.eat(b'{').then_some(())?;
-                let value = self.digits(8, 11);
-                self.eat(b'}').then_some(())?;
-                self.spelled(value);
-            }
-            b'0' => {
-                self.digits(8, 2);
-            }
-            b'1'..=b'9' => {
-                // A back reference, or an octal escape when it names more groups than exist.
-                self.pos -= 1;
-                let at = self.pos;
-                let octal = self.digits(8, 3);
-                self.pos = at;
-                self.digits(10, usize::MAX);
-                self.foldable = true;
-                self.high |= octal >= 0x80;
-            }
-            b'g' | b'k' => self.reference()?,
-            b'd' | b'D' | b'h' | b'H' | b'v' | b'V' | b'R' | b'N' | b'X' | b'K' | b'G' | b'A'
-            | b'Z' | b'z' | b'C' | b'a' | b'e' | b'f' | b'n' | b'r' | b't' | b'E' => {}
-            // PCRE2 refuses every other letter (`\y`, `\l`, `\U`, …).
-            b if b.is_ascii_alphabetic() => return None,
-            b => self.high |= b >= 0x80,
-        }
-        self.foldable |= c >= 0x80;
-        Some(())
-    }
-
-    /// `\g…` and `\k…`: a numbered or named reference, which a caseless flag compares folded.
-    fn reference(&mut self) -> Option<()> {
-        self.foldable = true;
-        match self.peek()? {
-            b'{' => self.name(b'}'),
-            b'<' => self.name(b'>'),
-            b'\'' => self.name(b'\''),
-            _ => {
-                self.eat(b'-');
-                self.eat(b'+');
-                self.digits(10, usize::MAX);
-                Some(())
-            }
-        }
-    }
-
-    /// A bracket class, the `[` already read.
-    fn class(&mut self) -> Option<()> {
-        self.eat(b'^');
-        let mut first = true;
-        loop {
-            let b = self.next()?;
-            match b {
-                b']' if !first => return Some(()),
-                b'\\' => self.escape(true)?,
-                b'[' => self.class_bracket()?,
-                _ => self.literal(b),
-            }
-            first = false;
-        }
-    }
-
-    /// A `[` inside a class: the start of a POSIX class, or a literal.
-    fn class_bracket(&mut self) -> Option<()> {
-        let Some(&kind) = self.src.get(self.pos).filter(|b| matches!(**b, b':' | b'.' | b'=')) else {
-            return Some(());
-        };
-        let Some(end) = posix_syntax_end(&self.src[self.pos + 1..], kind) else { return Some(()) };
-        // PCRE2 refuses collating elements and equivalence classes.
-        (kind == b':').then_some(())?;
-        let name = &self.src[self.pos + 1..self.pos + 1 + end];
-        let name = name.strip_prefix(b"^").unwrap_or(name);
-        if POSIX_READING.contains(&name) {
-            self.tables = true;
-        } else if !POSIX_FIXED.contains(&name) {
-            return None;
-        }
-        self.pos += end + 3;
-        Some(())
-    }
-
-    /// A group, the `(` already read.
-    fn group(&mut self) -> Option<()> {
-        if self.eat(b'*') {
-            return self.verb();
-        }
-        if !self.eat(b'?') {
-            return Some(());
-        }
-        match self.peek()? {
-            b'#' => self.name(b')'),
-            b':' | b'=' | b'!' | b'>' | b'|' => {
-                self.pos += 1;
-                Some(())
-            }
-            b'<' => {
-                self.pos += 1;
-                if matches!(self.peek(), Some(b'=' | b'!')) {
-                    self.pos += 1;
-                    return Some(());
-                }
-                self.name(b'>')
-            }
-            b'P' => {
-                self.pos += 1;
-                match self.next()? {
-                    b'<' => self.name(b'>'),
-                    b'=' | b'>' => self.name(b')'),
-                    _ => None,
-                }
-            }
-            b'\'' => {
-                self.pos += 1;
-                self.name(b'\'')
-            }
-            b'&' | b'R' | b'C' | b'0'..=b'9' | b'+' => self.name(b')'),
-            b'(' => self.condition(),
-            b'-' if self.src.get(self.pos + 1).is_some_and(u8::is_ascii_digit) => self.name(b')'),
-            _ => self.inline_flags(),
-        }
-    }
-
-    /// `(?(`: a lookaround condition leaves its own group to the main loop; any other condition
-    /// is a name or a number.
-    fn condition(&mut self) -> Option<()> {
-        if matches!(self.src.get(self.pos + 1), Some(b'?' | b'*')) {
-            return Some(());
-        }
-        self.pos += 1;
-        self.name(b')')
-    }
-
-    /// `(?imsxnJU-^…)` and `(?…:`: the flags an option group sets.
-    fn inline_flags(&mut self) -> Option<()> {
-        let mut negated = false;
-        loop {
-            match self.next()? {
-                b')' | b':' => return Some(()),
-                b'-' => negated = true,
-                b'^' => {}
-                b'i' => self.caseless |= !negated,
-                b'x' => self.extended |= !negated,
-                b'm' | b's' | b'n' | b'J' | b'U' | b'a' | b'D' | b'S' | b'W' | b'P' | b'T' => {}
-                _ => return None,
-            }
-        }
-    }
-
-    /// `(*NAME)`, `(*NAME:arg)` and the alphabetic assertions, the `(*` already read.
-    fn verb(&mut self) -> Option<()> {
-        let start = self.pos;
-        while self.peek().is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_') {
-            self.pos += 1;
-        }
-        let name = &self.src[start..self.pos];
-        if self.eat(b':') {
-            return if ALPHA_GROUPS.contains(&name) { Some(()) } else { self.name(b')') };
-        }
-        (self.eat(b')') && BACKTRACKING_VERBS.contains(&name)).then_some(())
-    }
-}
-
-/// PCRE2's `check_posix_syntax`: the length of the name when `rest` (the bytes after `[:`) holds
-/// `name:]` with no `]` before it, else `None`, and the `[` is a literal.
-fn posix_syntax_end(rest: &[u8], terminator: u8) -> Option<usize> {
-    let mut i = 0;
-    while i < rest.len() {
-        match rest[i] {
-            b'\\' if matches!(rest.get(i + 1), Some(b']' | b'\\')) => i += 1,
-            b'[' if rest.get(i + 1) == Some(&terminator) => return None,
-            b']' => return None,
-            c if c == terminator && rest.get(i + 1) == Some(&b']') => return Some(i),
-            _ => {}
-        }
-        i += 1;
-    }
-    None
 }
 
 #[cfg(test)]
@@ -541,10 +247,7 @@ mod tests {
     fn the_witnessed_exemptions_read_nothing() {
         for (row, pattern) in [
             ("P2 \\w with u", r"/^\w$/u"),
-            ("P20 /iu", "/^\u{c3}\u{84}$/iu"),
-            ("S8 /iu", "/^\u{c4}$/iu"),
             ("P21 [:alpha:] with u", "/^[[:alpha:]]$/u"),
-            ("S24 (*UCP) and /i", r"/(*UCP)^\xC4$/i"),
             ("P24 (*UCP) and \\w", r"/(*UCP)^\w$/"),
             ("(*UTF)(*UCP) together", r"/(*UTF)(*UCP)^\w$/"),
             ("(*UCP) after another option", r"/(*CRLF)(*UCP)\s/"),
@@ -574,6 +277,161 @@ mod tests {
         ] {
             assert_eq!(reads(pattern), Some(false), "{row}: {pattern}");
         }
+    }
+
+    /// Caseless matching compares through the table under `u` and UCP as well (`pcre2_match.c`'s
+    /// lowercase table, the JIT's fcc table): a caseless flag reads whenever the pattern can match
+    /// a letter. The macOS witnesses D1 to D5 and S8, S24 stand still (no `tr_TR` case map moves
+    /// there); the rule is the glibc evidence, as D-S5a's `i` rule is.
+    #[test]
+    fn a_caseless_flag_reads_under_u_and_ucp_where_a_letter_can_match() {
+        for (row, pattern) in [
+            ("D1", "/^i$/iu"),
+            ("D2", "/^I$/iu"),
+            ("D3", "/^I$/iu"),
+            ("D4", "/^[a-z]$/iu"),
+            ("D5", "/^i+$/iu"),
+            ("P20", "/^\u{c3}\u{84}$/iu"),
+            ("S8", "/^\u{c4}$/iu"),
+            ("S24", r"/(*UCP)^\xC4$/i"),
+            ("G1 an escaped high character", r"/^\x{c4}$/iu"),
+            ("a range spanning letters", "/^[!-~]$/iu"),
+            ("a range from punctuation to a letter", "/^[ -a]$/iu"),
+            ("dot", "/^.$/iu"),
+            ("a negated class", "/^[^0-9]$/iu"),
+            ("a negated digit class", r"/^\D$/iu"),
+            ("a property", r"/^\p{L}$/iu"),
+            ("w with i under UCP", r"/(*UCP)^\w$/i"),
+            ("a POSIX class with letters", "/^[[:alpha:]]$/iu"),
+            ("xdigit holds a to f", "/^[[:xdigit:]]$/iu"),
+            ("a negated digit POSIX class", "/^[[:^digit:]]$/iu"),
+            ("a back reference", r"/^(.)\1$/iu"),
+            ("an inline flag", "/^(?i)a$/u"),
+            ("an inline group", "/^(?i:a)b$/u"),
+        ] {
+            assert_eq!(reads(pattern), Some(true), "{row}: {pattern}");
+        }
+        // Without a caseless flag, or with nothing a letter can match, `u` reads nothing.
+        for (row, pattern) in [
+            ("no flag", "/^i$/u"),
+            ("digits", "/^[0-9]+$/iu"),
+            ("punctuation", "#^[!-/:-@]$#iu"),
+            ("a class of punctuation", r"/^[\[-`{-~]$/iu"),
+            ("d", r"/^\d$/iu"),
+            ("h and v", r"/^\h\v$/iu"),
+            ("a POSIX class with no letters", "/^[[:digit:][:punct:][:space:]]$/iu"),
+            ("a letter only in a name", r"/(?<abc>\d)/iu"),
+        ] {
+            assert_eq!(reads(pattern), Some(false), "{row}: {pattern}");
+        }
+        // The modifier, not the group, decides the letter-free cases above; a pattern with a
+        // letter and no flag at all is none.
+        assert_eq!(reads("/^abc$/u"), Some(false));
+        assert_eq!(reads(r"/(*UCP)^abc$/"), Some(false));
+    }
+
+    /// `(?P=name)` is a back reference like `\k<name>`, compared folded (B1); the other spellings
+    /// of a subroutine call fold nothing.
+    #[test]
+    fn a_named_back_reference_is_foldable_in_every_spelling() {
+        for pattern in [
+            "/^(?<a>.)(?P=a)$/i",
+            r"/^(?<a>.)\k<a>$/i",
+            r"/^(?<a>.)\k{a}$/i",
+            r"/^(?<a>.)\k'a'$/i",
+            r"/^(?<a>.)\g{a}$/i",
+            r"/^(.)\g{1}$/i",
+            r"/^(.)\g{-1}$/i",
+            r"/^(\d)(?P=x)(?<x>.)$/i",
+            // Nothing else here can match a letter: the reference alone is the reader.
+            r"/^(?<a>\d)(?P=a)$/i",
+            r"/^(?<a>\d)\k<a>$/i",
+        ] {
+            assert_eq!(reads(pattern), Some(true), "{pattern}");
+        }
+        for pattern in [r"/^(?<a>\d)(?P=a)$/", r"/^(?<a>\d)(?&a)$/i", r"/^(?P<a>\d)(?P>a)$/i"] {
+            assert_eq!(reads(pattern), Some(false), "{pattern}");
+        }
+    }
+
+    /// An `x`-mode `#` outside a class comments out the rest of its line, so a `\Q` or `(?#` in
+    /// the comment swallows nothing of what follows the newline (B2); in a class, after a
+    /// backslash, in `\Q..\E`, and where `x` is off, it is literal.
+    #[test]
+    fn an_extended_comment_hides_its_line_and_nothing_after_it() {
+        for (row, pattern) in [
+            ("B", "/^#\\Q\n\\w$/x"),
+            ("B2", "/^#(?#\n\\w(a)?$/x"),
+            ("an unclosed class in the comment", "/\\w #[\n/x"),
+            ("an unclosed group in the comment", "/\\w #(\n/x"),
+            ("a comment then a reader", "/a # \\d\n\\s/x"),
+            ("an inline x", "/(?x)a # (\n\\w/"),
+            ("a scoped x ends at its group", "/(?x:a # (\n)\\w/"),
+            ("x restored after the group", "/(?x:a)#\\w/"),
+            ("a cleared x", "/(?x)a(?-x)#\\w/"),
+            ("an escaped hash", "/(?x)a\\#\\w/"),
+            ("a hash in a class", "/(?x)[#]\\w/"),
+            ("a hash in a quote", "/(?x)\\Q#\\E\\w/"),
+            ("no x", "/a#\\w/"),
+        ] {
+            assert_eq!(reads(pattern), Some(true), "{row}: {pattern:?}");
+        }
+        for (row, pattern) in [
+            ("a comment holds the reader", "/a # \\w\n\\d/x"),
+            ("a comment holds a quote", "/a #\\Q\n\\d/x"),
+            ("an inline x comment", "/(?x)a # \\w\n/"),
+            ("a comment to the end", "/(?x)a # \\w/"),
+            ("a CR ends it", "/a #\\w\r\\d/x"),
+            ("a scoped x comment", "/(?x: a # \\w\n)\\d/"),
+            ("an unmatched paren in the comment", "/\\d #)\n/x"),
+            ("a high byte in a comment is not skipped whitespace", "/^a#\u{a0}\nb$/x"),
+        ] {
+            assert_eq!(reads(pattern), Some(false), "{row}: {pattern:?}");
+        }
+    }
+
+    /// UCP leaves the tables but for `[:ascii:]` and, without UTF, a name above ASCII (B3).
+    #[test]
+    fn ucp_still_asks_the_table_for_ascii_and_for_a_non_utf_name() {
+        for pattern in [
+            "/^[[:ascii:]]$/u",
+            "/^[[:^ascii:]]$/u",
+            "/(*UCP)^[[:ascii:]]$/",
+            "/(*UCP)^[[:^ascii:]]$/",
+            "/(*UCP)(?<\u{e4}>a)/",
+            "/(*UCP)(?<a>a)\\k<\u{e4}>?/",
+        ] {
+            assert_eq!(reads(pattern), Some(true), "{pattern:?}");
+        }
+        // With UTF a name is checked against Unicode properties (R1 to R8), and the other
+        // classes under UCP stay put.
+        for pattern in [
+            "/(?<\u{e4}>a)\\k<\u{e4}>/u",
+            "/(?<\u{e4}>a)(?P=\u{e4})/u",
+            "/(?<\u{e4}>a)(?&\u{e4})/u",
+            "/(?<\u{e4}>a)\\g{\u{e4}}/u",
+            "/(*MARK:\u{e4})a/u",
+            "/^[[:cntrl:][:print:][:graph:][:punct:][:blank:][:xdigit:]]$/u",
+        ] {
+            assert_eq!(reads(pattern), Some(false), "{pattern:?}");
+        }
+        // Outside UCP a name above ASCII reads.
+        assert_eq!(reads("/(?<\u{e4}>a)/"), Some(true));
+        assert_eq!(reads("/(*UTF)(?<\u{e4}>a)/"), Some(true));
+    }
+
+    /// `[[:<:]]` and `[[:>:]]` are rewritten to `\b(?=\w)` and `\b(?<=\w)`, and the `r` modifier
+    /// and `(?r)` (PHP 8.4) are valid: none of them is a decline (B4).
+    #[test]
+    fn word_boundary_classes_and_the_r_flag_are_known() {
+        assert_eq!(reads("/[[:<:]]\\xE4/"), Some(true));
+        assert_eq!(reads("/\\xE4[[:>:]]/"), Some(true));
+        assert_eq!(reads("/[[:<:]]a/u"), Some(false));
+        assert_eq!(reads(r"/^\w$/r"), Some(true));
+        assert_eq!(reads(r"/^(?r)\w$/"), Some(true));
+        assert_eq!(reads(r"/^(?r)\d$/"), Some(false));
+        assert_eq!(reads("/^a$/ri"), Some(true));
+        assert_eq!(reads(r"/^\d$/r"), Some(false));
     }
 
     /// `x` asks the table whether a byte is whitespace, under UCP as well: the witnessed
@@ -653,6 +511,10 @@ mod tests {
             r"/\x{/",
             r"/\o41/",
             "/(?P<n/",
+            "/a)/",
+            "/(a/",
+            "/(?:a/",
+            "/(?x:a/x",
         ] {
             assert_eq!(reads(pattern), None, "{pattern:?}");
         }

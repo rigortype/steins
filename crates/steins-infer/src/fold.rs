@@ -1342,18 +1342,19 @@ fn fold_shape_refusal(name: &str, args: &[FoldArg]) -> Option<FoldShapeRefusal> 
 /// verdict reads a string literal and nothing else.
 ///
 /// The same refusal holds a `preg_*` call whose literal pattern consults the locale's character
-/// tables (ADR-0101 §3.10): `\w`, `\s`, `\b`, a POSIX class, a caseless flag over a letter, or the
-/// `x` flag over a byte of `0x80..=0xFF`, outside `u` and `(*UCP)`. The runner has never called
-/// `setlocale`, so it answers under the C tables, which is a claim about the project's runtime
-/// the project never made. A pattern the reader declines is one PCRE2 refuses to compile
-/// (an unterminated class, an unknown escape or verb), which answers `false` with a warning
-/// under every locale and keeps folding as it did; so does a pattern that is no string (the
-/// engine throws). `preg_quote` compiles nothing and keeps folding.
+/// tables, or may (ADR-0101 §3.10): `\w`, `\s`, `\b`, a POSIX class, a caseless flag over a
+/// letter, the `x` flag over a byte of `0x80..=0xFF`. The runner has never called `setlocale`,
+/// so it answers under the C tables, which is a claim about the project's runtime the project
+/// never made. A pattern the reader declines refuses too, as an unreadable format does: the
+/// reader knows PCRE2's grammar as far as the corpus and the witnesses go, so a decline is not
+/// proof that PCRE2 refuses the pattern, and an invalid one that no longer folds only widens to
+/// the declared type. A pattern that is no string folds as before (the engine throws), and
+/// `preg_quote` compiles nothing and keeps folding.
 fn fold_reads_ambient_setting(name: &str, args: &[FoldArg]) -> bool {
     if steins_catalog::preg::compiles_pattern_argument(name) {
         return match args.first() {
             Some(FoldArg::Str(pattern)) => {
-                steins_catalog::preg::pattern_reads_locale(pattern) == Some(true)
+                steins_catalog::preg::pattern_reads_locale(pattern) != Some(false)
             }
             _ => false,
         };
@@ -1749,12 +1750,15 @@ mod ambient_gate_tests {
     #[test]
     fn a_pattern_that_reads_the_tables_does_not_fold() {
         for name in ["preg_match", "preg_match_all", "preg_split", "preg_replace", "preg_grep"] {
-            for pattern in [r"/\s/", r"/(\w)/", "/a/i", "/[[:alpha:]]/", "/^a\u{a0}b$/x"] {
+            // `/[/` and `/a\y/` are patterns the reader declines (PCRE2 refuses them, or the reader
+            // does not know them): the fold widens rather than claim the C tables.
+            for pattern in [
+                r"/\s/", r"/(\w)/", "/a/i", "/[[:alpha:]]/", "/^a\u{a0}b$/x", "/^i$/iu", "/[[:<:]]a/",
+                "/[/", r"/a\y/", "/\\w #[\n/x",
+            ] {
                 assert!(fold_reads_ambient_setting(name, &[s(pattern), s("x")]), "{name} {pattern}");
             }
-            // The last two are patterns PCRE2 refuses: no table is asked, and the fold is the
-            // engine's own `false`.
-            for pattern in [r"/\d+/", "/a/", r"/\s/u", r"/(*UCP)\w/", "/[a-z]+:/", "/[/", r"/a\y/"] {
+            for pattern in [r"/\d+/", "/a/", r"/\s/u", r"/(*UCP)\w/", "/[a-z]+:/", "/^.[/u"] {
                 assert!(!fold_reads_ambient_setting(name, &[s(pattern), s("x")]), "{name} {pattern}");
             }
             assert!(!fold_reads_ambient_setting(name, &[FoldArg::Int(5)]), "{name}: no string");

@@ -459,8 +459,10 @@ fn preg_split_folds_on_the_projects_own_pcre() {
         vec![
             "list{'a', 'b', 'c'}",
             "list{'a', 'b,c'}",
-            // The uncompilable pattern: the engine's own `false`, not the lane's verdict.
-            "false",
+            // The uncompilable pattern is no longer folded: the locale reader declines a
+            // pattern it cannot read (ADR-0101 §3.10), so the call keeps its declared type
+            // rather than the engine's `false` under the C tables.
+            "false|list<string>|list<list{string, int<0, max>}> (asserted)",
         ]
     );
     assert_eq!(
@@ -733,8 +735,9 @@ fn preg_match_folds_and_its_matches_argument_is_invalidated() {
             // A miss is `0`, a VALUE the narrowing lane can act on where the
             // declared `int|false` cannot.
             "0",
-            // An uncompilable pattern is `false` — the third arm, and a value too.
-            "false",
+            // An uncompilable pattern keeps the declared type: the locale reader declines it
+            // (ADR-0101 §3.10) and the fold widens rather than claim the C tables.
+            "0|1|false (asserted)",
         ]
     );
     assert!(steins_catalog::foldable("preg_match"));
@@ -974,7 +977,8 @@ fn preg_match_all_folds_and_is_refused_for_the_build_option() {
          \\PHPStan\\dumpType(preg_match_all(\"/a/\", \"aaa\"));\n\
          \\PHPStan\\dumpType(preg_match_all(\"/z/\", \"aaa\"));\n\
          \\PHPStan\\dumpType(preg_match_all(\"/[/\", \"aaa\"));\n";
-    assert_eq!(dumps(SRC, &mut folder), vec!["3", "0", "false"]);
+    // The uncompilable pattern is the locale reader's decline, which widens (ADR-0101 §3.10).
+    assert_eq!(dumps(SRC, &mut folder), vec!["3", "0", "int<0, max>|false (asserted)"]);
     assert_eq!(
         steins_catalog::refusal("preg_match_all").map(|r| r.axis),
         Some(steins_catalog::RefusalAxis::BuildOption),
