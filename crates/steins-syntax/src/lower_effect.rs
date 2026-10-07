@@ -147,15 +147,29 @@ pub(crate) fn const_args_of_call(fc: &FunctionCall<'_>) -> ConstArgs {
 /// One argument expression as a [`ConstInt`], or `None` when it is anything
 /// other than integer literals, bare global constants and their `|` (ADR-0099
 /// §3.3).
-fn const_int_of(expr: &Expression<'_>) -> Option<ConstInt> {
+pub(crate) fn const_int_of(expr: &Expression<'_>) -> Option<ConstInt> {
     match expr.unparenthesized() {
         Expression::Literal(Literal::Integer(li)) => match lower_int_literal(li.raw) {
             ArgValue::Int(v) => Some(ConstInt::Int(v)),
             _ => None,
         },
+        // A negative literal: `ctype_alpha(-1)`, a position the catalog reads as an integer.
+        Expression::UnaryPrefix(u) if matches!(u.operator, UnaryPrefixOperator::Negation(_)) => {
+            match const_int_of(u.operand)? {
+                ConstInt::Int(v) => v.checked_neg().map(ConstInt::Int),
+                _ => None,
+            }
+        }
         Expression::ConstantAccess(ca) => {
             let name = name_ref(&ca.name);
-            (!name.raw.contains('\\')).then_some(ConstInt::Const(name.raw))
+            if name.raw.contains('\\') {
+                return None;
+            }
+            Some(if name.kind == RefKind::FullyQualified {
+                ConstInt::Global(name.raw)
+            } else {
+                ConstInt::Const(name.raw)
+            })
         }
         Expression::Binary(b) if matches!(b.operator, BinaryOperator::BitwiseOr(_)) => {
             let mut terms = Vec::new();

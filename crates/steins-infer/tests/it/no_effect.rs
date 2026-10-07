@@ -89,8 +89,10 @@ fn an_impure_but_discardable_builtin_is_a_dead_statement() {
     for call in ["time()", "rand()", "rand(1, 10)", "microtime(true)", "uniqid()", "getenv('HOME')"] {
         reports("", call, "reads ambient state and hands it back");
     }
-    // The locale readers of ADR-0101 §3.9: discarding a locale read leaves the world as it was.
-    for call in ["basename('/a/b')", "strnatcmp('a', 'b')", "strnatcasecmp('a', 'b')", "pathinfo('/a/b.c')"] {
+    // The locale readers of ADR-0101 §3.9: discarding a locale read leaves the world as it was,
+    // and a read is discardable by prefix (ADR-0096). A `ctype_*` call is dead over a string literal
+    // alone: anything else raises `E_DEPRECATED` (below).
+    for call in ["basename('/a/b')", "strnatcmp('a', 'b')", "strnatcasecmp('a', 'b')", "pathinfo('/a/b.c')", "ctype_alpha('a')"] {
         reports("", call, "reads the locale and hands the answer back");
     }
 }
@@ -165,7 +167,7 @@ fn a_name_whose_literal_call_can_still_diagnose_is_refused() {
     // call can raise a warning or a deprecation, or write an engine slot
     // (`json_last_error`). The runner cannot see a diagnostic, so nothing here
     // can prove its absence.
-    for call in ["json_decode('{}')", "json_encode('x')", "trim('a')", "bindec('1')", "preg_split('/,/', 'a,b')", "idate('Y')", "strtr('a', 'a', 'b')", "ctype_alpha(65)", "ctype_alpha('a')", "strftime('%A', 0)"] {
+    for call in ["json_decode('{}')", "json_encode('x')", "trim('a')", "bindec('1')", "preg_split('/,/', 'a,b')", "idate('Y')", "strtr('a', 'a', 'b')", "strftime('%A', 0)", "ctype_alpha(65)", "ctype_alpha(null)", "ctype_alpha(1.5)", "ctype_alpha(true)", "ctype_alpha([])", "ctype_alpha(1000)", "ctype_upper(new \\stdClass)"] {
         silent("", call, "a literal call can diagnose or write engine state");
     }
 }

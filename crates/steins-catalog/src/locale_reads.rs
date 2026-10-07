@@ -1,187 +1,407 @@
-//! The locale readers whose read a **mode argument** decides (ADR-0101 §3.9, issue #1000, S4).
+//! The locale readers whose read a call decides (ADR-0101 §3.9, issue #1000, S4).
 //!
-//! Most readers of the locale cell read it on every call to them: `ctype_alpha`, `basename`,
-//! `strnatcmp` consult it whatever they were given, so [`effect_labels`](crate::effect_labels)
-//! states the read and a call site has nothing to decide. Three names read it only under a mode
-//! the caller selects with an argument, like the printf family's format:
+//! `basename` is the one reader this slice states unconditionally: `php_basename` consults the
+//! locale-derived `CG(ascii_compatible_locale)` before it looks at a byte, so every call reads it,
+//! the empty string included. Every other reader reads only if the call as written reaches the
+//! routine that consults the C library, so its row is the **upper bound** and the call site
+//! decides it, in the three ways the criterion of ADR-0101 §3.2 allows: a literal argument proves
+//! the read or drops it lexically, an omitted one is the parameter's default, and any other (a
+//! variable, an expression the scan cannot evaluate, a named or spread argument list) is the
+//! `value-dependent-read` gap and never a label. The deciding argument is a **mode** the caller
+//! selects, or the **content** the call hands the routine; php-src (`php-8.5.11`) says which:
 //!
-//! | name | argument | reads the locale when |
+//! | name | deciding argument | reads the locale when |
 //! | --- | --- | --- |
-//! | `sort`, `rsort`, `asort`, `arsort` | `$flags` (position 1) | its base type is `SORT_LOCALE_STRING` (`strcoll`) or `SORT_NATURAL` (`strnatcmp`'s `isspace`, `isdigit`, `toupper`) |
-//! | `ksort`, `krsort` | `$flags` (position 1) | the same, or the base type is `SORT_STRING` with `SORT_FLAG_CASE`: the key comparison folds case through `tolower` where the data sorts use the engine's ASCII table |
-//! | `substr_compare` | `$case_insensitive` (position 4) | it is true (`zend_binary_strncasecmp_l`) |
-//! | `pathinfo` | `$flags` (position 1) | it asks for the basename, extension or filename (`php_basename`); the directory name alone reads nothing |
+//! | `sort`, `rsort`, `asort`, `arsort` | `$flags` (1) | its base type is `SORT_LOCALE_STRING` (`strcoll`) or `SORT_NATURAL` (`strnatcmp`'s `isspace`, `isdigit`, `toupper`); `SORT_STRING` with `SORT_FLAG_CASE` reads on a floor below 8.2, so it is undecided |
+//! | `ksort`, `krsort` | `$flags` (1) | the same, or `SORT_STRING` with `SORT_FLAG_CASE`: the key comparison folds case through `tolower` where the data sorts use the engine's ASCII table |
+//! | `substr_compare` | `$case_insensitive` (4) | it is true (`zend_binary_strncasecmp_l`) |
+//! | `pathinfo` | `$flags` (1) | it asks for the basename, extension or filename (`php_basename`); the directory name alone reads nothing |
+//! | `ctype_*` (not digit, xdigit) | `$text` (0) | a string is not empty (the first byte is classified) or an `int` lies in -128..=255; every other type returns `false` before any table (`ctype_fallback`) |
+//! | `strnatcmp`, `strnatcasecmp` | both operands (0, 1) | neither is empty (`strnatcmp_ex` returns on a length of 0 before a table) |
+//! | `escapeshellarg` | `$arg` (0) | the string is not empty (`php_mblen` per byte); a NUL byte throws first |
+//! | `strip_tags` | `$string` (0) | it holds a `<` (`isspace(p[1])` after one, the first `<` is reached in the start state) |
+//! | `parse_url` | `$url` (0) | the first `:` is not at index 0 (`isalpha` over the scheme), or there is no `:`, no leading `//` and some byte other than `?` and `#` (the path, query or fragment is non-empty, and `php_replace_controlchars` calls `iscntrl` on each byte) |
+//! | `strftime`, `gmstrftime` | `$format` (0) | it holds a conversion that names the locale: `a A b B c h p r x X`; the numeric ones read nothing, and any other conversion is undecided |
 //!
-//! A row is the upper bound and the call site decides, in the three ways the criterion of
-//! ADR-0101 §3.2 allows: a literal argument proves the read or drops it, an omitted one is the
-//! parameter's default, and any other (a variable, an expression the scan cannot evaluate, a
-//! named or spread argument list) is the `value-dependent-read` gap and never a label. The
-//! catalog states the decision ([`LocaleReadGate::reads`]); the effects pass reads the call.
+//! A literal that shows no reading trigger is **absent**, not undecided, only where php-src shows
+//! the routine skipped; where the trigger is wider than the call can show (a `parse_url` literal
+//! that starts with a colon, a conversion this table does not know) the verdict is undecided.
 //!
-//! The rows follow `PINNED_PHP` (8.5), as every row does: on 8.1 the data sorts under
-//! `SORT_STRING | SORT_FLAG_CASE` also fold case through `tolower` (`string_case_compare_function`
-//! became ASCII-only in 8.2).
+//! The catalog states the decision ([`LocaleReadGate::reads`]); the effects pass reads the call.
+//! The rows follow `PINNED_PHP` (8.5), as every row does, except that a verdict that differs on
+//! 8.1 (the data sorts' case folding) is left undecided: a summary is a per-file fact and cannot
+//! depend on the project's PHP floor.
 
-/// What a call shows of the argument that decides a gated read.
+/// What a call shows of one deciding argument.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GateArg {
+pub enum GateArg<'a> {
     /// The call does not supply the argument: the parameter's default decides.
     Omitted,
     /// An integer the scan evaluated (a literal, an engine constant, a `|` of such terms).
     Int(i64),
     /// A literal `true` or `false`.
     Bool(bool),
+    /// A string literal, decoded.
+    Str(&'a str),
+    /// A value shown to be neither a string nor an integer: a `null`, `bool`, `float` or array
+    /// literal, or a by-value parameter its declared type keeps from both.
+    NotText,
 }
 
-/// Which argument of a gated reader decides its read, and how.
+/// Which arguments of a gated reader decide its read, and how.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LocaleReadGate {
-    position: usize,
     kind: Kind,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
-    /// A sort `$flags` of a data sort.
     DataSortFlags,
-    /// A sort `$flags` of a key sort.
     KeySortFlags,
-    /// `substr_compare`'s `$case_insensitive`.
     CaseInsensitive,
-    /// `pathinfo`'s `$flags`.
     PathinfoFlags,
+    Ctype,
+    StrNat,
+    EscapeShellArg,
+    StripTags,
+    ParseUrl,
+    Strftime,
 }
 
-/// `PHP_SORT_FLAG_CASE`, `PHP_SORT_STRING`, `PHP_SORT_LOCALE_STRING`, `PHP_SORT_NATURAL`.
 const SORT_FLAG_CASE: i64 = 8;
 const SORT_STRING: i64 = 2;
 const SORT_LOCALE_STRING: i64 = 5;
 const SORT_NATURAL: i64 = 6;
-/// The three `pathinfo` parts `php_basename` produces: `PATHINFO_BASENAME`, `PATHINFO_EXTENSION`
-/// and `PATHINFO_FILENAME`. `PATHINFO_DIRNAME` (1) is `zend_dirname`'s and reads nothing.
+/// The three `pathinfo` parts `php_basename` produces. `PATHINFO_DIRNAME` (1) is `zend_dirname`'s
+/// and reads nothing.
 const PATHINFO_BASENAME_PARTS: i64 = 2 | 4 | 8;
 
 /// The gate of the builtin `name` (case-insensitive), or `None` for a name whose read is
 /// unconditional or absent.
 #[must_use]
 pub fn locale_read_gate(name: &str) -> Option<LocaleReadGate> {
-    let (position, kind) = match name.to_ascii_lowercase().as_str() {
-        "sort" | "rsort" | "asort" | "arsort" => (1, Kind::DataSortFlags),
-        "ksort" | "krsort" => (1, Kind::KeySortFlags),
-        "substr_compare" => (4, Kind::CaseInsensitive),
-        "pathinfo" => (1, Kind::PathinfoFlags),
+    let kind = match name.to_ascii_lowercase().as_str() {
+        "sort" | "rsort" | "asort" | "arsort" => Kind::DataSortFlags,
+        "ksort" | "krsort" => Kind::KeySortFlags,
+        "substr_compare" => Kind::CaseInsensitive,
+        "pathinfo" => Kind::PathinfoFlags,
+        "ctype_alnum" | "ctype_alpha" | "ctype_cntrl" | "ctype_graph" | "ctype_lower"
+        | "ctype_print" | "ctype_punct" | "ctype_space" | "ctype_upper" => Kind::Ctype,
+        "strnatcmp" | "strnatcasecmp" => Kind::StrNat,
+        "escapeshellarg" => Kind::EscapeShellArg,
+        "strip_tags" => Kind::StripTags,
+        "parse_url" => Kind::ParseUrl,
+        "strftime" | "gmstrftime" => Kind::Strftime,
         _ => return None,
     };
-    Some(LocaleReadGate { position, kind })
+    Some(LocaleReadGate { kind })
 }
 
 impl LocaleReadGate {
-    /// The positional index of the deciding argument.
+    /// The positional indexes of the deciding arguments, in the order [`Self::reads`] takes them.
     #[must_use]
-    pub const fn position(self) -> usize {
-        self.position
+    pub const fn positions(self) -> &'static [usize] {
+        match self.kind {
+            Kind::DataSortFlags | Kind::KeySortFlags | Kind::PathinfoFlags => &[1],
+            Kind::CaseInsensitive => &[4],
+            Kind::StrNat => &[0, 1],
+            Kind::Ctype
+            | Kind::EscapeShellArg
+            | Kind::StripTags
+            | Kind::ParseUrl
+            | Kind::Strftime => &[0],
+        }
     }
 
-    /// Whether the read happens at a call whose deciding argument shows `arg`, or `None` when
-    /// the argument is of a shape this gate cannot decide on (an integer where the gate wants
-    /// a boolean): the caller treats that as the call showing nothing.
+    /// Whether the read happens at a call whose deciding arguments show `args` (one entry per
+    /// [`Self::positions`], `None` for an argument the scan shows nothing of), or `None` when
+    /// they do not decide it: the caller treats that as the read depending on a value the site
+    /// cannot see.
     #[must_use]
-    pub fn reads(self, arg: GateArg) -> Option<bool> {
-        match (self.kind, arg) {
-            // `$flags = SORT_REGULAR`, `$case_insensitive = false`, `$flags = PATHINFO_ALL`.
-            (Kind::PathinfoFlags, GateArg::Omitted) => Some(true),
-            (_, GateArg::Omitted) => Some(false),
-            (Kind::DataSortFlags, GateArg::Int(flags)) => Some(reads_by_sort_type(flags)),
-            (Kind::KeySortFlags, GateArg::Int(flags)) => {
-                Some(reads_by_sort_type(flags) || folds_key_case(flags))
-            }
-            (Kind::CaseInsensitive, GateArg::Bool(flag)) => Some(flag),
-            (Kind::PathinfoFlags, GateArg::Int(flags)) => {
-                Some(flags & PATHINFO_BASENAME_PARTS != 0)
-            }
-            _ => None,
+    pub fn reads(self, args: &[Option<GateArg<'_>>]) -> Option<bool> {
+        let first = args.first().copied().flatten();
+        match self.kind {
+            Kind::DataSortFlags => sort_reads(first?, false),
+            Kind::KeySortFlags => sort_reads(first?, true),
+            Kind::CaseInsensitive => match first? {
+                GateArg::Omitted => Some(false),
+                GateArg::Bool(flag) => Some(flag),
+                _ => None,
+            },
+            Kind::PathinfoFlags => match first? {
+                GateArg::Omitted => Some(true),
+                GateArg::Int(flags) => Some(flags & PATHINFO_BASENAME_PARTS != 0),
+                _ => None,
+            },
+            Kind::Ctype => match first? {
+                GateArg::Str(text) => Some(!text.is_empty()),
+                GateArg::Int(v) => Some((-128..=255).contains(&v)),
+                GateArg::Bool(_) | GateArg::NotText => Some(false),
+                GateArg::Omitted => None,
+            },
+            Kind::StrNat => strnat_reads(first, args.get(1).copied().flatten()),
+            Kind::EscapeShellArg => match first? {
+                GateArg::Str(arg) if arg.contains('\0') => None,
+                GateArg::Str(arg) => Some(!arg.is_empty()),
+                _ => None,
+            },
+            Kind::StripTags => match first? {
+                GateArg::Str(text) => Some(text.contains('<')),
+                _ => None,
+            },
+            Kind::ParseUrl => match first? {
+                GateArg::Str(url) => parse_url_reads(url),
+                _ => None,
+            },
+            Kind::Strftime => match first? {
+                GateArg::Str(format) => strftime_reads(format),
+                _ => None,
+            },
         }
     }
 }
 
 /// `php_get_data_compare_func`'s and `php_get_key_compare_func`'s dispatch: the type is the flags
 /// with `SORT_FLAG_CASE` removed, and a type that is not one of the named ones is `SORT_REGULAR`.
-fn reads_by_sort_type(flags: i64) -> bool {
-    matches!(flags & !SORT_FLAG_CASE, SORT_LOCALE_STRING | SORT_NATURAL)
+fn sort_reads(flags: GateArg<'_>, key_sort: bool) -> Option<bool> {
+    let flags = match flags {
+        GateArg::Omitted => return Some(false),
+        GateArg::Int(flags) => flags,
+        _ => return None,
+    };
+    let base = flags & !SORT_FLAG_CASE;
+    if matches!(base, SORT_LOCALE_STRING | SORT_NATURAL) {
+        return Some(true);
+    }
+    if base == SORT_STRING && flags & SORT_FLAG_CASE != 0 {
+        // A key sort folds case through `tolower` on every version; a data sort does so only
+        // before 8.2, which a per-file summary cannot know.
+        return key_sort.then_some(true);
+    }
+    Some(false)
 }
 
-/// `php_array_key_compare_string_case_unstable_i`: a key sort of strings folded to one case.
-fn folds_key_case(flags: i64) -> bool {
-    flags & SORT_FLAG_CASE != 0 && flags & !SORT_FLAG_CASE == SORT_STRING
+/// `strnatcmp_ex` returns on a zero length before it consults a table: a literal empty operand
+/// settles the call whatever the other is; otherwise both must be shown non-empty.
+fn strnat_reads(a: Option<GateArg<'_>>, b: Option<GateArg<'_>>) -> Option<bool> {
+    let empty = |arg: Option<GateArg<'_>>| matches!(arg, Some(GateArg::Str("")));
+    let text = |arg: Option<GateArg<'_>>| matches!(arg, Some(GateArg::Str(s)) if !s.is_empty());
+    if empty(a) || empty(b) {
+        Some(false)
+    } else if text(a) && text(b) {
+        Some(true)
+    } else {
+        None
+    }
+}
+
+/// `php_url_parse_ex2` (`ext/standard/url.c`): the scheme loop calls `isalpha` from the first byte
+/// when the first `:` is not at index 0, and every component it produces goes through
+/// `php_replace_controlchars` (`iscntrl` per byte). A string with no colon and no leading `//`
+/// produces a path, query or fragment from any byte other than `?` and `#`. The other shapes (a
+/// leading colon, a leading `//`, only `?` and `#`) may fail before any component, so they are
+/// undecided; the empty string produces an empty path and reads nothing.
+fn parse_url_reads(url: &str) -> Option<bool> {
+    if url.is_empty() {
+        return Some(false);
+    }
+    match url.find(':') {
+        Some(0) => None,
+        Some(_) => Some(true),
+        None if url.starts_with("//") => None,
+        None if url.bytes().any(|b| b != b'?' && b != b'#') => Some(true),
+        None => None,
+    }
+}
+
+/// The conversions of the C `strftime` that name the locale (`LC_TIME`): the abbreviated and full
+/// weekday and month names, `%c`, `%x` and `%X`, and the AM/PM markers and the 12-hour time that
+/// holds one. Each is witnessed moving on macOS (`%P` is glibc's and `%v`, `%+` BSD's, so they are undecided), and
+/// POSIX names them locale-dependent. The numeric conversions read nothing. A flag (`_ - 0 ^ #`),
+/// a width and an `E` or `O` modifier may precede a conversion; a modifier on a conversion that
+/// does not name the locale, a conversion this table does not know and a dangling `%` are
+/// undecided. The empty format returns `false` before the C call.
+fn strftime_reads(format: &str) -> Option<bool> {
+    const NAMES: &[u8] = b"aAbBchprxX";
+    const NUMERIC: &[u8] = b"CdDeFgGHIjklmMnRsStTuUVwWyYzZ%";
+    let mut reads = false;
+    let mut bytes = format.bytes().peekable();
+    while let Some(b) = bytes.next() {
+        if b != b'%' {
+            continue;
+        }
+        while bytes.next_if(|c| matches!(c, b'_' | b'-' | b'0' | b'^' | b'#')).is_some() {}
+        while bytes.next_if(u8::is_ascii_digit).is_some() {}
+        let modified = bytes.next_if(|c| matches!(c, b'E' | b'O')).is_some();
+        let conv = bytes.next()?;
+        if NAMES.contains(&conv) {
+            reads = true;
+        } else if modified || !NUMERIC.contains(&conv) {
+            return None;
+        }
+    }
+    Some(reads)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{GateArg, locale_read_gate};
+    use super::{GateArg, locale_read_gate, parse_url_reads, strftime_reads};
 
-    fn reads(name: &str, arg: GateArg) -> Option<bool> {
-        locale_read_gate(name).expect(name).reads(arg)
+    fn reads(name: &str, args: &[Option<GateArg<'_>>]) -> Option<bool> {
+        locale_read_gate(name).expect(name).reads(args)
+    }
+
+    fn one(name: &str, arg: GateArg<'_>) -> Option<bool> {
+        reads(name, &[Some(arg)])
     }
 
     /// The gated names, and the positions their deciding arguments take.
     #[test]
     fn the_gated_names_and_positions() {
         for name in ["sort", "rsort", "asort", "arsort", "ksort", "krsort", "PathInfo"] {
-            assert_eq!(locale_read_gate(name).expect(name).position(), 1, "{name}");
+            assert_eq!(locale_read_gate(name).expect(name).positions(), [1], "{name}");
         }
-        assert_eq!(locale_read_gate("substr_compare").expect("row").position(), 4);
-        for name in ["usort", "natsort", "array_multisort", "strnatcmp", "basename", "strcmp"] {
+        assert_eq!(locale_read_gate("substr_compare").expect("row").positions(), [4]);
+        assert_eq!(locale_read_gate("strnatcmp").expect("row").positions(), [0, 1]);
+        for name in ["ctype_alpha", "escapeshellarg", "strip_tags", "parse_url", "gmstrftime"] {
+            assert_eq!(locale_read_gate(name).expect(name).positions(), [0], "{name}");
+        }
+        // `basename` reads on every call, so it has no gate; the sets C fixes have no row.
+        for name in [
+            "usort", "natsort", "array_multisort", "basename", "strcmp", "ctype_digit",
+            "ctype_xdigit",
+        ] {
             assert_eq!(locale_read_gate(name), None, "{name}");
         }
     }
 
     /// A data sort reads under `SORT_LOCALE_STRING` and `SORT_NATURAL` with or without
-    /// `SORT_FLAG_CASE`, and under nothing else; a key sort also under the case-folding string
-    /// sort.
+    /// `SORT_FLAG_CASE`; a key sort also under the case-folding string sort; a data sort under
+    /// that flag pair reads on 8.1 and not on 8.2, so it is undecided.
     #[test]
     fn the_sort_flags_that_read() {
         for flags in [5, 6, 5 | 8, 6 | 8, 13, 14] {
-            assert_eq!(reads("sort", GateArg::Int(flags)), Some(true), "{flags}");
-            assert_eq!(reads("krsort", GateArg::Int(flags)), Some(true), "{flags}");
+            assert_eq!(one("sort", GateArg::Int(flags)), Some(true), "{flags}");
+            assert_eq!(one("krsort", GateArg::Int(flags)), Some(true), "{flags}");
         }
-        for flags in [0, 1, 2, 3, 4, 8, 9, 10, 7, 15, 16, -1] {
-            assert_eq!(reads("asort", GateArg::Int(flags)), Some(false), "{flags}");
+        for flags in [0, 1, 2, 3, 4, 8, 9, 7, 15, 16, -1] {
+            assert_eq!(one("asort", GateArg::Int(flags)), Some(false), "{flags}");
         }
-        assert_eq!(reads("ksort", GateArg::Int(2 | 8)), Some(true), "keys fold case by tolower");
-        assert_eq!(reads("ksort", GateArg::Int(2)), Some(false));
-        assert_eq!(reads("ksort", GateArg::Int(1 | 8)), Some(false));
-        assert_eq!(reads("rsort", GateArg::Omitted), Some(false), "SORT_REGULAR");
-        assert_eq!(reads("sort", GateArg::Bool(true)), None);
+        assert_eq!(one("ksort", GateArg::Int(2 | 8)), Some(true), "keys fold case by tolower");
+        assert_eq!(one("sort", GateArg::Int(2 | 8)), None, "a data sort reads before 8.2");
+        assert_eq!(one("ksort", GateArg::Int(2)), Some(false));
+        assert_eq!(one("ksort", GateArg::Int(1 | 8)), Some(false));
+        assert_eq!(one("rsort", GateArg::Omitted), Some(false), "SORT_REGULAR");
+        assert_eq!(one("sort", GateArg::Bool(true)), None);
+        assert_eq!(reads("sort", &[None]), None);
     }
 
     /// `substr_compare` reads only when case-insensitive, `pathinfo` unless only the
     /// directory is asked for.
     #[test]
-    fn the_other_gates() {
-        assert_eq!(reads("substr_compare", GateArg::Omitted), Some(false));
-        assert_eq!(reads("substr_compare", GateArg::Bool(false)), Some(false));
-        assert_eq!(reads("substr_compare", GateArg::Bool(true)), Some(true));
-        assert_eq!(reads("substr_compare", GateArg::Int(1)), None);
-        assert_eq!(reads("pathinfo", GateArg::Omitted), Some(true), "PATHINFO_ALL");
+    fn the_other_mode_gates() {
+        assert_eq!(one("substr_compare", GateArg::Omitted), Some(false));
+        assert_eq!(one("substr_compare", GateArg::Bool(false)), Some(false));
+        assert_eq!(one("substr_compare", GateArg::Bool(true)), Some(true));
+        assert_eq!(one("substr_compare", GateArg::Int(1)), None);
+        assert_eq!(one("pathinfo", GateArg::Omitted), Some(true), "PATHINFO_ALL");
         for flags in [15, 2, 4, 8, 1 | 4, 3, 14] {
-            assert_eq!(reads("pathinfo", GateArg::Int(flags)), Some(true), "{flags}");
+            assert_eq!(one("pathinfo", GateArg::Int(flags)), Some(true), "{flags}");
         }
         for flags in [1, 0, 16] {
-            assert_eq!(reads("pathinfo", GateArg::Int(flags)), Some(false), "{flags}");
+            assert_eq!(one("pathinfo", GateArg::Int(flags)), Some(false), "{flags}");
+        }
+    }
+
+    /// `ctype_*` classifies the first byte of a non-empty string and an `int` in -128..=255,
+    /// and returns `false` for everything else before it consults a table.
+    #[test]
+    fn ctype_reads_a_string_or_a_small_int_and_nothing_else() {
+        assert_eq!(one("ctype_alpha", GateArg::Str("a")), Some(true));
+        assert_eq!(one("ctype_alpha", GateArg::Str("12")), Some(true), "the table says false");
+        assert_eq!(one("ctype_alpha", GateArg::Str("")), Some(false));
+        for v in [-128, -1, 0, 65, 255] {
+            assert_eq!(one("ctype_upper", GateArg::Int(v)), Some(true), "{v}");
+        }
+        for v in [-129, 256, 1000, i64::MAX] {
+            assert_eq!(one("ctype_upper", GateArg::Int(v)), Some(false), "{v}");
+        }
+        assert_eq!(one("ctype_punct", GateArg::Bool(true)), Some(false));
+        assert_eq!(one("ctype_punct", GateArg::NotText), Some(false));
+        assert_eq!(reads("ctype_punct", &[None]), None);
+        assert_eq!(one("ctype_punct", GateArg::Omitted), None);
+    }
+
+    /// `strnatcmp_ex` consults a table only when both operands are non-empty.
+    #[test]
+    fn strnatcmp_reads_only_over_two_non_empty_operands() {
+        let s = |t| Some(GateArg::Str(t));
+        assert_eq!(reads("strnatcmp", &[s("a"), s("b")]), Some(true));
+        assert_eq!(reads("strnatcasecmp", &[s("a"), s("")]), Some(false));
+        assert_eq!(reads("strnatcmp", &[None, s("")]), Some(false), "one empty operand decides");
+        assert_eq!(reads("strnatcmp", &[s(""), None]), Some(false));
+        assert_eq!(reads("strnatcmp", &[s("a"), None]), None);
+        assert_eq!(reads("strnatcmp", &[None, None]), None);
+    }
+
+    /// `strip_tags` reads at its first `<`, `escapeshellarg` per byte, and a NUL byte throws first.
+    #[test]
+    fn strip_tags_and_escapeshellarg_read_by_content() {
+        assert_eq!(one("strip_tags", GateArg::Str("a <b> c")), Some(true));
+        assert_eq!(one("strip_tags", GateArg::Str("plain text > here")), Some(false));
+        assert_eq!(one("strip_tags", GateArg::Str("")), Some(false));
+        assert_eq!(one("strip_tags", GateArg::Int(5)), None);
+        assert_eq!(one("escapeshellarg", GateArg::Str("x")), Some(true));
+        assert_eq!(one("escapeshellarg", GateArg::Str("")), Some(false));
+        assert_eq!(one("escapeshellarg", GateArg::Str("a\0b")), None);
+    }
+
+    /// The shapes of `parse_url` the call can show: a scheme colon reads, a path with no colon
+    /// reads, and the shapes that may fail before any component are undecided.
+    #[test]
+    fn parse_url_reads_by_the_shape_of_the_url() {
+        for url in ["http://x/y", "a:b", "mailto:x@y", "/path", "a", "?q=1", "#f", "x?y", "a//b"] {
+            assert_eq!(parse_url_reads(url), Some(true), "{url}");
+        }
+        assert_eq!(parse_url_reads(""), Some(false));
+        for url in [":80", "://x", "//host/x", "//", "?", "#", "?#", "##"] {
+            assert_eq!(parse_url_reads(url), None, "{url}");
+        }
+    }
+
+    /// The conversions that name the locale read; the numeric ones do not; the rest are
+    /// undecided.
+    #[test]
+    fn strftime_reads_by_its_conversions() {
+        for format in ["%A", "%a %b", "%B %Y", "%c", "%x", "%X", "%p", "%r", "%h", "%-d %A", "%EX", "%OB"] {
+            assert_eq!(strftime_reads(format), Some(true), "{format}");
+        }
+        for format in [
+            "", "plain", "%Y-%m-%d %H:%M:%S", "%s", "%%", "%e %k %l %j %u %w", "%_d %-m %010Y",
+            "%Z %z %F %T %R %D", "100%%",
+        ] {
+            assert_eq!(strftime_reads(format), Some(false), "{format}");
+        }
+        for format in ["%", "%Q", "%+", "%v", "%P", "%Ed", "%Od", "%A %Q", "%Y %", "%E"] {
+            assert_eq!(strftime_reads(format), None, "{format}");
         }
     }
 
     /// Every gated name carries the read on its row, as the upper bound the gate narrows.
     #[test]
     fn a_gated_name_carries_the_read_on_its_row() {
-        for name in
-            ["sort", "rsort", "asort", "arsort", "ksort", "krsort", "substr_compare", "pathinfo"]
-        {
+        for name in [
+            "sort", "rsort", "asort", "arsort", "ksort", "krsort", "substr_compare", "pathinfo",
+            "ctype_alnum", "ctype_alpha", "ctype_cntrl", "ctype_graph", "ctype_lower",
+            "ctype_print", "ctype_punct", "ctype_space", "ctype_upper", "strnatcmp",
+            "strnatcasecmp", "escapeshellarg", "strip_tags", "parse_url", "strftime", "gmstrftime",
+        ] {
             let row = crate::effect_labels(name);
             assert!(
                 row.is_some_and(|l| l.contains(&"global.read.setting.locale")),
                 "{name}"
             );
+            assert!(locale_read_gate(name).is_some(), "{name}");
         }
     }
 }

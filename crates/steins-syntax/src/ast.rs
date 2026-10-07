@@ -533,7 +533,8 @@ pub struct ConstArgs {
     pub first: Option<CallTarget>,
     /// Positional argument 1.
     pub second: Option<CallTarget>,
-    /// The positions 1 to 3 whose argument is a [`ConstInt`], as `(position,
+    /// For a call to a `ctype_*` predicate the position 0 too (its text); otherwise the
+    /// positions 1 to 3 whose argument is a [`ConstInt`], as `(position,
     /// expression)` in position order: a flags argument the catalog can read
     /// (`json_encode($v, JSON_PRETTY_PRINT | JSON_THROW_ON_ERROR)`, ADR-0099
     /// §3.3). An argument that is anything else is simply absent. Appended
@@ -552,6 +553,22 @@ pub struct ConstArgs {
     /// the `precision` ini). An argument the scan can say nothing about is simply absent.
     /// Appended after [`Self::bools`].
     pub float_evidence: Vec<(u8, FloatEvidence)>,
+    /// For a call to a `ctype_*` predicate only: whether its first argument is shown to be
+    /// neither a string nor an integer, which is when the predicate returns `false` before it
+    /// consults the locale (ADR-0101 §3.9). Absent where the scan shows nothing. Appended after
+    /// [`Self::float_evidence`].
+    pub not_text: Vec<(u8, NotText)>,
+}
+
+/// What shows a call argument is neither a string nor an integer ([`ConstArgs::not_text`]).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
+pub enum NotText {
+    /// A `null`, `true`, `false`, float or array literal, or a `new` expression.
+    Literal,
+    /// A bare `$name` naming a by-value parameter the frame never writes: its declared type is
+    /// the engine's to read, as a variable shape's is.
+    Param(String),
 }
 
 /// What a structural scan shows of whether one printf value is a float (issue #1000,
@@ -598,11 +615,15 @@ pub enum FloatEvidence {
 pub enum ConstInt {
     /// An integer literal that fits `int`.
     Int(i64),
-    /// A global constant by spelling, leading `\` stripped, namespaced fetches
-    /// excluded (the same rule as [`CallTarget::ConstFetch`]).
+    /// A constant spelled bare, `NAME`: in a namespaced file PHP reads `Ns\NAME` first and the
+    /// global one second, which only the engine, holding the project, can tell apart. Namespaced
+    /// fetches are excluded (the same rule as [`CallTarget::ConstFetch`]).
     Const(String),
     /// A bitwise or of at least two terms, flattened (`A | B | C` is one node).
     Or(Vec<ConstInt>),
+    /// A constant spelled fully qualified, `\NAME`: the global one whatever the namespace
+    /// declares. Appended after [`Self::Or`] so no persisted variant index moves.
+    Global(String),
 }
 
 /// What a **structural** scan can show one positional argument of a named call
