@@ -23,7 +23,9 @@ value-conditional follows the three-way rule of §3.2, never an argument-blind r
 of D4 confirmed by the owner, 2026-10-07; the other builtin readers of `precision` and
 `serialize_precision` — `strval`, `implode`, `print_r`, `var_export`, `json_encode`, … — are
 coloured by slice S6); D5 ADR-0102 follows slices S1–S2 and is independent of S4–S6;
-D6 `setlocale($c, '0')` narrows to the read in S4 with the other call-site narrowings (landed, §3.9).
+D6 `setlocale($c, '0')` narrows to the read in S4 with the other call-site narrowings (landed, §3.9);
+D-S5a the `i` flag (or `(?i…)`) on any pattern that contains a letter reads the locale tables (adopted
+by the owner, 2026-10-07; landed in S5, §3.10).
 
 ADR-0021 Decision 2 certifies a builtin pure only when php-src shows it "reads
 only its arguments: no ini setting, locale, clock, environment, superglobal,
@@ -681,6 +683,103 @@ profile, `effect-diff`, the five transform dry-runs), head against `origin/maste
   with a method that reads the locale is no longer a candidate. `throws-envelope`, `loop-to-array-map`,
   `phpdoc-honesty` and `phpdoc-to-native` are byte-identical.
 
+### 3.10 Slice S5: the preg family reads the locale's tables (2026-10-07) — PENDING ratification
+
+Landed as S5 of the ambient-settings run (#1000), the biggest reader §7 deferred: `preg_*` without `/u`. It
+decides lexically, the way S4's readers do, with the owner's adoption of D-S5a. What it decides:
+
+- **What php-src does.** `pcre_get_compiled_regex_cache` is one compiler for every `preg_*`; once a script has
+  called `setlocale` with `LC_CTYPE` or `LC_ALL` (the only writer of `BG(ctype_string)`) it compiles with the
+  tables `pcre2_maketables()` builds from the process locale, and the cache key carries the locale string. The
+  modifier `u` sets `PCRE2_UTF` **and** `PCRE2_UCP`, and UCP is what routes `\w`, `\s`, `\b`, the POSIX classes
+  and caseless matching to Unicode properties; `(*UTF)` alone does not. The read is of the locale cell exactly as
+  `setlocale` leaves it, and the exemption is UCP, not UTF.
+- **The rule** (`pattern_reads_locale`, `steins-catalog`'s `preg/locale.rs`; one byte scan of its own, since
+  `capture_groups` declines on `x`, `n` and every `(*…)` verb, which is where this verdict has to answer).
+  Outside `u` and a leading `(*UCP)` a literal pattern reads iff it holds `\w \W \s \S \b \B`, a POSIX class
+  other than `[:digit:]` and `[:xdigit:]`, a caseless flag (the modifier, or an `i` an inline `(?…)` group sets)
+  together with a byte the flag can fold (an ASCII letter, a byte of `0x80..=0xFF`, a numeric escape or a back
+  reference: **D-S5a**), the `x` flag together with a byte of `0x80..=0xFF` (or an escape spelling one), or a
+  group or reference name with such a byte. It does not read for `\d`, `\p{..}`, literal bytes and ranges, `\h`,
+  `\v`, `.`, `\Q..\E` without a caseless flag, a group name or POSIX name (not a letter of the pattern), and a
+  `preg_quote`d literal, which compiles nothing. **D-S5b** stands: the subject literal does not exempt a
+  reading pattern, since an ASCII-only subject cannot meet a high byte only where the table is C's.
+  The `i` rule reads every lettered pattern because on glibc's `tr_TR` the case map of ASCII `I` and `i` is not
+  the C one; macOS did not move (S1, S2, S3, S23, P10, P14 stood still), so the oracle asserts those rows only
+  as the rule's (`ReadsByRule`) and the narrower reading (a high byte only) needs a glibc witness first.
+- **A deviation from the design, witnessed.** The design exempts `u` and `(*UCP)` wholesale. The oracle showed
+  one table they do not leave: PCRE2's `x` flag skips what `isspace` says of a byte below 256 **in every mode**,
+  so `/^a\xC2\xA0b$/xu` (a no-break space in the pattern) matches `ab` under `de_DE.UTF-8` and does not under
+  `C`, and `/(*UCP)^a\xA0b$/x` the same. A pattern with `u` or a leading `(*UCP)` therefore reads iff it is
+  extended (the modifier, or an inline `x` set) and holds a raw byte of `0x80..=0xFF`; everything else about it
+  is unread, and it is not parsed (`/^.[/u` is no read). The two oracle rows fail without this clause.
+- **Which functions.** The eight that compile: `preg_match`, `preg_match_all`, `preg_replace`,
+  `preg_replace_callback`, `preg_replace_callback_array`, `preg_filter`, `preg_split` and `preg_grep`, each
+  `{global.read.setting.locale}` as the upper bound the pattern at position 0 decides (`PregPattern`, the tenth
+  kind of `locale_read_gate`). `preg_quote` compiles nothing and keeps its empty row; `preg_last_error` and
+  `preg_last_error_msg` have no row and gain none. Three names were `{}` through the fold allowlist
+  (`preg_match`, `preg_match_all`, `preg_split`), three were out-parameter rows only and so `{}` at a call that
+  passes no out-parameter (`preg_replace`, `preg_replace_callback`, `preg_replace_callback_array`), and
+  `preg_filter` and `preg_grep` had no row (`no-effect-row`): all eight now carry the read. `preg_replace_callback` and `preg_replace_callback_array` are
+  invokers, whose own row the effects pass read **before** it asked the call; `higher_order` now narrows an
+  invoker's row by the same gate.
+- **The pattern argument.** A string literal is `ConstArgs::first`. An **array literal** (a list for
+  `preg_replace`, `preg_replace_callback` and `preg_filter`; the keys of the map for
+  `preg_replace_callback_array`) is carried as `ConstArgs::patterns`, appended after `not_text`: every element must
+  be a string literal, decoded, or the field is absent. An array reads if any pattern reads, an empty array
+  compiles nothing, and an array with an element the scan cannot read as a literal (a variable, a concatenation,
+  a spread, a nested array, a non-string key) is the gap whole: the patterns before a bad one are compiled and a
+  later one is not certain to be, so no partial claim is made. A trace payload, no schema bump.
+- **The gap.** A pattern that is not a literal (a variable, a concatenation, an interpolation, a class constant,
+  a named or spread argument list), a pattern the reader declines (an unterminated class, an unknown escape or
+  verb, an unknown modifier: PCRE2 would refuse it) and a `preg_*` handed over as a callback are
+  `value-dependent-read` and no label. A `preg_*` called with no pattern throws before it compiles and reads
+  nothing.
+- **The fold.** `fold_reads_ambient_setting` refuses a `preg_match`, `preg_match_all` or `preg_split` (the
+  foldable preg names) whose literal pattern reads: the runner has never called `setlocale`, so it answers under
+  the C tables, a claim about the project's runtime the project never made. A pattern the reader declines folds as
+  before (PCRE2 refuses to compile it, which answers `false` under every locale; the folding tests of `/[/`
+  stand), and `preg_quote` folds. ADR-0102's `remembered.rs` allowlist is untouched: `preg_*` stays off it, and a
+  `none` verdict makes a site `{}` without making the name rememberable.
+- **Witnessed.** `locale_readers_oracle.rs` gains 51 rows: the S5 witness table (`s5-preg.php`,
+  `s5-preg-2.php`; PHP 8.5.11 and 8.1.32 agree on every row) as one probe per row, the five functions of P18, P19,
+  P28, S21 and S22 beside `preg_match_all` and `preg_replace_callback`, and the two `x` rows above. Of the 13
+  must-stay rows of the table every one moves under `de_DE.UTF-8` or the Latin-1 locale on macOS and is asserted
+  coloured; the exempt rows are asserted `Stable` and the verdict `Some(false)`; the lexical-rule rows that stood
+  still are `ReadsByRule`. Each assertion fails on a mutation that returns the other answer.
+
+Measured on the ten public packages (`check --profile strict --no-php --vendor-diagnostics --no-cache`, default
+profile, `effect-diff`, the five transform dry-runs), head against `origin/master` (the merge base; the machine's
+load average was about 12, which no number below depends on):
+
+- `check` under both profiles is byte-identical on every package: no finding moves, none is reworded; no public
+  envelope covers a preg site, and `possibly_expected.toml` does not move.
+- `effect-diff`: of 28,846 function summaries, `global.read.setting.locale` is added to **241** and
+  `value-dependent-read` to **67**; nothing is removed and no other label moves. Of the 241, 56 hold the reading
+  literal themselves (43 through `\w \W \s \S \b` or a POSIX class, 13 through `i` alone: `GelfMessageFormatter::format`
+  and `BrowserConsoleHandler::handleCustomStyles`, `cleanClassName` and `pluralize`) and 185 inherit it through a
+  callee (`BrowserConsoleHandler::generateScript`, `handleStyles`; 3 of them hold only literals that read nothing,
+  `HeaderProcessor::parseHeaders` and `Terminal::initDimensions`). Of the 67 gaps, 63 sit on bodies already `…?`;
+  **4** were exhaustive and are not any more, each with a pattern the site cannot read as a literal:
+  `Standard::pSingleQuotedString` (the pattern is held in a local), `Standard::containsEndLabel` and
+  `SourceMapper::isInHiddenDirectory` (concatenated), `CarbonPeriod::addMissingParts`. No function gains
+  exhaustiveness (5,880 exhaustive on master, 5,876 here). The design's proxy counted 93 reading patterns among
+  323 without `u`; a grep of the same packages finds 97 of 367 literal single patterns (74 through the classes
+  and `x`, 23 through `i` alone), 21 of them with `u`, and the 28 patterns the reader declines are artifacts of the
+  grep (a concatenated pattern), not literals.
+- Folds: **none lost**. The one preg call with every argument literal in these packages is `preg_match('/^.[/u',
+  'a')`, which still folds. The design's "1 fold lost" was a `preg_replace` with an interpolated subject, which is
+  not on the fold allowlist and never folded.
+- `transform effects-envelope`: **+3** edits, none removed: a `@phpstan-impure global.read.setting.locale` tag on
+  Guzzle's `HeaderProcessor` (a docblock and its tag, two edits) and on PHP-Parser's `VoidCastEmulator` (one docblock).
+  The planner refuses 118 more functions that now carry the read and stay `…?` (`effects-not-exhaustive`),
+  rewords 58 of its `proven` lists to include it, and 22 class-wide `@phpstan-all-methods-pure` refusals disappear
+  (21 `effects-not-exhaustive`, 1 `uses-trait`): a class with a method that reads the locale is no longer a
+  candidate. `throws-envelope`, `loop-to-array-map`, `phpdoc-honesty` and `phpdoc-to-native` are byte-identical.
+- Left, with the reason: a pattern held in a local (`$regex = '/…/'; preg_replace($regex, …)`) or a constant
+  (`self::PATTERN`) is the gap although the literal is one assignment away, as S3's printf evidence was before its
+  calibration; the four exhaustive bodies above are the cost, and reading a once-assigned local literal is the
+  evidence queue. A subject literal does not exempt a reading pattern (D-S5b).
 
 ## 4. Decision: ADR-0021 Decision 2 is amended
 
@@ -798,7 +897,8 @@ real thing with the instrumented ranking of ADR-0021):
   pattern 341, of which 22 carry `u`. These are the exhaustiveness releases the
   later slices buy and must measure. S4 measured its half (§3.9): the proxy overstated the
   release, since the public `ctype_*` calls are `ctype_digit` and `ctype_xdigit`, which stay as they were,
-  and two bodies become exhaustive in all.
+  and two bodies become exhaustive in all. S5 measured the preg half (§3.10): the proxy overstated the
+  release again, 241 summaries gained the read and none became exhaustive.
 
 Gates a slice must pass, against its base: `check` default and strict
 byte-identical on the ten packages (no public envelope covers a printf site);
@@ -832,9 +932,10 @@ name `value-dependent-read`; and the public packages' default profile findings a
   `PINNED_PHP`; a floor below 8.2 reads `ucfirst` too, which the catalog has no version axis to say, and the data
   sorts under `SORT_STRING | SORT_FLAG_CASE`, which §3.9 leaves undecided for that reason.
 - Deferred, with the evidence that forced the deferral recorded:
-  - the preg family's locale tables (S5): the biggest queued reader and the
-    one with a lexical escape (`/u`); it needs the pattern-literal read and a
-    measurement before the fold allowlist's `preg_match` learns a refusal;
+  - the preg family's locale tables (S5, landed, §3.10): the biggest queued reader and the
+    one with a lexical escape (`/u`); it needed the pattern-literal read and a
+    measurement before the fold allowlist's `preg_match` learned a refusal, and the
+    measurement released no exhaustiveness (a pattern held in a local is still the gap);
   - the timezone cell: a call-site rule "timestamp present → setting read,
     not `nondet.time`" sharpens the whole date family, and `gmdate($f, $ts)`
     becomes pure;
