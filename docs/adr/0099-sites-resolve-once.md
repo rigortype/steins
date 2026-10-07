@@ -739,12 +739,23 @@ a conversion is `operator-to-string` and an edge to `__toString` carries its lab
   (`ArgShape::GlobalConst`, resolved as PHP does and answered by ADR-0094's `global_const_fact`): a
   scalar value holds no object, so `PHP_EOL` and a same-file `const GC = 'g'` convert nothing, and a
   constant the catalog and the project state nothing of stays a gap, as `const GO = new S;` must
-  (`takes(GO)` prints `[S]`). A class constant or enum case (`ArgShape::ClassConst`) can only hold a
-  scalar, an array or an enum case, and an enum cannot declare `__toString`, so nothing converts
-  (`takes(KO::X)` over an enum case raises `TypeError`): the ToString family reads it as no object,
-  every other family (an enum may implement `ArrayAccess`, `Countable`, `IteratorAggregate`) as an
-  operand nothing is known of. A class constant that names a global constant holding an object
-  (`const X = GO;`) is the one shape this reads wrongly, and is not witnessed in any corpus.
+  (`takes(GO)` prints `[S]`). A project constant is not read as a scalar where the project holds a
+  `define()` with a computed name: one run before the file is included wins over a later `const`,
+  which only warns (witnessed: `define($n, new S)` with `$n = 'DYN' . '2'`, then `const DYN2 =
+  'scalar'`, and `takes(DYN2)` prints `[S]`), and such a call can define any constant the engine
+  does not, so the engine's own (`PHP_EOL`) stand. A class constant or enum case
+  (`ArgShape::ClassConst`) cannot be `new Foo`, but it can name a constant that is one: `const GO =
+  new S; class KG { const X = GO; } final class KH { const Z = KG::X; }` is legal and `'a' .
+  KH::Z`, `echo KG::X`, `(string) KG::X`, `takes(KG::X)` and a `: string` return of it all print
+  `[S]` (witnessed). So the ToString family reads a class constant as converting nothing only where its
+  initializer, and every constant the initializer names, through any chain of class constants,
+  parents and interfaces up to eight links, ends in a scalar, an array of them, an enum case (an
+  enum cannot declare `__toString`; `takes(KO::X)` over one raises `TypeError`) or an engine
+  class's constant, and a global constant the project and the catalog state a scalar value of. A
+  class no file declares, a trait that may supply the constant, `static::` in a class a subclass
+  can extend, a call or a computed class in the initializer and a constant nothing declares are
+  unproven. Every other family (an enum may implement `ArrayAccess`, `Countable`,
+  `IteratorAggregate`) reads a class constant as an operand nothing is known of.
 - **A string accessor holds a string.** `getMessage()` converts the property inside the accessor and
   returns a string whatever the property held (witnessed: `$this->message = new S` prints `[S]` at the
   accessor and `gm()` returns `'s'`), so its result is an operand shown to hold no object, and
@@ -807,14 +818,16 @@ declared type. §7.5, "decided and not yet implemented", is closed. What stays o
 
 | Slice | Issue | Measured on the public corpora |
 |---|---|---|
-| coercion at user boundaries | #868 (S5) | of 28,847 functions 627 change the kinds behind their `…?`: 228 gain `operator-to-string` in both lanes (54 through a callback), 348 lose it and 57 lose `user-code-reach`, none gains another kind; 9 lose effect exhaustiveness and 15 the throw lane's, 45 become exhaustive in a lane; no proven label moves; `effect-diff` reports 25 `coverage-completed` and 9 `coverage-narrowed` events; `transform effects-envelope` 726 → 734 edits (+11, -3), `throws-envelope` and `loop-to-array-map` byte-identical; at `strict` (with `--vendor-diagnostics`) `throw.maybe-undeclared` +67 findings and -52 (net composer +9, console +19, process +9, phpunit -13, monolog -4, guzzle -4, Carbon -1) |
+| coercion at user boundaries | #868 (S5) | of 28,847 functions 604 change the kinds behind their `…?`: 228 gain `operator-to-string` in both lanes (54 through a callback), 325 lose it and 57 lose `user-code-reach`, none gains another kind; 9 lose effect exhaustiveness and 15 the throw lane's, 45 become exhaustive in a lane; no proven label moves; `effect-diff` reports 25 `coverage-completed` and 9 `coverage-narrowed` events; `transform effects-envelope` 726 → 734 edits (+11, -3), `throws-envelope` and `loop-to-array-map` byte-identical; at `strict` (with `--vendor-diagnostics`) `throw.maybe-undeclared` +67 findings and -50 (net composer +9, console +19, process +9, phpunit -13, monolog -3, guzzle -4) |
 
 The change is two-sided, and the table says which part is which. What S5 *adds* is the conversion at
 a boundary, and what it *removes* is the master gaps three of its operand readings recover, because
 the same classifier answers a concatenation as well as a call. Switching each reading off in turn on
-the final head, by the functions whose kinds change: the class and global constant readings
-(`PHP_EOL`, a same-file `const`, `self::NAME`, an enum case) remove `operator-to-string` from 297
-functions and `user-code-reach` from 12; `Foo::class` and `static::class` being strings remove it from
+the head before the class constants followed their initializers (which gives 23 of the
+functions back, as a class constant that names an unproven constant is unproven), by the functions
+whose kinds change: the class and global constant readings (`PHP_EOL`, a same-file `const`,
+`self::NAME`, an enum case) remove `operator-to-string` from 297 functions and `user-code-reach` from
+12; `Foo::class` and `static::class` being strings remove it from
 12 and `user-code-reach` from 31; a `match` of object-free arms from 11; `getMessage()` as a string from
 2 (and `user-code-reach` from 2); the callbacks add `operator-to-string` to 54. A parameter's default, a
 generator's return, an implicit `__toString` return and a constructor's destructuring or `foreach`
@@ -845,7 +858,7 @@ master gaps those readings recover (monolog `Utils::throwEncodeError()`, a conca
 of literals; composer's `JsonFile::encode()` callers; phpunit's `ListTestFilesCommand`), the ones that
 come are composer 17 in a vendored copy of `symfony/filesystem` under its test fixtures, console 22
 and process 9 at an argument or a return, and phpunit's and composer's callback sites. The
-`possibly_expected.toml` rows of composer, console, process, phpunit, monolog, guzzle and Carbon move
+`possibly_expected.toml` rows of composer, console, process, phpunit, monolog and guzzle move
 by the net.
 
 ### What stays open
