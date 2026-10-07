@@ -153,6 +153,7 @@ mod reflected_class_world;
 mod region_purity;
 mod registry;
 mod remembered_call_results;
+mod remembered_witnesses;
 mod replay_fold;
 mod resource_folds;
 mod resource_params;

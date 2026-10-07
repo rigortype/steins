@@ -64,14 +64,16 @@ union of shapes lives as contract arms (where discrimination happens), never
 inside one fact.
 _Avoid_: mirroring the contract lane's array split into the fact domain
 
-**Remembered call result** (ADR-0102; slice 1 implemented for builtin function callees with local-variable or literal arguments, the rest designed):
+**Remembered call result** (ADR-0102; slice 1 implemented for allowlisted builtin function callees with local-variable or scalar-literal arguments, the rest designed):
 A call's result held as a value-domain fact on its **call key** — the resolved
 callee, its argument places (ADR-0098) and receiver place — so a later call with
 the same key in the same frame answers the remembered fact until an invalidating
 site: a write to an argument or receiver place, a setting write to a cell the
-callee reads, an escape hatch, or an effect-lane gap. Only a callee whose effect
-answer is exhaustive and whose labels are `{}` or setting reads produces one; a
-"possibly impure" call never does, and the stat family is never remembered (PHP
+callee reads, an escape hatch, or an effect-lane gap (slice 1 forgets on a write to an
+argument place only, since it remembers no setting read). Slice 1 produces one only for a builtin on an allowlist of functions that read no ambient
+state at all (locale, ini, environment, clock, error state), whose own site is exhaustive and empty;
+a `{}` row is not enough, since many read unlabelled state, and no setting read is remembered until
+v2. A "possibly impure" call never produces one, and the stat family is never remembered (PHP
 caches only a successful stat of the last path, and `file_exists` never reads
 the cache). The invalidation set is derived from effect labels (ADR-0101 §5.4),
 never from a purity bit.

@@ -516,11 +516,6 @@ pub(crate) fn walk_trace(
     let cx = w.cx;
     let scope = w.scope;
     for (stmt_idx, stmt) in stmts.iter().enumerate() {
-        // The statement the remembered call results (ADR-0102) are asked about, for
-        // every exit of this iteration; a setting read does not survive a statement
-        // that holds a site which may rewrite the setting.
-        let _stmt_guard = w.remember.enter(stmt.span);
-        remembered::forget_for_statement(w, stmt.span, store);
         // 0. Statement-level inline `@var` casts (ADR-0073), applied before the
         // statement's own checks read the env. A tag above an `Assign` to the same
         // variable is erased by step 2's own rebind — the assignment-form `@var`
