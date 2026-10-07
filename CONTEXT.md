@@ -299,6 +299,18 @@ _Avoid_: pure modulo ambient state / practically pure (the rejected
 convenience, owner ruling 2026-10-03), locale-sensitive as a catalog
 disposition (a reason to colour a row, not to refuse one), epoch-stable read
 
+**Setting cell** (ADR-0101 §3.11):
+One member of the ambient settings' roster — `locale`, `precision` (the `precision`
+and `serialize_precision` inis together), `timezone`, `env`, `encoding` (the default
+charset and the mbstring and iconv entries) and `ini` (the residue, one entry at a
+time) — and the unit a label pair, a gate and an ini name belong to: the cell names
+`global.read.setting.<cell>` and `global.write.setting.<cell>`, a call-decided gate
+(`SettingReadGate`) names the cell whose read it decides, and `ini_get` or `ini_set`
+with a literal option name is the read or write of the cell that owns the name. A
+cell's labels are registered with the first row that colours it.
+_Avoid_: setting family (the whole `global.*.setting` subtree), locale gate (the
+gate now names its cell)
+
 **Site** (ADR-0099):
 One call-like or operator construct in a body — a call, a method call, a
 `new`, a callback, a `throw`, a language construct, an operator that may run

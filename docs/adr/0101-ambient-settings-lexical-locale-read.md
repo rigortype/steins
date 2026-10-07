@@ -158,7 +158,9 @@ global.write.setting.locale
 ```
 
 Four registry entries land with slice 1, and a fifth, `global.read.setting.precision`,
-with slice S3 (§3.8). The cell roster below names the later children (`timezone`, `env`,
+with slice S3 (§3.8); S6-core registers seven more with the first rows of `timezone`, `encoding` and `ini`
+and the precision write, the ini functions with a literal option name (§3.11), and `env` waits for `getenv`.
+The cell roster below names the later children (`timezone`, `env`,
 `encoding`, `ini`); each is registered in the slice that colours its first row, never ahead of one, which
 is ADR-0083's "reserved with no rows" case inverted: a label with no row is
 noise in the registry table and a declaration nobody can discharge.
@@ -565,8 +567,8 @@ against php-src at `php-8.5.11` and against the engine, and enters each name tha
   (`ctype_fallback`). `basename` is the one reader whose trigger is the call itself: `php_basename` consults the
   locale-derived `CG(ascii_compatible_locale)` before it looks at a byte, so every call reads it, `''` included,
   and no argument can rule it out (the flag selects the algorithm, which walks `php_mblen` where it is false).
-  The row is the upper bound and the call site decides it (`locale_read_gate`,
-  `site/locale.rs`).
+  The row is the upper bound and the call site decides it (`setting_read_gate`,
+  `site/setting.rs`).
 - **What decides each name** (php-src `php-8.5.11`; the trigger is the first thing the routine does with the
   argument).
   - `ctype_alnum`, `ctype_alpha`, `ctype_cntrl`, `ctype_graph`, `ctype_lower`, `ctype_print`, `ctype_punct`,
@@ -736,7 +738,7 @@ decides lexically, the way S4's readers do, with the owner's adoption of D-S5a. 
 - **Which functions.** The eight that compile: `preg_match`, `preg_match_all`, `preg_replace`,
   `preg_replace_callback`, `preg_replace_callback_array`, `preg_filter`, `preg_split` and `preg_grep`, each
   `{global.read.setting.locale}` as the upper bound the pattern at position 0 decides (`PregPattern`, the tenth
-  kind of `locale_read_gate`). `preg_quote` compiles nothing and keeps its empty row; `preg_last_error` and
+  kind of `setting_read_gate`). `preg_quote` compiles nothing and keeps its empty row; `preg_last_error` and
   `preg_last_error_msg` have no row and gain none. Three names were `{}` through the fold allowlist
   (`preg_match`, `preg_match_all`, `preg_split`), three were out-parameter rows only and so `{}` at a call that
   passes no out-parameter (`preg_replace`, `preg_replace_callback`, `preg_replace_callback_array`), and
@@ -808,6 +810,99 @@ the fold's refusal of a decline, and are identical: the public packages hold no 
   (`self::PATTERN`) is the gap although the literal is one assignment away, as S3's printf evidence was before its
   calibration; the four exhaustive bodies above are the cost, and reading a once-assigned local literal is the
   evidence queue. A subject literal does not exempt a reading pattern (D-S5b).
+
+### 3.11 Slice S6-core: the setting cells, the gate that names its cell, and the ini names (2026-10-08) — PENDING ratification
+
+Landed as the first sub-slice of S6 of the ambient-settings run (#1000), the shared base the later cell slices (env,
+encoding, timezone, precision, ini residue, the `DateTime` constructors) build on. The owner adopted the design's
+recommendations on 2026-10-08: **D-S6f** (the case folders follow `PINNED_PHP`, with the 8.1 readers recorded as a
+floor divergence), **D-S6b** (the clock half of the time family follows the criterion too) and the sub-slice order
+S6-core, env, encoding, timezone (functions), precision readers, ini residue, timezone (constructors), case folders.
+Neither D-S6f nor D-S6b colours a row here. What S6-core does:
+
+- **The roster as a type.** `SettingCell` (`steins-catalog`'s `setting.rs`) is the roster of §2.3: `Locale`,
+  `Precision`, `Timezone`, `Env`, `Encoding`, `Ini`, each with `read_label()` and `write_label()`, the pair
+  `global.read.setting.<cell>` and `global.write.setting.<cell>`. `precision` and `serialize_precision` are one cell
+  (the design's choice: a call that reads one has no reason to be told apart from a call that reads the other, and
+  `ini_set` of either is its write).
+- **The registry (§2.2's rule applied).** A cell's label is registered with the first row that colours it, and S6-core
+  colours no builtin row of a later cell, but it does colour rows: `ini_get`, `ini_set`, `ini_alter` and `ini_restore`
+  with a literal option name (below) carry the cell's read or write, and those are the first rows of the
+  `timezone`, `encoding` and `ini` cells and the first write of `precision`. Seven labels are registered with them
+  (`global.read.setting.timezone`, `.encoding` and `.ini`, and `global.write.setting.precision`, `.timezone`,
+  `.encoding` and `.ini`), none changes a finding by existing, and every one is a child of a coarse label, so an
+  envelope that admits the parent admits it. **`env` is not registered**: no ini entry feeds it, and its first row is
+  `getenv` (S6c), which registers the pair; `SettingCell::Env` is in the enum and carries its labels, and a test pins
+  that they stay out of the registry until a row names them.
+- **The gate names its cell.** `LocaleReadGate` is `SettingReadGate { cell, kind }` (`setting_reads.rs`, from
+  `locale_reads.rs`), `locale_read_gate` is `setting_read_gate`, and `steins-infer`'s `site/locale.rs` is
+  `site/setting.rs`. `narrow_labels` and `unreadable_mode` drop the label the gate's cell spells (`gate.cell().read_label()`)
+  and no other. Every gate of S4 and S5 names `Locale`, so no locale verdict moves; the later slices add kinds that name
+  their own cell. The oracle file keeps its name (`locale_readers_oracle.rs`) until a row of another cell joins it.
+- **The ini names** (`ini_cell(name)`). The table maps an option name to the cell that owns it, by php-src
+  (`6bc7c26cf6`, the 8.5 line): `precision` (`PHP_INI_ENTRY("precision")`, `EG(precision)`) and `serialize_precision`
+  (`PG(serialize_precision)`) to precision; `date.timezone` (`guess_timezone`, once no `date_default_timezone_set`
+  has run) to timezone; `default_charset`, `internal_encoding`, `input_encoding`, `output_encoding` (the core entries
+  `php_get_internal_encoding` and its two siblings read, `default_charset` unless `internal_encoding` is set),
+  `iconv.{internal,input,output}_encoding` and `mbstring.{internal_encoding,language,detect_order,http_input,http_output,substitute_character,strict_detection}`
+  (each the default of an `mb_*` reader) to encoding; `bcmath.scale`, `include_path` and `error_reporting` to the ini
+  residue. `mbstring.encoding_translation`, `mbstring.http_output_conv_mimetypes` and `mbstring.regex_*` feed an output
+  handler or `mb_ereg`, which no row of the roster reads, and every other entry has no reader a row names yet: they map
+  to no cell. The residue is one name at a time (§2.3), so a name joins it with the row that reads it. The lookup is
+  **exact**: the engine finds an entry by a case-sensitive hash lookup (`zend_ini_get_value`, `zend_alter_ini_entry_ex`),
+  and `ini_get('PRECISION')` is `false` (witnessed on 8.5), so a miscased name is no cell's.
+- **The rule** (`narrowed_ini_labels`, called from `function_effects` beside `narrowed_setlocale`, the call-site
+  narrowing S1 and S4 use for a row that is replaced rather than dropped). `ini_get` with one argument is the owning cell's
+  read, `ini_set` and `ini_alter` (php-src's `@alias ini_set`) with two arguments and `ini_restore` with one are its write,
+  where the option is a written string literal ([`ConstArgs::first`]) and the cell owns it. The criterion of §3.2 holds: each
+  reads or rewrites its entry on every run of the call as written, so the label is proven and not an upper bound. A call
+  of any other count raises an `ArgumentCountError` before it touches an entry, and a named or spread list has no count,
+  so both keep the coarse row; a name that is not a literal (a variable, a concatenation, an interpolation, a constant) and a
+  name no cell owns keep it too, and so does an ini function handed over as a callback (`builtin_callback` asks
+  `function_effects(builtin, None, None)`). The coarse rows are the argument-blind ones of before, `global.read` for
+  `ini_get` and `global.write` for the others: §2.2's sketch gave a dynamic ini name `global.read.setting`, and moving
+  the coarse rows there would reword findings that have nothing to do with a cell, so it is left to a decision of its own.
+  `ini_alter` and `ini_restore` had **no row** (`no-effect-row`); they are now the coarse `global.write`, which is the row
+  `ini_set` always had, and `ini_get_all` stays with the residue slice (S6e).
+- **Witnessed.** `setting_cells.rs` (`steins-infer` tests) is the S6-core witness table, one test per row group over every
+  name the table owns: `ini_get`, `ini_set`, `ini_alter` and `ini_restore` of each name carry the cell's read or write
+  (including `\ini_get`, an upper-case `INI_GET` and a double-quoted name); a variable, a concatenation, a constant, a
+  call, an interpolation, a named argument and a spread keep the coarse row; twenty unmapped or miscased names, and a
+  call with the wrong count, keep it; a callback keeps it; a declared envelope admits the cell it names and the parents
+  and no other cell, in either direction; and the locale verdicts of S1 to S5 are unchanged. Against the merge base the
+  table fails on 7 of its 9 tests (the cells are not there) and passes on the other two (the callback and the locale
+  rows); the `keeps the coarse row` tests fail on the base only through `ini_alter` and `ini_restore`, which had no row.
+  The catalog's own tests pin the table (every name once, every cell registered, `Env` not), the arity gate and the
+  label pair.
+
+Measured on the ten public packages (`check --profile strict --no-php --vendor-diagnostics --no-cache` and the default
+profile, `effect-diff`, the five transform dry-runs; a release binary built from the merge base `4af4103a` against one
+from the head; the machine's load average was about 20, which no number below depends on; the base and head outputs
+are non-empty and the binaries differ). The corpus holds 113 `ini_get` and `ini_set` call sites, 4 of them with a
+literal name a cell owns (`ini_set('precision', …)` twice, `ini_get('include_path')` twice, the second pair beside an
+`ini_set` of the same entry):
+
+- `check` under both profiles is **byte-identical** on every package: no finding moves, none is reworded.
+- `effect-diff`: of 28,846 function summaries, **22 events on 11 functions**, none in the eight packages that hold no
+  such call. `global.write.setting.precision` replaces `global.write` on `ModifyTest::testAddRealMicrosecondWithLowFloatPrecision`
+  (Carbon; one `ini_set('precision', …)`), and `global.read.setting.ini` and `global.write.setting.ini` replace `global.read`
+  and `global.write` on `PhpHandler::handleIncludePaths` (PHPUnit; the literal `include_path` calls). The other nine are
+  callers that inherit them (`Application::run`, `PhpHandler::handle` and seven `PhpHandlerTest` methods), which keep
+  their coarse labels from a call with a name that is not a literal and gain the two cell labels beside them: 21
+  `proven-added` events (10 reads, 10 writes, 1 precision write) and 3 `proven-removed-maybe` (`global.write` twice,
+  `global.read` once), all on the two functions that held the literal calls and no other source of the coarse label.
+  No function gains or loses exhaustiveness and no other label moves.
+- `transform effects-envelope`: byte-identical but for two refusals' `detail` text, which names the proven labels
+  (`proven global.write` is `proven global.write.setting.precision`; `proven global.read, global.write` is
+  `proven global.read.setting.ini, global.write.setting.ini`). No edit is added or removed. `throws-envelope`,
+  `loop-to-array-map`, `phpdoc-honesty` and `phpdoc-to-native` are byte-identical on all ten packages.
+- Wall time moves by nothing the load does not explain (a per-package pair of runs agrees to a second). The ledger counts
+  do not move, so no reseed.
+- Left: `ini_get_all`, `set_include_path`, `error_reporting($l)`, `bcscale` and `set_time_limit` (the residue slice),
+  the cells' builtin readers (S6c to S6e) and the constructor rows are not coloured; a non-literal name keeps
+  `global.read` and `global.write`, and moving those two to `global.read.setting` and `global.write.setting` (§2.2's sketch of a
+  dynamic ini name) would reword every `ini_get($name)` finding and is a decision of its own. `ini_restore` of a name no
+  cell owns is `global.write` where it was a `no-effect-row` gap, which the corpus never exercises.
 
 ## 4. Decision: ADR-0021 Decision 2 is amended
 
@@ -956,7 +1051,7 @@ name `value-dependent-read`; and the public packages' default profile findings a
   (§3.4): a value-lane precision loss on the corpus of at most the ten sites
   above, in exchange for a sound answer under every locale.
 - S4 (§3.9) spends the refusal queue of §4 apart from the encoding cell: the locale readers are rows, each
-  but `basename` decided by its call through `locale_read_gate`, and `number_format` is certified. The rows follow
+  but `basename` decided by its call through `setting_read_gate`, and `number_format` is certified. The rows follow
   `PINNED_PHP`; a floor below 8.2 reads `ucfirst` too, which the catalog has no version axis to say, and the data
   sorts under `SORT_STRING | SORT_FLAG_CASE`, which §3.9 leaves undecided for that reason.
 - Deferred, with the evidence that forced the deferral recorded:
