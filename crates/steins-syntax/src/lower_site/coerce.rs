@@ -17,8 +17,8 @@
 
 use mago_span::HasSpan;
 use mago_syntax::cst::{
-    Access, Argument, ArgumentList, AssignmentOperator, Expression, Hint, PartialArgument,
-    PartialArgumentList, Return, Variable,
+    Access, Argument, ArgumentList, AssignmentOperator, Expression, FunctionLikeParameterList, Hint,
+    PartialArgument, PartialArgumentList, Return, Variable,
 };
 
 use super::SiteScope;
@@ -151,16 +151,63 @@ pub(super) fn property_value_site(
     sx: &SiteScope<'_>,
     out: &mut Vec<SiteOrigin>,
 ) {
-    if !sx.cx.constructor
-        || !matches!(a.operator, AssignmentOperator::Assign(_) | AssignmentOperator::Coalesce(_))
-    {
+    if !matches!(a.operator, AssignmentOperator::Assign(_) | AssignmentOperator::Coalesce(_)) {
         return;
     }
-    let Expression::Access(Access::Property(pa)) = a.lhs.unparenthesized() else { return };
+    if let Some(name) = constructor_property(a.lhs, sx) {
+        value_site(C::PropertyValue, Some(&name), (a.rhs, to_span(a.span())), sx, out);
+    }
+}
+
+/// The site of a constructor's `$this->p` as a destructuring or `foreach` target, which stores a
+/// value nothing names (`[$this->p] = [$x]`, `foreach ($xs as $this->p)`).
+pub(super) fn property_target_site(
+    target: &Expression<'_>,
+    sx: &SiteScope<'_>,
+    out: &mut Vec<SiteOrigin>,
+) {
+    let Some(name) = constructor_property(target, sx) else { return };
+    let kind = SiteKind::Operator {
+        family: F::ToString,
+        construct: C::PropertyValue,
+        receivers: vec![None],
+        member: Some(name),
+    };
+    let mut site = sx.site(to_span(target.span()), kind);
+    site.operands = Some(vec![ArgShape::Unknown]);
+    out.push(site);
+}
+
+/// The name of the property `$this->name` a constructor's `target` writes.
+fn constructor_property(target: &Expression<'_>, sx: &SiteScope<'_>) -> Option<String> {
+    if !sx.cx.constructor {
+        return None;
+    }
+    let Expression::Access(Access::Property(pa)) = target.unparenthesized() else { return None };
     let this = matches!(pa.object.unparenthesized(),
         Expression::Variable(Variable::Direct(dv)) if bytes_to_string(dv.name) == "$this");
-    if let (true, Some(name)) = (this, method_name_of(&pa.property)) {
-        value_site(C::PropertyValue, Some(&name), (a.rhs, to_span(a.span())), sx, out);
+    if this { method_name_of(&pa.property) } else { None }
+}
+
+/// The sites of the defaults of a function-like's parameters, whose declared types convert them
+/// when the argument is left out: `function f(string $s = new S)` runs `S::__toString` at the
+/// call, in the file that declares the function. Each is the operator site of a return over the
+/// default.
+pub(crate) fn param_default_sites(
+    params: &FunctionLikeParameterList<'_>,
+    cx: &EffectScanCx,
+    out: &mut Vec<SiteOrigin>,
+) {
+    let sx = SiteScope { cx, guards: &[], catch_scope: &[] };
+    for param in params.parameters.iter() {
+        let (Some(hint), Some(default)) = (param.hint.as_ref(), param.default_value.as_ref())
+        else {
+            continue;
+        };
+        if let Some(text) = return_hint_text(hint) {
+            let span = to_span(default.value.span());
+            value_site(C::Return, Some(&text), (default.value, span), &sx, out);
+        }
     }
 }
 
@@ -188,7 +235,8 @@ fn value_site(
 }
 
 /// Whether `shape` shows a value no declared type converts to a string: an object-free
-/// value, or an array.
+/// value, an array, or a class constant (a scalar, an array or an enum case, which cannot
+/// declare `__toString`).
 pub(super) fn shows_no_object(shape: &ArgShape) -> bool {
-    matches!(shape, ArgShape::ObjectFree | ArgShape::Array)
+    matches!(shape, ArgShape::ObjectFree | ArgShape::Array | ArgShape::ClassConst)
 }

@@ -24,7 +24,9 @@ use crate::lower_effect::{
 use crate::lower_expr::lower_arg_value;
 use crate::lower_guards::scan_guard_regions;
 use crate::lower_presence::{maybe_undefined_reads, push_guard_root, subtree_has_goto};
-use crate::lower_site::{arrow_return_site, body_end, scan_owner_sites, scope_exit_sites};
+use crate::lower_site::{
+    arrow_return_site, body_end, param_default_sites, scan_owner_sites, scope_exit_sites,
+};
 use crate::lower_stmt::{
     block_end, call_invalidation, expr_end, lower_expr_stmt, lower_stmt, named_call, node_poisons,
     push_byref_captures, scan_guard_chain_no_default, scan_opaque, scan_string_contexts,
@@ -601,11 +603,13 @@ fn build_closure_scope_from_closure(
         ReceiverWrites::poisoned(),
     )
     .returning(cl.return_type_hint.as_ref().map(|r| &r.hint))
+    .generator(cl.body.statements.iter().any(|s| node_is_generator(&Node::Statement(s))))
     .with_body(
         &cl.parameter_list,
         Captures::Uses(&uses),
         cl.body.statements.iter().map(Node::Statement),
     );
+    param_default_sites(&cl.parameter_list, &cx, &mut sites);
     let mut is_generator = false;
     for s in cl.body.statements.iter() {
         lower_stmt(s, &mut stmts);
@@ -1499,7 +1503,9 @@ fn build_closure_scope_from_arrow(
         ReceiverWrites::poisoned(),
     )
     .returning(af.return_type_hint.as_ref().map(|r| &r.hint))
+    .generator(node_is_generator(&Node::Expression(af.expression)))
     .with_body(&af.parameter_list, Captures::All, std::iter::once(Node::Expression(af.expression)));
+    param_default_sites(&af.parameter_list, &cx, &mut sites);
     scan_owner_sites(&Node::Expression(af.expression), &cx, &mut sites);
     arrow_return_site(af.expression, &cx, &mut sites);
     scope_exit_sites(&cx, body_end(af.expression.span()), &mut sites);

@@ -371,6 +371,7 @@ fn target(expr: &Expression<'_>, sx: &SiteScope<'_>, out: &mut Vec<SiteOrigin>) 
     } else {
         chain(expr, C::Write, sx, out);
         offset_value(expr, None, sx, out);
+        coerce::property_target_site(expr, sx, out);
     }
 }
 

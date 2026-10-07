@@ -297,6 +297,23 @@ impl EffectScanCx {
         }
     }
 
+    /// A generator's `return` is the value `Generator::getReturn()` hands back, which no return
+    /// type converts: such a frame has no return site.
+    pub(crate) fn generator(mut self, is_generator: bool) -> Self {
+        if is_generator {
+            self.returns = None;
+        }
+        self
+    }
+
+    /// `__toString` has an implicit `: string` return type (witnessed: `return new S` converts).
+    pub(crate) fn implicit_to_string(mut self, method: &[u8]) -> Self {
+        if self.returns.is_none() && method.eq_ignore_ascii_case(b"__tostring") {
+            self.returns = Some("string".to_owned());
+        }
+        self
+    }
+
     /// Record the frame's return type ([`Self::returns`]) from its declaration.
     pub(crate) fn returning(mut self, hint: Option<&Hint<'_>>) -> Self {
         self.returns = hint.and_then(crate::lower_site::return_hint_text);

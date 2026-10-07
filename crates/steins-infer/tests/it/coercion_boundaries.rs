@@ -20,9 +20,14 @@ const CLASSES: &str = "\
     class Open { public function __toString(): string { echo '[Open]'; return 'o'; } }\n\
     final class Fin { public function __toString(): string { echo '[Fin]'; return 'f'; } }\n\
     class Foo {}\n\
-    class FooS extends Foo { public function __toString(): string { echo '[FooS]'; return 'fs'; } }\n\
-    class Inv { public function __invoke() { return 1; } public function __toString(): string { echo '[Inv]'; return 'i'; } }\n\
-    class Trav implements IteratorAggregate { public function getIterator(): Iterator { return new ArrayIterator([]); } public function __toString(): string { echo '[Trav]'; return 't'; } }\n";
+    class FooS extends Foo { public function __toString(): string { echo '[FooS]'; return 'fs'; \
+        } }\n\
+    class Inv { public function __invoke() { return 1; } public function __toString(): string { \
+        echo '[Inv]'; return 'i'; } }\n\
+    class Trav implements IteratorAggregate {\n\
+        public function getIterator(): Iterator { return new ArrayIterator([]); }\n\
+        public function __toString(): string { echo '[Trav]'; return 't'; }\n\
+    }\n";
 
 /// The declarations the calls below name: one parameter type each.
 const CALLEES: &str = "\
@@ -53,12 +58,20 @@ const CALLEES: &str = "\
     class Base { public function __construct(public string $p = '') {} }\n\
     class Child extends Base { public function __construct($x) { parent::__construct($x); } }\n\
     final class FinN {}\n\
-    final class PropS { public string $name = ''; public function __construct(Fin $s) { $this->name = $s; } }\n\
-    final class PropN { public string $name = ''; public function __construct(FinN $n) { $this->name = $n; } }\n\
-    final class PropUnknown { public string $name = ''; public function __construct($x) { $this->name = $x; } }\n\
-    final class PropBound { public string $name = ''; public function __construct(Open $o) { $this->name = $o; } }\n\
-    final class PropOpenN { public string $name = ''; public function __construct(N $n) { $this->name = $n; } }\n\
-    final class PropInt { public int $n = 0; public function __construct(Fin $s) { $this->n = $s; } }\n";
+    final class PropS { public string $name = ''; public function __construct(Fin $s) { \
+        $this->name = $s; } }\n\
+    final class PropN { public string $name = ''; public function __construct(FinN $n) { \
+        $this->name = $n; } }\n\
+    final class PropUnknown { public string $name = ''; public function __construct($x) { \
+        $this->name = $x; } }\n\
+    final class PropBound { public string $name = ''; public function __construct(Open $o) { \
+        $this->name = $o; } }\n\
+    final class PropOpenN { public string $name = ''; public function __construct(N $n) { \
+        $this->name = $n; } }\n\
+    final class PropInt {\n\
+        public int $n = 0;\n\
+        public function __construct(Fin $s) { $this->n = $s; }\n\
+    }\n";
 
 fn summary(src: &str, symbol: &str) -> EffectSummary {
     let tree = SourceTree::parse(src);
@@ -262,7 +275,8 @@ fn a_match_whose_every_arm_holds_no_object_converts_nothing() {
         "r",
     );
     nothing(
-        "function f($x) { return takes(match ($x) { 1 => 'a', 2 => 'b', default => throw new \\Exception('x') }); }",
+        "function f($x) { return takes(match ($x) { 1 => 'a', 2 => 'b', default => throw new \
+        \\Exception('x') }); }",
         "f",
     );
     // An arm that may be an object keeps the site.
@@ -309,7 +323,10 @@ fn a_return_of_an_object_through_a_string_type_is_an_edge() {
     runs_to_string("function r(): ?string { return new S; }", "r");
     runs_to_string("function r(): string|int { return new S; }", "r");
     // Closures and arrow functions convert through their own return types (witnessed).
-    runs_to_string("function r() { $c = function (): string { return new S; }; return $c(); }", "r");
+    runs_to_string(
+        "function r() { $c = function (): string { return new S; }; return $c(); }",
+        "r",
+    );
     runs_to_string("function r() { $c = fn(): string => new S; return $c(); }", "r");
 }
 
@@ -384,7 +401,8 @@ fn a_property_the_chain_does_not_declare_typed_is_not_converted() {
     for class in [
         "class K { public $n; public function __construct($x) { $this->n = $x; } }",
         "class K { public function __construct($x) { $this->n = $x; } }",
-        "class A { private string $n = ''; }\nclass K extends A { public function __construct($x) { $this->n = $x; } }",
+        "class A { private string $n = ''; }\nclass K extends A { public function \
+        __construct($x) { $this->n = $x; } }",
     ] {
         let s = summary(&file(false, class), "K::__construct");
         assert!(!s.gaps.contains(&TO_STRING), "{class}: {s:?}");
@@ -519,7 +537,8 @@ const S_CLASS: &str =
 #[test]
 fn the_calling_files_mode_governs_a_parameter() {
     // 5.19. witness: a coercive caller into a strict callee prints `[S]`.
-    let lib = "<?php\ndeclare(strict_types=1);\nfunction takes_strict_lib(string $s) { return $s; }\n";
+    let lib = "<?php\ndeclare(strict_types=1);\nfunction takes_strict_lib(string $s) { return \
+        $s; }\n";
     let caller = format!("<?php\n{S_CLASS}function f() {{ return takes_strict_lib(new S); }}\n");
     let s = project_summary(&[("caller.php", &caller), ("lib.php", lib)], 0, "f");
     assert!(s.exhaustive && s.throws_exhaustive, "{s:?}");
@@ -531,7 +550,8 @@ fn a_strict_caller_into_a_coercive_callee_converts_nothing() {
     // 5.20, must stay. witness: `TypeError`.
     let lib = "<?php\nfunction takes_coercive_lib(string $s) { return $s; }\n";
     let caller = format!(
-        "<?php\ndeclare(strict_types=1);\n{S_CLASS}function f() {{ return takes_coercive_lib(new S); }}\n"
+        "<?php\ndeclare(strict_types=1);\n{S_CLASS}function f() {{ return takes_coercive_lib(new \
+        S); }}\n"
     );
     let s = project_summary(&[("caller.php", &caller), ("lib.php", lib)], 0, "f");
     assert!(s.exhaustive && s.throws_exhaustive && s.labels.is_empty(), "{s:?}");
@@ -543,7 +563,8 @@ fn the_declaring_files_mode_governs_a_return() {
     // gap, and the strict caller reaches it through the edge.
     let lib = "<?php\nfunction returns_from_coercive_lib($x): string { return $x; }\n";
     let caller = format!(
-        "<?php\ndeclare(strict_types=1);\n{S_CLASS}function f() {{ return returns_from_coercive_lib(new S); }}\n"
+        "<?php\ndeclare(strict_types=1);\n{S_CLASS}function f() {{ return \
+        returns_from_coercive_lib(new S); }}\n"
     );
     let files = [("caller.php", caller.as_str()), ("lib.php", lib)];
     let callee = project_summary(&files, 1, "returns_from_coercive_lib");
@@ -552,7 +573,8 @@ fn the_declaring_files_mode_governs_a_return() {
     let at_caller = project_summary(&files, 0, "f");
     assert!(!at_caller.exhaustive && !at_caller.throws_exhaustive, "{at_caller:?}");
     // The reverse: a coercive caller into a strict callee's return has no site in the callee.
-    let strict_lib = "<?php\ndeclare(strict_types=1);\nfunction returns_from_strict_lib($x): string { return $x; }\n";
+    let strict_lib = "<?php\ndeclare(strict_types=1);\nfunction returns_from_strict_lib($x): \
+        string { return $x; }\n";
     let callee = project_summary(&[("lib.php", strict_lib)], 0, "returns_from_strict_lib");
     assert!(callee.exhaustive && callee.throws_exhaustive, "{callee:?}");
 }
@@ -562,7 +584,8 @@ fn a_parameter_type_is_read_in_the_callees_namespace() {
     // `Stringable` unqualified in a namespace is `Ns\Stringable`: no such class, so the
     // object is not one, and converts. Imported, it is the engine's and never converts.
     let lib = "<?php\nnamespace Lib;\nfunction a(string|Stringable $s) { return $s; }\n";
-    let imported = "<?php\nnamespace Lib;\nuse Stringable;\nfunction b(string|Stringable $s) { return $s; }\n";
+    let imported = "<?php\nnamespace Lib;\nuse Stringable;\nfunction b(string|Stringable $s) { \
+        return $s; }\n";
     let qualified = "<?php\nnamespace Lib;\nfunction c(string|\\Stringable $s) { return $s; }\n";
     let caller = format!(
         "<?php\n{S_CLASS}function fa() {{ return \\Lib\\a(new S); }}\n\
@@ -574,4 +597,161 @@ fn a_parameter_type_is_read_in_the_callees_namespace() {
     assert_eq!(at(lib, "fa"), ["io.output.buffer"]);
     assert!(at(imported, "fb").is_empty());
     assert!(at(qualified, "fc").is_empty());
+}
+
+// ---- callbacks, defaults, accessors, constants, generators (review of #1013) ----------
+
+/// `symbol` in a strict file: exhaustive in both lanes with no label.
+fn strict_nothing(code: &str, symbol: &str) {
+    let s = summary(&file(true, code), symbol);
+    assert!(s.exhaustive && s.throws_exhaustive && s.labels.is_empty(), "{symbol}: {s:?}\n{code}");
+}
+
+#[test]
+fn call_user_func_hands_its_arguments_to_the_callee_in_the_calling_files_mode() {
+    // witness: `[S]` in a coercive file, `TypeError` under `strict_types=1`.
+    runs_to_string("function f() { return call_user_func('takes', new S); }", "f");
+    has_gap("function f($x) { return call_user_func('takes', $x); }", "f");
+    nothing("function f() { return call_user_func('takes', 'a'); }", "f");
+    strict_nothing("function f() { return call_user_func('takes', new S); }", "f");
+    // (`call_user_func_array` has no throw row, so only the conversion is read here.)
+    let code = "function f($x) { return call_user_func_array('takes', $x); }";
+    let s = summary(&file(true, code), "f");
+    assert!(!s.gaps.contains(&TO_STRING) && !s.throws_gaps.contains(&TO_STRING), "{s:?}");
+    has_gap("function f($x) { return call_user_func_array('takes', $x); }", "f");
+}
+
+#[test]
+fn an_invoker_converts_for_its_callback_in_coercive_mode_whatever_the_file_declares() {
+    // witness: `array_map('takes', [new S])` prints `[S]` under `strict_types=1` too, and so do
+    // `array_filter`, `usort` and `array_walk`.
+    for call in [
+        "array_map('takes', [new S])",
+        "array_map('takes', $xs)",
+        "array_filter($xs, 'takes')",
+        "usort($xs, 'takes')",
+        "array_map(function (string $s) { return $s; }, $xs)",
+    ] {
+        has_gap(&format!("function f($xs) {{ return {call}; }}"), "f");
+        let s = summary(&file(true, &format!("function f($xs) {{ return {call}; }}")), "f");
+        assert!(s.gaps.contains(&TO_STRING), "strict: {call}: {s:?}");
+    }
+    // A callback that converts nothing, and operands shown to hold no object.
+    nothing("function f($xs) { return array_map('takesInt', $xs); }", "f");
+    nothing("function f($xs) { return array_map('takesMixed', $xs); }", "f");
+    nothing("function f() { return array_map('takes', ['a', 'b']); }", "f");
+    lacks_gap("function f($xs) { return array_map(fn(int $i) => $i, $xs); }", "f");
+}
+
+#[test]
+fn a_call_through_a_callable_variable_converts_in_the_calling_files_mode() {
+    // witness: `[S]` for `$f = takes(...); $f(new S)` and for a closure, `TypeError` when strict.
+    runs_to_string("function f() { $c = takes(...); return $c(new S); }", "f");
+    runs_to_string(
+        "function f() { $c = function (string $s) { return $s; }; return $c(new S); }",
+        "f",
+    );
+    has_gap("function f($x) { $c = takes(...); return $c($x); }", "f");
+    strict_nothing("function f() { $c = takes(...); return $c(new S); }", "f");
+    nothing("function f() { $c = takesInt(...); return $c(new S); }", "f");
+}
+
+#[test]
+fn a_default_value_is_converted_in_the_declaring_files_mode() {
+    // witness: `function d(string $s = new S)` prints `[S]` when the argument is left out, and
+    // raises `TypeError` under `strict_types=1`.
+    runs_to_string("function d(string $s = new S) { return $s; }", "d");
+    runs_to_string("class K { public function m(?string $s = new S) { return $s; } }", "K::m");
+    strict_nothing("function d(string $s = new S) { return $s; }", "d");
+    nothing("function d(string $s = 'x', int $i = 3, ?string $n = null) { return $s; }", "d");
+    nothing("function d(string $s = PHP_EOL, string $t = self::class) { return $s; }", "d");
+    nothing("function d(object $o = new S, mixed $m = new S) { return $o; }", "d");
+}
+
+#[test]
+fn a_string_accessor_result_holds_no_object() {
+    // witness: `getMessage()` converts a message an object was stored into inside the accessor
+    // and returns a string; the conversion is the accessor call's own row (#997), not the
+    // return's.
+    lacks_gap("function ex(): string { return (new \\RuntimeException('x'))->getMessage(); }", "ex");
+    lacks_gap("function ex(\\Throwable $e): string { return $e->getMessage(); }", "ex");
+    lacks_gap(
+        "final class MyE extends \\RuntimeException {\n\
+            public function m(): string { return $this->getMessage(); } }",
+        "MyE::m",
+    );
+    // `getCode()` hands the object back, so a `string` return converts it.
+    has_gap("function ex(\\Throwable $e): string { return $e->getCode(); }", "ex");
+}
+
+#[test]
+fn a_class_constant_or_enum_case_or_class_name_converts_nothing() {
+    // witness: a class constant holds a scalar, an array or an enum case, which raises
+    // `TypeError` where `__toString` would run; `K::class` is a string.
+    let classes = "enum Suit { case Hearts; }\n\
+        final class KC { const NAME = 'n'; const CASE = Suit::Hearts;\n\
+            public static function a() { return takes(self::NAME); }\n\
+            public static function b() { return takes(KC::class); }\n\
+            public static function c(): string { return self::NAME; }\n\
+            public static function d(): string { return static::class; }\n\
+            public static function e() { return takes(KC::CASE); }\n\
+            public static function f() { return takes(Suit::Hearts); } }";
+    for symbol in ["a", "b", "c", "d", "e", "f"] {
+        nothing(classes, &format!("KC::{symbol}"));
+    }
+    // A class constant is still an unknown object for the other families.
+    let code = format!("{classes}\nfunction f() {{ return count(KC::CASE); }}");
+    let (effects, _) = lanes(&code, "f");
+    assert!(effects.contains(&"user-code-reach"), "{effects:?}");
+}
+
+#[test]
+fn a_global_constant_is_read_off_its_value() {
+    // witness: `const GO = new S;` makes `takes(GO)` print `[S]`; a scalar constant holds none.
+    nothing("function f() { return takes(PHP_EOL); }", "f");
+    nothing("const GC = 'g';\nfunction f() { return takes(GC); }", "f");
+    nothing("function f() { return takes('a' . PHP_EOL); }", "f");
+    gap("const GO = new S;\nfunction f() { return takes(GO); }", "f");
+    gap("function f() { return takes(NO_SUCH_CONSTANT); }", "f");
+    nothing("function r(): string { return PHP_EOL; }", "r");
+}
+
+#[test]
+fn a_generators_return_converts_nothing() {
+    // witness: `Generator::getReturn()` hands the object back whatever the return type says.
+    nothing("function g(): string|iterable { yield 1; return new S; }", "g");
+    nothing("function g($x): string|iterable { yield 1; return $x; }", "g");
+    // A function that only mentions `yield` in a nested closure is not a generator.
+    runs_to_string("function r(): string { $c = function () { yield 1; }; return new S; }", "r");
+}
+
+#[test]
+fn to_string_without_a_declared_return_converts_what_it_returns() {
+    // witness: `__toString() { return new S; }` prints `[S]`: the return type is implicit.
+    runs_to_string("final class W { public function __toString() { return new S; } }", "W::__toString");
+    gap(
+        "final class W { public $v; public function __toString() { return $this->v; } }",
+        "W::__toString",
+    );
+    nothing("final class W { public function __toString() { return 'w'; } }", "W::__toString");
+}
+
+#[test]
+fn a_constructor_destructuring_a_foreach_a_reference_or_a_chain_converts_for_the_property() {
+    // witness: all four print `[Fin]`.
+    let classes = "final class RefW { public string $name = '';\n\
+            public function __construct(Fin $x) { $this->name = &$x; } }\n\
+        final class ListW { public string $name = '';\n\
+            public function __construct(Fin $x) { [$this->name] = [$x]; } }\n\
+        final class ForW { public string $name = '';\n\
+            public function __construct(Fin $x) { foreach ([$x] as $this->name) {} } }\n\
+        final class ChainW { public string $a = ''; public string $b = '';\n\
+            public function __construct(Fin $x) { $this->a = $this->b = $x; } }";
+    for class in ["RefW", "ListW", "ForW", "ChainW"] {
+        let s = summary(&file(false, classes), &format!("{class}::__construct"));
+        assert!(s.gaps.contains(&TO_STRING) || s.labels == ["io.output.buffer"], "{class}: {s:?}");
+    }
+    // The same in a strict file converts nothing.
+    let s = summary(&file(true, classes), "ListW::__construct");
+    assert!(!s.gaps.contains(&TO_STRING) && s.labels.is_empty(), "{s:?}");
 }

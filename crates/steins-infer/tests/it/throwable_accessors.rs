@@ -84,13 +84,10 @@ fn every_accessor_is_pure_through_this() {
     }
 }
 
-// The returns below are `mixed`: `getMessage()` and `getCode()` hand back a property a subclass may fill
-// with an object, which a `string` return type would convert through `__toString` (ADR-0099 §4.3's
-// Coerce row, issue #868), so a `: string` there is a gap of its own (`coercion_boundaries`).
 #[test]
 fn a_declared_receiver_reaches_the_row_through_its_chain() {
     let src = "<?php\nnamespace App;\nclass Oops extends \\LogicException {}\n\
-               function project(Oops $e): mixed { return $e->getMessage(); }\n\
+               function project(Oops $e): string { return $e->getMessage(); }\n\
                function engine(?\\RuntimeException $e): int { return $e->getLine(); }\n\
                function contract(\\Throwable $e): ?\\Throwable { return $e->getPrevious(); }\n\
                final class Holder {\n    \
@@ -105,7 +102,7 @@ fn a_declared_receiver_reaches_the_row_through_its_chain() {
 #[test]
 fn exact_receivers_reach_the_row_too() {
     let src = "<?php\nclass Oops extends \\Exception {\n    \
-               public function up(): mixed { return parent::getMessage(); }\n}\n\
+               public function up(): string { return parent::getMessage(); }\n}\n\
                function fresh(): int { return (new Oops('x'))->getCode(); }\n";
     proven_pure(src, "Oops::up");
     proven_pure(src, "fresh");

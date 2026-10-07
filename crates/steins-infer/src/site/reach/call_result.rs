@@ -229,17 +229,18 @@ fn engine_method_return<'a>(
 ) -> Option<Returned<'a>> {
     let exit = engine_exit(cx, start, method)?;
     // `getMessage()` and `getCode()` read an untyped property (`protected $message`,
-    // `protected $code`) a subclass may fill with an object, which the return then
-    // converts (`__toString` runs in the accessor) or hands back: no receiver is shown
-    // to hold a string, `parent::` and `Foo::` run on `$this` and `new` is not told
-    // apart from them. `getFile()` and `getLine()` read typed properties, which hold a string
+    // `protected $code`) a subclass may fill with an object. `getMessage()` converts it
+    // inside the accessor (`__toString` runs there, which is the call's own gap, #997) and
+    // hands back a string whatever the property held (witnessed on PHP 8.5.11), so its result
+    // holds no object; `getCode()` hands the object back, so no receiver is shown to hold an
+    // integer, `parent::` and `Foo::` run on `$this` and `new` is not told apart from them. `getFile()` and `getLine()` read typed properties, which hold a string
     // or an int unless a subclass unsets one and declares `__get`: the engine then reads the
     // property through it (`unset($this->file)`, `__get` returning an object whose `__toString`
     // runs in the accessor, witnessed on PHP 8.5.11), so they are read only where no such
     // subclass can exist (see [`property_read_is_direct`]). `getTrace()` and
     // `getTraceAsString()` read a private typed property no subclass reaches.
     let accessor = method.to_ascii_lowercase();
-    if reading == Reading::Objects && ["getmessage", "getcode"].contains(&accessor.as_str()) {
+    if reading == Reading::Objects && accessor == "getcode" {
         return None;
     }
     if reading == Reading::Objects

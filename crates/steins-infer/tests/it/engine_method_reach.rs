@@ -189,9 +189,9 @@ fn a_named_argument_list_reads_blind() {
 fn a_throwable_accessor_stays_exhaustive() {
     let src = "<?php\n\
         class Oops extends \\Exception {\n\
-            public function read(): mixed { return $this->getMessage(); }\n\
+            public function read(): string { return $this->getMessage(); }\n\
         }\n\
-        function g(\\Throwable $e): mixed { return $e->getMessage(); }\n";
+        function g(\\Throwable $e): string { return $e->getMessage(); }\n";
     for symbol in ["Oops::read", "g"] {
         let s = summary(src, symbol);
         assert!(s.exhaustive && s.labels.is_empty(), "{symbol}: {s:?}");

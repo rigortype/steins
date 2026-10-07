@@ -104,7 +104,13 @@ impl<'a> Resolver<'a, '_, '_> {
             SiteKind::Call { name, callbacks } => self.higher_order(name, callbacks),
             SiteKind::MethodCall { receiver, method } => self.method_call(receiver, method),
             SiteKind::New { class } => self.new_site(class),
-            SiteKind::Callback { cbref } => self.callback(cbref),
+            // `$f(...)` over a body-local closure or first-class callable: the call's own
+            // arguments are handed to the callee's parameters, in the calling file's mode.
+            SiteKind::Callback { cbref } => {
+                self.callback(cbref);
+                let sig = operator::callback_signature(self.cx, cbref);
+                self.coerce_arguments(sig);
+            }
             // A `$f()` the scan cannot name, in either lane.
             SiteKind::Dynamic(
                 DynamicSite::Call { .. } | DynamicSite::MethodCall | DynamicSite::StaticCall,
@@ -248,6 +254,29 @@ impl<'a> Resolver<'a, '_, '_> {
     fn coerce_arguments(&mut self, sig: Option<operator::Signature<'_>>) {
         let args = &self.site.args;
         let resolved = operator::coerce_arguments(self.cx, self.frame, args, sig.as_ref());
+        self.out.targets.extend(resolved.targets);
+        self.out.gaps.extend(resolved.gaps);
+    }
+
+    /// The conversions the arguments an invoker hands on to its project callback run on the
+    /// callback's parameters (issue #868). `call_user_func` forwards its own arguments in the
+    /// calling file's mode, so they are read as a call's are; every other invoker forwards what
+    /// it chooses (an array's elements, a key) and the engine calls the callback in coercive
+    /// mode whatever the calling file declares (`array_map('takes', [new S])` converts under
+    /// `strict_types=1`), except `call_user_func_array`, which follows the calling file. Those
+    /// are a gap where the callback converts and some other operand may hold an object.
+    fn forwarded_arguments(&mut self, builtin: &str, cbref: &CallbackRef, callback_param: usize) {
+        let Some(sig) = operator::callback_signature(self.cx, cbref) else { return };
+        let site = self.site;
+        let resolved = if builtin.eq_ignore_ascii_case("call_user_func") {
+            let rest = site.args.get(callback_param + 1..).unwrap_or(&[]);
+            operator::coerce_arguments(self.cx, self.frame, rest, Some(&sig))
+        } else {
+            let follows_caller = builtin.eq_ignore_ascii_case("call_user_func_array");
+            let operands = site.operands.as_deref();
+            let skip = (callback_param, follows_caller);
+            operator::forwarded_arguments(self.cx, self.frame, (operands, skip), &sig)
+        };
         self.out.targets.extend(resolved.targets);
         self.out.gaps.extend(resolved.gaps);
     }
@@ -418,6 +447,7 @@ impl<'a> Resolver<'a, '_, '_> {
             match callbacks.iter().find(|(p, _)| *p == callback_param) {
                 Some((_, cbref)) => {
                     self.callback(cbref);
+                    self.forwarded_arguments(&builtin, cbref, callback_param);
                     handled.push(callback_param);
                 }
                 // Callback slot filled by an unresolvable value.
