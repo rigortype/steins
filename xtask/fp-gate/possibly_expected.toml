@@ -196,22 +196,23 @@
 # Triage of the `throw.maybe-undeclared` that issue #868's coercion at user boundaries (S5) moves,
 # 2026-10-07 (ADR-0099's amendment of that date), over the ten public packages, measured as `steins
 # check --profile strict --no-php --vendor-diagnostics --no-cache` on the merge base and on the head:
-# an object handed to a project parameter, returned through a return type or stored by a constructor
-# into a typed property that admits `string` is converted by PHP in a file without `strict_types=1`,
-# and an operand nothing shows is now `operator-to-string`. Only the coercive files carry a site:
-# `strict_types=1` heads 99% of monolog's, chronos', composer's, guzzle's, phpunit's and PHP-Parser's
-# source files, so those rows do not move for it. +48 sites and 1 reworded, -1: composer +17 (every
-# one in a vendored copy of `symfony/filesystem` under its test fixtures, 14 at the site and 3 a
-# callee's), console +22 net (22 at a site, 1 reworded kind list on `InputFile::normalizePath()`),
-# process +9; monolog -1, a concatenation whose operand is a `match` of literals, which an operand
-# the scan now shows to hold no object (a `match` whose every arm does). Of the 396 operand sites that
-# convert, 251 are a variable some write of the frame leaves unproven, 49 a method call on a receiver
-# the scan cannot name, 33 a conditional or coalesce, 28 an array element, 15 another object's
-# property and 20 other forms. 175 functions gain `operator-to-string` (141 with a site of their own,
-# 34 through an edge), 8 stop being effect-exhaustive and 14 throw-exhaustive (console and process),
-# none gains, `effect-diff` reports 8 `coverage-narrowed` events and `transform effects-envelope`
-# plans 3 fewer edits (726 to 723). `phpstan/phpstan-src` is not remeasured here: the local fp-gate
-# decides its row.
+# +67 findings and -52. It is two movements. (1) An object handed to a project parameter, returned
+# through a return type, stored by a constructor into a typed property that admits `string`, left out
+# as a default, or forwarded to a callback is converted by PHP, and an operand nothing shows is now
+# `operator-to-string`; the callbacks convert in coercive mode under `strict_types=1` too (phpunit and
+# composer, whose source files are 99% strict, gain there: `array_any($ids, static function (string $id)
+# {…})` over a local assigned from `array_keys()`), and the argument, return and property sites are in
+# the coercive files only (console and process declare no `strict_types`: console +22 sites, process
+# +9; composer +17 in a vendored copy of `symfony/filesystem` under its test fixtures). (2) The
+# operand readings that classifier answers for a concatenation too recover master gaps: `Foo::class`, a
+# class constant or enum case, a scalar global constant (`PHP_EOL`), a `match` whose every arm holds no
+# object, and `getMessage()` (a string) are no longer an operand that may be an object, which removes
+# `operator-to-string` or `user-code-reach` from findings in composer's `Factory`, `Compiler` and
+# command classes (15 removed), phpunit's `TextUI` commands and configuration (22), monolog's `Logger`
+# and `Utils` (4), guzzle's `HeaderProcessor` callers (5) and Carbon's `CarbonInterval` (1); 67 are
+# added, 52 removed. Net per package: composer +9,
+# console +19, process +9, phpunit -13, monolog -4, guzzle -4, Carbon -1. `phpstan/phpstan-src` is not
+# remeasured here: the local fp-gate decides its row.
 
 # Triage of the `throw.maybe-undeclared` that the call-site read of a literal printf format and a
 # literal strict flag removes, 2026-10-03 (issues #860 and #991, ADR-0101 §3.8, slice S3), over the
@@ -257,8 +258,8 @@
 # 3301 → 3306  2026-10-03 (issue #882): +5 throw.maybe-undeclared at a drop site (a `new` temporary, or the end of a body whose class imports a trait), 2 more gained `destructor`; the triage is above the composer row.
 # 3306 → 3276  2026-10-03 (issues #860, #991): -30 throw.maybe-undeclared (an `in_array` or `array_search` with a literal `true` 22, a callee that lost `user-code-reach` 6, a printf literal format 2; 2 in vendored copies of `Filesystem.php`), 6 more lost `user-code-reach` from their kind list; the triage is above the composer row.
 # 3276 → 3298  2026-10-03 (issue #882, S6c): +22 throw.maybe-undeclared ((b) -5, (c) +27: a parameter hinted with, or a `new` of a class whose chain reaches, a Composer or PSR name this checkout lacks); the triage is above the composer row.
-# 3298 → 3315  2026-10-07 (issue #868, S5): +17 throw.maybe-undeclared, every one in a vendored copy of `symfony/filesystem` under the test fixtures (14 at an `operator-to-string` site, 3 a callee's); the triage is above the composer row.
-"composer/composer" = 3315
+# 3298 → 3307  2026-10-07 (issue #868, S5): +9 throw.maybe-undeclared net (+18 sites, -9: 17 in a vendored copy of `symfony/filesystem` under the test fixtures, the callers of `JsonFile::encode()` and `Composer::getVersion()` lost); the triage is above the composer row.
+"composer/composer" = 3307
 
 # 1 — `Application.php:409`, class 4 (`exitWithErrorMessage`).
 # 1 → 2, 2026-09-01 with issue #589 (the cross-lane guard join; see
@@ -313,7 +314,8 @@
 # 3314 → 3277  2026-10-03 (issues #860, #991): -37 throw.maybe-undeclared (an `in_array` or `array_search` with a literal `true` 30, a printf literal format 7); the local fp-gate measures 3292 → 3255 here, the 22 of slack the row already carried (3292 against 3314 on master) is kept; the triage is above the composer row.
 # 3277 → 3206  2026-10-03 (issue #882, S6c): -71 throw.maybe-undeclared ((a) -84, (b) -4, (c) +11, (d) +6); the local fp-gate measures 3255 → 3184 here, the 22 of slack the row already carried is kept; the triage is above the composer row.
 # 3206 → 3227  2026-10-03 (issue #1003, S6d): +21 throw.maybe-undeclared (16 callers of `CodeCoverage::instance()`'s lazy-singleton write, 5 writes of a property hinted with a rule or exception class a class that reaches a destructor extends), 9 more with the kind in their list; the local fp-gate measures 3184 → 3205 here, the 22 of slack the row already carried is kept; the triage is above the composer row.
-"sebastianbergmann/phpunit" = 3227
+# 3227 → 3214  2026-10-07 (issue #868, S5): -13 throw.maybe-undeclared net (+4 sites and 5 callees' kind lists, -17 `TextUI` commands and configuration over constants and a `match`); the triage is above the composer row.
+"sebastianbergmann/phpunit" = 3214
 
 # 10 — six class 1/2/3 in `Application.php`, `CompletionInput.php` and
 # `SymfonyStyle.php`; four class 5 in `Tests/`.
@@ -338,8 +340,8 @@
 # 497 → 493  2026-10-03 (issues #860, #991): -4 throw.maybe-undeclared (`in_array` with a literal `true`), 1 more lost `user-code-reach` from its kind list; the triage is above the composer row.
 # 493 → 503  2026-10-03 (issue #882, S6c): +10 throw.maybe-undeclared ((a) -8, (c) +1, (d) +17: `OutputInterface` bounds of classes that hold a class this checkout lacks); the triage is above the composer row.
 # 503 → 505  2026-10-03 (issue #1003, S6d): +2 throw.maybe-undeclared, the writes of `Command::$code` (`?InvokableCommand`), and 1 more with the kind in its list; the triage is above the composer row.
-# 505 → 527  2026-10-07 (issue #868, S5): +22 throw.maybe-undeclared at an `operator-to-string` site, and 1 more with the kind in its list (`InputFile::normalizePath()`, a finding that read `user-code-reach` alone); the triage is above the composer row.
-"symfony/console" = 527
+# 505 → 524  2026-10-07 (issue #868, S5): +19 throw.maybe-undeclared net (+22 argument and return sites, -3 gone, 2 reworded); the triage is above the composer row.
+"symfony/console" = 524
 
 # 6 — every row class 4 (`$this->fail()` in `ProcessTest.php`).
 # Unmoved by issue #599 leg 1 (2026-09-01), and twice over. Every row is
@@ -354,7 +356,7 @@
 # phpdoc/offset rows moved here from their family tables with the posture routing.
 # 149 → 136  2026-10-03 (issue #877): -13 throw.maybe-undeclared (user-code-reach 9, operator-array-access 2, operator-to-string 2); the triage is above the composer row.
 # 136 → 133  2026-10-03 (issues #860, #991): -3 throw.maybe-undeclared (a printf literal format 2, `in_array` with a literal `true` 1); the triage is above the composer row.
-# 133 → 142  2026-10-07 (issue #868, S5): +9 throw.maybe-undeclared at an `operator-to-string` site (`Process.php`); the triage is above the composer row.
+# 133 → 142  2026-10-07 (issue #868, S5): +9 throw.maybe-undeclared net (+9 `operator-to-string` sites in `Process.php`); the triage is above the composer row.
 "symfony/process" = 142
 
 # 2 — both class 4 (`markTestSkipped()` in the serialization tests).
@@ -398,7 +400,8 @@
 # 462 → 461  2026-10-03 (issues #860, #991): -1 throw.maybe-undeclared (`in_array` with a literal `true`); the triage is above the composer row.
 # 461 → 461  2026-10-03 (issue #882, S6c): no net change ((b) -4, a class whose traits are all read and clean; (d) +4, a `CarbonInterface` bound of a class that holds one); the triage is above the composer row.
 # 461 → 465  2026-10-03 (issue #1003, S6d): +4 throw.maybe-undeclared, the writes of `CarbonPeriod::$carbonCurrent` (`?CarbonInterface`); the triage is above the composer row.
-"briannesbitt/Carbon" = 465
+# 465 → 464  2026-10-07 (issue #868, S5): -1 throw.maybe-undeclared net (`CarbonInterval`, a concatenation over a constant); the triage is above the composer row.
+"briannesbitt/Carbon" = 464
 
 # 0 → 1, 2026-08-16 with issue #391 — and a sixth class, the first that is not
 # a binding claim at all: `type.maybe-argument-mismatch` on
@@ -467,14 +470,15 @@
 # 256 → 254  2026-10-03 (issues #860, #991): -2 throw.maybe-undeclared (`in_array` with a literal `true` 1, a callee that lost `user-code-reach` 1); the triage is above the composer row.
 # 254 → 272  2026-10-03 (issue #882, S6c): +18 throw.maybe-undeclared ((b) -1, (c) +19, PSR-typed parameters and `new` of a PSR-7 class this checkout lacks); the triage is above the composer row.
 # 272 → 277  2026-10-03 (issue #1003, S6d): +5 throw.maybe-undeclared, the writes of `EasyHandle`'s `?ResponseInterface` and exception properties (a typed property whose hint a class reaching a destructor implements); the triage is above the composer row.
-"guzzle/guzzle" = 277
+# 277 → 273  2026-10-07 (issue #868, S5): -4 throw.maybe-undeclared net (callers of `HeaderProcessor`, a call over a `string` accessor and a constant); the triage is above the composer row.
+"guzzle/guzzle" = 273
 # 175 → 176  2026-10-03 (issues #880, #875): +1 throw.maybe-undeclared, 1 operator-to-string at an offset write; the triage by kind is above the composer row.
 # 176 → 172  2026-10-03 (issue #877): -4 throw.maybe-undeclared (operator-to-string 3, user-code-reach 1); the triage is above the composer row.
 # 172 → 170  2026-10-03 (issues #860, #991): -2 throw.maybe-undeclared (`in_array` with a literal `true`), 1 more lost `user-code-reach` from its kind list; the triage is above the composer row.
 # 170 → 173  2026-10-03 (issue #882, S6c): +3 throw.maybe-undeclared ((c) a PSR-typed parameter); the triage is above the composer row.
 # 173 → 175  2026-10-03 (issue #1003, S6d): +2 throw.maybe-undeclared, a constructor's write after `parent::__construct()` over a property hinted with a class this checkout lacks (`MandrillHandler`, `PHPConsoleHandler`); the triage is above the composer row.
-# 175 → 174  2026-10-07 (issue #868, S5): -1 throw.maybe-undeclared (`Utils::throwEncodeError()`, a concatenation whose operand is a `match` of literals); the triage is above the composer row.
-"Seldaek/monolog" = 174
+# 175 → 171  2026-10-07 (issue #868, S5): -4 throw.maybe-undeclared net (`Logger` and `Utils` concatenations over a `match` of literals or a class constant); the triage is above the composer row.
+"Seldaek/monolog" = 171
 "thephpleague/flysystem" = 38
 "cakephp/chronos" = 50
 

@@ -681,9 +681,10 @@ operator whose operand's class the analysis cannot pin: `.`, `echo`, `$o->p`,
 `$o['k']`, `foreach`, `clone`; the name of a dynamic property, `$o->$n`, and
 the value of an offset write into something that may be a string, `$s[0] = $o`,
 and, in a file without `declare(strict_types=1)`, an argument handed to a project
-parameter, a `return` through a return type, or a constructor's write to a typed
-property that admits `string` (`takes($x)`, `return $x;` under `: string`,
-`$this->name = $x;`), are `operator-to-string`, and a property hook the engine's own code can run, in
+parameter, a `return` through a return type, a parameter's default or a constructor's
+write to a typed property that admits `string` (`takes($x)`, `return $x;` under
+`: string`, `$this->name = $x;`), and in any file an object an engine invoker such as
+`array_map` hands to a callback that takes a `string`, are `operator-to-string`, and a property hook the engine's own code can run, in
 an inherited exception constructor or `getMessage()`, or that a promoted
 constructor parameter declares, is `operator-magic-property`; `destructor` is a
 value that may run `__destruct` when dropped, at an `unset`, a reassignment,
