@@ -210,6 +210,28 @@ fn an_object_that_is_a_member_of_the_hint_is_taken_as_it_is() {
     nothing("function f(FooS $o) { return takesFoo($o); }", "f");
 }
 
+#[test]
+fn self_and_parent_in_a_hint_name_the_declaring_class_and_its_parent() {
+    // Neighbour (symfony's `TreeNode::addChild(self|string|callable $node)`). witness: an
+    // instance of the class is taken as it is; any other `Stringable` object is converted.
+    let tree = "final class Tree {\n\
+        public function add(self|string $n) { return $n; }\n\
+        public function convertOnly(string|int $n) { return $n; }\n\
+    }\n\
+    class Leaf extends Foo {\n\
+        public function add(parent|string $n) { return $n; }\n\
+    }";
+    nothing(&format!("{tree}\nfunction f() {{ return (new Tree)->add(new Tree); }}"), "f");
+    nothing(&format!("{tree}\nfunction f() {{ return (new Leaf)->add(new FooS); }}"), "f");
+    // An object that is neither converts (the `Stringable` one) or raises.
+    let converted = format!("{tree}\nfunction f() {{ return (new Tree)->add(new S); }}");
+    runs_to_string(&converted, "f");
+    runs_to_string(
+        &format!("{tree}\nfunction f() {{ return (new Tree)->convertOnly(new S); }}"),
+        "f",
+    );
+}
+
 // ---- 5.9-5.10 what the operand is ----------------------------------------------------
 
 #[test]
