@@ -14,6 +14,7 @@ use crate::contract::GenericCarry;
 use crate::cx::Cx;
 use crate::descent::scope_class;
 use crate::inaccessible::class_scope_known;
+use crate::remembered::{Remembered, join_remembered};
 use crate::shape_projection::shape_fact;
 use crate::transfers::transfer_arg_known;
 
@@ -681,6 +682,24 @@ pub(crate) struct Store {
     /// [`collect_cmp_refine`]: crate::refine::collect_cmp_refine
     /// [`collect_shape_guards`]: crate::shapes::collect_shape_guards
     pub(crate) guarded_calls: Vec<ArgValue>,
+    /// **Remembered call results** (ADR-0102): what a guard proved about a builtin
+    /// call's result, keyed by the call's structure (`strlen($s)`, `setlocale(LC_ALL,
+    /// '0')`), so a later identical call in this frame answers it. See
+    /// [`crate::remembered`] for the gate, the production and the consumer.
+    ///
+    /// A **fourth subject kind** beside the variable, the offset and the property:
+    /// no variable can take a key's spelling (it contains `(`). It is walk-local and
+    /// branch-scoped exactly as the lanes above are: cloned into each branch, joined
+    /// at the merge by [`join_remembered`] (a key survives only where every branch
+    /// holds it, its fact the join of theirs), emptied by a Barrier ([`Self::clear`]).
+    ///
+    /// Forgotten by the one funnel every rebind of a name already passes
+    /// ([`Self::unbind`], through [`Self::forget_keys_naming`]) — ADR-0070's
+    /// statement-end forgetting — and by [`Self::forget_setting_keys`] at a site the
+    /// effect lane says may rewrite a setting. The map holds a handful of entries
+    /// and is empty in nearly every frame, so a scan stands in for the place-to-keys
+    /// reverse index ADR-0102 §2.4 names.
+    pub(crate) remembered: HashMap<String, Remembered>,
 }
 
 /// A symbol a positive existence guard vouches for (ADR-0049 §4 guard-respect leg).
@@ -848,6 +867,9 @@ impl Store {
     pub(crate) fn unbind(&mut self, var: &str) {
         self.refs.remove(var);
         self.drop_places_of(var);
+        // A call result remembered on this name is as stale as the name (ADR-0102 §2.4,
+        // rule 1) — ADR-0070's statement-end forgetting reaches keys through here.
+        self.forget_keys_naming(var);
         // Reassignment / invalidation also voids the guard-derived class facts and
         // the declared-type arm lane: a rebound `$var` no longer satisfies the
         // narrowed possibilities established for the old value (ADR-0052 §9 —
@@ -911,6 +933,30 @@ impl Store {
         self.narrowed.clear();
         self.vouched.retain(|v| !matches!(v, Vouch::VarProperty { .. }));
         self.may_hold_places = false;
+        // Nothing is reachable after a Barrier, a remembered call result included.
+        self.remembered.clear();
+    }
+
+    /// Forget every remembered call result whose key names the place `var` — a
+    /// write to an argument place (ADR-0102 §2.4, rule 1). A no-op on the empty map,
+    /// which is nearly every frame.
+    pub(crate) fn forget_keys_naming(&mut self, var: &str) {
+        if !self.remembered.is_empty() {
+            self.remembered.retain(|_, r| !r.places.iter().any(|p| p == var));
+        }
+    }
+
+    /// Forget every remembered call result whose row reads a setting: a site the
+    /// effect lane says may rewrite one has run (ADR-0102 §2.4, rules 2 and 3). The
+    /// `{}`-row keys stay; their results are functions of their places.
+    pub(crate) fn forget_setting_keys(&mut self) {
+        self.remembered.retain(|_, r| !r.reads_setting);
+    }
+
+    /// Whether any remembered call result reads a setting — the cheap question
+    /// that keeps the statement-level site scan off every frame that has none.
+    pub(crate) fn has_setting_keys(&self) -> bool {
+        self.remembered.values().any(|r| r.reads_setting)
     }
 
     /// The narrowed declared-type arm lane of `var` (ADR-0052 §3, consumer (d) —
@@ -1622,6 +1668,10 @@ pub(crate) fn join_stores(first: &Store, rest: &[&Store]) -> Store {
         .cloned()
         .collect();
 
+    // Remembered call results (ADR-0102 §2.3): a key survives a join only where every
+    // branch holds it, and holds the join of the branches' facts.
+    let remembered = join_remembered(first, rest);
+
     // The place guard ORs rather than intersects (see [`Store::may_hold_places`]):
     // the joined `contract` can keep a place lane whose `refs` entry the branches
     // disagreed on, so a branch that bound one is enough to keep sweeping.
@@ -1636,6 +1686,7 @@ pub(crate) fn join_stores(first: &Store, rest: &[&Store]) -> Store {
         members,
         vouched,
         guarded_calls,
+        remembered,
         may_hold_places,
     }
 }

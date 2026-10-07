@@ -20,6 +20,7 @@ use crate::cx::Cx;
 use crate::dispatch::BuiltinCallee;
 use crate::env::{ContractArm, HeapRes, Known, Store, Stratum, array_literal_fact, singleton_fact};
 use crate::refine::{flatten_arms, refine_declared_arms, seed_shape_fact};
+use crate::remembered::{self, Lanes};
 use crate::resource::{builtin_resource_arms, resource_fold_return_fact};
 use crate::fold::Folder;
 use crate::shape_projection::{
@@ -440,6 +441,9 @@ pub(crate) enum BuiltinRung {
     ResourceArms(Vec<ContractArm>, HeapRes),
     /// The declared-return floor (ADR-0069), every arm `Asserted`.
     Floor(Vec<ContractArm>),
+    /// What a guard proved about this very call earlier in the frame (ADR-0102):
+    /// the key's two lanes, each carrying the stratum its own rung gave it.
+    Remembered(Lanes),
 }
 
 /// Which of the ladder's two seam-dependent rungs a seam asks
@@ -482,6 +486,24 @@ pub(crate) struct OptionalRungs {
 /// too and renders what the name declares.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn builtin_call_rung(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    name: &str,
+    args: &[ArgValue],
+    env: &HashMap<String, Known>,
+    store: Option<&Store>,
+    poisoned: bool,
+    rungs: OptionalRungs,
+) -> Option<BuiltinRung> {
+    // Above the five rungs, and over them: a call a guard narrowed earlier in the
+    // frame answers what the guard proved (ADR-0102), which no rung below can say.
+    let ladder = builtin_ladder(cx, folder, name, args, env, store, poisoned, rungs);
+    remembered::compose(cx, ladder, name, args, store, poisoned)
+}
+
+/// The five rungs of [`builtin_call_rung`], the call's own answer.
+#[allow(clippy::too_many_arguments)]
+fn builtin_ladder(
     cx: &Cx,
     folder: &mut dyn Folder,
     name: &str,
@@ -563,6 +585,9 @@ pub(crate) fn builtin_operand_fact(
         }
         BuiltinRung::Envelope(fact) => Some((fact, Stratum::Verified)),
         BuiltinRung::Floor(arms) => floor_operand_known(&arms),
+        // What a guard proved of this call: the fact, else the arms read the way the
+        // floor's are (the value lane they denote, then the declared lane).
+        BuiltinRung::Remembered(lanes) => lanes.fact.or_else(|| floor_operand_known(&lanes.arms?)),
         // Not asked.
         BuiltinRung::ResourceArms(..) => None,
     }

@@ -1727,6 +1727,41 @@ impl<'a> Cx<'a> {
         }
     }
 
+    /// What the effect lane reads a scope's sites against (ADR-0099 §2): the class
+    /// the body belongs to, its parameter list and every [`SiteOrigin`] of the body,
+    /// the three a [`Frame`] is built from.
+    ///
+    /// `None` for the top-level script scope, which the effect lane never records
+    /// sites for (its locals are the globals), and for a property hook, which
+    /// carries none. A caller reading a site's answer from the walk has no answer
+    /// at such a scope and must treat the missing answer as a gap.
+    ///
+    /// [`Frame`]: crate::site::reach::Frame
+    /// [`SiteOrigin`]: steins_syntax::SiteOrigin
+    pub(crate) fn scope_site_frame(
+        &self,
+        scope: &Scope,
+    ) -> Option<(Option<&'a str>, &'a [Param], &'a [steins_syntax::SiteOrigin])> {
+        match &scope.owner {
+            ScopeOwner::TopLevel | ScopeOwner::PropertyHook { .. } => None,
+            ScopeOwner::Function { fqn, .. } => {
+                let f = self.scope_function(fqn)?;
+                Some((None, &f.params, &f.sites))
+            }
+            ScopeOwner::Method { class, method } => {
+                let cd = self.tree().classes().iter().find(|c| c.fqn.eq_ignore_ascii_case(class))?;
+                let m = cd.methods.iter().find(|m| m.name.eq_ignore_ascii_case(method))?;
+                Some((Some(cd.fqn.as_str()), &m.params, &m.sites))
+            }
+            ScopeOwner::Closure { def_offset } => {
+                let s = self.tree().scopes().iter().find(|s| {
+                    matches!(&s.owner, ScopeOwner::Closure { def_offset: d } if d == def_offset)
+                })?;
+                Some((None, &s.params, &s.sites))
+            }
+        }
+    }
+
     /// The parsed `@param`/`@return`/assert envelopes off the scope's owning
     /// declaration docblock (function or method), with class-level `@template`
     /// names shadowed for a method (issue #5), or `None` when there is no docblock

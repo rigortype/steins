@@ -19,6 +19,7 @@ use crate::env::{
     elem_place,
 };
 use crate::refine::seed_shape_fact;
+use crate::remembered::REMEMBERED_BOUND;
 use crate::return_arms::call_return_arms;
 use crate::walk::WalkCx;
 
@@ -229,6 +230,31 @@ fn bind_builtin_rung(
         // holds the declaration itself, and the value lane holds the one fact the
         // arms denote where they denote one. A multi-arm row lives in the arm lane
         // alone.
+        // What a guard proved of this very call (ADR-0102): the value lane the key
+        // holds, else the one its arms denote, as the floor seeds it; and the arm lane.
+        BuiltinRung::Remembered(lanes) => {
+            let known = match (lanes.fact, &lanes.arms) {
+                (Some((fact, stratum)), _) => Some((fact, stratum)),
+                (None, Some(arms)) => floor_value_fact(arms).map(|f| (f, Stratum::Asserted)),
+                (None, None) => None,
+            };
+            match known {
+                Some((fact, stratum)) => lhs.bind_known(
+                    env,
+                    store,
+                    Known::value_strat(
+                        fact,
+                        lhs.line,
+                        Some(REMEMBERED_BOUND.to_owned()),
+                        stratum,
+                    ),
+                ),
+                None => lhs.clear(env, store),
+            }
+            if let Some(arms) = lanes.arms {
+                store.contract.insert(lhs.var.to_owned(), arms);
+            }
+        }
         BuiltinRung::Floor(arms) => {
             match floor_value_fact(&arms) {
                 Some(fact) => lhs.bind_known(
