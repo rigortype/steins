@@ -62,7 +62,9 @@ pub(super) fn function_call(fc: &FunctionCall<'_>, sx: &SiteScope<'_>, out: &mut
         let var = direct_var_callee(fc);
         if let Some(cbref) = var.as_ref().and_then(|v| cx.locals.get(v).cloned()) {
             // `$fn()` resolved to a body-local single-assignment closure.
-            out.push(sx.site(to_span(fc.span()), SiteKind::Callback { cbref }));
+            let mut site = sx.site(to_span(fc.span()), SiteKind::Callback { cbref });
+            site.args = coerce::call_args(&fc.argument_list, sx);
+            out.push(site);
         } else {
             // A dynamic function call (`$f()`, `($cb)()`) — unprovable. The callee's
             // name travels when it is a parameter nothing rebinds.

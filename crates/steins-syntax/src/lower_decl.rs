@@ -31,7 +31,8 @@ use crate::lower_expr::{
     method_name_of, trace_static_class,
 };
 use crate::lower_site::{
-    HintClasses, body_end, promoted_hook_sites, scan_owner_sites, scope_exit_sites,
+    HintClasses, body_end, param_default_sites, promoted_hook_sites, scan_owner_sites,
+    scope_exit_sites,
 };
 use crate::names::{
     PREG_FLAG_CONST_NAMES, RefResolver, ctx_of, name_ref, use_binds_php_version_id,
@@ -628,6 +629,13 @@ fn normalize_alias_fqn(s: &str) -> String {
     s.trim().trim_start_matches('\\').to_ascii_lowercase()
 }
 
+/// Whether a body's statements make the function a generator.
+fn has_yield<'a, 'arena: 'a>(
+    mut statements: impl Iterator<Item = &'a mago_syntax::cst::Statement<'arena>>,
+) -> bool {
+    statements.any(|s| crate::lower_scope::node_is_generator(&Node::Statement(s)))
+}
+
 fn lower_function(
     f: &Function<'_>,
     aliases: &SteinsAttrAliases,
@@ -643,7 +651,9 @@ fn lower_function(
         receiver_writes(f.body.statements.iter()),
     )
     .returning(f.return_type_hint.as_ref().map(|r| &r.hint))
+    .generator(has_yield(f.body.statements.iter()))
     .with_body(&f.parameter_list, Captures::None, f.body.statements.iter().map(Node::Statement));
+    param_default_sites(&f.parameter_list, &cx, &mut sites);
     for s in f.body.statements.iter() {
         scan_owner_sites(&Node::Statement(s), &cx, &mut sites);
     }
@@ -1297,7 +1307,10 @@ fn lower_method(m: &Method<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex, rc
         )
         .in_constructor(m.name.value.eq_ignore_ascii_case(b"__construct"))
         .returning(m.return_type_hint.as_ref().map(|r| &r.hint))
+        .implicit_to_string(m.name.value)
+        .generator(has_yield(block.statements.iter()))
         .with_body(&m.parameter_list, Captures::None, block.statements.iter().map(Node::Statement));
+        param_default_sites(&m.parameter_list, &cx, &mut sites);
         for s in block.statements.iter() {
             scan_owner_sites(&Node::Statement(s), &cx, &mut sites);
         }

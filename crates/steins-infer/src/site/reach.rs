@@ -81,7 +81,12 @@ impl<'a> Frame<'a> {
             ArgShape::MethodCall { receiver, method } => {
                 call_result::method_result(cx, self, receiver, method)
             }
-            ArgShape::Unknown => Held::Unknown,
+            // A constant with a scalar value holds no object; one the catalog and the project
+            // state nothing of may. A class constant is no object this answer can place: the
+            // ToString family asks about it apart (`Operator::subject`).
+            ArgShape::GlobalConst(name) => global_const_fact(cx, name)
+                .map_or(Held::Unknown, |(fact, _)| fact_held(&fact)),
+            ArgShape::Unknown | ArgShape::ClassConst => Held::Unknown,
         }
     }
 }
@@ -182,7 +187,11 @@ impl Frame<'_> {
             ArgShape::MethodCall { receiver, method } => {
                 call_result::method_float_class(cx, self, receiver, method)
             }
-            ArgShape::ObjectFree | ArgShape::Array | ArgShape::Unknown => FloatClass::Unknown,
+            ArgShape::ObjectFree
+            | ArgShape::Array
+            | ArgShape::Unknown
+            | ArgShape::GlobalConst(_)
+            | ArgShape::ClassConst => FloatClass::Unknown,
         }
     }
 
@@ -477,6 +486,19 @@ impl FloatClass {
             Some(_) => Some(Self::Unknown),
         })
         .unwrap_or(Self::No)
+    }
+}
+
+/// What a value the fact `fact` describes holds: the scalar layers hold no object, whatever the
+/// other layers are (an array shape's elements, an object) is not read.
+fn fact_held(fact: &Fact) -> Held {
+    match fact {
+        Fact::Singleton(_)
+        | Fact::OneOf(_)
+        | Fact::Refined { .. }
+        | Fact::General { .. }
+        | Fact::Union { .. } => Held::ObjectFree,
+        _ => Held::Unknown,
     }
 }
 

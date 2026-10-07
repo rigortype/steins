@@ -677,6 +677,18 @@ pub enum ArgShape {
     /// method that receiver reaches. A `?->` call is [`Self::Unknown`], as it
     /// records no site receiver. Appended after [`Self::Call`].
     MethodCall { receiver: EffectRecv, method: String },
+    /// A bare global constant fetch (`PHP_EOL`, `\JSON_ERROR_NONE`, `LIMIT`), by the reference as
+    /// written (issue #868): the engine resolves it as PHP does and reads its value from the
+    /// catalog or the project, so a constant with a scalar value holds no object. Appended after
+    /// [`Self::MethodCall`].
+    GlobalConst(NameRef),
+    /// A class constant or enum case fetch (`self::NAME`, `Foo::BAR`, `Suit::Hearts`), though not
+    /// `Foo::class`, which is a string ([`object_free`]). A class constant holds a scalar, an
+    /// array or an enum case (an object, but one that cannot declare `__toString`): no string
+    /// conversion runs on it, which is all the ToString family asks. Every other family reads it
+    /// as an operand nothing is known of (an enum may implement `ArrayAccess` or `Countable`).
+    /// Appended after [`Self::GlobalConst`].
+    ClassConst,
 }
 
 /// What every write a frame makes to a variable is shown to store (an

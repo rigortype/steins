@@ -26,7 +26,7 @@
 //! `callable` is taken as it is, and the others are converted.
 
 use steins_syntax::{
-    ArgShape, CallArg, EffectRecv, NameRef, OperatorConstruct as C, OperatorFamily as F, Param,
+    ArgShape, CallArg, CallbackRef, EffectRecv, NameRef, OperatorConstruct as C, OperatorFamily as F, Param,
     RefKind, SiteOrigin, SourceTree,
 };
 
@@ -34,6 +34,7 @@ use super::chain::{Chain, Lookup, lookup};
 use super::{Bound, Operator, Subject, gap_kind};
 use crate::Sym;
 use crate::contract::IsA;
+use crate::project::FnResolution;
 use crate::cx::Cx;
 use crate::site::reach::{Frame, Held};
 use crate::site::ResolvedSite;
@@ -351,4 +352,68 @@ pub(in crate::site) fn method_signature<'a>(cx: &Cx<'a>, sym: &Sym) -> Option<Si
     let (file, class) = cx.find_class(class)?;
     let decl = class.methods.iter().find(|m| m.name.eq_ignore_ascii_case(method))?;
     Some(Signature { file, params: &decl.params, class: Some(class.fqn.clone()) })
+}
+
+/// The parameters of the project function or closure a callback names, and its file; `None` for
+/// a builtin, which has its own row, and for a name nothing resolves.
+pub(in crate::site) fn callback_signature<'a>(
+    cx: &Cx<'a>,
+    cbref: &CallbackRef,
+) -> Option<Signature<'a>> {
+    match cbref {
+        CallbackRef::Closure(offset) => {
+            let scope = cx.closure_scope(*offset)?;
+            Some(Signature { file: cx.cur, params: &scope.params, class: None })
+        }
+        CallbackRef::Named(name) => match cx.resolve_function(name) {
+            FnResolution::User(site) => {
+                Some(Signature { file: site.file, params: &cx.fn_decl(site).params, class: None })
+            }
+            _ => None,
+        },
+    }
+}
+
+/// The conversions the arguments an invoker forwards to its callback run: a gap where some
+/// parameter of the callback converts an object and an operand of the invoker other than the
+/// callback (position `skip.0`) may hold one. `skip.1` says the forwarding follows the calling
+/// file's mode, which a strict file turns into a `TypeError`.
+pub(in crate::site) fn forwarded_arguments<'a>(
+    cx: &Cx<'a>,
+    frame: &Frame<'a>,
+    (operands, skip): (Option<&[ArgShape]>, (usize, bool)),
+    sig: &Signature<'a>,
+) -> ResolvedSite {
+    let mut op = Operator {
+        cx,
+        frame,
+        gap: gap_kind(F::ToString),
+        family: F::ToString,
+        construct: C::Echo,
+        member: None,
+        out: ResolvedSite::default(),
+    };
+    if skip.1 && cx.strict() {
+        return op.out;
+    }
+    let tree = cx.units[sig.file].tree;
+    let converts = sig.params.iter().any(|p| {
+        let Some(span) = p.hint_span else { return false };
+        let spelled = Spelled::new(cx, (tree, span.start), sig.class.as_deref());
+        tree.source_slice(span).is_some_and(|text| Declared::parse(text, &spelled).converts())
+    });
+    if !converts {
+        return op.out;
+    }
+    let unproven = match operands {
+        None => true,
+        Some(shapes) => shapes
+            .iter()
+            .enumerate()
+            .any(|(at, shape)| at != skip.0 && frame.held(cx, shape) != Held::ObjectFree),
+    };
+    if unproven {
+        op.gap();
+    }
+    op.out
 }

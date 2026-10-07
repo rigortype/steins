@@ -1053,14 +1053,29 @@ mod tests {
     fn the_arg_shape_call_variants_are_appended_and_round_trip() {
         use steins_syntax::{ArgShape, EffectRecv, NameRef, RefKind};
         let variants = serde_variants::<ArgShape>();
-        let expected =
-            ["ObjectFree", "Array", "Param", "Local", "ThisProperty", "Unknown", "Call", "MethodCall"];
+        let expected = [
+            "ObjectFree",
+            "Array",
+            "Param",
+            "Local",
+            "ThisProperty",
+            "Unknown",
+            "Call",
+            "MethodCall",
+            "GlobalConst",
+            "ClassConst",
+        ];
         assert_eq!(variants, expected);
         let call = NameRef { raw: "strlen".to_owned(), kind: RefKind::Unqualified, offset: 7 };
         let shapes = [
             ArgShape::Call(call.clone()),
             ArgShape::MethodCall { receiver: EffectRecv::Var("e".to_owned()), method: "m".into() },
-            ArgShape::MethodCall { receiver: EffectRecv::ClassName(call), method: "n".into() },
+            ArgShape::MethodCall {
+                receiver: EffectRecv::ClassName(call.clone()),
+                method: "n".into(),
+            },
+            ArgShape::GlobalConst(call),
+            ArgShape::ClassConst,
         ];
         for shape in shapes {
             let bytes = crate::wire::to_vec(&shape).expect("a shape serializes");
@@ -1157,7 +1172,8 @@ mod tests {
     fn a_calls_arguments_round_trip_through_the_codec() {
         let parsed = parsed_fixture();
         let sites = fixture_sites(&parsed);
-        let with_args: Vec<&SiteOrigin> = sites.iter().copied().filter(|s| !s.args.is_empty()).collect();
+        let with_args: Vec<&SiteOrigin> =
+            sites.iter().copied().filter(|s| !s.args.is_empty()).collect();
         assert!(with_args.iter().any(|s| s.args.iter().any(|a| a.spread)));
         assert!(with_args.iter().any(|s| s.args.iter().any(|a| a.name.is_some())));
         assert!(with_args.iter().any(|s| s.args.iter().any(|a| a.receiver.is_some())));

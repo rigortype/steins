@@ -28,7 +28,10 @@ mod coerce;
 mod drops;
 mod family;
 
-pub(super) use coerce::{Signature, arguments as coerce_arguments, method_signature};
+pub(super) use coerce::{
+    Signature, arguments as coerce_arguments, callback_signature, forwarded_arguments,
+    method_signature,
+};
 
 use steins_syntax::{
     ArgShape, EffectRecv, NativeType, OperatorConstruct as C, OperatorFamily as F, SiteOrigin,
@@ -210,6 +213,12 @@ impl<'a> Operator<'a, '_> {
     /// What the operand `shape`, written `receiver`, may be.
     fn subject(&self, shape: &ArgShape, receiver: Option<&EffectRecv>) -> Subject {
         let comparison = matches!(self.construct, C::LooseCompare | C::OrderCompare | C::Switch);
+        // A class constant is a scalar, an array or an enum case, which cannot declare
+        // `__toString`: nothing is converted. A comparison is as it was, and so is every other
+        // family (an enum may be `Countable` or `ArrayAccess`).
+        if self.family == F::ToString && !comparison && *shape == ArgShape::ClassConst {
+            return Subject::NoObject;
+        }
         match self.frame.held(self.cx, shape) {
             Held::ObjectFree => return Subject::NoObject,
             // An array is not an object; a comparison still compares its elements.

@@ -696,19 +696,27 @@ fn s8_a_final_engine_accessor_returns_a_string() {
         );
         assert_eq!(operator_gaps(&returns(&parent), "RtBase::m"), [TO_STRING], "{accessor}");
     }
-    for accessor in ["getMessage()", "getCode()"] {
+    // `getCode()` hands back the untyped property, an object where a subclass stored one;
+    // `getMessage()` converts it inside the accessor and returns a string (witnessed on PHP
+    // 8.5.11), so its result holds no object: the conversion is the accessor call's own gap
+    // (#997), not the operator's.
+    for (accessor, gap) in [("getMessage()", false), ("getCode()", true)] {
+        let expected: &[&str] = if gap { &[TO_STRING] } else { &[] };
         for receiver in ["\\Throwable $e", "\\RuntimeException $e", "RtEvil $e"] {
             let function = format!("function f({receiver}) {{ return 'x' . $e->{accessor}; }}");
             let src = file(&format!("{RETURNS}class RtEvil extends \\RuntimeException {{}}"), &function);
-            assert_eq!(operator_gaps(&src, "f"), [TO_STRING], "{accessor} on {receiver}");
+            assert_eq!(operator_gaps(&src, "f"), expected, "{accessor} on {receiver}");
         }
         let new = format!("function f() {{ return 'x' . (new \\RuntimeException('m'))->{accessor}; }}");
-        assert_eq!(operator_gaps(&returns(&new), "f"), [TO_STRING], "{accessor}");
+        assert_eq!(operator_gaps(&returns(&new), "f"), expected, "{accessor}");
     }
-    // The review's witness: a constructor that hands a subclass's message on is not pure.
+    // The review's witness of #996, a constructor that hands a subclass's message on
+    // (`parent::__construct($e->getMessage(), $e->getCode())`), converts the message inside
+    // `getMessage()`, which is the accessor call's own row (#997), not an operand's: the
+    // operand is a string, and `getCode()` meets an `int` parameter, which converts nothing.
     let relay = "class RT extends \\RuntimeException {}\nclass PFE extends RT {}\n\
         final class Relay extends RT { public function __construct(PFE $e) {\n\
-        parent::__construct($e->getMessage(), $e->getCode()); } }";
+        parent::__construct($e->getCode(), $e->getCode()); } }";
     let s = summary(&returns(relay), "Relay::__construct");
     assert!(!s.exhaustive, "{s:?}");
     // `getTrace()` is an array that may hold objects: not an object itself.

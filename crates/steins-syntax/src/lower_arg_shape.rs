@@ -78,6 +78,14 @@ pub(crate) fn arg_shape(expr: &Expression<'_>, cx: &EffectScanCx) -> ArgShape {
             cx.bindings.shape(&strip_dollar(bytes_to_string(dv.name)))
         }
         Expression::Call(call) => call_shape(call, cx),
+        // `Foo::class` is a string and an object-free form; every other class constant is not
+        // shown, but only an enum case among them is an object.
+        Expression::Access(Access::ClassConstant(cc))
+            if !object_free(expr) && class_const_name(&cc.constant).is_some() =>
+        {
+            ArgShape::ClassConst
+        }
+        Expression::ConstantAccess(ca) => ArgShape::GlobalConst(name_ref(&ca.name)),
         Expression::Access(Access::Property(pa)) => match prop_fetch_of(pa.object, &pa.property) {
             Some((var, prop)) if var == "this" => ArgShape::ThisProperty(prop),
             _ => ArgShape::Unknown,
@@ -194,6 +202,10 @@ pub(crate) fn object_free(expr: &Expression<'_>) -> bool {
         // A `match` yields the result of one arm (or raises, which yields nothing), so it holds
         // an object only where an arm may; a `throw` expression never yields a value.
         Expression::Match(m) => m.arms.iter().all(|arm| object_free(arm.expression())),
+        // `Foo::class`, `static::class` and `$o::class` are strings.
+        Expression::Access(Access::ClassConstant(cc)) => {
+            class_const_name(&cc.constant).is_some_and(|name| name.eq_ignore_ascii_case("class"))
+        }
         Expression::Throw(_) => true,
         _ => false,
     }
