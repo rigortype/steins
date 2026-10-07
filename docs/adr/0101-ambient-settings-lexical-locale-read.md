@@ -19,7 +19,10 @@ envelope findings only, with no bulk transform; D4 the `precision` cell is in th
 label `global.read.setting.precision` is registered with its first coloured builtin row,
 which is S3's `%s` of a value that is a float (landed, §3.8), and float-to-string operator sites
 wait for ADR-0008's opt-in (recorded in `not-implemented.md`); a builtin reader whose read is
-value-conditional follows the three-way rule of §3.2, never an argument-blind row; D5 ADR-0102 follows slices S1–S2 and is independent of S4–S6;
+value-conditional follows the three-way rule of §3.2, never an argument-blind row (this wording
+of D4 confirmed by the owner, 2026-10-07; the other builtin readers of `precision` and
+`serialize_precision` — `strval`, `implode`, `print_r`, `var_export`, `json_encode`, … — are
+coloured by slice S6); D5 ADR-0102 follows slices S1–S2 and is independent of S4–S6;
 D6 `setlocale($c, '0')` narrows to the read in S4 with the other call-site narrowings (landed, §3.9).
 
 ADR-0021 Decision 2 certifies a builtin pure only when php-src shows it "reads
