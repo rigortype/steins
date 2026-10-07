@@ -145,7 +145,7 @@ pub use effects::{
 };
 
 mod setting;
-pub use setting::{SettingCell, ini_cell, narrowed_ini_labels};
+pub use setting::{IniAccess, IniCall, SettingCell, ini_call, ini_cell, narrowed_ini_labels};
 
 mod setting_reads;
 pub use setting_reads::{GateArg, SettingReadGate, setting_read_gate};

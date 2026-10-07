@@ -322,15 +322,24 @@ the function handed over as a callback are the `value-dependent-read` gap and no
 pass drops the label that cell spells. Seven labels join the registry with the first rows that colour them:
 the reads of `timezone`, `encoding` and `ini` and the writes of `precision`, `timezone`, `encoding` and `ini`
 (the precision read was S3's). The `env` pair is in the enum and not in the registry: its first row is
-`getenv`. The first rows to name those cells are the ini functions with a **literal option name**: `ini_get`
-(one argument) reads the cell that owns the name, and `ini_set`, `ini_alter` (an alias of `ini_set`; it had no
-row, as `ini_restore` had none) and `ini_restore` (two, two and one arguments) write it, so `ini_set('precision', '3')`
-is `{global.write.setting.precision}` where the argument-blind row is `{global.write}`. The names are exact
+`getenv`. Registering a label is not inert: `effect.unknown-label` stops firing on it, did-you-mean suggestions can
+offer it, and an interop docblock tag naming it binds as an envelope. The first rows to name those cells are the ini
+functions with a **literal option name** (`ini_call`, `narrowed_ini_labels`): `ini_get` (one argument) reads the cell
+that owns the name, `ini_set` and `ini_alter` (an alias of `ini_set`; it had no row, as `ini_restore` had none) with two
+arguments read **and** write it (`zif_ini_set` returns the old value, via `zend_ini_get_value`, unconditionally), and
+`ini_restore` (one argument) writes it, so `ini_set('precision', '3')` is
+`{global.read.setting.precision, global.write.setting.precision}` where the argument-blind row is `{global.write}`.
+The value an `ini_set` or `ini_alter` stores is converted to a string first, and a float goes through `precision`: on
+the narrowed path the value is held to the three-way rule over S3's float evidence (`ConstArgs::float_evidence` now
+also carries `ini_set` and `ini_alter`, `site/setting.rs`'s `ini_value_read`): a float adds the proven
+`global.read.setting.precision`, a value shown no float adds nothing, any other is `value-dependent-read`. The names are exact
 (the engine finds an entry by a case-sensitive lookup) and each is in php-src's table of entries that feed a
-reader: `precision` and `serialize_precision` (precision); `date.timezone` (timezone); `default_charset`,
-`internal_encoding`, `input_encoding`, `output_encoding`, `iconv.{internal,input,output}_encoding` and
-`mbstring.{internal_encoding,language,detect_order,http_input,http_output,substitute_character,strict_detection}`
-(encoding); `bcmath.scale`, `include_path` and `error_reporting` (ini). A name no cell owns, a name the call
+reader: `precision` and `serialize_precision` (precision); `date.timezone` (timezone); `iconv.{internal,input,output}_encoding` and
+`mbstring.{language,detect_order,http_input,http_output,substitute_character,strict_detection}` (encoding);
+`bcmath.scale`, `include_path` and `error_reporting` (ini). `default_charset`, `internal_encoding`, `input_encoding`,
+`output_encoding` and `mbstring.internal_encoding` feed the encoding readers too, but rewriting one also resets the
+mb-regex encoding, which no cell holds until S6d (it maps them, with `mb_regex_encoding`, `mb_ereg*` and `mb_split`);
+they keep the coarse row. A name no cell owns, a name the call
 does not spell as a literal (a variable, a concatenation, a constant, a named or spread argument list), a count
 that is not the function's own and an ini function handed over as a callback keep the coarse `global.read` or
 `global.write`, which prefix subsumption already makes admissible wherever the cell is. `ini_get_all` and the

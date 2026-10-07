@@ -338,6 +338,10 @@ impl<'a> Resolver<'a, '_, '_> {
         {
             self.gap(gap);
         }
+        let value = (positional, args.consts);
+        if let Some(gap) = setting::ini_value_read(read, builtin, value, &mut labels) {
+            self.gap(gap);
+        }
         self.function_hit(builtin, name.simple(), labels, &[]);
         let reach =
             builtin_reach(self.cx, self.frame, builtin, (args.shapes, Some(args.consts)), &[]);
