@@ -94,6 +94,12 @@ fn argument<'c>(
     position: usize,
 ) -> Option<GateArg<'c>> {
     let at = u8::try_from(position).ok()?;
+    // An array literal of string-literal patterns (a `preg_*` call's first argument).
+    if position == 0
+        && let Some(patterns) = &consts.patterns
+    {
+        return Some(GateArg::Strs(patterns));
+    }
     let literal = match position {
         0 => consts.first.as_ref(),
         1 => consts.second.as_ref(),

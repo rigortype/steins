@@ -1124,6 +1124,7 @@ mod tests {
                 (6, FloatEvidence::OneOf(vec![FloatEvidence::NoFloat, FloatEvidence::Float])),
             ],
             not_text: vec![(0, NotText::Literal), (1, NotText::Param("t".to_owned()))],
+            patterns: Some(vec!["/a/".to_owned(), r"/\w/i".to_owned()]),
         };
         let bytes = crate::wire::to_vec(&args).expect("const args serialize");
         let back: ConstArgs = crate::wire::from_slice(&bytes).expect("const args round-trip");

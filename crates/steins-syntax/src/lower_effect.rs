@@ -144,6 +144,36 @@ pub(crate) fn const_args_of_call(fc: &FunctionCall<'_>) -> ConstArgs {
     out
 }
 
+/// The patterns of a `preg_*` call's **array literal** first argument ([`ConstArgs::patterns`]):
+/// the string-literal values of a list, or, with `keys`, the string-literal keys of a map
+/// (`preg_replace_callback_array`). `None` when the argument is not an array literal, when any
+/// element is a spread, a hole, a computed value or (with `keys`) a key that is no string
+/// literal, and when the call has a named or spread argument.
+pub(crate) fn pattern_list_of(fc: &FunctionCall<'_>, keys: bool) -> Option<Vec<String>> {
+    let positional = |a: &Argument<'_>| matches!(a, Argument::Positional(p) if p.ellipsis.is_none());
+    if !fc.argument_list.arguments.iter().all(positional) {
+        return None;
+    }
+    let Argument::Positional(first) = fc.argument_list.arguments.iter().next()? else { return None };
+    let elements: Vec<&ArrayElement<'_>> = match first.value.unparenthesized() {
+        Expression::Array(a) => a.elements.iter().collect(),
+        Expression::LegacyArray(a) => a.elements.iter().collect(),
+        _ => return None,
+    };
+    let string = |expr: &Expression<'_>| match expr.unparenthesized() {
+        Expression::Literal(Literal::String(ls)) => Some(bytes_to_string(ls.value?)),
+        _ => None,
+    };
+    elements
+        .into_iter()
+        .map(|element| match element {
+            ArrayElement::Value(v) if !keys => string(v.value),
+            ArrayElement::KeyValue(kv) => string(if keys { kv.key } else { kv.value }),
+            _ => None,
+        })
+        .collect()
+}
+
 /// One argument expression as a [`ConstInt`], or `None` when it is anything
 /// other than integer literals, bare global constants and their `|` (ADR-0099
 /// §3.3).

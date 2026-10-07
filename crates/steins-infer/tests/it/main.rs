@@ -143,6 +143,7 @@ mod phpdoc_contract;
 mod phpdoc_undefined_method;
 mod platform_constants;
 mod preg_invalid_pattern;
+mod preg_locale;
 mod preg_match_all_seed;
 mod printf_arity;
 mod printf_call_site;

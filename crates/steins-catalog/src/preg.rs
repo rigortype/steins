@@ -88,6 +88,10 @@
 //! `''|'a'`), and `\Q…\E` contributes its bytes verbatim. A decline never
 //! disturbs the [`MatchedText`] summary next to it.
 
+mod locale;
+
+pub use locale::{compiles_pattern_argument, pattern_reads_locale};
+
 /// The most members a [`literals`](CaptureGroup::literals) union may carry.
 ///
 /// Eight (issue #177): the consumer domain's finite-value layer widens past
@@ -416,12 +420,13 @@ struct Delimited<'a> {
     case_insensitive: bool,
 }
 
-/// Strip the delimiters and modifiers, yielding the bare expression.
+/// Strip the delimiters off a pattern, yielding the bare expression and the raw modifier bytes
+/// after the closing delimiter, which each reader validates against the letters it knows.
 ///
 /// Mirrors PHP: skip leading whitespace, take the first character as the
 /// delimiter, and — for the four bracket pairs — track nesting to find its
 /// partner. Everything after the closing delimiter is modifiers.
-fn split_delimited(pattern: &str) -> Option<Delimited<'_>> {
+fn split_pattern(pattern: &str) -> Option<(&str, &[u8])> {
     let bytes = pattern.as_bytes();
     let mut start = 0;
     while start < bytes.len() && bytes[start].is_ascii_whitespace() {
@@ -467,9 +472,20 @@ fn split_delimited(pattern: &str) -> Option<Delimited<'_>> {
         i += 1;
     };
 
+    // The scan is byte-wise, but it only ever stops on ASCII, and UTF-8 never
+    // encodes an ASCII byte inside a multi-byte sequence, so both cuts land on
+    // character boundaries.
+    let body = pattern.get(start + 1..end)?;
+    Some((body, &bytes[end + 1..]))
+}
+
+/// Strip the delimiters and modifiers, yielding the bare expression, and decline on a modifier
+/// that is not known to leave the capture numbering alone.
+fn split_delimited(pattern: &str) -> Option<Delimited<'_>> {
+    let (body, modifiers) = split_pattern(pattern)?;
     let mut ucp_digits = false;
     let mut case_insensitive = false;
-    for &m in &bytes[end + 1..] {
+    for &m in modifiers {
         // PHP ignores space, LF, and CR between modifiers — but not tab.
         if m == b' ' || m == b'\n' || m == b'\r' {
             continue;
@@ -480,11 +496,6 @@ fn split_delimited(pattern: &str) -> Option<Delimited<'_>> {
         ucp_digits |= m == b'u';
         case_insensitive |= m == b'i';
     }
-
-    // The scan is byte-wise, but it only ever stops on ASCII, and UTF-8 never
-    // encodes an ASCII byte inside a multi-byte sequence, so both cuts land on
-    // character boundaries.
-    let body = pattern.get(start + 1..end)?;
     Some(Delimited { body, ucp_digits, case_insensitive })
 }
 
