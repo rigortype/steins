@@ -235,8 +235,7 @@ fn value_site(
 }
 
 /// Whether `shape` shows a value no declared type converts to a string: an object-free
-/// value, an array, or a class constant (a scalar, an array or an enum case, which cannot
-/// declare `__toString`).
+/// value, or an array.
 pub(super) fn shows_no_object(shape: &ArgShape) -> bool {
-    matches!(shape, ArgShape::ObjectFree | ArgShape::Array | ArgShape::ClassConst)
+    matches!(shape, ArgShape::ObjectFree | ArgShape::Array)
 }

@@ -17,7 +17,9 @@ use mago_syntax::cst::{
     UnaryPrefixOperator, Variable,
 };
 
-use crate::ast::{ArgShape, ArgValue, EffectRecv, FloatEvidence, NotText, SUPERGLOBALS, Stored};
+use crate::ast::{
+    ArgShape, ArgValue, ConstInit, ConstRef, EffectRecv, FloatEvidence, NotText, SUPERGLOBALS, Stored,
+};
 use crate::lower_effect::EffectScanCx;
 use crate::lower_expr::{
     class_const_name, effect_recv_of_class, effect_recv_of_object, effect_recv_of_object_declared,
@@ -80,10 +82,11 @@ pub(crate) fn arg_shape(expr: &Expression<'_>, cx: &EffectScanCx) -> ArgShape {
         Expression::Call(call) => call_shape(call, cx),
         // `Foo::class` is a string and an object-free form; every other class constant is not
         // shown, but only an enum case among them is an object.
-        Expression::Access(Access::ClassConstant(cc))
-            if !object_free(expr) && class_const_name(&cc.constant).is_some() =>
-        {
-            ArgShape::ClassConst
+        Expression::Access(Access::ClassConstant(cc)) if !object_free(expr) => {
+            match (trace_static_class(cc.class), class_const_name(&cc.constant)) {
+                (Some(class), Some(name)) => ArgShape::ClassConst { class, name },
+                _ => ArgShape::Unknown,
+            }
         }
         Expression::ConstantAccess(ca) => ArgShape::GlobalConst(name_ref(&ca.name)),
         Expression::Access(Access::Property(pa)) => match prop_fetch_of(pa.object, &pa.property) {
@@ -994,5 +997,80 @@ fn store_into_args(list: &ArgumentList<'_>, resolvable: bool, out: &mut Writes) 
         if !(resolvable && positional && bare) {
             store_into_root(arg.value(), out);
         }
+    }
+}
+
+/// What a class constant's initializer can evaluate to ([`ConstInit`]): the constants it takes
+/// a value from, and whether any part of it is not a form the scan reads. A literal form, an
+/// array of them and `Foo::class` need nothing; arithmetic, bit operations, `??`, `?:` and
+/// array elements pass what their operands are through.
+pub(crate) fn const_init(expr: &Expression<'_>) -> ConstInit {
+    let mut init = ConstInit::default();
+    collect_const_init(expr, &mut init, 0);
+    init
+}
+
+fn collect_const_init(expr: &Expression<'_>, init: &mut ConstInit, depth: u8) {
+    if depth > 24 {
+        init.opaque = true;
+        return;
+    }
+    let expr = expr.unparenthesized();
+    if object_free(expr) {
+        return;
+    }
+    match expr {
+        Expression::ConstantAccess(ca) => init.refs.push(ConstRef::Global(name_ref(&ca.name))),
+        Expression::Access(Access::ClassConstant(cc)) => {
+            match (trace_static_class(cc.class), class_const_name(&cc.constant)) {
+                (Some(class), Some(name)) => init.refs.push(ConstRef::Class { class, name }),
+                _ => init.opaque = true,
+            }
+        }
+        Expression::Binary(b) => match b.operator {
+            BinaryOperator::Addition(_)
+            | BinaryOperator::Subtraction(_)
+            | BinaryOperator::Multiplication(_)
+            | BinaryOperator::Division(_)
+            | BinaryOperator::Modulo(_)
+            | BinaryOperator::Exponentiation(_)
+            | BinaryOperator::BitwiseAnd(_)
+            | BinaryOperator::BitwiseOr(_)
+            | BinaryOperator::BitwiseXor(_)
+            | BinaryOperator::LeftShift(_)
+            | BinaryOperator::RightShift(_)
+            | BinaryOperator::NullCoalesce(_) => {
+                collect_const_init(b.lhs, init, depth + 1);
+                collect_const_init(b.rhs, init, depth + 1);
+            }
+            _ => init.opaque = true,
+        },
+        Expression::UnaryPrefix(u) => match u.operator {
+            UnaryPrefixOperator::Negation(_)
+            | UnaryPrefixOperator::Plus(_)
+            | UnaryPrefixOperator::BitwiseNot(_) => collect_const_init(u.operand, init, depth + 1),
+            _ => init.opaque = true,
+        },
+        Expression::Conditional(c) => {
+            collect_const_init(c.then.unwrap_or(c.condition), init, depth + 1);
+            collect_const_init(c.r#else, init, depth + 1);
+        }
+        Expression::Array(a) => a.elements.iter().for_each(|e| collect_element(e, init, depth)),
+        Expression::LegacyArray(a) => {
+            a.elements.iter().for_each(|e| collect_element(e, init, depth));
+        }
+        _ => init.opaque = true,
+    }
+}
+
+fn collect_element(element: &ArrayElement<'_>, init: &mut ConstInit, depth: u8) {
+    match element {
+        ArrayElement::KeyValue(kv) => {
+            collect_const_init(kv.key, init, depth + 1);
+            collect_const_init(kv.value, init, depth + 1);
+        }
+        ArrayElement::Value(v) => collect_const_init(v.value, init, depth + 1),
+        ArrayElement::Variadic(v) => collect_const_init(v.value, init, depth + 1),
+        ArrayElement::Missing(_) => {}
     }
 }

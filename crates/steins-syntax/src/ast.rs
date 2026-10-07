@@ -682,13 +682,15 @@ pub enum ArgShape {
     /// catalog or the project, so a constant with a scalar value holds no object. Appended after
     /// [`Self::MethodCall`].
     GlobalConst(NameRef),
-    /// A class constant or enum case fetch (`self::NAME`, `Foo::BAR`, `Suit::Hearts`), though not
-    /// `Foo::class`, which is a string (an object-free form). A class constant holds a scalar, an
-    /// array or an enum case (an object, but one that cannot declare `__toString`): no string
-    /// conversion runs on it, which is all the ToString family asks. Every other family reads it
-    /// as an operand nothing is known of (an enum may implement `ArrayAccess` or `Countable`).
+    /// A class constant or enum case fetch (`self::NAME`, `Foo::BAR`, `Suit::Hearts`) by a class
+    /// the scan can name, though not `Foo::class`, which is a string (an object-free form). A
+    /// class constant is no object but through a constant it names (`const X = GO;` over a global
+    /// `const GO = new S;` is legal), or an enum case, which cannot declare `__toString`: the
+    /// engine follows the initializers ([`ConstInit`]) and, where every one ends in a scalar or
+    /// an enum case, the ToString family reads no conversion. Every other family reads it as an
+    /// operand nothing is known of (an enum may implement `ArrayAccess` or `Countable`).
     /// Appended after [`Self::GlobalConst`].
-    ClassConst,
+    ClassConst { class: StaticClass, name: String },
 }
 
 /// What every write a frame makes to a variable is shown to store (an
@@ -1484,8 +1486,34 @@ pub struct ClassConstDecl {
     pub docblock: Option<String>,
     /// The span of the constant name identifier (for diagnostic positions).
     pub span: Span,
+    /// What the initializer can be, for the question whether the constant may hold an object
+    /// (issue #868). Appended after [`Self::span`].
+    pub init: ConstInit,
 }
 // end untyped surface (ADR-0078, issue #200)
+
+/// What a class constant's initializer can evaluate to, as far as a structural scan shows: an
+/// object only through a constant it names, since a class constant cannot be `new Foo` (an enum
+/// case is an object, but one that cannot declare `__toString`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
+pub struct ConstInit {
+    /// A part of the initializer is not a literal form or a constant fetch (a call, a
+    /// computed class): nothing is shown of the value.
+    pub opaque: bool,
+    /// The constants the initializer takes its value from, whatever else it is made of.
+    pub refs: Vec<ConstRef>,
+}
+
+/// A constant an initializer takes a value from ([`ConstInit::refs`]).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
+pub enum ConstRef {
+    /// `Foo::BAR`, `self::BAR`, `parent::BAR`, or an enum case.
+    Class { class: StaticClass, name: String },
+    /// A global constant, by the reference as written.
+    Global(NameRef),
+}
 
 /// A user-defined class, **interface**, or **enum** declaration (top-level or
 /// namespaced). Interfaces are lowered (ADR-0033 Liskov, [`Self::is_interface`]);
