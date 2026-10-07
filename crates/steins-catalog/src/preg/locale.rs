@@ -36,7 +36,9 @@
 //!
 //! Everything else is exempt, and witnessed so: `\d`, `\h`, `\v`, `\R`, literal bytes and
 //! ranges without a caseless flag, `\Q..\E` and a `preg_quote`d literal. An `x`-mode `#` outside
-//! a class comments out the rest of its line, so what the comment holds is not scanned.
+//! a class comments out the rest of its line, ending where the newline convention says (LF unless
+//! `(*CR)`, `(*CRLF)`, `(*ANYCRLF)` or `(*NUL)` says otherwise; `(*ANY)` declines), so what the comment
+//! holds is not scanned.
 //!
 //! A pattern this reader cannot parse as PCRE2 does (unbalanced, an unknown escape or verb, an
 //! unknown modifier) is `None`, never a verdict: the caller treats it as a read that depends on a
@@ -44,7 +46,7 @@
 
 mod scan;
 
-use scan::Scan;
+use scan::{Newline, Scan};
 
 use super::split_pattern;
 
@@ -106,7 +108,7 @@ pub fn pattern_reads_locale(pattern: &str) -> Option<bool> {
         caseless,
         extended,
         x_now: extended,
-        any_newline: start.any_newline,
+        newline: start.newline,
         ..Scan::default()
     };
     scan.run()?;
@@ -122,7 +124,7 @@ pub fn pattern_reads_locale(pattern: &str) -> Option<bool> {
 /// The pattern-start options `(*UTF)(*UCP)(*CRLF)…` before the expression proper.
 struct Leading {
     ucp: bool,
-    any_newline: bool,
+    newline: Newline,
     end: usize,
 }
 
@@ -151,7 +153,7 @@ fn is_start_option(name: &[u8]) -> bool {
 }
 
 fn leading_options(src: &[u8]) -> Leading {
-    let mut out = Leading { ucp: false, any_newline: false, end: 0 };
+    let mut out = Leading { ucp: false, newline: Newline::default(), end: 0 };
     while src[out.end..].starts_with(b"(*") {
         let rest = &src[out.end + 2..];
         let Some(close) = rest.iter().position(|b| *b == b')') else { break };
@@ -160,7 +162,15 @@ fn leading_options(src: &[u8]) -> Leading {
             break;
         }
         out.ucp |= name == b"UCP";
-        out.any_newline |= name == b"ANY";
+        out.newline = match name {
+            b"CR" => Newline::Cr,
+            b"LF" => Newline::Lf,
+            b"CRLF" => Newline::Crlf,
+            b"ANYCRLF" => Newline::AnyCrlf,
+            b"ANY" => Newline::Any,
+            b"NUL" => Newline::Nul,
+            _ => out.newline,
+        };
         out.end += 2 + close + 1;
     }
     out
@@ -381,13 +391,51 @@ mod tests {
             ("a comment holds a quote", "/a #\\Q\n\\d/x"),
             ("an inline x comment", "/(?x)a # \\w\n/"),
             ("a comment to the end", "/(?x)a # \\w/"),
-            ("a CR ends it", "/a #\\w\r\\d/x"),
+            ("a CR is comment text under LF", "/a #\\w\r\\d/x"),
             ("a scoped x comment", "/(?x: a # \\w\n)\\d/"),
             ("an unmatched paren in the comment", "/\\d #)\n/x"),
             ("a high byte in a comment is not skipped whitespace", "/^a#\u{a0}\nb$/x"),
         ] {
             assert_eq!(reads(pattern), Some(false), "{row}: {pattern:?}");
         }
+    }
+
+    /// An `x` comment ends where the newline convention says, no earlier: under LF a CR, VT, FF
+    /// or NUL is comment text, and a `\Q` or `(?#` in it must not hide the pattern after the LF
+    /// (X1 to X8 of the re-review); under `(*CR)`, `(*CRLF)` and `(*NUL)` the LF is comment text.
+    #[test]
+    fn an_extended_comment_ends_at_the_newline_convention_and_nowhere_else() {
+        for (row, pattern) in [
+            ("X1 CR", "/^a#x\r\\Q\n\\w$/x"),
+            ("X2 FF", "/^a#x\x0C\\Q\n\\w$/x"),
+            ("X3 VT", "/^a#x\x0B\\Q\n\\w$/x"),
+            ("X4 NUL", "/^a#x\0\\Q\n\\w$/x"),
+            ("X5 CR then a comment group", "/^a#x\r(?#\n\\w(b)?$/x"),
+            ("X6 (*CR)", "/(*CR)^a#x\n\\Q\r\\w$/x"),
+            ("X7 (*CRLF)", "/(*CRLF)^a#x\n\\Q\r\n\\w$/x"),
+            ("X8 (*NUL)", "/(*NUL)^a#x\n\\Q\0\\w$/x"),
+            ("X9 (*ANYCRLF) CR", "/(*ANYCRLF)^a#x\r\\w$/x"),
+            ("(*ANYCRLF) CRLF", "/(*ANYCRLF)^a#x\r\n\\w$/x"),
+            ("(*ANYCRLF) LF", "/(*ANYCRLF)^a#x\n\\w$/x"),
+            ("(*LF) explicit", "/(*LF)^a#x\r\\Q\n\\w$/x"),
+            ("Y7 CR LF", "/^a#x\r\n\\w$/x"),
+            ("the last convention wins", "/(*CR)(*LF)^a#x\r\\Q\n\\w$/x"),
+        ] {
+            assert_eq!(reads(pattern), Some(true), "{row}: {pattern:?}");
+        }
+        // Where the comment does swallow the reader, nothing reads, and a lone CR under
+        // `(*CRLF)` is no end.
+        for (row, pattern) in [
+            ("(*CR) swallows the LF", "/(*CR)^a#x\n\\w\r$/x"),
+            ("(*CRLF) swallows a lone CR", "/(*CRLF)^a#x\r\\w\r\n$/x"),
+            ("(*NUL) swallows the LF", "/(*NUL)^a#x\n\\w\0$/x"),
+            ("LF swallows a CR", "/^a#x\r\\w\n$/x"),
+        ] {
+            assert_eq!(reads(pattern), Some(false), "{row}: {pattern:?}");
+        }
+        // `(*ANY)` differs by UTF mode and is not modelled.
+        assert_eq!(reads("/(*ANY)^a#x\n\\w$/x"), None);
+        assert_eq!(reads("/(*ANY)^a b$/x"), Some(false), "no comment, nothing to decide");
     }
 
     /// UCP leaves the tables but for `[:ascii:]` and, without UTF, a name above ASCII (B3).

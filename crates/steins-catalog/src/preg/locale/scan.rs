@@ -29,8 +29,22 @@ pub(super) struct Scan<'a> {
     pub(super) x_now: bool,
     /// The `x` flag at each enclosing group's opening, restored at its `)`.
     pub(super) stack: Vec<bool>,
-    /// `(*ANY)` makes NEL and the Unicode separators end an `x` comment too.
-    pub(super) any_newline: bool,
+    /// The newline convention, which decides where an `x` comment ends.
+    pub(super) newline: Newline,
+}
+
+/// The newline conventions a pattern-start option selects (`(*CR)`, `(*LF)`, `(*CRLF)`,
+/// `(*ANYCRLF)`, `(*ANY)`, `(*NUL)`); the default is LF.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub(super) enum Newline {
+    #[default]
+    Lf,
+    Cr,
+    Crlf,
+    AnyCrlf,
+    Nul,
+    /// LF, VT, FF, CR, NEL and the Unicode separators, which differ by UTF mode: not modelled.
+    Any,
 }
 
 const POSIX_NAMES: &[&[u8]] = &[
@@ -99,7 +113,7 @@ impl Scan<'_> {
                 b'[' => self.bracket()?,
                 b'(' => self.group()?,
                 b')' => self.x_now = self.stack.pop()?,
-                b'#' if self.x_now => self.comment(),
+                b'#' if self.x_now => self.comment()?,
                 b'.' => self.foldable = true,
                 _ => self.literal(b),
             }
@@ -139,25 +153,29 @@ impl Scan<'_> {
         }
     }
 
-    /// An `x`-mode comment, from the `#` already read to the end of its line. Every line ending
-    /// any newline convention names ends it, which can only end it early: what follows is then
-    /// scanned as pattern, an over-read and never a skipped token.
-    fn comment(&mut self) {
+    /// An `x`-mode comment, from the `#` already read to the end of its line, which is where the
+    /// newline convention says (LF by default: a CR, VT, FF or NUL inside it is comment text).
+    /// What the comment holds is not scanned, so it must end exactly where PCRE2 ends it: an
+    /// early end would scan a `\Q` or `(?#` the comment still holds and let it hide the pattern
+    /// after the newline. `(*ANY)` is not modelled and declines.
+    fn comment(&mut self) -> Option<()> {
         while let Some(b) = self.next() {
-            if matches!(b, b'\n' | b'\r' | 0x0B | 0x0C | 0) {
-                return;
-            }
-            if self.any_newline {
-                let rest = &self.src[self.pos..];
-                if b == 0x85 {
-                    return;
+            let ends = match self.newline {
+                Newline::Lf => b == b'\n',
+                Newline::Cr => b == b'\r',
+                Newline::Nul => b == 0,
+                Newline::AnyCrlf => b == b'\r' || b == b'\n',
+                Newline::Crlf => b == b'\r' && self.peek() == Some(b'\n'),
+                Newline::Any => return None,
+            };
+            if ends {
+                if self.newline == Newline::Crlf || (self.newline == Newline::AnyCrlf && b == b'\r') {
+                    self.eat(b'\n');
                 }
-                if b == 0xE2 && (rest.starts_with(&[0x80, 0xA8]) || rest.starts_with(&[0x80, 0xA9])) {
-                    self.pos += 2;
-                    return;
-                }
+                return Some(());
             }
         }
+        Some(())
     }
 
     /// The body of `\Q…\E`, to the `\E` or the end: literal, so only a caseless flag reads it.

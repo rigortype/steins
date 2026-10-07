@@ -343,7 +343,14 @@ fn preg_rows() -> Vec<Row> {
         row("preg R6 UCP name", r#"var_export(preg_match("/(*UCP)(?<\xE4>a)/", 'a'), true)"#, m("/(*UCP)(?<\u{e4}>a)/"), Moves),
         row("preg R7 u name", r#"var_export(preg_match("/(?<\xC3\xA4>a)/u", 'a'), true)"#, m("/(?<\u{e4}>a)/u"), Stable),
         // The `r` modifier is a valid flag, and `\w` under it reads as ever (PHP 8.4 and later).
-        row("preg r flag", r#"PHP_VERSION_ID < 80400 ? "skip" : var_export(preg_match('/^\w$/r', "\xE4"), true)"#, m(r"/^\w$/r"), Moves),
+        row("preg r flag", r#"var_export(PHP_VERSION_ID < 80400 ? preg_match('/^\w$/', "\xE4") : preg_match('/^\w$/r', "\xE4"), true)"#, m(r"/^\w$/r"), Moves),
+        // An `x` comment ends at the newline convention's character and nowhere earlier: a `\Q`
+        // after a CR (LF convention), or after an LF (`(*CR)`, `(*CRLF)`, `(*NUL)`), is comment text.
+        row("preg X1 CR in comment", r#"var_export(preg_match("/^a#x\r\\Q\n\\w$/x", "a\xE4"), true)"#, m("/^a#x\r\\Q\n\\w$/x"), Moves),
+        row("preg X3 VT in comment", r#"var_export(preg_match("/^a#x\x0B\\Q\n\\w$/x", "a\xE4"), true)"#, m("/^a#x\x0B\\Q\n\\w$/x"), Moves),
+        row("preg X6 CR convention", r#"var_export(preg_match("/(*CR)^a#x\n\\Q\r\\w$/x", "a\xE4"), true)"#, m("/(*CR)^a#x\n\\Q\r\\w$/x"), Moves),
+        row("preg X7 CRLF convention", r#"var_export(preg_match("/(*CRLF)^a#x\n\\Q\r\n\\w$/x", "a\xE4"), true)"#, m("/(*CRLF)^a#x\n\\Q\r\n\\w$/x"), Moves),
+        row("preg X8 NUL convention", r#"var_export(preg_match("/(*NUL)^a#x\n\\Q\0\\w$/x", "a\xE4"), true)"#, m("/(*NUL)^a#x\n\\Q\0\\w$/x"), Moves),
         // `preg_quote` compiles nothing.
         row("preg P27 quote", r#"bin2hex(preg_quote("\xE4."))"#, Reads("preg_quote"), Stable),
     ]
