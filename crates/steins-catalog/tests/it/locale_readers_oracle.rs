@@ -343,7 +343,7 @@ fn preg_rows() -> Vec<Row> {
         row("preg R6 UCP name", r#"var_export(preg_match("/(*UCP)(?<\xE4>a)/", 'a'), true)"#, m("/(*UCP)(?<\u{e4}>a)/"), Moves),
         row("preg R7 u name", r#"var_export(preg_match("/(?<\xC3\xA4>a)/u", 'a'), true)"#, m("/(?<\u{e4}>a)/u"), Stable),
         // The `r` modifier is a valid flag, and `\w` under it reads as ever (PHP 8.4 and later).
-        row("preg r flag", r#"var_export(PHP_VERSION_ID < 80400 ? preg_match('/^\w$/', "\xE4") : preg_match('/^\w$/r', "\xE4"), true)"#, m(r"/^\w$/r"), Moves),
+        row("preg r flag", r#"var_export((PHP_VERSION_ID < 80400 || version_compare(PCRE_VERSION, '10.43', '<')) ? preg_match('/^\w$/', "\xE4") : preg_match('/^\w$/r', "\xE4"), true)"#, m(r"/^\w$/r"), Moves),
         // An `x` comment ends at the newline convention's character and nowhere earlier: a `\Q`
         // after a CR (LF convention), or after an LF (`(*CR)`, `(*CRLF)`, `(*NUL)`), is comment text.
         row("preg X1 CR in comment", r#"var_export(preg_match("/^a#x\r\\Q\n\\w$/x", "a\xE4"), true)"#, m("/^a#x\r\\Q\n\\w$/x"), Moves),
