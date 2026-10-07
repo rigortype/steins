@@ -202,10 +202,10 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
         // `pcre2_maketables()` builds from the process locale once a script has called
         // `setlocale` (ADR-0101 §3.10, S5). The row is the upper bound and the literal pattern
         // decides it at the call site (`locale_read_gate`, `pattern_reads_locale`): `\w`, `\s`,
-        // `\b` and the POSIX classes, a caseless
-        // flag over a letter, and the `x` flag over a byte of `0x80..=0xFF` read; `u` and a
-        // leading `(*UCP)` exempt all of it but the last. `preg_quote` compiles nothing and
-        // keeps its empty row, and so do `preg_last_error` and `preg_last_error_msg`. The
+        // `\b` and the POSIX classes, a caseless flag where a letter can match, and the `x` flag
+        // over a byte of `0x80..=0xFF` read; `u` and a leading `(*UCP)` exempt the classes but
+        // not the caseless flag or the `x` flag. `preg_quote` compiles nothing and keeps its
+        // empty row, and so do `preg_last_error` and `preg_last_error_msg`. The
         // names that were `{}` through the fold allowlist (`preg_match`, `preg_match_all`,
         // `preg_split`) or only an out-parameter row (`preg_replace` and its kin) read the
         // locale as `sprintf` did.

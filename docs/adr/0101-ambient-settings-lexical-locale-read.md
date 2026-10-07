@@ -694,25 +694,43 @@ decides lexically, the way S4's readers do, with the owner's adoption of D-S5a. 
   modifier `u` sets `PCRE2_UTF` **and** `PCRE2_UCP`, and UCP is what routes `\w`, `\s`, `\b`, the POSIX classes
   and caseless matching to Unicode properties; `(*UTF)` alone does not. The read is of the locale cell exactly as
   `setlocale` leaves it, and the exemption is UCP, not UTF.
-- **The rule** (`pattern_reads_locale`, `steins-catalog`'s `preg/locale.rs`; one byte scan of its own, since
-  `capture_groups` declines on `x`, `n` and every `(*…)` verb, which is where this verdict has to answer).
-  Outside `u` and a leading `(*UCP)` a literal pattern reads iff it holds `\w \W \s \S \b \B`, a POSIX class
-  other than `[:digit:]` and `[:xdigit:]`, a caseless flag (the modifier, or an `i` an inline `(?…)` group sets)
-  together with a byte the flag can fold (an ASCII letter, a byte of `0x80..=0xFF`, a numeric escape or a back
-  reference: **D-S5a**), the `x` flag together with a byte of `0x80..=0xFF` (or an escape spelling one), or a
-  group or reference name with such a byte. It does not read for `\d`, `\p{..}`, literal bytes and ranges, `\h`,
-  `\v`, `.`, `\Q..\E` without a caseless flag, a group name or POSIX name (not a letter of the pattern), and a
-  `preg_quote`d literal, which compiles nothing. **D-S5b** stands: the subject literal does not exempt a
-  reading pattern, since an ASCII-only subject cannot meet a high byte only where the table is C's.
-  The `i` rule reads every lettered pattern because on glibc's `tr_TR` the case map of ASCII `I` and `i` is not
-  the C one; macOS did not move (S1, S2, S3, S23, P10, P14 stood still), so the oracle asserts those rows only
-  as the rule's (`ReadsByRule`) and the narrower reading (a high byte only) needs a glibc witness first.
-- **A deviation from the design, witnessed.** The design exempts `u` and `(*UCP)` wholesale. The oracle showed
-  one table they do not leave: PCRE2's `x` flag skips what `isspace` says of a byte below 256 **in every mode**,
-  so `/^a\xC2\xA0b$/xu` (a no-break space in the pattern) matches `ab` under `de_DE.UTF-8` and does not under
-  `C`, and `/(*UCP)^a\xA0b$/x` the same. A pattern with `u` or a leading `(*UCP)` therefore reads iff it is
-  extended (the modifier, or an inline `x` set) and holds a raw byte of `0x80..=0xFF`; everything else about it
-  is unread, and it is not parsed (`/^.[/u` is no read). The two oracle rows fail without this clause.
+- **The rule** (`pattern_reads_locale`, `steins-catalog`'s `preg/locale.rs` and `preg/locale/scan.rs`; one byte
+  scan of its own, since `capture_groups` declines on `x`, `n` and every `(*…)` verb, which is where this verdict
+  has to answer). Outside `u` and a leading `(*UCP)` a literal pattern reads iff it holds `\w \W \s \S \b \B`,
+  `[[:<:]]` or `[[:>:]]` (PCRE2 rewrites them to `\b`), a POSIX class other than `[:digit:]` and `[:xdigit:]`, or a
+  group or reference name with a byte of `0x80..=0xFF`. In **every** mode it reads iff it holds
+  - a caseless flag (the modifier, or an `i` an inline `(?…)` group sets) together with a character it can match
+    that is a letter: a literal letter or byte of `0x80..=0xFF`, a range whose span holds a letter (`[!-~]`), `.`, a
+    negated class, `\w \D \S \N \p{..}`, a POSIX class with letters (`[:xdigit:]` has `a` to `f`), a numeric escape
+    or a back reference in any spelling (`\1`, `\k<n>`, `\g{n}`, `(?P=n)`: **D-S5a**, extended to `u` below). It
+    reads nothing only where every character it can match is provably no letter: digits, punctuation, or
+    ranges confined to those;
+  - the `x` flag together with a raw byte of `0x80..=0xFF` (or an escape spelling one) outside an `x` comment;
+  - `[[:ascii:]]` or `[[:^ascii:]]`, which PCRE2 keeps on the table under UCP (`pcre2_compile.c:752`), and, under
+    `(*UCP)` without `u`, a name with a byte of `0x80..=0xFF` (`read_name`).
+
+  It does not read for `\d`, `\h`, `\v`, `\R`, literal bytes and ranges without a caseless flag, a group name or
+  POSIX name (not a letter of the pattern), `\Q..\E` without a caseless flag, and a `preg_quote`d literal, which
+  compiles nothing. An `x`-mode `#` outside a class (with the flag's scope kept per group: `(?x)`, `(?-x)`, `(?x:`)
+  comments out the rest of its line, which is not scanned, so a `\Q` or `(?#` in the comment swallows nothing
+  after the newline; every newline convention's terminator ends it, which can only end it early. **D-S5b** stands:
+  the subject literal does not exempt a reading pattern, since an ASCII-only subject cannot meet a high byte only
+  where the table is C's. `(*UTF)` alone is not UCP.
+  The `i` rule reads every lettered pattern because on glibc's `tr_TR` the case map of ASCII `I` and `i` is not the
+  C one; macOS did not move (S1, S2, S3, S23, P10, P14 stood still), so the oracle asserts those rows only as the
+  rule's (`ReadsByRule`), and the narrower reading (a high byte only) needs a glibc witness first.
+  **The rule extends to `u`.** Under UTF and UCP, caseless matching of an ASCII pattern character still compares
+  through the locale's lowercase table (`pcre2_match.c:1052-1056`, and the fcc table the JIT builds from it), so on
+  glibc's `tr_TR` `/^id$/iu` against `ID` moves; macOS's tables fold `i` as C's do and the witnesses D1 to D5 stand
+  still. The owner's D-S5a reasoning (the `tr_TR` case map) covers `u` as much as the bytes below it, so a caseless
+  flag reads wherever the pattern can match a letter, `u` or not, and a `u` pattern with no caseless flag reads
+  nothing. The narrowing to a high byte only waits for a glibc witness in both modes.
+- **Two tables the design's exemption missed, witnessed on macOS.** The design exempts `u` and `(*UCP)` wholesale.
+  The oracle showed three tables they do not leave. PCRE2's `x` flag skips what `isspace` says of a byte below 256
+  in every mode, so `/^a\xC2\xA0b$/xu` (a no-break space in the pattern) matches `ab` under `de_DE.UTF-8` and not
+  under `C`, and `/(*UCP)^a\xA0b$/x` the same. `[[:ascii:]]` under `u` moves (`/^[[:ascii:]]$/u` against `ä`). And
+  a name with a byte of `0x80..=0xFF` under `(*UCP)` without `u` moves (`/(*UCP)(?<\xE4>a)/` compiles under a locale
+  and not under `C`), where under `u` it does not (R1 to R8). Each oracle row fails without its clause.
 - **Which functions.** The eight that compile: `preg_match`, `preg_match_all`, `preg_replace`,
   `preg_replace_callback`, `preg_replace_callback_array`, `preg_filter`, `preg_split` and `preg_grep`, each
   `{global.read.setting.locale}` as the upper bound the pattern at position 0 decides (`PregPattern`, the tenth
@@ -731,26 +749,34 @@ decides lexically, the way S4's readers do, with the owner's adoption of D-S5a. 
   a spread, a nested array, a non-string key) is the gap whole: the patterns before a bad one are compiled and a
   later one is not certain to be, so no partial claim is made. A trace payload, no schema bump.
 - **The gap.** A pattern that is not a literal (a variable, a concatenation, an interpolation, a class constant,
-  a named or spread argument list), a pattern the reader declines (an unterminated class, an unknown escape or
-  verb, an unknown modifier: PCRE2 would refuse it) and a `preg_*` handed over as a callback are
-  `value-dependent-read` and no label. A `preg_*` called with no pattern throws before it compiles and reads
-  nothing.
+  a named or spread argument list), a pattern the reader declines (an unterminated class, an unbalanced group, an
+  unknown escape or verb, an unknown modifier: PCRE2 would refuse it, or the reader does not know it) and a
+  `preg_*` handed over as a callback are `value-dependent-read` and no label. The reader knows `r` (PHP 8.4) and
+  `(?r)` as valid flags. A `preg_*` called with no pattern throws before it compiles and reads nothing.
 - **The fold.** `fold_reads_ambient_setting` refuses a `preg_match`, `preg_match_all` or `preg_split` (the
-  foldable preg names) whose literal pattern reads: the runner has never called `setlocale`, so it answers under
-  the C tables, a claim about the project's runtime the project never made. A pattern the reader declines folds as
-  before (PCRE2 refuses to compile it, which answers `false` under every locale; the folding tests of `/[/`
-  stand), and `preg_quote` folds. ADR-0102's `remembered.rs` allowlist is untouched: `preg_*` stays off it, and a
-  `none` verdict makes a site `{}` without making the name rememberable.
-- **Witnessed.** `locale_readers_oracle.rs` gains 51 rows: the S5 witness table (`s5-preg.php`,
+  foldable preg names) whose literal pattern reads **or that the reader declines**: the runner has never called
+  `setlocale`, so it answers under the C tables, a claim about the project's runtime the project never made, and a
+  decline is not proof that PCRE2 refuses the pattern (the first cut folded a decline, and a valid `[[:<:]]` that
+  reads the tables was one). An invalid pattern that no longer folds widens to the declared type
+  (`preg_match('/[/', 'abc')` is `0|1|false`, not `false`); three folding tests pin that. `preg_quote` folds.
+  ADR-0102's `remembered.rs` allowlist is untouched: `preg_*` stays off it, and a `none` verdict makes a site `{}`
+  without making the name rememberable.
+- **Witnessed.** `locale_readers_oracle.rs` gains 71 rows: the S5 witness table (`s5-preg.php`,
   `s5-preg-2.php`; PHP 8.5.11 and 8.1.32 agree on every row) as one probe per row, the five functions of P18, P19,
-  P28, S21 and S22 beside `preg_match_all` and `preg_replace_callback`, and the two `x` rows above. Of the 13
-  must-stay rows of the table every one moves under `de_DE.UTF-8` or the Latin-1 locale on macOS and is asserted
-  coloured; the exempt rows are asserted `Stable` and the verdict `Some(false)`; the lexical-rule rows that stood
-  still are `ReadsByRule`. Each assertion fails on a mutation that returns the other answer.
+  P28, S21 and S22 beside `preg_match_all` and `preg_replace_callback`, and the rows the first table missed: the `x`
+  flag over a byte under `u` and `(*UCP)`, `(?P=a)`, `\k<a>` and `\1` back references, an `x` comment holding `\Q`
+  or `(?#`, `[[:<:]]` and `[[:>:]]`, `[[:ascii:]]` under `u`, a name under `(*UCP)` and under `u`, and `r`. Of the
+  rows that must stay every one moves under `de_DE.UTF-8` or the Latin-1 locale on macOS and is asserted coloured;
+  the exempt rows are asserted `Stable` and the verdict `Some(false)`; the lexical-rule rows that stood still (the
+  caseless ASCII ones, with or without `u`, `[!-~]`, `.`) are `ReadsByRule`. Each assertion fails on a mutation
+  that returns the other answer. A sweep of 123 patterns over every byte, every two-byte string of a small
+  alphabet and every code point below 0x180, under five locales, found no pattern that moves and is called silent.
 
 Measured on the ten public packages (`check --profile strict --no-php --vendor-diagnostics --no-cache`, default
 profile, `effect-diff`, the five transform dry-runs), head against `origin/master` (the merge base; the machine's
-load average was about 12, which no number below depends on):
+load average was about 12, which no number below depends on). The numbers below were taken twice, on the first cut and on the one that
+adds the caseless rule under `u`, the `x` comments, the named back reference, `[[:<:]]`, `[:ascii:]` under UCP and
+the fold's refusal of a decline, and are identical: the public packages hold no pattern those rules move. The result:
 
 - `check` under both profiles is byte-identical on every package: no finding moves, none is reworded; no public
   envelope covers a preg site, and `possibly_expected.toml` does not move.

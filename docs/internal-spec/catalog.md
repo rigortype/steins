@@ -297,20 +297,22 @@ flags, width and `E`/`O`), the numeric ones reading nothing and any other undeci
 position 4, `ConstArgs::ints` position 0 for a `ctype_*` call, and `ConstArgs::not_text` carries the evidence of
 the `ctype_*` argument.
 
-**The preg family** (S5, `pattern_reads_locale` in `steins-catalog`'s `preg/locale.rs`, the `PregPattern` kind of
-`locale_read_gate`). Every `preg_*` that compiles a pattern reaches one compiler, which asks the tables
-`pcre2_maketables()` builds from the process locale once a script has called `setlocale`. The literal
+**The preg family** (S5, `pattern_reads_locale` in `steins-catalog`'s `preg/locale.rs` and `preg/locale/scan.rs`, the
+`PregPattern` kind of `locale_read_gate`). Every `preg_*` that compiles a pattern reaches one compiler, which asks the
+tables `pcre2_maketables()` builds from the process locale once a script has called `setlocale`. The literal
 pattern at position 0 (an array literal of string literals for `preg_replace`, `preg_replace_callback`,
 `preg_filter`; the keys of the map for `preg_replace_callback_array`, carried as `ConstArgs::patterns`) decides
 the call. Outside `u` and a leading `(*UCP)` (UCP, not UTF, is what leaves the tables: `(*UTF)` alone reads) a
-pattern reads iff it holds `\w \W \s \S \b \B`, a POSIX class other than `[:digit:]` and `[:xdigit:]`, a
-caseless flag (`i`, or `(?i…)`) over a letter, a byte of `0x80..=0xFF` or a numeric escape or reference, or the
-`x` flag over a byte of `0x80..=0xFF`. `\d`, `\p{..}`, literal bytes and ranges, `\h`, `\v`, `.`, `\Q..\E` and
-a `preg_quote`d literal read nothing. `u` and `(*UCP)` exempt all of it but the `x` flag's whitespace skip,
-which asks the table for a raw byte of `0x80..=0xFF` in every mode. A pattern the reader cannot parse as PCRE2
-does, a pattern that is not a literal, an array with an element that is not a string literal, a named or
-spread argument list and the function handed over as a callback are the `value-dependent-read` gap and no
-label. The fold seam refuses a `preg_match`, `preg_match_all` or `preg_split` whose literal pattern reads
+pattern reads iff it holds `\w \W \s \S \b \B`, `[[:<:]]`, `[[:>:]]`, a POSIX class other than `[:digit:]` and
+`[:xdigit:]`, or a name above ASCII. In every mode it reads iff it holds a caseless flag (`i`, `(?i…)`) and a
+character that can match a letter (a letter, a high byte, a range spanning a letter, `.`, a negated class, `\w`,
+`\D`, `\p{..}`, a POSIX class with letters, a numeric escape or a back reference in any spelling), the `x` flag over
+a raw byte of `0x80..=0xFF` outside an `x` comment, `[[:ascii:]]`, or, under `(*UCP)` without `u`, a name above
+ASCII. `\d`, `\h`, `\v`, literal bytes and ranges without a caseless flag, `\Q..\E` and a `preg_quote`d literal read
+nothing, and an `x`-mode `#` comment is not scanned. A pattern the reader cannot parse as PCRE2 does, a pattern
+that is not a literal, an array with an element that is not a string literal, a named or spread argument list and
+the function handed over as a callback are the `value-dependent-read` gap and no label. The fold seam refuses a
+`preg_match`, `preg_match_all` or `preg_split` whose literal pattern reads or that the reader declines
 (`fold_reads_ambient_setting`); `preg_quote` still folds.
 
 `fprintf` and `vfprintf` still have no row. Both reads of a printf row are **conditional on the
