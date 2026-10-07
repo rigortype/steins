@@ -683,8 +683,8 @@ pub(crate) struct Store {
     /// [`collect_shape_guards`]: crate::shapes::collect_shape_guards
     pub(crate) guarded_calls: Vec<ArgValue>,
     /// **Remembered call results** (ADR-0102): what a guard proved about a builtin
-    /// call's result, keyed by the call's structure (`strlen($s)`, `setlocale(LC_ALL,
-    /// '0')`), so a later identical call in this frame answers it. See
+    /// call's result, keyed by the call's structure (`strlen($s)`, `strpos($h, '=')`),
+    /// so a later identical call in this frame answers it. See
     /// [`crate::remembered`] for the gate, the production and the consumer.
     ///
     /// A **fourth subject kind** beside the variable, the offset and the property:
@@ -695,10 +695,9 @@ pub(crate) struct Store {
     ///
     /// Forgotten by the one funnel every rebind of a name already passes
     /// ([`Self::unbind`], through [`Self::forget_keys_naming`]) — ADR-0070's
-    /// statement-end forgetting — and by [`Self::forget_setting_keys`] at a site the
-    /// effect lane says may rewrite a setting. The map holds a handful of entries
-    /// and is empty in nearly every frame, so a scan stands in for the place-to-keys
-    /// reverse index ADR-0102 §2.4 names.
+    /// statement-end forgetting. The map holds a handful of entries and is empty in
+    /// nearly every frame, so a scan stands in for the place-to-keys reverse index
+    /// ADR-0102 §2.4 names.
     pub(crate) remembered: HashMap<String, Remembered>,
 }
 
@@ -944,19 +943,6 @@ impl Store {
         if !self.remembered.is_empty() {
             self.remembered.retain(|_, r| !r.places.iter().any(|p| p == var));
         }
-    }
-
-    /// Forget every remembered call result whose row reads a setting: a site the
-    /// effect lane says may rewrite one has run (ADR-0102 §2.4, rules 2 and 3). The
-    /// `{}`-row keys stay; their results are functions of their places.
-    pub(crate) fn forget_setting_keys(&mut self) {
-        self.remembered.retain(|_, r| !r.reads_setting);
-    }
-
-    /// Whether any remembered call result reads a setting — the cheap question
-    /// that keeps the statement-level site scan off every frame that has none.
-    pub(crate) fn has_setting_keys(&self) -> bool {
-        self.remembered.values().any(|r| r.reads_setting)
     }
 
     /// The narrowed declared-type arm lane of `var` (ADR-0052 §3, consumer (d) —

@@ -1,6 +1,6 @@
 //! Remembered call results (ADR-0102, slice 1): what a guard proved about a builtin
-//! call's result stays true of the next identical call in the frame, until a site
-//! the effect lane names rewrites a place the call reads or a setting its row reads.
+//! call's result stays true of the next identical call in the frame, until a place
+//! the call names is rebound.
 //!
 //! ```php
 //! if (strpos($h, '=') !== false) {
@@ -12,23 +12,47 @@
 //!
 //! A [`Remembered`] is held on a **call key**: the builtin's spelling and one
 //! component per positional argument, each a local variable (a *place*) or a
-//! literal ([`key_of`]). It is structural, never textual (`strlen($s)` and
+//! scalar literal ([`key_of`]). It is structural, never textual (`strlen($s)` and
 //! `strlen( $s )` are one key), and no variable can take its spelling, since it
 //! contains `(`. A named or spread argument, a nested call, an operator expression, a
-//! property or an element gives the call no key (ADR-0102 D2).
+//! property, an element and a constant give the call no key (ADR-0102 D2). A constant
+//! is refused because its spelling is not its meaning: inside a namespace `FOO` is
+//! `ns\FOO` once that is defined and `\FOO` until then.
 //!
 //! # The gate
 //!
-//! A call produces a key only where its **ADR-0099 site answers exhaustive** with
-//! every label under `global.read.setting` ([`gate_of`]): a certified-pure name, a
-//! call-site certified name whose reach is ruled out, a foldable name on non-literal
-//! places, a printf call whose literal format drops every read or keeps only the
-//! locale read. `nondet.*`, `io*`, an effect-lane gap, a project callee and a method
-//! never produce one. The stat family never does either: its rows carry `io.fs.read`,
-//! which is not a setting read (ADR-0102 D1). An argument position the catalog says
-//! is by reference, a place holding an object, a resource or a closure, a by-reference
-//! parameter and a superglobal each refuse the key, since the call could rewrite the
-//! place or the place could change without a site naming it.
+//! A call produces a key only where three things hold, and the first is the reason
+//! the others exist: **the engine's answer is a function of the key's components and
+//! of nothing else the program can change.**
+//!
+//! 1. **The name is on [`ALLOWED`]**, a list of builtins each verified to read no
+//!    ambient state at all: no locale, ini setting, environment, clock, error state,
+//!    engine symbol table or stream. The catalog's `{}` row does not say this. It
+//!    records that a builtin reads no *labelled* effect, and many `{}` rows read
+//!    state no label names: `preg_*` consult the locale for `\w`, `strtolower` did
+//!    before PHP 8.2, a float rendered to a string goes through `precision`,
+//!    `json_encode` through `serialize_precision`. A remembered result that
+//!    outlives a rewrite of that state is a branch the analyzer drops and PHP takes,
+//!    and the catalog's `{}` is no evidence that no such state exists.
+//! 2. **The call's own ADR-0099 site is exhaustive and empty** ([`gate_of`]): no gap
+//!    and no label, so no argument reaches user code through the call (an object's
+//!    `__toString`, a `Countable::count`).
+//! 3. **The places are the frame's own** ([`is_value_place`]): every variable is
+//!    passed by value, holds no object, resource or closure, is no by-reference
+//!    parameter, and is not `$this`, a superglobal or `$http_response_header`. The
+//!    top-level script and a property hook record no site, so they remember nothing.
+//!
+//! A builtin whose parameters are `string` is allowed only in a `strict_types` file
+//! ([`Allowed::strict`]): a coercive call converts a float argument to a string
+//! through the `precision` ini, which is ambient state.
+//!
+//! A setting-read row (`sprintf('%.2f', $x)`, `setlocale(LC_ALL, '0')`) is **never**
+//! remembered in slice 1. Its result changes when a site rewrites the setting, and
+//! the sites that can (a user function, an error handler a warning fires, an output
+//! callback an `echo` fires, a tick function, a generator's caller) are not all
+//! sites the effect lane records; a sound forgetting needs that posture first
+//! (ADR-0102 §7). Nothing is remembered from the stat family, a `nondet.*` row, a
+//! project callee or a method either.
 //!
 //! # Production, the consumer, forgetting
 //!
@@ -47,34 +71,32 @@
 //! candidate values ([`candidates`]), so a second call decided by the first is
 //! decided, and a decided guard marks its dead branch (ADR-0002).
 //!
-//! A key is *forgotten* by three mechanisms, none of which tracks anything new:
+//! A key is *forgotten* by two mechanisms and survives a join only where every
+//! branch holds it ([`join_remembered`]):
 //!
 //! 1. a place it names is rebound: [`Store::unbind`] — ADR-0070's statement-end
 //!    forgetting — reaches the keys through [`Store::forget_keys_naming`], and
 //!    [`forget_statement_writes`] covers the writes that never pass through it (an
 //!    assignment to the place, an offset write to it);
-//! 2. a statement holds a site the effect lane says may rewrite a setting — a label
-//!    under `global.write`, `eval` or `ffi`, a project callee, or any gap — and
-//!    every key whose row reads a setting goes ([`forget_for_statement`]);
-//! 3. the join: a key survives a merge only where every branch holds it
-//!    ([`join_remembered`]).
+//! 2. the condition that produced it rebinds one of its places after the call.
+//!
+//! No statement forgets a key for any other reason: the allowed builtins read no
+//! ambient state, so nothing a callee, a handler or a callback does to the world
+//! changes a result, and a callee cannot reach a local the call passes by value.
 //!
 //! The stratum is the refinement's: a fact the call's own row seeds `Asserted` (the
 //! declared-return floor) stays `Asserted`, and a `=== literal` test pins a
 //! `Verified` singleton, which is the only thing the condition evaluator reads.
 
-use std::cell::{Cell, OnceCell};
+use std::cell::OnceCell;
 use std::collections::HashMap;
 
-use steins_catalog::subsumes;
 use steins_domain::Fact;
-use steins_syntax::{
-    ArgValue, CallExpr, Callee, CondExpr, CondOperand, SUPERGLOBALS, SiteKind, Span, StmtKind,
-};
+use steins_syntax::{ArgValue, CallExpr, Callee, CondExpr, CondOperand, SUPERGLOBALS, SiteKind, StmtKind};
 
 use crate::asserts::cond_invalidations;
 use crate::builtin_returns::{BuiltinRung, OptionalRungs, builtin_call_rung, floor_value_fact};
-use crate::by_value::{arg_is_by_value, is_assert_read_site, is_dump_read_site};
+use crate::by_value::arg_is_by_value;
 use crate::cx::Cx;
 use crate::env::{ContractArm, Known, Store, Stratum, arg_of_val, dedup_contract_arms};
 use crate::fold::Folder;
@@ -83,7 +105,7 @@ use crate::refine::{
     Refine, apply_class_narrowing, apply_refinements, else_refinements, then_refinements,
 };
 use crate::site::reach::Frame;
-use crate::site::{HitKind, Knowledge, Lane, ResolvedSite, Target, resolve_site};
+use crate::site::{Knowledge, Lane, ResolvedSite, resolve_site};
 use crate::walk::WalkCx;
 
 /// The most keys a store holds: a guard-heavy frame stops remembering past this, so
@@ -92,6 +114,80 @@ const MAX_KEYS: usize = 64;
 
 /// What a [`Known::bound`] says of a fact a call key supplied.
 pub(crate) const REMEMBERED_BOUND: &str = "remembered from a guard on the same call";
+
+/// A builtin a key may be produced for, with the argument counts the verification
+/// covers and whether its `string` parameters need a `strict_types` caller.
+struct Allowed {
+    name: &'static str,
+    min_args: usize,
+    max_args: usize,
+    strict: bool,
+}
+
+const fn allowed(name: &'static str, min_args: usize, max_args: usize, strict: bool) -> Allowed {
+    Allowed { name, min_args, max_args, strict }
+}
+
+/// The builtins that read no ambient state, each checked against php-src (8.5) and
+/// witnessed to give one answer for one argument list across a `setlocale`, an
+/// `ini_set`, an error handler, an output callback and a tick function:
+///
+/// * `strlen`, `ord`, `str_contains`, `str_starts_with`, `str_ends_with`, `strpos`,
+///   `strrpos`: byte comparisons of their string arguments. `stripos` and `strripos`
+///   fold case through the locale before 8.2 and are not here. A coercive caller
+///   converts a float argument through `precision`, so these take `strict`.
+/// * `count` of one argument: an array's element count (a `Countable` object runs
+///   user code, which the site gate refuses). `COUNT_RECURSIVE` walks nested
+///   arrays whose reference slots another alias can rewrite, so it is not here.
+/// * `is_int`, `is_integer`, `is_long`, `is_float`, `is_double`, `is_string`,
+///   `is_bool`, `is_array`, `is_null`, `is_scalar`, `is_numeric`: the zval's type tag
+///   (`is_numeric` parses with the engine's own `.`-only parser, no locale).
+///   `is_resource` is not here: `fclose` changes it through a by-value pass.
+/// * `array_key_exists`, `array_key_first`, `array_key_last`: a hash lookup. A `null`
+///   or fractional key is a deprecation, which reaches a handler but changes no
+///   result.
+/// * `ctype_digit`, `ctype_xdigit`: the C standard fixes both to the ASCII digits in
+///   every locale (ADR-0101 §3.9).
+/// * `intdiv`, `abs`: arithmetic on their arguments.
+///
+/// Not here, and why: `in_array` and `array_search` (an array can hold a reference
+/// slot another alias rewrites between the two calls), `gettype` and `is_resource`
+/// (a closed handle), every float-to-string renderer (`strval`, `implode`,
+/// `json_encode`, `var_export`, `str_replace`), the case folders, `trim` and its
+/// kin, `preg_*`, and `number_format`.
+const ALLOWED: &[Allowed] = &[
+    allowed("strlen", 1, 1, true),
+    allowed("ord", 1, 1, true),
+    allowed("str_contains", 2, 2, true),
+    allowed("str_starts_with", 2, 2, true),
+    allowed("str_ends_with", 2, 2, true),
+    allowed("strpos", 2, 3, true),
+    allowed("strrpos", 2, 3, true),
+    allowed("count", 1, 1, false),
+    allowed("is_int", 1, 1, false),
+    allowed("is_integer", 1, 1, false),
+    allowed("is_long", 1, 1, false),
+    allowed("is_float", 1, 1, false),
+    allowed("is_double", 1, 1, false),
+    allowed("is_string", 1, 1, false),
+    allowed("is_bool", 1, 1, false),
+    allowed("is_array", 1, 1, false),
+    allowed("is_null", 1, 1, false),
+    allowed("is_scalar", 1, 1, false),
+    allowed("is_numeric", 1, 1, false),
+    allowed("array_key_exists", 2, 2, false),
+    allowed("array_key_first", 1, 1, false),
+    allowed("array_key_last", 1, 1, false),
+    allowed("ctype_digit", 1, 1, false),
+    allowed("ctype_xdigit", 1, 1, false),
+    allowed("intdiv", 2, 2, false),
+    allowed("abs", 1, 1, false),
+];
+
+/// The [`Allowed`] row of a resolved builtin name, if it has one.
+fn allowed_row(builtin: &str) -> Option<&'static Allowed> {
+    ALLOWED.iter().find(|a| a.name == builtin)
+}
 
 /// A call's result as the two lanes a variable carries it in: the value-domain fact
 /// with its stratum, and the declared-contract arm list (each arm its own stratum).
@@ -102,21 +198,11 @@ pub(crate) struct Lanes {
     pub(crate) arms: Option<Vec<ContractArm>>,
 }
 
-/// One remembered call result: its [`Lanes`], the places its key names, and whether
-/// its row reads a setting (so a site that may rewrite one forgets it).
+/// One remembered call result: its [`Lanes`] and the places its key names.
 #[derive(Clone)]
 pub(crate) struct Remembered {
     pub(crate) lanes: Lanes,
     pub(crate) places: Vec<String>,
-    pub(crate) reads_setting: bool,
-}
-
-/// Which gate a call passed: its result is a function of its arguments alone
-/// (`Pure`), or also of a setting a site may rewrite (`SettingRead`).
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Gate {
-    Pure,
-    SettingRead,
 }
 
 /// A name no key may take as a place. `$this` and the superglobals can change
@@ -127,7 +213,7 @@ fn is_special_name(name: &str) -> bool {
 }
 
 /// The key of the call `name(args)` and the places it names, or `None` where a
-/// component is not a local variable or a literal (ADR-0102 §2.1).
+/// component is not a local variable or a scalar literal (ADR-0102 §2.1).
 pub(crate) fn key_of(name: &str, args: &[ArgValue]) -> Option<(String, Vec<String>)> {
     let mut parts = Vec::with_capacity(args.len());
     let mut places: Vec<String> = Vec::new();
@@ -147,9 +233,6 @@ pub(crate) fn key_of(name: &str, args: &[ArgValue]) -> Option<(String, Vec<Strin
             | ArgValue::Str(_)
             | ArgValue::Bool(_)
             | ArgValue::Null => parts.push(arg.render()),
-            // A constant is fixed once defined; spelled as written, so a second spelling
-            // of the same constant is a second key and never a wrong one.
-            ArgValue::GlobalConst(r) => parts.push(r.raw.clone()),
             _ => return None,
         }
     }
@@ -166,82 +249,21 @@ fn call_parts(call: &CallExpr) -> Option<(&str, Vec<ArgValue>)> {
     Some((name.as_str(), call.args.iter().map(|a| a.value.clone()).collect()))
 }
 
-/// The gate of a resolved site (ADR-0102 §2.5): exhaustive, and every label a read of
-/// a setting. A project edge, a declared bound, a construct and a method each refuse.
-fn gate_of(site: &ResolvedSite) -> Option<Gate> {
-    if !site.gaps.is_empty() {
-        return None;
-    }
-    let mut reads = false;
-    for target in &site.targets {
-        let Target::Engine(hit) = target else { return None };
-        if !matches!(hit.kind, HitKind::Function) {
-            return None;
-        }
-        for label in &hit.labels {
-            if !subsumes("global.read.setting", label) {
-                return None;
-            }
-            reads = true;
-        }
-    }
-    Some(if reads { Gate::SettingRead } else { Gate::Pure })
+/// The gate of a resolved site (ADR-0102 §2.5): exhaustive and empty. A label, a gap,
+/// a project edge or a declared bound each refuse.
+fn gate_of(site: &ResolvedSite) -> bool {
+    site.gaps.is_empty() && site.targets.is_empty()
 }
 
-/// The builtins that rewrite an ini setting. A call to one forgets **every** key, the
-/// `{}`-row ones too: those rows read the ini without saying so (a float rendered to
-/// a string goes through `precision`, a pattern match through the PCRE limits),
-/// which ADR-0101 §3.8 records as the catalog's known imprecision.
-const INI_WRITERS: &[&str] = &["ini_set", "ini_alter", "ini_restore"];
-
-/// Whether a resolved site may rewrite a setting a remembered result reads
-/// (ADR-0102 §2.4, rules 2 and 3): any gap, a project edge or declared bound (what
-/// the callee does is the fixpoint's, which the walk does not read), a label under
-/// `global.write`, `eval` or `ffi`.
-fn forgets_settings(site: &ResolvedSite) -> bool {
-    let forgetting = |label: &str| {
-        subsumes("global.write", label) || subsumes("eval", label) || subsumes("ffi", label)
-    };
-    !site.gaps.is_empty()
-        || site.targets.iter().any(|t| match t {
-            Target::Edge(_) | Target::Declared(_) => true,
-            Target::Engine(hit) => hit.labels.iter().any(|l| forgetting(l)),
-            Target::Construct { label, .. } => forgetting(label),
-            Target::Thrown { .. } => false,
-        })
-}
-
-/// The per-walk cache of what the effect lane says about the frame's sites, and the
-/// statement the walk is inside. Built lazily: a frame that remembers nothing never
-/// resolves a site.
+/// The per-walk cache of the frame the effect lane reads a scope's sites against.
+/// Built lazily: a frame that remembers nothing never resolves a site.
 pub(crate) struct RememberCache<'a> {
     frame: OnceCell<Option<Frame<'a>>>,
-    settings: OnceCell<Vec<Span>>,
-    ini: OnceCell<Vec<Span>>,
-    stmt: Cell<Span>,
 }
 
 impl Default for RememberCache<'_> {
     fn default() -> Self {
-        Self {
-            frame: OnceCell::new(),
-            settings: OnceCell::new(),
-            ini: OnceCell::new(),
-            stmt: Cell::new(Span { start: 0, end: 0 }),
-        }
-    }
-}
-
-/// Restores the statement the walk was inside when the walk of the next one ends, on
-/// every exit of its loop iteration.
-pub(crate) struct StmtGuard<'c> {
-    cell: &'c Cell<Span>,
-    prev: Span,
-}
-
-impl Drop for StmtGuard<'_> {
-    fn drop(&mut self) {
-        self.cell.set(self.prev);
+        Self { frame: OnceCell::new() }
     }
 }
 
@@ -251,12 +273,6 @@ impl Drop for StmtGuard<'_> {
 const EFFECTS: Knowledge<'static> = Knowledge::Catalog { lane: Lane::Effects, plugins: None };
 
 impl<'a> RememberCache<'a> {
-    /// Record the statement being walked until the guard drops. Its span is what a
-    /// condition asks "does a site in here rewrite a setting?" of.
-    pub(crate) fn enter(&self, span: Span) -> StmtGuard<'_> {
-        StmtGuard { cell: &self.stmt, prev: self.stmt.replace(span) }
-    }
-
     /// The frame the scope's sites are read against, once.
     fn frame(&self, w: &WalkCx<'a, '_>) -> Option<&Frame<'a>> {
         self.frame
@@ -267,72 +283,15 @@ impl<'a> RememberCache<'a> {
             .as_ref()
     }
 
-    /// The gate of the call's own site, or `None` where the site is not found, not a
-    /// plain call, or not exhaustive over setting reads.
-    fn gate(&self, w: &WalkCx<'a, '_>, call: &CallExpr) -> Option<Gate> {
-        let frame = self.frame(w)?;
-        let site = frame.sites.iter().find(|s| {
+    /// Whether the call's own site is found, a plain call, and passes the gate.
+    fn gate(&self, w: &WalkCx<'a, '_>, call: &CallExpr) -> bool {
+        let Some(frame) = self.frame(w) else { return false };
+        let Some(site) = frame.sites.iter().find(|s| {
             s.span.start == call.span.start && matches!(&s.kind, SiteKind::Call { .. })
-        })?;
+        }) else {
+            return false;
+        };
         gate_of(&resolve_site(w.cx, frame, site, &EFFECTS))
-    }
-
-    /// Whether some site inside `span` may rewrite a setting. The frame's sites are
-    /// resolved once, on the first ask.
-    fn rewrites_settings_in(&self, w: &WalkCx<'a, '_>, span: Span) -> bool {
-        let sites = self.settings.get_or_init(|| {
-            let Some(frame) = self.frame(w) else { return Vec::new() };
-            frame
-                .sites
-                .iter()
-                .filter(|s| !is_read_only_dump(w.cx, s))
-                .filter(|s| forgets_settings(&resolve_site(w.cx, frame, s, &EFFECTS)))
-                .map(|s| s.span)
-                .collect()
-        });
-        sites.iter().any(|s| s.start >= span.start && s.end <= span.end)
-    }
-
-    /// Whether some call inside `span` is to an ini writer, by the name it spells:
-    /// no site is resolved for it, so a frame with no such call pays a name scan.
-    fn writes_ini_in(&self, w: &WalkCx<'a, '_>, span: Span) -> bool {
-        let sites = self.ini.get_or_init(|| {
-            let Some(frame) = self.frame(w) else { return Vec::new() };
-            frame
-                .sites
-                .iter()
-                .filter(|s| {
-                    matches!(&s.kind, SiteKind::Call { name, .. }
-                        if INI_WRITERS.contains(&name.simple().to_ascii_lowercase().as_str()))
-                })
-                .map(|s| s.span)
-                .collect()
-        });
-        sites.iter().any(|s| s.start >= span.start && s.end <= span.end)
-    }
-}
-
-/// Whether a site is the analyzer's own observer (`dumpType`, `var_dump`, and under
-/// the harness `assertType`): it reads and binds nothing, and it runs no code that
-/// could rewrite a setting. The same recognition ADR-0070's by-value survival makes.
-fn is_read_only_dump(cx: &Cx, site: &steins_syntax::SiteOrigin) -> bool {
-    let SiteKind::Call { name, .. } = &site.kind else { return false };
-    is_dump_read_site(cx, name) || is_assert_read_site(cx, name)
-}
-
-/// Forget the setting reads at the start of a statement that holds a site which may
-/// rewrite a setting (ADR-0102 §2.4, rules 2 and 3), and every key at one that
-/// writes an ini setting. Before the statement rather
-/// than at its end: a consumer in the same statement as the rewriting site has no
-/// order to read, and nothing between the two re-produces a key.
-pub(crate) fn forget_for_statement(w: &WalkCx, span: Span, store: &mut Store) {
-    if store.remembered.is_empty() {
-        return;
-    }
-    if w.remember.writes_ini_in(w, span) {
-        store.remembered.clear();
-    } else if store.has_setting_keys() && w.remember.rewrites_settings_in(w, span) {
-        store.forget_setting_keys();
     }
 }
 
@@ -352,15 +311,14 @@ pub(crate) fn forget_statement_writes(kind: &StmtKind, store: &mut Store) {
     }
 }
 
-/// A call a condition names that may be remembered: its key, the places it names, the
-/// spans it appears at, and the gate it passed.
+/// A call a condition names that may be remembered: its key, the places it names and
+/// the spans it appears at.
 struct Candidate {
     key: String,
     name: String,
     args: Vec<ArgValue>,
     places: Vec<String>,
     spans: Vec<u32>,
-    gate: Gate,
 }
 
 /// Whether `var` may stand as a place in a key: a value held in the frame alone. An
@@ -376,9 +334,9 @@ fn is_value_place(w: &WalkCx, var: &str, env: &HashMap<String, Known>, store: &S
     !w.cx.scope_params(w.scope).is_some_and(|ps| ps.iter().any(|p| p.by_ref && p.name == var))
 }
 
-/// The candidate `call` is, if it is one: a builtin function the project does not
-/// shadow, called with a key's components, by value at every place, whose site passes
-/// the gate.
+/// The candidate `call` is, if it is one: an [`ALLOWED`] builtin the project does not
+/// shadow, called with a key's components and an argument count the allowance covers,
+/// by value at every place, whose site passes the gate.
 fn candidate(
     w: &WalkCx,
     call: &CallExpr,
@@ -388,9 +346,12 @@ fn candidate(
     let cx = w.cx;
     let (name, args) = call_parts(call)?;
     let r = call.callee_ref.as_ref()?;
-    if !matches!(cx.resolve_function(r), FnResolution::Builtin(_))
-        || cx.index.has_simple_function(name)
-    {
+    let FnResolution::Builtin(builtin) = cx.resolve_function(r) else { return None };
+    if cx.index.has_simple_function(name) {
+        return None;
+    }
+    let row = allowed_row(&builtin)?;
+    if !(row.min_args..=row.max_args).contains(&args.len()) || (row.strict && !cx.strict()) {
         return None;
     }
     let (key, places) = key_of(name, &args)?;
@@ -402,15 +363,10 @@ fn candidate(
             return None;
         }
     }
-    let gate = w.remember.gate(w, call)?;
-    Some(Candidate {
-        key,
-        name: name.to_owned(),
-        args,
-        places,
-        spans: vec![call.span.start],
-        gate,
-    })
+    if !w.remember.gate(w, call) {
+        return None;
+    }
+    Some(Candidate { key, name: name.to_owned(), args, places, spans: vec![call.span.start] })
 }
 
 /// Collect the candidates a condition names, in source order, one per key.
@@ -528,17 +484,6 @@ pub(crate) fn produce(
     }
     let mut cands = Vec::new();
     collect(w, cond, env, store, &mut cands);
-    // A key is not produced from a statement that holds a site which may rewrite what
-    // it reads: the site may run after the call, within the condition. A generator
-    // yields to code that may rewrite any setting between its statements.
-    let stmt = w.remember.stmt.get();
-    if w.remember.writes_ini_in(w, stmt) {
-        return;
-    }
-    cands.retain(|c| {
-        c.gate == Gate::Pure
-            || (!w.scope.is_generator && !w.remember.rewrites_settings_in(w, stmt))
-    });
     if cands.is_empty() {
         return;
     }
@@ -591,11 +536,7 @@ pub(crate) fn produce(
         }
         store.remembered.insert(
             c.key.clone(),
-            Remembered {
-                lanes: learned,
-                places: c.places.clone(),
-                reads_setting: c.gate == Gate::SettingRead,
-            },
+            Remembered { lanes: learned, places: c.places.clone() },
         );
     }
     for v in cond_invalidations(w.cx, cond, env, store, false) {
@@ -683,10 +624,7 @@ pub(crate) fn join_remembered(first: &Store, rest: &[&Store]) -> HashMap<String,
             let Some(joined) = join_lanes(&lanes, &r.lanes) else { continue 'keys };
             lanes = joined;
         }
-        out.insert(
-            key.clone(),
-            Remembered { lanes, places: r0.places.clone(), reads_setting: r0.reads_setting },
-        );
+        out.insert(key.clone(), Remembered { lanes, places: r0.places.clone() });
     }
     out
 }
