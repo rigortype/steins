@@ -43,7 +43,11 @@ exit
 ffi
 global.read   global.write
      global.read.setting   global.read.setting.locale   global.read.setting.precision
-     global.write.setting  global.write.setting.locale
+                           global.read.setting.timezone global.read.setting.encoding
+                           global.read.setting.ini
+     global.write.setting  global.write.setting.locale  global.write.setting.precision
+                           global.write.setting.timezone  global.write.setting.encoding
+                           global.write.setting.ini
 io   io.db   io.fs   io.fs.read   io.fs.write   io.input   io.ipc
      io.net  io.net.http   io.process   io.signal
      io.output   io.output.buffer   io.output.header
@@ -112,19 +116,28 @@ effect of reading a cell and a setting write the effect of rewriting one.
 
 | Label | Meaning | Origins |
 | --- | --- | --- |
-| `global.read.setting` | a read of some setting; the parent of every cell's read | — (no row; the roster's later cells and a dynamic ini name hang here) |
+| `global.read.setting` | a read of some setting; the parent of every cell's read | — (no row; the cells' labels hang here) |
 | `global.read.setting.locale` | a read of `LC_*` as `setlocale` leaves it | `sprintf`, `vsprintf`, `printf`, `vprintf` (`%f`, `%g`, `%G` render the locale's decimal point), `localeconv`, `nl_langinfo`, `strcoll`, `basename`, and the locale readers beyond printf, which read the locale only where the call reaches the routine that consults it: `ctype_*` (but `ctype_digit` and `ctype_xdigit`) over a non-empty string or an `int` in -128..=255, `strnatcmp` and `strnatcasecmp` over two non-empty operands, `escapeshellarg`, `strip_tags` (over a `<`), `parse_url`, `strftime` and `gmstrftime` (with `nondet.time`; for the conversions that name the locale), and, under the argument that selects the read, the sorts (`SORT_LOCALE_STRING`, `SORT_NATURAL`), `substr_compare` (case-insensitive) and `pathinfo` (unless only the directory is asked for), and the `preg_*` functions that compile a pattern (`preg_match`, `preg_match_all`, `preg_replace`, `preg_replace_callback`, `preg_replace_callback_array`, `preg_filter`, `preg_split`, `preg_grep`) under a literal pattern that asks the locale's character tables (`\w`, `\s`, `\b`, a POSIX class, `i` over a character that can be a letter, `x` over a byte of `0x80..=0xFF`; `u` and `(*UCP)` exempt the classes but not the last two or `[:ascii:]`). A literal argument decides, an omitted one defaults, and a read that depends on a value the call does not show is the `value-dependent-read` gap and no label; `setlocale('...', '0')` queries the cell |
-| `global.read.setting.precision` | a read of the `precision` ini | `sprintf`, `vsprintf`, `printf`, `vprintf` (a `%s` of a float renders it through `precision`: `1234.5678` is `1.23E+3` at `precision=3`) |
+| `global.read.setting.precision` | a read of the `precision` ini | `sprintf`, `vsprintf`, `printf`, `vprintf` (a `%s` of a float renders it through `precision`: `1234.5678` is `1.23E+3` at `precision=3`), and `ini_get('precision')` and `ini_get('serialize_precision')` |
+| `global.read.setting.timezone` | a read of the default timezone's ini | `ini_get('date.timezone')` |
+| `global.read.setting.encoding` | a read of the default charset and the mbstring and iconv entries | `ini_get` of `default_charset`, `internal_encoding`, `input_encoding`, `output_encoding`, `iconv.{internal,input,output}_encoding` or `mbstring.{internal_encoding,language,detect_order,http_input,http_output,substitute_character,strict_detection}` |
+| `global.read.setting.ini` | a read of an ini entry no other cell owns | `ini_get` of `bcmath.scale`, `include_path` or `error_reporting` |
 | `global.write.setting` | a rewrite of some setting | — |
 | `global.write.setting.locale` | a rewrite of the locale cell | `setlocale` (which also carries a coarse `global.read` for the environment block it consults when its locale is `''` or `null`, until the env cell has a label; a call whose only locale is a written non-empty string reads no environment and is the write alone) |
+| `global.write.setting.precision` | a rewrite of `precision` or `serialize_precision` | `ini_set`, `ini_alter` and `ini_restore` of either name |
+| `global.write.setting.timezone` | a rewrite of the default timezone's ini | `ini_set`, `ini_alter` and `ini_restore` of `date.timezone` |
+| `global.write.setting.encoding` | a rewrite of the default charset or an mbstring or iconv entry | `ini_set`, `ini_alter` and `ini_restore` of the names `global.read.setting.encoding` lists |
+| `global.write.setting.ini` | a rewrite of an ini entry no other cell owns | `ini_set`, `ini_alter` and `ini_restore` of `bcmath.scale`, `include_path` or `error_reporting` |
 
-The five are `global.read` and `global.write` children, so prefix subsumption carries
+The ini rows are call-decided (ADR-0101 §3.11): `ini_get` with one argument, `ini_set` and `ini_alter` with two and `ini_restore` with one, whose option name is a written string literal that a cell owns, carry that cell's read or write. The names are exact and case-sensitive, as the engine's lookup is. A name no cell owns, a name the call does not spell as a literal, a count that is not the function's own and a function handed over as a callback keep the coarse `global.read` (`ini_get`) or `global.write` (`ini_set`, `ini_alter`, `ini_restore`).
+
+All of them are `global.read` and `global.write` children, so prefix subsumption carries
 every existing consumer: a declared `global.read` or `global` envelope admits a setting
 read, a declared `global.write` admits `setlocale`'s write (a locale of `''` or `null` also reads the environment, which needs `global.read` or `global` as well), and a discarded locale read is still a
 discardable read (ADR-0096). `global.read` without a child stays the row for a read the
 catalog cannot place in a cell. A cell's label is registered in the slice that colours its
-first row and never ahead of one, so the timezone, environment, encoding and ini cells the
-ADR names are not in the registry yet. A `%s` of a float reads `precision`
+first row and never ahead of one: the timezone, encoding and ini cells are registered with the
+ini rows, and the environment cell is not in the registry yet (its first row is `getenv`). A `%s` of a float reads `precision`
 (`global.read.setting.precision`, registered with that first row, ADR-0101 D4), so a printf
 call that drops the locale read is not thereby free of settings; the float-to-string operator
 sites (`(string) $f`, `.`, `echo`) and the other float renderers (`strval`, `implode`,

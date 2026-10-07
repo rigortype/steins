@@ -253,12 +253,12 @@ only where the call site rules the reaching arguments out. Names that read the
 locale (`basename`, `pathinfo`, `strnatcmp`, `strnatcasecmp`, `substr_compare`,
 `parse_url`, `escapeshellarg`, `strip_tags`, the `ctype_*` family) are coloured with the read
 below (S4) and are not certified pure; names that read an ini setting (the `mb_*` family,
-`htmlspecialchars`) stay out until the encoding cell registers.
+`htmlspecialchars`) stay out until the encoding cell colours them (S6d); its labels are registered since S6-core.
 
 **The locale cell** (ADR-0101, issue #991) has four registry labels,
 `global.read.setting`, `global.read.setting.locale`, `global.write.setting` and
 `global.write.setting.locale`, and the `precision` cell has `global.read.setting.precision`,
-registered with its first coloured row (a `%s` of a float, ADR-0101 D4). These are the coloured rows. The coloured row answers
+registered with its first coloured row (a `%s` of a float, ADR-0101 D4); S6-core adds the cells the ini names reach (below). These are the coloured rows. The coloured row answers
 ahead of the fold allowlist's empty one, so `sprintf` is on the allowlist and
 carries a read; the allowlist is permission to ask the engine, not a promise
 that a call is pure, and Decision 2's bar for an **empty** row is unchanged.
@@ -275,7 +275,7 @@ that a call is pure, and Decision 2's bar for an **empty** row is unchanged.
 | `ctype_digit`, `ctype_xdigit` | none: C fixes their sets in every locale and no byte moved, so they read no setting that changes an answer (left uncatalogued, not certified) |
 | `setlocale` | `{global.write.setting.locale, global.read}` (the argument-blind row: the write, and the environment block read for `''` and `null`, coarse until the env cell has a label; a call with exactly two arguments whose locale is a written non-empty string other than `'0'` narrows to `{global.write.setting.locale}`, and the exact string `'0'`, the query form, narrows to `{global.read.setting.locale}` with no write (ADR-0101 D6, `narrowed_setlocale_labels`; `"0\0x"` is not the query, php-src compares the whole string) |
 
-**Call-decided readers** (S4, `locale_read_gate` in `steins-catalog`, `site/locale.rs` in `steins-infer`).
+**Call-decided readers** (S4, `setting_read_gate` in `steins-catalog`, `site/setting.rs` in `steins-infer`).
 Apart from `basename`, a locale reader reads only where the call reaches the routine that consults the
 C library, so its row is the upper bound and the call site decides it as it does a printf format: an
 omitted argument is the parameter's default, a literal the scan evaluates decides it lexically (a
@@ -298,7 +298,7 @@ position 4, `ConstArgs::ints` position 0 for a `ctype_*` call, and `ConstArgs::n
 the `ctype_*` argument.
 
 **The preg family** (S5, `pattern_reads_locale` in `steins-catalog`'s `preg/locale.rs` and `preg/locale/scan.rs`, the
-`PregPattern` kind of `locale_read_gate`). Every `preg_*` that compiles a pattern reaches one compiler, which asks the
+`PregPattern` kind of `setting_read_gate`). Every `preg_*` that compiles a pattern reaches one compiler, which asks the
 tables `pcre2_maketables()` builds from the process locale once a script has called `setlocale`. The literal
 pattern at position 0 (an array literal of string literals for `preg_replace`, `preg_replace_callback`,
 `preg_filter`; the keys of the map for `preg_replace_callback_array`, carried as `ConstArgs::patterns`) decides
@@ -314,6 +314,27 @@ that is not a literal, an array with an element that is not a string literal, a 
 the function handed over as a callback are the `value-dependent-read` gap and no label. The fold seam refuses a
 `preg_match`, `preg_match_all` or `preg_split` whose literal pattern reads or that the reader declines
 (`fold_reads_ambient_setting`); `preg_quote` still folds.
+
+**The setting cells and the ini names** (S6-core, `SettingCell`, `ini_cell` and `narrowed_ini_labels` in
+`steins-catalog`'s `setting.rs`). `SettingCell` is the roster of ADR-0101 §2.3 (`Locale`, `Precision`,
+`Timezone`, `Env`, `Encoding`, `Ini`), each with the label pair `global.read.setting.<cell>` and
+`global.write.setting.<cell>`; a call-decided gate names its cell (`SettingReadGate::cell`), and the effects
+pass drops the label that cell spells. Seven labels join the registry with the first rows that colour them:
+the reads of `timezone`, `encoding` and `ini` and the writes of `precision`, `timezone`, `encoding` and `ini`
+(the precision read was S3's). The `env` pair is in the enum and not in the registry: its first row is
+`getenv`. The first rows to name those cells are the ini functions with a **literal option name**: `ini_get`
+(one argument) reads the cell that owns the name, and `ini_set`, `ini_alter` (an alias of `ini_set`; it had no
+row, as `ini_restore` had none) and `ini_restore` (two, two and one arguments) write it, so `ini_set('precision', '3')`
+is `{global.write.setting.precision}` where the argument-blind row is `{global.write}`. The names are exact
+(the engine finds an entry by a case-sensitive lookup) and each is in php-src's table of entries that feed a
+reader: `precision` and `serialize_precision` (precision); `date.timezone` (timezone); `default_charset`,
+`internal_encoding`, `input_encoding`, `output_encoding`, `iconv.{internal,input,output}_encoding` and
+`mbstring.{internal_encoding,language,detect_order,http_input,http_output,substitute_character,strict_detection}`
+(encoding); `bcmath.scale`, `include_path` and `error_reporting` (ini). A name no cell owns, a name the call
+does not spell as a literal (a variable, a concatenation, a constant, a named or spread argument list), a count
+that is not the function's own and an ini function handed over as a callback keep the coarse `global.read` or
+`global.write`, which prefix subsumption already makes admissible wherever the cell is. `ini_get_all` and the
+cells' builtin readers and writers are later slices'.
 
 `fprintf` and `vfprintf` still have no row. Both reads of a printf row are **conditional on the
 call** (`'%d'` reads neither), so the row is an upper bound and not a claim about every call: the
