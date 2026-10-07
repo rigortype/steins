@@ -426,7 +426,11 @@
 # 903 → 904  2026-10-03 (issue #1003; #1009, Run 2 S6d): +1 `throw.maybe-undeclared`, a
 # `destructor` gap at a property write whose declared hint reaches a destructor class. Measured
 # by the local fp-gate on 41d820f9.
-"phpstan/phpstan-src" = 904
+# 904 → 909  2026-10-07, corpus drift, no engine change: the local checkout moved from
+# 566c4326 to f9a91596 (+20 PHP files under the gate's paths); master 603e9450 and #1010's head
+# measure 909 alike on the new revision (+2 `throw.maybe-undeclared`, +3 `variable.maybe-
+# undefined`).
+"phpstan/phpstan-src" = 909
 
 # New rows, 2026-10-02 (issues #915, #922): the strict-floor ids of the public packages that
 # had none. Measured under PHP 8.4.25 (CI's posture); the throw lane does not read the sidecar.
