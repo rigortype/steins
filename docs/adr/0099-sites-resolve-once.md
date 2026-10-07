@@ -640,7 +640,9 @@ call result takes with it are the same kinds, 112
   amendment read `getMessage()` as a string and tagged `RunProcessFailedException` pure; the
   review of #996 witnessed it, and neither accessor is read on any receiver now. The effect lane's
   own accessor row has the same premise on master (#997). `getTraceAsString()` and
-  `getTrace()` read a private typed property and stay. `getFile()` and `getLine()` read typed
+  `getTrace()` read a private typed property and stay. (Dated 2026-10-07, S5: `getMessage()` is read
+  as a string again. The conversion runs inside the accessor and returns a string, so the *result*
+  holds no object; the accessor call's own row is #997's. `getCode()` stays unproven.) `getFile()` and `getLine()` read typed
   properties a subclass can `unset` while declaring `__get`, which then runs (with its object's
   `__toString`) inside the accessor; they are read only on a final class or an exact receiver, with
   no `__get` on the chain.
@@ -665,7 +667,7 @@ a measured row to §6. Every witness below was run on PHP 8.5.11.
 
 | Family | Constructs | Nothing runs when | Edge when | Otherwise |
 |---|---|---|---|---|
-| Coerce | an operand handed to a project function's, method's or constructor's parameter; `return <expr>` from a function-like with a return type; `$this->p = <expr>` in a constructor, over a typed property; in a file without `strict_types=1`, where the declared type has a `string` member and none of `object`, `mixed`, `Stringable` | the operand is shown not to be an object; or every class it may be is an instance of a class member of the type, `Traversable` for `iterable`, a `Closure` or invokable class for `callable`; or an exact class's closed chain is not `Stringable` (the engine raises `TypeError`) | an exact class declares `__toString`, or a bound class's is final | gap |
+| Coerce | an operand handed to a project function's, method's or constructor's parameter, or forwarded to a project callback; a parameter's default value; `return <expr>` from a function-like with a return type (`__toString` has an implicit `: string`; a generator has none); `$this->p = <expr>` in a constructor, over a typed property; in a file without `strict_types=1` (a callback an engine invoker calls: whatever the file declares), where the declared type has a `string` member and none of `object`, `mixed`, `Stringable` | the operand is shown not to be an object; or every class it may be is an instance of a class member of the type, `Traversable` for `iterable`, a `Closure` or invokable class for `callable`; or an exact class's closed chain is not `Stringable` (the engine raises `TypeError`) | an exact class declares `__toString`, or a bound class's is final | gap |
 
 The rule after the type is the ToString row's, unchanged (`string_conversion`, no new gap kind), so
 a conversion is `operator-to-string` and an edge to `__toString` carries its labels and throws.
@@ -678,8 +680,25 @@ a conversion is `operator-to-string` and an edge to `__toString` carries its lab
   included. A `return` is an operator site over its operand (`OperatorConstruct::Return`) carrying the
   return type as written; an arrow function's body is its return. A constructor's `$this->p = …` (and
   `??=`) is an operator site over the value (`OperatorConstruct::PropertyValue`), and the resolver reads
-  the property's declaration off the class chain. Promotion is the parameter's conversion and needs no
-  site of its own (`new Promo(new S)` converts at the parameter, witnessed).
+  the property's declaration off the class chain; a destructuring or `foreach` target `$this->p` is the
+  same site over a value nothing names, and a reference assignment and a chain `$this->a = $this->b = $x`
+  are sites over their right-hand sides (all witnessed to convert). Promotion is the parameter's
+  conversion and needs no site of its own (`new Promo(new S)` converts at the parameter, witnessed).
+- **A parameter's default value** is converted in the **declaring** file's mode when the argument is left
+  out: `function d(string $s = new S)` prints `[S]` in a coercive file and raises `TypeError` under
+  `strict_types=1`. It is an operator site over the default in the callee's own body (the same construct
+  as a return, carrying the parameter's type), so the conversion is the callee's gap or edge and every
+  caller inherits it.
+- **A callback is a call whose arguments someone else forwards.** `$f = takes(...); $f(new S)` and a
+  body-local closure are read as a call is (the call's own arguments against the callee's parameters, in
+  the calling file's mode: `[S]` coercive, `TypeError` strict). `call_user_func('takes', new S)` is read
+  the same way for its forwarded arguments, and `call_user_func_array` follows the calling file too
+  (`TypeError` strict). Every other invoker calls the callback in coercive mode whatever the calling
+  file declares (witnessed under `strict_types=1`: `array_map('takes', [new S])`, `array_filter`,
+  `usort`, `array_walk` and `array_map(function (string $s) {…}, [new S])` all print `[S]`), and what it
+  forwards (an array's elements, a key) is not an operand of its own: the invoker's other operands are
+  read, and where the callback has a parameter that converts and one of them may hold an object the site
+  is `operator-to-string`. A builtin callback is its own row's (§4.1).
 - **Which file's mode governs** is the file whose code the engine is running at the check, and that
   is the whole answer, witnessed in both directions across files: a parameter follows the **calling**
   file (a coercive caller into a `strict_types=1` callee converts; a strict caller into a coercive
@@ -715,6 +734,23 @@ a conversion is `operator-to-string` and an edge to `__toString` carries its lab
   expression (it yields nothing). The commonest `: ?string` return in the corpora is a `match` of
   literals, and master read `'x' . match(…) { … => 'a' }` as a gap for the same reason; it is the
   one change here that reaches sites that are not boundaries, and it is measured with them below.
+- **Constants.** `Foo::class`, `static::class` and `$o::class` are strings, so object-free forms (this
+  too reaches the concatenations master read as gaps). A bare global constant is read off its value
+  (`ArgShape::GlobalConst`, resolved as PHP does and answered by ADR-0094's `global_const_fact`): a
+  scalar value holds no object, so `PHP_EOL` and a same-file `const GC = 'g'` convert nothing, and a
+  constant the catalog and the project state nothing of stays a gap, as `const GO = new S;` must
+  (`takes(GO)` prints `[S]`). A class constant or enum case (`ArgShape::ClassConst`) can only hold a
+  scalar, an array or an enum case, and an enum cannot declare `__toString`, so nothing converts
+  (`takes(KO::X)` over an enum case raises `TypeError`): the ToString family reads it as no object,
+  every other family (an enum may implement `ArrayAccess`, `Countable`, `IteratorAggregate`) as an
+  operand nothing is known of. A class constant that names a global constant holding an object
+  (`const X = GO;`) is the one shape this reads wrongly, and is not witnessed in any corpus.
+- **A string accessor holds a string.** `getMessage()` converts the property inside the accessor and
+  returns a string whatever the property held (witnessed: `$this->message = new S` prints `[S]` at the
+  accessor and `gm()` returns `'s'`), so its result is an operand shown to hold no object, and
+  `return $e->getMessage()` under `: string` has no site. S8's withdrawal of `getMessage()` is lifted by
+  this: the conversion is the accessor call's own row (#997), not the operand's. `getCode()` returns the
+  object and stays unproven.
 
 ### The witness table (21 rows; 10 must stay)
 
@@ -758,7 +794,7 @@ collects; `takes(...[new S])` converts; a by-reference `string &$s` converts the
 `string|callable` takes an invokable object and `string|iterable` a `Traversable` one as they are;
 `self|string` takes an instance of the declaring class (console's `TreeNode::addChild(self|string|callable
 $node)` was a gap until `self` was read); a closure's or an arrow function's `: string`
-converts what it returns; `takes([new S])` raises (an array is no conversion); `takes(1.5)` is
+converts what it returns (a generator's does not: `getReturn()` hands the object back); `takes([new S])` raises (an array is no conversion); `takes(1.5)` is
 `'1.5'`; `takes(true ? new S : 'a')` is an operand nothing shows, so a gap.
 
 ### §4.6 implemented; §7.5 closed
@@ -771,31 +807,46 @@ declared type. §7.5, "decided and not yet implemented", is closed. What stays o
 
 | Slice | Issue | Measured on the public corpora |
 |---|---|---|
-| coercion at user boundaries | #868 (S5) | 175 of 28,847 functions gain `operator-to-string` in both lanes and 1 loses it; 8 lose effect exhaustiveness, 14 the throw lane's, none gains; no proven label moves; `effect-diff` reports 8 `coverage-narrowed` events; `transform effects-envelope` 726 → 723 edits, `throws-envelope` and `loop-to-array-map` byte-identical; at `strict` (with `--vendor-diagnostics`) `throw.maybe-undeclared` +48 sites, 1 more reworded, -1 |
+| coercion at user boundaries | #868 (S5) | of 28,847 functions 627 change the kinds behind their `…?`: 228 gain `operator-to-string` in both lanes (54 through a callback), 348 lose it and 57 lose `user-code-reach`, none gains another kind; 9 lose effect exhaustiveness and 15 the throw lane's, 45 become exhaustive in a lane; no proven label moves; `effect-diff` reports 25 `coverage-completed` and 9 `coverage-narrowed` events; `transform effects-envelope` 726 → 734 edits (+11, -3), `throws-envelope` and `loop-to-array-map` byte-identical; at `strict` (with `--vendor-diagnostics`) `throw.maybe-undeclared` +67 findings and -52 (net composer +9, console +19, process +9, phpunit -13, monolog -4, guzzle -4, Carbon -1) |
 
-By package: Carbon 4, console 134, process 14 and flysystem 23 functions gain the kind. The sites
-are in the coercive files, and the public corpora hold few: `strict_types=1` heads 99% of monolog's,
-chronos', composer's, guzzle's, phpunit's and PHP-Parser's source files and 88% of flysystem's,
-so those packages move little or nothing; console's and process' declare none and carry 312 of the
-396 operand sites below; a tenth of Carbon's 925 files declare it. 141 of the 175 carry a coercion site in their own body (an argument 77, a return 55, both 7,
-a constructor's property write 2) and 34 inherit one through an edge. The 396 operand sites that
-convert read, by what the operand is: 251 a variable (213 handed to a call, 35 returned, 3 stored)
-that some write of the frame leaves unproven, 49 a method call on a receiver the scan cannot name
-(`$e->getMessage()` on a catch binding, `$command->getName()`), 28 an array element
-(`$this->messages[$name] ?? null`), 33 a conditional or a coalesce, 15 another object's property, and
-20 other forms (a chain on a property, a call of an untyped function, a class constant). No operand
-the S8 classifier proves, no literal and no local the scan shows object-free is among them. The 8
-functions that lose effect exhaustiveness are console's `ProgressBar::getMessage()` and
+The change is two-sided, and the table says which part is which. What S5 *adds* is the conversion at
+a boundary, and what it *removes* is the master gaps three of its operand readings recover, because
+the same classifier answers a concatenation as well as a call. Switching each reading off in turn on
+the final head, by the functions whose kinds change: the class and global constant readings
+(`PHP_EOL`, a same-file `const`, `self::NAME`, an enum case) remove `operator-to-string` from 297
+functions and `user-code-reach` from 12; `Foo::class` and `static::class` being strings remove it from
+12 and `user-code-reach` from 31; a `match` of object-free arms from 11; `getMessage()` as a string from
+2 (and `user-code-reach` from 2); the callbacks add `operator-to-string` to 54. A parameter's default, a
+generator's return, an implicit `__toString` return and a constructor's destructuring or `foreach`
+target move no function in these corpora (they are witnessed in `coercion_boundaries.rs`).
+
+The sites are in the coercive files, and the public corpora hold few: `strict_types=1` heads 99% of
+monolog's, chronos', composer's, guzzle's, phpunit's and PHP-Parser's source files and 88% of
+flysystem's. Their gains are the callbacks, which convert in coercive mode whatever the file declares
+(phpunit 29 functions, composer 20, flysystem 25); console's and process' declare none and carry 311
+of the 395 operand sites at an argument, a return or a constructor's write; a tenth of Carbon's 925
+files declare it. Those 395 sites read, by what the operand is: 251 a variable (213 handed to a call,
+35 returned, 3 stored) that some write of the frame leaves unproven, 49 a method call on a receiver
+the scan cannot name (`$e->getMessage()` on a catch binding, `$command->getName()`), 28 an array
+element (`$this->messages[$name] ?? null`), 33 a conditional or a coalesce, 15 another object's
+property and 19 other forms. No operand the S8 classifier proves, no literal, no constant and no
+local the scan shows object-free is among them. The callback sites that gain a gap are an engine
+invoker over operands the scan cannot show (`array_any($ids, static function (string $id) {…})` with
+`$ids = array_keys(…)`, a local assigned from a call: the keys are never objects, which only #877's
+locals proof shows) or a callable variable handed an unproven argument.
+
+The 9 functions that lose effect exhaustiveness are console's `ProgressBar::getMessage()` and
 `getBarCharacter()`, `QuestionHelper::mostRecentlyEnteredValue()`, `InputDefinition::negationToName()`
-and `shortcutToName()`, and `additionalFailureDescription()` of the three `Tester/Constraint` classes
-(an array element or a property returned under `: string`); the last three are the 3 lost
-`@phpstan-all-methods-pure` edits. The one function that loses the kind is monolog's
-`Utils::throwEncodeError()`, whose concatenation operand is a `match` of literals. At `strict`
-the +48 sites are composer 17 (every one in a vendored copy of `symfony/filesystem` under its test
-fixtures, 14 at the site and 3 a callee's), console 22 and process 9; the 1 reworded is console's
-`InputFile::normalizePath()`, which gains the kind; the 1 removed is monolog's, the `match`.
-The `possibly_expected.toml` rows of composer, console, process and monolog move by that
-delta.
+and `shortcutToName()`, `additionalFailureDescription()` of the three `Tester/Constraint` classes (an
+array element or a property returned under `: string`) and one phpunit method; the three console
+classes are the 3 lost `@phpstan-all-methods-pure` edits, and the 11 new edits are bodies that became
+exhaustive. At `strict` the findings that go are mostly the
+master gaps those readings recover (monolog `Utils::throwEncodeError()`, a concatenation over a `match`
+of literals; composer's `JsonFile::encode()` callers; phpunit's `ListTestFilesCommand`), the ones that
+come are composer 17 in a vendored copy of `symfony/filesystem` under its test fixtures, console 22
+and process 9 at an argument or a return, and phpunit's and composer's callback sites. The
+`possibly_expected.toml` rows of composer, console, process, phpunit, monolog, guzzle and Carbon move
+by the net.
 
 ### What stays open
 
@@ -806,6 +857,11 @@ Each witnessed on PHP 8.5.11 unless it says it is not.
   `S::__toString` and the throw lane reads it exhaustive. The slice covers constructors, as the
   design says; a site in every method is one more `emit` and would cost the throw lane the same
   kind wherever the operand is unproven.
+- **The conversion inside an engine accessor.** `getMessage()` converts what its property holds in the
+  accessor, which is the call's own row (#997); this slice gives the result no object and does not give
+  that row.
+- **A method callback** (`'Foo::m'`, `[$o, 'm']`) is not a resolved callback and is a gap already; only a
+  function name, a closure and a first-class callable are read.
 - **A property of another object, a static property, and a typed property no project class
   declares.** `$o->p = $x` is a state construct; an engine class's typed properties (`Exception::$file`,
   `$line`) are not in the project chain, and a vendor parent the project does not hold already makes the
@@ -815,15 +871,11 @@ Each witnessed on PHP 8.5.11 unless it says it is not.
   `Checked` envelope discharges the call's gap. A callback the engine invokes with arguments of its
   own choosing (`array_map` over a closure with a `string` parameter) is read through the invoker's row
   only.
-- **Operands the scan cannot show.** A class constant, `::class`, a global constant and an enum case
-  are not object-free shapes (`'a' . K::class` is a gap on master, for the same reason), an
-  array element, a local assigned from a call (S8's open sub-slice) and another object's property
-  are unproven, which is the bulk of the 396 above. The only classes that convert here are those with
-  `__toString`, so a class constant (never an object but an enum case, which cannot declare one) is
-  provably no conversion: a shape that said so without calling it object-free (an enum case is an
-  object for `ArrayAccess`, `Iterate` and `Clone`) is the sub-slice that would recover most of them.
-- **`static` in a type, an intersection member and a parameter's own default** read as converting or
-  as nothing, whichever is the over-approximation. A `static` return admits an instance of the
+- **Operands the scan cannot show.** An array element, a local assigned from a call or from a
+  `string` parameter, a coalesce or ternary over variables, arithmetic and another object's property
+  are unproven, which is the bulk of the operand sites below; they are #877's locals sub-slice.
+- **`static` in a type and an intersection member** read as converting or as nothing, whichever is
+  the over-approximation. A `static` return admits an instance of the
   called class only, so reading it as converting over-reports the instance case.
 - **A trait's `self`.** A trait method's `self` is the using class, which the trait's body cannot
   name; the frame's class is the trait, which no object is an instance of, so the type reads as
