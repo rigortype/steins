@@ -288,10 +288,10 @@ locale read; `%F`, `%h` and `%H` are the locale-independent spellings a
 fix-it offers. A read is a proven label only where it is unconditional for the
 call as written; one that depends on a value the site cannot see (a `%s` of a
 value not shown to be a float, a format that is not literal, a sort `$flags`
-or a `substr_compare` case switch that is not literal) is the
-`value-dependent-read` coverage gap until the site rules it in or out. A reader
-that classifies the bytes it is given (`ctype_alpha`, `basename`) reads on every
-call that has bytes to classify, and is the label (ADR-0101 §3.9).
+or a `substr_compare` case switch that is not literal, a `ctype_alpha($s)` over
+a string that may be empty) is the `value-dependent-read` coverage gap until the
+site rules it in or out: a literal argument shows whether the call reaches the
+routine that consults the cell (ADR-0101 §3.9).
 _Avoid_: pure modulo ambient state / practically pure (the rejected
 convenience, owner ruling 2026-10-03), locale-sensitive as a catalog
 disposition (a reason to colour a row, not to refuse one), epoch-stable read
