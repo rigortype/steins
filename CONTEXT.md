@@ -318,6 +318,19 @@ as residue. Not a **Dischargeable
 obstacle**, which is a silence leg of a check family.
 _Avoid_: obstacle (taken by Dischargeable obstacle)
 
+**Coercion site** (ADR-0099 §4.3's Coerce row):
+A place a type declaration converts an object to a string with no cast written
+— an argument handed to a project function's, method's or constructor's
+parameter, a `return` through a return type, a constructor's write to a typed
+property — when the declared type admits `string` and not the object as it is
+(`?string`, `string|int`, `string|array`; never `object`, `mixed` or
+`Stringable`) and the governing file is coercive: the calling file for a
+parameter, the declaring file for a return, the writing file for a property.
+Resolved by the ToString rule, so an exact class with `__toString` is an edge
+and an operand nothing names is `operator-to-string`. A `strict_types=1` file
+has none.
+_Avoid_: boundary conversion, coercion gap
+
 **Drop site** (ADR-0100 §7):
 A place a frame releases a value — `unset`, a reassignment, the end of the
 body, a `new` that dies in the expression holding it, a write to or `unset` of
