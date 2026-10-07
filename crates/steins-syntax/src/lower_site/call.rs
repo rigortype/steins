@@ -39,6 +39,8 @@ pub(super) fn function_call(fc: &FunctionCall<'_>, sx: &SiteScope<'_>, out: &mut
         let name = name_ref(id);
         let simple = name.simple().to_ascii_lowercase();
         let printf = ["sprintf", "printf"].contains(&simple.as_str());
+        // `ini_set` renders its value as a string first: a float goes through `precision`.
+        let ini_value = ["ini_set", "ini_alter"].contains(&simple.as_str());
         let ctype = simple.starts_with("ctype_");
         let mut site = sx.site(span, SiteKind::Call { name, callbacks });
         site.ref_targets = ref_targets;
@@ -48,7 +50,7 @@ pub(super) fn function_call(fc: &FunctionCall<'_>, sx: &SiteScope<'_>, out: &mut
             let keys = simple == "preg_replace_callback_array";
             site.const_args.patterns = pattern_list_of(fc, keys);
         }
-        if printf {
+        if printf || ini_value {
             site.const_args.float_evidence = float_evidence_of_args(&fc.argument_list, cx);
         }
         if ctype {

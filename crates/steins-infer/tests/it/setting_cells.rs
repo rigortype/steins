@@ -1,8 +1,9 @@
 //! The ini functions with a literal option name read and write the cell that owns the name
 //! (ADR-0101 §3.11, issue #1000, S6-core): `ini_get('precision')` is the precision cell's read,
-//! `ini_set('date.timezone', …)` the timezone cell's write, and a name no cell owns, a name the
-//! call does not spell, and a call whose arguments are not the function's own keep the coarse
-//! `global.read` and `global.write`.
+//! `ini_set('date.timezone', …)` the timezone cell's read (it returns the old value) and write,
+//! and a name no cell owns, a name the call does not spell, and a call whose arguments are not
+//! the function's own keep the coarse `global.read` and `global.write`. The value an `ini_set`
+//! stores is rendered as a string first, which reads `precision` where it is a float.
 //!
 //! S6-core colours no other row: every locale verdict of S1 to S5 reads as it did, which the last
 //! tests pin beside the suites of those slices.
@@ -10,6 +11,7 @@
 use steins_infer::{Diagnostic, EFFECT_ID, EffectSummary, check, effect_summary};
 use steins_syntax::SourceTree;
 
+const DEPENDS: &str = "value-dependent-read";
 const COARSE_READ: &str = "global.read";
 const COARSE_WRITE: &str = "global.write";
 const LOCALE_READ: &str = "global.read.setting.locale";
@@ -53,18 +55,13 @@ const ENCODING: (&str, &str) = ("global.read.setting.encoding", "global.write.se
 const INI: (&str, &str) = ("global.read.setting.ini", "global.write.setting.ini");
 
 /// Every option name the table owns, with the cell php-src shows it feeding.
-const NAMES: [(&str, (&str, &str)); 20] = [
+const NAMES: [(&str, (&str, &str)); 15] = [
     ("precision", PRECISION),
     ("serialize_precision", PRECISION),
     ("date.timezone", TIMEZONE),
-    ("default_charset", ENCODING),
-    ("internal_encoding", ENCODING),
-    ("input_encoding", ENCODING),
-    ("output_encoding", ENCODING),
     ("iconv.internal_encoding", ENCODING),
     ("iconv.input_encoding", ENCODING),
     ("iconv.output_encoding", ENCODING),
-    ("mbstring.internal_encoding", ENCODING),
     ("mbstring.language", ENCODING),
     ("mbstring.detect_order", ENCODING),
     ("mbstring.http_input", ENCODING),
@@ -86,27 +83,69 @@ fn ini_get_of_a_literal_name_reads_the_cell() {
     }
 }
 
-/// `ini_set`, its alias `ini_alter` and `ini_restore` rewrite the entry they name.
+/// `ini_set` and its alias `ini_alter` return the entry's old value (php-src calls
+/// `zend_ini_get_value` unconditionally), so they read the cell they rewrite; `ini_restore`
+/// returns nothing and only writes.
 #[test]
-fn ini_set_alter_and_restore_of_a_literal_name_write_the_cell() {
-    for (name, (_, write)) in NAMES {
-        proves("", &format!("ini_set('{name}', '1')"), &[write]);
-        proves("", &format!("ini_set('{name}', 1)"), &[write]);
-        proves("", &format!("ini_alter('{name}', '1')"), &[write]);
+fn ini_set_and_alter_read_and_write_the_cell_and_restore_writes_it() {
+    for (name, (read, write)) in NAMES {
+        proves("", &format!("ini_set('{name}', '1')"), &[read, write]);
+        proves("", &format!("ini_set('{name}', 1)"), &[read, write]);
+        proves("", &format!("ini_alter('{name}', '1')"), &[read, write]);
         proves("", &format!("ini_restore('{name}')"), &[write]);
     }
-    // The value is the call's own business: a variable of a declared scalar type changes no cell.
-    proves("string $v", "ini_set('precision', $v)", &[PRECISION.1]);
-    proves("int $v", "ini_set('date.timezone', $v)", &[TIMEZONE.1]);
+    // A value shown to be no float is the call's own business and reads no other cell.
+    proves("string $v", "ini_set('precision', $v)", &[PRECISION.0, PRECISION.1]);
+    proves("int $v", "ini_set('date.timezone', $v)", &[TIMEZONE.0, TIMEZONE.1]);
+}
+
+/// The value an `ini_set` or `ini_alter` stores is converted to a string first, and a float is
+/// rendered through `precision` (`ini_set('include_path', 1234.5678)` stores `1.23E+3` under
+/// `precision=3`, witnessed). The three-way rule of ADR-0101 §3.2 over the value: shown a float
+/// is the proven `global.read.setting.precision`, shown no float reads nothing, anything else is
+/// the `value-dependent-read` gap and no label. The cell's own read and write are there either
+/// way.
+#[test]
+fn the_value_of_an_ini_set_reads_precision_where_it_is_a_float() {
+    let cell = [INI.0, INI.1];
+    let with_precision = [INI.0, PRECISION.0, INI.1];
+    for call in ["ini_set", "ini_alter"] {
+        for value in ["1234.5678", "1.5", "(float) $n", "$f"] {
+            let s = row("float $f, int $n", &format!("return {call}('include_path', {value});"));
+            assert_eq!(s.labels, with_precision, "{call} {value}: {s:?}");
+            assert!(!s.gaps.contains(&DEPENDS), "{call} {value}: {s:?}");
+        }
+        for value in ["'/x'", "7", "null", "true", "$s", "$n", "'a' . $s", "$b"] {
+            proves("string $s, int $n, bool $b", &format!("{call}('include_path', {value})"), &cell);
+        }
+        for value in ["$m", "$n", "$m ?? 0"] {
+            let s = row("mixed $m, int|float $n", &format!("return {call}('include_path', {value});"));
+            assert_eq!(s.labels, cell, "{call} {value}: {s:?}");
+            assert!(s.gaps.contains(&DEPENDS) && !s.exhaustive, "{call} {value}: {s:?}");
+        }
+    }
+    // The cell of `precision` already carries the read, as the old value it returns, so its own
+    // value needs no second verdict.
+    for value in ["1.5", "$m"] {
+        let s = row("mixed $m", &format!("return ini_set('precision', {value});"));
+        assert_eq!(s.labels, [PRECISION.0, PRECISION.1], "{value}: {s:?}");
+        assert!(!s.gaps.contains(&DEPENDS), "{value}: {s:?}");
+    }
+    // `ini_get` and `ini_restore` take no value; a name no cell owns keeps the coarse row and
+    // decides nothing here.
+    proves("mixed $m", "ini_get('include_path')", &[INI.0]);
+    labels("mixed $m", "ini_set('display_errors', $m)", &[COARSE_WRITE]);
+    let s = row("mixed $m", "return ini_set('display_errors', $m);");
+    assert!(!s.gaps.contains(&DEPENDS), "{s:?}");
 }
 
 /// A statement is the call too: the write is not an expression's value.
 #[test]
 fn a_discarded_ini_write_is_the_cells_write() {
-    let s = row("", "ini_set('serialize_precision', '17'); ini_restore('precision');");
+    let s = row("", "ini_restore('serialize_precision'); ini_restore('precision');");
     assert_eq!(s.labels, [PRECISION.1], "{s:?}");
     let s = row("", "ini_set('precision', '3'); return ini_get('include_path');");
-    assert_eq!(s.labels, [INI.0, PRECISION.1], "{s:?}");
+    assert_eq!(s.labels, [INI.0, PRECISION.0, PRECISION.1], "{s:?}");
 }
 
 /// A name the call does not spell as a literal is any entry, so the row is the coarse one: a
@@ -140,6 +179,9 @@ fn an_unmapped_name_keeps_the_coarse_row() {
         "display_errors", "memory_limit", "max_execution_time", "pcre.backtrack_limit",
         "mbstring.regex_retry_limit", "mbstring.encoding_translation", "intl.default_locale",
         "date.default_latitude", "no.such.entry", "", "PRECISION", "Date.Timezone",
+        // These five also reset the mb-regex encoding, which no cell holds until S6d.
+        "default_charset", "internal_encoding", "input_encoding", "output_encoding",
+        "mbstring.internal_encoding",
         "INCLUDE_PATH", " precision",
     ] {
         labels("", &format!("ini_get('{name}')"), &[COARSE_READ]);
@@ -172,32 +214,49 @@ fn an_ini_function_handed_over_as_a_callback_keeps_the_coarse_row() {
 }
 
 /// A read and a write of different cells are not one another: a declared envelope admits the
-/// cell it names and the coarse parent, and no other cell (ADR-0101 §2.2).
+/// cell it names and the coarse parents, and no other cell (ADR-0101 §2.2). An `ini_set` also
+/// reads the cell, so an envelope that names only the write refuses it.
 #[test]
 fn an_envelope_admits_the_cell_it_names_and_the_parents() {
     let at = |declared: &str, body: &str| {
         findings(&format!(
-            "<?php\n#[\\Steins\\Effect('{declared}')]\nfunction f(): mixed {{ {body} }}\n"
+            "<?php\n#[\\Steins\\Effect({declared})]\nfunction f(): mixed {{ {body} }}\n"
         ))
     };
     let read = "return ini_get('precision');";
-    let write = "return ini_set('date.timezone', 'UTC');";
-    for declared in ["global.read.setting.precision", "global.read.setting", "global.read", "global"] {
+    let set = "return ini_set('date.timezone', 'UTC');";
+    let restore = "ini_restore('date.timezone'); return 1;";
+    for declared in ["'global.read.setting.precision'", "'global.read.setting'", "'global.read'", "'global'"] {
         assert!(at(declared, read).is_empty(), "{declared}: {:#?}", at(declared, read));
     }
-    for declared in ["global.write.setting.timezone", "global.write.setting", "global.write", "global"] {
-        assert!(at(declared, write).is_empty(), "{declared}: {:#?}", at(declared, write));
+    // The old value is a read: an `ini_set` needs both halves, and `ini_restore` only the write.
+    for declared in [
+        "'global.read.setting.timezone', 'global.write.setting.timezone'",
+        "'global.read.setting', 'global.write.setting'",
+        "'global.read', 'global.write'",
+        "'global'",
+    ] {
+        assert!(at(declared, set).is_empty(), "{declared}: {:#?}", at(declared, set));
+    }
+    for declared in ["'global.write.setting.timezone'", "'global.write.setting'", "'global.write'"] {
+        assert!(at(declared, restore).is_empty(), "{declared}: {:#?}", at(declared, restore));
+    }
+    // The write alone does not cover `ini_set`: it names the cell's read as the excess.
+    for declared in ["'global.write.setting.timezone'", "'global.write'"] {
+        let d = at(declared, set);
+        assert_eq!(d.len(), 1, "{declared}: {d:#?}");
+        assert!(d[0].message.contains("global.read.setting.timezone"), "{}", d[0].message);
     }
     // Another cell's read does not cover it, and neither does the other direction.
     for declared in [
-        "global.read.setting.timezone", "global.read.setting.locale", "global.write.setting.precision",
-        "global.write",
+        "'global.read.setting.timezone'", "'global.read.setting.locale'",
+        "'global.write.setting.precision'", "'global.write'",
     ] {
         let d = at(declared, read);
         assert_eq!(d.len(), 1, "{declared}: {d:#?}");
         assert!(d[0].message.contains("global.read.setting.precision"), "{}", d[0].message);
     }
-    let d = at("global.write.setting.precision", write);
+    let d = at("'global.read.setting.timezone', 'global.write.setting.precision'", set);
     assert_eq!(d.len(), 1, "{d:#?}");
     assert!(d[0].message.contains("global.write.setting.timezone"), "{}", d[0].message);
     // A pure function over a read of a cell reports it, as over any setting read.

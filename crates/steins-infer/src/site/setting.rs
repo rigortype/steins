@@ -22,12 +22,12 @@
 //! A bare constant is read as PHP resolves it ([`global_const_fact`]): a namespaced twin the
 //! project declares shadows the global one, and a twin the scan cannot read is the gap.
 
-use steins_catalog::{GateArg, SettingReadGate, setting_read_gate};
+use steins_catalog::{GateArg, IniAccess, SettingCell, SettingReadGate, ini_call, setting_read_gate};
 use steins_domain::{Fact, Val};
 use steins_syntax::{CallTarget, ConstArgs, ConstInt, NameRef, NotText, RefKind};
 
 use super::GapKind;
-use super::reach::Frame;
+use super::reach::{FloatClass, Frame};
 use crate::cx::Cx;
 use crate::global_consts::global_const_fact;
 
@@ -60,6 +60,44 @@ pub(super) fn unreadable_mode(name: &str, labels: &mut Vec<&'static str>) -> Opt
     let read = setting_read_gate(name)?.cell().read_label();
     labels.retain(|label| *label != read);
     Some(GapKind::ValueDependentRead)
+}
+
+/// The `precision` read of an `ini_set` or `ini_alter` call that [`ini_call`] maps to a cell
+/// (ADR-0101 §3.11): the new value is converted to a string before the entry is touched
+/// (`zval_get_tmp_string`), and a float is rendered through `precision`
+/// (`ini_set('include_path', 1234.5678)` stores `1.23E+3` at `precision=3`). The cell's own
+/// read and write are the catalog's narrowed row; this is the value argument's, decided by the
+/// three-way rule of §3.2 over the same float evidence as a `%s`: a value shown a float is the
+/// proven `global.read.setting.precision`, a value shown no float reads nothing, and any other
+/// is the [`GapKind::ValueDependentRead`] gap and no label. An `ini_set` of the precision cell
+/// itself already carries that read, as the old value it returns. An unmapped name keeps the
+/// coarse row and decides nothing here.
+pub(super) fn ini_value_read(
+    (cx, frame): (&Cx, &Frame),
+    builtin: &str,
+    (positional, consts): (Option<usize>, &ConstArgs),
+    labels: &mut Vec<&'static str>,
+) -> Option<GapKind> {
+    let Some(CallTarget::Literal(option)) = consts.first.as_ref() else { return None };
+    let call = ini_call(builtin, option, positional?)?;
+    if call.access != IniAccess::Set || call.cell == SettingCell::Precision {
+        return None;
+    }
+    let class = match consts.float_evidence.iter().find(|(position, _)| *position == 1) {
+        Some((_, evidence)) => frame.float_class(cx, evidence),
+        None => FloatClass::Unknown,
+    };
+    match class {
+        FloatClass::Yes => {
+            let read = SettingCell::Precision.read_label();
+            if !labels.contains(&read) {
+                labels.push(read);
+            }
+            None
+        }
+        FloatClass::No => None,
+        FloatClass::Unknown => Some(GapKind::ValueDependentRead),
+    }
 }
 
 /// Whether the call reads the locale, or `None` when its deciding arguments do not show it.
