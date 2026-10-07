@@ -726,7 +726,7 @@ mod tests {
             ),
             (
                 "vendor/lib/b/src/operators.php",
-                "<?php\nnamespace Lib\\A;\nclass Operators {\n  public function each($o, $b): \\Generator {\n    $s = $o . $b;\n    $s .= $o;\n    $s = \"x{$o}\";\n    $s = <<<T\n      v {$o}\n      T;\n    $s = (string) $o;\n    echo $o;\n    print $o;\n    $t = $o == 'a';\n    $t = $o < $b;\n    switch ($o) { case 'a': break; }\n    $v = $o->p;\n    $o->p = 1;\n    $o->p++;\n    $t = isset($o->p);\n    $t = empty($o->p);\n    unset($o->p);\n    $t = $o->p ?? 1;\n    $o->p ??= 1;\n    $r = &$o->p;\n    [$x, $y] = $o;\n    foreach ($o as $z) {}\n    yield from $o;\n    f(...$o);\n    $c = clone $o;\n    $w = $this->q;\n    $d = clone($o, ['a' => 1]);\n    $m = $o->$b;\n    $n = $$b;\n    $o->p[0] = $b;\n    $q = new Q;\n    $q = null;\n    unset($q);\n    new Q;\n    $this->h = null;\n    self::$s = null;\n    unset($this->h);\n  }\n  public function __construct() {\n    $this->h = null;\n  }\n}\n",
+                "<?php\nnamespace Lib\\A;\nclass Operators {\n  public function each($o, $b): \\Generator {\n    $s = $o . $b;\n    $s .= $o;\n    $s = \"x{$o}\";\n    $s = <<<T\n      v {$o}\n      T;\n    $s = (string) $o;\n    echo $o;\n    print $o;\n    $t = $o == 'a';\n    $t = $o < $b;\n    switch ($o) { case 'a': break; }\n    $v = $o->p;\n    $o->p = 1;\n    $o->p++;\n    $t = isset($o->p);\n    $t = empty($o->p);\n    unset($o->p);\n    $t = $o->p ?? 1;\n    $o->p ??= 1;\n    $r = &$o->p;\n    [$x, $y] = $o;\n    foreach ($o as $z) {}\n    yield from $o;\n    f(...$o);\n    g(n: new Q, m: $b);\n    $c = clone $o;\n    $w = $this->q;\n    $d = clone($o, ['a' => 1]);\n    $m = $o->$b;\n    $n = $$b;\n    $o->p[0] = $b;\n    $q = new Q;\n    $q = null;\n    unset($q);\n    new Q;\n    $this->h = null;\n    self::$s = null;\n    unset($this->h);\n  }\n  public function __construct($v = null) {\n    $this->h = null;\n    $this->g = $v;\n  }\n}\n",
             ),
             ("vendor/autoload.php", "<?php\nfunction stray_helper() {}\n"),
         ]
@@ -1147,6 +1147,24 @@ mod tests {
             let bytes = crate::wire::to_vec(site).expect("a site serializes");
             let back: SiteOrigin = crate::wire::from_slice(&bytes).expect("a site round-trips");
             assert_eq!(&back, site);
+        }
+    }
+
+    /// A call site's arguments (issue #868, the Coerce row) are the last field of a site: a spread
+    /// and a named argument are in the fixture, and every site with arguments round-trips with
+    /// them.
+    #[test]
+    fn a_calls_arguments_round_trip_through_the_codec() {
+        let parsed = parsed_fixture();
+        let sites = fixture_sites(&parsed);
+        let with_args: Vec<&SiteOrigin> = sites.iter().copied().filter(|s| !s.args.is_empty()).collect();
+        assert!(with_args.iter().any(|s| s.args.iter().any(|a| a.spread)));
+        assert!(with_args.iter().any(|s| s.args.iter().any(|a| a.name.is_some())));
+        assert!(with_args.iter().any(|s| s.args.iter().any(|a| a.receiver.is_some())));
+        for site in with_args {
+            let bytes = crate::wire::to_vec(site).expect("a site serializes");
+            let back: SiteOrigin = crate::wire::from_slice(&bytes).expect("a site round-trips");
+            assert_eq!(&back.args, &site.args);
         }
     }
 

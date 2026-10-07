@@ -137,6 +137,14 @@ impl<'a> Resolver<'a, '_, '_> {
         self.out.gaps.insert(kind);
     }
 
+    /// The edge to a project method or constructor, then the conversions the call's
+    /// arguments run on its parameter types.
+    fn edge_with_arguments(&mut self, sym: Sym) {
+        let sig = operator::method_signature(self.cx, &sym);
+        self.push(Edge::call(sym));
+        self.coerce_arguments(sig);
+    }
+
     fn push(&mut self, target: Target) {
         self.out.targets.push(target);
     }
@@ -229,6 +237,22 @@ impl<'a> Resolver<'a, '_, '_> {
     }
 
     fn user_call(&mut self, name: &NameRef, site: Site, args: &CallArgs<'_>) {
+        self.user_edges(name, site, args);
+        let params = &self.cx.fn_decl(site).params;
+        self.coerce_arguments(Some(operator::Signature { file: site.file, params }));
+    }
+
+    /// The conversions the call's arguments run on the parameter types of the project
+    /// callee `sig` (ADR-0099 §4.3's Coerce row, issue #868); `None` where no declaration
+    /// was found for an edge.
+    fn coerce_arguments(&mut self, sig: Option<operator::Signature<'_>>) {
+        let resolved = operator::coerce_arguments(self.cx, self.frame, &self.site.args, sig.as_ref());
+        self.out.targets.extend(resolved.targets);
+        self.out.gaps.extend(resolved.gaps);
+    }
+
+    /// The edge to a project function, or its conditional-purity row.
+    fn user_edges(&mut self, name: &NameRef, site: Site, args: &CallArgs<'_>) {
         let decl = self.cx.fn_decl(site);
         let sym = Sym::Func(decl.fqn.clone());
         let contract = if self.effects() {
@@ -469,7 +493,7 @@ impl<'a> Resolver<'a, '_, '_> {
     fn method_call(&mut self, receiver: &EffectRecv, method: &str) {
         let miss = match method_edge(self.cx, self.frame.class_fqn, receiver, method) {
             Ok(sym) => {
-                self.push(Edge::call(sym));
+                self.edge_with_arguments(sym);
                 return;
             }
             Err(miss) => miss,
@@ -589,7 +613,7 @@ impl<'a> Resolver<'a, '_, '_> {
             self.hooked_engine_code(throwable_creation_hooks(self.cx, self.frame.class_fqn, class));
         }
         match target {
-            NewTarget::Edge(sym) => self.push(Edge::call(sym)),
+            NewTarget::Edge(sym) => self.edge_with_arguments(sym),
             NewTarget::Absent => {}
             NewTarget::Engine(fqn) if self.effects() => match engine::constructor_effects(&fqn) {
                 Some(labels) => {

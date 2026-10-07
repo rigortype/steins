@@ -992,6 +992,16 @@ pub enum OperatorConstruct {
     DropPropInit,
     /// `unset($this->p)` of a property that may hold a value to drop.
     DropPropUnset,
+    /// The value of a `return <expr>` in a function-like whose declared return type admits
+    /// `string` ([`OperatorFamily::ToString`], ADR-0099 §4.3's Coerce row, issue #868). One
+    /// operand, the returned expression; [`SiteKind::Operator::member`] is the return type as
+    /// written (`?string`, `string|int`), which the resolver reads against the operand's class.
+    Return,
+    /// The value of a write `$this->p = <expr>` in a constructor, which a typed property whose
+    /// declared type admits `string` converts ([`OperatorFamily::ToString`], the Coerce row).
+    /// One operand, the value; [`SiteKind::Operator::member`] is the property's name, and the
+    /// resolver reads its declared type off the class chain.
+    PropertyValue,
 }
 
 impl OperatorFamily {
@@ -1002,7 +1012,7 @@ impl OperatorFamily {
 
 impl OperatorConstruct {
     /// Every form, in declaration order, which is the order the payload codec numbers them by.
-    pub const ALL: [Self; 34] = [
+    pub const ALL: [Self; 36] = [
         Self::Concat,
         Self::ConcatAssign,
         Self::Interpolation,
@@ -1037,6 +1047,8 @@ impl OperatorConstruct {
         Self::DropPropWrite,
         Self::DropPropInit,
         Self::DropPropUnset,
+        Self::Return,
+        Self::PropertyValue,
     ];
 
     /// The family a form belongs to, or `None` for the forms
@@ -1055,7 +1067,9 @@ impl OperatorConstruct {
             | Self::OrderCompare
             | Self::Switch
             | Self::Name
-            | Self::OffsetValue => Some(OperatorFamily::ToString),
+            | Self::OffsetValue
+            | Self::Return
+            | Self::PropertyValue => Some(OperatorFamily::ToString),
             Self::Destructure => Some(OperatorFamily::ArrayAccess),
             Self::Foreach | Self::YieldFrom | Self::Spread => Some(OperatorFamily::Iterate),
             Self::Clone | Self::CloneWith => Some(OperatorFamily::Clone),
@@ -1207,6 +1221,28 @@ pub struct SiteOrigin {
     pub ref_targets: Option<Vec<RefTarget>>,
     /// The proven-constant leading arguments of a named-function call; empty for every other kind.
     pub const_args: ConstArgs,
+    /// What each argument of a call, method call or `new` is, in source order, for the
+    /// coercion the callee's parameter types run on it (ADR-0099 §4.3's Coerce row, issue
+    /// #868): the shape, what names the class, the name of a named argument, a spread. Empty
+    /// when no argument can hold an object (every one is a positional [`ArgShape::ObjectFree`]
+    /// or [`ArgShape::Array`] expression) and for every other kind of site. Appended after
+    /// [`Self::const_args`].
+    pub args: Vec<CallArg>,
+}
+
+/// One argument of a call-like site ([`SiteOrigin::args`]).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
+pub struct CallArg {
+    /// The parameter name of a named argument (`f(s: $x)`), without the `$`.
+    pub name: Option<String>,
+    /// `...$x`: the argument unpacks into every position from here on.
+    pub spread: bool,
+    /// What the expression is shown to hold, as an operand's.
+    pub shape: ArgShape,
+    /// What names the expression's class without a flow environment (`new Foo`, `$this`, a
+    /// never-written variable or property), as an operator operand's.
+    pub receiver: Option<EffectRecv>,
 }
 
 /// A recognized effect-envelope declaration (ADR-0005/0006/0018): the upper

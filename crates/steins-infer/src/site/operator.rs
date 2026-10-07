@@ -24,8 +24,11 @@
 //! use: [`drops`] answers whether the value a frame releases may run a destructor.
 
 mod chain;
+mod coerce;
 mod drops;
 mod family;
+
+pub(super) use coerce::{Signature, arguments as coerce_arguments, method_signature};
 
 use steins_syntax::{
     ArgShape, EffectRecv, NativeType, OperatorConstruct as C, OperatorFamily as F, SiteOrigin,
@@ -49,6 +52,10 @@ pub(super) fn resolve<'a>(
 ) -> ResolvedSite {
     if family == F::Drop {
         return drops::resolve(cx, frame, construct, receivers, member);
+    }
+    // The Coerce row's value sites: a return and a constructor's typed-property write.
+    if matches!(construct, C::Return | C::PropertyValue) {
+        return coerce::value(cx, frame, site, (construct, receivers, member));
     }
     let mut op = Operator {
         cx,

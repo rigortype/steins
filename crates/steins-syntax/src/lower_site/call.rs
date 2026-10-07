@@ -3,11 +3,11 @@
 
 use mago_span::HasSpan;
 use mago_syntax::cst::{
-    AnonymousClass, Argument, ClassLikeMemberSelector, Expression, FunctionCall, Instantiation, MethodCall,
+    AnonymousClass, Argument, ArgumentList, ClassLikeMemberSelector, Expression, FunctionCall, Instantiation, MethodCall,
     NullSafeMethodCall, StaticMethodCall,
 };
 
-use super::SiteScope;
+use super::{SiteScope, coerce};
 use crate::ast::{ArgShape, DynamicSite, SiteKind, SiteOrigin, Span};
 use crate::lower_arg_shape::{
     arg_shapes_of, float_evidence_of_args, method_call_shapes, not_text_of_args,
@@ -56,6 +56,7 @@ pub(super) fn function_call(fc: &FunctionCall<'_>, sx: &SiteScope<'_>, out: &mut
             site.const_args.not_text = not_text_of_args(&fc.argument_list, cx);
         }
         site.operands = arg_shapes_of(&fc.argument_list, cx);
+        site.args = coerce::call_args(&fc.argument_list, sx);
         out.push(site);
     } else {
         let var = direct_var_callee(fc);
@@ -78,12 +79,13 @@ fn instance_call(
     selector: &ClassLikeMemberSelector<'_>,
     span: Span,
     sx: &SiteScope<'_>,
-    operands: impl FnOnce() -> Option<Vec<ArgShape>>,
+    (list, operands): (&ArgumentList<'_>, impl FnOnce() -> Option<Vec<ArgShape>>),
 ) -> SiteOrigin {
     match (effect_recv_of_object_declared(object, sx.cx), method_name_of(selector)) {
         (Some(receiver), Some(method)) => {
             let mut site = sx.site(span, SiteKind::MethodCall { receiver, method });
             site.operands = operands();
+            site.args = coerce::call_args(list, sx);
             site
         }
         // `$var->m()` / `$o->$m()` — receiver or selector not resolvable.
@@ -94,7 +96,8 @@ fn instance_call(
 /// A `$o->m(...)` call.
 pub(super) fn method_call(mc: &MethodCall<'_>, sx: &SiteScope<'_>, out: &mut Vec<SiteOrigin>) {
     let shapes = || method_call_shapes(mc.object, &mc.argument_list, sx.cx);
-    out.push(instance_call(mc.object, &mc.method, to_span(mc.span()), sx, shapes));
+    let span = to_span(mc.span());
+    out.push(instance_call(mc.object, &mc.method, span, sx, (&mc.argument_list, shapes)));
 }
 
 /// A `$o?->m(...)` call, whose arguments record no shapes.
@@ -103,7 +106,8 @@ pub(super) fn nullsafe_method_call(
     sx: &SiteScope<'_>,
     out: &mut Vec<SiteOrigin>,
 ) {
-    out.push(instance_call(mc.object, &mc.method, to_span(mc.span()), sx, || None));
+    let span = to_span(mc.span());
+    out.push(instance_call(mc.object, &mc.method, span, sx, (&mc.argument_list, || None)));
 }
 
 /// A `Foo::m(...)` call.
@@ -118,6 +122,7 @@ pub(super) fn static_method_call(
     {
         let mut site = sx.site(span, SiteKind::MethodCall { receiver, method });
         site.operands = method_call_shapes(sc.class, &sc.argument_list, sx.cx);
+        site.args = coerce::call_args(&sc.argument_list, sx);
         out.push(site);
     } else {
         // `$var::m()` / `static::m()` / `Foo::$m()` — unresolvable.
@@ -139,6 +144,9 @@ pub(super) fn instantiation(
                 Some(list) => arg_shapes_of(list, sx.cx),
                 None => Some(Vec::new()),
             };
+            if let Some(list) = &inst.argument_list {
+                site.args = coerce::call_args(list, sx);
+            }
             out.push(site);
         }
         None => out.push(sx.site(span, SiteKind::Dynamic(DynamicSite::New))),
@@ -158,7 +166,11 @@ pub(super) fn anonymous_class(
             out.push(sx.site(span, SiteKind::Dynamic(DynamicSite::AnonymousClass)));
         }
         AnonymousConstructor::Inherited(class) => {
-            out.push(sx.site(span, SiteKind::New { class }));
+            let mut site = sx.site(span, SiteKind::New { class });
+            if let Some(list) = &ac.argument_list {
+                site.args = coerce::partial_call_args(list, sx);
+            }
+            out.push(site);
         }
         AnonymousConstructor::None => {}
     }

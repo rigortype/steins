@@ -34,6 +34,7 @@ mod closure_liskov;
 mod closure_return;
 mod closures;
 mod coalesce_value;
+mod coercion_boundaries;
 mod coercion_witness_grid;
 mod comparison_value;
 mod concat;

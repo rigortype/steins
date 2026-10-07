@@ -13,7 +13,7 @@ use std::collections::HashSet;
 use mago_span::HasSpan;
 use mago_syntax::cst::{
     Access, AnonymousClass, Argument, ArrayElement, BinaryOperator, ClassLikeMember, Expression,
-    FunctionCall, Literal, Node, PartialApplication, Statement, UnaryPrefixOperator, Variable,
+    FunctionCall, Hint, Literal, Node, PartialApplication, Statement, UnaryPrefixOperator, Variable,
 };
 
 use crate::ast::{
@@ -256,6 +256,10 @@ pub(crate) struct EffectScanCx {
     /// ([`property_write_span`]). Only a method sets it: a closure or arrow
     /// function defined in a constructor is a frame of its own.
     pub(crate) constructor: bool,
+    /// The frame's declared return type as the resolver reads it, when it spells a `string`
+    /// member ([`crate::lower_site::return_hint_text`]): a `return <expr>` is then a coercion
+    /// site (ADR-0099 §4.3's Coerce row). `None` for a frame with no such type.
+    pub(crate) returns: Option<String>,
     /// What the frame's variables are shown to hold, for the [`crate::ast::ArgShape`] of a
     /// bare variable argument; opaque until [`Self::with_body`] builds it.
     pub(crate) bindings: FrameBindings,
@@ -281,7 +285,22 @@ impl EffectScanCx {
             .collect();
         let bindings = FrameBindings::opaque();
         let drops = crate::lower_site::DropSubjects::new();
-        Self { locals, byref_params, frame_aliased, writes, constructor: false, bindings, drops }
+        Self {
+            locals,
+            byref_params,
+            frame_aliased,
+            writes,
+            constructor: false,
+            returns: None,
+            bindings,
+            drops,
+        }
+    }
+
+    /// Record the frame's return type ([`Self::returns`]) from its declaration.
+    pub(crate) fn returning(mut self, hint: Option<&Hint<'_>>) -> Self {
+        self.returns = hint.and_then(crate::lower_site::return_hint_text);
+        self
     }
 
     /// Mark the frame as a `__construct` body ([`Self::constructor`]).

@@ -196,7 +196,7 @@ impl<'a> Operator<'a, '_> {
     /// Whether the chain declares the property `member` and the accessing scope
     /// sees it: public, or private to the scope's own class, or protected within
     /// the scope's hierarchy.
-    fn visible_property(&self, chain: &Chain<'a>, member: &str) -> bool {
+    pub(super) fn visible_property(&self, chain: &Chain<'a>, member: &str) -> bool {
         use steins_syntax::Visibility;
         let Some((prop, owner)) = chain.property(member) else { return false };
         let scope = self.frame.class_fqn;

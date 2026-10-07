@@ -37,7 +37,7 @@ use mago_syntax::cst::{
     Literal, Node, StringPart, SwitchCase, UnaryPrefix, UnaryPrefixOperator, Variable,
 };
 
-use super::{SiteScope, drops, scan_sites};
+use super::{SiteScope, coerce, drops, scan_sites};
 use crate::ast::{
     ArgShape, ConstArgs, EffectRecv, OperatorConstruct as C, OperatorFamily as F, SiteKind,
     SiteOrigin,
@@ -77,6 +77,7 @@ pub(crate) fn promoted_hook_sites(params: &FunctionLikeParameterList<'_>) -> Vec
             operands: Some(vec![ArgShape::Unknown]),
             ref_targets: None,
             const_args: ConstArgs::default(),
+            args: Vec::new(),
         })
         .collect()
 }
@@ -136,6 +137,10 @@ pub(super) fn lower(node: &Node<'_, '_>, sx: &SiteScope<'_>, out: &mut Vec<SiteO
         }
         Node::ArrayAppend(ap) => {
             offset_site(ap.array, to_span(ap.span()), C::Write, sx, out);
+            false
+        }
+        Node::Return(r) => {
+            coerce::return_site(r, sx, out);
             false
         }
         _ => {
@@ -292,6 +297,7 @@ fn assignment(
             } else {
                 chain(a.lhs, C::Write, sx, out);
                 offset_value(a.lhs, Some(a.rhs), sx, out);
+                coerce::property_value_site(a, sx, out);
             }
         }
         AssignmentOperator::Concat(_) => {
@@ -303,6 +309,7 @@ fn assignment(
             chain(a.lhs, C::CoalesceAssign, sx, out);
             // `$s[5] ??= $o` on a string converts `$o` as `=` does (witnessed).
             offset_value(a.lhs, Some(a.rhs), sx, out);
+            coerce::property_value_site(a, sx, out);
         }
         _ => chain(a.lhs, C::ReadWrite, sx, out),
     }
