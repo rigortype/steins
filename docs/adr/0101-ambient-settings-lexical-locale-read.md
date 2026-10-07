@@ -539,36 +539,77 @@ against php-src at `php-8.5.11` and against the engine, and enters each name tha
 - **The evidence bar.** A name is coloured where php-src shows its own path consulting the locale (a C-library
   character-class or case table, `strcoll`, `strftime`, `mbrlen`, or an engine flag `setlocale` derives) **and** the
   engine moved under a locale other than `C` on this machine; a name that did not move anywhere stays as it is, and
-  the reason is recorded below. The witness is the oracle table `locale_readers_oracle.rs` (steins-catalog tests): 38
+  the reason is recorded below. The witness is the oracle table `locale_readers_oracle.rs` (steins-catalog tests): 55
   probes, each under `C`, `de_DE.UTF-8`, a Latin-1 locale and, where installed, `ja_JP.eucJP`, asserted in both
-  directions (a probe that moved is a name the catalog colours; a name it colours has a probe that moved). Whether a
-  byte is a letter or a space is the C library's table, so a probe is either asserted on every platform (a Latin-1
-  letter, a day name, a collation) or only where it was witnessed, macOS's libc (`MovesOnMacos`: glibc's UTF-8
-  locales classify bytes `0x80..=0xFF` as nothing, and the probe may stand still there). The CI test job generates
-  `de_DE.UTF-8` and `de_DE.ISO-8859-1` and proves PHP can select them.
-- **Coloured, the read on every call** (`effect_labels`): `ctype_alnum`, `ctype_alpha`, `ctype_cntrl`, `ctype_graph`,
-  `ctype_lower`, `ctype_print`, `ctype_punct`, `ctype_space`, `ctype_upper` (`isalpha` and its siblings per byte,
-  `ext/ctype/ctype.c`); `strnatcmp` and `strnatcasecmp` (`strnatcmp_ex`'s `isdigit`, `isspace`, `toupper`);
-  `basename` (`php_basename` picks its algorithm by `CG(ascii_compatible_locale)`, which `setlocale` sets, and
-  walks `php_mblen` otherwise: the witness moved `basename("\x8E/")` under `ja_JP.eucJP`, where the leading byte
-  swallows the separator); `escapeshellarg` (`php_mblen` drops a byte that is no character of the locale: `"\xE4"`
-  is `'ä'`'s byte in Latin-1 and nothing under UTF-8); `strip_tags` (`isspace` after a `<`: `"<\xA0b>x"` moved);
-  `parse_url` (`isalpha` in a scheme: `"a\xE4://x/y"` moved under Latin-1); `strftime` and `gmstrftime` (C
-  `strftime`, `LC_TIME`), which also carry the time family's argument-blind `nondet.time` for the clock and,
-  for `strftime`, the timezone, until the timezone cell sharpens both.
-- **Gated by a mode argument** (`locale_read_gate`, `site/locale.rs`): the sorts read the locale only under
-  `SORT_LOCALE_STRING` (`strcoll`) and `SORT_NATURAL` (`strnatcmp_ex`), with or without `SORT_FLAG_CASE`, and
-  `ksort` and `krsort` also under `SORT_STRING | SORT_FLAG_CASE` (`php_array_key_compare_string_case_unstable_i`
-  folds case through `zend_binary_strcasecmp_l`, a C `tolower`, where the data sorts use the ASCII table; `krsort`
-  of `"\xC4"` and `"\xE4"` moved under Latin-1); `substr_compare` reads under a true `$case_insensitive`
-  (`zend_binary_strncasecmp_l`); `pathinfo` reads for the basename, extension and filename parts and not for
-  `PATHINFO_DIRNAME` alone. These are the three-way rule of §3.2: an omitted argument is the parameter's default
-  (`sort($a)` is `SORT_REGULAR` and reads nothing, `pathinfo($p)` is `PATHINFO_ALL` and reads), a literal the scan
-  evaluates (an integer, an engine constant, a `|` of such terms, a `true` or `false`; `ConstArgs::bools` now reads
-  position 4) proves or drops the read, and a variable, an expression the scan cannot evaluate, a named or spread
-  list or the name handed over as a callback is `value-dependent-read` and no label, never an argument-blind one.
-  The run's slice list named `SORT_LOCALE_STRING` alone; the witness moved `SORT_NATURAL` and the key sorts too, so the gate
-  covers them (`sort(["\xA0", 'b', 'a'], SORT_NATURAL)` moved on macOS).
+  directions (a probe that moved is a name the catalog does not call silent; a name it proves has a probe that
+  moved). Whether a byte is a letter or a space is the C library's table, so a probe is either asserted on every
+  platform (a Latin-1 letter, a day name, a collation) or only where it was witnessed, macOS's libc
+  (`MovesOnMacos`: glibc's UTF-8 locales classify bytes `0x80..=0xFF` as nothing, and the probe may stand still
+  there). The CI test job generates `de_DE.UTF-8` (`locale-gen`) and a Latin-1 locale (`localedef -i de_DE -f
+  ISO-8859-1`, since `locale-gen` accepts only the names of `/usr/share/i18n/SUPPORTED`) and proves PHP can select them.
+- **The criterion, applied as §3.2 states it.** A row is proven at a call only where the call as written makes the
+  read unconditional, and the criterion is the same for every reader here: a **literal** argument decides
+  lexically, by the trigger php-src shows for that function (below); a **type** that rules the read out means no
+  read; and anything else (a variable, an expression the scan cannot evaluate, a named or spread argument list,
+  the builtin handed over as a callback) is the `value-dependent-read` gap and never a label. An omitted argument
+  is the parameter's default. This holds for `ctype_*`, `parse_url`, `strip_tags`, `escapeshellarg`, `strnatcmp`
+  and `strnatcasecmp` as much as for the sorts and `pathinfo`: each consults a C-library table only for some
+  contents, so `ctype_alpha($s)` over a `string $s` that may be empty is the gap, while
+  `#[\Steins\Pure] function f(bool $b) { return ctype_alpha($b); }` is not a finding, because php-src returns
+  `false` for a `bool`, `float`, `null`, array, object or an `int` outside -128..=255 before any table
+  (`ctype_fallback`). `basename` is the one reader whose trigger is the call itself: `php_basename` consults the
+  locale-derived `CG(ascii_compatible_locale)` before it looks at a byte, so every call reads it, `''` included,
+  and no argument can rule it out (the flag selects the algorithm, which walks `php_mblen` where it is false).
+  The row is the upper bound and the call site decides it (`locale_read_gate`,
+  `site/locale.rs`).
+- **What decides each name** (php-src `php-8.5.11`; the trigger is the first thing the routine does with the
+  argument).
+  - `ctype_alnum`, `ctype_alpha`, `ctype_cntrl`, `ctype_graph`, `ctype_lower`, `ctype_print`, `ctype_punct`,
+    `ctype_space`, `ctype_upper` (`ext/ctype/ctype.c`): a non-empty string classifies its first byte, an `int`
+    in -128..=255 is classified as a character, every other int (`allow_digits`, `allow_minus`) and every other
+    type returns before a table. A literal string, int (a negative one included), bool, null, float, array
+    literal or `new` expression decides; a by-value parameter whose declared type has no `string`, `int`,
+    `mixed` or `callable` member, that the frame never writes and no named call may take by reference, is shown
+    to hold neither (`ConstArgs::not_text`); a `string` or `int` parameter, `mixed` or an untyped value is the
+    gap.
+  - `strnatcmp`, `strnatcasecmp` (`strnatcmp_ex`): both operands non-empty; a literal empty operand settles the
+    call whatever the other is.
+  - `escapeshellarg` (`php_escape_shell_arg`): `php_mblen` over each byte of a non-empty string; a NUL byte
+    throws first, so it is the gap.
+  - `strip_tags` (`php_strip_tags_ex`): `isspace(p[1])` at the first `<`, reached in the start state; a string
+    without `<` reads nothing, with or without an allowed-tags argument.
+  - `parse_url` (`php_url_parse_ex2`): `isalpha` over the scheme when the first `:` is not at index 0, and
+    `iscntrl` over every component it produces (`php_replace_controlchars`). A literal with a colon past index 0 reads; one with no colon, no leading `//` and a byte
+    other than `?` and `#` produces a non-empty path, query or fragment and reads; the empty string reads nothing;
+    a leading colon, a leading `//` and a string of only `?` and `#` may fail before any component, so they are
+    the gap.
+  - `strftime`, `gmstrftime` (`php_strftime`, then the C `strftime`): the locale is read by the conversions that
+    name it, `a A b B c h p r x X` (and the same behind an `E` or `O` modifier), which POSIX names locale-dependent
+    and the engine moved on (`%A` in 241 of 288 macOS locales, `%x` in 285, `%c` in 278, `%p` in 227, `%r` in 235,
+    `%X` in 36); the numeric conversions `C d D e F g G H I j k l m M n R s S t T u U V w W y Y z Z %` moved in
+    none, so a format of only those reads nothing. A flag (`_ - 0 ^ #`), a width and an `E` or `O` modifier may
+    precede a conversion and change nothing about which ones read; a conversion this table does not know (`%P` is
+    glibc's, `%v` and `%+` BSD's), a modifier on a numeric conversion and a dangling `%` are the gap. The empty
+    format returns `false` before the C call. The row keeps the time family's argument-blind `nondet.time`
+    whatever the format, and a non-literal format is the gap for the locale half.
+  - `sort`, `rsort`, `asort`, `arsort`, `ksort`, `krsort`: `$flags` (position 1) selects the comparison. The base
+    type `SORT_LOCALE_STRING` reads (`strcoll`) and so does `SORT_NATURAL` (`strnatcmp_ex`'s `isspace`, `isdigit`,
+    `toupper`), with or without `SORT_FLAG_CASE`; the key sorts also read under `SORT_STRING | SORT_FLAG_CASE`
+    (`php_array_key_compare_string_case_unstable_i` folds case through `zend_binary_strcasecmp_l`, a C `tolower`;
+    `krsort` of `"\xC4"` and `"\xE4"` moved under Latin-1). A data sort under that flag pair reads on 8.1 and not on
+    8.2 or later (`string_case_compare_function` became ASCII-only), so on a PHP floor below 8.2 it is the
+    `value-dependent-read` gap and no label. It is the gap on every floor, because the own rows a file contributes
+    are persisted per file and are read before the run's PHP floor (`Fixpoints::php_floor`) is known; a
+    floor-keyed verdict would put the floor into the persisted fact. On 8.2 or later the gap is the conservative
+    side by that one case. The slice list named `SORT_LOCALE_STRING` alone; the witness moved `SORT_NATURAL` and the key sorts too.
+  - `substr_compare` reads under a true `$case_insensitive` (`zend_binary_strncasecmp_l`); `pathinfo` for the
+    basename, extension and filename parts and not for `PATHINFO_DIRNAME` alone.
+  - A bare constant in a flag is read as PHP resolves it (`global_const_fact`): `namespace App; const
+    PATHINFO_DIRNAME = 2; pathinfo($p, PATHINFO_DIRNAME)` is the namespaced twin's `2` and reads, `\PATHINFO_DIRNAME`
+    stays the global `1`, and a twin the scan cannot read is the gap. `ConstInt` gains `Global` for the fully
+    qualified spelling and `ConstArgs::ints` position 0 for a `ctype_*` call. The same shadow reaches the
+    `json_encode` flags of ADR-0099 §3.3, which evaluate a bare constant without the project and are left for their
+    own slice.
 - **Certified with no read**: `number_format` joins `CERTIFIED_AT_CALL_SITE` (§4). `_php_math_number_format_ex`
   renders with `%.*F`, whose decimal point `xbuf_format_converter` fixes at `.` (only `%f` takes
   `LCONV_DECIMAL_POINT`), splits at either `.` or `,` and takes the separators from its arguments; its one C
@@ -579,9 +620,10 @@ against php-src at `php-8.5.11` and against the engine, and enters each name tha
 - **Left as they are, with the reason.** `ctype_digit` and `ctype_xdigit`: C fixes their sets in every locale
   (C11 7.4.1.5 and 7.4.1.12) and a 256-byte table under every witness locale did not move, so they read no setting
   that changes an answer; no row, and no certification either (a row is written only where the read is real, and
-  certifying them is the same claim from the other side, which no witness here needs). `pathinfo`'s directory part and `substr_compare` case-sensitive read nothing, which the
-  gates say. `strcasecmp`, `strncasecmp`, `strtoupper`, `ucfirst`, `trim`, `str_contains`, `json_encode` and the
-  data sorts under `SORT_STRING | SORT_FLAG_CASE` did not move on 8.5 and are oracle rows that must stay stable.
+  certifying them is the same claim from the other side, which no witness here needs).
+  `strcasecmp`, `strncasecmp`, `strtoupper`, `ucfirst`, `trim`, `str_contains`, `json_encode` did not
+  move on 8.5 and are oracle rows that must stay stable. The data sorts under `SORT_STRING | SORT_FLAG_CASE` did not
+  move on 8.5 either, and their oracle rows assert the catalog leaves them undecided, not that it calls them silent.
 - **`setlocale($c, '0')` narrows to the read alone (D6).** `try_setlocale_str` compares the **whole string** with
   `"0"` and passes `NULL` to the C `setlocale`, which answers the current locale and changes nothing
   (`narrowed_setlocale_labels`: exactly two positional arguments, the literal `'0'`). The test is on the whole
@@ -590,60 +632,52 @@ against php-src at `php-8.5.11` and against the engine, and enters each name tha
   keeps the row. S1 had read it as the query; the S1 test list keeps it on the row either way, so nothing moves, and
   the doc comment is corrected here. An integer `0`, a third argument and an array keep the row too. The oracle
   asserts that the query changes nothing.
-- **A calibration the criterion of §3.2 leaves open, stated.** A per-byte reader classifies the bytes it is
-  given, so `ctype_alpha('')` reads nothing, `strip_tags` of a string with no `<` and `parse_url` of one with no
-  scheme colon read nothing, and `strnatcmp` with an empty operand returns before consulting a table. §3.2 proves a
-  label only where the read happens on every run of the call, which these do not. They are **not** the
-  `value-dependent-read` gap, for a reason of what the gap is for: the gap is where a value the site cannot see picks
-  the *routine* that consults the cell (a `%s` of a float versus a string, a format with or without `f`), so that
-  `'%d'` reads nothing on every input and the label would be true on no path. Here the call is the cell's consumer
-  for every input that gives it something to classify, and a finding that the function depends on the locale is true
-  of all of them: `#[\Steins\Pure] function f(string $s) { return ctype_alpha($s); }` is exceeded by the call, as
-  `mb_strlen($s)` is by the default encoding. A literal empty argument is the one shape the site shows to read
-  nothing and is not narrowed (nobody writes it); a body that would be read as impure only through `ctype_alpha('')`
-  is not a case this slice measured. If the owner reads §3.2 more strictly, the move is to give these names a gate
-  on their argument and every `ctype_alpha($s)` becomes `value-dependent-read`, which releases no body: the S4 gain is
-  then zero for the per-byte readers, and the call is the owner's.
 - **A discarded locale read is a dead statement** (§3.7, `statement.no-effect`): the read is covered by
-  `global.read`, so `basename('/a/b');`, `strnatcmp('a', 'b');` and `pathinfo('/a/b.c');` are reported once the
-  name has a row, as `sprintf('%f', 1.5);` is. The names whose literal call raises a diagnostic the catalog
-  row cannot record are refused by name (`REFUSED_ON_LITERALS`): `ctype_*` deprecates anything but a string
-  since 8.1 (`ctype_alpha(65)`), and `strftime` and `gmstrftime` are deprecated outright. The public corpus has
-  no such statement.
-- **PHP versions.** The rows follow `PINNED_PHP` (8.5), as `strtoupper`'s 8.1 read already does (§7). Witnessed on
-  8.1.32: the data sorts under `SORT_STRING | SORT_FLAG_CASE` and `ucfirst` read there (the ASCII folding is 8.2's),
-  and `strip_tags` and `parse_url`, whose 8.1 source passes a signed `char` to `isspace` and `isalpha`, did not move
-  on these probes; every other row moved as on 8.5. The oracle skips the three probes whose answer is 8.2's.
-- **Unmeasured siblings, queued.** The same probe moved `natsort`, `natcasesort` (always `strnatcmp_ex`),
-  `array_multisort` and `array_unique` under the locale and natural flags, `escapeshellcmd` (`php_mblen`),
-  `str_word_count` (`isalpha`), `soundex` and `metaphone` (`toupper`, `isalpha`; `soundex` moved under
-  `tr_TR.ISO8859-9`), `hebrev` (`ispunct`), `str_getcsv`, `fgetcsv` and `fputcsv` (`php_mblen`), and
-  `iconv` with `//TRANSLIT`. None is in this slice's list, so none is coloured.
+  `global.read`, so `basename('/a/b');`, `strnatcmp('a', 'b');`, `pathinfo('/a/b.c');` and `ctype_alpha('a');` are
+  reported once the name has a row, as `sprintf('%f', 1.5);` is. The names whose literal call raises a diagnostic
+  the catalog row cannot record are refused: `strftime` and `gmstrftime` are deprecated outright
+  (`REFUSED_ON_LITERALS`), and the `ctype_*` predicates deprecate anything but a string since 8.1
+  (`ctype_alpha(65)`, `(null)`, `(1.5)`, `(true)`, `([])` and `ctype_upper(new stdClass)` raise `E_DEPRECATED`, which
+  reaches `set_error_handler`), so they are admitted over a string literal alone (`STRING_LITERAL_ONLY`): a discarded
+  `ctype_alpha('abc');` is reported and `ctype_alpha(65);` is not, although a setting read is discardable by prefix
+  (ADR-0096). The public corpus has no such statement.
+- **PHP versions.** The rows follow `PINNED_PHP` (8.5), as `strtoupper`'s 8.1 read already does (§7), except where
+  the version changes the answer and a per-file fact cannot know the floor (the data sorts above, the gap on every
+  floor). Witnessed on 8.1.32: `ucfirst` also reads there, and `strip_tags` and `parse_url`, whose 8.1 source passes a
+  signed `char` to `isspace` and `isalpha`, did not move on these probes; every other row moved as on 8.5. The oracle
+  is gated by the running `PHP_VERSION_ID`: a probe whose answer is 8.2's (`ucfirst` and the two data sorts) evaluates
+  to a constant on an older engine, so it observes nothing there, and below 8.2 the positive direction of every other
+  row (a coloured name moved under a witness locale) is not asserted. The soundness direction (nothing the catalog
+  calls silent moved), every `Stable` row and the catalog's own verdicts are asserted on every version. The oracle
+  does not skip itself on an older engine.
 
 Measured on the ten public packages (`check --profile strict --no-php --vendor-diagnostics --no-cache`, default
 profile, `effect-diff`, the five transform dry-runs), head against `origin/master` (the merge base):
 
 - `check` under both profiles is byte-identical on every package: no finding moves, none is reworded.
-- `effect-diff`: of 28,846 function summaries, `global.read.setting.locale` is added to **718**, a set the direct
-  calls of the new rows seed (token matches, an upper bound: `parse_url` 30, `basename` 28, `pathinfo` 8,
-  `escapeshellarg` 8, `strip_tags` 8, `strnatcasecmp` 4, `strnatcmp` 1, and `sort` and `ksort` 10, of which the
-  proven reads are the `SORT_NATURAL` calls of Composer's `FilesystemRepository` and Console's `Application`) and
-  callees carry to the other 618. The two `setlocale` summaries of Carbon's translator lose the write and the coarse
-  read (`proven-removed-maybe`: the query, `setlocale(LC_TIME, '0')`). No other label moves, no label is added to
-  a non-locale name, and nothing leaves a function.
-- **Coverage.** Five bodies become exhaustive, each with the read: `Factory::getLockFile` (`pathinfo`),
-  `Url::isAllowedRedirect` and `NoProxyPatternTest::getUrl` (`parse_url`), `TestSuiteLoader::classNameFromFileName`
-  (`basename`), `Input::escapeToken` (`escapeshellarg`). 66 functions lose the `no-effect-row` gap, those five to exhaustiveness and 61 keeping another
-  cause; four gain `user-code-reach` (the reach rule now applies to a row that was unrowed; each was `…?` already) and
-  one gains `value-dependent-read` (`pathinfo($p, $component)`, the one non-literal flag on the corpus). The public
-  corpus has little else to release: its `ctype_*` calls are `ctype_digit` and `ctype_xdigit` (left as they are) and
-  one `ctype_alnum` inside a polyfilled-name body that stays `unknown-function`, and none of the five bodies is a
-  `number_format` one, so its calls sit in bodies with other gaps.
-- `transform effects-envelope`: **+5** edits, each a `@phpstan-impure global.read.setting.locale` tag on one of
-  the five bodies (three extend a docblock, two create one), none removed. The planner refuses 124 more functions
-  that now carry the read and stay `…?` (`effects-not-exhaustive`), and 23 class-wide `@phpstan-all-methods-pure`
-  refusals disappear: a class with a method that reads the locale is no longer a candidate. `throws-envelope`,
-  `loop-to-array-map`, `phpdoc-honesty` and `phpdoc-to-native` are byte-identical.
+- `effect-diff`: of 28,846 function summaries, `global.read.setting.locale` is added to **485**. The first
+  calibration of this slice proved the per-byte readers on every call and added it to 718; of those 718, 485 keep
+  the label, and the 233 that lose it are all the gap: 81 functions gain `value-dependent-read` and 152 already
+  carried it from a printf site (none is left with neither). The direct callers that keep it are `basename` 28 (always proven), `pathinfo` 7, `escapeshellarg` 5, a
+  `sort` or `ksort` 6 (the `SORT_NATURAL` calls of Composer's `FilesystemRepository` and Console's
+  `Application`) and `parse_url` 2 (token matches, an upper bound); callees carry it to the rest. 89 functions gain
+  `value-dependent-read` where a `parse_url($url)`, `strip_tags($html)`, `escapeshellarg($arg)`,
+  `strnatcasecmp($a, $b)` or `pathinfo($p, $component)` sees a value, and 4 gain `user-code-reach` (the reach rule now
+  applies to a row that was unrowed); each was `…?` already. The two `setlocale` summaries of Carbon's translator lose
+  the write and the coarse read (`proven-removed-maybe`: the query, `setlocale(LC_TIME, '0')`). No other label moves,
+  none is added to a non-locale name, and nothing leaves a function.
+- **Coverage.** Two bodies become exhaustive, each with the read: `Factory::getLockFile` (`pathinfo($f,
+  PATHINFO_EXTENSION)`) and `TestSuiteLoader::classNameFromFileName` (`basename`). 66 functions lose the
+  `no-effect-row` gap, those two to exhaustiveness and the rest keeping another cause. The public corpus has little
+  else to release: its `ctype_*` calls are `ctype_digit` and `ctype_xdigit` (left as they are) and one
+  `ctype_alnum` inside a polyfilled-name body that stays `unknown-function`, and `number_format` sits in bodies with
+  other gaps.
+- `transform effects-envelope`: **+2** edits, each a `@phpstan-impure global.read.setting.locale` tag on one of
+  the two bodies (both create a docblock), none removed. The planner refuses 40 more functions that now carry the read
+  and stay `…?` (`effects-not-exhaustive`), and 9 class-wide `@phpstan-all-methods-pure` refusals disappear: a class
+  with a method that reads the locale is no longer a candidate. `throws-envelope`, `loop-to-array-map`,
+  `phpdoc-honesty` and `phpdoc-to-native` are byte-identical.
+
 
 ## 4. Decision: ADR-0021 Decision 2 is amended
 
@@ -761,7 +795,7 @@ real thing with the instrumented ranking of ADR-0021):
   pattern 341, of which 22 carry `u`. These are the exhaustiveness releases the
   later slices buy and must measure. S4 measured its half (§3.9): the proxy overstated the
   release, since the public `ctype_*` calls are `ctype_digit` and `ctype_xdigit`, which stay as they were,
-  and five bodies become exhaustive in all.
+  and two bodies become exhaustive in all.
 
 Gates a slice must pass, against its base: `check` default and strict
 byte-identical on the ten packages (no public envelope covers a printf site);
@@ -790,10 +824,10 @@ name `value-dependent-read`; and the public packages' default profile findings a
 - The native `NUMERIC` transfer stops answering for `%f`/`%g` with an int
   (§3.4): a value-lane precision loss on the corpus of at most the ten sites
   above, in exchange for a sound answer under every locale.
-- S4 (§3.9) spends the refusal queue of §4 apart from the encoding cell: the locale readers are rows, the
-  mode-conditional ones gated by `locale_read_gate`, and `number_format` is certified. The rows follow
-  `PINNED_PHP`; a floor below 8.2 reads the data sorts under `SORT_STRING | SORT_FLAG_CASE` and `ucfirst`
-  too, which the catalog has no version axis to say.
+- S4 (§3.9) spends the refusal queue of §4 apart from the encoding cell: the locale readers are rows, each
+  but `basename` decided by its call through `locale_read_gate`, and `number_format` is certified. The rows follow
+  `PINNED_PHP`; a floor below 8.2 reads `ucfirst` too, which the catalog has no version axis to say, and the data
+  sorts under `SORT_STRING | SORT_FLAG_CASE`, which §3.9 leaves undecided for that reason.
 - Deferred, with the evidence that forced the deferral recorded:
   - the preg family's locale tables (S5): the biggest queued reader and the
     one with a lexical escape (`/u`); it needs the pattern-literal read and a

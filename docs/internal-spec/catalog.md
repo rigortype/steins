@@ -268,27 +268,33 @@ that a call is pure, and Decision 2's bar for an **empty** row is unchanged.
 | `sprintf`, `vsprintf` | `{global.read.setting.locale, global.read.setting.precision}` |
 | `printf`, `vprintf` | `{io.output.buffer, global.read.setting.locale, global.read.setting.precision}` |
 | `localeconv`, `nl_langinfo`, `strcoll` | `{global.read.setting.locale}` |
-| `ctype_alnum`, `ctype_alpha`, `ctype_cntrl`, `ctype_graph`, `ctype_lower`, `ctype_print`, `ctype_punct`, `ctype_space`, `ctype_upper`, `basename`, `strnatcmp`, `strnatcasecmp`, `escapeshellarg`, `strip_tags`, `parse_url` | `{global.read.setting.locale}` (S4: php-src consults the C library's tables or the engine's locale-derived state on every call) |
-| `strftime`, `gmstrftime` | `{global.read.setting.locale, nondet.time}` (the time family's argument-blind clock beside the day and month names; the timezone cell sharpens the clock half) |
-| `sort`, `rsort`, `asort`, `arsort`, `ksort`, `krsort`, `substr_compare`, `pathinfo` | `{global.read.setting.locale}` as the upper bound a **mode argument** decides (below) |
+| `basename` | `{global.read.setting.locale}` (S4: `php_basename` consults the locale-derived `CG(ascii_compatible_locale)` before it looks at a byte, so every call reads it) |
+| `ctype_alnum`, `ctype_alpha`, `ctype_cntrl`, `ctype_graph`, `ctype_lower`, `ctype_print`, `ctype_punct`, `ctype_space`, `ctype_upper`, `strnatcmp`, `strnatcasecmp`, `escapeshellarg`, `strip_tags`, `parse_url`, `sort`, `rsort`, `asort`, `arsort`, `ksort`, `krsort`, `substr_compare`, `pathinfo` | `{global.read.setting.locale}` as the upper bound the **call** decides (below) |
+| `strftime`, `gmstrftime` | `{global.read.setting.locale, nondet.time}` (the time family's argument-blind clock; the locale half is decided by the format, below) |
 | `ctype_digit`, `ctype_xdigit` | none: C fixes their sets in every locale and no byte moved, so they read no setting that changes an answer (left uncatalogued, not certified) |
 | `setlocale` | `{global.write.setting.locale, global.read}` (the argument-blind row: the write, and the environment block read for `''` and `null`, coarse until the env cell has a label; a call with exactly two arguments whose locale is a written non-empty string other than `'0'` narrows to `{global.write.setting.locale}`, and the exact string `'0'`, the query form, narrows to `{global.read.setting.locale}` with no write (ADR-0101 D6, `narrowed_setlocale_labels`; `"0\0x"` is not the query, php-src compares the whole string) |
 
-**Mode-gated readers** (S4, `locale_read_gate` in `steins-catalog`, `site/locale.rs` in `steins-infer`).
-The sorts, `substr_compare` and `pathinfo` read the locale only under an argument the caller
-chooses, so their row is the upper bound and the call site decides it as it does a printf format:
-a **sort**'s `$flags` (position 1) reads under the base type `SORT_LOCALE_STRING` (`strcoll`) or
-`SORT_NATURAL` (`strnatcmp`), with or without `SORT_FLAG_CASE`, and `ksort` and `krsort` also under
-`SORT_STRING | SORT_FLAG_CASE` (the key comparison folds case through `tolower`; the data sorts use
-the engine's ASCII table from 8.2); `substr_compare`'s `$case_insensitive` (position 4) reads when
-true; `pathinfo`'s `$flags` (position 1, default `PATHINFO_ALL`) reads unless it asks for
-`PATHINFO_DIRNAME` alone. An omitted argument is the parameter's default, a literal the scan evaluates
-(an integer, an engine constant, a `|` of such terms, a `true` or `false`; `ConstArgs::bools` reaches
-position 4 for this) decides, and anything else (a variable, an unevaluable expression, a named or spread
-argument list, the builtin handed over as a callback) is the `value-dependent-read` gap and no label.
-A per-byte reader (`ctype_*`, `strnatcmp`, `escapeshellarg`, `strip_tags`, `parse_url`) classifies the
-bytes it is given, so a call that is given none (an empty string, a string with no `<` for `strip_tags`)
-reads nothing; the row does not model that, and the read is the call's (ADR-0101 §3.9).
+**Call-decided readers** (S4, `locale_read_gate` in `steins-catalog`, `site/locale.rs` in `steins-infer`).
+Apart from `basename`, a locale reader reads only where the call reaches the routine that consults the
+C library, so its row is the upper bound and the call site decides it as it does a printf format: an
+omitted argument is the parameter's default, a literal the scan evaluates decides it lexically (a
+string, an integer, an engine constant read as PHP resolves it, a `|` of such terms, a `true` or
+`false`, and for `ctype_*` a `null`, float or array literal, a `new` expression or a by-value parameter the frame never
+writes whose declared type has no `string`, `int`, `mixed` or `callable` member), and anything else (a
+variable, an unevaluable expression, a named or spread argument list, the builtin handed over as a
+callback) is the `value-dependent-read` gap and no label. A **mode** decides the sorts (`$flags`, position 1:
+`SORT_LOCALE_STRING` and `SORT_NATURAL` read, with or without `SORT_FLAG_CASE`; `ksort` and `krsort` also
+under `SORT_STRING | SORT_FLAG_CASE`, whose key comparison folds case through `tolower`; a data sort under that
+pair reads before 8.2, so it is the gap on every floor, the persisted per-file row not knowing the PHP floor), `substr_compare` (`$case_insensitive`, position
+4, reads when true) and `pathinfo` (`$flags`, default `PATHINFO_ALL`, reads unless `PATHINFO_DIRNAME` alone).
+The **content** decides the rest, each by the trigger php-src shows: `ctype_*` a non-empty string or an `int`
+in -128..=255 (every other type returns `false` before a table); `strnatcmp` and `strnatcasecmp` both operands
+non-empty; `escapeshellarg` a non-empty string without a NUL byte; `strip_tags` a `<`; `parse_url` a first
+colon past index 0, or no colon, no leading `//` and a byte other than `?` and `#` (the shapes that may fail
+before any component are undecided); `strftime` a conversion that names the locale (`a A b B c h p r x X`, with
+flags, width and `E`/`O`), the numeric ones reading nothing and any other undecided. `ConstArgs::bools` reaches
+position 4, `ConstArgs::ints` position 0 for a `ctype_*` call, and `ConstArgs::not_text` carries the evidence of
+the `ctype_*` argument.
 
 `fprintf` and `vfprintf` still have no row. Both reads of a printf row are **conditional on the
 call** (`'%d'` reads neither), so the row is an upper bound and not a claim about every call: the
