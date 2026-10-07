@@ -713,7 +713,9 @@ decides lexically, the way S4's readers do, with the owner's adoption of D-S5a. 
   POSIX name (not a letter of the pattern), `\Q..\E` without a caseless flag, and a `preg_quote`d literal, which
   compiles nothing. An `x`-mode `#` outside a class (with the flag's scope kept per group: `(?x)`, `(?-x)`, `(?x:`)
   comments out the rest of its line, which is not scanned, so a `\Q` or `(?#` in the comment swallows nothing
-  after the newline; every newline convention's terminator ends it, which can only end it early. **D-S5b** stands:
+  after the newline; it ends exactly where the newline convention says (LF unless a leading `(*CR)`, `(*CRLF)`,
+  `(*ANYCRLF)` or `(*NUL)` says otherwise, a lone CR, VT, FF or NUL being comment text under LF, and `(*ANY)`, which
+  differs by UTF mode, declines), since an early end would scan a `\Q` or `(?#` the comment still holds. **D-S5b** stands:
   the subject literal does not exempt a reading pattern, since an ASCII-only subject cannot meet a high byte only
   where the table is C's. `(*UTF)` alone is not UCP.
   The `i` rule reads every lettered pattern because on glibc's `tr_TR` the case map of ASCII `I` and `i` is not the
