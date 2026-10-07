@@ -126,5 +126,10 @@ only under witnessed probes.
   whole gate, not a hand-rolled `steins check`: it covers every locally
   listed project, including public ones CI never measures, and only its
   posture matches the ledger. A PR that could move it says in its body what
-  it measured; reseed the local ledger after merge from that run.
+  it measured; reseed the local ledger after merge from that run. Its wall
+  times swing with machine load (concurrent agent builds tripled one cold
+  run), so a timing regression is judged only against a run taken under
+  similar load, with the load recorded. When the gate reports that a local
+  project's revision moved, run master's binary on the same revision before
+  attributing anything to the PR: what master also shows is corpus drift.
 - Every PR body states what was not measured.
