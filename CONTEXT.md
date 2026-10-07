@@ -293,7 +293,8 @@ value not shown to be a float, a format that is not literal, a sort `$flags`
 or a `substr_compare` case switch that is not literal, a `ctype_alpha($s)` over
 a string that may be empty) is the `value-dependent-read` coverage gap until the
 site rules it in or out: a literal argument shows whether the call reaches the
-routine that consults the cell (ADR-0101 §3.9).
+routine that consults the cell (ADR-0101 §3.9), and a literal `preg_*` pattern shows
+whether the compiler asks the locale's tables (§3.10).
 _Avoid_: pure modulo ambient state / practically pure (the rejected
 convenience, owner ruling 2026-10-03), locale-sensitive as a catalog
 disposition (a reason to colour a row, not to refuse one), epoch-stable read

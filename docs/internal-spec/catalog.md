@@ -271,6 +271,7 @@ that a call is pure, and Decision 2's bar for an **empty** row is unchanged.
 | `basename` | `{global.read.setting.locale}` (S4: `php_basename` consults the locale-derived `CG(ascii_compatible_locale)` before it looks at a byte, so every call reads it) |
 | `ctype_alnum`, `ctype_alpha`, `ctype_cntrl`, `ctype_graph`, `ctype_lower`, `ctype_print`, `ctype_punct`, `ctype_space`, `ctype_upper`, `strnatcmp`, `strnatcasecmp`, `escapeshellarg`, `strip_tags`, `parse_url`, `sort`, `rsort`, `asort`, `arsort`, `ksort`, `krsort`, `substr_compare`, `pathinfo` | `{global.read.setting.locale}` as the upper bound the **call** decides (below) |
 | `strftime`, `gmstrftime` | `{global.read.setting.locale, nondet.time}` (the time family's argument-blind clock; the locale half is decided by the format, below) |
+| `preg_match`, `preg_match_all`, `preg_replace`, `preg_replace_callback`, `preg_replace_callback_array`, `preg_filter`, `preg_split`, `preg_grep` | `{global.read.setting.locale}` as the upper bound the **literal pattern** decides (S5, below). `preg_quote` compiles nothing and keeps its empty row; `preg_last_error` and `preg_last_error_msg` have no row |
 | `ctype_digit`, `ctype_xdigit` | none: C fixes their sets in every locale and no byte moved, so they read no setting that changes an answer (left uncatalogued, not certified) |
 | `setlocale` | `{global.write.setting.locale, global.read}` (the argument-blind row: the write, and the environment block read for `''` and `null`, coarse until the env cell has a label; a call with exactly two arguments whose locale is a written non-empty string other than `'0'` narrows to `{global.write.setting.locale}`, and the exact string `'0'`, the query form, narrows to `{global.read.setting.locale}` with no write (ADR-0101 D6, `narrowed_setlocale_labels`; `"0\0x"` is not the query, php-src compares the whole string) |
 
@@ -295,6 +296,22 @@ before any component are undecided); `strftime` a conversion that names the loca
 flags, width and `E`/`O`), the numeric ones reading nothing and any other undecided. `ConstArgs::bools` reaches
 position 4, `ConstArgs::ints` position 0 for a `ctype_*` call, and `ConstArgs::not_text` carries the evidence of
 the `ctype_*` argument.
+
+**The preg family** (S5, `pattern_reads_locale` in `steins-catalog`'s `preg/locale.rs`, the `PregPattern` kind of
+`locale_read_gate`). Every `preg_*` that compiles a pattern reaches one compiler, which asks the tables
+`pcre2_maketables()` builds from the process locale once a script has called `setlocale`. The literal
+pattern at position 0 (an array literal of string literals for `preg_replace`, `preg_replace_callback`,
+`preg_filter`; the keys of the map for `preg_replace_callback_array`, carried as `ConstArgs::patterns`) decides
+the call. Outside `u` and a leading `(*UCP)` (UCP, not UTF, is what leaves the tables: `(*UTF)` alone reads) a
+pattern reads iff it holds `\w \W \s \S \b \B`, a POSIX class other than `[:digit:]` and `[:xdigit:]`, a
+caseless flag (`i`, or `(?i…)`) over a letter, a byte of `0x80..=0xFF` or a numeric escape or reference, or the
+`x` flag over a byte of `0x80..=0xFF`. `\d`, `\p{..}`, literal bytes and ranges, `\h`, `\v`, `.`, `\Q..\E` and
+a `preg_quote`d literal read nothing. `u` and `(*UCP)` exempt all of it but the `x` flag's whitespace skip,
+which asks the table for a raw byte of `0x80..=0xFF` in every mode. A pattern the reader cannot parse as PCRE2
+does, a pattern that is not a literal, an array with an element that is not a string literal, a named or
+spread argument list and the function handed over as a callback are the `value-dependent-read` gap and no
+label. The fold seam refuses a `preg_match`, `preg_match_all` or `preg_split` whose literal pattern reads
+(`fold_reads_ambient_setting`); `preg_quote` still folds.
 
 `fprintf` and `vfprintf` still have no row. Both reads of a printf row are **conditional on the
 call** (`'%d'` reads neither), so the row is an upper bound and not a claim about every call: the
