@@ -22,12 +22,12 @@
 
 mod contract;
 pub(crate) mod engine;
-mod locale;
 pub(crate) mod method;
 mod operator;
 mod printf;
 pub(crate) mod reach;
 mod resolve;
+mod setting;
 
 use std::collections::BTreeSet;
 

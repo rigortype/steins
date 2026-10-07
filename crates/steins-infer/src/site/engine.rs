@@ -118,6 +118,7 @@ pub(crate) fn function_effects(
         Some(labels) => labels,
         None => steins_catalog::narrowed_output_labels(name, return_mode)
             .or_else(|| narrowed_setlocale(name, arg_targets, const_args))
+            .or_else(|| narrowed_ini(name, arg_targets, const_args))
             .or_else(|| steins_catalog::effect_labels(name))
             .unwrap_or(&[]),
     };
@@ -137,6 +138,19 @@ fn narrowed_setlocale(
 ) -> Option<&'static [&'static str]> {
     let Some(CallTarget::Literal(locale)) = const_args?.second.as_ref() else { return None };
     steins_catalog::narrowed_setlocale_labels(name, locale, arg_targets?.len())
+}
+
+/// An `ini_get`, `ini_set`, `ini_alter` or `ini_restore` call's narrowed labels (ADR-0101 S6-core):
+/// the read or write of the cell that owns the written option name. Needs the call's positional
+/// arity and its first argument as a string literal, so it answers `None` where either is
+/// unreadable, for a name no cell owns, and for a name that is no ini function.
+fn narrowed_ini(
+    name: &str,
+    arg_targets: Option<&[RefTarget]>,
+    const_args: Option<&ConstArgs>,
+) -> Option<&'static [&'static str]> {
+    let Some(CallTarget::Literal(option)) = const_args?.first.as_ref() else { return None };
+    steins_catalog::narrowed_ini_labels(name, option, arg_targets?.len())
 }
 
 /// The classes a call to the builtin `name` raises, on the throw axis

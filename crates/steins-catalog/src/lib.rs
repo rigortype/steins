@@ -144,8 +144,11 @@ pub use effects::{
     variadic_tail_is_data,
 };
 
-mod locale_reads;
-pub use locale_reads::{GateArg, LocaleReadGate, locale_read_gate};
+mod setting;
+pub use setting::{SettingCell, ini_cell, narrowed_ini_labels};
+
+mod setting_reads;
+pub use setting_reads::{GateArg, SettingReadGate, setting_read_gate};
 
 mod knowledge;
 pub use knowledge::{

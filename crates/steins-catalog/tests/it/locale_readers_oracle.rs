@@ -22,7 +22,7 @@
 
 use std::process::{Command, Stdio};
 
-use steins_catalog::{GateArg, certified_at_call_site, effect_labels, locale_read_gate};
+use steins_catalog::{GateArg, certified_at_call_site, effect_labels, setting_read_gate};
 
 use super::locale_oracle::oracle_unavailable;
 
@@ -69,11 +69,11 @@ impl Verdict {
     fn reads(self) -> Option<bool> {
         match self {
             Self::Row(name) => {
-                assert!(locale_read_gate(name).is_none(), "{name} is gated");
+                assert!(setting_read_gate(name).is_none(), "{name} is gated");
                 Some(effect_labels(name).is_some_and(|l| l.contains(&READ)))
             }
             Self::Gate(name, args) => {
-                let gate = locale_read_gate(name).unwrap_or_else(|| panic!("{name} has no gate"));
+                let gate = setting_read_gate(name).unwrap_or_else(|| panic!("{name} has no gate"));
                 assert!(effect_labels(name).is_some_and(|l| l.contains(&READ)), "{name}");
                 assert_eq!(gate.positions().len(), args.len(), "{name}");
                 gate.reads(args)
