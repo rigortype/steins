@@ -295,10 +295,10 @@ fn preg_rows() -> Vec<Row> {
         row("preg S9 i bytes", r#"var_export(preg_match("/^\xC3\x84$/i", "\xC3\xA4"), true)"#, m("/^\u{c3}\u{84}$/i"), ReadsByRule),
         // `u` and a leading `(*UCP)` route the classes and the folding to Unicode properties.
         row("preg P2 w under u", r#"var_export(preg_match('/^\w$/u', "\xC3\xA4"), true)"#, m(r"/^\w$/u"), Stable),
-        row("preg S8 iu", r#"var_export(preg_match("/^\xC3\x84$/iu", "\xC3\xA4"), true)"#, m("/^\u{c3}\u{84}$/iu"), Stable),
-        row("preg P20 iu", r#"var_export(preg_match('/^\xC3\x84$/iu', "\xC3\xA4"), true)"#, m(r"/^\xC3\x84$/iu"), Stable),
+        row("preg S8 iu", r#"var_export(preg_match("/^\xC3\x84$/iu", "\xC3\xA4"), true)"#, m("/^\u{c3}\u{84}$/iu"), ReadsByRule),
+        row("preg P20 iu", r#"var_export(preg_match('/^\xC3\x84$/iu', "\xC3\xA4"), true)"#, m(r"/^\xC3\x84$/iu"), ReadsByRule),
         row("preg P21 alpha under u", r#"var_export(preg_match('/^[[:alpha:]]$/u', "\xC3\xA4"), true)"#, m("/^[[:alpha:]]$/u"), Stable),
-        row("preg S24 UCP and i", r#"var_export(preg_match('/(*UCP)^\xC4$/i', "\xE4"), true)"#, m(r"/(*UCP)^\xC4$/i"), Stable),
+        row("preg S24 UCP and i", r#"var_export(preg_match('/(*UCP)^\xC4$/i', "\xE4"), true)"#, m(r"/(*UCP)^\xC4$/i"), ReadsByRule),
         row("preg P24 UCP and w", r#"var_export(preg_match('/(*UCP)^\w$/', "\xE4"), true)"#, m(r"/(*UCP)^\w$/"), Stable),
         // The sets C fixes, and the patterns that ask no table.
         row("preg P4 d", r#"var_export(preg_match('/^\d$/', "\xB2"), true)"#, m(r"/^\d$/"), Stable),
@@ -315,6 +315,35 @@ fn preg_rows() -> Vec<Row> {
         row("preg P26 v", r#"var_export(preg_match('/^\v$/', "\x85"), true)"#, m(r"/^\v$/"), Stable),
         row("preg P17 dot", r#"var_export(preg_match('/^.$/', "\xE4"), true)"#, m("/^.$/"), Stable),
         row("preg S11 x ascii", r#"var_export(preg_match('/^a b$/x', 'ab'), true)"#, m("/^a b$/x"), Stable),
+        // Caseless matching under `u` compares through the table too: no macOS witness moved
+        // (glibc's `tr_TR` case map is the evidence, `pcre2_match.c:1052-1056`), the rule reads
+        // wherever a letter can match, and nothing where none can.
+        row("preg D1 iu", r#"var_export(preg_match('/^i$/iu', "\xC3\x9D"), true)"#, m("/^i$/iu"), ReadsByRule),
+        row("preg D4 iu range", r#"var_export(preg_match('/^[a-z]$/iu', "\xC3\x9D"), true)"#, m("/^[a-z]$/iu"), ReadsByRule),
+        row("preg F1 i spanning range", r#"var_export(preg_match('/^[!-~]$/i', "\xFD"), true)"#, m("/^[!-~]$/i"), ReadsByRule),
+        row("preg i dot", r#"var_export(preg_match('/^.$/i', "\xFD"), true)"#, m("/^.$/i"), ReadsByRule),
+        row("preg K1 i digits", r#"var_export(preg_match('/^[0-9]$/i', "\xB2"), true)"#, m("/^[0-9]$/i"), Stable),
+        row("preg i digits under u", r#"var_export(preg_match('/^[0-9]$/iu', "\xC2\xB2"), true)"#, m("/^[0-9]$/iu"), Stable),
+        // A named back reference is compared folded in every spelling.
+        row("preg A named backref", r#"var_export(preg_match('/^(?<a>.)(?P=a)$/i', "\xC4\xE4"), true)"#, m("/^(?<a>.)(?P=a)$/i"), Moves),
+        row("preg A2 k backref", r#"var_export(preg_match('/^(?<a>.)\k<a>$/i', "\xC4\xE4"), true)"#, m(r"/^(?<a>.)\k<a>$/i"), Moves),
+        row("preg K5 numbered backref", r#"var_export(preg_match('/^(.)\1$/i', "\xC4\xE4"), true)"#, m(r"/^(.)\1$/i"), Moves),
+        // An `x` comment hides its line and nothing after it: a `\Q` or `(?#` in the comment
+        // swallows no token past the newline.
+        row("preg B x comment quote", r#"var_export(preg_match("/^#\\Q\n\\w$/x", "\xE4"), true)"#, m("/^#\\Q\n\\w$/x"), Moves),
+        row("preg B2 x comment group", r#"var_export(preg_match("/^#(?#\n\\w(a)?$/x", "\xE4"), true)"#, m("/^#(?#\n\\w(a)?$/x"), Moves),
+        row("preg x comment holds the reader", r#"var_export(preg_match("/^a #\\w\nb$/x", "ab"), true)"#, m("/^a #\\w\nb$/x"), Stable),
+        row("preg J1 x comment high byte", r#"var_export(preg_match("/^a#\xA0\nb$/x", "ab"), true)"#, m("/^a#\u{a0}\nb$/x"), Stable),
+        // `[[:<:]]` and `[[:>:]]` are `\b` in disguise.
+        row("preg C word start", r#"var_export(preg_match('/[[:<:]]\xE4/', " \xE4"), true)"#, m(r"/[[:<:]]\xE4/"), Moves),
+        row("preg C2 word end", r#"var_export(preg_match('/\xE4[[:>:]]/', "\xE4 "), true)"#, m(r"/\xE4[[:>:]]/"), Moves),
+        // UCP keeps `[:ascii:]` on the table, and a name above ASCII without UTF.
+        row("preg E4 ascii under u", r#"var_export(preg_match('/^[[:ascii:]]$/u', "\xC3\xA4"), true)"#, m("/^[[:ascii:]]$/u"), Moves),
+        row("preg E4b negated ascii under u", r#"var_export(preg_match('/^[[:^ascii:]]$/u', "\xC3\xA4"), true)"#, m("/^[[:^ascii:]]$/u"), Moves),
+        row("preg R6 UCP name", r#"var_export(preg_match("/(*UCP)(?<\xE4>a)/", 'a'), true)"#, m("/(*UCP)(?<\u{e4}>a)/"), Moves),
+        row("preg R7 u name", r#"var_export(preg_match("/(?<\xC3\xA4>a)/u", 'a'), true)"#, m("/(?<\u{e4}>a)/u"), Stable),
+        // The `r` modifier is a valid flag, and `\w` under it reads as ever (PHP 8.4 and later).
+        row("preg r flag", r#"PHP_VERSION_ID < 80400 ? "skip" : var_export(preg_match('/^\w$/r', "\xE4"), true)"#, m(r"/^\w$/r"), Moves),
         // `preg_quote` compiles nothing.
         row("preg P27 quote", r#"bin2hex(preg_quote("\xE4."))"#, Reads("preg_quote"), Stable),
     ]
