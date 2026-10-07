@@ -683,7 +683,7 @@ pub enum ArgShape {
     /// [`Self::MethodCall`].
     GlobalConst(NameRef),
     /// A class constant or enum case fetch (`self::NAME`, `Foo::BAR`, `Suit::Hearts`), though not
-    /// `Foo::class`, which is a string ([`object_free`]). A class constant holds a scalar, an
+    /// `Foo::class`, which is a string (an object-free form). A class constant holds a scalar, an
     /// array or an enum case (an object, but one that cannot declare `__toString`): no string
     /// conversion runs on it, which is all the ToString family asks. Every other family reads it
     /// as an operand nothing is known of (an enum may implement `ArrayAccess` or `Countable`).

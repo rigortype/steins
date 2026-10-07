@@ -42,9 +42,30 @@ fn an_expression_qualifies_by_its_form() {
     use ArgShape::{Array, ObjectFree, Unknown};
     let args = "1, 'a', \"x{$v}\", 'a' . $v, $v === 1, !$v, (string) $v, isset($v), [1, ['k' => 2]]";
     assert_eq!(shapes("$v", &format!("g({args});")), vec![ObjectFree; 9]);
+    let eol = ArgShape::GlobalConst(steins_syntax::NameRef {
+        raw: "PHP_EOL".to_owned(),
+        kind: steins_syntax::RefKind::Unqualified,
+        offset: 0,
+    });
     assert_eq!(shapes("$v", "g([$v], (array) $v, $v + 1, PHP_EOL, $v ? 'a' : 'b');"), [
-        Array, Array, Unknown, Unknown, ObjectFree
+        Array, Array, Unknown, eol, ObjectFree
     ]);
+}
+
+/// A class name is a string (`Foo::class`, `static::class`, `$o::class`); any other class
+/// constant or enum case is a shape of its own, and a `match` or a `throw` is object-free when
+/// its arms are (issue #868).
+#[test]
+fn a_class_constant_is_its_own_shape_and_a_class_name_holds_no_object() {
+    use ArgShape::{ClassConst, ObjectFree, Unknown};
+    let args = "Foo::class, static::class, $v::class, self::class";
+    assert_eq!(shapes("$v", &format!("g({args});")), vec![ObjectFree; 4]);
+    let consts = "g(Foo::BAR, self::NAME, Suit::Hearts, static::X);";
+    assert_eq!(shapes("$v", consts), vec![ClassConst; 4]);
+    assert_eq!(shapes("$v", "g(Foo::{$v}, $v::BAR);"), [Unknown, ClassConst]);
+    let arms =
+        "g(match ($v) { 1 => 'a', default => null }, match ($v) { 1 => $v, default => 'b' });";
+    assert_eq!(shapes("$v", arms), [ObjectFree, Unknown]);
 }
 
 /// A call result carries its callee (issue #877): the syntax crate cannot ask the
