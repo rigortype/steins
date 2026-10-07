@@ -13,6 +13,7 @@
 //! catch-variable scope the throw scan threads through it.
 
 mod call;
+mod coerce;
 mod construct;
 mod derive;
 mod drops;
@@ -28,6 +29,7 @@ use crate::lower_effect::EffectScanCx;
 pub(crate) use drops::{
     DropSubjects, HintClasses, body_end, scope_exit_sites, subjects as drop_subjects,
 };
+pub(crate) use coerce::{arrow_return_site, return_hint_text};
 pub(crate) use operator::promoted_hook_sites;
 pub use derive::{derive_effect_origins, derive_throw_origins};
 
@@ -54,6 +56,7 @@ impl SiteScope<'_> {
             operands: None,
             ref_targets: None,
             const_args: ConstArgs::default(),
+            args: Vec::new(),
         }
     }
 }

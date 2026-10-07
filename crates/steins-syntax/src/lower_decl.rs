@@ -642,6 +642,7 @@ fn lower_function(
         body_aliased(f.body.statements.iter()),
         receiver_writes(f.body.statements.iter()),
     )
+    .returning(f.return_type_hint.as_ref().map(|r| &r.hint))
     .with_body(&f.parameter_list, Captures::None, f.body.statements.iter().map(Node::Statement));
     for s in f.body.statements.iter() {
         scan_owner_sites(&Node::Statement(s), &cx, &mut sites);
@@ -1295,6 +1296,7 @@ fn lower_method(m: &Method<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex, rc
             receiver_writes(block.statements.iter()),
         )
         .in_constructor(m.name.value.eq_ignore_ascii_case(b"__construct"))
+        .returning(m.return_type_hint.as_ref().map(|r| &r.hint))
         .with_body(&m.parameter_list, Captures::None, block.statements.iter().map(Node::Statement));
         for s in block.statements.iter() {
             scan_owner_sites(&Node::Statement(s), &cx, &mut sites);
