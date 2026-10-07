@@ -166,6 +166,7 @@ mod return_summary;
 mod returned_allocation;
 mod s6_routing;
 mod same_this_descent;
+mod setting_cells;
 mod settype_cast;
 mod shape_covers;
 mod shape_fact_acceptance;

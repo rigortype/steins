@@ -40,7 +40,6 @@ use steins_syntax::{
 
 use super::contract::{conditional_purity, eval_conditional_purity};
 use super::engine;
-use super::locale;
 use super::method::{
     EngineMethod, engine_class_of, engine_method, method_edge, new_hooks, parent_constructor_hooks,
     throwable_creation_hooks,
@@ -48,6 +47,7 @@ use super::method::{
 use super::operator;
 use super::printf;
 use super::reach::{Frame, builtin_reach, callback_reaches_user_code, engine_method_reach};
+use super::setting;
 use super::{
     Edge, GapKind, Hit, HitKind, Knowledge, Lane, NewTarget, Reach, ResolvedSite, Target,
     new_origin, resolve_new,
@@ -334,7 +334,7 @@ impl<'a> Resolver<'a, '_, '_> {
         let positional = args.targets.map(<[_]>::len);
         let (read, spelled) = ((self.cx, self.frame), (name, builtin));
         if let Some(gap) =
-            locale::narrow_labels(read, spelled, (positional, args.consts), &mut labels)
+            setting::narrow_labels(read, spelled, (positional, args.consts), &mut labels)
         {
             self.gap(gap);
         }
@@ -439,7 +439,7 @@ impl<'a> Resolver<'a, '_, '_> {
             let positional = site.ref_targets.as_ref().map(Vec::len);
             let (read, spelled) = ((self.cx, self.frame), (name, builtin.as_str()));
             if let Some(gap) =
-                locale::narrow_labels(read, spelled, (positional, &site.const_args), &mut labels)
+                setting::narrow_labels(read, spelled, (positional, &site.const_args), &mut labels)
             {
                 self.gap(gap);
             }
@@ -507,7 +507,7 @@ impl<'a> Resolver<'a, '_, '_> {
                 }
                 // A reader whose read a mode argument decides is called with one of the
                 // invoker's choosing.
-                if let Some(gap) = locale::unreadable_mode(builtin, &mut labels) {
+                if let Some(gap) = setting::unreadable_mode(builtin, &mut labels) {
                     self.gap(gap);
                 }
                 self.function_hit(builtin, name.simple(), labels, &[]);

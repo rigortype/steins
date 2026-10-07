@@ -58,7 +58,7 @@ use crate::fold::foldable;
 ///   the time family's `nondet.time`), the sorts, `substr_compare` and `pathinfo` read it only
 ///   where the call reaches the routine that consults it: their row is the upper bound and a
 ///   call site proves, drops or gaps it as the printf family's is
-///   ([`locale_read_gate`](crate::locale_read_gate)). `number_format` reads no setting and is
+///   ([`setting_read_gate`](crate::setting_read_gate)). `number_format` reads no setting and is
 ///   certified at the call site ([`certified_at_call_site`]).
 /// * The preg family (ADR-0101 §3.10, S5): `preg_match`, `preg_match_all`, `preg_replace`,
 ///   `preg_replace_callback`, `preg_replace_callback_array`, `preg_filter`, `preg_split` and
@@ -181,7 +181,7 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
         // locale-derived `CG(ascii_compatible_locale)` before it looks at a byte, and walks
         // `php_mblen` where it is false (ADR-0101 §3.9, issue #1000, S4).
         "basename" => Some(LOCALE_READ),
-        // The readers whose read the call decides (`locale_read_gate`): the row is the upper
+        // The readers whose read the call decides (`setting_read_gate`): the row is the upper
         // bound, and the call site proves it, drops it or gaps it. A mode argument selects it
         // (the sorts under `SORT_LOCALE_STRING` and `SORT_NATURAL`, `substr_compare` when
         // case-insensitive, `pathinfo` unless only the directory name is asked for), or the
@@ -201,7 +201,7 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
         // The preg family compiles its pattern through one compiler, which asks the tables
         // `pcre2_maketables()` builds from the process locale once a script has called
         // `setlocale` (ADR-0101 §3.10, S5). The row is the upper bound and the literal pattern
-        // decides it at the call site (`locale_read_gate`, `pattern_reads_locale`): `\w`, `\s`,
+        // decides it at the call site (`setting_read_gate`, `pattern_reads_locale`): `\w`, `\s`,
         // `\b` and the POSIX classes, a caseless flag where a letter can match, and the `x` flag
         // over a byte of `0x80..=0xFF` read; `u` and a leading `(*UCP)` exempt the classes but
         // not the caseless flag or the `x` flag. `preg_quote` compiles nothing and keeps its
@@ -229,9 +229,12 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
         "exec" | "shell_exec" | "popen" | "proc_open" => Some(IO_PROCESS),
         "curl_exec" => Some(NET_TO_OUTPUT),
         "error_log" | "syslog" | "sleep" | "usleep" => Some(IO),
-        "date_default_timezone_set" | "mb_regex_encoding" | "ini_set" | "putenv" => {
-            Some(GLOBAL_WRITE)
-        }
+        // `ini_alter` is `ini_set` under another name, and `ini_restore` puts an entry back: both
+        // rewrite the entry they name. The row is the coarse write; a call that spells a literal
+        // option name a cell owns narrows to that cell's write ([`narrowed_ini_labels`], ADR-0101
+        // S6-core), as `ini_get` narrows its read.
+        "date_default_timezone_set" | "mb_regex_encoding" | "ini_set" | "ini_alter"
+        | "ini_restore" | "putenv" => Some(GLOBAL_WRITE),
         // `setlocale` rewrites the locale cell, and with `''` or `null` as its
         // locale it also takes the name from the environment block, which is a
         // read; there is no environment cell yet, so that read is the coarse
@@ -2021,7 +2024,10 @@ mod tests {
         for name in ["print_r", "var_dump", "var_export", "flush", "ob_flush"] {
             assert_eq!(effect_labels(name), Some(&["io.output.buffer"][..]), "{name}");
         }
-        for name in ["ini_set", "putenv", "date_default_timezone_set", "mb_regex_encoding"] {
+        for name in [
+            "ini_set", "ini_alter", "ini_restore", "putenv", "date_default_timezone_set",
+            "mb_regex_encoding",
+        ] {
             assert_eq!(effect_labels(name), Some(&["global.write"][..]), "{name}");
         }
         for name in ["getenv", "ini_get", "date_default_timezone_get"] {

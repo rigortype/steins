@@ -1,9 +1,10 @@
-//! The locale readers whose read the call decides, at a call site (ADR-0101 §3.9, S4).
+//! The setting readers whose read the call decides, at a call site (ADR-0101 §3.9, S4; renamed
+//! from `locale` in S6-core, when a gate came to name its cell).
 //!
 //! `sort`, `substr_compare`, `pathinfo`, the `ctype_*` predicates, `strnatcmp`, `escapeshellarg`,
 //! `strip_tags`, `parse_url` and `strftime` are catalogued with the locale read
 //! ([`steins_catalog::effect_labels`]), but read it only where the call reaches the routine that
-//! consults it ([`steins_catalog::locale_read_gate`]): under a mode argument (a sort's `$flags`,
+//! consults it ([`steins_catalog::setting_read_gate`]): under a mode argument (a sort's `$flags`,
 //! `substr_compare`'s case switch) or over content the routine classifies (a non-empty string, a
 //! `<`, a conversion that names the locale). A label is proven at a call only where the read
 //! happens on every run of the call as written, so the row is the upper bound this module
@@ -21,7 +22,7 @@
 //! A bare constant is read as PHP resolves it ([`global_const_fact`]): a namespaced twin the
 //! project declares shadows the global one, and a twin the scan cannot read is the gap.
 
-use steins_catalog::{GateArg, LocaleReadGate, locale_read_gate};
+use steins_catalog::{GateArg, SettingReadGate, setting_read_gate};
 use steins_domain::{Fact, Val};
 use steins_syntax::{CallTarget, ConstArgs, ConstInt, NameRef, NotText, RefKind};
 
@@ -29,9 +30,6 @@ use super::GapKind;
 use super::reach::Frame;
 use crate::cx::Cx;
 use crate::global_consts::global_const_fact;
-
-/// The locale cell's read, ADR-0101 §2.2.
-const LOCALE: &str = "global.read.setting.locale";
 
 /// Narrow the row `labels` of a call to the builtin `builtin` (spelled `name`), when it is a
 /// gated reader, by what the call shows of its deciding arguments, and say whether the read
@@ -43,11 +41,12 @@ pub(super) fn narrow_labels(
     (positional, consts): (Option<usize>, &ConstArgs),
     labels: &mut Vec<&'static str>,
 ) -> Option<GapKind> {
-    let gate = locale_read_gate(builtin)?;
+    let gate = setting_read_gate(builtin)?;
     match decide(gate, (cx, frame), name, (positional, consts)) {
         Some(true) => None,
         Some(false) => {
-            labels.retain(|label| *label != LOCALE);
+            let read = gate.cell().read_label();
+            labels.retain(|label| *label != read);
             None
         }
         None => unreadable_mode(builtin, labels),
@@ -58,14 +57,14 @@ pub(super) fn narrow_labels(
 /// its choosing, or called with arguments the scan cannot read: the read depends on them, so it
 /// is no label and the call is [`GapKind::ValueDependentRead`]. `None` for a name with no gate.
 pub(super) fn unreadable_mode(name: &str, labels: &mut Vec<&'static str>) -> Option<GapKind> {
-    locale_read_gate(name)?;
-    labels.retain(|label| *label != LOCALE);
+    let read = setting_read_gate(name)?.cell().read_label();
+    labels.retain(|label| *label != read);
     Some(GapKind::ValueDependentRead)
 }
 
 /// Whether the call reads the locale, or `None` when its deciding arguments do not show it.
 fn decide(
-    gate: LocaleReadGate,
+    gate: SettingReadGate,
     (cx, frame): (&Cx, &Frame),
     name: &NameRef,
     (positional, consts): (Option<usize>, &ConstArgs),
@@ -170,14 +169,17 @@ fn eval_int(cx: &Cx, name: &NameRef, expr: &ConstInt) -> Option<i64> {
 
 #[cfg(test)]
 mod tests {
-    use super::LOCALE;
+    use steins_catalog::{SettingCell, setting_read_gate};
 
-    /// The label this module drops is the registry entry the rows spell.
+    /// The label this module drops is the registry entry the rows spell: the read of the cell the
+    /// gate names.
     #[test]
     fn the_label_is_the_rows_label() {
-        assert!(steins_catalog::is_known_label(LOCALE));
-        for name in ["sort", "substr_compare", "pathinfo", "ctype_alpha", "strftime"] {
-            assert!(steins_catalog::effect_labels(name).is_some_and(|l| l.contains(&LOCALE)));
+        for name in ["sort", "substr_compare", "pathinfo", "ctype_alpha", "strftime", "preg_match"] {
+            let read = setting_read_gate(name).expect(name).cell().read_label();
+            assert_eq!(read, SettingCell::Locale.read_label(), "{name}");
+            assert!(steins_catalog::is_known_label(read), "{name}");
+            assert!(steins_catalog::effect_labels(name).is_some_and(|l| l.contains(&read)));
         }
     }
 }

@@ -1,4 +1,8 @@
-//! The locale readers whose read a call decides (ADR-0101 §3.9, issue #1000, S4).
+//! The setting readers whose read a call decides (ADR-0101 §3.9, issue #1000, S4).
+//!
+//! A gate names the [`SettingCell`] whose read it decides ([`SettingReadGate::cell`]). Every gate
+//! of S4 and S5 decides the locale's; the cells of the later slices of S6 add their own kinds
+//! and name their cell, so the effects pass drops the label the gate's cell spells and no other.
 //!
 //! `basename` is the one reader this slice states unconditionally: `php_basename` consults the
 //! locale-derived `CG(ascii_compatible_locale)` before it looks at a byte, so every call reads it,
@@ -28,11 +32,12 @@
 //! the routine skipped; where the trigger is wider than the call can show (a `parse_url` literal
 //! that starts with a colon, a conversion this table does not know) the verdict is undecided.
 //!
-//! The catalog states the decision ([`LocaleReadGate::reads`]); the effects pass reads the call.
+//! The catalog states the decision ([`SettingReadGate::reads`]); the effects pass reads the call.
 //! The rows follow `PINNED_PHP` (8.5), as every row does, except that a verdict that differs on
 //! 8.1 (the data sorts' case folding) is left undecided: a summary is a per-file fact and cannot
 //! depend on the project's PHP floor.
 
+use crate::SettingCell;
 use crate::preg::pattern_reads_locale;
 
 /// What a call shows of one deciding argument.
@@ -56,7 +61,8 @@ pub enum GateArg<'a> {
 
 /// Which arguments of a gated reader decide its read, and how.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LocaleReadGate {
+pub struct SettingReadGate {
+    cell: SettingCell,
     kind: Kind,
 }
 
@@ -86,7 +92,7 @@ const PATHINFO_BASENAME_PARTS: i64 = 2 | 4 | 8;
 /// The gate of the builtin `name` (case-insensitive), or `None` for a name whose read is
 /// unconditional or absent.
 #[must_use]
-pub fn locale_read_gate(name: &str) -> Option<LocaleReadGate> {
+pub fn setting_read_gate(name: &str) -> Option<SettingReadGate> {
     let kind = match name.to_ascii_lowercase().as_str() {
         "sort" | "rsort" | "asort" | "arsort" => Kind::DataSortFlags,
         "ksort" | "krsort" => Kind::KeySortFlags,
@@ -102,10 +108,17 @@ pub fn locale_read_gate(name: &str) -> Option<LocaleReadGate> {
         _ if crate::preg::compiles_pattern_argument(name) => Kind::PregPattern,
         _ => return None,
     };
-    Some(LocaleReadGate { kind })
+    Some(SettingReadGate { cell: SettingCell::Locale, kind })
 }
 
-impl LocaleReadGate {
+impl SettingReadGate {
+    /// The cell whose read the gate decides: the label [`SettingCell::read_label`] spells is the
+    /// one the call keeps or drops.
+    #[must_use]
+    pub const fn cell(self) -> SettingCell {
+        self.cell
+    }
+
     /// The positional indexes of the deciding arguments, in the order [`Self::reads`] takes them.
     #[must_use]
     pub const fn positions(self) -> &'static [usize] {
@@ -274,7 +287,7 @@ fn strftime_reads(format: &str) -> Option<bool> {
 
 #[cfg(test)]
 mod tests {
-    use super::{GateArg, locale_read_gate, parse_url_reads, strftime_reads};
+    use super::{GateArg, SettingCell, parse_url_reads, setting_read_gate, strftime_reads};
 
     const PREG_NAMES: [&str; 8] = [
         "preg_match",
@@ -288,7 +301,7 @@ mod tests {
     ];
 
     fn reads(name: &str, args: &[Option<GateArg<'_>>]) -> Option<bool> {
-        locale_read_gate(name).expect(name).reads(args)
+        setting_read_gate(name).expect(name).reads(args)
     }
 
     fn one(name: &str, arg: GateArg<'_>) -> Option<bool> {
@@ -299,22 +312,22 @@ mod tests {
     #[test]
     fn the_gated_names_and_positions() {
         for name in ["sort", "rsort", "asort", "arsort", "ksort", "krsort", "PathInfo"] {
-            assert_eq!(locale_read_gate(name).expect(name).positions(), [1], "{name}");
+            assert_eq!(setting_read_gate(name).expect(name).positions(), [1], "{name}");
         }
-        assert_eq!(locale_read_gate("substr_compare").expect("row").positions(), [4]);
-        assert_eq!(locale_read_gate("strnatcmp").expect("row").positions(), [0, 1]);
+        assert_eq!(setting_read_gate("substr_compare").expect("row").positions(), [4]);
+        assert_eq!(setting_read_gate("strnatcmp").expect("row").positions(), [0, 1]);
         for name in ["ctype_alpha", "escapeshellarg", "strip_tags", "parse_url", "gmstrftime"] {
-            assert_eq!(locale_read_gate(name).expect(name).positions(), [0], "{name}");
+            assert_eq!(setting_read_gate(name).expect(name).positions(), [0], "{name}");
         }
         for name in PREG_NAMES {
-            assert_eq!(locale_read_gate(name).expect(name).positions(), [0], "{name}");
+            assert_eq!(setting_read_gate(name).expect(name).positions(), [0], "{name}");
         }
         // `basename` reads on every call, so it has no gate; the sets C fixes have no row.
         for name in [
             "usort", "natsort", "array_multisort", "basename", "strcmp", "ctype_digit",
             "ctype_xdigit", "preg_quote", "preg_last_error", "preg_last_error_msg",
         ] {
-            assert_eq!(locale_read_gate(name), None, "{name}");
+            assert_eq!(setting_read_gate(name), None, "{name}");
         }
     }
 
@@ -456,7 +469,8 @@ mod tests {
         assert_eq!(list(&["/a/", r"/\y/"]), None);
     }
 
-    /// Every gated name carries the read on its row, as the upper bound the gate narrows.
+    /// Every gated name carries the read on its row, as the upper bound the gate narrows, and
+    /// the gate names the cell that read is: every gate of S4 and S5 decides the locale's.
     #[test]
     fn a_gated_name_carries_the_read_on_its_row() {
         for name in [
@@ -468,11 +482,10 @@ mod tests {
             "preg_replace_callback_array", "preg_filter", "preg_split", "preg_grep",
         ] {
             let row = crate::effect_labels(name);
-            assert!(
-                row.is_some_and(|l| l.contains(&"global.read.setting.locale")),
-                "{name}"
-            );
-            assert!(locale_read_gate(name).is_some(), "{name}");
+            let gate = setting_read_gate(name).expect(name);
+            assert_eq!(gate.cell(), SettingCell::Locale, "{name}");
+            assert!(row.is_some_and(|l| l.contains(&gate.cell().read_label())), "{name}");
+            assert_eq!(gate.cell().read_label(), "global.read.setting.locale", "{name}");
         }
     }
 }

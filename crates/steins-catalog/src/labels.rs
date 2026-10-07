@@ -70,12 +70,21 @@ const BUILTIN_LABELS: &[&str] = {
         // implicitly and only the script's own calls rewrite. A cell's label is
         // registered in the slice that colours its first row, never ahead of one.
         "global.read.setting",
+        // The default charset and the mbstring and iconv entries: the first row is `ini_get` of
+        // one of those names (S6-core); `env` has none yet, its first row is `getenv`.
+        "global.read.setting.encoding",
+        "global.read.setting.ini", // `ini_get('include_path')`, `bcmath.scale`, `error_reporting`.
         "global.read.setting.locale", // LC_* as `setlocale` leaves it.
         // `precision`, as a `%s` of a float reads it (S3: the first row to colour it).
         "global.read.setting.precision",
+        "global.read.setting.timezone", // `ini_get('date.timezone')` (S6-core).
         "global.write",
         "global.write.setting",
+        "global.write.setting.encoding",
+        "global.write.setting.ini",
         "global.write.setting.locale",
+        "global.write.setting.precision", // `ini_set('precision', …)` (S6-core).
+        "global.write.setting.timezone",
         "io",
         "io.db",
         "io.fs",
@@ -469,8 +478,11 @@ mod tests {
     fn the_setting_labels_are_registered_and_ride_the_global_prefixes() {
         for label in [
             "global.read.setting", "global.read.setting.locale",
-            "global.read.setting.precision", "global.write.setting",
-            "global.write.setting.locale",
+            "global.read.setting.precision", "global.read.setting.timezone",
+            "global.read.setting.encoding", "global.read.setting.ini", "global.write.setting",
+            "global.write.setting.locale", "global.write.setting.precision",
+            "global.write.setting.timezone", "global.write.setting.encoding",
+            "global.write.setting.ini",
         ] {
             assert!(is_known_label(label), "{label}");
             assert!(is_core_label(label), "{label} is under a core root");
@@ -482,7 +494,8 @@ mod tests {
         assert!(!subsumes("global.write", "global.read.setting.locale"), "a read is not a write");
         assert!(!subsumes("global.read.setting.locale", "global.read.setting"), "fine is not coarse");
         assert!(!is_known_label("global.read.settings"), "a typo stays unknown");
-        assert!(!is_known_label("global.read.setting.timezone"), "no cell ahead of its first row");
+        assert!(!is_known_label("global.read.setting.env"), "no cell ahead of its first row");
+        assert!(!is_known_label("global.write.setting.env"), "no cell ahead of its first row");
         assert!(is_known_label("global.read.setting.precision"), "registered with its first row");
         assert!(subsumes("global.read.setting", "global.read.setting.precision"));
         assert!(!subsumes("global.read.setting.locale", "global.read.setting.precision"));
