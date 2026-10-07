@@ -229,6 +229,25 @@ fn an_operand_shown_not_to_be_an_object_converts_nothing() {
 }
 
 #[test]
+fn a_match_whose_every_arm_holds_no_object_converts_nothing() {
+    // Neighbour (a `match` of literals is the commonest `: ?string` return in the corpora).
+    // witness: `'png'`, `'jpg'` or `NULL`.
+    nothing(
+        "function r(string $d): ?string { return match (true) {\n\
+            str_starts_with($d, 'PNG') => 'png',\n\
+            default => null,\n\
+        }; }",
+        "r",
+    );
+    nothing(
+        "function f($x) { return takes(match ($x) { 1 => 'a', 2 => 'b', default => throw new \\Exception('x') }); }",
+        "f",
+    );
+    // An arm that may be an object keeps the site.
+    has_gap("function f($x, $o) { return takes(match ($x) { 1 => 'a', default => $o }); }", "f");
+}
+
+#[test]
 fn an_operand_nothing_is_known_of_is_a_gap() {
     // 5.10, the volume driver. witness: `[S]` when handed an `S`.
     gap("function f($x) { return takes($x); }", "f");

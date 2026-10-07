@@ -191,6 +191,10 @@ pub(crate) fn object_free(expr: &Expression<'_>) -> bool {
         }
         Expression::Array(a) => a.elements.iter().all(element_object_free),
         Expression::LegacyArray(a) => a.elements.iter().all(element_object_free),
+        // A `match` yields the result of one arm (or raises, which yields nothing), so it holds
+        // an object only where an arm may; a `throw` expression never yields a value.
+        Expression::Match(m) => m.arms.iter().all(|arm| object_free(arm.expression())),
+        Expression::Throw(_) => true,
         _ => false,
     }
 }
