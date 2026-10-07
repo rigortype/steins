@@ -209,9 +209,9 @@
 # object, and `getMessage()` (a string) are no longer an operand that may be an object, which removes
 # `operator-to-string` or `user-code-reach` from findings in composer's `Factory`, `Compiler` and
 # command classes (15 removed), phpunit's `TextUI` commands and configuration (22), monolog's `Logger`
-# and `Utils` (4), guzzle's `HeaderProcessor` callers (5) and Carbon's `CarbonInterval` (1); 67 are
-# added, 52 removed. Net per package: composer +9,
-# console +19, process +9, phpunit -13, monolog -4, guzzle -4, Carbon -1. `phpstan/phpstan-src` is not
+# and `Utils` (3) and guzzle's `HeaderProcessor` callers (5); 67 are added, 50 removed. Net per package:
+# composer +9, console +19, process +9, phpunit -13, monolog -3, guzzle -4, Carbon 0 (its one
+# `CarbonInterval` removal needed a class constant that names an unproven constant, which stays a gap). `phpstan/phpstan-src` is not
 # remeasured here: the local fp-gate decides its row.
 
 # Triage of the `throw.maybe-undeclared` that the call-site read of a literal printf format and a
@@ -400,8 +400,7 @@
 # 462 → 461  2026-10-03 (issues #860, #991): -1 throw.maybe-undeclared (`in_array` with a literal `true`); the triage is above the composer row.
 # 461 → 461  2026-10-03 (issue #882, S6c): no net change ((b) -4, a class whose traits are all read and clean; (d) +4, a `CarbonInterface` bound of a class that holds one); the triage is above the composer row.
 # 461 → 465  2026-10-03 (issue #1003, S6d): +4 throw.maybe-undeclared, the writes of `CarbonPeriod::$carbonCurrent` (`?CarbonInterface`); the triage is above the composer row.
-# 465 → 464  2026-10-07 (issue #868, S5): -1 throw.maybe-undeclared net (`CarbonInterval`, a concatenation over a constant); the triage is above the composer row.
-"briannesbitt/Carbon" = 464
+"briannesbitt/Carbon" = 465
 
 # 0 → 1, 2026-08-16 with issue #391 — and a sixth class, the first that is not
 # a binding claim at all: `type.maybe-argument-mismatch` on
@@ -477,8 +476,8 @@
 # 172 → 170  2026-10-03 (issues #860, #991): -2 throw.maybe-undeclared (`in_array` with a literal `true`), 1 more lost `user-code-reach` from its kind list; the triage is above the composer row.
 # 170 → 173  2026-10-03 (issue #882, S6c): +3 throw.maybe-undeclared ((c) a PSR-typed parameter); the triage is above the composer row.
 # 173 → 175  2026-10-03 (issue #1003, S6d): +2 throw.maybe-undeclared, a constructor's write after `parent::__construct()` over a property hinted with a class this checkout lacks (`MandrillHandler`, `PHPConsoleHandler`); the triage is above the composer row.
-# 175 → 171  2026-10-07 (issue #868, S5): -4 throw.maybe-undeclared net (`Logger` and `Utils` concatenations over a `match` of literals or a class constant); the triage is above the composer row.
-"Seldaek/monolog" = 171
+# 175 → 172  2026-10-07 (issue #868, S5): -3 throw.maybe-undeclared net (`Logger` and `Utils` concatenations over a `match` of literals or a class constant); the triage is above the composer row.
+"Seldaek/monolog" = 172
 "thephpleague/flysystem" = 38
 "cakephp/chronos" = 50
 
