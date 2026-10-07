@@ -1,6 +1,7 @@
 # A call's result is remembered on its key until a site invalidates it: the value-lane half of "remembering and forgetting"
 
-**Status: proposed (2026-10-03), PENDING ratification.** Designed by the
+**Status: proposed (2026-10-03), PENDING ratification. Slice 1 landed 2026-10-07 (§7), PENDING
+ratification.** Designed by the
 architect under the owner's standing delegation, as the separate ADR that
 ADR-0101 §5.5 scopes; the owner's framing (2026-10-03): "`is_dir($dir)`'s
 result stays deterministic until `clearstatcache()`, so it can be treated as a
@@ -304,3 +305,101 @@ strict option asks for.
 - **Remembering the stat family under an opt-in or at a weaker stratum.** §4.
 - **Folding this into ADR-0101.** ADR-0101 §5.5: a subject kind, a key, scope
   rules and a calibration are each larger than any decision there.
+
+## 7. Slice 1, landed (2026-10-07), PENDING ratification
+
+Slice 1 of #1000: builtin function callees, positional arguments that are local variables or literals,
+no out-parameters, methods, project callees or nested calls. The design above stands; this section
+records what was built, where it departs from the text, and what was measured.
+
+**Where it lives.** `crates/steins-infer/src/remembered.rs` holds the key, the gate, production, the
+consumer and the join. The carrier is `Store::remembered`, a walk-local map beside `guarded_calls`,
+not an env entry: every rebind of a name already passes `Store::unbind`, which is the funnel rule 1
+needs, and a store entry joins by the same intersect rule the other store lanes take. An entry holds
+the key's two lanes, the value fact with its stratum and the arm list (a `T|false` row has no
+value-lane carrier, so the `!== false` narrowing of `strpos` lives in the arms), the places the key
+names, and whether its row reads a setting. The place-to-keys reverse index is a scan of that map,
+which is empty in nearly every frame.
+
+**Production** (`produce`) is guard survival by the machinery a variable's guard takes. Each candidate
+call becomes a scratch variable seeded with the call's own answer (the builtin-call ladder), the
+condition is rewritten so the key stands where the call stood, and `apply_refinements` and
+`apply_class_narrowing` run on the scratch pair. What moved is the key's lanes. It runs at the end of
+`apply_cond_side` (`if`, `elseif`, a loop header and its exit negation, and so the desugared `match
+(true)`), on the right operand of `&&` and `||` (the threaded env), and after `assert()`. A ternary
+arm resolves literals only and never reads a key. The keys naming a place the condition itself may
+rebind are dropped, so `strlen($s) === 5 && ($s = f())` leaves nothing behind.
+
+**The gate** (`gate_of`) reads the call's own ADR-0099 site: no gap, and every target an engine
+function hit whose labels lie under `global.read.setting`. A call also needs a builtin that no project
+function shadows by simple name, every variable argument by value at its position
+(`arg_is_by_value`), every variable a plain local (not an object, resource, closure or by-reference
+parameter, not `$this`, a superglobal or `$http_response_header`), and a scope that is not poisoned.
+The top-level script and a property hook record no sites, so nothing is remembered there. The stat
+family is refused by the gate itself: its rows carry `io`, which is no setting read (D1).
+
+**The consumer** is the builtin-call ladder (`compose`), so the assignment, the dump and the operand
+seams read it alike, and a call a rung already folded to one value keeps that. `eval_cond` reads a
+remembered `Verified` finite fact as a call operand's candidate values, which is how a second guard on
+the same call is decided and its dead branch marked. An `Asserted` fact (the catalog floor's) answers
+nothing there.
+
+**Forgetting.** Rule 1: `Store::unbind`, plus `forget_statement_writes` for an assignment to the place
+and an offset write, append or unset on it. Rules 2 and 3: at the start of a statement whose span
+holds a site that may rewrite a setting (a gap, a project edge, a declared bound, or a label under
+`global.write`, `eval` or `ffi`), every setting-read key goes; the statement's span includes its
+nested bodies, so a loop and an `Opaque` construct forget at their start, and a condition does not
+produce a setting-read key when its statement holds such a site. `dumpType`, `var_dump` and the
+harness `assertType` are exempt: they read and run nothing. The join keeps a key only where every
+branch holds it.
+
+**Two additions to the design**, each from a witness (`neighbours` rows N4 to N6 below):
+
+- A call to `ini_set`, `ini_alter` or `ini_restore` forgets every key, `{}`-row ones included. The
+  `{}` rows read the ini without saying so (`strval($f)` renders through `precision`,
+  `json_encode($f)` through `serialize_precision`); ADR-0101 §3.8 records that as the catalog's known
+  imprecision, and a remembered result must not turn it into a proven value.
+- A generator remembers no setting read: a `yield` is no site, and the caller may rewrite the locale
+  before the generator resumes.
+
+**Witnesses.** The design's R1 to R13 hold as stated; each row is a pair of fixtures
+(`crates/steins-infer/tests/it/remembered_call_results.rs`), checked both ways, and mutating out the
+statement forgetting, `unbind`'s hook or the statement-write hook fails the rows that name them. The
+neighbouring rows were measured on PHP 8.5.11 with a script of their own:
+
+| row | span | verdict |
+| --- | --- | --- |
+| N1 | `strlen($s)` across `opaque($cb)` whose callback sets the locale | same |
+| N2 | `count($arr)` across `$arr[] = 3` | DIFFERS |
+| N3 | `strlen($s)` across `$s[10] = 'x'` | DIFFERS |
+| N4 | `strval($f)` across `ini_set('precision', …)` | DIFFERS |
+| N5 | `json_encode(0.1 + 0.2)` across `ini_set('serialize_precision', …)` | DIFFERS |
+| N6 | `sprintf('%.2f', 2.5)` across a `yield` after which the caller sets the locale | DIFFERS |
+| N7 | `count($_GET)` across a callee writing `$_GET` | DIFFERS |
+| N8 | `count($p)` of a by-reference parameter across a write through a global alias | DIFFERS |
+| N9 | `strlen($s)` across a loop that appends to `$s` | DIFFERS |
+| N10 | `strlen($s)` across `strtoupper($s)` | same |
+| N11 | `strlen($s)` across `unset($s)` | DIFFERS |
+| N12 | `strlen($s)` after `strlen($s) === 5 && ($s = strrev($s . '!')) !== ''` | DIFFERS |
+| N13 | `strpos($h, '=')` across `setlocale` | same |
+| N14 | `number_format($x, 2)` across `setlocale` | same |
+
+**Measured.** On the ten public packages (`check --profile strict --no-php --vendor-diagnostics
+--no-cache`, and the default profile) against the merge base: no finding appeared
+or disappeared on either profile, the effect lane (`effect-diff`) is byte-identical (no label, gap or
+exhaustiveness moved) and the five transforms' dry-runs are byte-identical. The feature is exercised:
+an instrumented build produced about 1,500 keys over the ten packages (`strtolower($value)`,
+`trim($contents)`, `strpos($output, "%")` and `preg_match` against a literal pattern most often, none
+a setting read) and answered four second calls (`\count($args) === 0` then `=== 1`, and Composer's
+`strlen($credential) > 6` then `> 3`), none of which reaches a verdict or a finding. The `nsrt` harness
+(phpstan-src, without the file #783 holds out; 18,228 measured) moves from 4,158 to 4,161 `match`:
+`bug-2648.php:40` (`count($list)` under `count($list) === 1`), `bug-9404.php:10` (`gettype($x)` under
+`gettype($x) === 'integer'`) and `count-recursive.php:17` (`count($m, $mode)` under `> 2`), with
+`count-recursive.php:107` closer and still a `differ`. Private corpus not run.
+
+**What it still assumes.** A diagnostic an engine function raises can run an installed error handler,
+and an output handler or a destructor can run at a site that is not the one that registered it; the
+effect lane charges those effects to the registration (ADR-0021), and a remembered result inherits
+that posture. Deferred as designed: methods and receiver places, project callees, nested calls,
+out-parameters, per-cell precision of rule 2.
+

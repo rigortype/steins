@@ -64,7 +64,7 @@ union of shapes lives as contract arms (where discrimination happens), never
 inside one fact.
 _Avoid_: mirroring the contract lane's array split into the fact domain
 
-**Remembered call result** (ADR-0102, designed-not-implemented):
+**Remembered call result** (ADR-0102; slice 1 implemented for builtin function callees with local-variable or literal arguments, the rest designed):
 A call's result held as a value-domain fact on its **call key** — the resolved
 callee, its argument places (ADR-0098) and receiver place — so a later call with
 the same key in the same frame answers the remembered fact until an invalidating
