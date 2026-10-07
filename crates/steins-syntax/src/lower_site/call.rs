@@ -3,8 +3,8 @@
 
 use mago_span::HasSpan;
 use mago_syntax::cst::{
-    AnonymousClass, Argument, ArgumentList, ClassLikeMemberSelector, Expression, FunctionCall, Instantiation, MethodCall,
-    NullSafeMethodCall, StaticMethodCall,
+    AnonymousClass, Argument, ArgumentList, ClassLikeMemberSelector, Expression, FunctionCall,
+    Instantiation, MethodCall, NullSafeMethodCall, StaticMethodCall,
 };
 
 use super::{SiteScope, coerce};

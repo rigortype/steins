@@ -28,7 +28,7 @@ use crate::ast::{
 use crate::lower_arg_shape::arg_shape;
 use crate::lower_effect::EffectScanCx;
 use crate::lower_expr::{effect_recv_of_object_declared, method_name_of};
-use crate::{bytes_to_string, strip_dollar, to_span};
+use crate::{bytes_to_string, to_span};
 
 /// The return type `hint` as the resolver reads it, when it spells a `string` member: its
 /// members joined by `|` (an intersection by `&`, `null` for a `?` prefix), a class name as
@@ -97,7 +97,10 @@ pub(super) fn call_args(list: &ArgumentList<'_>, sx: &SiteScope<'_>) -> Vec<Call
 }
 
 /// [`call_args`] for the argument list of an anonymous class's `new`.
-pub(super) fn partial_call_args(list: &PartialArgumentList<'_>, sx: &SiteScope<'_>) -> Vec<CallArg> {
+pub(super) fn partial_call_args(
+    list: &PartialArgumentList<'_>,
+    sx: &SiteScope<'_>,
+) -> Vec<CallArg> {
     let arguments = list.arguments.iter().filter_map(|argument| match argument {
         PartialArgument::Positional(p) => Some((None, p.ellipsis.is_some(), p.value)),
         PartialArgument::Named(n) => Some((Some(bytes_to_string(n.name.value)), false, n.value)),
@@ -155,7 +158,7 @@ pub(super) fn property_value_site(
     }
     let Expression::Access(Access::Property(pa)) = a.lhs.unparenthesized() else { return };
     let this = matches!(pa.object.unparenthesized(),
-        Expression::Variable(Variable::Direct(dv)) if strip_dollar(bytes_to_string(dv.name)) == "this");
+        Expression::Variable(Variable::Direct(dv)) if bytes_to_string(dv.name) == "$this");
     if let (true, Some(name)) = (this, method_name_of(&pa.property)) {
         value_site(C::PropertyValue, Some(&name), (a.rhs, to_span(a.span())), sx, out);
     }
