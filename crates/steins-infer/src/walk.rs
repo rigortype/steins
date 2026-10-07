@@ -46,6 +46,7 @@ use crate::out_params::{
 use crate::predicates::apply_type_narrowing;
 use crate::project::{Diagnostic, FnResolution};
 use crate::rebind;
+use crate::remembered::{self, RememberCache};
 use crate::refine::{
     apply_class_narrowing, apply_inline_var_casts, apply_refinements, collect_guard_calls_any,
     then_refinements,
@@ -122,6 +123,7 @@ pub(crate) fn analyze_scope(
         uncovered_matches: std::cell::RefCell::new(Vec::new()),
         alloc: std::cell::Cell::new(alloc_start),
         summary,
+        remember: RememberCache::default(),
     };
     let _frame = FrameGuard::enter(scope);
     let flow =
@@ -376,6 +378,10 @@ pub(crate) struct WalkCx<'a, 'w> {
     ///
     /// [`descend`]: crate::descent::descend
     pub(crate) summary: Option<SummaryCtx>,
+    /// What the effect lane says about this frame's sites, and the statement being
+    /// walked, for the remembered call results (ADR-0102). Lazy: a frame that
+    /// remembers nothing resolves no site.
+    pub(crate) remember: RememberCache<'a>,
 }
 
 impl WalkCx<'_, '_> {
@@ -510,6 +516,11 @@ pub(crate) fn walk_trace(
     let cx = w.cx;
     let scope = w.scope;
     for (stmt_idx, stmt) in stmts.iter().enumerate() {
+        // The statement the remembered call results (ADR-0102) are asked about, for
+        // every exit of this iteration; a setting read does not survive a statement
+        // that holds a site which may rewrite the setting.
+        let _stmt_guard = w.remember.enter(stmt.span);
+        remembered::forget_for_statement(w, stmt.span, store);
         // 0. Statement-level inline `@var` casts (ADR-0073), applied before the
         // statement's own checks read the env. A tag above an `Assign` to the same
         // variable is erased by step 2's own rebind — the assignment-form `@var`
@@ -701,6 +712,9 @@ pub(crate) fn walk_trace(
                 // (`assert(is_string($x))`) route through the same `if`-guard
                 // narrowing with no assert-specific plumbing (ADR-0064 §5).
                 apply_shape_narrowing(w.cx, cond, true, env, store, true);
+                // A call the assertion narrowed answers the same narrowing at its next
+                // identical call (ADR-0102).
+                remembered::produce(w, folder, cond, true, env, store);
                 Flow::FellThrough
             }
             // Terminators: the trace stops; the remainder is unreachable.
@@ -805,6 +819,10 @@ pub(crate) fn walk_trace(
                 descent, facts, out,
             ),
         };
+
+        // A write to a place a remembered call result names that no `unbind` saw: the
+        // assignment's own target, an offset write's base (ADR-0102 §2.4, rule 1).
+        remembered::forget_statement_writes(&stmt.kind, store);
 
         // 3 to 5. The asserts, the by-ref invalidation, then what `pre_call` read.
         settle_stmt(w, stmt, pre_call, env, store);

@@ -1006,6 +1006,16 @@ fn dump_builtin_call(arg: &DumpArg, folder: &mut dyn Folder) -> Option<DumpRende
             let text = render_contract_arms(cx, &arms)?;
             Some(DumpRendering { text, asserted: true })
         }
+        // What a guard proved of this very call (ADR-0102): the fact the key holds at
+        // its own stratum, else its arms, `(asserted)` as far as any arm is.
+        BuiltinRung::Remembered(lanes) => match lanes.fact {
+            Some((fact, stratum)) => Some(DumpRendering::of_fact(&fact, stratum)),
+            None => {
+                let arms = lanes.arms?;
+                let text = render_contract_arms(cx, &arms)?;
+                Some(DumpRendering { text, asserted: arms.iter().any(|a| a.stratum == Stratum::Asserted) })
+            }
+        },
         // Not asked.
         BuiltinRung::ResourceArms(..) => None,
     }

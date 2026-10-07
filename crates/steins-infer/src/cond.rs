@@ -27,6 +27,7 @@ use crate::existence::eval_existence_call;
 use crate::offsets::{ShapeRead, offset_key_of, offset_operand_fact, shape_read_at};
 use crate::predicates::apply_type_narrowing;
 use crate::refine::{apply_refinements, collect_refine};
+use crate::remembered;
 use crate::transfers::{transfer_arg_fact, transfer_arg_known};
 use crate::walk::{WalkCx, mark_dead_operand, mark_dead_span};
 
@@ -178,14 +179,16 @@ pub(crate) fn eval_cond(
             if let Some(v) = eval_version_id_cmp(w.cx, *op, lhs, rhs) {
                 return v;
             }
-            let lv = cmp_operand_values(w, folder, lhs, env, poisoned);
-            let rv = cmp_operand_values(w, folder, rhs, env, poisoned);
+            let lv = cmp_operand_values(w, folder, lhs, (env, store), poisoned);
+            let rv = cmp_operand_values(w, folder, rhs, (env, store), poisoned);
             match (lv, rv) {
                 (Some(lv), Some(rv)) => eval_cmp(*op, &lv, &rv),
                 _ => Certainty::Maybe,
             }
         }
-        CondExpr::Truthy(op) => match operand_values(op, env, poisoned) {
+        CondExpr::Truthy(op) => match operand_values(op, env, poisoned)
+            .or_else(|| remembered::candidates(w, op, store))
+        {
             Some(vs) => all_agree(vs.iter().map(php_truthy)),
             None => Certainty::Maybe,
         },
@@ -207,8 +210,11 @@ pub(crate) fn eval_cond(
                 mark_dead_operand(w, b, *span);
                 return Certainty::No;
             }
-            let (benv, bstore) =
+            let (benv, mut bstore) =
                 threaded_operand_env(w.cx, a, true, env, store, poisoned);
+            // The left operand's calls, narrowed by its having held (ADR-0102): `b`
+            // reads them as it reads the variables the operand narrowed.
+            remembered::produce(w, folder, a, true, &benv, &mut bstore);
             va.and(eval_cond(w, folder, b, &benv, &bstore, poisoned))
         }
         CondExpr::Or(a, b, span) => {
@@ -218,8 +224,9 @@ pub(crate) fn eval_cond(
                 mark_dead_operand(w, b, *span);
                 return Certainty::Yes;
             }
-            let (benv, bstore) =
+            let (benv, mut bstore) =
                 threaded_operand_env(w.cx, a, false, env, store, poisoned);
+            remembered::produce(w, folder, a, false, &benv, &mut bstore);
             va.or(eval_cond(w, folder, b, &benv, &bstore, poisoned))
         }
         // A foldable existence predicate in guard position folds to a Yes/No/Maybe
@@ -1420,7 +1427,7 @@ fn cmp_operand_values(
     w: &WalkCx,
     folder: &mut dyn Folder,
     op: &CondOperand,
-    env: &HashMap<String, Known>,
+    (env, store): (&HashMap<String, Known>, &Store),
     poisoned: bool,
 ) -> Option<Vec<ArgValue>> {
     if let Some(vs) = operand_values(op, env, poisoned) {
@@ -1432,7 +1439,10 @@ fn cmp_operand_values(
     }
     let name = call.callee.clone()?;
     let args: Vec<ArgValue> = call.args.iter().map(|a| a.value.clone()).collect();
+    // The fold first: a call it resolves is one value and no remembered fact outranks
+    // it. A call it cannot resolve may be one a guard decided earlier (ADR-0102).
     w.cx.cmp_candidates_under(&ArgValue::Call(name, args), env, poisoned, folder, None, None)
+        .or_else(|| remembered::candidates(w, op, store))
 }
 
 /// variable, the literal itself, else `None` (unknown → the caller yields `Maybe`).

@@ -24,6 +24,7 @@ use crate::existence::existence_vouch;
 use crate::out_params::{check_preg_pattern, seed_out_params, seed_produced_places};
 use crate::predicates::apply_type_narrowing;
 use crate::project::Diagnostic;
+use crate::remembered;
 use crate::refine::{
     Refine, apply_class_narrowing, apply_refinements, collect_guard_calls, collect_guard_calls_any,
     collect_same_expr_call_guards, else_refinements, subtract_contract_lane, then_refinements,
@@ -262,6 +263,10 @@ pub(crate) fn apply_cond_side(
     // the `proc_open` row has, and the one `if (proc_open($c, $s, $pipes))`
     // lands in.
     seed_produced_places(w, folder, cond, then, env, store);
+    // Last: what the condition proves about the calls it names, remembered on the
+    // key so that the next identical call answers it (ADR-0102). After every
+    // vocabulary above, which may have forgotten a name a key stands on.
+    remembered::produce(w, folder, cond, then, env, store);
 }
 
 /// One name's pre-branch value and declared-arm lanes, held across the branches

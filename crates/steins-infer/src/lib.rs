@@ -85,6 +85,7 @@ pub mod promote;
 mod purity;
 mod rebind;
 mod refine;
+mod remembered;
 mod resource;
 mod return_arms;
 mod return_maybe;
