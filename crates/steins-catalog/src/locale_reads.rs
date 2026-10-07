@@ -22,6 +22,7 @@
 //! | `strip_tags` | `$string` (0) | it holds a `<` (`isspace(p[1])` after one, the first `<` is reached in the start state) |
 //! | `parse_url` | `$url` (0) | the first `:` is not at index 0 (`isalpha` over the scheme), or there is no `:`, no leading `//` and some byte other than `?` and `#` (the path, query or fragment is non-empty, and `php_replace_controlchars` calls `iscntrl` on each byte) |
 //! | `strftime`, `gmstrftime` | `$format` (0) | it holds a conversion that names the locale: `a A b B c h p r x X`; the numeric ones read nothing, and any other conversion is undecided |
+//! | `preg_match`, `preg_match_all`, `preg_replace`, `preg_replace_callback`, `preg_replace_callback_array` (its keys), `preg_filter`, `preg_split`, `preg_grep` | `$pattern` (0), or an array literal of patterns | the literal pattern consults the C library's character tables ([`pattern_reads_locale`](crate::preg::pattern_reads_locale), ADR-0101 §3.10, S5): `\w \W \s \S \b \B`, a POSIX class but `[:digit:]` and `[:xdigit:]`, a caseless flag over a letter, the `x` flag over a byte of `0x80..=0xFF`; the `u` modifier and a leading `(*UCP)` exempt all of it but the last. An array reads if any of its patterns does |
 //!
 //! A literal that shows no reading trigger is **absent**, not undecided, only where php-src shows
 //! the routine skipped; where the trigger is wider than the call can show (a `parse_url` literal
@@ -31,6 +32,8 @@
 //! The rows follow `PINNED_PHP` (8.5), as every row does, except that a verdict that differs on
 //! 8.1 (the data sorts' case folding) is left undecided: a summary is a per-file fact and cannot
 //! depend on the project's PHP floor.
+
+use crate::preg::pattern_reads_locale;
 
 /// What a call shows of one deciding argument.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,6 +49,9 @@ pub enum GateArg<'a> {
     /// A value shown to be neither a string nor an integer: a `null`, `bool`, `float` or array
     /// literal, or a by-value parameter its declared type keeps from both.
     NotText,
+    /// An array literal every one of whose patterns is a string literal, decoded: the patterns
+    /// of `preg_replace` and its kin, or the keys of `preg_replace_callback_array`.
+    Strs(&'a [String]),
 }
 
 /// Which arguments of a gated reader decide its read, and how.
@@ -66,6 +72,7 @@ enum Kind {
     StripTags,
     ParseUrl,
     Strftime,
+    PregPattern,
 }
 
 const SORT_FLAG_CASE: i64 = 8;
@@ -92,6 +99,7 @@ pub fn locale_read_gate(name: &str) -> Option<LocaleReadGate> {
         "strip_tags" => Kind::StripTags,
         "parse_url" => Kind::ParseUrl,
         "strftime" | "gmstrftime" => Kind::Strftime,
+        _ if crate::preg::compiles_pattern_argument(name) => Kind::PregPattern,
         _ => return None,
     };
     Some(LocaleReadGate { kind })
@@ -109,7 +117,8 @@ impl LocaleReadGate {
             | Kind::EscapeShellArg
             | Kind::StripTags
             | Kind::ParseUrl
-            | Kind::Strftime => &[0],
+            | Kind::Strftime
+            | Kind::PregPattern => &[0],
         }
     }
 
@@ -137,7 +146,7 @@ impl LocaleReadGate {
                 GateArg::Str(text) => Some(!text.is_empty()),
                 GateArg::Int(v) => Some((-128..=255).contains(&v)),
                 GateArg::Bool(_) | GateArg::NotText => Some(false),
-                GateArg::Omitted => None,
+                GateArg::Omitted | GateArg::Strs(_) => None,
             },
             Kind::StrNat => strnat_reads(first, args.get(1).copied().flatten()),
             Kind::EscapeShellArg => match first? {
@@ -157,7 +166,27 @@ impl LocaleReadGate {
                 GateArg::Str(format) => strftime_reads(format),
                 _ => None,
             },
+            Kind::PregPattern => match first? {
+                GateArg::Str(pattern) => pattern_reads_locale(pattern),
+                GateArg::Strs(patterns) => patterns_read_locale(patterns),
+                // No pattern, no compile: `ArgumentCountError` first.
+                GateArg::Omitted => Some(false),
+                _ => None,
+            },
         }
+    }
+}
+
+/// An array of patterns reads if any of them does; one the reader declines leaves the verdict
+/// undecided unless another pattern already reads. An empty array compiles nothing.
+fn patterns_read_locale(patterns: &[String]) -> Option<bool> {
+    let verdicts: Vec<Option<bool>> = patterns.iter().map(|p| pattern_reads_locale(p)).collect();
+    if verdicts.contains(&Some(true)) {
+        Some(true)
+    } else if verdicts.contains(&None) {
+        None
+    } else {
+        Some(false)
     }
 }
 
@@ -247,6 +276,17 @@ fn strftime_reads(format: &str) -> Option<bool> {
 mod tests {
     use super::{GateArg, locale_read_gate, parse_url_reads, strftime_reads};
 
+    const PREG_NAMES: [&str; 8] = [
+        "preg_match",
+        "preg_match_all",
+        "preg_replace",
+        "preg_replace_callback",
+        "preg_replace_callback_array",
+        "preg_filter",
+        "preg_split",
+        "preg_grep",
+    ];
+
     fn reads(name: &str, args: &[Option<GateArg<'_>>]) -> Option<bool> {
         locale_read_gate(name).expect(name).reads(args)
     }
@@ -266,10 +306,13 @@ mod tests {
         for name in ["ctype_alpha", "escapeshellarg", "strip_tags", "parse_url", "gmstrftime"] {
             assert_eq!(locale_read_gate(name).expect(name).positions(), [0], "{name}");
         }
+        for name in PREG_NAMES {
+            assert_eq!(locale_read_gate(name).expect(name).positions(), [0], "{name}");
+        }
         // `basename` reads on every call, so it has no gate; the sets C fixes have no row.
         for name in [
             "usort", "natsort", "array_multisort", "basename", "strcmp", "ctype_digit",
-            "ctype_xdigit",
+            "ctype_xdigit", "preg_quote", "preg_last_error", "preg_last_error_msg",
         ] {
             assert_eq!(locale_read_gate(name), None, "{name}");
         }
@@ -387,6 +430,32 @@ mod tests {
         }
     }
 
+    /// A literal pattern decides by the verdict of `pattern_reads_locale`, for every name that
+    /// compiles one; an array of patterns reads if any of them does, an empty one compiles
+    /// nothing, and a pattern the reader declines is undecided unless another already reads.
+    #[test]
+    fn a_preg_call_reads_by_its_literal_pattern() {
+        for name in PREG_NAMES {
+            assert_eq!(one(name, GateArg::Str(r"/^\w$/")), Some(true), "{name}");
+            assert_eq!(one(name, GateArg::Str(r"/^\d$/")), Some(false), "{name}");
+            assert_eq!(one(name, GateArg::Str(r"/^\w$/u")), Some(false), "{name}");
+            assert_eq!(one(name, GateArg::Str(r"/a\y/")), None, "{name}");
+            assert_eq!(one(name, GateArg::Omitted), Some(false), "{name}");
+            assert_eq!(one(name, GateArg::Bool(true)), None, "{name}");
+            assert_eq!(one(name, GateArg::NotText), None, "{name}");
+            assert_eq!(reads(name, &[None]), None, "{name}");
+        }
+        let list = |patterns: &[&str]| -> Option<bool> {
+            let owned: Vec<String> = patterns.iter().map(|p| (*p).to_owned()).collect();
+            one("preg_replace", GateArg::Strs(&owned))
+        };
+        assert_eq!(list(&[]), Some(false));
+        assert_eq!(list(&["/a/", "/b/"]), Some(false));
+        assert_eq!(list(&["/a/", r"/\s/"]), Some(true), "any reading pattern reads");
+        assert_eq!(list(&[r"/\y/", r"/\s/"]), Some(true), "a pattern that reads beats a decline");
+        assert_eq!(list(&["/a/", r"/\y/"]), None);
+    }
+
     /// Every gated name carries the read on its row, as the upper bound the gate narrows.
     #[test]
     fn a_gated_name_carries_the_read_on_its_row() {
@@ -395,6 +464,8 @@ mod tests {
             "ctype_alnum", "ctype_alpha", "ctype_cntrl", "ctype_graph", "ctype_lower",
             "ctype_print", "ctype_punct", "ctype_space", "ctype_upper", "strnatcmp",
             "strnatcasecmp", "escapeshellarg", "strip_tags", "parse_url", "strftime", "gmstrftime",
+            "preg_match", "preg_match_all", "preg_replace", "preg_replace_callback",
+            "preg_replace_callback_array", "preg_filter", "preg_split", "preg_grep",
         ] {
             let row = crate::effect_labels(name);
             assert!(

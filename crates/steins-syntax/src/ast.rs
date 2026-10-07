@@ -558,6 +558,13 @@ pub struct ConstArgs {
     /// consults the locale (ADR-0101 §3.9). Absent where the scan shows nothing. Appended after
     /// [`Self::float_evidence`].
     pub not_text: Vec<(u8, NotText)>,
+    /// For a call to a `preg_*` function only: the patterns of an **array literal** at position
+    /// 0 when every one is a string literal, decoded and in source order (the values of
+    /// `preg_replace`'s array, the keys of `preg_replace_callback_array`'s map); `None` for any
+    /// other argument, and for a literal with a spread, a computed element or a key that is
+    /// not a string (ADR-0101 §3.10). A single literal pattern is [`Self::first`]. Appended
+    /// after [`Self::not_text`].
+    pub patterns: Option<Vec<String>>,
 }
 
 /// What shows a call argument is neither a string nor an integer ([`ConstArgs::not_text`]).

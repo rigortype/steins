@@ -747,8 +747,11 @@ mod tests {
         for name in ["range", "preg_split"] {
             assert!(foldable(name), "{name} folds on a 64-bit engine");
             assert!(!portable(name), "{name} is refused on a 32-bit engine");
-            assert_eq!(effect_labels(name), Some(&[][..]), "{name} is catalogued pure");
         }
+        assert_eq!(effect_labels("range"), Some(&[][..]), "range is catalogued pure");
+        // `preg_split` compiles its pattern through the locale's tables (ADR-0101 §3.10, S5), so
+        // it is no longer the empty row; the call site decides the read.
+        assert_eq!(effect_labels("preg_split"), Some(&["global.read.setting.locale"][..]));
     }
 
     /// Issue #78 admissions: on the allowlist AND carry the empty effect set.

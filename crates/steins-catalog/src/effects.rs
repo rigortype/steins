@@ -60,6 +60,12 @@ use crate::fold::foldable;
 ///   call site proves, drops or gaps it as the printf family's is
 ///   ([`locale_read_gate`](crate::locale_read_gate)). `number_format` reads no setting and is
 ///   certified at the call site ([`certified_at_call_site`]).
+/// * The preg family (ADR-0101 §3.10, S5): `preg_match`, `preg_match_all`, `preg_replace`,
+///   `preg_replace_callback`, `preg_replace_callback_array`, `preg_filter`, `preg_split` and
+///   `preg_grep` compile their pattern through the locale's character tables, so their row is
+///   `global.read.setting.locale` as an upper bound, and the literal pattern decides it at the
+///   call ([`pattern_reads_locale`](crate::preg::pattern_reads_locale)). `preg_quote` and the
+///   two `preg_last_error*` readers compile nothing.
 /// * `curl_exec` keeps `io.output` arg-blind (only `CURLOPT_RETURNTRANSFER`
 ///   suppresses it); `system`/`passthru` take parent `io.output` since
 ///   OB-capturability evidence for a relayed child's output is split
@@ -190,6 +196,21 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
         | "ctype_print" | "ctype_punct" | "ctype_space" | "ctype_upper" | "strnatcmp"
         | "strnatcasecmp" | "escapeshellarg" | "strip_tags" | "parse_url" | "sort" | "rsort"
         | "asort" | "arsort" | "ksort" | "krsort" | "substr_compare" | "pathinfo" => {
+            Some(LOCALE_READ)
+        }
+        // The preg family compiles its pattern through one compiler, which asks the tables
+        // `pcre2_maketables()` builds from the process locale once a script has called
+        // `setlocale` (ADR-0101 §3.10, S5). The row is the upper bound and the literal pattern
+        // decides it at the call site (`locale_read_gate`, `pattern_reads_locale`): `\w`, `\s`,
+        // `\b` and the POSIX classes, a caseless
+        // flag over a letter, and the `x` flag over a byte of `0x80..=0xFF` read; `u` and a
+        // leading `(*UCP)` exempt all of it but the last. `preg_quote` compiles nothing and
+        // keeps its empty row, and so do `preg_last_error` and `preg_last_error_msg`. The
+        // names that were `{}` through the fold allowlist (`preg_match`, `preg_match_all`,
+        // `preg_split`) or only an out-parameter row (`preg_replace` and its kin) read the
+        // locale as `sprintf` did.
+        "preg_match" | "preg_match_all" | "preg_replace" | "preg_replace_callback"
+        | "preg_replace_callback_array" | "preg_filter" | "preg_split" | "preg_grep" => {
             Some(LOCALE_READ)
         }
         // The clock too, as the time family's argument-blind `nondet.time`; the locale half is
@@ -3073,10 +3094,12 @@ mod tests {
         // A by-ref row is not an effect color: `similar_text` writes argument 2
         // and touches nothing global. (`preg_match` used to be the example here
         // and stopped being one when issue #382 admitted it — a foldable name is
-        // catalogued-PURE, `Some(&[])`, not uncatalogued.)
+        // catalogued-PURE, `Some(&[])`, not uncatalogued — and it reads the locale's
+        // tables since ADR-0101 §3.10.)
         assert_eq!(out_params("similar_text"), Some(&[2][..]));
         assert_eq!(effect_labels("similar_text"), None);
-        assert_eq!(effect_labels("preg_match"), Some(&[][..]), "foldable is catalogued-pure");
+        assert_eq!(effect_labels("preg_match"), Some(&["global.read.setting.locale"][..]));
+        assert_eq!(effect_labels("preg_quote"), Some(&[][..]), "foldable and compiling nothing");
     }
 
     #[test]

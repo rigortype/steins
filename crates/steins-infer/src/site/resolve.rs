@@ -433,7 +433,16 @@ impl<'a> Resolver<'a, '_, '_> {
         // lane reads the invoker's own throw row the same way, and a row the audit
         // has not given it is a gap there.
         if self.effects() {
-            let labels = engine::function_effects(&builtin, targets, Some(&site.const_args));
+            let mut labels = engine::function_effects(&builtin, targets, Some(&site.const_args));
+            // An invoker can read a setting too (`preg_replace_callback` compiles its pattern):
+            // the call's literal arguments decide it as they do a plain call's.
+            let positional = site.ref_targets.as_ref().map(Vec::len);
+            let (read, spelled) = ((self.cx, self.frame), (name, builtin.as_str()));
+            if let Some(gap) =
+                locale::narrow_labels(read, spelled, (positional, &site.const_args), &mut labels)
+            {
+                self.gap(gap);
+            }
             self.function_hit(&builtin, name.simple(), labels, &[]);
         } else {
             let call = Some((site.ref_targets.as_ref().map(Vec::len), &site.const_args));

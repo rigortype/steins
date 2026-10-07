@@ -1340,7 +1340,24 @@ fn fold_shape_refusal(name: &str, args: &[FoldArg]) -> Option<FoldShapeRefusal> 
 ///
 /// A format that is not a string, or no argument at all, declines too: the
 /// verdict reads a string literal and nothing else.
+///
+/// The same refusal holds a `preg_*` call whose literal pattern consults the locale's character
+/// tables (ADR-0101 §3.10): `\w`, `\s`, `\b`, a POSIX class, a caseless flag over a letter, or the
+/// `x` flag over a byte of `0x80..=0xFF`, outside `u` and `(*UCP)`. The runner has never called
+/// `setlocale`, so it answers under the C tables, which is a claim about the project's runtime
+/// the project never made. A pattern the reader declines is one PCRE2 refuses to compile
+/// (an unterminated class, an unknown escape or verb), which answers `false` with a warning
+/// under every locale and keeps folding as it did; so does a pattern that is no string (the
+/// engine throws). `preg_quote` compiles nothing and keeps folding.
 fn fold_reads_ambient_setting(name: &str, args: &[FoldArg]) -> bool {
+    if steins_catalog::preg::compiles_pattern_argument(name) {
+        return match args.first() {
+            Some(FoldArg::Str(pattern)) => {
+                steins_catalog::preg::pattern_reads_locale(pattern) == Some(true)
+            }
+            _ => false,
+        };
+    }
     let Some(family) = steins_catalog::printf_family(name) else { return false };
     match args.get(family.format_position()) {
         Some(FoldArg::Str(format)) => steins_catalog::format_reads_locale(format),
@@ -1725,6 +1742,30 @@ mod ambient_gate_tests {
         assert!(fold_reads_ambient_setting("vsprintf", &[s("%f"), FoldArg::Array(vec![])]));
         assert!(fold_reads_ambient_setting("printf", &[s("%g")]));
         assert!(!fold_reads_ambient_setting("vsprintf", &[s("%d"), FoldArg::Array(vec![])]));
+    }
+
+    /// A literal pattern that reads the locale tables does not fold, whatever the subject is;
+    /// one that shows none does, and so does `preg_quote`, which compiles nothing.
+    #[test]
+    fn a_pattern_that_reads_the_tables_does_not_fold() {
+        for name in ["preg_match", "preg_match_all", "preg_split", "preg_replace", "preg_grep"] {
+            for pattern in [r"/\s/", r"/(\w)/", "/a/i", "/[[:alpha:]]/", "/^a\u{a0}b$/x"] {
+                assert!(fold_reads_ambient_setting(name, &[s(pattern), s("x")]), "{name} {pattern}");
+            }
+            // The last two are patterns PCRE2 refuses: no table is asked, and the fold is the
+            // engine's own `false`.
+            for pattern in [r"/\d+/", "/a/", r"/\s/u", r"/(*UCP)\w/", "/[a-z]+:/", "/[/", r"/a\y/"] {
+                assert!(!fold_reads_ambient_setting(name, &[s(pattern), s("x")]), "{name} {pattern}");
+            }
+            assert!(!fold_reads_ambient_setting(name, &[FoldArg::Int(5)]), "{name}: no string");
+            assert!(!fold_reads_ambient_setting(name, &[]), "{name}: no argument");
+        }
+        assert!(!fold_reads_ambient_setting("preg_quote", &[s(r"\w.")]));
+        assert!(asked("preg_quote", &["\\w."]));
+        assert!(!asked("preg_match", &[r"/\s/", " "]));
+        assert!(!asked("preg_split", &["/a/i", "xAy"]));
+        assert!(asked("preg_match", &[r"/\d/", "1"]));
+        assert!(asked("preg_split", &["/,/", "a,b"]));
     }
 
     /// Through the seam: the engine is not asked for a call that keeps the read,

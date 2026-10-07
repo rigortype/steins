@@ -615,6 +615,51 @@ fn scans_a_ctype_argument_that_is_neither_a_string_nor_an_integer() {
     assert!(not_text("bool $b", "strlen($b);").is_empty());
 }
 
+/// ADR-0101 §3.10: a `preg_*` call's array literal of patterns, as decoded string literals in
+/// source order (values of a list, keys of `preg_replace_callback_array`'s map), and nothing for
+/// any array a literal scan cannot read whole.
+#[test]
+fn scans_the_patterns_of_a_preg_array_literal() {
+    fn patterns(body: &str) -> Option<Vec<String>> {
+        let src = format!("<?php function f($p, $q): void {{ {body} }}");
+        let tree = SourceTree::parse(&src);
+        let f = tree.functions().iter().find(|f| f.name == "f").expect("f").clone();
+        match derive_effect_origins(&f.sites).first().expect("one origin").clone() {
+            EffectOrigin::Call { const_args, .. } | EffectOrigin::HigherOrder { const_args, .. } => {
+                const_args.patterns
+            }
+            other => panic!("expected a named-call origin, got {other:?}"),
+        }
+    }
+    let strings = |items: &[&str]| Some(items.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>());
+    assert_eq!(patterns("preg_replace(['/a/', \"/\\\\s/\"], '', $q);"), strings(&["/a/", r"/\s/"]));
+    assert_eq!(patterns("preg_replace(array('/a/'), '', $q);"), strings(&["/a/"]));
+    assert_eq!(patterns("preg_replace(['x' => '/a/', 'y' => '/b/'], '', $q);"), strings(&["/a/", "/b/"]));
+    assert_eq!(patterns("preg_filter([], '', $q);"), strings(&[]));
+    assert_eq!(
+        patterns("preg_replace_callback_array(['/a/' => 'f', '/b/i' => 'g'], $q);"),
+        strings(&["/a/", "/b/i"])
+    );
+    // A single literal is `first`, not a list.
+    assert_eq!(patterns("preg_match('/a/', $q);"), None);
+    assert_eq!(patterns("preg_replace($p, '', $q);"), None);
+    // An element that is no string literal, a spread, a hole or a nested array defeats it, and so
+    // does a named or spread argument anywhere in the list.
+    assert_eq!(patterns("preg_replace(['/a/', $p], '', $q);"), None);
+    assert_eq!(patterns("preg_replace(['/a/', '/b/' . $p], '', $q);"), None);
+    assert_eq!(patterns("preg_replace(['/a/', ...$p], '', $q);"), None);
+    assert_eq!(patterns("preg_replace(['/a/', ['/b/']], '', $q);"), None);
+    assert_eq!(patterns("preg_replace(['/a/', 5], '', $q);"), None);
+    assert_eq!(patterns("preg_replace(['/a/'], '', subject: $q);"), None);
+    assert_eq!(patterns("preg_replace(...$p);"), None);
+    // The keys of a callback map must be string literals, and a value-only list has no pattern.
+    assert_eq!(patterns("preg_replace_callback_array(['/a/' => 'f', $p => 'g'], $q);"), None);
+    assert_eq!(patterns("preg_replace_callback_array(['/a/', '/b/'], $q);"), None);
+    assert_eq!(patterns("preg_replace_callback_array([5 => 'f'], $q);"), None);
+    // Only a `preg_*` call records it.
+    assert_eq!(patterns("str_replace(['/a/'], '', $q);"), None);
+}
+
 // Class / method lowering (class-world extension)
 
 use steins_syntax::{Callee, ClassDecl, Receiver, ScopeOwner, StaticClass, StmtKind, Visibility};
