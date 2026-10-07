@@ -245,6 +245,11 @@ fn a_pure_envelope_over_a_reading_pattern_is_exceeded() {
     ] {
         assert!(findings(&pure(body)).is_empty(), "{body}: {:#?}", findings(&pure(body)));
     }
-    let admitted = "<?php\n#[\\Steins\\Effects('global.read')]\nfunction f(): int|false { return preg_match('/\\s/', 'a'); }\n";
+    let admitted = "<?php\n#[\\Steins\\Effect('global.read')]\nfunction f(): int|false { return preg_match('/\\s/', 'a'); }\n";
     assert!(findings(admitted).is_empty());
+    // The attribute is read: an envelope that does not admit the read reports it.
+    let refused = admitted.replace("global.read", "global.write");
+    let d = findings(&refused);
+    assert_eq!(d.len(), 1, "{d:#?}");
+    assert!(d[0].message.contains(READ), "{}", d[0].message);
 }

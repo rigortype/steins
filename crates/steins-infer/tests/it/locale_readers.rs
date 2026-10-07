@@ -391,8 +391,13 @@ fn a_pure_envelope_over_a_locale_reader_is_exceeded() {
     let d = findings(pure);
     assert_eq!(d.len(), 1, "{d:#?}");
     assert!(d[0].message.contains("global.read.setting.locale"), "{}", d[0].message);
-    let admitted = "<?php\n#[\\Steins\\Effects('global.read')]\nfunction f(): bool { return ctype_alpha('a'); }\n";
+    let admitted = "<?php\n#[\\Steins\\Effect('global.read')]\nfunction f(): bool { return ctype_alpha('a'); }\n";
     assert!(findings(admitted).is_empty());
+    // The attribute is read: an envelope that does not admit the read reports it.
+    let refused = admitted.replace("global.read", "global.write");
+    let d = findings(&refused);
+    assert_eq!(d.len(), 1, "{d:#?}");
+    assert!(d[0].message.contains("global.read.setting.locale"), "{}", d[0].message);
     // A call that may or may not reach the table is no proven read, so no finding at the
     // default floor: a `bool`, which never does, and a `string`, which may be empty.
     for signature in ["bool $b", "string $s"] {
