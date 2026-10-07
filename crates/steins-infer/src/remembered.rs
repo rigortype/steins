@@ -13,7 +13,7 @@
 //! A [`Remembered`] is held on a **call key**: the builtin's spelling and one
 //! component per positional argument, each a local variable (a *place*) or a
 //! scalar literal ([`key_of`]). It is structural, never textual (`strlen($s)` and
-//! `strlen( $s )` are one key), and no variable can take its spelling, since it
+//! `strlen( $s )` are one key; a literal is a type tag and its raw bytes, one to one), and no variable can take its spelling, since it
 //! contains `(`. A named or spread argument, a nested call, an operator expression, a
 //! property, an element and a constant give the call no key (ADR-0102 D2). A constant
 //! is refused because its spelling is not its meaning: inside a namespace `FOO` is
@@ -228,11 +228,17 @@ pub(crate) fn key_of(name: &str, args: &[ArgValue]) -> Option<(String, Vec<Strin
                     places.push(v.clone());
                 }
             }
-            ArgValue::Int(_)
-            | ArgValue::Float(_)
-            | ArgValue::Str(_)
-            | ArgValue::Bool(_)
-            | ArgValue::Null => parts.push(arg.render()),
+            ArgValue::Int(i) => parts.push(format!("i:{i}")),
+            // The bit pattern: `-0.0` and `0.0` are two arguments, and no float literal is NaN.
+            ArgValue::Float(f) => parts.push(format!("f:{:016x}", f.to_bits())),
+            // The raw bytes, hex: a display spelling (`render`) escapes and so collides
+            // (`'\n'`, two bytes, and `"\n"`, one, both render as `"\n"`).
+            ArgValue::Str(s) => {
+                let hex: String = s.as_bytes().iter().map(|b| format!("{b:02x}")).collect();
+                parts.push(format!("s:{hex}"));
+            }
+            ArgValue::Bool(b) => parts.push(format!("b:{}", u8::from(*b))),
+            ArgValue::Null => parts.push("n".to_owned()),
             _ => return None,
         }
     }
@@ -627,4 +633,38 @@ pub(crate) fn join_remembered(first: &Store, rest: &[&Store]) -> HashMap<String,
         out.insert(key.clone(), Remembered { lanes, places: r0.places.clone() });
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A literal is keyed by its type tag and raw bytes, so no two distinct literals share a
+    /// key, whatever their display spelling.
+    #[test]
+    fn distinct_literals_never_share_a_key() {
+        let lits = [
+            ArgValue::Int(1),
+            ArgValue::Float(1.0),
+            ArgValue::Float(0.0),
+            ArgValue::Float(-0.0),
+            ArgValue::Str("1".into()),
+            ArgValue::Str("\\n".into()),
+            ArgValue::Str("\n".into()),
+            ArgValue::Str("\"".into()),
+            ArgValue::Str("\\\"".into()),
+            ArgValue::Bool(true),
+            ArgValue::Bool(false),
+            ArgValue::Null,
+            ArgValue::Str("".into()),
+        ];
+        let mut keys: Vec<String> = lits
+            .iter()
+            .map(|a| key_of("strpos", std::slice::from_ref(a)).expect("a literal has a key").0)
+            .collect();
+        let n = keys.len();
+        keys.sort();
+        keys.dedup();
+        assert_eq!(keys.len(), n, "two literals share a key: {keys:?}");
+    }
 }
