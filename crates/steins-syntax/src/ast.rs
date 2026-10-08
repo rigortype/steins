@@ -565,6 +565,27 @@ pub struct ConstArgs {
     /// not a string (ADR-0101 §3.10). A single literal pattern is [`Self::first`]. Appended
     /// after [`Self::not_text`].
     pub patterns: Option<Vec<String>>,
+    /// For a call to a builtin whose spelling starts `mb_`, `iconv`, `html` or `get_html` only
+    /// (the names that take an `$encoding` or read the encoding cell): the positions 0 to 5
+    /// whose argument is a string, integer, `null`, boolean, float or array literal, as
+    /// `(position, literal)` in position order (ADR-0101 §3.13). An argument that is anything else is
+    /// simply absent, and so is every one of a named or spread argument list. Appended after
+    /// [`Self::patterns`].
+    pub literals: Vec<(u8, ArgLiteral)>,
+}
+
+/// One call argument the scan reads as a literal ([`ConstArgs::literals`]).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
+pub enum ArgLiteral {
+    /// A quoted string literal with no interpolation, decoded.
+    Str(String),
+    /// An integer literal, or a negated one.
+    Int(i64),
+    /// A `null` literal, in any spelling of the keyword.
+    Null,
+    /// A boolean, float or array literal: a value that is none of the above.
+    Other,
 }
 
 /// What shows a call argument is neither a string nor an integer ([`ConstArgs::not_text`]).

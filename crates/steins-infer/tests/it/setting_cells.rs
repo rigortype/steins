@@ -57,10 +57,16 @@ const ENCODING: (&str, &str) = ("global.read.setting.encoding", "global.write.se
 const INI: (&str, &str) = ("global.read.setting.ini", "global.write.setting.ini");
 
 /// Every option name the table owns, with the cell php-src shows it feeding.
-const NAMES: [(&str, (&str, &str)); 15] = [
+const NAMES: [(&str, (&str, &str)); 20] = [
     ("precision", PRECISION),
     ("serialize_precision", PRECISION),
     ("date.timezone", TIMEZONE),
+    // These five also reset the mb-regex encoding, which the cell holds since S6d.
+    ("default_charset", ENCODING),
+    ("internal_encoding", ENCODING),
+    ("input_encoding", ENCODING),
+    ("output_encoding", ENCODING),
+    ("mbstring.internal_encoding", ENCODING),
     ("iconv.internal_encoding", ENCODING),
     ("iconv.input_encoding", ENCODING),
     ("iconv.output_encoding", ENCODING),
@@ -181,9 +187,6 @@ fn an_unmapped_name_keeps_the_coarse_row() {
         "display_errors", "memory_limit", "max_execution_time", "pcre.backtrack_limit",
         "mbstring.regex_retry_limit", "mbstring.encoding_translation", "intl.default_locale",
         "date.default_latitude", "no.such.entry", "", "PRECISION", "Date.Timezone",
-        // These five also reset the mb-regex encoding, which no cell holds until S6d.
-        "default_charset", "internal_encoding", "input_encoding", "output_encoding",
-        "mbstring.internal_encoding",
         "INCLUDE_PATH", " precision",
     ] {
         labels("", &format!("ini_get('{name}')"), &[COARSE_READ]);
@@ -314,5 +317,6 @@ fn the_locale_verdicts_of_s1_to_s5_are_unchanged() {
     // The other global writers and readers keep their coarse rows.
     labels("", "date_default_timezone_set('UTC')", &[COARSE_WRITE]);
     labels("", "date_default_timezone_get()", &[COARSE_READ]);
-    labels("", "mb_regex_encoding('UTF-8')", &[COARSE_WRITE]);
+    // The mb-regex encoding is the encoding cell's since S6d: `'UTF-8'` sets it.
+    labels("", "mb_regex_encoding('UTF-8')", &[ENCODING.1]);
 }

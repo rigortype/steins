@@ -28,7 +28,10 @@ pub enum SettingCell {
     Timezone,
     /// The process environment block: `putenv` writes it, `getenv` reads it.
     Env,
-    /// The default character set the `mb_*`, `iconv_*` and HTML functions fall back to.
+    /// The default character set the `mb_*`, `iconv_*` and HTML functions fall back to, and the
+    /// mbstring state they read without being handed it: the mb-regex encoding, options and
+    /// syntax, the substitution character, the detect order, the language and the HTTP output
+    /// encoding (ADR-0101 §3.13).
     Encoding,
     /// The residue: an ini value no other cell owns, one name at a time (`bcmath.scale`,
     /// `include_path`, `error_reporting`).
@@ -95,25 +98,30 @@ impl SettingCell {
 /// | --- | --- | --- |
 /// | precision | `precision`, `serialize_precision` | `EG(precision)` (`smart_str_append_double`, the float-to-string conversions) and `PG(serialize_precision)` (`var_export`, `json_encode`, `serialize`, `var_dump`) |
 /// | timezone | `date.timezone` | `guess_timezone`, once no `date_default_timezone_set` has run |
-/// | encoding | `iconv.{internal,input,output}_encoding`, `mbstring.{language,detect_order,http_input,http_output,substitute_character,strict_detection}` | the defaults of the `iconv_*` functions and of `mb_detect_encoding`, `mb_language`, `mb_http_input`, `mb_http_output` and `mb_substitute_character` |
+/// | encoding | `default_charset`, `internal_encoding`, `input_encoding`, `output_encoding`, `mbstring.internal_encoding`, `iconv.{internal,input,output}_encoding`, `mbstring.{language,detect_order,http_input,http_output,substitute_character,strict_detection}` | the defaults of the `mb_*`, `iconv_*` and HTML functions that take an `$encoding`, of `mb_ereg*` and `mb_split`, and of `mb_detect_encoding`, `mb_language`, `mb_http_input`, `mb_http_output` and `mb_substitute_character` |
 /// | ini | `bcmath.scale`, `include_path`, `error_reporting` | `bc*` without a scale, `get_include_path`, `error_reporting()` |
 ///
-/// Five entries that feed the encoding readers are **left unmapped**: `default_charset`,
-/// `internal_encoding`, `input_encoding`, `output_encoding` and `mbstring.internal_encoding`.
-/// Rewriting any of them runs `_php_mb_ini_mbstring_internal_encoding_set` (`mbstring.c`), which
-/// also resets the mb-regex encoding (`php_mb_regex_set_default_mbctype`), the state
-/// `mb_regex_encoding()` writes; that state belongs to no cell yet, so a cell write would be
-/// narrower than the call. S6d puts the mb-regex encoding into the encoding cell, colours
-/// `mb_regex_encoding`, `mb_ereg*` and `mb_split`, and maps the five names then.
+/// Five more entries feed the encoding readers and also reset the mb-regex encoding:
+/// `default_charset`, `internal_encoding`, `input_encoding`, `output_encoding` and
+/// `mbstring.internal_encoding`. Rewriting any of them runs
+/// `_php_mb_ini_mbstring_internal_encoding_set` (`mbstring.c`), which calls
+/// `php_mb_regex_set_default_mbctype`, the state `mb_regex_encoding()` writes. S6-core left them
+/// on the coarse row because that state belonged to no cell; S6d puts the mb-regex state into the
+/// encoding cell (ADR-0101 §3.13), so a write of any of the five is the cell's write.
 ///
-/// `mbstring.encoding_translation`, `mbstring.http_output_conv_mimetypes` and `mbstring.regex_*`
-/// feed an output handler or `mb_ereg*`, whose rows are S6d's, and the remaining entries have no
-/// reader a row names yet: they map to no cell and keep the coarse row. The locale and
-/// environment cells own no ini.
+/// `mbstring.encoding_translation` and `mbstring.http_output_conv_mimetypes` feed an output
+/// handler, `mbstring.regex_stack_limit` and `mbstring.regex_retry_limit` bound a regex's
+/// backtracking and change a result only where it fails: none of them has a reader a row names,
+/// so they map to no cell and keep the coarse row. The locale and environment cells own no ini.
 const INI_NAMES: &[(&str, SettingCell)] = &[
     ("precision", SettingCell::Precision),
     ("serialize_precision", SettingCell::Precision),
     ("date.timezone", SettingCell::Timezone),
+    ("default_charset", SettingCell::Encoding),
+    ("internal_encoding", SettingCell::Encoding),
+    ("input_encoding", SettingCell::Encoding),
+    ("output_encoding", SettingCell::Encoding),
+    ("mbstring.internal_encoding", SettingCell::Encoding),
     ("iconv.internal_encoding", SettingCell::Encoding),
     ("iconv.input_encoding", SettingCell::Encoding),
     ("iconv.output_encoding", SettingCell::Encoding),
@@ -271,6 +279,12 @@ mod tests {
             ("date.timezone", Timezone),
             ("iconv.internal_encoding", Encoding),
             ("mbstring.language", Encoding),
+            // These five also reset the mb-regex encoding, which the cell holds since S6d.
+            ("default_charset", Encoding),
+            ("internal_encoding", Encoding),
+            ("input_encoding", Encoding),
+            ("output_encoding", Encoding),
+            ("mbstring.internal_encoding", Encoding),
             ("bcmath.scale", Ini),
             ("include_path", Ini),
             ("error_reporting", Ini),
@@ -280,9 +294,6 @@ mod tests {
         for name in [
             "", "display_errors", "memory_limit", "max_execution_time", "pcre.backtrack_limit",
             "mbstring.regex_retry_limit", "mbstring.encoding_translation", "mbstring.foo",
-            // These five also reset the mb-regex encoding, which no cell holds until S6d.
-            "default_charset", "internal_encoding", "input_encoding", "output_encoding",
-            "mbstring.internal_encoding",
             "date.default_latitude", "intl.default_locale", "setlocale", "locale",
             // The engine finds an entry by an exact, case-sensitive lookup.
             "PRECISION", "Precision", "Date.Timezone", "precision ", "precision\0",
@@ -314,7 +325,8 @@ mod tests {
         }
         // An unmapped name keeps the coarse row, and so does a name that is no ini function.
         assert_eq!(narrowed("ini_set", "display_errors", 2), None);
-        assert_eq!(narrowed("ini_set", "default_charset", 2), None, "it resets the mb-regex encoding");
+        assert_eq!(narrowed("ini_set", "default_charset", 2), both(SettingCell::Encoding));
+        assert_eq!(narrowed("ini_get", "mbstring.internal_encoding", 1), read(SettingCell::Encoding));
         assert_eq!(narrowed("ini_get_all", "precision", 1), None);
         assert_eq!(narrowed("putenv", "precision", 1), None);
     }

@@ -649,7 +649,7 @@ mod tests {
             ),
             (
                 "a known builtin with no row on either axis",
-                "<?php declare(strict_types=1); function f(string $s) { return mb_strlen($s); }",
+                "<?php declare(strict_types=1); function f(string $s) { return mb_detect_encoding($s); }",
                 func("f"),
                 &[NoEffectRow],
                 &[NoThrowRow],

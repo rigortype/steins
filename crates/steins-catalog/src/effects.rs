@@ -66,6 +66,15 @@ use crate::fold::foldable;
 ///   `global.read.setting.locale` as an upper bound, and the literal pattern decides it at the
 ///   call ([`pattern_reads_locale`](crate::preg::pattern_reads_locale)). `preg_quote` and the
 ///   two `preg_last_error*` readers compile nothing.
+/// * The encoding readers (ADR-0101 §3.13, S6d): the 42 `mb_*`, `iconv_*` and HTML functions that
+///   take an `$encoding` carry `global.read.setting.encoding` as an upper bound, which the call
+///   site proves for an omitted or `null` encoding, drops for a literal name, and leaves to the
+///   `value-dependent-read` gap otherwise ([`setting_read_gate`](crate::setting_read_gate)).
+///   `mb_internal_encoding`, `mb_regex_encoding`, `mb_http_output`, `mb_detect_order`,
+///   `mb_language` and `mb_substitute_character` read the cell with no argument and write it with
+///   one, `mb_regex_set_options` reads on every call, and `mb_ereg`, `mb_eregi`,
+///   `mb_ereg_replace`, `mb_eregi_replace`, `mb_ereg_match` and `mb_split` read the mb-regex
+///   state the cell holds.
 /// * `curl_exec` keeps `io.output` arg-blind (only `CURLOPT_RETURNTRANSFER`
 ///   suppresses it); `system`/`passthru` take parent `io.output` since
 ///   OB-capturability evidence for a relayed child's output is split
@@ -104,6 +113,14 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
     // it. `$_ENV` is a startup copy that no call here reaches, so no row names it.
     const ENV_READ: &[&str] = &["global.read.setting.env"];
     const ENV_WRITE: &[&str] = &["global.write.setting.env"];
+    // The encoding cell (ADR-0101 S6d): the default charset the `mb_*`, `iconv_*` and HTML
+    // functions fall back to, and the mb-regex state. A reader that takes an `$encoding` carries
+    // the read as an upper bound and the call site decides it (`setting_read_gate`); an accessor
+    // carries the read and the write, and the call site drops the one its arity rules out.
+    const ENCODING_READ: &[&str] = &["global.read.setting.encoding"];
+    const ENCODING_READ_WRITE: &[&str] =
+        &["global.read.setting.encoding", "global.write.setting.encoding"];
+    const ENCODING_WRITE: &[&str] = &["global.write.setting.encoding"];
     // `printf`/`vprintf` write their rendering to the output channel AND read
     // the locale while rendering.
     const OUTPUT_BUFFER_PRINTF_READS: &[&str] = &[
@@ -237,8 +254,9 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
         // rewrite the entry they name. The row is the coarse write; a call that spells a literal
         // option name a cell owns narrows to that cell's write ([`narrowed_ini_labels`], ADR-0101
         // S6-core), as `ini_get` narrows its read.
-        "date_default_timezone_set" | "mb_regex_encoding" | "ini_set" | "ini_alter"
-        | "ini_restore" => Some(GLOBAL_WRITE),
+        "date_default_timezone_set" | "ini_set" | "ini_alter" | "ini_restore" => {
+            Some(GLOBAL_WRITE)
+        }
         // `putenv` rewrites the environment block, the env cell's write (ADR-0101 S6c); the
         // entry it names is the one `getenv` reads back.
         "putenv" => Some(ENV_WRITE),
@@ -294,6 +312,32 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
         | "odbc_connect" | "odbc_pconnect" | "odbc_close" | "odbc_exec" | "odbc_do"
         | "odbc_prepare" | "odbc_execute" | "odbc_commit" | "odbc_rollback"
         | "odbc_autocommit" => Some(IO_DB_LABELS),
+        // The encoding cell (ADR-0101 §3.13, S6d). A function that takes an `$encoding` reads the
+        // cell where the argument is omitted or `null` (the HTML functions also for `''`), so its
+        // row is the upper bound and the call site proves, drops or gaps the read
+        // ([`setting_read_gate`](crate::setting_read_gate)); the 42 names are the classes of
+        // `setting_reads/encoding.rs`. `mb_ereg` and its kin compile under the mb-regex
+        // encoding and options, which the cell holds, and read it on every call.
+        "mb_check_encoding" | "mb_chr" | "mb_ord" | "mb_strcut" | "mb_stripos" | "mb_strlen"
+        | "mb_strpos" | "mb_strripos" | "mb_strrpos" | "mb_strwidth" | "mb_substr_count"
+        | "mb_convert_case" | "mb_convert_encoding" | "mb_convert_kana"
+        | "mb_decode_numericentity" | "mb_encode_numericentity" | "mb_lcfirst" | "mb_ltrim"
+        | "mb_rtrim" | "mb_scrub" | "mb_str_pad" | "mb_str_split" | "mb_strimwidth"
+        | "mb_stristr" | "mb_strrchr" | "mb_strrichr" | "mb_strstr" | "mb_strtolower"
+        | "mb_strtoupper" | "mb_substr" | "mb_trim" | "mb_ucfirst" | "htmlspecialchars"
+        | "htmlentities" | "html_entity_decode" | "get_html_translation_table"
+        | "iconv_strlen" | "iconv_strpos" | "iconv_strrpos" | "iconv_substr"
+        | "iconv_mime_decode" | "iconv_mime_decode_headers" | "iconv_get_encoding"
+        | "mb_ereg" | "mb_eregi" | "mb_ereg_replace" | "mb_eregi_replace" | "mb_ereg_match"
+        | "mb_split" => Some(ENCODING_READ),
+        // The accessors return the current value with no argument and set it with one, and
+        // `mb_regex_set_options` returns the previous options whatever it is given.
+        "mb_internal_encoding" | "mb_regex_encoding" | "mb_http_output" | "mb_detect_order"
+        | "mb_language" | "mb_substitute_character" | "mb_regex_set_options" => {
+            Some(ENCODING_READ_WRITE)
+        }
+        // Rewrites an `iconv.*_encoding` ini entry.
+        "iconv_set_encoding" => Some(ENCODING_WRITE),
         // `getenv` reads the environment block at every arity (ADR-0101 S6c): `getenv()` lists
         // it, `getenv($name)` and `getenv($name, true)` read one entry of it.
         "getenv" => Some(ENV_READ),
@@ -467,7 +511,7 @@ pub(crate) fn certified_pure(name: &str) -> bool {
 ///   and its `string` separators are the reach the call-site rule holds it to.
 ///
 /// Deliberately absent: `htmlspecialchars` (`default_charset`) and the `mb_*` family
-/// (`mbstring` ini) read the encoding cell, which a later slice registers. `strtok` keeps
+/// (`mbstring` ini) read the encoding cell and carry its read row (ADR-0101 S6d). `strtok` keeps
 /// its position in interpreter state. `vsprintf` and `sprintf` read `LC_NUMERIC`'s decimal
 /// point under `%f`, `%g` and `%G` (issue #991), and `basename`, `pathinfo`, `strnatcmp`,
 /// `strnatcasecmp`, `substr_compare`, `parse_url`, `escapeshellarg`, `strip_tags` and the
@@ -1370,6 +1414,9 @@ pub fn out_params(name: &str) -> Option<&'static [usize]> {
         // `preg_match(..., array &$matches = null, …)` — the ADR's headline
         // case: optional, so the arity leg does real work.
         "preg_match" | "preg_match_all" => Some(P2),
+        // `mb_ereg(..., &$matches = null)`: the row that lets `mb_ereg` and `mb_eregi` carry the
+        // encoding read (ADR-0101 S6d) without a write to `$matches` going unnamed.
+        "mb_ereg" | "mb_eregi" => Some(P2),
         "similar_text" => Some(P2),
         // `is_callable(..., string &$callable_name = null)` — the one type
         // predicate with a reference parameter (issue #559).
@@ -2037,7 +2084,7 @@ mod tests {
             assert_eq!(effect_labels(name), Some(&["io.output.buffer"][..]), "{name}");
         }
         for name in [
-            "ini_set", "ini_alter", "ini_restore", "date_default_timezone_set", "mb_regex_encoding",
+            "ini_set", "ini_alter", "ini_restore", "date_default_timezone_set",
         ] {
             assert_eq!(effect_labels(name), Some(&["global.write"][..]), "{name}");
         }

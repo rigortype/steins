@@ -660,6 +660,66 @@ fn scans_the_patterns_of_a_preg_array_literal() {
     assert_eq!(patterns("str_replace(['/a/'], '', $q);"), None);
 }
 
+/// ADR-0101 §3.13: the literal arguments of a call to an encoding-taking builtin, at the position
+/// they sit (up to the fifth), whatever the kind of the call's other arguments; nothing for a
+/// named or spread list, and nothing for a call to any other function.
+#[test]
+fn scans_the_literal_arguments_of_an_encoding_call() {
+    use steins_syntax::ArgLiteral::{Int, Null, Other, Str};
+    fn literals(body: &str) -> Vec<(u8, steins_syntax::ArgLiteral)> {
+        let src = format!("<?php function f($p, $q): void {{ {body} }}");
+        let tree = SourceTree::parse(&src);
+        let f = tree.functions().iter().find(|f| f.name == "f").expect("f").clone();
+        match derive_effect_origins(&f.sites).first().expect("one origin").clone() {
+            EffectOrigin::Call { const_args, .. } | EffectOrigin::HigherOrder { const_args, .. } => {
+                const_args.literals
+            }
+            other => panic!("expected a named-call origin, got {other:?}"),
+        }
+    }
+    let text = |s: &str| Str(s.to_owned());
+    assert_eq!(literals("mb_strlen($p, 'UTF-8');"), [(1, text("UTF-8"))]);
+    assert_eq!(literals("mb_strlen($p, null);"), [(1, Null)]);
+    assert_eq!(literals("mb_strlen($p, NULL);"), [(1, Null)]);
+    assert_eq!(literals("mb_strlen($p);"), []);
+    assert_eq!(
+        literals("mb_strpos($p, 'b', 0, 'UTF-8');"),
+        [(1, text("b")), (2, Int(0)), (3, text("UTF-8"))]
+    );
+    assert_eq!(
+        literals("mb_str_pad($p, 4, ' ', 1, null);"),
+        [(1, Int(4)), (2, text(" ")), (3, Int(1)), (4, Null)]
+    );
+    assert_eq!(literals("mb_substitute_character(-65);"), [(0, Int(-65))]);
+    assert_eq!(literals("mb_detect_order(['UTF-8']);"), [(0, Other)]);
+    assert_eq!(literals("mb_internal_encoding(true);"), [(0, Other)]);
+    assert_eq!(literals("htmlspecialchars($p, ENT_QUOTES, 'UTF-8');"), [(2, text("UTF-8"))]);
+    assert_eq!(
+        literals("html_entity_decode('&', 3, '');"),
+        [(0, text("&")), (1, Int(3)), (2, text(""))]
+    );
+    assert_eq!(literals("iconv_strlen($p, 'ISO-8859-1');"), [(1, text("ISO-8859-1"))]);
+    assert_eq!(
+        literals("get_html_translation_table(1, 3, 'UTF-8');"),
+        [(0, Int(1)), (1, Int(3)), (2, text("UTF-8"))]
+    );
+    // A value the scan cannot read is absent, and an interpolated string is not a literal.
+    assert_eq!(literals("mb_strlen($p, $q);"), []);
+    assert_eq!(literals("mb_strlen($p, \"{$q}\");"), []);
+    assert_eq!(literals("mb_strlen($p, 'UTF' . '-8');"), []);
+    // Positions past the fifth are not read; a named or spread list defeats positions wholesale.
+    assert_eq!(
+        literals("mb_str_pad($p, 4, ' ', 1, 'UTF-8', 7);"),
+        [(1, Int(4)), (2, text(" ")), (3, Int(1)), (4, text("UTF-8")), (5, Int(7))]
+    );
+    assert_eq!(literals("mb_str_pad($p, 4, ' ', 1, 'UTF-8', 7, 8);").len(), 5);
+    assert_eq!(literals("mb_strlen($p, encoding: 'UTF-8');"), []);
+    assert_eq!(literals("mb_strlen(...$p);"), []);
+    // Only the encoding-taking spellings record it.
+    assert_eq!(literals("strlen('x');"), []);
+    assert_eq!(literals("str_pad($p, 4, ' ', 1);"), []);
+}
+
 // Class / method lowering (class-world extension)
 
 use steins_syntax::{Callee, ClassDecl, Receiver, ScopeOwner, StaticClass, StmtKind, Visibility};

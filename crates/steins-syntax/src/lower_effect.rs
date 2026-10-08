@@ -17,8 +17,8 @@ use mago_syntax::cst::{
 };
 
 use crate::ast::{
-    ArgValue, CallExpr, CallTarget, CallbackRef, ConstArgs, ConstInt, NameRef, RefKind, RefTarget,
-    SUPERGLOBALS, StaticClass,
+    ArgLiteral, ArgValue, CallExpr, CallTarget, CallbackRef, ConstArgs, ConstInt, NameRef, RefKind,
+    RefTarget, SUPERGLOBALS, StaticClass,
 };
 use crate::lower_arg_shape::{Captures, FrameBindings};
 use crate::lower_expr::{
@@ -140,6 +140,38 @@ pub(crate) fn const_args_of_call(fc: &FunctionCall<'_>) -> ConstArgs {
         {
             out.bools.push((u8::try_from(pos).expect("a position of 2 to 4"), flag));
         }
+    }
+    out
+}
+
+/// [`ConstArgs::literals`] of a call to an encoding-taking builtin: the positions 0 to 5 whose
+/// argument is a string, integer, `null`, boolean, float or array literal. Empty for a named or
+/// spread argument list, whose positions cannot be read.
+pub(crate) fn literals_of_call(fc: &FunctionCall<'_>) -> Vec<(u8, ArgLiteral)> {
+    let mut out = Vec::new();
+    for (pos, arg) in fc.argument_list.arguments.iter().enumerate() {
+        let Argument::Positional(p) = arg else { return Vec::new() };
+        if p.ellipsis.is_some() {
+            return Vec::new();
+        }
+        let Ok(position) = u8::try_from(pos) else { continue };
+        if position > 5 {
+            continue;
+        }
+        let literal = match p.value.unparenthesized() {
+            Expression::Literal(Literal::Null(_)) => Some(ArgLiteral::Null),
+            Expression::Literal(Literal::String(ls)) => {
+                ls.value.map(|v| ArgLiteral::Str(bytes_to_string(v)))
+            }
+            Expression::Literal(Literal::True(_) | Literal::False(_) | Literal::Float(_))
+            | Expression::Array(_)
+            | Expression::LegacyArray(_) => Some(ArgLiteral::Other),
+            other => match const_int_of(other) {
+                Some(ConstInt::Int(v)) => Some(ArgLiteral::Int(v)),
+                _ => None,
+            },
+        };
+        out.extend(literal.map(|l| (position, l)));
     }
     out
 }
