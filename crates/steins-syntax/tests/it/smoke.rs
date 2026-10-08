@@ -725,15 +725,14 @@ fn scans_the_literal_arguments_of_an_encoding_call() {
 /// the constructors' function spellings record nothing.
 #[test]
 fn scans_the_timestamp_arguments_of_a_time_family_call() {
-    use steins_syntax::ArgLiteral::{Int, Null, Str};
+    use steins_syntax::ArgLiteral::{Int, Null, Other, Str};
     fn literals(body: &str) -> Vec<(u8, steins_syntax::ArgLiteral)> {
         let src = format!("<?php function f($p, $q): void {{ {body} }}");
         let tree = SourceTree::parse(&src);
         let f = tree.functions().iter().find(|f| f.name == "f").expect("f").clone();
         match derive_effect_origins(&f.sites).first().expect("one origin").clone() {
-            EffectOrigin::Call { const_args, .. } | EffectOrigin::HigherOrder { const_args, .. } => {
-                const_args.literals
-            }
+            EffectOrigin::Call { const_args, .. }
+            | EffectOrigin::HigherOrder { const_args, .. } => const_args.literals,
             other => panic!("expected a named-call origin, got {other:?}"),
         }
     }
@@ -746,7 +745,7 @@ fn scans_the_timestamp_arguments_of_a_time_family_call() {
     assert_eq!(literals("idate('y', 5);"), [(0, text("y")), (1, Int(5))]);
     assert_eq!(literals("strtotime('+1 day', 7);"), [(0, text("+1 day")), (1, Int(7))]);
     assert_eq!(literals("getdate(9);"), [(0, Int(9))]);
-    assert_eq!(literals("localtime(9, true);"), [(0, Int(9)), (1, steins_syntax::ArgLiteral::Other)]);
+    assert_eq!(literals("localtime(9, true);"), [(0, Int(9)), (1, Other)]);
     assert_eq!(literals("strftime('%Y', 4);"), [(0, text("%Y")), (1, Int(4))]);
     assert_eq!(literals("gmstrftime('%Y', 4);"), [(0, text("%Y")), (1, Int(4))]);
     assert_eq!(
