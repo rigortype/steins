@@ -253,7 +253,7 @@ only where the call site rules the reaching arguments out. Names that read the
 locale (`basename`, `pathinfo`, `strnatcmp`, `strnatcasecmp`, `substr_compare`,
 `parse_url`, `escapeshellarg`, `strip_tags`, the `ctype_*` family) are coloured with the read
 below (S4) and are not certified pure; names that read an ini setting (the `mb_*` family,
-`htmlspecialchars`) stay out until the encoding cell colours them (S6d); its labels are registered since S6-core.
+`htmlspecialchars`) are coloured with the encoding cell's read (S6d, below) and are not certified pure.
 
 **The locale cell** (ADR-0101, issue #991) has four registry labels,
 `global.read.setting`, `global.read.setting.locale`, `global.write.setting` and
@@ -336,13 +336,36 @@ also carries `ini_set` and `ini_alter`, `site/setting.rs`'s `ini_value_read`): a
 reader: `precision` and `serialize_precision` (precision); `date.timezone` (timezone); `iconv.{internal,input,output}_encoding` and
 `mbstring.{language,detect_order,http_input,http_output,substitute_character,strict_detection}` (encoding);
 `bcmath.scale`, `include_path` and `error_reporting` (ini). `default_charset`, `internal_encoding`, `input_encoding`,
-`output_encoding` and `mbstring.internal_encoding` feed the encoding readers too, but rewriting one also resets the
-mb-regex encoding, which no cell holds until S6d (it maps them, with `mb_regex_encoding`, `mb_ereg*` and `mb_split`);
-they keep the coarse row. A name no cell owns, a name the call
+`output_encoding` and `mbstring.internal_encoding` feed the encoding readers too and also reset the mb-regex
+encoding; S6-core left them on the coarse row for that reason and S6d maps them to the encoding cell, which holds the
+mb-regex state. A name no cell owns, a name the call
 does not spell as a literal (a variable, a concatenation, a constant, a named or spread argument list), a count
 that is not the function's own and an ini function handed over as a callback keep the coarse `global.read` or
 `global.write`, which prefix subsumption already makes admissible wherever the cell is. `ini_get_all` and the
 cells' builtin readers and writers are later slices'.
+
+**The encoding readers** (S6d, `setting_reads/encoding.rs` in `steins-catalog`; ADR-0101 §3.13). The cell is the
+default character set and the mbstring state a call reads without being handed it. The 42 functions whose generated
+parameter list names an `encoding` or `from_encoding` and take it as an optional string carry
+`global.read.setting.encoding` as an upper bound, and the gate (`SettingReadGate`, kind `Encoding`) reads the
+argument at the position the generated table gives: omitted or `null` is the proven read; a literal name drops it
+for the **plain** `mb_*` class (`mb_strlen`, `mb_strwidth`, `mb_strpos`, `mb_strrpos`, `mb_stripos`, `mb_strripos`,
+`mb_substr_count`, `mb_strcut`, `mb_check_encoding`, `mb_chr`, `mb_ord`), and leaves it undecided for the 21
+**substituting** ones, which rebuild the string under `MBSTRG(current_filter_illegal_substchar)` and the illegal
+mode that `mb_substitute_character()` writes, so an invalid subject reads the cell whatever encoding is named; the
+HTML functions also read for `''` (`determine_charset`) and `htmlspecialchars`, `htmlentities` and
+`html_entity_decode` return before that on an empty subject, or one with no `&`, so their subject is a deciding
+argument too; the iconv functions are undecided for `''`, `char` and `locale` (the C library's own charset), and
+`iconv_strrpos` returns on an empty needle first. The accessors (`mb_internal_encoding`, `mb_regex_encoding`,
+`mb_http_output`, `mb_detect_order`, `mb_language`, `mb_substitute_character`) carry the read and the write: with no
+argument or `null` the write is dropped, with any other argument the read is, and `mb_regex_set_options` reads on
+every call (it returns the previous options) and writes when given a string. `mb_ereg`, `mb_eregi`,
+`mb_ereg_replace`, `mb_eregi_replace`, `mb_ereg_match` and `mb_split` read the cell on every call (they compile under
+the mb-regex encoding and options), with no gate; `mb_ereg` and `mb_eregi` also have an out-parameter row for
+`$matches`. `ConstArgs::literals` carries the literal arguments of a call whose spelling starts `mb_`, `iconv`,
+`html` or `get_html`, at any position up to the fifth. `mb_detect_encoding`, `mb_get_info`, `mb_http_input`,
+`mb_encode_mimeheader`, `mb_ereg_search*` (which keep a search state outside the cell) and `mb_ereg_replace_callback`
+(which runs user code) are not coloured.
 
 `fprintf` and `vfprintf` still have no row. Both reads of a printf row are **conditional on the
 call** (`'%d'` reads neither), so the row is an upper bound and not a claim about every call: the
