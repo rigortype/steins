@@ -625,11 +625,11 @@ fn method_effect_envelope_admits_subsumed_helper_effect() {
 /// would pass.
 #[test]
 fn the_time_familys_siblings_exceed_a_pure_envelope() {
-    for (call, name) in [
-        ("strtotime($when)", "strtotime"),
-        ("idate('Y', 0)", "idate"),
-        ("gmdate('Y-m-d', 0)", "gmdate"),
-        ("gmmktime(0, 0, 0)", "gmmktime"),
+    for (call, name, label) in [
+        ("strtotime($when, 0)", "strtotime", "global.read.setting.timezone"),
+        ("idate('Y', 0)", "idate", "global.read.setting.timezone"),
+        ("gmdate('Y-m-d')", "gmdate", "nondet.time"),
+        ("gmmktime(0, 0, 0)", "gmmktime", "nondet.time"),
     ] {
         let src = format!(
             "<?php\n/** @phpstan-pure */\nfunction f(string $when): mixed {{ return {call}; }}\n"
@@ -637,7 +637,7 @@ fn the_time_familys_siblings_exceed_a_pure_envelope() {
         let d = one(&src);
         assert_eq!(
             d.message,
-            format!("{name}() has effect nondet.time, but f() is declared @phpstan-pure"),
+            format!("{name}() has effect {label}, but f() is declared @phpstan-pure"),
             "{name} reads the clock or the ambient timezone"
         );
     }
@@ -648,9 +648,25 @@ fn the_time_familys_siblings_exceed_a_pure_envelope() {
             format!("<?php\n/** @phpstan-pure */\nfunction f(): array {{ return {call}; }}\n");
         assert_eq!(
             one(&src).message,
-            format!("{name}() has effect nondet.time, but f() is declared @phpstan-pure")
+            format!(
+                "{name}() has effect global.read.setting.timezone, but f() is declared @phpstan-pure"
+            )
         );
     }
+    // Without the base timestamp the call reads both, and each label is its own finding.
+    let both = "<?php\n/** @phpstan-pure */\nfunction f(string $w): int|false { return strtotime($w); }\n";
+    let messages: Vec<String> = effects(both).into_iter().map(|d| d.message).collect();
+    assert_eq!(
+        messages,
+        [
+            "strtotime() has effect global.read.setting.timezone, but f() is declared @phpstan-pure",
+            "strtotime() has effect nondet.time, but f() is declared @phpstan-pure",
+        ]
+    );
+    // A UTC formatter handed its timestamp reads neither the clock nor a setting: the zone cell
+    // is not read, and the envelope is not exceeded (ADR-0101 §3.14).
+    let utc = "<?php\n/** @phpstan-pure */\nfunction f(): string { return gmdate('Y-m-d', 0); }\n";
+    assert_eq!(effects(utc).len(), 0, "gmdate with a timestamp is pure");
     // The control: a pure builtin under the same envelope says nothing.
     let clean = "<?php\n/** @phpstan-pure */\nfunction f(string $s): string { return strtoupper($s); }\n";
     assert_eq!(effects(clean).len(), 0, "coloring the time family colored nothing else");

@@ -855,6 +855,11 @@ mod tests {
             "mb_strtolower", "mb_strlen", "mb_substr", "time", "rand", "setlocale",
             "file_get_contents", "printf", "date", "strtotime", "idate", "strcmp",
             "strcasecmp", "number_format", "bin2hex",
+            // The time family stays unfoldable once a timestamp drops the clock from its row
+            // (ADR-0101 §3.14): `date` with a literal timestamp still reads the timezone cell, and
+            // the UTC spellings are excluded with them by name.
+            "gmdate", "mktime", "gmmktime", "getdate", "localtime", "strftime", "gmstrftime",
+            "date_default_timezone_get", "date_default_timezone_set", "checkdate",
         ] {
             assert!(!foldable(name), "{name} must not be foldable");
             assert!(!portable(name), "{name} must not be certified portable");

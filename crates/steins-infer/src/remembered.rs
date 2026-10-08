@@ -677,4 +677,18 @@ mod tests {
         assert!(allowed_row("getenv").is_none(), "a setting read is never remembered");
         assert!(allowed_row("putenv").is_none(), "a setting write is never remembered");
     }
+
+    /// ADR-0101 §3.14, S6b-1: `date($f, $ts)` loses `nondet.time` and reads the timezone cell, a
+    /// setting, so it is not remembered either; nor is the accessor of the zone, nor the UTC
+    /// spellings, whose row is `{}` with a timestamp but which no audit has put on the list.
+    #[test]
+    fn the_time_family_stays_off_the_allowlist() {
+        for name in [
+            "date", "gmdate", "idate", "mktime", "gmmktime", "strtotime", "getdate", "localtime",
+            "strftime", "gmstrftime", "checkdate", "date_default_timezone_get",
+            "date_default_timezone_set",
+        ] {
+            assert!(allowed_row(name).is_none(), "{name}: a setting read is never remembered");
+        }
+    }
 }

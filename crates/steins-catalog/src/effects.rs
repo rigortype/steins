@@ -55,7 +55,7 @@ use crate::fold::foldable;
 /// * The locale readers beyond printf (ADR-0101 §3.9, S4): `basename` reads the locale on every
 ///   call. `ctype_*` but `ctype_digit` and `ctype_xdigit`, `strnatcmp`, `strnatcasecmp`,
 ///   `escapeshellarg`, `strip_tags`, `parse_url`, `strftime` and `gmstrftime` (which also carry
-///   the time family's `nondet.time`), the sorts, `substr_compare` and `pathinfo` read it only
+///   the time family's labels), the sorts, `substr_compare` and `pathinfo` read it only
 ///   where the call reaches the routine that consults it: their row is the upper bound and a
 ///   call site proves, drops or gaps it as the printf family's is
 ///   ([`setting_read_gate`](crate::setting_read_gate)). `number_format` reads no setting and is
@@ -75,6 +75,14 @@ use crate::fold::foldable;
 ///   one, `mb_regex_set_options` reads on every call, and `mb_ereg`, `mb_eregi`,
 ///   `mb_ereg_replace`, `mb_eregi_replace`, `mb_ereg_match` and `mb_split` read the mb-regex
 ///   state the cell holds.
+/// * The time family (ADR-0101 §3.14, S6b-1): `date`, `idate`, `mktime`, `strtotime`, `getdate`,
+///   `localtime` and `strftime` read the **timezone cell** on every call, and the clock only
+///   where the timestamp is left out, so their row is `global.read.setting.timezone` beside
+///   `nondet.time` as an upper bound and a literal timestamp drops the clock
+///   ([`clock_gate`](crate::clock_gate)). `gmdate`, `gmmktime` and `gmstrftime` read UTC and carry
+///   the clock alone. `date_default_timezone_get` reads the cell and `date_default_timezone_set`
+///   writes it; `checkdate` reads nothing. The `DateTime` constructors and `date_create*` keep
+///   the argument-blind `nondet.time` until their per-method table (S6b-2).
 /// * `curl_exec` keeps `io.output` arg-blind (only `CURLOPT_RETURNTRANSFER`
 ///   suppresses it); `system`/`passthru` take parent `io.output` since
 ///   OB-capturability evidence for a relayed child's output is split
@@ -97,8 +105,15 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
     const LOCALE_READ: &[&str] = &["global.read.setting.locale"];
     // `strftime` and `gmstrftime` name the days and months by the locale (`LC_TIME`) and, with
     // no timestamp, read the clock: the locale read beside the time family's argument-blind
-    // `nondet.time` (ADR-0101 §3.9; the timezone cell sharpens the clock half later).
+    // `nondet.time` (ADR-0101 §3.9, §3.14).
     const LOCALE_READ_CLOCK: &[&str] = &["global.read.setting.locale", "nondet.time"];
+    const LOCALE_TIMEZONE_READ_CLOCK: &[&str] =
+        &["global.read.setting.locale", "global.read.setting.timezone", "nondet.time"];
+    // The timezone cell (ADR-0101 §3.14): the default zone `date_default_timezone_set` and the
+    // `date.timezone` ini leave, read by every function that formats or builds a local time.
+    const TIMEZONE_READ: &[&str] = &["global.read.setting.timezone"];
+    const TIMEZONE_WRITE: &[&str] = &["global.write.setting.timezone"];
+    const TIMEZONE_READ_CLOCK: &[&str] = &["global.read.setting.timezone", "nondet.time"];
     // The printf family also reads the `precision` ini when a `%s` renders a float
     // (`ini_set('precision', '3')` turns `1234.5678` into `1.23E+3`), the first
     // row to colour that cell (ADR-0101 D4, S3). Both reads are conditional on the
@@ -151,18 +166,16 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
         "rand" | "mt_rand" | "random_int" | "random_bytes" | "uniqid" | "shuffle" => {
             Some(NONDET_RANDOM)
         }
-        // The time family, argument-blind (ADR-0021). `date("Y-m-d", 0)` with an
-        // explicit timestamp still reads the ambient timezone, and the same
-        // name with the timestamp omitted reads the clock, so the row is the
-        // upper bound over both — which is why `date` has carried this label
-        // since the first seeding pass. The names below are that row's
-        // siblings, added when a coverage survey found the module doc claiming
-        // `strtotime`/`idate` were `nondet.time` while `effect_labels` answered
-        // `None` for both. The `gm*` spellings read UTC rather than the ambient
-        // zone, but omitting their timestamp still reads the clock.
-        "time" | "microtime" | "hrtime" | "date" | "mktime" => Some(NONDET_TIME),
-        "strtotime" | "idate" | "gmdate" | "gmmktime" | "getdate" | "localtime" => {
-            Some(NONDET_TIME)
+        // The time family (ADR-0021, ADR-0101 §3.14). `time`, `microtime` and `hrtime` read the
+        // clock on every call. The functions that format or build a local time read the
+        // **timezone cell** on every call (`get_timezone_info()`), and the clock only where the
+        // call leaves a timestamp out, so their row is the upper bound over both and the call site
+        // drops `nondet.time` where a literal timestamp is supplied (`clock_gate`).
+        // The `gm*` spellings read UTC, not the cell: `gmdate` and `gmmktime` carry the clock alone.
+        // `mktime` keeps `nondet.time` at every arity (the seed's DST flag, `ClockGate`).
+        "time" | "microtime" | "hrtime" | "gmdate" | "gmmktime" => Some(NONDET_TIME),
+        "date" | "mktime" | "strtotime" | "idate" | "getdate" | "localtime" => {
+            Some(TIMEZONE_READ_CLOCK)
         }
         // The function spellings of `new DateTime(...)` and of the static
         // `createFromFormat` factories (issue #848), on the constructors'
@@ -234,9 +247,12 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
         | "preg_replace_callback_array" | "preg_filter" | "preg_split" | "preg_grep" => {
             Some(LOCALE_READ)
         }
-        // The clock too, as the time family's argument-blind `nondet.time`; the locale half is
-        // decided by the format (`strftime_reads`).
-        "strftime" | "gmstrftime" => Some(LOCALE_READ_CLOCK),
+        // The clock too, as the time family's `nondet.time` (dropped by a supplied timestamp); the
+        // locale half is decided by the format (`strftime_reads`). `strftime` also reads the
+        // timezone cell (`php_strftime` takes `get_timezone_info()` unless `gmt`), and
+        // `gmstrftime` formats UTC and does not.
+        "strftime" => Some(LOCALE_TIMEZONE_READ_CLOCK),
+        "gmstrftime" => Some(LOCALE_READ_CLOCK),
         // Shell out and relay the child's output (ADR-0083).
         "system" | "passthru" => Some(PROCESS_TO_OUTPUT),
         // Shell out and DO NOT relay: `exec` captures into its by-ref array and
@@ -254,9 +270,11 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
         // rewrite the entry they name. The row is the coarse write; a call that spells a literal
         // option name a cell owns narrows to that cell's write ([`narrowed_ini_labels`], ADR-0101
         // S6-core), as `ini_get` narrows its read.
-        "date_default_timezone_set" | "ini_set" | "ini_alter" | "ini_restore" => {
-            Some(GLOBAL_WRITE)
-        }
+        "ini_set" | "ini_alter" | "ini_restore" => Some(GLOBAL_WRITE),
+        // `date_default_timezone_set` rewrites the timezone cell (ADR-0101 §3.14) and reads
+        // nothing; `date_default_timezone_get` reports it.
+        "date_default_timezone_set" => Some(TIMEZONE_WRITE),
+        "date_default_timezone_get" => Some(TIMEZONE_READ),
         // `putenv` rewrites the environment block, the env cell's write (ADR-0101 S6c); the
         // entry it names is the one `getenv` reads back.
         "putenv" => Some(ENV_WRITE),
@@ -345,7 +363,7 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
         // `getenv` reads the environment block at every arity (ADR-0101 S6c): `getenv()` lists
         // it, `getenv($name)` and `getenv($name, true)` read one entry of it.
         "getenv" => Some(ENV_READ),
-        "ini_get" | "date_default_timezone_get" => Some(GLOBAL_READ),
+        "ini_get" => Some(GLOBAL_READ),
         // Signal delivery/handling (effects_gaps.md §1); pcntl/posix functions.
         "pcntl_signal" | "pcntl_signal_dispatch" | "pcntl_alarm" | "pcntl_async_signals"
         | "pcntl_sigprocmask" | "pcntl_sigwaitinfo" | "posix_kill" => Some(IO_SIGNAL),
@@ -2034,13 +2052,14 @@ mod tests {
         ] {
             assert_eq!(effect_labels(name), READ, "{name}");
         }
-        for name in ["strftime", "gmstrftime"] {
-            assert_eq!(
-                effect_labels(name),
-                Some(&["global.read.setting.locale", "nondet.time"][..]),
-                "{name}"
-            );
-        }
+        assert_eq!(
+            effect_labels("gmstrftime"),
+            Some(&["global.read.setting.locale", "nondet.time"][..])
+        );
+        assert_eq!(
+            effect_labels("strftime"),
+            Some(&["global.read.setting.locale", "global.read.setting.timezone", "nondet.time"][..])
+        );
         for name in ["ctype_digit", "ctype_xdigit", "natsort", "usort", "array_multisort"] {
             assert_eq!(effect_labels(name), None, "{name} has no row");
         }
@@ -2087,14 +2106,36 @@ mod tests {
         for name in ["print_r", "var_dump", "var_export", "flush", "ob_flush"] {
             assert_eq!(effect_labels(name), Some(&["io.output.buffer"][..]), "{name}");
         }
-        for name in [
-            "ini_set", "ini_alter", "ini_restore", "date_default_timezone_set",
-        ] {
+        for name in ["ini_set", "ini_alter", "ini_restore"] {
             assert_eq!(effect_labels(name), Some(&["global.write"][..]), "{name}");
         }
-        for name in ["ini_get", "date_default_timezone_get"] {
-            assert_eq!(effect_labels(name), Some(&["global.read"][..]), "{name}");
+        assert_eq!(effect_labels("ini_get"), Some(&["global.read"][..]));
+    }
+
+    /// ADR-0101 §3.14, S6b-1: the time family. The functions that format or build a local time
+    /// carry the timezone read beside the clock (the call site drops the clock where a timestamp
+    /// is supplied), the `gm*` spellings carry the clock alone, the zone accessors read and write
+    /// the timezone cell, `checkdate` has no row, and the constructors keep the argument-blind
+    /// clock row for S6b-2.
+    #[test]
+    fn the_time_family_reads_the_timezone_cell_and_the_clock() {
+        const ZONE: &str = "global.read.setting.timezone";
+        for name in ["date", "DATE", "mktime", "strtotime", "idate", "getdate", "localtime"] {
+            assert_eq!(effect_labels(name), Some(&[ZONE, "nondet.time"][..]), "{name}");
         }
+        for name in ["time", "microtime", "hrtime", "gmdate", "gmmktime"] {
+            assert_eq!(effect_labels(name), Some(&["nondet.time"][..]), "{name}");
+        }
+        assert_eq!(effect_labels("date_default_timezone_get"), Some(&[ZONE][..]));
+        assert_eq!(
+            effect_labels("date_default_timezone_set"),
+            Some(&["global.write.setting.timezone"][..])
+        );
+        assert_eq!(effect_labels("checkdate"), None);
+        for name in ["date_create", "date_create_immutable", "date_create_from_format"] {
+            assert_eq!(effect_labels(name), Some(&["nondet.time"][..]), "{name}");
+        }
+        assert_eq!(method_effect_labels("DateTime", "__construct"), Some(&["nondet.time"][..]));
     }
 
     /// ADR-0101 S6c: the environment block. `getenv` reads it at every arity and `putenv` writes

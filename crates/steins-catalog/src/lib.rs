@@ -10,10 +10,9 @@
 //! decline on 32-bit; a refused row has a recorded divergence, an unverified
 //! row has none (see [`PortabilityClass`]). Other exclusions and their evidence:
 //!
-//! * `strtotime`/`date`/`idate` and their siblings `gmdate`/`gmmktime`/
-//!   `getdate`/`localtime` are `nondet.time`, timezone-coupled even with
-//!   explicit timestamps — and omitting the timestamp reads the clock, which is
-//!   the argument-blind upper bound the row states (ADR-0021).
+//! * `strtotime`/`date`/`idate` and their siblings `gmdate`/`gmmktime`/`mktime`/
+//!   `getdate`/`localtime` read the default timezone (the zone cell, ADR-0101 §3.14), and the
+//!   clock too where the timestamp is omitted: the row is the upper bound over both.
 //! * `mb_*` depends on `mbstring.internal_encoding`; php-wasm 0.1.0 lacks it.
 //! * `strcmp`/`strcasecmp` promise only a sign, not `memcmp`'s
 //!   implementation-defined magnitude.
@@ -148,7 +147,7 @@ mod setting;
 pub use setting::{IniAccess, IniCall, SettingCell, ini_call, ini_cell, narrowed_ini_labels};
 
 mod setting_reads;
-pub use setting_reads::{GateArg, SettingReadGate, setting_read_gate};
+pub use setting_reads::{ClockGate, GateArg, SettingReadGate, clock_gate, setting_read_gate};
 
 mod knowledge;
 pub use knowledge::{

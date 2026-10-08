@@ -317,9 +317,9 @@ fn the_locale_verdicts_of_s1_to_s5_are_unchanged() {
     // A reader the call cannot decide is the gap and no label, whatever cell the ini calls name.
     let s = row("string $p, string $s", "return preg_match($p, $s);");
     assert!(s.labels.is_empty() && s.gaps.contains(&"value-dependent-read"), "{s:?}");
-    // The other global writers and readers keep their coarse rows.
-    labels("", "date_default_timezone_set('UTC')", &[COARSE_WRITE]);
-    labels("", "date_default_timezone_get()", &[COARSE_READ]);
+    // The zone accessors are the timezone cell's since S6b-1.
+    labels("", "date_default_timezone_set('UTC')", &[TIMEZONE.1]);
+    labels("", "date_default_timezone_get()", &[TIMEZONE.0]);
     // The mb-regex encoding is the encoding cell's since S6d: `'UTF-8'` sets it.
     labels("", "mb_regex_encoding('UTF-8')", &[ENCODING.1]);
 }
