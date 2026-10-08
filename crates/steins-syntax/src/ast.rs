@@ -569,10 +569,9 @@ pub struct ConstArgs {
     /// names that take an `$encoding` or read the encoding cell), or that is one of the time
     /// family whose timestamp decides the clock read (`date`, `idate`, `gmdate`, `gmmktime`,
     /// `strtotime`, `getdate`, `localtime`, `strftime`, `gmstrftime`; ADR-0101 §3.14): the
-    /// positions 0 to 5
-    /// whose argument is a string, integer, `null`, boolean, float or array literal, as
-    /// `(position, literal)` in position order (ADR-0101 §3.13). An argument that is anything else is
-    /// simply absent, and so is every one of a named or spread argument list. Appended after
+    /// positions 0 to 5 whose argument is a string, integer, `null`, boolean, float or array
+    /// literal, as `(position, literal)` in position order (ADR-0101 §3.13). An argument that is
+    /// anything else is simply absent, and so is every one of a named or spread argument list. Appended after
     /// [`Self::patterns`].
     pub literals: Vec<(u8, ArgLiteral)>,
     /// For a call to one of the time-family names [`Self::literals`] covers: what the scan shows
