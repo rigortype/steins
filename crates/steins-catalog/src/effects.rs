@@ -171,7 +171,7 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
         // **timezone cell** on every call (`get_timezone_info()`), and the clock only where the
         // call leaves a timestamp out, so their row is the upper bound over both and the call site
         // drops `nondet.time` where a literal timestamp is supplied (`clock_gate`).
-        // The `gm*` spellings read UTC, not the cell: `gmdate` and `gmmktime` carry the clock alone.
+        // The `gm*` spellings read UTC, not the cell: `gmdate` and `gmmktime` carry the clock.
         // `mktime` keeps `nondet.time` at every arity (the seed's DST flag, `ClockGate`).
         "time" | "microtime" | "hrtime" | "gmdate" | "gmmktime" => Some(NONDET_TIME),
         "date" | "mktime" | "strtotime" | "idate" | "getdate" | "localtime" => {
