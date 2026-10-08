@@ -338,6 +338,7 @@ impl<'a> Resolver<'a, '_, '_> {
         {
             self.gap(gap);
         }
+        setting::narrow_clock(read, spelled, (positional, args.consts), &mut labels);
         let value = (positional, args.consts);
         if let Some(gap) = setting::ini_value_read(read, builtin, value, &mut labels) {
             self.gap(gap);

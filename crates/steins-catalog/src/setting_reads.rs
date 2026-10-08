@@ -38,7 +38,10 @@
 //! 8.1 (the data sorts' case folding) is left undecided: a summary is a per-file fact and cannot
 //! depend on the project's PHP floor.
 
+mod clock;
 mod encoding;
+
+pub use clock::{ClockGate, clock_gate};
 
 use crate::SettingCell;
 use crate::preg::pattern_reads_locale;

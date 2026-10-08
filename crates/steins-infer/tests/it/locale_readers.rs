@@ -163,17 +163,22 @@ fn parse_url_reads_by_the_shape_of_a_literal_url() {
     }
 }
 
-/// `strftime` names the locale only through some conversions; the clock stays on the row.
+/// `strftime` names the locale only through some conversions; the zone and the clock stay on
+/// the row of `strftime` (ADR-0101 §3.14), and `gmstrftime` reads no zone.
 #[test]
 fn strftime_reads_the_locale_only_for_the_conversions_that_name_it() {
-    for call in ["strftime('%A')", "strftime('%a %d %b', $t)", "gmstrftime('%c', 0)", "strftime('%x %X')"] {
-        proves("int $t", call, &[READ, "nondet.time"]);
+    const ZONE: &str = "global.read.setting.timezone";
+    for call in ["strftime('%A')", "strftime('%a %d %b', $t)", "strftime('%x %X')"] {
+        proves("int $t", call, &[READ, ZONE, "nondet.time"]);
     }
-    for call in ["strftime('%Y-%m-%d %H:%M:%S', $t)", "strftime('%s', 0)", "gmstrftime('%%', $t)", "strftime('')"] {
-        proves("int $t", call, &["nondet.time"]);
+    proves("int $t", "gmstrftime('%c', 0)", &[READ]);
+    for call in ["strftime('%Y-%m-%d %H:%M:%S', $t)", "strftime('')"] {
+        proves("int $t", call, &[ZONE, "nondet.time"]);
     }
+    proves("int $t", "strftime('%s', 0)", &[ZONE]);
+    proves("int $t", "gmstrftime('%%', $t)", &["nondet.time"]);
     for call in ["strftime($f)", "strftime($f, $t)", "strftime('%A %Q')", "strftime('%Ed')", "strftime('%')"] {
-        depends("string $f, int $t", call, &["nondet.time"]);
+        depends("string $f, int $t", call, &[ZONE, "nondet.time"]);
     }
 }
 

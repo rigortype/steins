@@ -22,7 +22,9 @@
 //! A bare constant is read as PHP resolves it ([`global_const_fact`]): a namespaced twin the
 //! project declares shadows the global one, and a twin the scan cannot read is the gap.
 
-use steins_catalog::{GateArg, IniAccess, SettingCell, SettingReadGate, ini_call, setting_read_gate};
+use steins_catalog::{
+    GateArg, IniAccess, SettingCell, SettingReadGate, clock_gate, ini_call, setting_read_gate,
+};
 use steins_domain::{Fact, Val};
 use steins_syntax::{ArgLiteral, CallTarget, ConstArgs, ConstInt, NameRef, NotText, RefKind};
 
@@ -58,6 +60,38 @@ pub(super) fn narrow_labels(
         None => unreadable_mode(builtin, labels),
     }
 }
+
+/// The clock half of a time-family call (ADR-0101 §3.14): `nondet.time` is dropped where the
+/// call shows the timestamp it is handed (an integer literal), and kept where the timestamp is
+/// omitted, `null`, or anything the scan cannot read. It is an upper bound the call site only
+/// ever narrows, so an unreadable timestamp is no gap: the label stays, as it did before the
+/// timezone cell. A name with no [`clock_gate`] decides nothing.
+pub(super) fn narrow_clock(
+    (cx, frame): (&Cx, &Frame),
+    (name, builtin): (&NameRef, &str),
+    (positional, consts): (Option<usize>, &ConstArgs),
+    labels: &mut Vec<&'static str>,
+) {
+    let Some(gate) = clock_gate(builtin) else { return };
+    let Some(arity) = positional else { return };
+    let args: Vec<Option<GateArg<'_>>> = gate
+        .positions()
+        .iter()
+        .map(|&position| {
+            if position >= arity {
+                Some(GateArg::Omitted)
+            } else {
+                argument((cx, frame), name, consts, position)
+            }
+        })
+        .collect();
+    if gate.reads(&args) == Some(false) {
+        labels.retain(|label| *label != CLOCK_LABEL);
+    }
+}
+
+/// The time family's clock label.
+const CLOCK_LABEL: &str = "nondet.time";
 
 /// The row of a gated reader handed over as a callback, which its invoker calls with arguments of
 /// its choosing, or called with arguments the scan cannot read: the read depends on them, so it

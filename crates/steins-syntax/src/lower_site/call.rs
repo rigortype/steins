@@ -22,6 +22,19 @@ use crate::lower_expr::{
 use crate::names::name_ref;
 use crate::to_span;
 
+/// The functions whose timestamp argument decides whether they read the clock (ADR-0101 §3.14).
+const TIME_FAMILY: [&str; 9] = [
+    "date",
+    "idate",
+    "gmdate",
+    "gmmktime",
+    "strtotime",
+    "getdate",
+    "localtime",
+    "strftime",
+    "gmstrftime",
+];
+
 /// A `f(...)` call: a plain call, a higher-order call, a call of a body-local
 /// callback, or a dynamic call.
 pub(super) fn function_call(fc: &FunctionCall<'_>, sx: &SiteScope<'_>, out: &mut Vec<SiteOrigin>) {
@@ -50,8 +63,11 @@ pub(super) fn function_call(fc: &FunctionCall<'_>, sx: &SiteScope<'_>, out: &mut
             let keys = simple == "preg_replace_callback_array";
             site.const_args.patterns = pattern_list_of(fc, keys);
         }
-        if ["mb_", "iconv", "html", "get_html"].iter().any(|prefix| simple.starts_with(prefix)) {
-            // The encoding argument can sit at any position up to the fifth (ADR-0101 §3.13).
+        if ["mb_", "iconv", "html", "get_html"].iter().any(|prefix| simple.starts_with(prefix))
+            || TIME_FAMILY.contains(&simple.as_str())
+        {
+            // The encoding argument can sit at any position up to the fifth (ADR-0101 §3.13), and
+            // so can a time-family timestamp or field (`gmmktime` takes six, §3.14).
             site.const_args.literals = literals_of_call(fc);
         }
         if printf || ini_value {
