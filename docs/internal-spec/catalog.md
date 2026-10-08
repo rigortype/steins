@@ -270,10 +270,32 @@ that a call is pure, and Decision 2's bar for an **empty** row is unchanged.
 | `localeconv`, `nl_langinfo`, `strcoll` | `{global.read.setting.locale}` |
 | `basename` | `{global.read.setting.locale}` (S4: `php_basename` consults the locale-derived `CG(ascii_compatible_locale)` before it looks at a byte, so every call reads it) |
 | `ctype_alnum`, `ctype_alpha`, `ctype_cntrl`, `ctype_graph`, `ctype_lower`, `ctype_print`, `ctype_punct`, `ctype_space`, `ctype_upper`, `strnatcmp`, `strnatcasecmp`, `escapeshellarg`, `strip_tags`, `parse_url`, `sort`, `rsort`, `asort`, `arsort`, `ksort`, `krsort`, `substr_compare`, `pathinfo` | `{global.read.setting.locale}` as the upper bound the **call** decides (below) |
-| `strftime`, `gmstrftime` | `{global.read.setting.locale, nondet.time}` (the time family's argument-blind clock; the locale half is decided by the format, below) |
+| `strftime` | `{global.read.setting.locale, global.read.setting.timezone, nondet.time}` (the locale half is decided by the format, below; the clock is dropped by a literal timestamp, below) |
+| `gmstrftime` | `{global.read.setting.locale, nondet.time}` (it formats UTC and reads no zone) |
+| `date`, `idate`, `mktime`, `strtotime`, `getdate`, `localtime` | `{global.read.setting.timezone, nondet.time}` (S6b-1: every call reads the timezone cell; the clock only where the timestamp is left out, below) |
+| `gmdate`, `gmmktime` | `{nondet.time}` as the upper bound a supplied timestamp drops to `{}` (below) |
+| `date_default_timezone_get`, `date_default_timezone_set` | `{global.read.setting.timezone}`, `{global.write.setting.timezone}` |
 | `preg_match`, `preg_match_all`, `preg_replace`, `preg_replace_callback`, `preg_replace_callback_array`, `preg_filter`, `preg_split`, `preg_grep` | `{global.read.setting.locale}` as the upper bound the **literal pattern** decides (S5, below). `preg_quote` compiles nothing and keeps its empty row; `preg_last_error` and `preg_last_error_msg` have no row |
 | `ctype_digit`, `ctype_xdigit` | none: C fixes their sets in every locale and no byte moved, so they read no setting that changes an answer (left uncatalogued, not certified) |
 | `setlocale` | `{global.write.setting.locale, global.read}` (the argument-blind row: the write, and the environment block read for `''` and `null`, coarse until the env cell has a label; a call with exactly two arguments whose locale is a written non-empty string other than `'0'` narrows to `{global.write.setting.locale}`, and the exact string `'0'`, the query form, narrows to `{global.read.setting.locale}` with no write (ADR-0101 D6, `narrowed_setlocale_labels`; `"0\0x"` is not the query, php-src compares the whole string) |
+
+**The time family** (S6b-1, `setting_reads/clock.rs` in `steins-catalog`; ADR-0101 §3.14). The row was
+`nondet.time`, argument-blind. The two causes it joined are now apart. The zone is read on every call by `date`,
+`idate`, `mktime`, `strtotime`, `getdate`, `localtime` and `strftime` (`get_timezone_info()`; `strtotime('… UTC')`
+and `strtotime('@0')` read it though their value is stable), and the clock only where the timestamp is left out
+(`if (ts_is_null) ts = php_time()`), so the row is the upper bound `{global.read.setting.timezone, nondet.time}`
+and a **clock gate** (`ClockGate`, `clock_gate`) drops `nondet.time` where the call shows its timestamp as an
+integer literal (or a constant the scan evaluates, at positions 1 to 3): `date($f, 0)` is
+`{global.read.setting.timezone}`, `date($f)` and `date($f, null)` are both, `gmdate($f, 0)` is `{}` and `gmdate($f)`
+is `{nondet.time}`. The deciding argument is the timestamp (position 1 for `date`, `idate`, `gmdate`, `strftime`,
+`gmstrftime` and `strtotime`'s base; 0 for `getdate` and `localtime`); `gmmktime` reads the clock unless all six
+fields are shown supplied; `mktime` is **ungated** and keeps the clock at every arity, because the seed's DST
+flag, taken from the current time, still decides the repeated hour of a fall-back transition. A timestamp the scan
+cannot read (a variable, an expression, a named or spread list) keeps the label and is **no gap**: the clock is
+an upper bound there, as it always was. `ConstArgs::literals` carries the literal arguments of the nine names.
+`checkdate` reads nothing and has no row. The `DateTime` constructors and `date_create*` keep the argument-blind
+`nondet.time` until their per-method table (S6b-2). None of these names is on the fold or the remembered
+allowlist, so a call that reads a setting is neither folded nor remembered.
 
 **Call-decided readers** (S4, `setting_read_gate` in `steins-catalog`, `site/setting.rs` in `steins-infer`).
 Apart from `basename`, a locale reader reads only where the call reaches the routine that consults the
