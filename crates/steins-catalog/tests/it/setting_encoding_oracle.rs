@@ -45,6 +45,8 @@ enum Verdict {
 enum Moves {
     Yes,
     No,
+    /// Not asserted: the engine's answer depends on the C library (glibc moves, macOS does not).
+    Maybe,
 }
 
 struct Row {
@@ -66,7 +68,7 @@ const fn row(
 }
 
 use GateArg::{Null, Omitted, Str};
-use Moves::{No, Yes};
+use Moves::{Maybe, No, Yes};
 use Verdict::{Gate, IniName, Row as Ungated, Unmapped, Writes};
 
 /// `default_charset` to Latin-1, the write every `mb_*`, `iconv_*` and HTML reader follows.
@@ -589,12 +591,73 @@ const ROWS: &[Row] = &[
         Gate("mb_strrchr", &[Some(Str("SJIS"))]),
         Yes,
     ),
+    // The illegal-character counter (`MBSTRG(illegalchars)`): the converters add to it and the
+    // zero-argument `mb_check_encoding()` reads it, so both are the cell's.
+    row(
+        "W1 mb_convert_encoding counts illegal characters",
+        r#"mb_convert_encoding("a\xFFb", 'UTF-16BE');"#,
+        "var_export(mb_check_encoding(), true)",
+        Writes("mb_convert_encoding", &[Some(Omitted)]),
+        Yes,
+    ),
+    row(
+        "W1b mb_convert_encoding with a named source counts them too",
+        r#"mb_convert_encoding("a\xFFb", 'UTF-16BE', 'UTF-8');"#,
+        "var_export(mb_check_encoding(), true)",
+        Writes("mb_convert_encoding", &[Some(Str("UTF-8"))]),
+        Yes,
+    ),
+    row(
+        "W2 mb_scrub counts illegal characters",
+        r#"mb_scrub("a\xFFb");"#,
+        "var_export(mb_check_encoding(), true)",
+        Writes("mb_scrub", &[Some(Omitted)]),
+        Yes,
+    ),
+    row(
+        "W3 mb_check_encoding() reads the counter",
+        r#"mb_convert_encoding("a\xFFb", 'UTF-16BE');"#,
+        "var_export(mb_check_encoding(), true)",
+        Gate("mb_check_encoding", &[Some(Omitted)]),
+        Yes,
+    ),
+    // The two regex limits are read by every search and change a result silently.
+    row(
+        "L1 mbstring.regex_retry_limit",
+        "ini_set('mbstring.regex_retry_limit', '1000');",
+        r#"var_export(mb_ereg('(a+)+c|x', str_repeat('a', 18) . 'bx'), true)"#,
+        IniName("mbstring.regex_retry_limit"),
+        Yes,
+    ),
+    // glibc's `//TRANSLIT` consults the locale; macOS's libiconv does not, so no movement is
+    // asserted, and the catalog must not call the read absent.
+    row(
+        "T1 iconv_mime_decode //TRANSLIT",
+        "setlocale(LC_ALL, 'C.UTF-8', 'en_US.UTF-8');",
+        r#"bin2hex(iconv_mime_decode('=?UTF-8?B?w6nigqzjgYI=?=', 0, 'ASCII//TRANSLIT'))"#,
+        Gate("iconv_mime_decode", &[Some(Str("ASCII//TRANSLIT"))]),
+        Maybe,
+    ),
+    row(
+        "T2 iconv_mime_decode_headers //TRANSLIT",
+        "setlocale(LC_ALL, 'C.UTF-8', 'en_US.UTF-8');",
+        r#"bin2hex(json_encode(iconv_mime_decode_headers("Subject: =?UTF-8?B?w6nigqzjgYI=?=", 0, 'ASCII//TRANSLIT')))"#,
+        Gate("iconv_mime_decode_headers", &[Some(Str("ASCII//TRANSLIT"))]),
+        Maybe,
+    ),
+    row(
+        "T3 iconv_strlen //IGNORE",
+        "setlocale(LC_ALL, 'C.UTF-8', 'en_US.UTF-8');",
+        r#"var_export(iconv_strlen("a\xFFb", 'UTF-8//IGNORE'), true)"#,
+        Gate("iconv_strlen", &[Some(Str("UTF-8//IGNORE"))]),
+        Maybe,
+    ),
     // An ini entry no cell owns moves none of the readers above.
     row(
-        "C7 mbstring.regex_retry_limit",
-        "ini_set('mbstring.regex_retry_limit', '10');",
+        "C7 mbstring.encoding_translation",
+        "ini_set('mbstring.encoding_translation', '1');",
         r#"mb_strlen("\xC3\xA4") . mb_regex_encoding() . var_export(mb_ereg('^.b$', "\xC3\xA4b"), true)"#,
-        Unmapped("mbstring.regex_retry_limit"),
+        Unmapped("mbstring.encoding_translation"),
         No,
     ),
 ];
@@ -697,6 +760,7 @@ fn the_encoding_verdicts_match_the_engine() {
         match row.moves {
             Yes => assert!(moved, "{label}: expected to move, stayed {bare:?}"),
             No => assert!(!moved, "{label}: expected to stay, moved {bare:?} -> {after:?}"),
+            Maybe => {}
         }
     }
 }
