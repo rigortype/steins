@@ -321,8 +321,7 @@ the function handed over as a callback are the `value-dependent-read` gap and no
 `global.write.setting.<cell>`; a call-decided gate names its cell (`SettingReadGate::cell`), and the effects
 pass drops the label that cell spells. Seven labels join the registry with the first rows that colour them:
 the reads of `timezone`, `encoding` and `ini` and the writes of `precision`, `timezone`, `encoding` and `ini`
-(the precision read was S3's). The `env` pair is in the enum and not in the registry: its first row is
-`getenv`. Registering a label is not inert: `effect.unknown-label` stops firing on it, did-you-mean suggestions can
+(the precision read was S3's). The `env` pair joined the registry with its first rows, `getenv` and `putenv` (S6c). Registering a label is not inert: `effect.unknown-label` stops firing on it, did-you-mean suggestions can
 offer it, and an interop docblock tag naming it binds as an envelope. The first rows to name those cells are the ini
 functions with a **literal option name** (`ini_call`, `narrowed_ini_labels`): `ini_get` (one argument) reads the cell
 that owns the name, `ini_set` and `ini_alter` (an alias of `ini_set`; it had no row, as `ini_restore` had none) with two

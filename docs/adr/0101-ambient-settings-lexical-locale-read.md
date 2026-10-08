@@ -930,6 +930,82 @@ literal name a cell owns (`ini_set('precision', …)` twice, `ini_get('include_p
   dynamic ini name) would reword every `ini_get($name)` finding and is a decision of its own. `ini_restore` of a name no
   cell owns is `global.write` where it was a `no-effect-row` gap, which the corpus never exercises.
 
+### 3.12 Slice S6c: env (2026-10-08) — PENDING ratification
+
+Landed as the third sub-slice of S6 of the ambient-settings run (#1000), after S6-core (§3.11) and before the encoding
+cell. The design (the S6 section of #1000) sets the rule: the environment block is a cell of its own, `getenv` reads it
+at every arity, `putenv` writes it, and `$_ENV` is not part of the cell. What S6c does:
+
+- **Witnessed (php 8.5.11, NTS, the CLI; the rows of `setting_env_oracle.rs`).** `putenv("K=one")` then `getenv("K")`
+  answers `'one'` (E1); a second `putenv` is seen by the next `getenv` (E1′, the read observes the write, so the read is of
+  the block and not of a value cached at startup); `getenv()` with no argument lists the block and holds the entry
+  (E3); `getenv("K", true)` answers the same entry (E4); `putenv("K")` without `=` removes it (`getenv` then `false`).
+  `$_ENV["K"] = "nine"` leaves `getenv("K")` at `false` (E5): a superglobal write never reaches the block. And a
+  `putenv` is not reflected in `$_ENV` (the `snapshot` row): `$_ENV` is a startup copy. **`$_ENV` therefore stays the
+  superglobal and gets no row**, as the design says.
+- **Rows (`effects.rs`).** `getenv` carries `global.read.setting.env` at every arity; `putenv` carries
+  `global.write.setting.env`. Both are argument-blind (no gate, no narrowing), so the arity does not decide the label.
+  The coarse rows they replace were `global.read` (`getenv`) and `global.write` (`putenv`, which shared the arm of
+  `ini_set`, `date_default_timezone_set` and the rest). `ini_get`, `date_default_timezone_get` and the other coarse
+  writers keep their rows. `apache_getenv` and `apache_setenv` have **no row**: they are SAPI-provided functions
+  (`absence.rs`'s `apache_` prefix), which the catalog does not seed, so there is nothing to recolour and no row is
+  invented. `$_ENV` has no row because it is not a function.
+- **Registry.** `global.read.setting.env` and `global.write.setting.env` join the builtin table
+  (`labels.rs`), and `SettingCell::Env` is registered like the other cells: every cell's pair is now registered, and the
+  test that pinned `Env` out is replaced by one that pins all six. Registration is not inert (§3.11): `effect.unknown-label`
+  stops firing on the two labels, and a docblock tag naming one now binds as an envelope. No ini name maps to `Env`, and
+  the `ini_cell` table is untouched (S6-core's tests still pin that).
+- **`setlocale` keeps its coarse read.** `setlocale('', …)` consults the environment block too (`LC_ALL` and the
+  others), and the row still says `global.read` for that consultation. The S6-core comment said the environment read
+  would narrow when the cell landed. It is **not narrowed here**: the locale verdicts of §3.9 and §3.11 pin
+  `global.read` beside `global.write.setting.locale` (`locale_cell.rs`, `locale_readers.rs`, `setting_cells.rs`), and
+  narrowing would move all of them for a read that an envelope admitting `global.read` still admits. It is a follow-up,
+  reported in the slice's PR and not in this section's rule.
+- **`remembered.rs` (ADR-0102), unchanged.** `getenv` is not on `ALLOWED`, and the allowlist stays by name. A pin test
+  (`getenv_and_putenv_stay_off_the_allowlist`) records that: a setting read is never remembered in v1 (§7 of ADR-0102),
+  and the env cell does not lift that posture; ADR-0102 may lift it later for the env cell, and that would be a change
+  to that ADR's posture, not this slice's.
+- **Discard.** `global.read.setting.env` is a child of `global.read`, and `no_effect`'s discardable set admits
+  `global.read` by prefix. A probe of a statement-position `getenv('X');` reports `statement.no-effect` on the base and on
+  the head, and the two `check` outputs are byte-identical.
+
+**Tests.** `setting_env_oracle.rs` (new, `steins-catalog` integration tests, the S6c witness): the catalog's two rows
+(`getenv` is the env read, `putenv` its write, neither gated), and the seven PHP rows above, asserted against the
+output of `php` and skipped loudly without it (failing under `CI`). Its catalog half fails on the base; its PHP half is
+a witness of the engine and passes on both, by design. `setting_cells.rs` (`steins-infer`):
+`the_environment_block_is_what_getenv_reads_and_putenv_writes` (every arity, the variable name, `getenv(null)`, the
+`putenv` forms, and a `$_ENV` read keeping no env label) fails on the base and passes here. `effects.rs`:
+`the_env_cell_has_a_read_row_and_a_write_row`, and the locale-cell neighbour test without `getenv`/`putenv`.
+`labels.rs` and `setting.rs` pin the registration of all six cells. `remembered.rs`: the allowlist pin.
+
+**Measurement.** Base is the merge base `19b4e1d7` (a release binary built from a copy of that tree; `git archive`
+omits `crates/` through `export-ignore`, so the copy was the worktree with this slice's tracked diff reversed), head is
+this branch's release binary. Ten public packages, `check --profile strict --no-php --vendor-diagnostics --no-cache
+--format json` (and the default profile, run too): **byte-identical** on every package under both profiles, and no
+public envelope or docblock names the env labels, so no finding moves, appears or disappears. `effect-diff`: of 28,846
+compared summaries (28,847 captured), **1,951 events on 858 functions** in six packages (composer 867 events, symfony/console
+514, guzzle 260, phpunit 224, symfony/process 52, flysystem 34; none in the other four). Every event is a function that
+calls `getenv` or `putenv`, which the design expects:
+
+- `proven-added global.read.setting.env`: **750**; `proven-added global.write.setting.env`: **248**.
+- `proven-removed-maybe global.read`: **726**; `proven-removed-maybe global.write`: **219**. The coarse label is no
+  longer proven on these functions, because the call that carried it is now a narrower label.
+- `proven-removed global.read`: **3**; `proven-removed global.write`: **5**. These are the functions whose only
+  coarse label came from `getenv` or `putenv` (`GuzzleHttp\Handler\ProxyEnv::getNoProxy` and `::getenv`,
+  `Symfony\Component\Console\CI\GithubActionReporter::isGithubActionEnvironment`, and five test set-up and tear-down
+  methods that call `putenv`). Each of the eight has an env event in the same function.
+- Pairing: no function loses a coarse label without gaining an env label. 27 functions gain an env label and keep a
+  coarse label from a call the row does not recolour (`proven-added` only; not traced call by call).
+
+No function gains or loses exhaustiveness, and no label other than `global.read`, `global.write` and the two env labels
+moves. Every move is a narrowing to a child of the coarse label, so an envelope that admits the coarse label admits the
+new one; an envelope that names the coarse label without its child was never a `putenv` or `getenv` envelope in the
+corpus (none is). Wall time moves by nothing the load does not explain.
+
+**Not measured.** The private corpus (not run, per the brief). The `apache_*` pair, which exists only in a SAPI that
+defines it. A non-macOS libc: no row here depends on the C library's tables, because the environment block is the
+process's own (unlike §3.9 and §3.10).
+
 ## 4. Decision: ADR-0021 Decision 2 is amended
 
 Decision 2's bar — "reads only its arguments: no ini setting, locale, clock,
