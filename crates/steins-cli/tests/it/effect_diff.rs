@@ -269,9 +269,9 @@ fn the_baseline_stores_gap_kinds_and_a_version_one_file_is_refused() {
     assert_eq!(entry["throws_gaps"], serde_json::json!(["unknown-function"]));
 
     // A known builtin that neither lane has a row for names its axis, not the
-    // unknown-function kind: `mb_strlen` is mined and uncoloured, unaudited.
+    // unknown-function kind: `mb_detect_encoding` is mined and uncoloured, unaudited.
     let dir2 = workdir("gaps-known");
-    write(&dir2, "a.php", "<?php\nfunction width(string $s): int { return mb_strlen($s); }\n");
+    write(&dir2, "a.php", "<?php\nfunction width(string $s): string|false { return mb_detect_encoding($s); }\n");
     assert_eq!(run_in(&dir2, &["effect-diff", "--set-baseline", "a.php"]).code, 0);
     let text = std::fs::read_to_string(dir2.join("steins-effects-baseline.json")).expect("baseline");
     let v: serde_json::Value = serde_json::from_str(&text).expect("json");
