@@ -6,8 +6,8 @@
 //! `global.write.setting.<cell>`, which hang under the coarse `global.read` and `global.write`
 //! labels by prefix, so every consumer that admits the parent admits the cell. A cell's labels
 //! enter the registry ([`crate::known_labels`]) in the slice that colours its first row, and not
-//! before: [`SettingCell::Env`] is in the roster and carries its labels, and they stay out of the
-//! registry until `getenv` is coloured.
+//! before. The environment cell's pair entered with `getenv` and `putenv` (ADR-0101 S6c), the last
+//! cell to be registered.
 //!
 //! The first rows to name a cell other than the locale are the `ini_*` functions with a **literal
 //! option name** ([`narrowed_ini_labels`]): `ini_set('precision', …)` reads and writes the
@@ -238,14 +238,13 @@ mod tests {
         assert_eq!(SettingCell::ALL.len(), 6);
     }
 
-    /// A cell's labels are registered with its first coloured row (ADR-0101 §2.2): the ini rows
-    /// are the first to colour every cell but the environment's, whose first row is `getenv`.
+    /// A cell's labels are registered with its first coloured row (ADR-0101 §2.2): every cell has
+    /// one now, the environment's since `getenv` and `putenv` (S6c).
     #[test]
     fn a_cell_is_registered_once_a_row_colours_it() {
         for cell in SettingCell::ALL {
-            let coloured = cell != SettingCell::Env;
-            assert_eq!(is_known_label(cell.read_label()), coloured, "{cell:?}");
-            assert_eq!(is_known_label(cell.write_label()), coloured, "{cell:?}");
+            assert!(is_known_label(cell.read_label()), "{cell:?}");
+            assert!(is_known_label(cell.write_label()), "{cell:?}");
         }
     }
 
