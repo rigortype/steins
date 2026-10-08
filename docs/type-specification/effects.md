@@ -44,10 +44,10 @@ ffi
 global.read   global.write
      global.read.setting   global.read.setting.locale   global.read.setting.precision
                            global.read.setting.timezone global.read.setting.encoding
-                           global.read.setting.ini
+                           global.read.setting.env global.read.setting.ini
      global.write.setting  global.write.setting.locale  global.write.setting.precision
                            global.write.setting.timezone  global.write.setting.encoding
-                           global.write.setting.ini
+                           global.write.setting.env global.write.setting.ini
 io   io.db   io.fs   io.fs.read   io.fs.write   io.input   io.ipc
      io.net  io.net.http   io.process   io.signal
      io.output   io.output.buffer   io.output.header
@@ -123,10 +123,12 @@ effect of reading a cell and a setting write the effect of rewriting one.
 | `global.read.setting.encoding` | a read of the default charset and the mbstring and iconv entries | `ini_get` of `iconv.{internal,input,output}_encoding` or `mbstring.{language,detect_order,http_input,http_output,substitute_character,strict_detection}` (`default_charset`, `internal_encoding`, `input_encoding`, `output_encoding` and `mbstring.internal_encoding` also reset the mb-regex encoding, which no cell holds yet, so they keep the coarse row until S6d) |
 | `global.read.setting.ini` | a read of an ini entry no other cell owns | `ini_get` of `bcmath.scale`, `include_path` or `error_reporting` |
 | `global.write.setting` | a rewrite of some setting | — |
-| `global.write.setting.locale` | a rewrite of the locale cell | `setlocale` (which also carries a coarse `global.read` for the environment block it consults when its locale is `''` or `null`, until the env cell has a label; a call whose only locale is a written non-empty string reads no environment and is the write alone) |
+| `global.write.setting.locale` | a rewrite of the locale cell | `setlocale` (which also carries a coarse `global.read` for the environment block it consults when its locale is `''` or `null`: the env cell has its label since S6c, and this row keeps the coarse read for that consultation; a call whose only locale is a written non-empty string reads no environment and is the write alone) |
 | `global.write.setting.precision` | a rewrite of `precision` or `serialize_precision` | `ini_set` and `ini_alter` (which also read it, as the old value they return) and `ini_restore` of either name |
 | `global.write.setting.timezone` | a rewrite of the default timezone's ini | `ini_set` and `ini_alter` (which also read it) and `ini_restore` of `date.timezone` |
 | `global.write.setting.encoding` | a rewrite of the default charset or an mbstring or iconv entry | `ini_set` and `ini_alter` (which also read it) and `ini_restore` of the names `global.read.setting.encoding` lists |
+| `global.read.setting.env` | a read of the process environment block | `getenv`, at every arity: `getenv()` lists the block and `getenv($name)` and `getenv($name, true)` read one entry (ADR-0101 S6c). `$_ENV` is a startup copy that no call reaches through this cell, and `apache_getenv` has no row |
+| `global.write.setting.env` | a rewrite of the process environment block | `putenv`, the entry `getenv` reads back (ADR-0101 S6c). `apache_setenv` has no row |
 | `global.write.setting.ini` | a rewrite of an ini entry no other cell owns | `ini_set` and `ini_alter` (which also read it) and `ini_restore` of `bcmath.scale`, `include_path` or `error_reporting` |
 
 The ini rows are call-decided (ADR-0101 §3.11): `ini_get` with one argument, `ini_set` and `ini_alter` with two and `ini_restore` with one, whose option name is a written string literal that a cell owns, carry that cell's read (`ini_get`), read and write (`ini_set`, `ini_alter`: they return the old value) or write (`ini_restore`). The value an `ini_set` stores is converted to a string, which reads `precision` where it is a float: a value shown a float adds `global.read.setting.precision`, one shown no float adds nothing, and any other is the `value-dependent-read` gap. The names are exact and case-sensitive, as the engine's lookup is. A name no cell owns, a name the call does not spell as a literal, a count that is not the function's own and a function handed over as a callback keep the coarse `global.read` (`ini_get`) or `global.write` (`ini_set`, `ini_alter`, `ini_restore`).
@@ -137,7 +139,7 @@ read, a declared `global.write` admits `setlocale`'s write (a locale of `''` or 
 discardable read (ADR-0096). `global.read` without a child stays the row for a read the
 catalog cannot place in a cell. A cell's label is registered in the slice that colours its
 first row and never ahead of one: the timezone, encoding and ini cells are registered with the
-ini rows, and the environment cell is not in the registry yet (its first row is `getenv`). A `%s` of a float reads `precision`
+ini rows, and the environment cell joined with its first rows, `getenv` and `putenv` (ADR-0101 S6c). A `%s` of a float reads `precision`
 (`global.read.setting.precision`, registered with that first row, ADR-0101 D4), so a printf
 call that drops the locale read is not thereby free of settings; the float-to-string operator
 sites (`(string) $f`, `.`, `echo`) and the other float renderers (`strval`, `implode`,
