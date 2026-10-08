@@ -168,18 +168,20 @@ fn parse_url_reads_by_the_shape_of_a_literal_url() {
 #[test]
 fn strftime_reads_the_locale_only_for_the_conversions_that_name_it() {
     const ZONE: &str = "global.read.setting.timezone";
-    for call in ["strftime('%A')", "strftime('%a %d %b', $t)", "strftime('%x %X')"] {
+    for call in ["strftime('%A')", "strftime('%x %X')"] {
         proves("int $t", call, &[READ, ZONE, "nondet.time"]);
     }
+    // An `int` timestamp is supplied, so the clock goes (ADR-0101 §3.14).
+    proves("int $t", "strftime('%a %d %b', $t)", &[READ, ZONE]);
     proves("int $t", "gmstrftime('%c', 0)", &[READ]);
-    for call in ["strftime('%Y-%m-%d %H:%M:%S', $t)", "strftime('')"] {
-        proves("int $t", call, &[ZONE, "nondet.time"]);
-    }
+    proves("int $t", "strftime('')", &[ZONE, "nondet.time"]);
+    proves("int $t", "strftime('%Y-%m-%d %H:%M:%S', $t)", &[ZONE]);
     proves("int $t", "strftime('%s', 0)", &[ZONE]);
-    proves("int $t", "gmstrftime('%%', $t)", &["nondet.time"]);
-    for call in ["strftime($f)", "strftime($f, $t)", "strftime('%A %Q')", "strftime('%Ed')", "strftime('%')"] {
+    proves("int $t", "gmstrftime('%%', $t)", &[]);
+    for call in ["strftime($f)", "strftime('%A %Q')", "strftime('%Ed')", "strftime('%')"] {
         depends("string $f, int $t", call, &[ZONE, "nondet.time"]);
     }
+    depends("string $f, int $t", "strftime($f, $t)", &[ZONE]);
 }
 
 /// A bare constant is read as PHP resolves it: a namespaced twin the file declares shadows the

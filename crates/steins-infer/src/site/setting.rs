@@ -81,13 +81,33 @@ pub(super) fn narrow_clock(
             if position >= arity {
                 Some(GateArg::Omitted)
             } else {
-                argument((cx, frame), name, consts, position)
+                timestamp((cx, frame), name, consts, position)
             }
         })
         .collect();
     if gate.reads(&args) == Some(false) {
         labels.retain(|label| *label != CLOCK_LABEL);
     }
+}
+
+/// What the call shows of the timestamp (or field) at `position`: an integer it evaluates, a
+/// `null`, or a value shown not to be `null` (a non-`null` literal or form, a parameter, property
+/// or call whose declared type excludes it). Anything else is `None`, the label kept.
+fn timestamp<'c>(
+    (cx, frame): (&Cx, &Frame),
+    name: &NameRef,
+    consts: &'c ConstArgs,
+    position: usize,
+) -> Option<GateArg<'c>> {
+    let at = u8::try_from(position).ok()?;
+    match argument((cx, frame), name, consts, position) {
+        Some(GateArg::Int(v)) => return Some(GateArg::Int(v)),
+        Some(GateArg::Null) => return Some(GateArg::Null),
+        Some(_) => return Some(GateArg::NonNull),
+        None => {}
+    }
+    let (_, evidence) = consts.timestamps.iter().find(|(p, _)| *p == at)?;
+    frame.non_null(cx, evidence).then_some(GateArg::NonNull)
 }
 
 /// The time family's clock label.

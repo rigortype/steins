@@ -63,6 +63,9 @@ pub enum GateArg<'a> {
     /// A value shown to be neither a string nor an integer: a `null`, `bool`, `float` or array
     /// literal, or a by-value parameter its declared type keeps from both.
     NotText,
+    /// A value shown not to be `null` (a time function's timestamp: ADR-0101 §3.14). The locale
+    /// readers never see it, and read it as they read [`Self::NotText`].
+    NonNull,
     /// An array literal every one of whose patterns is a string literal, decoded: the patterns
     /// of `preg_replace` and its kin, or the keys of `preg_replace_callback_array`.
     Strs(&'a [String]),
@@ -173,7 +176,7 @@ impl SettingReadGate {
             Kind::Ctype => match first? {
                 GateArg::Str(text) => Some(!text.is_empty()),
                 GateArg::Int(v) => Some((-128..=255).contains(&v)),
-                GateArg::Bool(_) | GateArg::NotText | GateArg::Null => Some(false),
+                GateArg::Bool(_) | GateArg::NotText | GateArg::Null | GateArg::NonNull => Some(false),
                 GateArg::Omitted | GateArg::Strs(_) => None,
             },
             Kind::StrNat => strnat_reads(first, args.get(1).copied().flatten()),

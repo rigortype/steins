@@ -1091,7 +1091,7 @@ mod tests {
     fn the_const_args_flags_and_float_evidence_round_trip() {
         use steins_syntax::{
             ArgLiteral, ArgShape, CallTarget, ConstArgs, ConstInt, FloatEvidence, NotText,
-            StaticClass, Stored,
+            NullEvidence, StaticClass, Stored,
         };
         let param = ArgShape::Param { name: "s".to_owned(), stores: Stored::ObjectFree };
         let args = ConstArgs {
@@ -1105,7 +1105,7 @@ mod tests {
                 (
                     3,
                     FloatEvidence::Shape {
-                        shape: param,
+                        shape: param.clone(),
                         unwritten: false,
                         writes: vec![FloatEvidence::GlobalConst(steins_syntax::NameRef {
                             raw: "PHP_EOL".to_owned(),
@@ -1130,6 +1130,21 @@ mod tests {
                 (0, ArgLiteral::Str("UTF-8".to_owned())),
                 (1, ArgLiteral::Int(-3)),
                 (4, ArgLiteral::Null),
+            ],
+            timestamps: vec![
+                (0, NullEvidence::NonNull),
+                (1, NullEvidence::MayNull),
+                (
+                    2,
+                    NullEvidence::OneOf(vec![
+                        NullEvidence::Shape(ArgShape::Call(steins_syntax::NameRef {
+                            raw: "time".to_owned(),
+                            kind: steins_syntax::RefKind::Unqualified,
+                            offset: 0,
+                        })),
+                        NullEvidence::Shape(param.clone()),
+                    ]),
+                ),
             ],
         };
         let bytes = crate::wire::to_vec(&args).expect("const args serialize");

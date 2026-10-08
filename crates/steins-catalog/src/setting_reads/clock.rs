@@ -22,10 +22,13 @@
 //! transition), so six literal fields can still depend on when the call runs. `gmmktime` seeds
 //! from UTC, where the flag is 0 and no zone lookup follows.
 //!
-//! A timestamp the call shows as a literal integer is supplied; an omitted one and a literal
-//! `null` read the clock; any other argument (a variable, an expression, a named or spread
-//! argument list) is undecided, and the row keeps the label: the label is an upper bound there,
-//! as every time-family row was.
+//! A timestamp the call shows **not to be `null`** is supplied: an integer literal or constant,
+//! and any argument whose type at the call excludes `null` (an `int` parameter, `time()`,
+//! arithmetic, a property declared `int`; [`GateArg::NonNull`]). The value is the caller's, and
+//! whatever clock produced it is read where it was produced (`time()` carries `nondet.time`
+//! itself). An omitted one and a literal `null` read the clock; any other argument (a value
+//! whose type may be `null` or is unknown, a named or spread argument list) is undecided, and
+//! the row keeps the label: the label is an upper bound there, as every time-family row was.
 
 use super::GateArg;
 
@@ -69,8 +72,8 @@ impl ClockGate {
 
     /// Whether the call reads the clock, at a call whose deciding arguments show `args` (as
     /// [`SettingReadGate::reads`](super::SettingReadGate::reads) takes them): `Some(true)` for an
-    /// omitted or `null` timestamp, `Some(false)` where every deciding argument is a literal
-    /// integer, and `None` when they do not decide it, which the caller treats as the label kept.
+    /// omitted or `null` timestamp, `Some(false)` where every deciding argument is an integer
+    /// or shown non-`null`, and `None` when they do not decide it, which the caller treats as the label kept.
     #[must_use]
     pub fn reads(self, args: &[Option<GateArg<'_>>]) -> Option<bool> {
         let unsupplied =
@@ -78,7 +81,7 @@ impl ClockGate {
         if args.iter().any(unsupplied) {
             return Some(true);
         }
-        let supplied = |arg: &Option<GateArg<'_>>| matches!(arg, Some(GateArg::Int(_)));
+        let supplied = |arg: &Option<GateArg<'_>>| matches!(arg, Some(GateArg::Int(_) | GateArg::NonNull));
         args.iter().all(supplied).then_some(false)
     }
 }
@@ -117,6 +120,7 @@ mod tests {
             assert_eq!(reads(name, &[Some(GateArg::Null)]), Some(true), "{name}");
             assert_eq!(reads(name, &[Some(GateArg::Int(0))]), Some(false), "{name}");
             assert_eq!(reads(name, &[Some(GateArg::Int(-1))]), Some(false), "{name}");
+            assert_eq!(reads(name, &[Some(GateArg::NonNull)]), Some(false), "{name}");
             for other in [GateArg::Str("0"), GateArg::Bool(true), GateArg::NotText] {
                 assert_eq!(reads(name, &[Some(other)]), None, "{name}");
             }
@@ -131,6 +135,9 @@ mod tests {
         let int = Some(GateArg::Int(1));
         let omitted = Some(GateArg::Omitted);
         assert_eq!(reads("gmmktime", &[int; 6]), Some(false));
+        let non_null = Some(GateArg::NonNull);
+        assert_eq!(reads("gmmktime", &[non_null; 6]), Some(false));
+        assert_eq!(reads("gmmktime", &[int, non_null, int, non_null, int, int]), Some(false));
         assert_eq!(reads("gmmktime", &[int, int, int, int, int, omitted]), Some(true));
         assert_eq!(reads("gmmktime", &[int, Some(GateArg::Null), int, int, int, int]), Some(true));
         assert_eq!(reads("gmmktime", &[int, None, int, int, int, int]), None);
