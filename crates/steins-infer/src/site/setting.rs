@@ -24,7 +24,7 @@
 
 use steins_catalog::{GateArg, IniAccess, SettingCell, SettingReadGate, ini_call, setting_read_gate};
 use steins_domain::{Fact, Val};
-use steins_syntax::{CallTarget, ConstArgs, ConstInt, NameRef, NotText, RefKind};
+use steins_syntax::{ArgLiteral, CallTarget, ConstArgs, ConstInt, NameRef, NotText, RefKind};
 
 use super::GapKind;
 use super::reach::{FloatClass, Frame};
@@ -42,7 +42,13 @@ pub(super) fn narrow_labels(
     labels: &mut Vec<&'static str>,
 ) -> Option<GapKind> {
     let gate = setting_read_gate(builtin)?;
-    match decide(gate, (cx, frame), name, (positional, consts)) {
+    let args = gate_args(gate, (cx, frame), name, (positional, consts));
+    // An accessor shown to have nothing to set from writes nothing (ADR-0101 §3.13).
+    if args.as_deref().is_some_and(|args| !gate.writes(args)) {
+        let write = gate.cell().write_label();
+        labels.retain(|label| *label != write);
+    }
+    match args.and_then(|args| gate.reads(&args)) {
         Some(true) => None,
         Some(false) => {
             let read = gate.cell().read_label();
@@ -100,26 +106,27 @@ pub(super) fn ini_value_read(
     }
 }
 
-/// Whether the call reads the locale, or `None` when its deciding arguments do not show it.
-fn decide(
+/// What the call shows of each of the gate's deciding arguments, or `None` for a named or spread
+/// argument list, whose positions cannot be read.
+fn gate_args<'c>(
     gate: SettingReadGate,
     (cx, frame): (&Cx, &Frame),
     name: &NameRef,
-    (positional, consts): (Option<usize>, &ConstArgs),
-) -> Option<bool> {
+    (positional, consts): (Option<usize>, &'c ConstArgs),
+) -> Option<Vec<Option<GateArg<'c>>>> {
     let arity = positional?;
-    let args: Vec<Option<GateArg<'_>>> = gate
-        .positions()
-        .iter()
-        .map(|&position| {
-            if position >= arity {
-                Some(GateArg::Omitted)
-            } else {
-                argument((cx, frame), name, consts, position)
-            }
-        })
-        .collect();
-    gate.reads(&args)
+    Some(
+        gate.positions()
+            .iter()
+            .map(|&position| {
+                if position >= arity {
+                    Some(GateArg::Omitted)
+                } else {
+                    argument((cx, frame), name, consts, position)
+                }
+            })
+            .collect(),
+    )
 }
 
 /// What the scan shows of the argument at `position`: a string, an integer it evaluates, a
@@ -131,6 +138,15 @@ fn argument<'c>(
     position: usize,
 ) -> Option<GateArg<'c>> {
     let at = u8::try_from(position).ok()?;
+    // The literals of an encoding-taking call, at any position (ADR-0101 §3.13).
+    if let Some((_, literal)) = consts.literals.iter().find(|(p, _)| *p == at) {
+        return Some(match literal {
+            ArgLiteral::Str(text) => GateArg::Str(text),
+            ArgLiteral::Int(v) => GateArg::Int(*v),
+            ArgLiteral::Null => GateArg::Null,
+            ArgLiteral::Other => GateArg::NotText,
+        });
+    }
     // An array literal of string-literal patterns (a `preg_*` call's first argument).
     if position == 0
         && let Some(patterns) = &consts.patterns

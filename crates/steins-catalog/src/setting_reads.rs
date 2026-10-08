@@ -27,6 +27,7 @@
 //! | `parse_url` | `$url` (0) | the first `:` is not at index 0 (`isalpha` over the scheme), or there is no `:`, no leading `//` and some byte other than `?` and `#` (the path, query or fragment is non-empty, and `php_replace_controlchars` calls `iscntrl` on each byte) |
 //! | `strftime`, `gmstrftime` | `$format` (0) | it holds a conversion that names the locale: `a A b B c h p r x X`; the numeric ones read nothing, and any other conversion is undecided |
 //! | `preg_match`, `preg_match_all`, `preg_replace`, `preg_replace_callback`, `preg_replace_callback_array` (its keys), `preg_filter`, `preg_split`, `preg_grep` | `$pattern` (0), or an array literal of patterns | the literal pattern consults the C library's character tables ([`pattern_reads_locale`](crate::preg::pattern_reads_locale), ADR-0101 §3.10, S5): `\w \W \s \S \b \B`, a POSIX class but `[:digit:]` and `[:xdigit:]`, a caseless flag where a letter can match, the `x` flag over a byte of `0x80..=0xFF`, `[[:<:]]`; the `u` modifier and a leading `(*UCP)` exempt the classes but not the caseless flag, the `x` flag, `[:ascii:]` or a name above ASCII under `(*UCP)` alone. An array reads if any of its patterns does |
+//! | the encoding readers (the `$encoding` of `mb_*`, `iconv_*`, `htmlspecialchars` and kin; `mb_internal_encoding` and the other accessors) | `$encoding`, or the accessor's one argument | the argument is omitted or `null`, by class ([`encoding`], ADR-0101 §3.13, S6d); they decide the **encoding** cell's read, and an accessor or `mb_regex_set_options` also its write |
 //!
 //! A literal that shows no reading trigger is **absent**, not undecided, only where php-src shows
 //! the routine skipped; where the trigger is wider than the call can show (a `parse_url` literal
@@ -36,6 +37,8 @@
 //! The rows follow `PINNED_PHP` (8.5), as every row does, except that a verdict that differs on
 //! 8.1 (the data sorts' case folding) is left undecided: a summary is a per-file fact and cannot
 //! depend on the project's PHP floor.
+
+mod encoding;
 
 use crate::SettingCell;
 use crate::preg::pattern_reads_locale;
@@ -51,6 +54,9 @@ pub enum GateArg<'a> {
     Bool(bool),
     /// A string literal, decoded.
     Str(&'a str),
+    /// A literal `null`, for the readers whose default is the cell's (the encoding argument).
+    /// The locale readers' `null` is [`Self::NotText`].
+    Null,
     /// A value shown to be neither a string nor an integer: a `null`, `bool`, `float` or array
     /// literal, or a by-value parameter its declared type keeps from both.
     NotText,
@@ -79,6 +85,7 @@ enum Kind {
     ParseUrl,
     Strftime,
     PregPattern,
+    Encoding(encoding::Gate),
 }
 
 const SORT_FLAG_CASE: i64 = 8;
@@ -93,7 +100,8 @@ const PATHINFO_BASENAME_PARTS: i64 = 2 | 4 | 8;
 /// unconditional or absent.
 #[must_use]
 pub fn setting_read_gate(name: &str) -> Option<SettingReadGate> {
-    let kind = match name.to_ascii_lowercase().as_str() {
+    let lower = name.to_ascii_lowercase();
+    let kind = match lower.as_str() {
         "sort" | "rsort" | "asort" | "arsort" => Kind::DataSortFlags,
         "ksort" | "krsort" => Kind::KeySortFlags,
         "substr_compare" => Kind::CaseInsensitive,
@@ -106,7 +114,10 @@ pub fn setting_read_gate(name: &str) -> Option<SettingReadGate> {
         "parse_url" => Kind::ParseUrl,
         "strftime" | "gmstrftime" => Kind::Strftime,
         _ if crate::preg::compiles_pattern_argument(name) => Kind::PregPattern,
-        _ => return None,
+        _ => {
+            let gate = encoding::gate_of(&lower)?;
+            return Some(SettingReadGate { cell: SettingCell::Encoding, kind: Kind::Encoding(gate) });
+        }
     };
     Some(SettingReadGate { cell: SettingCell::Locale, kind })
 }
@@ -126,6 +137,7 @@ impl SettingReadGate {
             Kind::DataSortFlags | Kind::KeySortFlags | Kind::PathinfoFlags => &[1],
             Kind::CaseInsensitive => &[4],
             Kind::StrNat => &[0, 1],
+            Kind::Encoding(gate) => gate.positions(),
             Kind::Ctype
             | Kind::EscapeShellArg
             | Kind::StripTags
@@ -158,7 +170,7 @@ impl SettingReadGate {
             Kind::Ctype => match first? {
                 GateArg::Str(text) => Some(!text.is_empty()),
                 GateArg::Int(v) => Some((-128..=255).contains(&v)),
-                GateArg::Bool(_) | GateArg::NotText => Some(false),
+                GateArg::Bool(_) | GateArg::NotText | GateArg::Null => Some(false),
                 GateArg::Omitted | GateArg::Strs(_) => None,
             },
             Kind::StrNat => strnat_reads(first, args.get(1).copied().flatten()),
@@ -186,6 +198,19 @@ impl SettingReadGate {
                 GateArg::Omitted => Some(false),
                 _ => None,
             },
+            Kind::Encoding(gate) => gate.reads(args),
+        }
+    }
+
+    /// Whether the call may write the cell the gate names, at a call whose deciding arguments
+    /// show `args` (as [`Self::reads`] takes them). Only an accessor (`mb_internal_encoding` and
+    /// its kin) and `mb_regex_set_options` write, and only when given something to set; every
+    /// other gate answers `true`, and its row has no write to keep or drop.
+    #[must_use]
+    pub fn writes(self, args: &[Option<GateArg<'_>>]) -> bool {
+        match self.kind {
+            Kind::Encoding(gate) => gate.writes(args),
+            _ => true,
         }
     }
 }

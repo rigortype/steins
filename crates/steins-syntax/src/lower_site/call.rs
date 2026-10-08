@@ -14,7 +14,7 @@ use crate::lower_arg_shape::{
 };
 use crate::lower_effect::{
     AnonymousConstructor, anonymous_class_constructor, arg_targets_of_call, const_args_of_call,
-    const_int_of, direct_var_callee, higher_order_of_call, pattern_list_of,
+    const_int_of, direct_var_callee, higher_order_of_call, literals_of_call, pattern_list_of,
 };
 use crate::lower_expr::{
     effect_recv_of_class, effect_recv_of_object_declared, method_name_of, trace_static_class,
@@ -49,6 +49,10 @@ pub(super) fn function_call(fc: &FunctionCall<'_>, sx: &SiteScope<'_>, out: &mut
             // An array of patterns is the one literal shape `first` cannot hold (ADR-0101 §3.10).
             let keys = simple == "preg_replace_callback_array";
             site.const_args.patterns = pattern_list_of(fc, keys);
+        }
+        if ["mb_", "iconv", "html", "get_html"].iter().any(|prefix| simple.starts_with(prefix)) {
+            // The encoding argument can sit at any position up to the fifth (ADR-0101 §3.13).
+            site.const_args.literals = literals_of_call(fc);
         }
         if printf || ini_value {
             site.const_args.float_evidence = float_evidence_of_args(&fc.argument_list, cx);

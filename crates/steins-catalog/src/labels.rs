@@ -71,7 +71,7 @@ const BUILTIN_LABELS: &[&str] = {
         // registered in the slice that colours its first row, never ahead of one.
         "global.read.setting",
         // The default charset and the mbstring and iconv entries: the first row is `ini_get` of
-        // one of those names (S6-core).
+        // one of those names (S6-core); the `$encoding` readers colour it from S6d.
         "global.read.setting.encoding",
         // The process environment block: `getenv` reads it (S6c: the first row of the cell; no
         // ini entry feeds it).

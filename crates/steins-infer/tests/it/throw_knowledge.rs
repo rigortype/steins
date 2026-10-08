@@ -62,8 +62,11 @@ fn a_known_builtin_nobody_audited_is_a_gap_never_throwless() {
     // `ValueError` for an unknown encoding: no row, no audit, so a gap.
     let src = file(true, "string $s", "return mb_strlen($s);");
     assert_eq!(throw_gaps(&src), ["no-throw-row"]);
-    // The effect lane has no row either, and says so under its own name.
-    assert_eq!(summary(&src, "f").gaps, ["no-effect-row"]);
+    // The effect lane has a row since S6d (the encoding read), and a call with no encoding named
+    // carries it; a name with no row says so under its own name.
+    assert!(summary(&src, "f").gaps.is_empty());
+    let detect = file(true, "string $s", "return mb_detect_encoding($s);");
+    assert_eq!(summary(&detect, "f").gaps, ["no-effect-row"]);
     // A truly unknown name is still the old kind.
     assert_eq!(throw_gaps(&file(true, "", "return no_such_function();")), ["unknown-function"]);
 }
