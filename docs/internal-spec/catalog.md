@@ -355,10 +355,10 @@ for the **plain** `mb_*` class (`mb_strlen`, `mb_strwidth`, `mb_strpos`, `mb_str
 mode that `mb_substitute_character()` writes, so an invalid subject reads the cell whatever encoding is named; the
 HTML functions also read for `''` (`determine_charset`) and `htmlspecialchars`, `htmlentities` and
 `html_entity_decode` return before that on an empty subject, or one with no `&`, so their subject is a deciding
-argument too; the iconv functions are undecided for `''`, `char` and `locale` (the C library's own charset), and
+argument too; the iconv functions are undecided for `''`, `char`, `locale` and any name with a `//` suffix (the C library's own charset; glibc's `//TRANSLIT` consults the locale), and
 `iconv_strrpos` returns on an empty needle first. The accessors (`mb_internal_encoding`, `mb_regex_encoding`,
 `mb_http_output`, `mb_detect_order`, `mb_language`, `mb_substitute_character`) carry the read and the write: with no
-argument or `null` the write is dropped, with any other argument the read is, and `mb_regex_set_options` reads on
+argument or `null` the write is dropped, with any other argument the read is, and `mb_convert_encoding` and `mb_scrub` also write the cell (the illegal-character counter, `MBSTRG(illegalchars)`); `mb_regex_set_options` reads on
 every call (it returns the previous options) and writes when given a string. `mb_ereg`, `mb_eregi`,
 `mb_ereg_replace`, `mb_eregi_replace`, `mb_ereg_match` and `mb_split` read the cell on every call (they compile under
 the mb-regex encoding and options), with no gate; `mb_ereg` and `mb_eregi` also have an out-parameter row for
