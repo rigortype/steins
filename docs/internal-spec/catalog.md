@@ -285,13 +285,13 @@ that a call is pure, and Decision 2's bar for an **empty** row is unchanged.
 and `strtotime('@0')` read it though their value is stable), and the clock only where the timestamp is left out
 (`if (ts_is_null) ts = php_time()`), so the row is the upper bound `{global.read.setting.timezone, nondet.time}`
 and a **clock gate** (`ClockGate`, `clock_gate`) drops `nondet.time` where the call shows its timestamp as an
-integer literal (or a constant the scan evaluates, at positions 1 to 3): `date($f, 0)` is
+integer literal or constant, or by any argument shown **not `null`** at the call (an `int` parameter that the frame never writes, `time()` or another call whose declared return excludes `null`, arithmetic, a cast, a property declared so; `NullEvidence` in `ConstArgs::timestamps`, read by `Frame::non_null`): `date($f, 0)` is
 `{global.read.setting.timezone}`, `date($f)` and `date($f, null)` are both, `gmdate($f, 0)` is `{}` and `gmdate($f)`
 is `{nondet.time}`. The deciding argument is the timestamp (position 1 for `date`, `idate`, `gmdate`, `strftime`,
 `gmstrftime` and `strtotime`'s base; 0 for `getdate` and `localtime`); `gmmktime` reads the clock unless all six
 fields are shown supplied; `mktime` is **ungated** and keeps the clock at every arity, because the seed's DST
-flag, taken from the current time, still decides the repeated hour of a fall-back transition. A timestamp the scan
-cannot read (a variable, an expression, a named or spread list) keeps the label and is **no gap**: the clock is
+flag, taken from the current time, still decides the repeated hour of a fall-back transition. A timestamp that
+may be `null` or the scan cannot place (a `?int`, an untyped or local variable, a named or spread list) keeps the label and is **no gap**: the clock is
 an upper bound there, as it always was. `ConstArgs::literals` carries the literal arguments of the nine names.
 `checkdate` reads nothing and has no row. The `DateTime` constructors and `date_create*` keep the argument-blind
 `nondet.time` until their per-method table (S6b-2). None of these names is on the fold or the remembered
