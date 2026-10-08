@@ -90,18 +90,84 @@ fn strftime_adds_the_zone_to_the_locale_verdict() {
     proves("", "gmstrftime('%A')", &[LOCALE, CLOCK]);
 }
 
-/// A timestamp the scan cannot read keeps the clock: a variable, an expression, a constant,
-/// a float or string literal, and a named or spread argument list. None of these is a gap.
+/// A timestamp shown not to be `null` is supplied, whatever produced it: the caller's value is
+/// read where it came from (`time()` carries `nondet.time` itself). An `int` parameter, a
+/// property declared `int`, arithmetic, a cast, a float or string literal, a call whose declared
+/// return excludes `null`, and a conditional whose branches all do, drop the date function's
+/// clock and keep its zone.
 #[test]
-fn an_unreadable_timestamp_keeps_the_clock_and_is_no_gap() {
+fn a_timestamp_shown_non_null_drops_the_clock() {
     for call in [
         "date('Y', $ts)",
         "date('Y', $ts + 1)",
+        "date('Y', (int) $m)",
         "date('Y', 1.5)",
         "date('Y', '0')",
+        "date('Y', $m ?? 0)",
+        "date('Y', $flag ? $ts : 0)",
+        "date('Y', $ts ?: 0)",
+        "date('Y', time())",
+        "date('Y', strtotime('now'))",
     ] {
-        proves("int $ts, array $a", call, &[ZONE, CLOCK]);
+        let s = summary("int $ts, bool $flag, mixed $m", &format!("return {call};"));
+        assert!(s.labels.iter().any(|l| l == ZONE), "{call}: {s:?}");
+        // The clock stays only where `time()` is read in the argument itself.
+        let from_time = call.contains("time(");
+        assert_eq!(s.labels.iter().any(|l| l == CLOCK), from_time, "{call}: {s:?}");
     }
+    proves("int $ts", "date('Y', $ts)", &[ZONE]);
+    proves("int $ts", "gmdate('Y', $ts)", &[]);
+    proves("int $ts", "idate('Y', $ts)", &[ZONE]);
+    proves("int $ts", "getdate($ts)", &[ZONE]);
+    proves("int $ts", "localtime($ts)", &[ZONE]);
+    proves("int $ts", "strtotime('now', $ts)", &[ZONE]);
+    proves("int $ts", "strftime('%Y', $ts)", &[ZONE]);
+    proves("int $ts", "gmstrftime('%Y', $ts)", &[]);
+    proves("int $ts", "gmmktime(0, 0, 0, 1, 1, $ts)", &[]);
+    proves("int $a, int $b", "gmmktime($a, 0, $b, 1, 1, 2020)", &[]);
+    // The clock comes from `time()` and not from the date function.
+    proves("", "date('Y', time())", &[ZONE, CLOCK]);
+    proves("", "gmdate('Y', time())", &[CLOCK]);
+    // A property declared `int`.
+    let src = "<?php\nclass C { private int $at = 0; function f() { return gmdate('Y', $this->at); } }\n";
+    let tree = SourceTree::parse(src);
+    let functions = tree.functions().to_vec();
+    let classes = tree.classes().to_vec();
+    let s = effect_summary(&tree, &functions, &classes)
+        .into_iter()
+        .find(|s| s.symbol.ends_with("::f"))
+        .expect("summary for C::f");
+    assert!(s.labels.is_empty(), "{s:?}");
+}
+
+/// A timestamp whose type may include `null`, or is unknown, keeps the clock, and so does one
+/// the scan cannot place; none of these is a gap.
+#[test]
+fn a_timestamp_that_may_be_null_keeps_the_clock_and_is_no_gap() {
+    for (params, call) in [
+        ("?int $ts", "date('Y', $ts)"),
+        ("int|null $ts", "date('Y', $ts)"),
+        ("int $ts = null", "date('Y', $ts)"),
+        ("mixed $ts", "date('Y', $ts)"),
+        ("$ts", "date('Y', $ts)"),
+        ("int $ts", "date('Y', null)"),
+        ("int $ts", "date('Y', $ts ?? null)"),
+        ("?int $ts", "date('Y', $ts ?: null)"),
+        ("bool $f, ?int $ts", "date('Y', $f ? $ts : 0)"),
+        ("?int $ts", "gmdate('Y', $ts)"),
+        ("int $ts", "gmdate('Y', $undefined)"),
+        ("int $ts", "gmdate('Y', $ts = null)"),
+        ("int $ts", "gmdate('Y', unknown_function())"),
+        ("int $ts", "gmmktime(0, 0, 0, 1, 1, null)"),
+        ("?int $y", "gmmktime(0, 0, 0, 1, 1, $y)"),
+    ] {
+        let s = summary(params, &format!("return {call};"));
+        assert!(s.labels.iter().any(|l| l == CLOCK), "{params} / {call}: {s:?}");
+        assert!(!s.gaps.contains(&"value-dependent-read"), "{params} / {call}: {s:?}");
+    }
+    // A parameter the frame rebinds is not the value its declaration holds.
+    let s = summary("int $ts", "$ts = null; return date('Y', $ts);");
+    assert!(s.labels.iter().any(|l| l == CLOCK), "{s:?}");
     // A named or spread list has no positions to read: the labels stay, beside the reach gap
     // those argument lists already carry.
     for call in [
@@ -114,9 +180,6 @@ fn an_unreadable_timestamp_keeps_the_clock_and_is_no_gap() {
         assert_eq!(s.labels, [ZONE, CLOCK], "{call}: {s:?}");
         assert!(!s.gaps.contains(&"value-dependent-read"), "{call}: {s:?}");
     }
-    proves("int $ts", "gmdate('Y', $ts)", &[CLOCK]);
-    proves("int $ts", "getdate($ts)", &[ZONE, CLOCK]);
-    proves("int $ts", "gmmktime(0, 0, 0, 1, 1, $ts)", &[CLOCK]);
 }
 
 /// The zone accessors, the clock readers and `checkdate`.

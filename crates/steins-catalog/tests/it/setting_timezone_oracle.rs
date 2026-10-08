@@ -219,7 +219,7 @@ const fn clock(
 }
 
 use Clock::{Gate, Kept};
-use GateArg::{Int, Null, Omitted};
+use GateArg::{Int, NonNull, Null, Omitted};
 
 /// `$n` is a `null` the script holds: a call handed it is one the catalog cannot place.
 const CLOCK_ROWS: &[ClockRow] = &[
@@ -227,6 +227,56 @@ const CLOCK_ROWS: &[ClockRow] = &[
     clock("C1b date null", "date('s', null)", Gate("date", &[Some(Null)]), true),
     clock("C1c date supplied", "date('s', 0)", Gate("date", &[Some(Int(0))]), false),
     clock("C1d date from a variable", "date('s', $n)", Gate("date", &[None]), true),
+    // A timestamp the site shows non-null (an `int` variable, arithmetic) is supplied: it does not
+    // move with the clock, and the call site drops the clock label. A `null` variable does.
+    clock("C1e date from an int variable", "date('s', $i)", Gate("date", &[Some(NonNull)]), false),
+    clock("C1f date from arithmetic", "date('s', $i + 1)", Gate("date", &[Some(NonNull)]), false),
+    clock(
+        "C2c gmdate from an int variable",
+        "gmdate('s', $i)",
+        Gate("gmdate", &[Some(NonNull)]),
+        false,
+    ),
+    clock(
+        "C3c idate from an int variable",
+        "idate('s', $i)",
+        Gate("idate", &[Some(NonNull)]),
+        false,
+    ),
+    clock(
+        "C4e strtotime with a base from a variable",
+        "strtotime('+1 day', $i)",
+        Gate("strtotime", &[Some(NonNull)]),
+        false,
+    ),
+    clock(
+        "C5d getdate from a variable",
+        "json_encode(getdate($i))",
+        Gate("getdate", &[Some(NonNull)]),
+        false,
+    ),
+    clock(
+        "C7e strftime from a variable",
+        "strftime('%S', $i)",
+        Gate("strftime", &[Some(NonNull)]),
+        false,
+    ),
+    clock(
+        "C8d gmmktime with all six from variables",
+        "gmmktime($i, $i, $i, 4, $i, 2020)",
+        Gate(
+            "gmmktime",
+            &[
+                Some(NonNull),
+                Some(NonNull),
+                Some(NonNull),
+                Some(Int(4)),
+                Some(NonNull),
+                Some(Int(2020)),
+            ],
+        ),
+        false,
+    ),
     clock("C2 gmdate omitted", "gmdate('s')", Gate("gmdate", &[Some(Omitted)]), true),
     clock("C2b gmdate supplied", "gmdate('s', 0)", Gate("gmdate", &[Some(Int(0))]), false),
     clock("C3 idate omitted", "idate('s')", Gate("idate", &[Some(Omitted)]), true),
@@ -364,7 +414,7 @@ fn the_clock_verdicts_match_the_engine() {
     let probes: Vec<String> =
         CLOCK_ROWS.iter().map(|row| format!("fn() => json_encode({})", row.probe)).collect();
     let script = format!(
-        "$n = null; $p = [{}]; \
+        "$n = null; $i = 5; $p = [{}]; \
          $a = array_map(fn($f) => $f(), $p); usleep(1100000); \
          $b = array_map(fn($f) => $f(), $p); \
          foreach ($a as $i => $x) {{ echo $x !== $b[$i] ? '1' : '0'; }}",

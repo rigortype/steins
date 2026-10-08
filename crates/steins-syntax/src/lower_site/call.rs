@@ -11,6 +11,7 @@ use super::{SiteScope, coerce};
 use crate::ast::{ArgShape, DynamicSite, SiteKind, SiteOrigin, Span};
 use crate::lower_arg_shape::{
     arg_shapes_of, float_evidence_of_args, method_call_shapes, not_text_of_args,
+    null_evidence_of_args,
 };
 use crate::lower_effect::{
     AnonymousConstructor, anonymous_class_constructor, arg_targets_of_call, const_args_of_call,
@@ -69,6 +70,9 @@ pub(super) fn function_call(fc: &FunctionCall<'_>, sx: &SiteScope<'_>, out: &mut
             // The encoding argument can sit at any position up to the fifth (ADR-0101 §3.13), and
             // so can a time-family timestamp or field (`gmmktime` takes six, §3.14).
             site.const_args.literals = literals_of_call(fc);
+            if TIME_FAMILY.contains(&simple.as_str()) {
+                site.const_args.timestamps = null_evidence_of_args(&fc.argument_list, cx);
+            }
         }
         if printf || ini_value {
             site.const_args.float_evidence = float_evidence_of_args(&fc.argument_list, cx);

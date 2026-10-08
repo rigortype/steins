@@ -255,7 +255,7 @@ impl Gate {
             Self::Accessor => match args.first().copied().flatten()? {
                 GateArg::Omitted | GateArg::Null => Some(true),
                 // Anything that is not `null` sets (a bad value throws before it does).
-                GateArg::Str(_) | GateArg::Int(_) | GateArg::Bool(_) | GateArg::NotText => {
+                GateArg::Str(_) | GateArg::Int(_) | GateArg::Bool(_) | GateArg::NotText | GateArg::NonNull => {
                     Some(false)
                 }
                 GateArg::Strs(_) => None,

@@ -20,7 +20,7 @@ use std::collections::HashSet;
 use steins_catalog::{ArgReach, PrintfFamily};
 use steins_syntax::{
     ArgShape, ArgValue, CallTarget, ConstArgs, EffectRecv, FloatEvidence, NameRef, Param,
-    PropertyDecl, SiteKind, SiteOrigin, StaticClass, Stored, Visibility,
+    NullEvidence, PropertyDecl, SiteKind, SiteOrigin, StaticClass, Stored, Visibility,
 };
 
 use super::{NewTarget, Reach, engine_exit, resolve_new};
@@ -149,6 +149,42 @@ impl Frame<'_> {
             FloatEvidence::Shape { shape, unwritten, writes } => {
                 self.shape_float_class(cx, (shape, *unwritten), writes)
             }
+        }
+    }
+
+    /// Whether the value `evidence` describes is shown never to be `null`
+    /// ([`NullEvidence`], a time-family call's [`ConstArgs::timestamps`]). A parameter is as its
+    /// declared type says while no write rebinds it (the scan names only a parameter the frame
+    /// never writes, and a named call that takes it by reference rebinds it here); a property
+    /// and a call are as their declarations say. A conditional is non-`null` where both of its
+    /// branches are.
+    pub(crate) fn non_null(&self, cx: &Cx, evidence: &NullEvidence) -> bool {
+        match evidence {
+            NullEvidence::NonNull => true,
+            NullEvidence::MayNull => false,
+            NullEvidence::OneOf(branches) => branches.iter().all(|b| self.non_null(cx, b)),
+            NullEvidence::Shape(shape) => match shape {
+                ArgShape::Param { name, .. } => {
+                    let Some(param) = self.params.iter().find(|p| &p.name == name) else {
+                        return false;
+                    };
+                    // `int $t = null` is implicitly nullable.
+                    !param.has_null_default
+                        && !self.rebound_by_call(cx, name)
+                        && param
+                            .hint_span
+                            .and_then(|span| cx.tree().source_slice(span))
+                            .is_some_and(hint_non_null)
+                }
+                ArgShape::ThisProperty(name) => {
+                    this_property_hint(cx, self.class_fqn, name, hint_non_null).unwrap_or(false)
+                }
+                ArgShape::Call(name) => call_result::function_non_null(cx, name),
+                ArgShape::MethodCall { receiver, method } => {
+                    call_result::method_non_null(cx, self, receiver, method)
+                }
+                _ => false,
+            },
         }
     }
 
@@ -564,6 +600,19 @@ fn hint_non_float(hint: &str) -> bool {
         .peekable();
     members.peek().is_some()
         && members.all(|m| !matches!(m.to_ascii_lowercase().as_str(), "float" | "mixed"))
+}
+
+/// Whether the type spelled `hint` excludes `null`: no `?` prefix and no member `null`,
+/// `mixed` or `void`. An untyped declaration has no hint to read and is never asked.
+pub(crate) fn hint_non_null(hint: &str) -> bool {
+    let hint = hint.trim();
+    let mut members = hint
+        .split(|c: char| matches!(c, '|' | '&' | '(' | ')' | '?') || c.is_whitespace())
+        .filter(|m| !m.is_empty())
+        .peekable();
+    !hint.starts_with('?')
+        && members.peek().is_some()
+        && members.all(|m| !matches!(m.to_ascii_lowercase().as_str(), "null" | "mixed" | "void"))
 }
 
 /// Whether the type spelled `hint` admits no string: no member is `string`,

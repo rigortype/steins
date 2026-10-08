@@ -18,7 +18,8 @@ use mago_syntax::cst::{
 };
 
 use crate::ast::{
-    ArgShape, ArgValue, ConstInit, ConstRef, EffectRecv, FloatEvidence, NotText, SUPERGLOBALS, Stored,
+    ArgShape, ArgValue, ConstInit, ConstRef, EffectRecv, FloatEvidence, NotText, NullEvidence,
+    SUPERGLOBALS, Stored,
 };
 use crate::lower_effect::EffectScanCx;
 use crate::lower_expr::{
@@ -335,6 +336,101 @@ pub(crate) fn float_evidence_of_args(
         }
     }
     out
+}
+
+/// [`ConstArgs::timestamps`] of a time-family call: the [`NullEvidence`] of each of the first
+/// six arguments. Empty for a named or spread argument list, whose positions cannot be read.
+///
+/// [`ConstArgs::timestamps`]: crate::ast::ConstArgs::timestamps
+pub(crate) fn null_evidence_of_args(
+    list: &ArgumentList<'_>,
+    cx: &EffectScanCx,
+) -> Vec<(u8, NullEvidence)> {
+    let mut out = Vec::new();
+    for (position, arg) in list.arguments.iter().enumerate() {
+        let Argument::Positional(p) = arg else { return Vec::new() };
+        if p.ellipsis.is_some() {
+            return Vec::new();
+        }
+        let Ok(position) = u8::try_from(position) else { break };
+        if position > 5 {
+            break;
+        }
+        out.extend(null_evidence(p.value, cx).map(|evidence| (position, evidence)));
+    }
+    out
+}
+
+/// What the scan shows of whether `expr` is `null` ([`NullEvidence`]), or `None` when it shows
+/// nothing. A local variable shows nothing: it starts `null`, and the scan does not follow which
+/// of its writes a read sees. A `??` is its right side, since a left side that is set is not
+/// `null`; a short `?:` is its else branch, since a truthy then branch is not `null` either.
+fn null_evidence(expr: &Expression<'_>, cx: &EffectScanCx) -> Option<NullEvidence> {
+    let e = expr.unparenthesized();
+    if matches!(e, Expression::Literal(Literal::Null(_))) {
+        return Some(NullEvidence::MayNull);
+    }
+    if non_null_form(e) {
+        return Some(NullEvidence::NonNull);
+    }
+    match e {
+        Expression::Binary(b) if matches!(b.operator, BinaryOperator::NullCoalesce(_)) => {
+            null_evidence(b.rhs, cx)
+        }
+        Expression::Conditional(c) => match c.then {
+            Some(then) => Some(NullEvidence::OneOf(vec![
+                null_evidence(then, cx)?,
+                null_evidence(c.r#else, cx)?,
+            ])),
+            None => null_evidence(c.r#else, cx),
+        },
+        _ => match float_evidence(e, Some(cx))? {
+            FloatEvidence::Shape { shape: shape @ ArgShape::Param { .. }, unwritten: true, .. }
+            | FloatEvidence::Shape {
+                shape:
+                    shape @ (ArgShape::ThisProperty(_)
+                    | ArgShape::Call(_)
+                    | ArgShape::MethodCall { .. }),
+                ..
+            } => Some(NullEvidence::Shape(shape)),
+            _ => None,
+        },
+    }
+}
+
+/// Whether an expression's value is **not `null` by its form alone** ([`NullEvidence::NonNull`]).
+fn non_null_form(expr: &Expression<'_>) -> bool {
+    match expr.unparenthesized() {
+        Expression::Literal(Literal::Null(_)) => false,
+        Expression::Literal(_)
+        | Expression::MagicConstant(_)
+        | Expression::CompositeString(_)
+        | Expression::Array(_)
+        | Expression::LegacyArray(_)
+        | Expression::Instantiation(_)
+        | Expression::Construct(Construct::Isset(_) | Construct::Empty(_)) => true,
+        Expression::Binary(b) => !matches!(b.operator, BinaryOperator::NullCoalesce(_)),
+        Expression::UnaryPrefix(u) => match u.operator {
+            UnaryPrefixOperator::ErrorControl(_) => non_null_form(u.operand),
+            UnaryPrefixOperator::ArrayCast(..)
+            | UnaryPrefixOperator::BoolCast(..)
+            | UnaryPrefixOperator::BooleanCast(..)
+            | UnaryPrefixOperator::DoubleCast(..)
+            | UnaryPrefixOperator::RealCast(..)
+            | UnaryPrefixOperator::FloatCast(..)
+            | UnaryPrefixOperator::IntCast(..)
+            | UnaryPrefixOperator::IntegerCast(..)
+            | UnaryPrefixOperator::ObjectCast(..)
+            | UnaryPrefixOperator::StringCast(..)
+            | UnaryPrefixOperator::BinaryCast(..)
+            | UnaryPrefixOperator::BitwiseNot(_)
+            | UnaryPrefixOperator::Not(_)
+            | UnaryPrefixOperator::Plus(_)
+            | UnaryPrefixOperator::Negation(_) => true,
+            _ => false,
+        },
+        _ => false,
+    }
 }
 
 /// [`ConstArgs::not_text`] of a `ctype_*` call: the first argument, when it is a `null`, boolean,

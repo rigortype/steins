@@ -31,7 +31,7 @@ use std::collections::HashSet;
 use steins_contract::ContractTy;
 use steins_syntax::{EffectRecv, NameRef, Span, Visibility};
 
-use super::{FloatClass, Frame, Held, hint_float_class, hint_held};
+use super::{FloatClass, Frame, Held, hint_float_class, hint_held, hint_non_null};
 use crate::builtin_returns::{builtin_method_row, floor_target_admits};
 use crate::contract::IsA;
 use crate::cx::Cx;
@@ -67,6 +67,61 @@ impl Returned<'_> {
             Self::Mined(declared) => steins_contract::lower_str(declared)
                 .map_or(FloatClass::Unknown, |ty| contract_float_class(&ty)),
         }
+    }
+}
+
+impl Returned<'_> {
+    /// Whether a value of this type excludes `null`.
+    fn non_null(self) -> bool {
+        match self {
+            Self::Native(hint) => hint_non_null(hint),
+            Self::Mined(declared) => {
+                steins_contract::lower_str(declared).is_some_and(|ty| contract_non_null(&ty))
+            }
+        }
+    }
+}
+
+/// Whether the result of the plain call `name(...)` is never `null`, by its declared return.
+pub(super) fn function_non_null(cx: &Cx, name: &NameRef) -> bool {
+    function_return(cx, name).is_some_and(Returned::non_null)
+}
+
+/// Whether the result of a method or static call `method` on `receiver`, written in `frame`, is
+/// never `null`, by its declared return. Read like a float: the accessor gates about objects do
+/// not apply to a question about `null`.
+pub(super) fn method_non_null(
+    cx: &Cx,
+    frame: &Frame,
+    receiver: &EffectRecv,
+    method: &str,
+) -> bool {
+    method_return(cx, frame, receiver, method, Reading::Float).is_some_and(Returned::non_null)
+}
+
+/// Whether a value of the lowered type `ty` is never `null`: a scalar, array or class type, a
+/// literal, a union of such, an intersection with one such member. `mixed`, `null` and any type
+/// not modeled are not.
+fn contract_non_null(ty: &ContractTy) -> bool {
+    match ty {
+        ContractTy::Never
+        | ContractTy::Base(_)
+        | ContractTy::IntIn(_)
+        | ContractTy::StrWith(_)
+        | ContractTy::StrOpaque
+        | ContractTy::LitInt(_)
+        | ContractTy::LitFloat(_)
+        | ContractTy::LitStr(_)
+        | ContractTy::LitBool(_)
+        | ContractTy::ArrayAny { .. }
+        | ContractTy::ListOf { .. }
+        | ContractTy::MapOf { .. }
+        | ContractTy::Shape { .. }
+        | ContractTy::Class(_)
+        | ContractTy::ObjectAny => true,
+        ContractTy::Union(members) => !members.is_empty() && members.iter().all(contract_non_null),
+        ContractTy::Inter(members) => members.iter().any(contract_non_null),
+        _ => false,
     }
 }
 

@@ -575,6 +575,33 @@ pub struct ConstArgs {
     /// simply absent, and so is every one of a named or spread argument list. Appended after
     /// [`Self::patterns`].
     pub literals: Vec<(u8, ArgLiteral)>,
+    /// For a call to one of the time-family names [`Self::literals`] covers: what the scan shows
+    /// of whether the argument at each position 0 to 5 is **non-null**, as `(position,
+    /// evidence)` in position order (ADR-0101 §3.14). A timestamp that is shown non-null is
+    /// supplied, and the call does not read the clock for it. An argument the scan shows nothing
+    /// of is absent, and so is every one of a named or spread argument list. Appended after
+    /// [`Self::literals`].
+    pub timestamps: Vec<(u8, NullEvidence)>,
+}
+
+/// What a structural scan shows of whether one argument is `null` ([`ConstArgs::timestamps`]):
+/// the engine reads the declared type a shape names, as it does for [`FloatEvidence`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
+pub enum NullEvidence {
+    /// A form that is no `null` whatever its operands hold: a non-`null` literal, a magic
+    /// constant, an interpolated string, an array literal, a cast but `(unset)` and `(void)`,
+    /// arithmetic, bitwise, string, comparison and logical operators, `!`, `isset`, `empty`, and
+    /// a `new` expression.
+    NonNull,
+    /// A `null` literal.
+    MayNull,
+    /// A by-value parameter the frame never writes, `$this->name`, or a call, for the engine to
+    /// read the declared type of ([`ArgShape::Param`], [`ArgShape::ThisProperty`],
+    /// [`ArgShape::Call`], [`ArgShape::MethodCall`]).
+    Shape(ArgShape),
+    /// A conditional: the value is one of these.
+    OneOf(Vec<NullEvidence>),
 }
 
 /// One call argument the scan reads as a literal ([`ConstArgs::literals`]).
