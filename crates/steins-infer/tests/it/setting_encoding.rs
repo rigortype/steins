@@ -46,7 +46,9 @@ fn proves(call: &str, labels: &[&str]) {
 /// The call carries no label and the `value-dependent-read` gap.
 fn depends(call: &str) {
     let s = summary("string $e, array $a", &format!("return {call};"));
-    assert!(s.labels.is_empty(), "{call}: {s:?}");
+    // The converters that count illegal characters keep their write whatever the read is.
+    assert!(s.labels.iter().all(|l| l == WRITE), "{call}: {s:?}");
+    assert!(!s.labels.iter().any(|l| l == READ), "{call}: {s:?}");
     assert!(s.gaps.contains(&DEPENDS), "{call}: {s:?}");
     assert!(!s.exhaustive, "{call}: {s:?}");
 }
@@ -101,11 +103,19 @@ fn substituting_calls(encoding: Option<&str>) -> Vec<String> {
 /// An omitted encoding and a literal `null` are the proven read, through every function.
 #[test]
 fn an_omitted_or_null_encoding_is_the_proven_read() {
+    // The two converters that count illegal characters write the cell beside the read.
+    let labels = |call: &str| -> Vec<&'static str> {
+        if call.starts_with("mb_convert_encoding") || call.starts_with("mb_scrub") {
+            vec![READ, WRITE]
+        } else {
+            vec![READ]
+        }
+    };
     for call in plain_calls(None).into_iter().chain(substituting_calls(None)) {
-        proves(&call, &[READ]);
+        proves(&call, &labels(&call));
     }
     for call in plain_calls(Some("null")).into_iter().chain(substituting_calls(Some("null"))) {
-        proves(&call, &[READ]);
+        proves(&call, &labels(&call));
     }
     for call in [
         "iconv_strlen('ab')",
@@ -129,6 +139,18 @@ fn an_omitted_or_null_encoding_is_the_proven_read() {
     }
 }
 
+/// `mb_convert_encoding` and `mb_scrub` add to the illegal-character counter, which the
+/// zero-argument `mb_check_encoding()` and `mb_get_info('illegal_chars')` read: the write is the
+/// cell's, whatever the encoding shows, and the zero-argument reader carries the read.
+#[test]
+fn the_illegal_character_counter_is_the_cells() {
+    proves("mb_check_encoding()", &[READ]);
+    proves("mb_scrub('a')", &[READ, WRITE]);
+    let s = summary("", "return mb_convert_encoding('a', 'UTF-16BE', 'UTF-8');");
+    assert_eq!(s.labels, [WRITE], "{s:?}");
+    assert!(s.gaps.contains(&DEPENDS), "{s:?}");
+}
+
 /// A literal encoding name reads nothing in the plain class; the substituting class leaves it
 /// undecided, because the substitution character is the cell's and an invalid subject reads it.
 #[test]
@@ -138,7 +160,14 @@ fn a_literal_name_reads_nothing_or_is_undecided_by_class() {
     }
     for call in substituting_calls(Some("'UTF-8'")) {
         let s = summary("", &format!("return {call};"));
-        assert!(s.labels.is_empty() && s.gaps.contains(&DEPENDS), "{call}: {s:?}");
+        let written: &[&str] =
+            if call.starts_with("mb_convert_encoding") || call.starts_with("mb_scrub") {
+                &[WRITE]
+            } else {
+                &[]
+            };
+        assert_eq!(s.labels, written, "{call}: {s:?}");
+        assert!(s.gaps.contains(&DEPENDS), "{call}: {s:?}");
     }
     for call in [
         "iconv_strlen('ab', 'UTF-8')",
@@ -152,6 +181,7 @@ fn a_literal_name_reads_nothing_or_is_undecided_by_class() {
         "html_entity_decode('&lt;', ENT_QUOTES, 'UTF-8')",
         "get_html_translation_table(HTML_ENTITIES, ENT_QUOTES, 'UTF-8')",
         "iconv_get_encoding('no_such_type')",
+        "iconv_strlen('ab', 'ISO-8859-1')",
     ] {
         proves(call, &[]);
     }
@@ -160,6 +190,12 @@ fn a_literal_name_reads_nothing_or_is_undecided_by_class() {
         "iconv_strlen('ab', '')",
         "iconv_strlen('ab', 'char')",
         "iconv_substr('ab', 0, 1, 'locale')",
+        "iconv_strlen('ab', 'ASCII//TRANSLIT')",
+        "iconv_substr('ab', 0, 1, 'UTF-8//IGNORE')",
+        "iconv_strpos('ab', 'b', 0, 'ascii//translit//ignore')",
+        "iconv_strrpos('ab', 'b', 'ASCII//TRANSLIT')",
+        "iconv_mime_decode('ab', 0, 'ASCII//TRANSLIT')",
+        "iconv_mime_decode_headers('ab', 0, 'ASCII//TRANSLIT')",
     ] {
         depends(call);
     }
@@ -233,7 +269,7 @@ fn an_encoding_further_along_is_read_at_its_position() {
     proves("mb_str_pad('ab', 4, ' ', STR_PAD_LEFT, null)", &[READ]);
     proves("mb_strwidth('ab', 'UTF-8')", &[]);
     // `mb_convert_encoding`'s encoding is the third (the source), not the second.
-    proves("mb_convert_encoding('ab', 'UTF-16BE')", &[READ]);
+    proves("mb_convert_encoding('ab', 'UTF-16BE')", &[READ, WRITE]);
     depends("mb_convert_encoding('ab', 'UTF-16BE', 'UTF-8')");
 }
 

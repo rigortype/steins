@@ -57,7 +57,7 @@ const ENCODING: (&str, &str) = ("global.read.setting.encoding", "global.write.se
 const INI: (&str, &str) = ("global.read.setting.ini", "global.write.setting.ini");
 
 /// Every option name the table owns, with the cell php-src shows it feeding.
-const NAMES: [(&str, (&str, &str)); 20] = [
+const NAMES: [(&str, (&str, &str)); 22] = [
     ("precision", PRECISION),
     ("serialize_precision", PRECISION),
     ("date.timezone", TIMEZONE),
@@ -67,6 +67,9 @@ const NAMES: [(&str, (&str, &str)); 20] = [
     ("input_encoding", ENCODING),
     ("output_encoding", ENCODING),
     ("mbstring.internal_encoding", ENCODING),
+    // Every `mb_ereg*` search reads the two limits and a result changes silently under them.
+    ("mbstring.regex_retry_limit", ENCODING),
+    ("mbstring.regex_stack_limit", ENCODING),
     ("iconv.internal_encoding", ENCODING),
     ("iconv.input_encoding", ENCODING),
     ("iconv.output_encoding", ENCODING),
@@ -185,7 +188,7 @@ fn a_name_the_call_does_not_spell_keeps_the_coarse_row() {
 fn an_unmapped_name_keeps_the_coarse_row() {
     for name in [
         "display_errors", "memory_limit", "max_execution_time", "pcre.backtrack_limit",
-        "mbstring.regex_retry_limit", "mbstring.encoding_translation", "intl.default_locale",
+        "mbstring.encoding_translation", "intl.default_locale",
         "date.default_latitude", "no.such.entry", "", "PRECISION", "Date.Timezone",
         "INCLUDE_PATH", " precision",
     ] {

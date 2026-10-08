@@ -31,7 +31,7 @@ pub enum SettingCell {
     /// The default character set the `mb_*`, `iconv_*` and HTML functions fall back to, and the
     /// mbstring state they read without being handed it: the mb-regex encoding, options and
     /// syntax, the substitution character, the detect order, the language and the HTTP output
-    /// encoding (ADR-0101 §3.13).
+    /// encoding and the count of illegal characters the converters have met (ADR-0101 §3.13).
     Encoding,
     /// The residue: an ini value no other cell owns, one name at a time (`bcmath.scale`,
     /// `include_path`, `error_reporting`).
@@ -110,13 +110,18 @@ impl SettingCell {
 /// encoding cell (ADR-0101 §3.13), so a write of any of the five is the cell's write.
 ///
 /// `mbstring.encoding_translation` and `mbstring.http_output_conv_mimetypes` feed an output
-/// handler, `mbstring.regex_stack_limit` and `mbstring.regex_retry_limit` bound a regex's
-/// backtracking and change a result only where it fails: none of them has a reader a row names,
-/// so they map to no cell and keep the coarse row. The locale and environment cells own no ini.
+/// handler and have no reader a row names: they map to no cell and keep the coarse row.
+/// `mbstring.regex_stack_limit` and `mbstring.regex_retry_limit` are read by every `mb_ereg*`
+/// search (`_php_mb_onig_search`) and change a result silently
+/// (`mb_ereg('(a+)+c|x', str_repeat('a', 18) . 'bx')` is `true`, and `false` after
+/// `ini_set('mbstring.regex_retry_limit', '1000')`), so they map to the cell, which holds the
+/// mb-regex state. The locale and environment cells own no ini.
 const INI_NAMES: &[(&str, SettingCell)] = &[
     ("precision", SettingCell::Precision),
     ("serialize_precision", SettingCell::Precision),
     ("date.timezone", SettingCell::Timezone),
+    ("mbstring.regex_retry_limit", SettingCell::Encoding),
+    ("mbstring.regex_stack_limit", SettingCell::Encoding),
     ("default_charset", SettingCell::Encoding),
     ("internal_encoding", SettingCell::Encoding),
     ("input_encoding", SettingCell::Encoding),
@@ -285,6 +290,8 @@ mod tests {
             ("input_encoding", Encoding),
             ("output_encoding", Encoding),
             ("mbstring.internal_encoding", Encoding),
+            ("mbstring.regex_retry_limit", Encoding),
+            ("mbstring.regex_stack_limit", Encoding),
             ("bcmath.scale", Ini),
             ("include_path", Ini),
             ("error_reporting", Ini),
@@ -293,7 +300,7 @@ mod tests {
         }
         for name in [
             "", "display_errors", "memory_limit", "max_execution_time", "pcre.backtrack_limit",
-            "mbstring.regex_retry_limit", "mbstring.encoding_translation", "mbstring.foo",
+            "mbstring.encoding_translation", "mbstring.foo",
             "date.default_latitude", "intl.default_locale", "setlocale", "locale",
             // The engine finds an entry by an exact, case-sensitive lookup.
             "PRECISION", "Precision", "Date.Timezone", "precision ", "precision\0",

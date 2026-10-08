@@ -15,7 +15,7 @@
 //! | HTML | `htmlspecialchars htmlentities` | no read | both return on an empty string before `determine_charset` |
 //! | HTML | `html_entity_decode` | no read | returns the string on one with no `&` before `determine_charset` |
 //! | HTML | `get_html_translation_table` | no read | |
-//! | iconv | `iconv_strlen iconv_substr iconv_strpos iconv_mime_decode iconv_mime_decode_headers` | no read, but `''`, `char` and `locale` are undecided | a `null` charset takes `get_internal_encoding()`; the C library takes the locale's own charset for an empty name |
+//! | iconv | `iconv_strlen iconv_substr iconv_strpos iconv_mime_decode iconv_mime_decode_headers` | no read, but `''`, `char`, `locale` and any name with a `//` suffix are undecided | a `null` charset takes `get_internal_encoding()`; the C library takes the locale's own charset for an empty name, and glibc's `//TRANSLIT` consults the locale (`iconv_mime_decode('=?UTF-8?B?w6nigqzjgYI=?=', 0, 'ASCII//TRANSLIT')` is `?EUR?` under `C` and `eEUR?` under `C.UTF-8`) |
 //! | iconv | `iconv_strrpos` | the same | and an empty needle returns `false` before the charset is looked at |
 //!
 //! The omitted or `null` argument is the proven read except where the class lists an early
@@ -213,7 +213,10 @@ impl Class {
             }
             Self::HtmlEncode | Self::HtmlTable | Self::HtmlDecode => Some(false),
             Self::Iconv | Self::IconvNeedle => {
+                // glibc reads the locale for a `//TRANSLIT` or `//IGNORE` suffix (the transliteration
+                // table is the locale's), so any `//` is undecided too.
                 let locale_charset = name.is_empty()
+                    || name.contains("//")
                     || name.eq_ignore_ascii_case("char")
                     || name.eq_ignore_ascii_case("locale");
                 (!locale_charset).then_some(false)
@@ -371,7 +374,9 @@ mod tests {
             "mb_eregi_replace", "mb_ereg_match", "mb_split",
         ]);
         for name in names {
-            assert_eq!(effect_labels(name), Some(&[READ][..]), "{name}");
+            let counts = matches!(name, "mb_convert_encoding" | "mb_scrub");
+            let row: &[&str] = if counts { &[READ, WRITE] } else { &[READ] };
+            assert_eq!(effect_labels(name), Some(row), "{name}");
             if let Some(gate) = setting_read_gate(name) {
                 assert_eq!(gate.cell(), SettingCell::Encoding, "{name}");
             }
@@ -477,8 +482,10 @@ mod tests {
             assert_eq!(at(Some(Omitted)), Some(true), "{name}");
             assert_eq!(at(Some(Null)), Some(true), "{name}");
             assert_eq!(at(Some(Str("UTF-8"))), Some(false), "{name}");
-            assert_eq!(at(Some(Str("ISO-8859-1//TRANSLIT"))), Some(false), "{name}");
-            for locale in ["", "char", "CHAR", "Locale"] {
+            assert_eq!(at(Some(Str("ISO-8859-1"))), Some(false), "{name}");
+            for locale in ["", "char", "CHAR", "Locale", "ASCII//TRANSLIT", "ascii//translit",
+                "UTF-8//IGNORE", "UTF-8//TRANSLIT//IGNORE", "//TRANSLIT"]
+            {
                 assert_eq!(at(Some(Str(locale))), None, "{name} {locale:?}");
             }
         }
@@ -488,6 +495,26 @@ mod tests {
         assert_eq!(at(None, Some(Omitted)), None);
         assert_eq!(at(None, Some(Str("UTF-8"))), Some(false));
         assert_eq!(at(Some(Str("b")), Some(Str(""))), None);
+        assert_eq!(at(Some(Str("b")), Some(Str("ASCII//TRANSLIT"))), None);
+    }
+
+    /// `mb_convert_encoding` and `mb_scrub` add to the illegal-character counter, which
+    /// `mb_get_info('illegal_chars')` and the zero-argument `mb_check_encoding()` read: they carry
+    /// the cell's write beside the read, whatever the encoding argument shows.
+    #[test]
+    fn the_converters_that_count_illegal_characters_write_the_cell() {
+        use GateArg::{Omitted, Str};
+        for name in ["mb_convert_encoding", "mb_scrub"] {
+            assert_eq!(effect_labels(name), Some(&[READ, WRITE][..]), "{name}");
+            for arg in [Omitted, Str("UTF-8")] {
+                assert!(writes(name, &[Some(arg)]), "{name}");
+            }
+        }
+        // `mb_chr` restores the counter, and the other substituting readers do not touch it.
+        for name in ["mb_chr", "mb_substr", "mb_strtoupper", "mb_convert_kana", "mb_strlen"] {
+            assert_eq!(effect_labels(name), Some(&[READ][..]), "{name}");
+        }
+        assert_eq!(reads("mb_check_encoding", &[Some(Omitted)]), Some(true));
     }
 
     /// An accessor reads with no argument or `null` and writes with anything else; the argument

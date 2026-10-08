@@ -320,9 +320,9 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
         // encoding and options, which the cell holds, and read it on every call.
         "mb_check_encoding" | "mb_chr" | "mb_ord" | "mb_strcut" | "mb_stripos" | "mb_strlen"
         | "mb_strpos" | "mb_strripos" | "mb_strrpos" | "mb_strwidth" | "mb_substr_count"
-        | "mb_convert_case" | "mb_convert_encoding" | "mb_convert_kana"
+        | "mb_convert_case" | "mb_convert_kana"
         | "mb_decode_numericentity" | "mb_encode_numericentity" | "mb_lcfirst" | "mb_ltrim"
-        | "mb_rtrim" | "mb_scrub" | "mb_str_pad" | "mb_str_split" | "mb_strimwidth"
+        | "mb_rtrim" | "mb_str_pad" | "mb_str_split" | "mb_strimwidth"
         | "mb_stristr" | "mb_strrchr" | "mb_strrichr" | "mb_strstr" | "mb_strtolower"
         | "mb_strtoupper" | "mb_substr" | "mb_trim" | "mb_ucfirst" | "htmlspecialchars"
         | "htmlentities" | "html_entity_decode" | "get_html_translation_table"
@@ -330,6 +330,10 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
         | "iconv_mime_decode" | "iconv_mime_decode_headers" | "iconv_get_encoding"
         | "mb_ereg" | "mb_eregi" | "mb_ereg_replace" | "mb_eregi_replace" | "mb_ereg_match"
         | "mb_split" => Some(ENCODING_READ),
+        // `php_mb_convert_encoding_ex` adds to `MBSTRG(illegalchars)`, the counter
+        // `mb_get_info('illegal_chars')` and the zero-argument `mb_check_encoding()` read.
+        // `mb_chr` restores it and the other readers never reach the function.
+        "mb_convert_encoding" | "mb_scrub" => Some(ENCODING_READ_WRITE),
         // The accessors return the current value with no argument and set it with one, and
         // `mb_regex_set_options` returns the previous options whatever it is given.
         "mb_internal_encoding" | "mb_regex_encoding" | "mb_http_output" | "mb_detect_order"
