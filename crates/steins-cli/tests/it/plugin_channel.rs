@@ -285,7 +285,7 @@ fn an_unsupported_api_version_skips_the_plugin_and_says_so() {
 }
 
 /// A plugin's coloring of a builtin the catalog knows but has no effect row for
-/// (`mb_strlen`: mined signature, no colour) enters the declared lane, and the gap
+/// (`mb_detect_encoding`: mined signature, no colour) enters the declared lane, and the gap
 /// stays and names itself (ADR-0068, ADR-0099 §3.2). A name the catalog colours
 /// answers from its row, and the plugin is not asked.
 #[test]
@@ -294,13 +294,13 @@ fn a_plugin_coloring_of_a_known_builtin_without_a_row_is_declared_and_the_gap_st
     p.manifest(
         r#"{ "steins-plugin-api": 1,
              "labels": ["acme.cache"],
-             "effects": { "mb_strlen": ["acme.cache"], "strlen": ["acme.cache"] } }"#,
+             "effects": { "mb_detect_encoding": ["acme.cache"], "strlen": ["acme.cache"] } }"#,
     );
     p.write(
         "src/known.php",
         concat!(
             "<?php\n\ndeclare(strict_types=1);\n\n",
-            "function width(string $s): int\n{\n    return mb_strlen($s);\n}\n\n",
+            "function width(string $s): string|false\n{\n    return mb_detect_encoding($s);\n}\n\n",
             "function size(string $s): int\n{\n    return strlen($s);\n}\n"
         ),
     );

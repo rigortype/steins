@@ -326,6 +326,13 @@ mod tests {
         for (name, _) in EXCLUDED {
             assert!(gate_of(name).is_none(), "{name}");
         }
+        // None of them is on the fold allowlist, so the fold seam has nothing to refuse.
+        for name in PLAIN.iter().chain(SUBSTITUTING).chain(ICONV).chain(ACCESSORS) {
+            assert!(!crate::foldable(name), "{name}");
+        }
+        for name in ["htmlspecialchars", "htmlentities", "html_entity_decode", "iconv_strrpos"] {
+            assert!(!crate::foldable(name), "{name}");
+        }
     }
 
     /// A gated reader's `$encoding` position is the generated table's, and the guarded classes
