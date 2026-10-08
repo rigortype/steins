@@ -2,3 +2,4 @@
 
 mod locale_oracle;
 mod locale_readers_oracle;
+mod setting_env_oracle;

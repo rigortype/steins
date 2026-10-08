@@ -667,4 +667,14 @@ mod tests {
         keys.dedup();
         assert_eq!(keys.len(), n, "two literals share a key: {keys:?}");
     }
+
+    /// ADR-0101 S6c: `getenv` reads the environment block, a setting read, and `putenv` writes
+    /// it. Neither is on [`ALLOWED`], so no result of either is remembered: v1 remembers no
+    /// setting read (ADR-0102 §7), and the env cell does not lift that posture. The allowlist is
+    /// by name, so this pins the absence rather than a row.
+    #[test]
+    fn getenv_and_putenv_stay_off_the_allowlist() {
+        assert!(allowed_row("getenv").is_none(), "a setting read is never remembered");
+        assert!(allowed_row("putenv").is_none(), "a setting write is never remembered");
+    }
 }

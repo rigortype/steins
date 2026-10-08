@@ -15,6 +15,8 @@ const DEPENDS: &str = "value-dependent-read";
 const COARSE_READ: &str = "global.read";
 const COARSE_WRITE: &str = "global.write";
 const LOCALE_READ: &str = "global.read.setting.locale";
+const ENV_READ: &str = "global.read.setting.env";
+const ENV_WRITE: &str = "global.write.setting.env";
 
 fn summary(src: &str) -> EffectSummary {
     let tree = SourceTree::parse(src);
@@ -268,6 +270,22 @@ fn an_envelope_admits_the_cell_it_names_and_the_parents() {
 /// What must not move: the locale rows of S1 to S5 read as they did, beside the new cells. The
 /// suites of those slices (`locale_cell`, `locale_readers`, `printf_call_site`, `preg_locale`)
 /// pin the rest.
+/// ADR-0101 S6c: `getenv` reads the environment block at every arity and `putenv` writes it. The
+/// row is argument-blind, so the count and the name do not narrow it, and a `$_ENV` access is no
+/// call: it keeps the coarse superglobal label and never reaches the env cell.
+#[test]
+fn the_environment_block_is_what_getenv_reads_and_putenv_writes() {
+    for call in ["getenv('A')", "getenv()", "getenv('A', true)", "getenv($n)", "getenv(null)"] {
+        labels("string $n", call, &[ENV_READ]);
+    }
+    labels("", "putenv('A=b')", &[ENV_WRITE]);
+    labels("string $n", "putenv($n)", &[ENV_WRITE]);
+    labels("", "putenv('A')", &[ENV_WRITE]);
+    // `$_ENV` is a startup copy; a read of it is no setting read.
+    let s = row("", "return $_ENV['A'];");
+    assert!(!s.labels.iter().any(|l| l.contains("setting.env")), "{s:?}");
+}
+
 #[test]
 fn the_locale_verdicts_of_s1_to_s5_are_unchanged() {
     let write = "global.write.setting.locale";
@@ -294,9 +312,7 @@ fn the_locale_verdicts_of_s1_to_s5_are_unchanged() {
     let s = row("string $p, string $s", "return preg_match($p, $s);");
     assert!(s.labels.is_empty() && s.gaps.contains(&"value-dependent-read"), "{s:?}");
     // The other global writers and readers keep their coarse rows.
-    labels("", "putenv('A=b')", &[COARSE_WRITE]);
     labels("", "date_default_timezone_set('UTC')", &[COARSE_WRITE]);
-    labels("", "getenv('A')", &[COARSE_READ]);
     labels("", "date_default_timezone_get()", &[COARSE_READ]);
     labels("", "mb_regex_encoding('UTF-8')", &[COARSE_WRITE]);
 }
