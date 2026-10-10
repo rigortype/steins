@@ -57,6 +57,8 @@ fn a_pure_statement_keeps_the_env() {
         "isset($i, $c);",
         "empty($c);",
         "[1, 2.5, 'x', null, true];",
+        "99999999999999999999;",
+        "[9223372036854775807 => 1];",
         "['a' => 1, 'b' => [2, 3]];",
         "[0 => 'a', 1 => 'b'];",
         "__LINE__;",
@@ -146,6 +148,9 @@ fn a_statement_that_runs_code_or_writes_stays_a_barrier() {
         "['a' => 1, 'a' => 2];",
         "[1, 0 => 2];",
         "[0 => 1, '0' => 2];",
+        // A key past i64 is a float key: an implicit-conversion deprecation.
+        "[99999999999999999999 => 1];",
+        "[9223372036854775808 => 1];",
         // An undefined variable read inside a larger expression warns.
         "$zz ? 1 : 2;",
         "$zz && 1;",
@@ -173,7 +178,14 @@ fn a_statement_that_runs_code_or_writes_stays_a_barrier() {
 fn a_handler_that_rebinds_a_local_is_not_outrun_by_a_diagnostic_statement() {
     // `~1.5;` raises a deprecation, the handler writes `$x`, and PHP prints `ok`. The
     // argument check must not run on the stale `'a'`.
-    for stmt in ["~1.5;", "['a' => 1]['b'];", "$zz ? 1 : 2;", "-$zz;"] {
+    for stmt in [
+        "~1.5;",
+        "['a' => 1]['b'];",
+        "$zz ? 1 : 2;",
+        "-$zz;",
+        "[99999999999999999999 => 1];",
+        "[9223372036854775808 => 1];",
+    ] {
         let src = format!(
             "<?php
 declare(strict_types=1);
