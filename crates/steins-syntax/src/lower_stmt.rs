@@ -31,6 +31,7 @@ use crate::lower_globals::{
 };
 use crate::lower_guards::guard_regions_of;
 use crate::lower_presence::subtree_has_goto;
+use crate::lower_pure::is_pure_expr;
 use crate::lower_jump::{arm_landing, body_has_jump, ends_own_switch, jump_level};
 use crate::lower_try::{lower_try, try_end};
 use crate::memo::{self, TryScan};
@@ -1826,6 +1827,10 @@ pub(crate) fn lower_expr_stmt(expr: &Expression<'_>) -> Stmt {
         Expression::Construct(Construct::Exit(_) | Construct::Die(_)) => {
             Stmt::lowered(StmtKind::Exit { span: to_span(expr.span()) }, Vec::new())
         }
+        // A pure expression writes nothing (`1;`, `$i;`, a literal match arm): the
+        // empty `Echo` is the no-op entry, which keeps its `guards` and `runs` and
+        // leaves the env alone. The table is on [`crate::lower_pure`] (issue #946).
+        _ if is_pure_expr(expr) => Stmt::lowered(StmtKind::Echo(Vec::new()), Vec::new()),
         _ => Stmt::lowered(StmtKind::Barrier, Vec::new()),
     }
 }
