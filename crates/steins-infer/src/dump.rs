@@ -17,7 +17,7 @@ use crate::{
     DEBUG_PHPDOC_TYPE_ID, DEBUG_TRACE_ID, DEBUG_TYPE_ID, DEBUG_VAR_DUMP_ID, DUMP_PHPDOC_TYPE_FQN,
     DUMP_TYPE_FQN,
 };
-use crate::assert_harness::{ASSERT_SINK, AssertObservation};
+use crate::assert_harness::{ASSERT_SINK, AssertObservation, observers_muted};
 use crate::assign::eval_coalesce_fact;
 use crate::builtin_returns::{BuiltinRung, OptionalRungs, builtin_call_rung, builtin_return_floor};
 use crate::cond::{eval_ternary_fact_strat, total_op_fact};
@@ -1357,7 +1357,7 @@ pub(crate) fn emit_asserts(
     store: &Store,
 ) {
     // Fast path: no sink ⇒ not the harness ⇒ assertType is an ordinary call.
-    if ASSERT_SINK.with(|s| s.borrow().is_none()) {
+    if ASSERT_SINK.with(|s| s.borrow().is_none()) || observers_muted() {
         return;
     }
     let cx = w.cx;

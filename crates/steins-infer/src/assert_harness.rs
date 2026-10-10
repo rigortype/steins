@@ -166,11 +166,48 @@ pub fn probe_subjects(
     SUBJECT_PROBE.with(|s| s.borrow_mut().take().map(|st| st.answers).unwrap_or_default())
 }
 
+thread_local! {
+    /// Set while a walk runs for its env alone ([`MuteObservers`]): the walk that
+    /// carries a `finally` from the normal exits of its `try` to the successor
+    /// (`try_catch::walk_for_env`). Its envs hold on some of the paths into the
+    /// code it walks, not all of them, so neither harness records what it reads
+    /// there; the walk over every path already answered for the same sites.
+    static MUTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Mutes both harness observers ([`SUBJECT_PROBE`] and [`ASSERT_SINK`]) until
+/// dropped, and restores the previous state then, so a muted walk nested in
+/// another stays muted and a panic unwinding through one cannot leave the thread
+/// muted for the next scope.
+pub(crate) struct MuteObservers {
+    was: bool,
+}
+
+impl MuteObservers {
+    pub(crate) fn new() -> Self {
+        Self { was: MUTED.with(|m| m.replace(true)) }
+    }
+}
+
+impl Drop for MuteObservers {
+    fn drop(&mut self) {
+        MUTED.with(|m| m.set(self.was));
+    }
+}
+
+/// Whether a [`MuteObservers`] is live on this thread.
+pub(crate) fn observers_muted() -> bool {
+    MUTED.with(std::cell::Cell::get)
+}
+
 /// Answer any installed [`SUBJECT_PROBE`] request keyed at this statement, from
 /// the walk's **entry** env. A no-op with no probe installed (every normal
 /// check), and never run under a binding descent — the plain per-scope pass is
 /// the one universal reading, exactly as the dump and trace observers are gated.
 pub(crate) fn record_subject_probe(cx: &Cx<'_>, stmt: &Stmt, env: &HashMap<String, Known>) {
+    if observers_muted() {
+        return;
+    }
     SUBJECT_PROBE.with(|slot| {
         let mut slot = slot.borrow_mut();
         let Some(state) = slot.as_mut() else { return };
