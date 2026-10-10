@@ -32,6 +32,8 @@ fn every_spelling_that_folds_to_null_is_a_null_default() {
         "[null][0]",
         "[1, null][1]",
         "\\true ? null : 0",
+        "true ? null : N",
+        "false ? N : null",
     ] {
         assert!(has_null_default(default), "{default}");
     }
@@ -52,6 +54,14 @@ fn a_default_that_does_not_fold_to_null_is_not() {
         "N ?? null",
         "N ? null : 0",
         "\\strlen('')",
+        "[N, null][1]",
+        "[null, N][0]",
+        "[N] ? null : 1",
+        "[null, N] ? null : 1",
+        "[null, \\strlen('')][0]",
+        "null ?? N",
+        "N ?? null",
+        "N ? 1 : null",
     ] {
         assert!(!has_null_default(default), "{default}");
     }

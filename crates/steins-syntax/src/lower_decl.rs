@@ -725,10 +725,25 @@ impl Fold {
 }
 
 /// Fold a parameter default far enough to tell whether PHP evaluates it to `null` at compile
-/// time, which makes the parameter implicitly nullable (issue #1023): the keyword in any case
-/// and with or without a leading `\`, and the compound forms over literals (`null ?? null`,
-/// `true ? null : 0`, `[null][0]`). A user constant (`= N` with `const N = null`) is not folded
-/// at compile time, so it is [`Fold::Unknown`] and the parameter is not nullable.
+/// time, which makes the parameter implicitly nullable (issue #1023).
+///
+/// The rule: a default folds to a value only if PHP's compile-time constant evaluation accepts
+/// every sub-expression it actually evaluates; one [`Fold::Unknown`] there makes the whole
+/// default Unknown. A sub-expression that is dropped before evaluation is not looked at. A user
+/// constant (`= N` with `const N = null`) is never substituted at compile time, so it is Unknown.
+/// Each rule is witnessed on PHP 8.5.9 in a namespace with `const N = null`.
+///
+/// | form | rule |
+/// |---|---|
+/// | `null`, `\null` (any case) | Null |
+/// | `true`/`false`, `\true`/`\false`, int, float, string literal | Scalar, with its truthiness |
+/// | any other constant, call, variable, ... | Unknown |
+/// | `(e)` | as `e` |
+/// | `l ?? r` | `l` Unknown: Unknown; `l` Null: `r` (`null ?? N` is a `TypeError`); else `l` (`1 ?? N` is `1`, `r` is dropped) |
+/// | `c ?: r` | `c` Unknown: Unknown; `c` truthy: `c` (`1 ?: N` is `1`); else `r` |
+/// | `c ? t : e` | `c` Unknown: Unknown; else only the taken branch counts (`true ? null : N` is `null`, `N ? 1 : null` is a `TypeError`) |
+/// | `[a, b, ...]` | a list; Unknown if **any** element is Unknown, taken or not (`[N, null][1]`, `[N] ? null : 1`), or if keyed, spread or with a hole |
+/// | `list[i]` | `list` a list and `i` an int literal in range: that element; else Unknown |
 fn fold_default(e: &Expression<'_>) -> Fold {
     match e.unparenthesized() {
         Expression::Literal(Literal::Null(_)) => Fold::Null,
@@ -780,7 +795,10 @@ fn fold_list<'a>(elements: impl Iterator<Item = &'a ArrayElement<'a>>) -> Fold {
     let mut items = Vec::new();
     for el in elements {
         match el {
-            ArrayElement::Value(v) => items.push(fold_default(v.value)),
+            ArrayElement::Value(v) => match fold_default(v.value) {
+                Fold::Unknown => return Fold::Unknown,
+                item => items.push(item),
+            },
             _ => return Fold::Unknown,
         }
     }

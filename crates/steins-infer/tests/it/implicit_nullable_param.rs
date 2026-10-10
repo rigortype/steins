@@ -189,3 +189,15 @@ fn a_default_that_does_not_fold_to_null_stays_non_nullable() {
         assert_eq!(mismatches(&src).len(), 1, "{default}");
     }
 }
+
+#[test]
+fn an_array_default_holding_a_user_constant_is_not_folded_so_null_still_convicts() {
+    // PHP folds an array only when every element is a compile-time constant, so these are not
+    // nullable: `a(null)` is a `TypeError` (witnessed on PHP 8.5.9), and so is the omitted call.
+    for default in ["[N, null][1]", "[null, N][0]", "[N] ? null : 1", "[null, N] ? null : 1"] {
+        let src = format!(
+            "<?php\ndeclare(strict_types=1);\nnamespace A;\nconst N = null;\nfunction a(int $x = {default}): void {{}}\na(null);\n"
+        );
+        assert_eq!(mismatches(&src).len(), 1, "{default}");
+    }
+}
