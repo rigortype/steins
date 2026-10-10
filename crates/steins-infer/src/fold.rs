@@ -1350,7 +1350,18 @@ fn fold_shape_refusal(name: &str, args: &[FoldArg]) -> Option<FoldShapeRefusal> 
 /// proof that PCRE2 refuses the pattern, and an invalid one that no longer folds only widens to
 /// the declared type. A pattern that is no string folds as before (the engine throws), and
 /// `preg_quote` compiles nothing and keeps folding.
+///
+/// A float renderer (`strval`, `implode`, `json_encode` and the rest of
+/// [`steins_catalog::precision_gate`], ADR-0101 §3.15) whose literal arguments hold a float at the
+/// depth it renders them does not fold either: the runner renders under the default `precision`
+/// and `serialize_precision`, which the project never promised, so `strval(1.5)` is left to the
+/// row (`global.read.setting.precision`). A value that holds none folds as before, and so does a
+/// non-finite float, which is written without either entry. `json_encode` with
+/// `JSON_NUMERIC_CHECK` does not fold at all, since the flag turns a numeric string into a float.
 fn fold_reads_ambient_setting(name: &str, args: &[FoldArg]) -> bool {
+    if let Some(gate) = steins_catalog::precision_gate(name) {
+        return fold_renders_float(gate, args);
+    }
     if steins_catalog::preg::compiles_pattern_argument(name) {
         return match args.first() {
             Some(FoldArg::Str(pattern)) => {
@@ -1364,6 +1375,34 @@ fn fold_reads_ambient_setting(name: &str, args: &[FoldArg]) -> bool {
         Some(FoldArg::Str(format)) => steins_catalog::format_reads_locale(format),
         _ => true,
     }
+}
+
+/// Whether a call to a float renderer folds a float into its text ([`fold_reads_ambient_setting`]).
+fn fold_renders_float(gate: steins_catalog::PrecisionGate, args: &[FoldArg]) -> bool {
+    /// `JSON_NUMERIC_CHECK`.
+    const NUMERIC_CHECK: i64 = 32;
+    /// Whether `arg`, rendered at `depth`, writes a finite float.
+    fn holds_float(arg: &FoldArg, depth: steins_catalog::RenderDepth) -> bool {
+        use steins_catalog::RenderDepth::{Elements, Nested, Value};
+        match (arg, depth) {
+            (FoldArg::Float(f), _) => f.is_finite(),
+            (FoldArg::Array(entries), Elements) => {
+                entries.iter().any(|(_, entry)| holds_float(entry, Value))
+            }
+            (FoldArg::Array(entries), Nested) => {
+                entries.iter().any(|(_, entry)| holds_float(entry, Nested))
+            }
+            _ => false,
+        }
+    }
+    if matches!(args.get(1), Some(FoldArg::Int(flags)) if flags & NUMERIC_CHECK != 0)
+        && steins_catalog::precision_gate("json_encode") == Some(gate)
+    {
+        return true;
+    }
+    gate.values(args.len())
+        .into_iter()
+        .any(|(position, depth)| args.get(position).is_some_and(|arg| holds_float(arg, depth)))
 }
 
 /// Which fold lane an engine of this integer width gets — the width half of
@@ -1783,5 +1822,59 @@ mod ambient_gate_tests {
         assert!(!asked("sprintf", &["%g", "1.5"]));
         assert!(!asked("sprintf", &["%f"]));
         assert!(asked("strtoupper", &["%f"]));
+    }
+
+    fn list(entries: Vec<FoldArg>) -> FoldArg {
+        FoldArg::Array(entries.into_iter().map(|entry| (None, entry)).collect())
+    }
+
+    /// A float renderer does not fold a float the renderer writes: `strval(1.5)` and
+    /// `json_encode([1.5])` are left to the row, and a value free of floats folds as before
+    /// (ADR-0101 §3.15). `implode` renders one level and the walkers every level, so a float
+    /// inside a nested array is a read for `json_encode` and none for `implode`.
+    #[test]
+    fn a_renderer_does_not_fold_a_float_it_writes() {
+        let float = || FoldArg::Float(1.5);
+        assert!(fold_reads_ambient_setting("strval", &[float()]));
+        assert!(fold_reads_ambient_setting("json_encode", &[float()]));
+        assert!(fold_reads_ambient_setting("json_encode", &[list(vec![list(vec![float()])])]));
+        let mixed = list(vec![FoldArg::Int(1), float()]);
+        assert!(fold_reads_ambient_setting("implode", &[s(","), mixed]));
+        assert!(fold_reads_ambient_setting("join", &[list(vec![float()])]));
+        assert!(fold_reads_ambient_setting("implode", &[float(), list(vec![s("a")])]));
+        assert!(!fold_reads_ambient_setting("implode", &[s(","), list(vec![list(vec![float()])])]));
+        assert!(!fold_reads_ambient_setting("strval", &[list(vec![float()])]));
+        for name in ["strval", "json_encode", "implode"] {
+            let ints = [s("a"), list(vec![FoldArg::Int(1)])];
+            assert!(!fold_reads_ambient_setting(name, &ints), "{name}");
+        }
+        assert!(!fold_reads_ambient_setting("json_encode", &[list(vec![s("a"), FoldArg::Int(1)])]));
+        assert!(!fold_reads_ambient_setting("strval", &[FoldArg::Float(f64::NAN)]));
+        assert!(!fold_reads_ambient_setting("strval", &[FoldArg::Float(f64::INFINITY)]));
+        assert!(!fold_reads_ambient_setting("round", &[float()]));
+        assert!(!fold_reads_ambient_setting("floatval", &[float()]));
+    }
+
+    /// `JSON_NUMERIC_CHECK` turns a numeric string into a float, so the call is left to the row.
+    #[test]
+    fn json_encode_with_the_numeric_check_does_not_fold() {
+        let numeric = [list(vec![s("1.5")]), FoldArg::Int(32)];
+        assert!(fold_reads_ambient_setting("json_encode", &numeric));
+        let pretty = [list(vec![s("1.5")]), FoldArg::Int(128)];
+        assert!(!fold_reads_ambient_setting("json_encode", &pretty));
+    }
+
+    /// Through the seam: the engine is not asked for `strval(1.5)` and is asked for `strval(1)`.
+    #[test]
+    fn the_engine_is_asked_for_a_renderer_only_when_it_writes_no_float() {
+        let asked_with = |name: &str, args: &[ArgValue]| {
+            let mut folder = EngineFolder::with_engine(Counting::default());
+            folder.fold(name, args, true);
+            !folder.engine.folds.is_empty()
+        };
+        assert!(!asked_with("strval", &[ArgValue::Float(1.5)]));
+        assert!(asked_with("strval", &[ArgValue::Int(1)]));
+        assert!(asked_with("strval", &[ArgValue::Str("1.5".into())]));
+        assert!(asked_with("floatval", &[ArgValue::Float(1.5)]));
     }
 }

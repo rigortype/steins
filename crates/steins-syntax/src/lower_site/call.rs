@@ -11,7 +11,7 @@ use super::{SiteScope, coerce};
 use crate::ast::{ArgShape, DynamicSite, SiteKind, SiteOrigin, Span};
 use crate::lower_arg_shape::{
     arg_shapes_of, float_evidence_of_args, method_call_shapes, not_text_of_args,
-    null_evidence_of_args,
+    null_evidence_of_args, rendered_evidence_of_args,
 };
 use crate::lower_effect::{
     AnonymousConstructor, anonymous_class_constructor, arg_targets_of_call, const_args_of_call,
@@ -34,6 +34,21 @@ const TIME_FAMILY: [&str; 9] = [
     "localtime",
     "strftime",
     "gmstrftime",
+];
+
+/// The functions that render a value through the `precision` or `serialize_precision` ini
+/// (ADR-0101 §3.15): the catalog's `precision_gate` names the same set.
+const PRECISION_RENDERERS: [&str; 10] = [
+    "strval",
+    "implode",
+    "join",
+    "print_r",
+    "var_export",
+    "json_encode",
+    "serialize",
+    "var_dump",
+    "debug_zval_dump",
+    "settype",
 ];
 
 /// A `f(...)` call: a plain call, a higher-order call, a call of a body-local
@@ -76,6 +91,9 @@ pub(super) fn function_call(fc: &FunctionCall<'_>, sx: &SiteScope<'_>, out: &mut
         }
         if printf || ini_value {
             site.const_args.float_evidence = float_evidence_of_args(&fc.argument_list, cx);
+        }
+        if PRECISION_RENDERERS.contains(&simple.as_str()) {
+            site.const_args.rendered = rendered_evidence_of_args(&fc.argument_list, cx);
         }
         if ctype {
             // A predicate's text is at position 0: an integer there is a character code.

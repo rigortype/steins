@@ -178,17 +178,19 @@ fn a_caller_inherits_the_read_through_its_callee() {
     assert!(s.exhaustive, "{s:?}");
 }
 
-/// A body with no printf-family call carries no setting label: `(string) $f`,
-/// `strval`, `json_encode` and `round` of a float carry none, and a literal that
-/// merely contains a percent sign calls nothing. (The string cast and `strval`
-/// do read the `precision` ini, which is its own cell under D4 whose label only a
-/// printf `%s` colours so far (float-to-string operator sites wait for ADR-0008's
-/// opt-in), so "no label" is the claim and not "reads no setting".)
+/// A body with no printf-family call carries no locale label: `(string) $f`, `strval`,
+/// `json_encode` and `round` of a float carry none, and a literal that merely contains a percent
+/// sign calls nothing. (`strval` and `json_encode` of a float read the precision cell since
+/// ADR-0101 §3.15, and the string cast is an operator site, unlabelled under D4, so "no locale
+/// label" is the claim and not "reads no setting".)
 #[test]
 fn a_body_with_no_printf_family_call_keeps_no_read() {
+    let precision = "global.read.setting.precision";
     for call in ["(string) $f", "strval($f)", "json_encode($f)", "round($f, 2)", "'%f'"] {
         let s = summary(&body("float $f", &format!("return {call};")), "f");
-        assert!(!s.labels.iter().any(|l| l.starts_with("global.")), "{call}: {s:?}");
+        let others = s.labels.iter().any(|l| l.starts_with("global.") && *l != precision);
+        assert!(!others, "{call}: {s:?}");
+        assert!(!s.labels.contains(&READ.to_owned()), "{call}: {s:?}");
     }
 }
 

@@ -23,7 +23,8 @@
 //! project declares shadows the global one, and a twin the scan cannot read is the gap.
 
 use steins_catalog::{
-    GateArg, IniAccess, SettingCell, SettingReadGate, clock_gate, ini_call, setting_read_gate,
+    GateArg, IniAccess, PrecisionGate, Rendered, SettingCell, SettingReadGate, clock_gate,
+    ini_call, precision_gate, setting_read_gate,
 };
 use steins_domain::{Fact, Val};
 use steins_syntax::{ArgLiteral, CallTarget, ConstArgs, ConstInt, NameRef, NotText, RefKind};
@@ -59,6 +60,66 @@ pub(super) fn narrow_labels(
         }
         None => unreadable_mode(builtin, labels),
     }
+}
+
+/// The `precision` read of a float renderer (ADR-0101 §3.15, S6a): `strval`, `settype`, `implode`,
+/// `print_r`, `var_export`, `json_encode`, `serialize`, `var_dump` and `debug_zval_dump` render a
+/// float through `precision` or `serialize_precision` (one cell) and read nothing of a value that
+/// holds none, so the catalog's row is the upper bound and the call decides it by the three-way
+/// rule of §3.2: a value shown to be a float, or to hold one at the depth the function walks, is
+/// the proven read; every value shown to hold none drops it; any other, a named or spread argument
+/// list included, is [`GapKind::ValueDependentRead`] and no label. A name with no
+/// [`precision_gate`] decides nothing.
+pub(super) fn narrow_precision(
+    (cx, frame): (&Cx, &Frame),
+    (name, builtin): (&NameRef, &str),
+    (positional, consts): (Option<usize>, &ConstArgs),
+    labels: &mut Vec<&'static str>,
+) -> Option<GapKind> {
+    let gate = precision_gate(builtin)?;
+    let verdict =
+        positional.and_then(|arity| precision_read(gate, (cx, frame), name, (arity, consts)));
+    if verdict == Some(true) {
+        return None;
+    }
+    let read = SettingCell::Precision.read_label();
+    labels.retain(|label| *label != read);
+    verdict.is_none().then_some(GapKind::ValueDependentRead)
+}
+
+/// [`PrecisionGate::reads`] over what the call shows of its rendered values and its extra
+/// arguments.
+fn precision_read(
+    gate: PrecisionGate,
+    (cx, frame): (&Cx, &Frame),
+    name: &NameRef,
+    (arity, consts): (usize, &ConstArgs),
+) -> Option<bool> {
+    let values: Vec<Option<Rendered>> = gate
+        .values(arity)
+        .into_iter()
+        .map(|(position, depth)| {
+            let at = u8::try_from(position).ok()?;
+            let (_, evidence) = consts.rendered.iter().find(|(p, _)| *p == at)?;
+            match frame.float_class_at(cx, evidence, depth) {
+                FloatClass::Yes => Some(Rendered::Float),
+                FloatClass::No => Some(Rendered::NoFloat),
+                FloatClass::Unknown => None,
+            }
+        })
+        .collect();
+    let extras: Vec<Option<GateArg<'_>>> = gate
+        .extras()
+        .iter()
+        .map(|&position| {
+            if position >= arity {
+                Some(GateArg::Omitted)
+            } else {
+                argument((cx, frame), name, consts, position)
+            }
+        })
+        .collect();
+    gate.reads(&values, &extras)
 }
 
 /// The clock half of a time-family call (ADR-0101 §3.14): `nondet.time` is dropped where the
@@ -117,7 +178,11 @@ const CLOCK_LABEL: &str = "nondet.time";
 /// its choosing, or called with arguments the scan cannot read: the read depends on them, so it
 /// is no label and the call is [`GapKind::ValueDependentRead`]. `None` for a name with no gate.
 pub(super) fn unreadable_mode(name: &str, labels: &mut Vec<&'static str>) -> Option<GapKind> {
-    let read = setting_read_gate(name)?.cell().read_label();
+    let read = match setting_read_gate(name) {
+        Some(gate) => gate.cell().read_label(),
+        // A float renderer handed over as a callback renders the values its invoker chooses.
+        None => precision_gate(name).map(|_| SettingCell::Precision.read_label())?,
+    };
     labels.retain(|label| *label != read);
     Some(GapKind::ValueDependentRead)
 }

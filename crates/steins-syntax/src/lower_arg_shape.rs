@@ -361,6 +361,91 @@ pub(crate) fn null_evidence_of_args(
     out
 }
 
+/// [`ConstArgs::rendered`] of a call to a function that renders its arguments through the
+/// `precision` ini: the [`rendered_evidence`] of every positional argument, in position order.
+/// Empty for a named or spread argument list, whose positions cannot be read.
+///
+/// [`ConstArgs::rendered`]: crate::ast::ConstArgs::rendered
+pub(crate) fn rendered_evidence_of_args(
+    list: &ArgumentList<'_>,
+    cx: &EffectScanCx,
+) -> Vec<(u8, FloatEvidence)> {
+    let mut out = Vec::new();
+    for (position, arg) in list.arguments.iter().enumerate() {
+        let Argument::Positional(p) = arg else { return Vec::new() };
+        if p.ellipsis.is_some() {
+            return Vec::new();
+        }
+        let Ok(position) = u8::try_from(position) else { break };
+        out.extend(rendered_evidence(p.value, cx).map(|evidence| (position, evidence)));
+    }
+    out
+}
+
+/// What the scan shows of whether `expr` is a float **or holds one** ([`FloatEvidence`] read at
+/// the depth a renderer walks): [`float_evidence`] for a scalar form, and for an array literal
+/// the evidence of its elements ([`FloatEvidence::Members`]), since the `NoFloat` of
+/// [`float_evidence`] says the array is no float and nothing of what it holds. A conditional and
+/// a `??` are one of their branches, `@` is its operand, and `(array)` of a float is an array
+/// holding it (a literal array stays itself, and the cast of anything else shows nothing). An
+/// array with a spread element, or a form that is none of these and that [`float_evidence`]
+/// cannot name, shows nothing.
+///
+/// A variable is read as [`float_evidence`] reads it. That evidence says a write of the frame
+/// leaves no float in the variable, and an array literal written to it is such a write, so the
+/// engine reads a variable's evidence for what it holds only while the frame never writes it.
+fn rendered_evidence(expr: &Expression<'_>, cx: &EffectScanCx) -> Option<FloatEvidence> {
+    let e = expr.unparenthesized();
+    match e {
+        Expression::Array(a) => members_evidence(a.elements.iter(), cx),
+        Expression::LegacyArray(a) => members_evidence(a.elements.iter(), cx),
+        Expression::Conditional(c) => Some(FloatEvidence::OneOf(vec![
+            rendered_evidence(c.then.unwrap_or(c.condition), cx)?,
+            rendered_evidence(c.r#else, cx)?,
+        ])),
+        Expression::Binary(b) if matches!(b.operator, BinaryOperator::NullCoalesce(_)) => {
+            Some(FloatEvidence::OneOf(vec![
+                rendered_evidence(b.lhs, cx)?,
+                rendered_evidence(b.rhs, cx)?,
+            ]))
+        }
+        Expression::UnaryPrefix(u) => match u.operator {
+            UnaryPrefixOperator::ErrorControl(_) => rendered_evidence(u.operand, cx),
+            // `(array) [..]` is the array, `(array) 1.5` an array holding the float, and the
+            // elements of the array a variable holds are not what the variable's evidence says.
+            UnaryPrefixOperator::ArrayCast(..) => match u.operand.unparenthesized() {
+                Expression::Array(_) | Expression::LegacyArray(_) => {
+                    rendered_evidence(u.operand, cx)
+                }
+                operand if float_form(operand) => {
+                    Some(FloatEvidence::Members(vec![FloatEvidence::Float]))
+                }
+                _ => None,
+            },
+            _ => float_evidence(e, Some(cx)),
+        },
+        _ => float_evidence(e, Some(cx)),
+    }
+}
+
+/// [`FloatEvidence::Members`] of the elements of an array literal, or `None` when one is a spread
+/// or a hole or shows nothing.
+fn members_evidence<'a>(
+    elements: impl Iterator<Item = &'a ArrayElement<'a>>,
+    cx: &EffectScanCx,
+) -> Option<FloatEvidence> {
+    let mut members = Vec::new();
+    for element in elements {
+        let value = match element {
+            ArrayElement::KeyValue(kv) => kv.value,
+            ArrayElement::Value(v) => v.value,
+            ArrayElement::Variadic(_) | ArrayElement::Missing(_) => return None,
+        };
+        members.push(rendered_evidence(value, cx)?);
+    }
+    Some(FloatEvidence::Members(members))
+}
+
 /// What the scan shows of whether `expr` is `null` ([`NullEvidence`]), or `None` when it shows
 /// nothing. A local variable shows nothing: it starts `null`, and the scan does not follow which
 /// of its writes a read sees. A `??` is its right side, since a left side that is set is not

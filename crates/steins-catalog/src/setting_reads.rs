@@ -40,8 +40,10 @@
 
 mod clock;
 mod encoding;
+mod precision;
 
 pub use clock::{ClockGate, clock_gate};
+pub use precision::{Depth as RenderDepth, PrecisionGate, Rendered, precision_gate};
 
 use crate::SettingCell;
 use crate::preg::pattern_reads_locale;

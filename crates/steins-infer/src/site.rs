@@ -714,7 +714,7 @@ mod tests {
             ),
             (
                 "flags the scan cannot read",
-                "<?php function f($flags) { return json_encode([1], $flags); }",
+                "<?php function f($flags) { return json_decode('1', false, 512, $flags); }",
                 func("f"),
                 &[],
                 &[FlagDependentThrow],

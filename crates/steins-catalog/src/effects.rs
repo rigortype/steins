@@ -18,6 +18,13 @@
 
 use crate::fold::foldable;
 
+/// The precision cell's read (ADR-0101 §3.15): the float renderers read it when the value they
+/// render is a float, `precision` or `serialize_precision` by the function, one label for both.
+const PRECISION_READ: &[&str] = &["global.read.setting.precision"];
+/// The dumpers write to the output channel beside it.
+const OUTPUT_BUFFER_PRECISION_READ: &[&str] =
+    &["io.output.buffer", "global.read.setting.precision"];
+
 /// The effect labels (ADR-0018 hierarchical dot-paths) a builtin carries, or
 /// `None` when **uncatalogued** (unknown effects, ADR-0005): `Some(&[])` is
 /// catalogued-pure ([`foldable`] builtins and the `CERTIFIED_PURE` families),
@@ -37,7 +44,8 @@ use crate::fold::foldable;
 /// * `print_r`/`var_export`/`var_dump` are `io.output.buffer`; the first two are
 ///   pure in return-mode, and a call site that *proves* the flag narrows the row
 ///   away — see [`narrowed_output_labels`] (issue #352). `var_dump` has no such
-///   mode and keeps the row at every call site.
+///   mode and keeps the row at every call site. They, `var_dump` and `debug_zval_dump` also read
+///   the **precision cell** (below), which return mode does not remove.
 /// * `sleep`/`usleep` are `io`: an observable timing side effect.
 /// * The printf family reads the **locale cell** (ADR-0101): `sprintf` and
 ///   `vsprintf` are `global.read.setting.locale`, and `printf`/`vprintf` carry it
@@ -83,6 +91,14 @@ use crate::fold::foldable;
 ///   the clock alone. `date_default_timezone_get` reads the cell and `date_default_timezone_set`
 ///   writes it; `checkdate` reads nothing. The `DateTime` constructors and `date_create*` keep
 ///   the argument-blind `nondet.time` until their per-method table (S6b-2).
+/// * The float renderers (ADR-0101 §3.15, S6a): `strval`, `settype`, `implode`, `join`, `print_r`,
+///   `var_export`, `json_encode`, `serialize`, `var_dump` and `debug_zval_dump` read
+///   `global.read.setting.precision` when the value they render is a float (`precision` for the
+///   first four and `print_r`, `serialize_precision` for the rest; the one cell stands for both).
+///   The read is **value-conditional**, so the row is the upper bound and the call site decides
+///   it ([`precision_gate`](crate::precision_gate)). `number_format` and `round` read neither
+///   entry, `strval($int)` and `json_encode($int)` render no float, and the operators (`(string)
+///   $f`, `"$f"`, `.`, `echo`) are no calls and stay unlabelled under D4.
 /// * `curl_exec` keeps `io.output` arg-blind (only `CURLOPT_RETURNTRANSFER`
 ///   suppresses it); `system`/`passthru` take parent `io.output` since
 ///   OB-capturability evidence for a relayed child's output is split
@@ -194,7 +210,7 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
         "file_get_contents" | "file_put_contents" | "fopen" | "copy" | "rename" | "readfile"
         | "fpassthru" | "fread" | "fgets" | "fwrite" | "fputs" | "unlink" | "mkdir" | "rmdir"
         | "touch" | "scandir" | "file_exists" | "is_file" | "is_dir" => Some(IO),
-        "print_r" | "var_dump" | "var_export" | "flush" | "ob_flush" => Some(IO_OUTPUT_BUFFER),
+        "flush" | "ob_flush" => Some(IO_OUTPUT_BUFFER),
         // The printf family reads the locale's decimal point under `%f`, `%g`
         // and `%G` (issue #991, ADR-0101 §2.4), and the `precision` ini under a
         // `%s` of a float (D4). The row is argument-blind and keeps both reads at
@@ -378,7 +394,27 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
         _ => None,
     };
 
-    colored.or_else(|| (foldable(name) || certified_pure(name)).then_some(EMPTY))
+    colored
+        .or_else(|| precision_row(name))
+        .or_else(|| (foldable(name) || certified_pure(name)).then_some(EMPTY))
+}
+
+/// The float renderers' rows (ADR-0101 §3.15, S6a): they read the precision cell when the value
+/// they render is a float, an upper bound the call site decides ([`precision_gate`]). The dumpers
+/// write to the output channel beside it, and `print_r` and `var_export` in return mode lose
+/// that label alone ([`narrowed_output_labels`]).
+///
+/// [`precision_gate`]: crate::precision_gate
+fn precision_row(name: &str) -> Option<&'static [&'static str]> {
+    match name.to_ascii_lowercase().as_str() {
+        "print_r" | "var_dump" | "var_export" | "debug_zval_dump" => {
+            Some(OUTPUT_BUFFER_PRECISION_READ)
+        }
+        "strval" | "implode" | "join" | "json_encode" | "serialize" | "settype" => {
+            Some(PRECISION_READ)
+        }
+        _ => None,
+    }
 }
 
 /// The builtins **certified pure** without being [`foldable`] (issue #851,
@@ -614,7 +650,9 @@ pub fn narrowed_output_labels(name: &str, return_mode: bool) -> Option<&'static 
         return None;
     }
     match name.to_ascii_lowercase().as_str() {
-        "print_r" | "var_export" => Some(&[]),
+        // The rendering still reads the precision cell (ADR-0101 §3.15), which the call site
+        // decides by the value it shows.
+        "print_r" | "var_export" => Some(&["global.read.setting.precision"]),
         _ => None,
     }
 }
@@ -2098,13 +2136,17 @@ mod tests {
         assert_eq!(super::narrowed_setlocale_labels("putenv", "C", 2), None, "only setlocale");
     }
 
-    /// Sibling rows the locale slice must not move: the dumpers keep the plain
-    /// output label, the other global writers stay `global.write`, and the
-    /// reads of other cells stay `global.read`.
+    /// Sibling rows the locale slice must not move: the output flushers keep the plain output
+    /// label, the dumpers carry it beside the precision read (ADR-0101 §3.15), the other global
+    /// writers stay `global.write`, and the reads of other cells stay `global.read`.
     #[test]
     fn the_locale_cell_leaves_its_neighbours_alone() {
-        for name in ["print_r", "var_dump", "var_export", "flush", "ob_flush"] {
+        for name in ["flush", "ob_flush"] {
             assert_eq!(effect_labels(name), Some(&["io.output.buffer"][..]), "{name}");
+        }
+        for name in ["print_r", "var_dump", "var_export", "debug_zval_dump"] {
+            let both = &["io.output.buffer", "global.read.setting.precision"][..];
+            assert_eq!(effect_labels(name), Some(both), "{name}");
         }
         for name in ["ini_set", "ini_alter", "ini_restore"] {
             assert_eq!(effect_labels(name), Some(&["global.write"][..]), "{name}");
@@ -3259,10 +3301,12 @@ mod tests {
         // The OB flush pair writes through the buffer like `echo` does.
         assert_eq!(effect_labels("flush"), Some(&["io.output.buffer"][..]));
         assert_eq!(effect_labels("ob_flush"), Some(&["io.output.buffer"][..]));
-        // Return-mode (issue #352): the two dumpers that have one narrow to no
-        // label at a call site that proves it, and to nothing anywhere else.
+        // Return-mode (issue #352): the two dumpers that have one narrow to the precision read
+        // alone at a call site that proves it (the output label goes, ADR-0101 §3.15), and to
+        // nothing anywhere else.
         for name in ["print_r", "var_export", "PRINT_R"] {
-            assert_eq!(super::narrowed_output_labels(name, true), Some(&[][..]));
+            let precision = &["global.read.setting.precision"][..];
+            assert_eq!(super::narrowed_output_labels(name, true), Some(precision));
             assert_eq!(super::narrowed_output_labels(name, false), None);
         }
         for name in ["var_dump", "printf", "vprintf", "flush", "ob_flush", "echo"] {

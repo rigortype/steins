@@ -581,6 +581,15 @@ pub struct ConstArgs {
     /// of is absent, and so is every one of a named or spread argument list. Appended after
     /// [`Self::literals`].
     pub timestamps: Vec<(u8, NullEvidence)>,
+    /// For a call to a function that renders a value through the `precision` or
+    /// `serialize_precision` ini (`strval`, `implode`, `join`, `print_r`, `var_export`,
+    /// `json_encode`, `serialize`, `var_dump`, `debug_zval_dump`, `settype`; ADR-0101 §3.15): what
+    /// the scan shows of whether each positional argument is a float or holds one, as `(position,
+    /// evidence)` in position order. An array literal is [`FloatEvidence::Members`], so the
+    /// engine can read it at the depth the function renders. An argument the scan shows nothing of
+    /// is absent, and so is every one of a named or spread argument list. Appended after
+    /// [`Self::timestamps`].
+    pub rendered: Vec<(u8, FloatEvidence)>,
 }
 
 /// What a structural scan shows of whether one argument is `null` ([`ConstArgs::timestamps`]):
@@ -661,6 +670,12 @@ pub enum FloatEvidence {
     StaticProperty { class: StaticClass, name: String },
     /// A conditional (`c ? a : b`, `a ?: b`, `a ?? b`): the value is one of these.
     OneOf(Vec<FloatEvidence>),
+    /// An array literal (or a `(array)` cast) whose elements have this evidence, one per element
+    /// in source order; empty for `[]`. It is no float itself. A renderer that walks the array
+    /// reads the evidence of the elements it reaches (ADR-0101 §3.15); one that renders the array
+    /// as a whole (`strval`) reads nothing of them. Appended **after** the variants above so no
+    /// persisted variant index moves.
+    Members(Vec<FloatEvidence>),
 }
 
 /// A constant integer expression a **structural** scan can evaluate: an integer

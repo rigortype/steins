@@ -22,7 +22,9 @@
 
 use std::process::{Command, Stdio};
 
-use steins_catalog::{GateArg, certified_at_call_site, effect_labels, setting_read_gate};
+use steins_catalog::{
+    GateArg, SettingCell, certified_at_call_site, effect_labels, setting_read_gate,
+};
 
 use super::locale_oracle::oracle_unavailable;
 
@@ -57,7 +59,8 @@ enum Verdict {
     Certified(&'static str),
     /// A known name with no setting row and no certification.
     Uncatalogued(&'static str),
-    /// A name whose row says nothing of a setting: pure or otherwise, no `global.read.setting`.
+    /// A name whose row says nothing of a setting but the precision cell: pure or otherwise, no
+    /// `global.read.setting` of another cell.
     NoSetting(&'static str),
     /// A call `narrowed_setlocale_labels` decides: the name and the locale it is given.
     Narrowed(&'static str, &'static str),
@@ -93,10 +96,14 @@ impl Verdict {
                 Some(labels.is_some_and(|l| l.contains(&READ)))
             }
             Self::NoSetting(name) => {
+                // The precision cell's read is the one other this oracle's names carry
+                // (`json_encode`, ADR-0101 §3.15).
+                let precision = SettingCell::Precision.read_label();
                 assert!(
-                    effect_labels(name)
-                        .is_none_or(|labels| labels.iter().all(|l| !l.starts_with("global."))),
-                    "{name} reads a setting on its row"
+                    effect_labels(name).is_none_or(|labels| labels
+                        .iter()
+                        .all(|l| !l.starts_with("global.") || *l == precision)),
+                    "{name} reads a setting but the precision on its row"
                 );
                 Some(false)
             }
