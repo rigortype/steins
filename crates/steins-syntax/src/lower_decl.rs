@@ -843,8 +843,15 @@ fn lower_classes_into(
 }
 
 /// Whether descending through `node` keeps a declaration **unconditional** (ADR-0049
-/// A2i): only the program root, namespace nodes, and the `Statement` wrapper are
-/// transparent; every other node (control flow, function/method body, block) taints it.
+/// A2i): the program root, namespace nodes, the `Statement` wrapper, and a `Block`
+/// are transparent; every other node (control flow, function/method body) taints it.
+///
+/// The `Block` is the braced namespace body (`namespace A { … }`, issue #973), which
+/// PHP compiles as a declaration scope exactly as `namespace A;` is. A bare `{ … }`
+/// at file level is admitted by the same rule: PHP's `zend_compile_top_stmt` recurses
+/// into a statement list, so its functions are hoisted too (verified on PHP 8.5). A
+/// `Block` under `if`, a loop, or a function body is still reached through a tainting
+/// parent, so it stays conditional.
 /// Whether descending through `node` keeps a **call** unconditional — everything
 /// [`is_decl_transparent`] admits, plus the expression spine a statement's own
 /// call sits in.
@@ -868,6 +875,7 @@ fn is_decl_transparent(node: &Node<'_, '_>) -> bool {
             | Node::Namespace(_)
             | Node::NamespaceBody(_)
             | Node::NamespaceImplicitBody(_)
+            | Node::Block(_)
     )
 }
 

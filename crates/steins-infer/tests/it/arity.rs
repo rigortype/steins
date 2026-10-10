@@ -430,3 +430,20 @@ fn silent_magic_call_absent_method() {
     );
     assert!(d.is_empty(), "{d:?}");
 }
+
+// Issue #973: a braced namespace body is a declaration scope like `namespace A;`.
+// The braced case fires exactly as its unbraced control does.
+
+#[test]
+fn braced_namespace_function_too_few_positional() {
+    let d = fires("<?php\nnamespace A {\n    function two($a, $b) {}\n    two(1);\n}\n");
+    assert_eq!(d.len(), 1, "{d:?}");
+    assert!(too_few(&d[0]));
+}
+
+#[test]
+fn unbraced_namespace_function_too_few_positional_control() {
+    let d = fires("<?php\nnamespace A;\nfunction two($a, $b) {}\ntwo(1);\n");
+    assert_eq!(d.len(), 1, "{d:?}");
+    assert!(too_few(&d[0]));
+}
