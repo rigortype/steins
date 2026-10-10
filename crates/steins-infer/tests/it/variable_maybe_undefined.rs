@@ -237,3 +237,28 @@ fn the_defaulting_idiom_is_silent() {
         "<?php\nfunction f(): int {\n    if (!isset($x)) {\n        $x = 1;\n    }\n    return $x;\n}\n",
     );
 }
+
+// A binding under a short-circuit right operand (issue #948 d1-d3), each witnessed
+// to warn on PHP 8.5 for the input that skips the binding.
+
+#[test]
+fn a_short_circuit_right_operand_binding_fires() {
+    fires("<?php\nfunction d1(bool $c): void { $c && ($x = 1); echo $x; }\n", "x");
+    fires("<?php\nfunction d2(bool $c): void { $c || ($y = 1); echo $y; }\n", "y");
+    fires("<?php\nfunction d3(?int $n): void { $n ?? ($z = 1); echo $z; }\n", "z");
+}
+
+#[test]
+fn a_read_where_the_short_circuit_binding_ran_is_silent() {
+    silent("<?php\nfunction f(bool $c): void { $c && ($x = 1) && print($x); }\n");
+    silent("<?php\nfunction f(bool $c): void { if ($c && ($x = 1)) { echo $x; } }\n");
+    silent("<?php\nfunction f(bool $c): void { ($x = 1) && $c; echo $x; }\n");
+}
+
+#[test]
+fn an_existence_guard_or_an_idiom_that_always_binds_is_silent() {
+    silent("<?php\nfunction f(bool $c): void { if ($c) { $a = 1; } isset($a) || ($a = 2); echo $a; }\n");
+    silent("<?php\nfunction f(bool $c): void { $c && ($x = 1) || ($x = 2); echo $x; }\n");
+    silent("<?php\nfunction f(bool $c): void { $c ? ($x = 1) : exit(1); echo $x; }\n");
+    silent("<?php\nfinal class K { function m(&$o) { $o = 1; } }\nfunction d(K $k): void { $k?->m($out); echo $out; }\n");
+}

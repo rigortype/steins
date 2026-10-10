@@ -24,7 +24,9 @@ use crate::lower_effect::{
 use crate::lower_expr::lower_arg_value;
 use crate::lower_globals::{GlobalsKey, globals_fetch};
 use crate::lower_guards::scan_guard_regions;
-use crate::lower_presence::{maybe_undefined_reads, push_guard_root, subtree_has_goto};
+use crate::lower_presence::{
+    implied_binary, implied_elvis, maybe_undefined_reads, push_guard_root, subtree_has_goto,
+};
 use crate::lower_site::{
     arrow_return_site, body_end, param_default_sites, scan_owner_sites, scope_exit_sites,
 };
@@ -743,6 +745,9 @@ pub(crate) struct VarUsage {
     /// `bound` and not here. Maintained through [`Self::branch`]; the presence pass reads
     /// the difference as `Maybe` (issue #948).
     pub(crate) uncond_bound: std::collections::HashSet<String>,
+    /// Set while the presence pass asks for a subtree's unconditional bindings from inside
+    /// its own refinement walk: the short-circuit arms then skip their own refinement.
+    pub(crate) in_implied: bool,
     pub(crate) reads: Vec<UndefinedRead>,
     /// See [`Scope::ref_arg_candidates`] — collected in the same walk but on its own
     /// terms, because a binding form must not depend on a read being recorded.
@@ -793,6 +798,18 @@ impl VarUsage {
         let outer = std::mem::take(&mut self.uncond_bound);
         scan(self);
         std::mem::replace(&mut self.uncond_bound, outer)
+    }
+
+    /// Add what an operator binds on both of its outcomes: the intersection of the true-side
+    /// and false-side refinements the presence pass computes for it. Skipped when the scan
+    /// is itself part of such a computation.
+    fn note_after(&mut self, implied: Option<(std::collections::HashSet<String>, std::collections::HashSet<String>)>) {
+        if self.in_implied {
+            return;
+        }
+        if let Some((on_true, on_false)) = implied {
+            self.uncond_bound.extend(on_true.intersection(&on_false).cloned());
+        }
     }
 
     /// Scan arms of which exactly one runs (a ternary's, a `match`'s): a name every
@@ -1242,16 +1259,18 @@ pub(crate) fn scan_var_usage(node: &Node<'_, '_>, guarded: bool, shielded: &[Shi
                 let proved = extend_shield(base, bound_when(c.condition, true));
                 let inner = proved.as_deref().unwrap_or(base);
                 let bound = acc.branch(|a| scan_var_usage(&Node::Expression(then), guarded, inner, a));
-                arms.push((!matches!(then, Expression::Throw(_))).then_some(bound));
+                arms.push((!arm_diverges(then)).then_some(bound));
             }
             let proved = extend_shield(base, bound_when(c.condition, false));
             let inner = proved.as_deref().unwrap_or(base);
             let bound = acc.branch(|a| scan_var_usage(&Node::Expression(c.r#else), guarded, inner, a));
-            arms.push((!matches!(c.r#else, Expression::Throw(_))).then_some(bound));
+            arms.push((!arm_diverges(c.r#else)).then_some(bound));
             // Only the full ternary completes through exactly one arm; `?:` may complete
             // on the condition alone, so its `else` binds nothing unconditionally.
             if c.then.is_some() {
                 acc.join_arms(arms);
+            } else {
+                acc.note_after(Some(implied_elvis(c)));
             }
             return;
         }
@@ -1275,21 +1294,15 @@ pub(crate) fn scan_var_usage(node: &Node<'_, '_>, guarded: bool, shielded: &[Shi
                 first_condition = false;
                 let body = arm.expression();
                 let bound = acc.branch(|a| scan_var_usage(&Node::Expression(body), guarded, shielded, a));
-                arms.push((!matches!(body, Expression::Throw(_))).then_some(bound));
+                arms.push((!arm_diverges(body)).then_some(bound));
             }
             acc.join_arms(arms);
             return;
         }
-        // `$o?->m($x = 1)`: a null receiver short-circuits the call, arguments included.
-        Node::NullSafeMethodCall(c) => {
-            scan_var_usage(&Node::Expression(c.object), guarded, shielded, acc);
-            scan_var_usage(&Node::ClassLikeMemberSelector(&c.method), guarded, shielded, acc);
-            acc.branch(|a| {
-                bind_call_arguments(&c.argument_list, a);
-                scan_var_usage(&Node::ArgumentList(&c.argument_list), guarded, shielded, a);
-            });
-            return;
-        }
+        // `$o?->m($x = 1)` skips the arguments on a null receiver, but this pass cannot see
+        // whether the receiver may be null, so they bind unconditionally (the silent side).
+        Node::NullSafeMethodCall(c) => bind_call_arguments(&c.argument_list, acc),
+
         // The statement spelling of the same idiom. The bare `isset`/`empty` tests need
         // no block-scoped tracking: the `if`'s whole body — including its
         // `elseif`/`else` clauses — is one subtree, and shielding all of it is the same
@@ -1336,6 +1349,7 @@ pub(crate) fn scan_var_usage(node: &Node<'_, '_>, guarded: bool, shielded: &[Shi
         Node::Binary(b) if b.operator.is_null_coalesce() => {
             scan_var_usage(&Node::Expression(b.lhs), true, shielded, acc);
             acc.branch(|a| scan_var_usage(&Node::Expression(b.rhs), guarded, shielded, a));
+            acc.note_after(implied_binary(b));
             return;
         }
         // The operands of a short-circuit operator are the guard idiom in expression
@@ -1352,6 +1366,7 @@ pub(crate) fn scan_var_usage(node: &Node<'_, '_>, guarded: bool, shielded: &[Shi
             let proved = extend_shield(shielded, bound_when(b.lhs, is_logical_and(&b.operator)));
             let inner = proved.as_deref().unwrap_or(shielded);
             acc.branch(|a| scan_var_usage(&Node::Expression(b.rhs), guarded, inner, a));
+            acc.note_after(implied_binary(b));
             return;
         }
 
@@ -1720,4 +1735,16 @@ fn collect_var_reads(node: &Node<'_, '_>, out: &mut Vec<String>) {
     for child in children(node) {
         collect_var_reads(&child, out);
     }
+}
+
+/// Whether a ternary or `match` arm may never complete, so that it drops out of the
+/// "every arm binds" intersection: a `throw` expression, `exit`/`die`, or a call, since
+/// whether a callee is `: never` is the project index's to say and this pass has none.
+fn arm_diverges(expr: &Expression<'_>) -> bool {
+    matches!(
+        expr.unparenthesized(),
+        Expression::Throw(_)
+            | Expression::Construct(Construct::Exit(_) | Construct::Die(_))
+            | Expression::Call(_)
+    )
 }
