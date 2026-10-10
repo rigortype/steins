@@ -3329,8 +3329,11 @@ pub enum StmtKind {
     /// the two entry sets a walker forgets before a handler.
     ///
     /// `writes`, `reads`, `poisons` and `may_return` are the whole construct's, with
-    /// the meaning they have on [`Self::Opaque`]; a walker's successor applies them as
-    /// it would there. `body` runs straight-line from the construct's entry.
+    /// the meaning they have on [`Self::Opaque`]. `may_return` pushes the hidden-exit
+    /// floor in every case; a walker's successor applies the sets as it would there
+    /// only when `has_goto` is set, and is otherwise the join of the envs at the
+    /// normal exits carried through `finally` (S1b of #1033).
+    /// `body` runs straight-line from the construct's entry.
     /// `body_writes`/`body_reads` are the sets of the body alone, and
     /// `catch_writes`/`catch_reads` those of every catch body together: a `catch` is
     /// entered from any point of the body, so its entry is the construct's entry with

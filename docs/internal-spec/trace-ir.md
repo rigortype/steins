@@ -57,7 +57,7 @@ an opaque entry keeps the blanket drop.
 | `Opaque { writes, reads, poisons, may_return }` | a recognized control-flow construct whose internals are not modeled but whose write and read sets are; `may_return` is true when the subtree contains a `return` the walk cannot see as a top-level `Return` |
 | `Barrier` | anything unmodeled *and* unbounded — `declare`, `__halt_compiler`, declarations. Erases all known values |
 | `Label { span }` | a `goto` label (ADR-0103): a barrier, and a point where a walk a terminator stopped resumes. A `goto` lowers as `LoopJump`, ending its list; `Stmt::holds_label` marks a label, or an `if`/`try` holding one, as the next live statement |
-| `Try { body, catches, finally, catches_live, has_goto, body_writes, body_reads, catch_writes, catch_reads, writes, reads, poisons, may_return }` | `try`/`catch`/`finally` (ADR-0027's 2026-10-11 amendment): the block walks straight-line; each `catch` (a `CatchArm`: its `CatchClause` and body) enters with the block's sets forgotten and the caught variable seeded, and `finally` with the block's and the catches' sets forgotten; the successor applies `writes`/`reads` as `Opaque` does. `catches_live` is `false` when no statement of the block can throw, `has_goto` keeps the successor live. The construct terminates when `finally` does or when the block and every live `catch` do |
+| `Try { body, catches, finally, catches_live, has_goto, body_writes, body_reads, catch_writes, catch_reads, writes, reads, poisons, may_return }` | `try`/`catch`/`finally` (ADR-0027's 2026-10-11 amendment): the block walks straight-line; each `catch` (a `CatchArm`: its `CatchClause` and body) enters with the block's sets forgotten and the caught variable seeded, and `finally` with the block's and the catches' sets forgotten; the successor is the join of the envs at the normal exits (the block's end and each live `catch`'s, where they fall through), carried through `finally` when there is one; with `has_goto` it applies `writes`/`reads` as `Opaque` does. `catches_live` is `false` when no statement of the block can throw, `has_goto` keeps the successor live. The construct terminates when `finally` does or when the block and every live `catch` do |
 
 Compound assignment (`+=`, `.=`) lowers its value to `Other` — the statement is
 modeled, the value is not. A dynamic property name (`$o->$p = …`) or a chained
@@ -188,10 +188,9 @@ are appended after `Unknown`, so no persisted variant index moves.
 ## Not implemented
 
 - **Loop bodies as traces.** Loops are `Opaque`.
-- **A precise successor for `try`.** The block and catch exits are not joined
-  into the successor env, which forgets the construct's sets as an `Opaque`'s
-  does (slice S1b of #1033). The catch *guards* are carried on throw origins
-  separately, and the walk does not use them to decide which `catch` is live.
+- **Catch matching in the walk.** The catch *guards* are carried on throw
+  origins separately, and the walk does not use them to decide which `catch` is
+  live.
 - **Expression-position `match`.**
 - **Array element tracking.** `ArgValue` carries array literals; there is no
   per-element fact lane.
