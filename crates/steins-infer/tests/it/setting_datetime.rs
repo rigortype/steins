@@ -117,6 +117,9 @@ fn the_format_factories() {
         proves(params, &format!("{spelling}('Y-m-d|', $s)"), &[ZONE]);
         proves(params, &format!("{spelling}('\\\\!Y-m-d', $s)"), &[ZONE, CLOCK]);
         proves(params, &format!("{spelling}('Y-m-d e', $s)"), &[ZONE, CLOCK]);
+        // A `!` after a zone conversion keeps the zone flag and the clock's DST flag (§3.17).
+        proves(params, &format!("{spelling}('e !Y-m-d H:i', $s)"), &[ZONE, CLOCK]);
+        proves(params, &format!("{spelling}('!Y-m-d H:i e', $s)"), &[ZONE]);
         carries(params, &format!("{spelling}('Y-m-d', $s, $tz)"), &[CLOCK]);
         carries(params, &format!("{spelling}('!Y-m-d', $s, $tz)"), &[]);
         proves(params, &format!("{spelling}('!Y-m-d', $s, null)"), &[ZONE]);

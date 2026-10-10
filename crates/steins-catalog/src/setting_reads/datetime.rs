@@ -27,8 +27,10 @@
 //!   on when the call runs: the clock is dropped there. The seed's DST flag, which keeps the clock
 //!   on `mktime`, is consulted only for a time that names its zone (`do_adjust_timezone` reads
 //!   `tz->dst` under `have_zone`), where the parsed zone has set it. A keyword reads it. For a
-//!   `createFromFormat` call, a format holding an unescaped `!` or `|` resets every field it does
-//!   not parse to the epoch, so the clock is dropped; any other format keeps it.
+//!   `createFromFormat` call, a format holding an unescaped `|`, or an unescaped `!` no zone
+//!   conversion precedes, resets every field it does not parse to the epoch, so the clock is
+//!   dropped; any other format keeps it (a `!` after `e` keeps `have_zone` and the clock's DST
+//!   flag; `resets_fields`).
 //!
 //! An undecided call **keeps** both labels and raises no gap, as the clock gate does (§3.14): the
 //! row is the upper bound the call only narrows. The second argument is the zone object; a
@@ -225,16 +227,23 @@ fn names_zone(rest: &[u8], timed: bool) -> bool {
     }
 }
 
-/// Whether a `createFromFormat` format holds an unescaped `!` or `|`: every field it does not
-/// parse is reset to the epoch's instead of the current time's.
+/// Whether a `createFromFormat` format holds an unescaped `|`, or an unescaped `!` that no
+/// unescaped zone conversion (`e`, `T`, `O`, `P`, `p`) precedes: every field it does not parse is
+/// reset to the epoch's instead of the current time's. A `!` after a zone conversion is not
+/// enough: `timelib_time_reset_fields` clears `tz_info` but leaves `have_zone`, so
+/// `timelib_fill_holes` copies the clock's DST flag and `do_adjust_timezone` reads it for the
+/// repeated hour (`'e !Y-m-d H:i'` moves with the clock; witnessed).
 fn resets_fields(format: &str) -> bool {
+    let mut zone = false;
     let mut bytes = format.bytes();
     while let Some(b) = bytes.next() {
         match b {
             b'\\' => {
                 bytes.next();
             }
-            b'!' | b'|' => return true,
+            b'|' => return true,
+            b'!' if !zone => return true,
+            b'e' | b'T' | b'O' | b'P' | b'p' => zone = true,
             _ => {}
         }
     }
@@ -358,7 +367,15 @@ mod tests {
         for f in ["!Y-m-d", "Y-m-d|", "!d", "H:i|", "Y-m-d\\\\|"] {
             assert_eq!(format.reads_clock(&[s(f), None]), Some(false), "{f}");
         }
-        for f in ["Y-m-d", "\\!Y-m-d", "\\|Y-m-d", "Y-m-d H:i:s", "U"] {
+        // A `!` after a zone conversion leaves the zone's `have_zone` and copies the clock's DST
+        // flag, which decides the repeated hour: not a reset. An escaped conversion is a literal.
+        for f in ["!Y-m-d H:i e", "Y-m-d H:i e|", "e|Y-m-d", "\\e !Y-m-d H:i", "e !Y-m-d|"] {
+            assert_eq!(format.reads_clock(&[s(f), None]), Some(false), "{f}");
+        }
+        for f in [
+            "Y-m-d", "\\!Y-m-d", "\\|Y-m-d", "Y-m-d H:i:s", "U", "e !Y-m-d H:i", "T !Y-m-d H:i",
+            "O!Y-m-d", "P !Y", "p !Y", "e\\\\!Y",
+        ] {
             assert_eq!(format.reads_clock(&[s(f), None]), None, "{f}");
         }
     }
