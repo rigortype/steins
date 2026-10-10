@@ -460,16 +460,21 @@ this one rule to their own flow.
 
 **A `catch` of a block that cannot throw is dead.** A `catch` is a
 non-deterministic branch, except when every statement of the block is
-throw-free. The whitelist is the presence pass's `stmt_cannot_throw`, which
-moves to `lower_try.rs`, plus a `return` whose value's type the spelling
-decides (`return 1;`, `return [];`, a bare `return;`). That `return` throws
-only when the declared return type rejects that type. That is a proven
+throw-free, and the whitelist (`try_body_cannot_throw` in `lower_try.rs`) holds
+three statements: an empty one, a bare `return;`, and a `return` of a literal
+value (`return 1;`, `return [];`, `return ['a' => -1];`). That `return` throws
+only when the declared return type rejects the literal's type. That is a proven
 `TypeError` the return-type check reports on the statement itself, so reading
 the statement as throw-free can only drop a `catch (TypeError)` arm of code
-already convicted. The whitelist also narrows, to match witnesses: a sign is
-admitted only over a number literal (`-[]`, `-$a` with `$a = []` and `-"abc"`
-throw), and an array-literal key only as a literal (`[$k => 1]` throws when
-`$k` holds an array). A dead `catch` is neither walked nor marked dead. This
+already convicted; a destructor that throws as the locals are released at the
+`return` throws in the caller (witnessed). A plain assignment is not admitted,
+though the presence pass's prologue reads one: witnessed on 8.5.11, `$conn =
+null;` over an object whose `__destruct` throws, and `$ref = "many";` through a
+reference to an `int` property, each throw inside the block (#1036's review).
+The literal reading is narrow on the same evidence: a sign only over a number
+literal (`-[]`, `-$a` with `$a = []` and `-"abc"` throw), an array key only as a
+literal (`[$k => 1]` throws when `$k` holds an array). A dead `catch` is neither
+walked nor marked dead. This
 is what makes `try { return 1; } catch (Exception $e) { echo 1; }` terminate,
 which #905's control shape `h` needed: that shape was itself a false
 positive, not the correct report the issue took it for.
