@@ -1117,6 +1117,27 @@ Landed as the eighth sub-slice of S6 of the ambient-settings run (#1000), after 
 
 **Not measured.** The private corpus (not run, per the brief). PHP 8.1 to 8.3 (the oracle and the faketime witness ran on 8.5.11 and 8.4.25). A glibc build (the rows use the bundled timezone database, no C library). The number of functions the gap alternative would have made non-exhaustive (argued above, not counted). `createFromFormat`'s zone conversions (`e`, `T`, `O`, `P`), which the gate does not read. A zone object reached through a local variable, which stays undecided (S6b-1's local-variable limitation).
 
+### 3.18 Slice S6f: case folders (2026-10-10) — PENDING ratification
+
+Landed as the ninth sub-slice of S6 of the ambient-settings run (#1000), after S6b-2 (§3.17). It is docs only: no row
+changes. The owner's decision D-S6f (the S6 design, adopted 2026-10-08) keeps the case folders on `PINNED_PHP` (8.5);
+this note records the witness for that and the one place the floor matters (§7).
+
+- **Witness.** `setlocale(LC_ALL, $locale)`, then each name on the same ISO-8859-1 bytes (`"\xC4\xD6\xDC"` and
+  `"\xE4\xF6\xFC"`), under `C`, `de_DE.ISO8859-1` and `de_DE.UTF-8`, on PHP 8.1.32 (nix, `nixos-24.11#php81`) and
+  8.5.11. On 8.1 under either German locale `strtolower`, `strtoupper`, `ucfirst`, `ucwords`, `stripos` and `stristr`
+  move: `strtolower("\xC4\xD6\xDC") === "\xE4\xF6\xFC"` is true there, and false under `C` and on 8.5. `lcfirst`,
+  `strcasecmp`, `strncasecmp` and `str_ireplace` do not move on 8.1. On 8.5 none of the six moves under either German
+  locale. `substr_compare` moves on both versions, which agrees with its S4 row (§3.9). The probe is scratch and not
+  committed; macOS libc only, glibc not run.
+- **The floor divergence (§7).** A project whose PHP floor is below 8.2 gets no `global.read.setting.locale` label at
+  these six calls, because the rows follow `PINNED_PHP` and the catalog has no version axis (ADR-0021). The effect set
+  under-reports on 8.1 and matches 8.2 and later, where none of the six reads. The four names that did not move, and
+  `strnatcasecmp` and `substr_compare` (S4 rows, which read on both), are not affected by this.
+- **Not witnessed here.** `strnatcasecmp`: the probe's input did not separate the locales, so its S4 witness (§3.9)
+  stands. The §1.4 table (line 110) says `strcasecmp` is read on 8.1; this probe finds it is not, under either German
+  locale, which agrees with D-S6f. §1.4 is left unedited for the owner to correct.
+
 ## 4. Decision: ADR-0021 Decision 2 is amended
 
 Decision 2's bar — "reads only its arguments: no ini setting, locale, clock,
@@ -1282,6 +1303,10 @@ name `value-dependent-read`; and the public packages' default profile findings a
   describes an opt-in that would *drop a setting-read label*, and remains
   unbuilt); ADR-0021 gains one for Decision 2; ADR-0046 and ADR-0096 need
   none, their read-shaped families carry the child by prefix.
+- **A floor divergence for six case folders (S6f, §3.18).** `strtolower`, `strtoupper`, `ucfirst`, `ucwords`,
+  `stripos` and `stristr` read the locale on PHP 8.1 and not on 8.2 or later. The rows follow `PINNED_PHP`, so a
+  project whose floor is below 8.2 gets no locale label at these calls and its effect set under-reports on 8.1. D-S6f
+  records this as the floor divergence; closing it needs the version axis that ADR-0021 does not have.
 
 ## 8. Considered and rejected
 

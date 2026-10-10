@@ -726,6 +726,12 @@ shadow `integer`, an alias declaration may not rebind it, and taking the
 shadowing answer for the declaration question made every non-reserved
 pseudo-type aliasable and then convicted values the declaration accepts.
 
+**Case folders below PHP 8.2** (ADR-0101 §3.18, D-S6f). On PHP 8.1 under a German `LC_CTYPE`, `strtolower`,
+`strtoupper`, `ucfirst`, `ucwords`, `stripos` and `stristr` read the locale; PHP 8.2 made them locale-insensitive.
+The catalog colours them for the pinned PHP (8.5), where they read nothing, and has no version axis to colour them per
+floor. A project whose PHP floor is below 8.2 therefore gets no locale label at these calls, and its effect set
+under-reports on 8.1. Closing it needs a floor-keyed row, which ADR-0021 does not provide.
+
 ## Engine and performance
 
 **Cross-run persistence and the warm path have landed** (ADR-0092, the
