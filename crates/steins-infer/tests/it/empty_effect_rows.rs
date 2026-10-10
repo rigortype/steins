@@ -71,13 +71,31 @@ fn a_built_value_read_or_set_in_place_is_exhaustive_and_silent() {
         "return (new DateTime('@0'))->setDate(2020, 2, 29);",
         "return (new DateTime('@0'))->setISODate(2020, 10, 3);",
         "return (new DateTime('@0'))->setTimezone(new DateTimeZone('Europe/Paris'));",
-        "return (new DateTime('@0'))->modify('tomorrow');",
-        "return (new DateTime('@0'))->modify('now');",
-        "return (new DateTime('@0'))->modify('+1 day');",
-        "return (new DateTimeImmutable('@0'))->modify('first day of next month');",
     ] {
         exhaustive_and_silent(&strict_pure_f("", body));
     }
+}
+
+/// `modify` has no row (ADR-0101 §3.20): a garbage modifier warns below PHP 8.3 and reaches a
+/// user error handler, so no version-free row can say it reads nothing. It stays the gap.
+#[test]
+fn modify_stays_a_gap_on_every_receiver() {
+    for body in [
+        "return (new DateTime('@0'))->modify('tomorrow');",
+        "return (new DateTimeImmutable('@0'))->modify('first day of next month');",
+    ] {
+        let s = summary_of(&strict_pure_f("", body), "f");
+        assert!(!s.exhaustive && s.gaps == ["no-effect-row"], "{body}: {s:?}");
+    }
+}
+
+/// A float argument to an int setter raises `E_DEPRECATED` (PHP 8.1 and later) in coercive code,
+/// and the catalog keeps the row: the same accepted residue as `str_repeat('a', 1.5)`, which is
+/// silent under `@phpstan-pure` (ADR-0101 §3.20). Pinned so a change to either shows up.
+#[test]
+fn a_float_into_an_int_setter_is_the_accepted_residue() {
+    exhaustive_and_silent(&pure_f("", "return (new DateTime('@0'))->setTime(1.5, 2, 3);"));
+    exhaustive_and_silent(&pure_f("", "return str_repeat('a', 1.5);"));
 }
 
 /// In coercive code the same literal-argument call keeps the gap: its `string` parameter reads
