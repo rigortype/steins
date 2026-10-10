@@ -52,7 +52,8 @@ fn run(src: &str) -> Vec<Diagnostic> {
 
 /// Every finding a source produces, as `line id`, sorted.
 fn findings(src: &str) -> Vec<String> {
-    let mut out: Vec<String> = run(src).into_iter().map(|d| format!("{} {}", d.line, d.id)).collect();
+    let mut out: Vec<String> =
+        run(src).into_iter().map(|d| format!("{} {}", d.line, d.id)).collect();
     out.sort();
     out
 }
