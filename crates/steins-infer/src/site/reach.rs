@@ -137,7 +137,7 @@ impl Frame<'_> {
                 FloatClass::agree(branches.iter().map(|b| self.float_class_at(cx, b, depth)))
             }
             FloatEvidence::Members(items) => {
-                let element = if depth == RenderDepth::Nested { depth } else { RenderDepth::Value };
+                let element = if depth.walks() { depth } else { RenderDepth::Value };
                 match depth {
                     RenderDepth::Value => FloatClass::No,
                     _ => {
@@ -152,7 +152,13 @@ impl Frame<'_> {
                 // whatever the literal says: a typed one is read by its declaration first.
                 let literal = cx.resolve_class_const(class, name, self.class_fqn);
                 match (cx.class_const_declared_type(class, name, self.class_fqn), literal) {
-                    (Some(None), Some(ArgValue::Float(f))) if f.is_finite() => FloatClass::Yes,
+                    (Some(None), Some(ArgValue::Float(f)))
+                        if f.is_finite() || depth.reads_non_finite() =>
+                    {
+                        FloatClass::Yes
+                    }
+                    // `var_dump`, `debug_zval_dump` and `json_encode` write `INF` and `NAN` whole.
+                    (Some(None), Some(ArgValue::Float(_))) => FloatClass::No,
                     (Some(None), Some(v)) if scalar_not_float(&v) => FloatClass::No,
                     (Some(Some(hint)), Some(ArgValue::Int(_) | ArgValue::Float(_)))
                         if declared_float(hint) =>
@@ -634,7 +640,7 @@ fn declared_float(hint: &str) -> bool {
 /// Whether a value the fact `fact` describes is a float, read at `depth`
 /// ([`Frame::float_class_at`]): a literal or a set of literals is as its members are, a scalar base
 /// as the base is (a nullable one may be `null`), and any other layer is not read. A non-finite
-/// float is undecided: it is written without either ini entry.
+/// float is a read where the renderer cuts its text by the entry, none where it prints it whole.
 fn fact_float_class(fact: &Fact, depth: RenderDepth) -> FloatClass {
     match fact {
         Fact::Singleton(v) => val_float_class(v, depth),
@@ -650,10 +656,10 @@ fn fact_float_class(fact: &Fact, depth: RenderDepth) -> FloatClass {
 /// holds at the depth the renderer walks.
 fn val_float_class(v: &Val, depth: RenderDepth) -> FloatClass {
     match v {
-        Val::Float(f) if f.is_finite() => FloatClass::Yes,
-        Val::Float(_) => FloatClass::Unknown,
+        Val::Float(f) if f.is_finite() || depth.reads_non_finite() => FloatClass::Yes,
+        Val::Float(_) => FloatClass::No,
         Val::Array(items) => {
-            let element = if depth == RenderDepth::Nested { depth } else { RenderDepth::Value };
+            let element = if depth.walks() { depth } else { RenderDepth::Value };
             match depth {
                 RenderDepth::Value => FloatClass::No,
                 _ => FloatClass::holds(items.iter().map(|(_, v)| val_float_class(v, element))),
@@ -902,5 +908,28 @@ pub(crate) fn engine_method_reach(
         Reach::Possible
     } else {
         Reach::RuledOut
+    }
+}
+
+#[cfg(test)]
+mod non_finite_tests {
+    use super::{FloatClass, RenderDepth, Val, val_float_class};
+
+    /// A non-finite float is cut by the entry (`strval(-INF)` is `-IN` at `precision=3`), except
+    /// where the renderer writes it whole or refuses it (ADR-0101 §3.15).
+    #[test]
+    fn a_non_finite_float_is_a_read_unless_the_renderer_writes_it_whole() {
+        let inf = Val::Float(f64::NEG_INFINITY);
+        for depth in [RenderDepth::Value, RenderDepth::Elements, RenderDepth::Nested] {
+            let held = Val::Array(vec![(steins_domain::Key::Int(0), Val::Float(f64::NAN))]);
+            let walked = depth != RenderDepth::Value;
+            assert_eq!(val_float_class(&inf, depth), FloatClass::Yes, "{depth:?}");
+            let want = if walked { FloatClass::Yes } else { FloatClass::No };
+            assert_eq!(val_float_class(&held, depth), want, "{depth:?}");
+        }
+        assert_eq!(val_float_class(&inf, RenderDepth::NestedFinite), FloatClass::No);
+        let held = Val::Array(vec![(steins_domain::Key::Int(0), inf)]);
+        assert_eq!(val_float_class(&held, RenderDepth::NestedFinite), FloatClass::No);
+        assert_eq!(val_float_class(&Val::Float(1.5), RenderDepth::NestedFinite), FloatClass::Yes);
     }
 }

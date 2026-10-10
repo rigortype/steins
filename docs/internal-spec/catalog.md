@@ -323,7 +323,7 @@ evaluate, makes a float-free value undecided (a numeric string becomes a float),
 undecided (a deep value is refused before it is written). `settype` renders only to the type `'string'`; its
 variable is rebound by the call itself, so it is always the gap. `number_format`, `round`, `intval` and the operator
 sites (`(string) $f`, `"$f"`, `.`, `echo`; D4) carry no label. The fold refuses a renderer whose literal arguments
-hold a finite float at the depth it renders them, and `json_encode` with `JSON_NUMERIC_CHECK`.
+hold a float at the depth it renders them, and `json_encode` with `JSON_NUMERIC_CHECK`.
 
 **Call-decided readers** (S4, `setting_read_gate` in `steins-catalog`, `site/setting.rs` in `steins-infer`).
 Apart from `basename`, a locale reader reads only where the call reaches the routine that consults the

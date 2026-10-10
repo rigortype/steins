@@ -265,15 +265,28 @@ fn a_callback_and_an_unreadable_argument_list_are_the_gap() {
     depends("array $xs", "implode(',', ...$xs)");
 }
 
-/// A non-finite float is written without either entry (Q18h to Q18j), so a constant that is one
-/// is undecided for the renderers and for a printf `%s` alike, never a proven label.
+/// A non-finite float is cut by the entry (`strval(-INF)` is `-IN` at `precision=3`), so it is a
+/// proven read for the renderers that convert it and for a printf `%s` (Q18h to Q18m). The
+/// constants `NAN` and `INF` carry no value in the catalog's table, so the literal `1e999` is the
+/// way to write one; `var_dump`, `debug_zval_dump` and `json_encode` write it whole or refuse it
+/// (Q18n to Q18p), which the depth tests below pin, and a literal one is an accepted
+/// over-approximation there (the evidence for a float literal does not carry its value).
 #[test]
-fn a_non_finite_float_is_undecided() {
-    for call in ["strval(NAN)", "strval(INF)", "json_encode([NAN])", "sprintf('%s', INF)"] {
+fn a_non_finite_float_is_a_read_for_the_renderers_that_cut_it() {
+    for call in [
+        "strval(1e999)",
+        "strval(-1e999)",
+        "sprintf('%s', 1e999)",
+        "print_r(1e999, true)",
+        "var_export(-1e999, true)",
+        "serialize(1e999)",
+        "implode(',', [1e999])",
+    ] {
+        reads_only("", call, &[PRECISION]);
+    }
+    for call in ["strval(NAN)", "sprintf('%s', INF)", "json_encode([NAN])"] {
         depends("", call);
     }
-    proves("", "strval(M_PI)", &[PRECISION]);
-    proves("", "sprintf('%s', M_PI)", &[PRECISION]);
 }
 
 /// A pure envelope over a proven read is exceeded at the call, as it is for a printf `%s`; one

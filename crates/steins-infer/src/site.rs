@@ -276,8 +276,8 @@ impl GapKind {
             Self::OperatorClone => "a cloned operand may run `__clone`",
             Self::Destructor => "a dropped value may run `__destruct`",
             Self::ValueDependentRead => {
-                "a setting read depends on a value the site cannot see (a `%s` of a value that \
-                 may be a float, a format that is not literal, or a flag that is not literal)"
+                "a setting read depends on a value the site cannot see (a value not shown to be a \
+                 float or free of floats, or a format, flag or type that is not literal)"
             }
         }
     }

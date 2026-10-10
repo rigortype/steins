@@ -23,8 +23,10 @@
 //! number before it is written, so with that flag, or with flags the scan cannot evaluate, a
 //! value of strings and integers is not shown to hold no float; and a `$depth` argument can end
 //! the walk with an error before it reaches the float, so a proven read needs the depth omitted.
-//! A non-finite float (`NAN`, `INF`) is written without either entry (`json_encode` refuses it),
-//! which the evidence reader treats as undecided.
+//! A non-finite float (`NAN`, `INF`) is a read too, for all but three renderers: the entry cuts the
+//! text (`strval(-INF)` is `-IN` at `precision=3`, `serialize(-INF)` is `d:-IN;` at
+//! `serialize_precision=3`). `var_dump` and `debug_zval_dump` print `float(-INF)` whole and
+//! `json_encode` refuses it, so they read nothing of one (`Depth::NestedFinite`).
 //!
 //! The Q-numbers in the oracle (`setting_precision_oracle.rs`) are the witnesses: each row there
 //! runs the call under `ini_set('precision', '3')` and `ini_set('serialize_precision', '3')` and
@@ -42,6 +44,25 @@ pub enum Depth {
     Elements,
     /// The value is walked: every element of every array, and every property of an object.
     Nested,
+    /// [`Self::Nested`] for a renderer that writes a non-finite float without the entry:
+    /// `var_dump`, `debug_zval_dump` (`float(INF)`) and `json_encode` (which refuses it).
+    NestedFinite,
+}
+
+impl Depth {
+    /// Whether the renderer walks into arrays and objects.
+    #[must_use]
+    pub const fn walks(self) -> bool {
+        matches!(self, Self::Nested | Self::NestedFinite)
+    }
+
+    /// Whether a non-finite float (`NAN`, `INF`) is a read: the entry sets how many characters of
+    /// `INF` or `NAN` survive (`strval(-INF)` is `-IN` at `precision=3`), except where the
+    /// renderer prints it whole or refuses it.
+    #[must_use]
+    pub const fn reads_non_finite(self) -> bool {
+        !matches!(self, Self::NestedFinite)
+    }
 }
 
 /// What a call shows of one rendered value, read at the depth the gate names.
@@ -113,8 +134,9 @@ impl PrecisionGate {
                 1 => vec![(0, Depth::Elements)],
                 _ => vec![(0, Depth::Value), (1, Depth::Elements)],
             },
-            Kind::Walk | Kind::Json => first_value(arity, Depth::Nested),
-            Kind::WalkEach => (0..arity).map(|position| (position, Depth::Nested)).collect(),
+            Kind::Walk => first_value(arity, Depth::Nested),
+            Kind::Json => first_value(arity, Depth::NestedFinite),
+            Kind::WalkEach => (0..arity).map(|position| (position, Depth::NestedFinite)).collect(),
         }
     }
 
@@ -215,8 +237,9 @@ mod tests {
         assert_eq!(values("implode", 1), [(0, Depth::Elements)]);
         assert_eq!(values("join", 2), [(0, Depth::Value), (1, Depth::Elements)]);
         assert_eq!(values("print_r", 2), [(0, Depth::Nested)]);
-        assert_eq!(values("json_encode", 3), [(0, Depth::Nested)]);
-        let each = [(0, Depth::Nested), (1, Depth::Nested), (2, Depth::Nested)];
+        assert_eq!(values("json_encode", 3), [(0, Depth::NestedFinite)]);
+        assert_eq!(values("serialize", 1), [(0, Depth::Nested)]);
+        let each = [(0, Depth::NestedFinite), (1, Depth::NestedFinite), (2, Depth::NestedFinite)];
         assert_eq!(values("var_dump", 3), each);
         assert_eq!(values("var_dump", 0), []);
         assert_eq!(precision_gate("settype").expect("row").extras(), [1]);
