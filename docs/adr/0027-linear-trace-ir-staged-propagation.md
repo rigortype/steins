@@ -418,3 +418,120 @@ refuses, and a terminating loop inside an `if` arm. Also
 `crates/steins-syntax/tests/it/binding_presence.rs`,
 `crates/steins-syntax/tests/it/trace_stmt_lowering.rs` for
 `nested_jumps_only`, and `crates/steins-infer/tests/it/return_missing.rs`.
+
+## Amendment (2026-10-11): a `try` is a sub-trace, and terminates when its `finally` or every live arm does — PENDING ratification
+
+Issues #943 and #905, slice S1 of the walker coverage run (#1033). After the
+loop amendments above, `try` was the last control-flow construct that lowered
+to `StmtKind::Opaque`. Nothing in a `try` block, a `catch` or a `finally` was
+walked, so every trace-borne finding there was silence, and the walk always
+fell through the construct. The second half was a default-surface false
+positive: `$x = null; try { return; } finally { echo 1; } $x->bar();`
+reported `call.on-null` on a line PHP never runs. Its terminality was
+`Unknown` whole, and a `do`-`while` whose body held one fell back to
+`FallsThrough`, so `type.return-maybe-missing` reported functions that return
+on every path (#905).
+
+`try` now lowers to `StmtKind::Try`, appended after `Barrier`. It carries the
+block, each `catch` (its `CatchClause` as the throw system reads it, ADR-0040,
+and its body), the `finally`, the whole construct's `Opaque` sets, and the
+sets of the block alone and of the catch bodies together.
+
+**Where control leaves each part.** Witnessed on PHP 8.5.11:
+
+| part ends by | then |
+| --- | --- |
+| the block falls through | `finally` runs, then the successor |
+| the block returns, `break`s or `continue`s | `finally` runs, then that exit proceeds |
+| the block throws | a matching `catch` runs; with none, `finally` runs and the throw proceeds |
+| the block calls `exit` | nothing else runs |
+| a `catch` falls through | `finally` runs, then the successor |
+| a `catch` exits or jumps | `finally` runs, then that exit proceeds |
+| `finally` falls through | whatever was pending proceeds |
+| `finally` returns or throws | it replaces whatever was pending, a throw included |
+| `finally` jumps out | a compile error ("jump out of a finally block is disallowed") |
+
+So the successor is reachable exactly when `finally`, if there is one, can
+fall through, **and** the block or some live `catch` can. A `finally` that
+falls through does not rescue a block that terminates. One that terminates
+terminates the construct whatever the other parts do. The lowering
+(`try_end`), the walker (`walk_try`) and the binding-presence pass each apply
+this one rule to their own flow.
+
+**A `catch` of a block that cannot throw is dead.** A `catch` is a
+non-deterministic branch, except when every statement of the block is
+throw-free. The whitelist is the presence pass's `stmt_cannot_throw`, which
+moves to `lower_try.rs`, plus a `return` whose value's type the spelling
+decides (`return 1;`, `return [];`, a bare `return;`). That `return` throws
+only when the declared return type rejects that type. That is a proven
+`TypeError` the return-type check reports on the statement itself, so reading
+the statement as throw-free can only drop a `catch (TypeError)` arm of code
+already convicted. The whitelist also narrows, to match witnesses: a sign is
+admitted only over a number literal (`-[]`, `-$a` with `$a = []` and `-"abc"`
+throw), and an array-literal key only as a literal (`[$k => 1]` throws when
+`$k` holds an array). A dead `catch` is neither walked nor marked dead. This
+is what makes `try { return 1; } catch (Exception $e) { echo 1; }` terminate,
+which #905's control shape `h` needed: that shape was itself a false
+positive, not the correct report the issue took it for.
+
+**The block runs straight-line.** It is walked on a copy of the construct's
+entry env, exactly as the statements before it were, so its findings are a
+top-level statement's.
+
+**A handler enters with what came before it forgotten.** A `catch` is entered
+from any point of the block. Its entry is the construct's entry with the
+block's `writes` dropped and the objects its `reads` name swept. This is the
+2026-09-04 amendment's argument for a loop body's entry, applied verbatim:
+a name the block neither assigns nor hands to a call holds what it held at the
+entry, but the object it points at may have been mutated through it. The
+caught variable is then forgotten and seeded as a declared receiver of the
+caught classes: a `Verified` arm per class on the contract lane, and the
+declared heap object a parameter of that one type gets. The seed is withheld
+unless every caught class is a known class-like that is provably a
+`Throwable`. An interface that does not extend `Throwable` names only part of
+what the object is, and a lane of it alone would call `$e->getMessage()`
+missing. `finally` is entered from any point of the block or of one `catch`,
+so its entry drops both parts' sets.
+
+The remembered call results of ADR-0102 need nothing of their own here. The
+handler entry drops a name through `Store::unbind`, which forgets the keys
+that name it (§2.4 rule 1), and a condition in the block that rebinds a place
+puts it in the block's `writes`. That is the loop entry's mechanism, and it
+covers the same cases.
+
+**The successor is an `Opaque`'s.** It forgets the whole construct's sets and
+pushes the hidden-exit floor, exactly as before. A precise join of the block
+and catch exits (`try { $x = 1; } catch (E $e) { $x = 2; }` leaving `1|2`) is
+slice S1b, after this slice's A/B. At the top-level frame a statement in the
+block may have run user code that rebinds any global (issue #762), so the
+handler entries and the successor start from nothing there, while the block
+applies the rule statement by statement.
+
+**`goto` stays unbounded.** A `goto` or a label anywhere in the construct
+keeps it `Unknown` in `stmt_end`, keeps the walker's successor live, and keeps
+the presence pass falling through.
+
+**Consumers that must not read the block's returns as the function's.**
+`phpdoc-honesty`'s `contains_opaque` refuses a body holding a `try`, as it
+refuses a loop. A `finally` that returns replaces the block's return value,
+and a `catch` may return something else, so the visible returns beside it are
+not the whole set. `collect_returns` does not descend into one either. The
+summary walk keeps the hidden-exit floor for the same reason: a `return` the
+block walk records is joined with the floor and never stands for the exit
+set alone.
+
+The trace payload changes shape. Under the 2026-09-27 narrowing
+(`docs/internal-spec/generation-schema.md`), a trace-IR change moves the
+analyzer version, which refuses every stored trace, so `SCHEMA_VERSION` does
+not move.
+
+Fixtures: `crates/steins-infer/tests/it/try_bodies.rs` holds the #943 table
+(t1 to t10), the #905 table (f to j), a returning `finally` over a throwing
+block, nested `try`s, a `try` in a loop with jumps in the block, the `catch`
+and around the `finally`, the caught variable for one class, a multi-catch
+and an interface, and a `catch` without a variable. Also
+`crates/steins-syntax/tests/it/terminality.rs` for the rule table,
+`crates/steins-syntax/tests/it/binding_presence.rs`, and the pins this
+amendment flips in `return_missing.rs`, `variable_undefined.rs`,
+`trace_annotation.rs` and `match_unhandled_throw.rs` (a `catch
+(RuntimeException)` does not absorb an `UnhandledMatchError`, witnessed).
