@@ -25,7 +25,8 @@ use crate::lower_expr::lower_arg_value;
 use crate::lower_globals::{GlobalsKey, globals_fetch};
 use crate::lower_guards::scan_guard_regions;
 use crate::lower_presence::{
-    implied_binary, implied_elvis, maybe_undefined_reads, push_guard_root, subtree_has_goto,
+    InfoMap, Refinement, binary_info, elvis_info, maybe_undefined_reads, push_guard_root, span_key,
+    subtree_has_goto,
 };
 use crate::lower_site::{
     arrow_return_site, body_end, param_default_sites, scan_owner_sites, scope_exit_sites,
@@ -745,9 +746,10 @@ pub(crate) struct VarUsage {
     /// `bound` and not here. Maintained through [`Self::branch`]; the presence pass reads
     /// the difference as `Maybe` (issue #948).
     pub(crate) uncond_bound: std::collections::HashSet<String>,
-    /// Set while the presence pass asks for a subtree's unconditional bindings from inside
-    /// its own refinement walk: the short-circuit arms then skip their own refinement.
-    pub(crate) in_implied: bool,
+    /// The refinement of every short-circuit operator the scan has left, by span: each is
+    /// computed once, from its operands' unconditional bindings and their own entries
+    /// here, so the cost of the whole is linear in the expression.
+    pub(crate) infos: InfoMap,
     pub(crate) reads: Vec<UndefinedRead>,
     /// See [`Scope::ref_arg_candidates`] — collected in the same walk but on its own
     /// terms, because a binding form must not depend on a read being recorded.
@@ -800,16 +802,11 @@ impl VarUsage {
         std::mem::replace(&mut self.uncond_bound, outer)
     }
 
-    /// Add what an operator binds on both of its outcomes: the intersection of the true-side
-    /// and false-side refinements the presence pass computes for it. Skipped when the scan
-    /// is itself part of such a computation.
-    fn note_after(&mut self, implied: Option<(std::collections::HashSet<String>, std::collections::HashSet<String>)>) {
-        if self.in_implied {
-            return;
-        }
-        if let Some((on_true, on_false)) = implied {
-            self.uncond_bound.extend(on_true.intersection(&on_false).cloned());
-        }
+    /// Record a short-circuit operator's refinement and add what it binds on both of its
+    /// outcomes (the intersection of the two sides) to the unconditional set.
+    fn finish_operator(&mut self, key: (u32, u32), refinement: Refinement) {
+        self.uncond_bound.extend(refinement.0.intersection(&refinement.1).cloned());
+        self.infos.insert(key, refinement);
     }
 
     /// Scan arms of which exactly one runs (a ternary's, a `match`'s): a name every
@@ -1249,7 +1246,9 @@ pub(crate) fn scan_var_usage(node: &Node<'_, '_>, guarded: bool, shielded: &[Shi
         // a containment rule and not a reachability one. Only the TESTED name is
         // shielded, so `$view` above is still judged. ---
         Node::Conditional(c) => {
-            scan_var_usage(&Node::Expression(c.condition), guarded, shielded, acc);
+            let cond_bound =
+                acc.branch(|a| scan_var_usage(&Node::Expression(c.condition), guarded, shielded, a));
+            acc.uncond_bound.extend(cond_bound.iter().cloned());
             let extended = extend_shield(shielded, guard_tested_names(c.condition));
             let base = extended.as_deref().unwrap_or(shielded);
             // `?:` has no `then` arm; its condition IS the value, already walked. Each
@@ -1269,8 +1268,9 @@ pub(crate) fn scan_var_usage(node: &Node<'_, '_>, guarded: bool, shielded: &[Shi
             // on the condition alone, so its `else` binds nothing unconditionally.
             if c.then.is_some() {
                 acc.join_arms(arms);
-            } else {
-                acc.note_after(Some(implied_elvis(c)));
+            } else if let Some(else_bound) = arms.pop().flatten() {
+                let refinement = elvis_info(&acc.infos, c, &cond_bound, &else_bound);
+                acc.finish_operator(span_key(c.span()), refinement);
             }
             return;
         }
@@ -1347,9 +1347,12 @@ pub(crate) fn scan_var_usage(node: &Node<'_, '_>, guarded: bool, shielded: &[Shi
             return;
         }
         Node::Binary(b) if b.operator.is_null_coalesce() => {
-            scan_var_usage(&Node::Expression(b.lhs), true, shielded, acc);
-            acc.branch(|a| scan_var_usage(&Node::Expression(b.rhs), guarded, shielded, a));
-            acc.note_after(implied_binary(b));
+            let lhs = acc.branch(|a| scan_var_usage(&Node::Expression(b.lhs), true, shielded, a));
+            acc.uncond_bound.extend(lhs.iter().cloned());
+            let rhs = acc.branch(|a| scan_var_usage(&Node::Expression(b.rhs), guarded, shielded, a));
+            if let Some(refinement) = binary_info(&acc.infos, b, &lhs, &rhs) {
+                acc.finish_operator(span_key(b.span()), refinement);
+            }
             return;
         }
         // The operands of a short-circuit operator are the guard idiom in expression
@@ -1362,11 +1365,14 @@ pub(crate) fn scan_var_usage(node: &Node<'_, '_>, guarded: bool, shielded: &[Shi
             if stack_guard::exhausted() {
                 return;
             }
-            scan_var_usage(&Node::Expression(b.lhs), guarded, shielded, acc);
+            let lhs = acc.branch(|a| scan_var_usage(&Node::Expression(b.lhs), guarded, shielded, a));
+            acc.uncond_bound.extend(lhs.iter().cloned());
             let proved = extend_shield(shielded, bound_when(b.lhs, is_logical_and(&b.operator)));
             let inner = proved.as_deref().unwrap_or(shielded);
-            acc.branch(|a| scan_var_usage(&Node::Expression(b.rhs), guarded, inner, a));
-            acc.note_after(implied_binary(b));
+            let rhs = acc.branch(|a| scan_var_usage(&Node::Expression(b.rhs), guarded, inner, a));
+            if let Some(refinement) = binary_info(&acc.infos, b, &lhs, &rhs) {
+                acc.finish_operator(span_key(b.span()), refinement);
+            }
             return;
         }
 

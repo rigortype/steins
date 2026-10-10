@@ -113,6 +113,9 @@ pub(crate) struct PresenceLeaf {
     /// The subset of `bound` that every normal completion of the unit binds; the rest
     /// is bound under a short-circuit operand, a ternary or `match` arm.
     pub(crate) uncond: HashSet<String>,
+    /// For a branch condition: the names proved bound on its true and false continuation.
+    pub(crate) on_true: HashSet<String>,
+    pub(crate) on_false: HashSet<String>,
 }
 
 #[derive(Default)]
