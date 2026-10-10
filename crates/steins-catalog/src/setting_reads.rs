@@ -240,8 +240,8 @@ impl SettingReadGate {
 
     /// Whether the call may write the cell the gate names, at a call whose deciding arguments
     /// show `args` (as [`Self::reads`] takes them). Only an accessor (`mb_internal_encoding` and
-    /// its kin) and `mb_regex_set_options` write, and only when given something to set; every
-    /// other gate answers `true`, and its row has no write to keep or drop.
+    /// its kin), `mb_regex_set_options`, `bcscale` and `error_reporting` write, and only when given
+    /// something to set; every other gate answers `true`, and its row has no write to keep or drop.
     #[must_use]
     pub fn writes(self, args: &[Option<GateArg<'_>>]) -> bool {
         match self.kind {

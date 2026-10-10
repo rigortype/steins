@@ -574,9 +574,10 @@ pub struct ConstArgs {
     /// anything else is simply absent, and so is every one of a named or spread argument list. Appended after
     /// [`Self::patterns`].
     pub literals: Vec<(u8, ArgLiteral)>,
-    /// For a call to one of the time-family names [`Self::literals`] covers: what the scan shows
-    /// of whether the argument at each position 0 to 5 is **non-null**, as `(position,
-    /// evidence)` in position order (ADR-0101 §3.14). A timestamp that is shown non-null is
+    /// For a call to one of the time-family names [`Self::literals`] covers, or to a residue
+    /// function whose `$scale` decides its read (ADR-0101 §3.14, §3.16): what the scan shows of
+    /// whether the argument at each position 0 to 5 is **non-null**, as `(position, evidence)` in
+    /// position order. A timestamp that is shown non-null is
     /// supplied, and the call does not read the clock for it. An argument the scan shows nothing
     /// of is absent, and so is every one of a named or spread argument list. Appended after
     /// [`Self::literals`].
