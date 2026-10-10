@@ -488,6 +488,7 @@ fn build_hook_expr_scope(
             value_position: false,
             // A hook body is never the top-level frame (issue #762).
             runs: Runs::default(),
+            holds_label: false,
         },
         HookKind::Set => Stmt {
             span: to_span(expr.span()),
@@ -1544,6 +1545,7 @@ fn build_closure_scope_from_arrow(
         value_position: false,
         // An arrow body is never the top-level frame (issue #762).
         runs: Runs::default(),
+        holds_label: false,
     };
     let mut opaque = Vec::new();
     scan_opaque(&Node::Expression(af.expression), &mut opaque, false);

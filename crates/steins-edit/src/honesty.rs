@@ -808,6 +808,7 @@ fn contains_opaque(stmts: &[Stmt]) -> bool {
         | StmtKind::Foreach { .. }
         | StmtKind::DoWhile { .. }
         | StmtKind::LoopJump { .. }
+        | StmtKind::Label { .. }
         | StmtKind::Barrier => true,
         StmtKind::If { then_trace, elseifs, else_trace, .. } => {
             contains_opaque(then_trace)

@@ -234,3 +234,40 @@ fn a_goto_landing_carries_no_env() {
         vec![Some(true)]
     );
 }
+
+#[test]
+fn a_goto_ends_its_list_and_a_label_marks_where_a_walk_resumes() {
+    // ADR-0103: a `goto` is a terminator; a label, and an `if` or `try` holding one,
+    // say where a walk resumes. A label in a loop does not count outside it.
+    let got = stmts(
+        "bool $c",
+        "goto out; $x = 1; out: echo 1; if ($c) { in: echo 2; } try { t: echo 3; } finally {} \
+         while ($c) { w: break; }",
+    );
+    let kinds: Vec<(&str, bool)> = got
+        .iter()
+        .map(|s| {
+            let k = match &s.kind {
+                StmtKind::LoopJump { .. } => "jump",
+                StmtKind::Label { .. } => "label",
+                StmtKind::If { .. } => "if",
+                StmtKind::Try { .. } => "try",
+                StmtKind::While { .. } => "while",
+                _ => "other",
+            };
+            (k, s.holds_label)
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![
+            ("jump", false),
+            ("other", false),
+            ("label", true),
+            ("other", false),
+            ("if", true),
+            ("try", true),
+            ("while", false),
+        ]
+    );
+}

@@ -500,10 +500,40 @@ pub(crate) fn push_hidden_exit_floor(w: &WalkCx, may_return: bool) {
 /// Walk an ordered statement (sub-)trace against a mutable env, threading the same
 /// findings sink, descent, and facts. Returns whether the trace falls through.
 /// Statements after a terminator are unreachable and are **not** walked (ADR-0031
-/// closes ADR-0027's dead-fallthrough gap).
+/// closes ADR-0027's dead-fallthrough gap) — up to the next statement that holds a
+/// `goto` label ([`Stmt::holds_label`], ADR-0103), where control may arrive from a
+/// `goto` with anything bound: the walk resumes there with nothing known.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn walk_trace(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    stmts: &[Stmt],
+    env: &mut HashMap<String, Known>,
+    store: &mut Store,
+    descent: &mut Option<Descent<'_>>,
+    facts: &mut Option<&mut Vec<LineFact>>,
+    guarded: bool,
+    out: &mut Vec<Diagnostic>,
+) -> Flow {
+    let mut rest = stmts;
+    loop {
+        let cut = rest.iter().skip(1).position(|s| s.holds_label).map_or(rest.len(), |p| p + 1);
+        let flow = walk_run(w, folder, &rest[..cut], env, store, descent, facts, guarded, out);
+        if cut == rest.len() {
+            return flow;
+        }
+        if flow == Flow::Terminated {
+            env.clear();
+            store.clear();
+        }
+        rest = &rest[cut..];
+    }
+}
+
+/// [`walk_trace`] over one run of statements no label interrupts.
 #[allow(clippy::too_many_arguments)]
 #[expect(clippy::too_many_lines, reason = "the phase order and step-2 match stay together (#769)")]
-pub(crate) fn walk_trace(
+fn walk_run(
     w: &WalkCx,
     folder: &mut dyn Folder,
     stmts: &[Stmt],
@@ -607,7 +637,8 @@ pub(crate) fn walk_trace(
 
         // 2. Apply the statement's own effect on the environment + compute its flow.
         let flow = match &stmt.kind {
-            StmtKind::Barrier => {
+            // A label is reached from any `goto` naming it (ADR-0103).
+            StmtKind::Barrier | StmtKind::Label { .. } => {
                 env.clear();
                 store.clear();
                 Flow::FellThrough

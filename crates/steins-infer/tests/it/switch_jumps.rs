@@ -373,3 +373,61 @@ function ok(int $k): int { switch ($k) { case 1: return 1; default: return 2; } 
     lines.sort_unstable();
     assert_eq!(lines, vec![2, 3, 4]);
 }
+
+// ---- round 2 review: an unconditional goto ends its list ------------------------
+
+#[test]
+fn an_unconditional_goto_ends_its_list() {
+    // The reviewer's `h1` and its `if` twin (PHP 8.5.11: neither `$o = null;` runs,
+    // so `$o->m()` succeeds or is skipped). A `goto` used to read as a barrier that
+    // falls through, which carried the dead `$o = null` to the read.
+    let src = "<?php
+final class X { public function m(): int { return 1; } }
+function h1(int $k): void {
+    $o = new X(); switch ($k) { case 1: goto out; $o = null; break; default: return; }
+    $o->m(); out: echo 1;
+}
+function i1(bool $c): void {
+    $o = new X(); if ($c) { goto out; $o = null; }
+    $o->m(); out: echo 1;
+}
+function e1(bool $c): void {
+    if ($c) { goto out; } else { goto out; }
+    nope_dead();
+    out: nope_live();
+}
+";
+    assert_eq!(lines_of(src, "call.on-null"), Vec::<u32>::new());
+    assert_eq!(lines_of(src, "call.undefined-function"), vec![14]);
+}
+
+#[test]
+fn a_label_resumes_the_walk_with_nothing_known() {
+    // A terminator ends a list only up to the next label: `f(1)` reaches line 4 and
+    // fails on null (PHP 8.5.11). The walk used to call it dead after the `return`.
+    let src = "<?php
+function f(int $k): void {
+    if ($k) { goto out; } return;
+    out: $n = null; $n->foo();
+}
+function later(): void {
+    $o = new ArrayObject(); goto out; $o = null;
+    out: echo $o->count();
+}
+function nested(bool $c): void {
+    $o = new ArrayObject(); goto in; $o = null;
+    if ($c) { in: echo $o->count(); $n = null; $n->foo(); }
+}
+function backward(): void {
+    $o = null; top: if ($o) { echo $o->count(); return; } $o = new ArrayObject(); goto top;
+}
+function into_case(int $k): void {
+    $o = new ArrayObject();
+    switch ($k) { case 1: goto two; case 2: two: $o = null; break; default: return; }
+    $o->count();
+}
+";
+    // Line 4 is the resumed list; 12 the twin inside the `if` a `goto` enters (PHP
+    // lets it, even when `$c` is false); 20 the reviewer's case-to-case `goto`.
+    assert_eq!(lines_of(src, "call.on-null"), vec![4, 12, 20]);
+}
