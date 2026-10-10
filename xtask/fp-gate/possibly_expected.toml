@@ -343,7 +343,8 @@
 # 503 → 505  2026-10-03 (issue #1003, S6d): +2 throw.maybe-undeclared, the writes of `Command::$code` (`?InvokableCommand`), and 1 more with the kind in its list; the triage is above the composer row.
 # 505 → 524  2026-10-07 (issue #868, S5): +19 throw.maybe-undeclared net (+22 argument and return sites, -3 gone, 2 reworded); the triage is above the composer row.
 # 524 → 522  2026-10-11 (issue #943, #1033 S1): -2 variable.maybe-undefined FPs at `Application.php:374,378`, where an inner try whose body and catch both terminate now ends that path.
-"symfony/console" = 522
+# 522 → 523  2026-10-11 (issue #948, #1033 S5): +1 variable.maybe-undefined at `Completion/CompletionInput.php:125`, TRUE. `$argumentName` is the `foreach` key after the loop, so unbound when the definition has no arguments, and the `||` right operand `getArgument($argumentName)` (a possible by-reference binding) no longer binds it on the path where `!isset(...)` was already true; PHP warns there.
+"symfony/console" = 523
 
 # 6 — every row class 4 (`$this->fail()` in `ProcessTest.php`).
 # Unmoved by issue #599 leg 1 (2026-09-01), and twice over. Every row is
