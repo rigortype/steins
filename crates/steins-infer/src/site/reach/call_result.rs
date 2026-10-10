@@ -31,7 +31,10 @@ use std::collections::HashSet;
 use steins_contract::ContractTy;
 use steins_syntax::{EffectRecv, NameRef, Span, Visibility};
 
-use super::{FloatClass, Frame, Held, hint_float_class, hint_held, hint_non_null};
+use steins_catalog::RenderDepth;
+use steins_domain::Base;
+
+use super::{FloatClass, Frame, Held, hint_float_class_at, hint_held, hint_non_null};
 use crate::builtin_returns::{builtin_method_row, floor_target_admits};
 use crate::contract::IsA;
 use crate::cx::Cx;
@@ -60,12 +63,12 @@ impl Returned<'_> {
         }
     }
 
-    /// Whether a value of this type is a float.
-    fn float_class(self) -> FloatClass {
+    /// Whether a value of this type is a float, read at `depth` ([`Frame::float_class_at`]).
+    fn float_class(self, depth: RenderDepth) -> FloatClass {
         match self {
-            Self::Native(hint) => hint_float_class(hint),
+            Self::Native(hint) => hint_float_class_at(hint, depth),
             Self::Mined(declared) => steins_contract::lower_str(declared)
-                .map_or(FloatClass::Unknown, |ty| contract_float_class(&ty)),
+                .map_or(FloatClass::Unknown, |ty| contract_float_class_at(&ty, depth)),
         }
     }
 }
@@ -131,8 +134,8 @@ pub(super) fn function_result(cx: &Cx, name: &NameRef) -> Held {
 }
 
 /// Whether the result of the plain call `name(...)` is a float.
-pub(super) fn function_float_class(cx: &Cx, name: &NameRef) -> FloatClass {
-    function_return(cx, name).map_or(FloatClass::Unknown, Returned::float_class)
+pub(super) fn function_float_class(cx: &Cx, name: &NameRef, depth: RenderDepth) -> FloatClass {
+    function_return(cx, name).map_or(FloatClass::Unknown, |returned| returned.float_class(depth))
 }
 
 /// The declared return of the plain call `name(...)`, where a gate lets one answer.
@@ -177,9 +180,10 @@ pub(super) fn method_float_class(
     frame: &Frame,
     receiver: &EffectRecv,
     method: &str,
+    depth: RenderDepth,
 ) -> FloatClass {
     method_return(cx, frame, receiver, method, Reading::Float)
-        .map_or(FloatClass::Unknown, Returned::float_class)
+        .map_or(FloatClass::Unknown, |returned| returned.float_class(depth))
 }
 
 /// What a declared return is read for: whether the value holds an object
@@ -410,6 +414,46 @@ fn contract_float_class(ty: &ContractTy) -> FloatClass {
             if members.iter().any(|m| contract_float_class(m) == FloatClass::No) =>
         {
             FloatClass::No
+        }
+        _ => FloatClass::Unknown,
+    }
+}
+
+/// [`contract_float_class`] for a value a renderer reads at `depth` ([`Frame::float_class_at`]):
+/// the same at [`RenderDepth::Value`], and for a walked one a type that states its contents.
+/// `float` is a float; an integer, string, boolean or `null` type holds none; a list or an array
+/// holds what its elements do (an element that is an array is `"Array"` at
+/// [`RenderDepth::Elements`] and walked at [`RenderDepth::Nested`]), and a float element proves a
+/// float only in a non-empty one. A union is as its members agree. `array`, a shape, a class,
+/// `object` and `mixed` do not say what they hold, and neither does a type not modeled.
+fn contract_float_class_at(ty: &ContractTy, depth: RenderDepth) -> FloatClass {
+    if depth == RenderDepth::Value {
+        return contract_float_class(ty);
+    }
+    let elements = |elem: &ContractTy, non_empty: bool| {
+        let class = if depth == RenderDepth::Nested {
+            contract_float_class_at(elem, depth)
+        } else {
+            contract_float_class(elem)
+        };
+        if class == FloatClass::Yes && !non_empty { FloatClass::Unknown } else { class }
+    };
+    match ty {
+        ContractTy::Null
+        | ContractTy::Never
+        | ContractTy::IntIn(_)
+        | ContractTy::StrWith(_)
+        | ContractTy::StrOpaque
+        | ContractTy::LitInt(_)
+        | ContractTy::LitStr(_)
+        | ContractTy::LitBool(_) => FloatClass::No,
+        ContractTy::Base(Base::Float) => FloatClass::Yes,
+        ContractTy::LitFloat(f) if f.is_finite() => FloatClass::Yes,
+        ContractTy::Base(Base::Int | Base::String | Base::Bool) => FloatClass::No,
+        ContractTy::ListOf { elem, non_empty } => elements(elem, *non_empty),
+        ContractTy::MapOf { val, non_empty, .. } => elements(val, *non_empty),
+        ContractTy::Union(members) if !members.is_empty() => {
+            FloatClass::agree(members.iter().map(|m| contract_float_class_at(m, depth)))
         }
         _ => FloatClass::Unknown,
     }

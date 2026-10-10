@@ -758,6 +758,47 @@ fn scans_the_timestamp_arguments_of_a_time_family_call() {
     assert_eq!(literals("time();"), []);
 }
 
+/// ADR-0101 §3.15: a float renderer records the float evidence of each positional argument, an
+/// array literal as the evidence of its elements, and nothing for another name or for an argument
+/// list whose positions cannot be read.
+#[test]
+fn scans_the_rendered_arguments_of_a_float_renderer() {
+    use steins_syntax::FloatEvidence::{Float, Members, NoFloat, OneOf};
+    fn rendered(body: &str) -> Vec<(u8, steins_syntax::FloatEvidence)> {
+        let src = format!("<?php function f($p, $q): void {{ {body} }}");
+        let tree = SourceTree::parse(&src);
+        let f = tree.functions().iter().find(|f| f.name == "f").expect("f").clone();
+        match derive_effect_origins(&f.sites).first().expect("one origin").clone() {
+            EffectOrigin::Call { const_args, .. }
+            | EffectOrigin::HigherOrder { const_args, .. } => const_args.rendered,
+            other => panic!("expected a named-call origin, got {other:?}"),
+        }
+    }
+    assert_eq!(rendered("strval(1.5);"), [(0, Float)]);
+    assert_eq!(rendered("STRVAL('a');"), [(0, NoFloat)]);
+    assert_eq!(rendered("json_encode([1, [2.5]]);"), [(
+        0,
+        Members(vec![NoFloat, Members(vec![Float])])
+    )]);
+    assert_eq!(rendered("json_encode([]);"), [(0, Members(Vec::new()))]);
+    assert_eq!(rendered("implode(',', [1.5]);"), [(0, NoFloat), (1, Members(vec![Float]))]);
+    assert_eq!(rendered("var_dump(1, 2.5);"), [(0, NoFloat), (1, Float)]);
+    assert_eq!(rendered("print_r($p ? [1] : [1.5], true);").len(), 2);
+    assert_eq!(
+        rendered("print_r($p ? [1] : [1.5]);"),
+        [(0, OneOf(vec![Members(vec![NoFloat]), Members(vec![Float])]))]
+    );
+    assert_eq!(rendered("serialize((array) 1.5);"), [(0, Members(vec![Float]))]);
+    // An element the scan cannot place, a spread, a cast of a variable and a variable's array:
+    // nothing is recorded for the position.
+    assert_eq!(rendered("json_encode([$p[0]]);"), []);
+    assert_eq!(rendered("json_encode([...$p]);"), []);
+    assert_eq!(rendered("json_encode((array) $p);"), []);
+    assert_eq!(rendered("strval(value: 1.5);"), []);
+    assert_eq!(rendered("strval(...$p);"), []);
+    assert_eq!(rendered("round(1.5);"), []);
+}
+
 // Class / method lowering (class-world extension)
 
 use steins_syntax::{Callee, ClassDecl, Receiver, ScopeOwner, StaticClass, StmtKind, Visibility};

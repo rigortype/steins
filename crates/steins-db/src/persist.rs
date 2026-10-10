@@ -1146,13 +1146,26 @@ mod tests {
                     ]),
                 ),
             ],
+            rendered: vec![
+                (0, FloatEvidence::Members(vec![FloatEvidence::Float, FloatEvidence::NoFloat])),
+                (1, FloatEvidence::Members(Vec::new())),
+            ],
         };
         let bytes = crate::wire::to_vec(&args).expect("const args serialize");
         let back: ConstArgs = crate::wire::from_slice(&bytes).expect("const args round-trip");
         assert_eq!(back, args);
         assert_eq!(
             serde_variants::<FloatEvidence>(),
-            ["NoFloat", "Float", "Shape", "GlobalConst", "ClassConst", "StaticProperty", "OneOf"]
+            [
+                "NoFloat",
+                "Float",
+                "Shape",
+                "GlobalConst",
+                "ClassConst",
+                "StaticProperty",
+                "OneOf",
+                "Members"
+            ]
         );
     }
 

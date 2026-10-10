@@ -168,6 +168,7 @@ mod s6_routing;
 mod same_this_descent;
 mod setting_cells;
 mod setting_encoding;
+mod setting_precision;
 mod setting_timezone;
 mod settype_cast;
 mod shape_covers;

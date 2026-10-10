@@ -17,7 +17,7 @@ mod consts;
 use std::cell::OnceCell;
 use std::collections::HashSet;
 
-use steins_catalog::{ArgReach, PrintfFamily};
+use steins_catalog::{ArgReach, PrintfFamily, RenderDepth};
 use steins_syntax::{
     ArgShape, ArgValue, CallTarget, ConstArgs, EffectRecv, FloatEvidence, NameRef, Param,
     NullEvidence, PropertyDecl, SiteKind, SiteOrigin, StaticClass, Stored, Visibility,
@@ -111,27 +111,61 @@ impl Frame<'_> {
     /// type says while no write rebinds it, and a local is as the writes the scan carried
     /// say; a conditional is as its branches agree.
     pub(crate) fn float_class(&self, cx: &Cx, evidence: &FloatEvidence) -> FloatClass {
+        self.float_class_at(cx, evidence, RenderDepth::Value)
+    }
+
+    /// [`Self::float_class`] of a value a renderer reads at `depth` (ADR-0101 §3.15). At
+    /// [`RenderDepth::Value`] the value is converted whole and an array holds nothing read; at
+    /// [`RenderDepth::Elements`] it is an array whose elements are each converted whole, and at
+    /// [`RenderDepth::Nested`] the renderer walks into every array and object. A walked value is
+    /// [`FloatClass::Yes`] where it is a float or an array literal holding one that is read, and
+    /// [`FloatClass::No`] where it is shown to hold none: a type that admits an array or an
+    /// object without saying what it holds (`array`, a class, `mixed`) is
+    /// [`FloatClass::Unknown`], and so is a local, whose writes the scan reads for the value and
+    /// not for what an array it holds contains.
+    pub(crate) fn float_class_at(
+        &self,
+        cx: &Cx,
+        evidence: &FloatEvidence,
+        depth: RenderDepth,
+    ) -> FloatClass {
+        let walked = depth != RenderDepth::Value;
         match evidence {
             FloatEvidence::NoFloat => FloatClass::No,
             FloatEvidence::Float => FloatClass::Yes,
             FloatEvidence::OneOf(branches) => {
-                FloatClass::agree(branches.iter().map(|b| self.float_class(cx, b)))
+                FloatClass::agree(branches.iter().map(|b| self.float_class_at(cx, b, depth)))
+            }
+            FloatEvidence::Members(items) => {
+                let element = if depth == RenderDepth::Nested { depth } else { RenderDepth::Value };
+                match depth {
+                    RenderDepth::Value => FloatClass::No,
+                    _ => {
+                        FloatClass::holds(items.iter().map(|i| self.float_class_at(cx, i, element)))
+                    }
+                }
             }
             FloatEvidence::GlobalConst(name) => global_const_fact(cx, name)
-                .map_or(FloatClass::Unknown, |(fact, _)| fact_float_class(&fact)),
+                .map_or(FloatClass::Unknown, |(fact, _)| fact_float_class(&fact, depth)),
             FloatEvidence::ClassConst { class, name } => {
                 // A typed constant holds its declared type, so `const float X = 1` is a float
                 // whatever the literal says: a typed one is read by its declaration first.
                 let literal = cx.resolve_class_const(class, name, self.class_fqn);
                 match (cx.class_const_declared_type(class, name, self.class_fqn), literal) {
-                    (Some(None), Some(ArgValue::Float(_))) => FloatClass::Yes,
+                    (Some(None), Some(ArgValue::Float(f))) if f.is_finite() => FloatClass::Yes,
                     (Some(None), Some(v)) if scalar_not_float(&v) => FloatClass::No,
                     (Some(Some(hint)), Some(ArgValue::Int(_) | ArgValue::Float(_)))
                         if declared_float(hint) =>
                     {
                         FloatClass::Yes
                     }
-                    (Some(Some(hint)), Some(_)) if hint_non_float(hint) => FloatClass::No,
+                    // A walked value is read as the literal says: a type that admits no float
+                    // does not make an array literal's elements any less so.
+                    (Some(Some(hint)), Some(v))
+                        if hint_non_float(hint) && (!walked || scalar_not_float(&v)) =>
+                    {
+                        FloatClass::No
+                    }
                     _ => FloatClass::Unknown,
                 }
             }
@@ -143,11 +177,15 @@ impl Frame<'_> {
                     StaticClass::Static => None,
                 };
                 start
-                    .and_then(|start| property_hint(cx, &start, (name, true), hint_float_class))
+                    .and_then(|start| {
+                        property_hint(cx, &start, (name, true), |hint| {
+                            hint_float_class_at(hint, depth)
+                        })
+                    })
                     .unwrap_or(FloatClass::Unknown)
             }
             FloatEvidence::Shape { shape, unwritten, writes } => {
-                self.shape_float_class(cx, (shape, *unwritten), writes)
+                self.shape_float_class(cx, (shape, *unwritten), writes, depth)
             }
         }
     }
@@ -204,6 +242,7 @@ impl Frame<'_> {
         cx: &Cx,
         (shape, unwritten): (&ArgShape, bool),
         writes: &[FloatEvidence],
+        depth: RenderDepth,
     ) -> FloatClass {
         let written = FloatClass::agree(writes.iter().map(|w| self.float_class(cx, w)));
         match shape {
@@ -214,7 +253,17 @@ impl Frame<'_> {
                 let param = self.params.iter().find(|p| &p.name == name);
                 let hint = param.and_then(|p| p.hint_span);
                 let nullable_default = param.is_some_and(|p| p.has_null_default);
-                match hint.and_then(|span| cx.tree().source_slice(span)).map(hint_float_class) {
+                let hint = hint.and_then(|span| cx.tree().source_slice(span));
+                if depth != RenderDepth::Value {
+                    // The writes the scan carries are read for the value, not for what an array
+                    // it holds contains: only a parameter the frame never writes is read.
+                    return match hint.map(|h| hint_float_class_at(h, depth)) {
+                        Some(FloatClass::No) if unwritten => FloatClass::No,
+                        Some(FloatClass::Yes) if unwritten && !nullable_default => FloatClass::Yes,
+                        _ => FloatClass::Unknown,
+                    };
+                }
+                match hint.map(hint_float_class) {
                     Some(FloatClass::No) if writes.is_empty() || written == FloatClass::No => {
                         FloatClass::No
                     }
@@ -227,19 +276,19 @@ impl Frame<'_> {
             // A local starts `null`, so only what every write stores can show it no float.
             ArgShape::Local { name, .. } => {
                 let no_float = writes.is_empty() || written == FloatClass::No;
-                if no_float && !self.rebound_by_call(cx, name) {
+                if depth == RenderDepth::Value && no_float && !self.rebound_by_call(cx, name) {
                     FloatClass::No
                 } else {
                     FloatClass::Unknown
                 }
             }
             ArgShape::ThisProperty(name) => {
-                this_property_hint(cx, self.class_fqn, name, hint_float_class)
-                    .unwrap_or(FloatClass::Unknown)
+                let read = |hint: &str| hint_float_class_at(hint, depth);
+                this_property_hint(cx, self.class_fqn, name, read).unwrap_or(FloatClass::Unknown)
             }
-            ArgShape::Call(name) => call_result::function_float_class(cx, name),
+            ArgShape::Call(name) => call_result::function_float_class(cx, name, depth),
             ArgShape::MethodCall { receiver, method } => {
-                call_result::method_float_class(cx, self, receiver, method)
+                call_result::method_float_class(cx, self, receiver, method, depth)
             }
             ArgShape::ObjectFree
             | ArgShape::Array
@@ -543,6 +592,21 @@ impl FloatClass {
     }
 }
 
+impl FloatClass {
+    /// What an array holding `parts` renders: a float if some part is one, no float if none can
+    /// be, and unknown otherwise. An empty array renders none.
+    fn holds(parts: impl IntoIterator<Item = Self>) -> Self {
+        let parts: Vec<Self> = parts.into_iter().collect();
+        if parts.contains(&Self::Yes) {
+            Self::Yes
+        } else if parts.iter().all(|p| *p == Self::No) {
+            Self::No
+        } else {
+            Self::Unknown
+        }
+    }
+}
+
 /// What a value the fact `fact` describes holds: the scalar layers hold no object, whatever the
 /// other layers are (an array shape's elements, an object) is not read.
 fn fact_held(fact: &Fact) -> Held {
@@ -567,18 +631,35 @@ fn declared_float(hint: &str) -> bool {
     matches!(hint.trim().to_ascii_lowercase().as_str(), "float" | "?float")
 }
 
-/// Whether a value the fact `fact` describes is a float: a literal or a set of literals is as
-/// its members are, a scalar base as the base is (a nullable one may be `null`), and any other
-/// layer is not read.
-fn fact_float_class(fact: &Fact) -> FloatClass {
-    let of = |v: &Val| if matches!(v, Val::Float(_)) { FloatClass::Yes } else { FloatClass::No };
+/// Whether a value the fact `fact` describes is a float, read at `depth`
+/// ([`Frame::float_class_at`]): a literal or a set of literals is as its members are, a scalar base
+/// as the base is (a nullable one may be `null`), and any other layer is not read. A non-finite
+/// float is undecided: it is written without either ini entry.
+fn fact_float_class(fact: &Fact, depth: RenderDepth) -> FloatClass {
     match fact {
-        Fact::Singleton(v) => of(v),
-        Fact::OneOf(vals) => FloatClass::agree(vals.iter().map(of)),
+        Fact::Singleton(v) => val_float_class(v, depth),
+        Fact::OneOf(vals) => FloatClass::agree(vals.iter().map(|v| val_float_class(v, depth))),
         Fact::Refined { base, nullable: false, .. } | Fact::General { base, nullable: false } => {
             if *base == Base::Float { FloatClass::Yes } else { FloatClass::No }
         }
         _ => FloatClass::Unknown,
+    }
+}
+
+/// [`fact_float_class`] of one literal value: a fully known array is read for the floats it
+/// holds at the depth the renderer walks.
+fn val_float_class(v: &Val, depth: RenderDepth) -> FloatClass {
+    match v {
+        Val::Float(f) if f.is_finite() => FloatClass::Yes,
+        Val::Float(_) => FloatClass::Unknown,
+        Val::Array(items) => {
+            let element = if depth == RenderDepth::Nested { depth } else { RenderDepth::Value };
+            match depth {
+                RenderDepth::Value => FloatClass::No,
+                _ => FloatClass::holds(items.iter().map(|(_, v)| val_float_class(v, element))),
+            }
+        }
+        _ => FloatClass::No,
     }
 }
 
@@ -596,6 +677,30 @@ pub(crate) fn hint_float_class(hint: &str) -> FloatClass {
     } else {
         FloatClass::Unknown
     }
+}
+
+/// [`hint_float_class`] for a value a renderer reads at `depth`: at [`RenderDepth::Value`] the
+/// value is converted whole, and a walked one is an array or object whose contents the hint does
+/// not state, so only a hint whose every member is a scalar that is no float is
+/// [`FloatClass::No`], and exactly `float` is [`FloatClass::Yes`].
+pub(crate) fn hint_float_class_at(hint: &str, depth: RenderDepth) -> FloatClass {
+    if depth == RenderDepth::Value {
+        return hint_float_class(hint);
+    }
+    let hint = hint.trim();
+    if hint.eq_ignore_ascii_case("float") {
+        return FloatClass::Yes;
+    }
+    let mut members = hint
+        .split(|c: char| matches!(c, '|' | '&' | '(' | ')' | '?') || c.is_whitespace())
+        .filter(|m| !m.is_empty())
+        .peekable();
+    let scalar = members.peek().is_some()
+        && members.all(|m| {
+            let m = m.to_ascii_lowercase();
+            matches!(m.as_str(), "int" | "string" | "bool" | "null" | "false" | "true")
+        });
+    if scalar { FloatClass::No } else { FloatClass::Unknown }
 }
 
 /// Whether the type spelled `hint` admits no float: no member is `float` or `mixed`.

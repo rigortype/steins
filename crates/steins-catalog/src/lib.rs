@@ -147,7 +147,10 @@ mod setting;
 pub use setting::{IniAccess, IniCall, SettingCell, ini_call, ini_cell, narrowed_ini_labels};
 
 mod setting_reads;
-pub use setting_reads::{ClockGate, GateArg, SettingReadGate, clock_gate, setting_read_gate};
+pub use setting_reads::{
+    ClockGate, GateArg, PrecisionGate, RenderDepth, Rendered, SettingReadGate, clock_gate,
+    precision_gate, setting_read_gate,
+};
 
 mod knowledge;
 pub use knowledge::{
