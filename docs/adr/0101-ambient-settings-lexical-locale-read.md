@@ -1158,6 +1158,77 @@ Landed as issue #1020, the follow-up that §3.12 deferred: the S6c note kept `se
 - **Not done.** `exec`, `proc_open` and `shell_exec` hand the environment to a child, and gettext reads `LANGUAGE`;
   neither row names the env cell yet (the second paragraph of #1020, left for its own slice).
 
+### 3.20 Follow-up: empty rows for the builtins that read no ambient state (2026-10-10) — PENDING ratification
+
+A follow-up to S6 of the ambient-settings run (#1000), after S6f (§3.18). It gives an explicit empty effect row to the
+calls that read neither the default zone, the clock nor a setting, so a pure function over them is exhaustive instead
+of the honest `no-effect-row` gap. It supersedes §3.16's "keep no row" for `bcceil`, `bcfloor` and `bcround`.
+
+- **Rows (`effects.rs`).** `bcceil`, `bcfloor` and `bcround` (`scale_free_row`, a helper chained after `ini_row` so
+  `effect_labels` stays under `too-many-lines-threshold`). On a built `DateTime` and `DateTimeImmutable`, as method rows
+  of `method_effect_labels`: `format`, `getTimestamp`, `getTimezone`, `getOffset`, `setTimestamp`, `setTime`, `setDate`,
+  `setISODate`, `setTimezone` and `modify`. `DateTime::createFromTimestamp`. `DateTimeZone::__construct`, `getName` and
+  `getOffset`. Each is `{}`. The reach rows for the same methods (`reach/methods.rs`) are required by the lockstep
+  between the three method tables: `format` and `modify` take a `string` (coerced, so an object reaches `__toString` in
+  coercive code, witnessed), the setters and `createFromTimestamp` take integers (an object is a `TypeError` in both
+  modes, witnessed), and the `DateTimeZone` and `DateTimeInterface` positions are `Inert` by the override the module
+  documents (a user subclass runs nothing, witnessed).
+- **The witnesses (PHP 8.5.11, nix libfaketime 0.9.10).** A 2 x 2 grid: the default zone `UTC` or `Asia/Tokyo` set by
+  `date_default_timezone_set`, against the clock 2024-07-01 12:00 UTC or 2024-01-15 03:00 UTC (the second run with
+  `Europe/London` as the zone, where the fall-back DST seed of §3.14 could show). Every candidate is the same in all four
+  runs. The method probes run on a fixed value, `(new DateTime('@1710051000'))` moved to a fixed zone object (a timestamp built value), and each
+  is also run on the `DateTimeImmutable` twin. Positive controls move as they must: `new DateTime('now GMT')` and
+  `new DateTime('2020-01-01')` move with the zone, `new DateTime('now')`, `tomorrow UTC` and `createFromFormat` with the
+  clock (`tomorrow UTC` on the clock alone, since its zone is fixed). `date.timezone` set by `-d` (no
+  `date_default_timezone_set`) moves neither `format`, `createFromTimestamp` nor the bc rounders (a subset of the probes). `bcceil`, `bcfloor` and `bcround` are the same under
+  `bcmath.scale` 0 and 7, where `bcadd` moves (so the probe is sensitive to the scale cell).
+- **Moved: none.** Each candidate in the brief was checked and none moved. `modify('now')`, `modify('tomorrow')`,
+  `modify('+1 day')`, `modify('10:00')`, `modify('monday')`, `modify('first day of next month')`, `modify('@86400')`,
+  `modify('UTC')`, `modify('Europe/London')`, `modify('EST')` and the setters all give one answer across the grid. The
+  zone-reading constructor (`new DateTime('now GMT')`) is not a candidate and keeps its label (§3.17). So no candidate
+  stays unrowed for a read, and nothing is left unrowed on this ground.
+- **Throws are an independent table.** `throws_of` (`knowledge.rs`) reads `builtin_throws` and `THROWLESS_NAMES`, and
+  `method_throws` (`builtins.rs`) reads its own rows; the effect table feeds neither, so an effect row cannot make a call
+  throw-free. Pinned by `an_empty_row_states_no_throw`. The throws are real and the catalog states none of them:
+  `bcround('abc')`, `bcceil('abc')` and `bcfloor('abc')` raise `ValueError` (not well-formed); `modify('garbage')` and
+  `modify('')` raise `DateMalformedStringException` (8.3+, a `DateTime` method row is deliberately absent from
+  `method_throws`); `new DateTimeZone('bad')`, `''`, `'0'`, `'@0'`, `'now'` and `'localtime'` raise
+  `DateInvalidTimeZoneException`, and `method_throws` answers `None` for the constructor. All of these stay the throw
+  lane's `no-throw-row` gap, as before.
+- **Limits the rows do not lift.** A variable receiver names no class to the engine (ADR-0067), so `$d->format('Y')`
+  on a written `$d` stays `dynamic-callee`. A method call on a `new` receiver records no operand shapes, so its literal
+  `string` argument reads blind in coercive code (`(new DateTime('@0'))->format('Y')` keeps `user-code-reach`), and is
+  exhaustive under `declare(strict_types=1)`, where the coercion is a `TypeError`. The test pins both sides.
+- **Consequence for DateTimeImmutable::createFromTimestamp.** The brief named only `DateTime::createFromTimestamp`. The
+  twin exists on 8.5.11 and returns the same UTC value under both zones and both clocks, so its row is the same fact.
+  It is not rowed here; a follow-up can add it with the reach row.
+- **Tests.** `effects.rs`: `the_built_value_and_zone_rows_are_empty` (the rows, and no final-method answer for a bound
+  receiver), `an_empty_row_states_no_throw` (the throw independence), `the_residue_cell_has_its_rows` (updated).
+  `reach/methods.rs`: `the_built_value_and_zone_rows_reach_only_through_a_string` (the positions), and
+  `a_method_without_a_row_is_blind_not_inert` now uses `DateTime::getLastErrors`. `empty_effect_rows.rs` (infer, new):
+  the rounders and the built values under strict typing are exhaustive and silent (red on the base, green after),
+  the zone and factory rows exhaustive and silent, the variable receiver keeps the gap, the coercive literal keeps
+  `user-code-reach`, an object argument that coerces is not exhaustive, and a bound receiver keeps the gap.
+- **Measurement (public corpus, ten packages; base a78171af, head the branch).** `check --profile strict
+  --no-php --vendor-diagnostics --no-cache --format json`: **nine packages byte-identical, one differs**
+  (`cakephp/chronos`), with the exit codes the same. The one difference removes a `throw.maybe-undeclared` finding at
+  `src/Chronos.php:966`, where `parent::modify($modifier)` sits in `Chronos::modify(string $modifier)`. The base charged
+  the call's unbounded reach because `DateTime::modify` had no reach row; the head proves the argument object-free,
+  since `$modifier` is a `string` parameter and coercion ran at the method's entry. The finding was a false positive;
+  it is removed, nothing new appears. `check` default (`--no-cache`): **byte-identical on all ten**, exit codes the
+  same. `effect-diff` (`--set-baseline` on the base, `--baseline` on the head): **seven events, all
+  `coverage-completed`** (the `no-effect-row` gap closed), **none `proven-added` or `proven-removed`**, no label
+  change. By cause: `Carbon` 5 (`Tests\CarbonPeriod\Fixtures\AbstractCarbon` `modify`, `setDate`, `setISODate`,
+  `setTime`, `setTimestamp`, whose bodies call the parent `DateTime` methods), `chronos` 1
+  (`Chronos::safeCreateDateTimeZone`, `new DateTimeZone(date_default_timezone_get())`, now the constructor row), and
+  `phpunit` 1 (`OtrXmlLogger::timestamp`, `new DateTimeImmutable('now', new DateTimeZone('UTC'))->format(...)`, whose
+  clock label already came from the constructor, so only the coverage moved). The rerun on the final binary (after the
+  helper refactor) gives the same numbers.
+- **Not measured.** The private corpus (not run). PHP 8.4 and earlier for these rows: the witnesses are 8.5.11 (8.4.25
+  agreed on the S6b-2 probes, not rerun here). A glibc build (the bundled zone database only). `DateTimeImmutable::createFromTimestamp`
+  (not rowed, per the brief). The fp-gate baselines and the CLI snapshot tests: not run, and the A/B covers the ten
+  public packages only. The effect-diff compared-function total was not recounted.
+
 ## 4. Decision: ADR-0021 Decision 2 is amended
 
 Decision 2's bar — "reads only its arguments: no ini setting, locale, clock,

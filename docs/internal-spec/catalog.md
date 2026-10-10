@@ -281,6 +281,7 @@ that a call is pure, and Decision 2's bar for an **empty** row is unchanged.
 | `date_default_timezone_get`, `date_default_timezone_set` | `{global.read.setting.timezone}`, `{global.write.setting.timezone}` |
 | `date_create`, `date_create_immutable`, `date_create_from_format`, `date_create_immutable_from_format` | `{global.read.setting.timezone, nondet.time}` as the upper bound the **string, format and zone object** decide (S6b-2, below); the constructors' per-method rows are the same |
 | `strval`, `settype`, `implode`, `join`, `json_encode`, `serialize` | `{global.read.setting.precision}` as the upper bound the **value rendered** decides (S6a, below) |
+| `bcceil`, `bcfloor`, `bcround`; a built `DateTime`'s or `DateTimeImmutable`'s readers and setters (`format`, `getTimestamp`, `getTimezone`, `getOffset`, `setTimestamp`, `setTime`, `setDate`, `setISODate`, `setTimezone`, `modify`); `DateTime::createFromTimestamp`; `DateTimeZone`'s constructor, `getName` and `getOffset` | `{}`, witnessed under two default zones and two clocks (ADR-0101 §3.20). A `string` argument on a `new` receiver stays blind in coercive code, and a throw is the throw table's, not this row's |
 | `print_r`, `var_export`, `var_dump`, `debug_zval_dump` | `{io.output.buffer, global.read.setting.precision}`; `print_r` and `var_export` in return mode narrow to `{global.read.setting.precision}` (S6a, below) |
 | `preg_match`, `preg_match_all`, `preg_replace`, `preg_replace_callback`, `preg_replace_callback_array`, `preg_filter`, `preg_split`, `preg_grep` | `{global.read.setting.locale}` as the upper bound the **literal pattern** decides (S5, below). `preg_quote` compiles nothing and keeps its empty row; `preg_last_error` and `preg_last_error_msg` have no row |
 | `ctype_digit`, `ctype_xdigit` | none: C fixes their sets in every locale and no byte moved, so they read no setting that changes an answer (left uncatalogued, not certified) |
@@ -451,7 +452,7 @@ null evidence the time family uses (`ConstArgs::timestamps`, which a residue cal
 cannot show keeps the label, as the clock gate keeps `nondet.time`: no `value-dependent-read` gap is raised, because
 the label is the upper bound there. `bcscale` and `error_reporting` return the old value, so they read on every call,
 and they write only when the argument is given and is not `null`; both gate kinds are `Ini` in `SettingReadGate`.
-`bcceil`, `bcfloor` and `bcround` take no scale and read nothing (witnessed), so they keep no row. `set_time_limit`
+`bcceil`, `bcfloor` and `bcround` take no scale and read nothing (witnessed), so they carry the empty row (ADR-0101 §3.20, which supersedes §3.16's "no row"). `set_time_limit`
 writes `max_execution_time` and reads nothing, and `set_include_path` reads and writes its entry. `ini_get_all` lists
 every entry, so it reads the parent `global.read.setting` and no one cell. `ini_restore` and `ini_set` of a name the
 call does not spell keep the coarse row (S6-core). The `@` operator sets `error_reporting` for the call it silences
