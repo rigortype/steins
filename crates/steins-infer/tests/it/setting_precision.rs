@@ -265,6 +265,43 @@ fn a_callback_and_an_unreadable_argument_list_are_the_gap() {
     depends("array $xs", "implode(',', ...$xs)");
 }
 
+/// A non-finite float is written without either entry (Q18h to Q18j), so a constant that is one
+/// is undecided for the renderers and for a printf `%s` alike, never a proven label.
+#[test]
+fn a_non_finite_float_is_undecided() {
+    for call in ["strval(NAN)", "strval(INF)", "json_encode([NAN])", "sprintf('%s', INF)"] {
+        depends("", call);
+    }
+    proves("", "strval(M_PI)", &[PRECISION]);
+    proves("", "sprintf('%s', M_PI)", &[PRECISION]);
+}
+
+/// A pure envelope over a proven read is exceeded at the call, as it is for a printf `%s`; one
+/// over a value shown float-free is silent.
+#[test]
+fn a_pure_envelope_is_exceeded_by_a_proven_read_only() {
+    let envelope = |call: &str| {
+        let src = format!(
+            "<?php\n#[\\Steins\\Pure]\nfunction f(float $f, int $n): string {{ return {call}; }}\n"
+        );
+        let tree = SourceTree::parse(&src);
+        let functions = tree.functions().to_vec();
+        steins_infer::check(&tree, &functions, "test.php")
+            .into_iter()
+            .filter(|d| d.id == steins_infer::EFFECT_ID)
+            .map(|d| d.message)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        envelope("strval($f)"),
+        ["strval() has effect global.read.setting.precision, but f() is declared #[\\Steins\\Pure]"]
+    );
+    assert_eq!(envelope("json_encode([1.5])").len(), 1);
+    assert!(envelope("strval($n)").is_empty());
+    assert!(envelope("json_encode([1, 'a'])").is_empty());
+    assert!(envelope("number_format($f, 2)").is_empty());
+}
+
 /// Both inis share the cell, and `ini_set` of either name is its write.
 #[test]
 fn both_inis_are_the_one_cell() {
