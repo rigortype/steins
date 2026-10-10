@@ -526,6 +526,69 @@ block may have run user code that rebinds any global (issue #762), so the
 handler entries and the successor start from nothing there, while the block
 applies the rule statement by statement.
 
+*Revision (2026-10-11, S1b of #1033) — PENDING ratification:* the successor is
+the join of the normal exits, carried through `finally`. It replaces the
+paragraph above for every `try` without a `goto` or a label.
+
+A *normal exit* is the end of the block or of a live `catch`, reached by
+falling through. The successor is reached only through one, and then through
+`finally` falling through. A path through the block's end ran the whole block
+straight-line. A path through a `catch` ran it from the catch's entry, which
+has already dropped everything the block may have changed before an exception
+left it. So each exit's env is sound for the paths through it, and their join
+is sound for the successor. The join is `join_envs`, the one `if` and `match`
+use, store included.
+
+| normal exits that fall through | `finally` | successor |
+| --- | --- | --- |
+| none | any | dead |
+| some | none | the join of their envs |
+| some | terminates on its walk over every entry | dead |
+| some | falls through on that walk | `finally` walked from the join: its end env, or dead where that walk terminates |
+| a `goto` or label inside | any | reachable, with the paragraph above's `Opaque` env |
+
+Witnessed on PHP 8.5.11 with `var_dump`, each with the block falling through
+and with it throwing: `try { $x = 1; } catch (E $e) { $x = 2; }` leaves `1` or
+`2`, and Steins now reads `1|2` (#943 `t6`). A `catch` that returns leaves the
+block's `1`. A block that always throws leaves the catch's `2`, not the entry's
+`0`. A `finally { $x = 5; }` leaves `5` on both paths. Nested `try`s join
+inside out to `1|2|3`. A property one `catch` writes joins with the value the
+block left. A name only the block assigns is unknown after the construct, and
+the presence pass keeps reporting its read under `variable.maybe-undefined`.
+PHP warns "Undefined variable" there when the `catch` ran.
+
+**`finally` is walked twice.** The walk over every entry, from the forgotten
+entry above, judges its statements: its findings, its dumps, the regions it
+proves dead and the summary exits it records. A second walk from the join
+carries the normal paths to the successor. That walk's env holds on some of
+the paths into `finally`, not all of them, so it reports nothing. The dead
+regions, uncovered matches and summary exits it adds are cut off again, and the
+`assertType` and loop-subject harness observers are muted while it runs. A
+branch the join decides is still live when an exception arrives: `$x = 0; try
+{ f(); $x = 1; } catch (E $e) { return; } finally { if ($x === 1) {} else {
+echo NOPE; } }` reads the undefined constant when `f()` throws, and the
+constant check still reports it.
+
+**The hidden-exit floor stays.** It is about the summary exits, not the
+successor. A `return` in the block or a `catch` records its exit before
+`finally` runs, and a `finally` can replace that value, or mutate the returned
+object or `$this` after the snapshot. So a construct that may return still
+pushes the floor, and the join changes nothing about it. The remembered call
+results of ADR-0102 need nothing new either. Each exit's store carries the keys
+its own walk kept, and the store join keeps a key only where every exit does.
+The top-level rebind rule needs no clear of its own at the successor. The
+block applies it statement by statement, and each handler entry already starts
+from nothing where it fires. A construct that poisons leaves nothing behind.
+
+Measured on the ten public corpus packages against the merge base: one finding
+moved, +1 `phpdoc.param-mismatch` at `strict` in composer. A `try` above it
+only calls a method on a receiver, and the old successor forgot the receiver,
+so a later call on it resolved nothing. Nothing moved at `default`. The five
+`transform` dry-runs are byte-identical, and `effect-diff` reports no event.
+
+Fixtures: the "successor" section of
+`crates/steins-infer/tests/it/try_bodies.rs`.
+
 **`goto` stays unbounded.** A `goto` or a label anywhere in the construct
 keeps it `Unknown` in `stmt_end`, keeps the walker's successor live, and keeps
 the presence pass falling through.

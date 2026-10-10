@@ -182,7 +182,14 @@
 # 35 → 21  2026-10-02 (issues #915, #922): the 14 `phpdoc.maybe-argument-mismatch` /
 # `phpdoc.maybe-return-mismatch` rows are strict-floor ids, and the gate now counts every
 # strict-floor id in POSSIBLY_EXPECTED, by the registry's floor. Same findings, other table.
-"composer/composer" = 21
+# 21 → 22  2026-10-11 (issue #943, #1033 S1b, the try successor join): +1
+# phpdoc.param-mismatch at `Command/SelfUpdateCommand.php:217`. A `try` above it only calls a
+# method on `$versionsUtil`, and its old opaque successor forgot the receiver, so
+# `$versionsUtil->getLatest()` at line 194 resolved nothing. The join keeps it. TRUE under the
+# sealed-shape reading of the flysystem row below: `getLatest()`'s `@return` shape carries
+# `path`, `min-php` and `eol`, which `getMaintenanceWarning()`'s `@param array{version, …}
+# $entry` does not name. A disagreement between two docblocks; nothing fails at runtime.
+"composer/composer" = 22
 
 #   8 → 12 (+4): `realpath()` into a `string` parameter four times — `new
 #   TestCase($filename)` twice in `Runner/Phpt/TestCaseTest.php`, `new
