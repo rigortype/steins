@@ -2183,8 +2183,8 @@ mod tests {
     /// ADR-0101 §3.14, S6b-1: the time family. The functions that format or build a local time
     /// carry the timezone read beside the clock (the call site drops the clock where a timestamp
     /// is supplied), the `gm*` spellings carry the clock alone, the zone accessors read and write
-    /// the timezone cell, `checkdate` has no row, and the constructors keep the argument-blind
-    /// clock row for S6b-2.
+    /// the timezone cell, `checkdate` has no row, and the constructors carry both as the upper
+    /// bound their call narrows (S6b-2, §3.17).
     #[test]
     fn the_time_family_reads_the_timezone_cell_and_the_clock() {
         const ZONE: &str = "global.read.setting.timezone";

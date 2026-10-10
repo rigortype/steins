@@ -279,6 +279,7 @@ that a call is pure, and Decision 2's bar for an **empty** row is unchanged.
 | `date`, `idate`, `mktime`, `strtotime`, `getdate`, `localtime` | `{global.read.setting.timezone, nondet.time}` (S6b-1: every call reads the timezone cell; the clock only where the timestamp is left out, below) |
 | `gmdate`, `gmmktime` | `{nondet.time}` as the upper bound a supplied timestamp drops to `{}` (below) |
 | `date_default_timezone_get`, `date_default_timezone_set` | `{global.read.setting.timezone}`, `{global.write.setting.timezone}` |
+| `date_create`, `date_create_immutable`, `date_create_from_format`, `date_create_immutable_from_format` | `{global.read.setting.timezone, nondet.time}` as the upper bound the **string, format and zone object** decide (S6b-2, below); the constructors' per-method rows are the same |
 | `strval`, `settype`, `implode`, `join`, `json_encode`, `serialize` | `{global.read.setting.precision}` as the upper bound the **value rendered** decides (S6a, below) |
 | `print_r`, `var_export`, `var_dump`, `debug_zval_dump` | `{io.output.buffer, global.read.setting.precision}`; `print_r` and `var_export` in return mode narrow to `{global.read.setting.precision}` (S6a, below) |
 | `preg_match`, `preg_match_all`, `preg_replace`, `preg_replace_callback`, `preg_replace_callback_array`, `preg_filter`, `preg_split`, `preg_grep` | `{global.read.setting.locale}` as the upper bound the **literal pattern** decides (S5, below). `preg_quote` compiles nothing and keeps its empty row; `preg_last_error` and `preg_last_error_msg` have no row |
@@ -304,9 +305,26 @@ fields are shown supplied; `mktime` is **ungated** and keeps the clock at every 
 flag, taken from the current time, still decides the repeated hour of a fall-back transition. A timestamp that
 may be `null` or the scan cannot place (a `?int`, an untyped or local variable, a named or spread list) keeps the label and is **no gap**: the clock is
 an upper bound there, as it always was. `ConstArgs::literals` carries the literal arguments of the nine names.
-`checkdate` reads nothing and has no row. The `DateTime` constructors and `date_create*` keep the argument-blind
-`nondet.time` until their per-method table (S6b-2). None of these names is on the fold or the remembered
-allowlist, so a call that reads a setting is neither folded nor remembered.
+`checkdate` reads nothing and has no row. None of these names is on the fold or the remembered allowlist, so a
+call that reads a setting is neither folded nor remembered.
+
+**The `DateTime` constructors** (S6b-2, `setting_reads/datetime.rs` in `steins-catalog`; ADR-0101 §3.17). `new
+DateTime(...)`, `new DateTimeImmutable(...)`, the static `createFromFormat` factories and the four `date_create*`
+spellings run `php_date_initialize`, which reads the default zone unless a `DateTimeZone` is passed and the clock on
+every call, and copies from the clock and the zone only the fields the string leaves out. The row is the upper bound
+`{global.read.setting.timezone, nondet.time}` and a **date gate** (`DateGate`, `date_gate`, `date_method_gate`)
+drops each read the call rules out. The zone goes for a zone object shown not `null` (the parameter is
+`?DateTimeZone`, and any other value throws first), and for a literal whose every field and zone is its own: an `@`
+timestamp, an absolute `YYYY-MM-DD` date (optionally with a time) followed by ` UTC`, ` GMT`, `Z` or an offset, or a
+keyword (`now`, `today`, ...) followed by ` UTC` in capitals. The clock goes for an `@` timestamp and for an absolute
+date with or without a zone (every field is set, so `php_time()`'s value is overwritten), and for a `createFromFormat`
+format with an unescaped `!` or `|`. A keyword, or an absolute date with no zone, is the proven read; any other
+literal, any string the scan does not spell, an alias of the class and a named or spread list **keep both labels and
+raise no gap**, as the clock gate does. A zone the string names but that is not an identifier (`'now GMT'`, `'today
+utc'`, `'now +01:00'`) still copies the default zone's wall clock for the fields it leaves out, and timelib reads
+`est`, `a`, `Japan`, `-05` and `+5` as zones, so no lexical blacklist is used. `ConstArgs::literals` and
+`ConstArgs::timestamps` are recorded on a `new` that spells `DateTime` or `DateTimeImmutable`, on a static
+`__construct` or `createFromFormat` call, and on the four functions.
 
 **The float renderers** (S6a, `setting_reads/precision.rs` in `steins-catalog`; ADR-0101 §3.15). A float becomes
 text through `precision` (`strval`, `settype` to a string, `implode`, `print_r`) or `serialize_precision`
@@ -643,13 +661,14 @@ that route, and the body that registered the class holds the gap.
 
 Constructor rows (`__construct`, issue #804) are what `new C(...)` and a
 subclass's `parent::__construct(...)` run: `PDO` is `io.db`, `DateTime` and
-`DateTimeImmutable` are `nondet.time`, and every engine `Throwable`, the SPL
+`DateTimeImmutable` are `{global.read.setting.timezone, nondet.time}` as the
+upper bound their call decides (S6b-2, above), and every engine `Throwable`, the SPL
 containers, `ArrayObject`, `WeakMap`, `DateInterval` and `stdClass` are pure. The
 `Throwable` accessors (`getMessage`, `getCode`, `getFile`, `getLine`,
 `getPrevious`, `getTrace`, `getTraceAsString`, issue #847) are pure on every
 engine `Throwable`; `__toString` has no row. The static
 `DateTime::createFromFormat` and `DateTimeImmutable::createFromFormat` take the
-constructors' `nondet.time`, as their function spellings do in `effect_labels`
+constructors' row, as their function spellings do in `effect_labels`
 (issue #848), and the copying factories (`createFromImmutable`,
 `createFromMutable`, `createFromInterface`) are pure.
 
