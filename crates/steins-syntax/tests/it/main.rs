@@ -18,6 +18,7 @@ mod interpolation_value;
 mod isset_value;
 mod loop_nesting;
 mod method_call_value;
+mod null_default;
 mod operator_sites;
 mod operator_value;
 mod relative_names;
