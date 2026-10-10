@@ -469,12 +469,13 @@ fn a_ternary_or_match_arm_binds_on_some_paths_only() {
 }
 
 #[test]
-fn coalesce_assign_and_nullsafe_arguments_are_conditional() {
+fn coalesce_assign_is_conditional_and_nullsafe_arguments_are_not_modelled() {
     // `??=` binds its target either way and runs its right side on a miss only.
     assert_eq!(maybe("$y ??= ($x = 1); echo $y;"), none());
     assert_eq!(maybe("$y ??= ($x = 1); echo $x;"), one("x"));
-    // A null receiver skips the call, arguments and all.
-    assert_eq!(maybe("$c?->m($x = 1); echo $x;"), one("x"));
+    // A null receiver skips the call, but the pass cannot see nullability: silent.
+    assert_eq!(maybe("$c?->m($x = 1); echo $x;"), none());
+    assert_eq!(maybe("$c?->m($out); echo $out;"), none());
     assert_eq!(maybe("$c->m($x = 1); echo $x;"), none());
 }
 
@@ -507,6 +508,49 @@ fn nested_short_circuits_compose() {
 }
 
 #[test]
+fn an_existence_guard_binds_on_the_path_that_skips_the_right_side() {
+    for guard in [
+        "isset($a) || ($a = 2)",
+        "isset($a) or $a = 2",
+        "!isset($a) && ($a = 2)",
+        "empty($a) && ($a = 2)",
+        "$a ?? ($a = 2)",
+        "isset($a) ?: ($a = 2)",
+        "!empty($a) || ($a = 2)",
+    ] {
+        assert_eq!(maybe(&format!("if ($c) {{ $a = 1; }} {guard}; echo $a;")), none(), "{guard}");
+        // Expression position composes the same way.
+        assert_eq!(maybe(&format!("if ($c) {{ $a = 1; }} $r = {guard}; echo $a;")), none(), "{guard}");
+    }
+    // The guard names another variable: no proof.
+    assert_eq!(maybe("if ($c) { $b = 1; } isset($b) || ($a = 2); echo $a;"), one("a"));
+    assert_eq!(maybe("isset($d) || ($a = 2); echo $a;"), one("a"));
+    // The same name bound on both outcomes.
+    assert_eq!(maybe("$c && ($x = 1) || ($x = 2); echo $x;"), none());
+    assert_eq!(maybe("$c && ($x = 1) || ($y = 2); echo $x;"), one("x"));
+}
+
+#[test]
+fn an_arm_that_cannot_complete_drops_out_of_the_intersection() {
+    assert_eq!(maybe("$c ? ($x = 1) : exit(1); echo $x;"), none());
+    assert_eq!(maybe("$c ? ($x = 1) : die('a'); echo $x;"), none());
+    // A callee may be `: never`; the pass has no index, so a call arm is read that way.
+    assert_eq!(maybe("$c ? ($x = 1) : nv(); echo $x;"), none());
+    assert_eq!(maybe("match ($c) { 1 => $x = 1, default => exit }; echo $x;"), none());
+    assert_eq!(maybe("match ($c) { 1 => $x = 1, default => nv() }; echo $x;"), none());
+    // A completing non-binding arm still counts.
+    assert_eq!(maybe("$c ? ($x = 1) : 0; echo $x;"), one("x"));
+}
+
+#[test]
+fn assert_refines_only_by_isset_guards() {
+    // With `zend.assertions=-1` the call does not run, so its assignments are not there.
+    assert_eq!(maybe("assert($c && ($x = 1)); echo $x;"), one("x"));
+    assert_eq!(maybe("if ($d) { $x = 1; } assert(isset($x)); echo $x;"), none());
+    assert_eq!(maybe("if ($d) { $x = 1; } assert(isset($x) && $c); echo $x;"), none());
+}
+
+#[test]
 fn a_condition_refines_the_branch_its_outcome_implies() {
     // The true branch of `A && B` ran `B`; the false branch of `A || B` ran `B`.
     assert_eq!(maybe("if ($c && ($x = 1)) { echo $x; }"), none());
@@ -525,7 +569,6 @@ fn a_condition_refines_the_branch_its_outcome_implies() {
     assert_eq!(maybe("if ($c && ($d && ($x = 1))) { echo $x; }"), none());
     // Ternary, `??` and `?:` conditions refine nothing.
     assert_eq!(maybe("if ($d ?? ($x = 1)) { echo $x; }"), one("x"));
-    assert_eq!(maybe("assert($c && ($x = 1)); echo $x;"), none());
 }
 
 #[test]

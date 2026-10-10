@@ -7,7 +7,7 @@ use std::collections::HashSet;
 
 use mago_span::HasSpan;
 use mago_syntax::cst::{
-    Access, Argument, BinaryOperator, Call, Construct, Expression, Node, Statement,
+    Access, Argument, AssignmentOperator, BinaryOperator, Call, Construct, Expression, Node, Statement,
     UnaryPrefixOperator, Variable,
 };
 
@@ -290,7 +290,12 @@ fn collect_direct_variable_names(node: &Node<'_, '_>, out: &mut Vec<String>) {
 }
 
 /// The names a condition **proves bound** on one of its continuations
-/// (ADR-0081 §5).
+/// (ADR-0081 §5), by `isset`/`empty` alone.
+///
+/// Only these refine a statement-position `assert()` (see [`assert_bound_names`]): with
+/// assertions compiled out (`zend.assertions=-1`) the call does not run, so a binding the
+/// asserted expression makes (`assert($c && ($x = 1))`) is not there to rely on, while an
+/// `isset` guard only ever moves toward silence.
 ///
 /// `want_true` asks for the true-continuation. `isset($x)` proves `$x` bound when
 /// true; `empty($x)` and `!isset($x)` prove it bound when **false** — which is the
@@ -300,9 +305,35 @@ fn collect_direct_variable_names(node: &Node<'_, '_>, out: &mut Vec<String>) {
 /// `&&` conjoins on the true side (both operands hold), `||` on the false side
 /// (neither holds). No polarity ever refines toward absence: `isset` is false on a
 /// bound null, so a false `isset($x)` proves nothing about the binding.
-fn guard_bound_names(cond: &Expression<'_>, want_true: bool, out: &mut Vec<String>) {
-    let (on_true, on_false) = implied_bound(cond);
-    out.extend(if want_true { on_true } else { on_false });
+fn isset_bound_names(cond: &Expression<'_>, want_true: bool, out: &mut Vec<String>) {
+    match cond.unparenthesized() {
+        Expression::Construct(Construct::Isset(i)) if want_true => {
+            for value in i.values.iter() {
+                push_guard_root(value, out);
+            }
+        }
+        Expression::Construct(Construct::Empty(e)) if !want_true => {
+            push_guard_root(e.value, out);
+        }
+        Expression::UnaryPrefix(up) if matches!(up.operator, UnaryPrefixOperator::Not(_)) => {
+            isset_bound_names(up.operand, !want_true, out);
+        }
+        Expression::Binary(b)
+            if want_true
+                && matches!(b.operator, BinaryOperator::And(_) | BinaryOperator::LowAnd(_)) =>
+        {
+            isset_bound_names(b.lhs, true, out);
+            isset_bound_names(b.rhs, true, out);
+        }
+        Expression::Binary(b)
+            if !want_true
+                && matches!(b.operator, BinaryOperator::Or(_) | BinaryOperator::LowOr(_)) =>
+        {
+            isset_bound_names(b.lhs, false, out);
+            isset_bound_names(b.rhs, false, out);
+        }
+        _ => {}
+    }
 }
 
 /// The names a condition proves bound on its true and its false continuation, in that
@@ -312,41 +343,55 @@ fn guard_bound_names(cond: &Expression<'_>, want_true: bool, out: &mut Vec<Strin
 ///
 /// What a binding inside an expression does to the names after it:
 ///
-/// A unit's bindings are applied after its reads, and a binding that sits where
-/// evaluation may not reach is `Maybe`, not `Bound`: `join(before, Bound)`, so a name
-/// already `Bound` stays so. "After" is the state following the whole unit; "true" and
-/// "false" are the states of a branch the unit is the condition of, which
-/// [`implied_bound`] refines. `L` is an operand evaluated whenever the expression is,
-/// `R` one evaluated only on some paths.
+/// A unit's bindings are applied after its reads. A binding where evaluation may not
+/// reach is `join(before, Bound)` on the path that skips it, so a name already `Bound`
+/// stays so. For `&&`, `||`, `and`, `or`, `??` and `?:` the state **after** the
+/// expression is the join of the two refinements computed here: a name is `Bound` after
+/// it exactly when it is in both the true-side and the false-side set (the set it is
+/// proved bound on each continuation), and `Maybe` otherwise. That one rule is why
+/// `isset($a) || ($a = 2)` binds (the left guard proves `$a` on the path that skips the
+/// right side) and `$c && ($x = 1) || ($x = 2)` binds (both outcomes ran an assignment).
+/// "True" and "false" are also the states of a branch the unit is the condition of.
+/// `L` is an operand evaluated whenever the expression is, `R` one evaluated only on
+/// some paths.
 ///
-/// | form                         | L binds (after/true/false) | R binds: after | true  | false |
-/// |------------------------------|----------------------------|----------------|-------|-------|
-/// | `A && B`, `A and B`          | Bound / Bound / Bound      | Maybe          | Bound | Maybe |
-/// | `A \|\| B`, `A or B`         | Bound / Bound / Bound      | Maybe          | Maybe | Bound |
-/// | `A ?? B`                     | Bound / Bound / Bound      | Maybe          | Maybe | Maybe |
-/// | `A ?: B`                     | Bound / Bound / Bound      | Maybe          | Maybe | Maybe |
-/// | `C ? X : Y` (C is L)         | Bound / Bound / Bound      | Maybe (1)      | Maybe | Maybe |
-/// | `match (S) { P => X, .. }`   | S, first P: Bound (2)      | Maybe (1)      | Maybe | Maybe |
-/// | `A xor B`                    | Bound / Bound / Bound      | Bound (3)      | Bound | Bound |
-/// | `$a ??= B` (`$a` is L)       | Bound / Bound / Bound      | Maybe          | Maybe | Maybe |
-/// | `$o?->m(B)` (`$o` is L)      | Bound / Bound / Bound      | Maybe (4)      | Maybe | Maybe |
+/// | form                         | L binds           | R binds: true | false | after                |
+/// |------------------------------|-------------------|---------------|-------|----------------------|
+/// | `A && B`, `A and B`          | Bound             | Bound         | Maybe | T and F (1)          |
+/// | `A \|\| B`, `A or B`         | Bound             | Maybe         | Bound | T and F (1)          |
+/// | `A ?? B`                     | Bound             | Maybe         | Maybe | A's root, or L (2)   |
+/// | `A ?: B`                     | Bound             | Maybe         | Maybe | T(A) and (F(A) or B) |
+/// | `C ? X : Y` (C is L)         | Bound             | Maybe         | Maybe | every completing arm (3) |
+/// | `match (S) { P => X, .. }`   | S, first P: Bound | Maybe         | Maybe | every completing arm (3) |
+/// | `A xor B`                    | Bound             | Bound         | Bound | Bound (4)            |
+/// | `$a ??= B` (`$a` is L)       | Bound             | Maybe         | Maybe | Maybe                |
 ///
-/// 1. A name every completing arm binds is `Bound` after the expression: `$c ? ($x = 1)
-///    : ($x = 2)`, and a `match` (an unmatched subject throws, so some arm ran). An arm
-///    that is a `throw` expression never completes and drops out of the intersection.
-/// 2. Later conditions of a `match` run only when the earlier ones failed.
-/// 3. `xor` does not short-circuit: both operands always run.
-/// 4. A null receiver skips the call, arguments included.
+/// 1. `T` and `F` are the true-side and false-side sets this function returns; `after` is
+///    their intersection. Nested forms compose through the same recursion.
+/// 2. `A ?? B` runs `B` only when `A` is null or unset, so a root local of `A`
+///    (`$a`, `$a['k']`, `$a->p`) is bound on the path that skips `B`; a name `B` binds is
+///    bound after only if it is such a root.
+/// 3. An arm that cannot complete drops out of the intersection: a `throw` expression,
+///    `exit`/`die`, and any call (whether a callee is `: never` is a question for the
+///    project index, which this pass does not have, so a call arm is read as possibly
+///    diverging). `$c ? ($x = 1) : ($x = 2)` and a `match` (an unmatched subject throws,
+///    so some arm ran) bind what every completing arm binds. Later conditions of a
+///    `match` run only when the earlier ones failed.
+/// 4. `xor` does not short-circuit: both operands always run.
+///
+/// A `?->` call's arguments are **not** a row: the presence pass cannot see whether the
+/// receiver may be null (`$k?->m($out)` on a non-nullable `$k` always runs the call), so
+/// the arguments stay unconditional bindings, the recall-losing side.
 ///
 /// The `true`/`false` columns are the precision of a branch condition: the true
 /// continuation of `A && B` implies `B` ran, the false continuation of `A || B` implies
 /// `B` ran, and negation swaps them. `?:`, `??`, the ternary and `match` as a condition
-/// refine nothing (their outcome does not say which arm ran), which stays `Maybe`.
+/// refine only by the same intersection, which says nothing about which arm ran.
 ///
 /// Witnessed on PHP 8.5: each `Maybe` cell warns `Undefined variable` on some input
 /// (`$c && ($x = 1); echo $x;` with `$c` false; `$c || ($x = 1)` with `$c` true;
-/// `$n ?? ($x = 1)` with `$n` set; `$c ? ($x = 1) : 0` with `$c` false; `$o?->m($x = 1)`
-/// with `$o` null; `$a ??= ($x = 1)` with `$a` set), and `$a && ($b = 1) || ($c = 2)`
+/// `$n ?? ($x = 1)` with `$n` set; `$c ? ($x = 1) : 0` with `$c` false;
+/// `$a ??= ($x = 1)` with `$a` set), and `$a && ($b = 1) || ($c = 2)`
 /// composes: `$b` and `$c` are both `Maybe`.
 fn implied_bound(cond: &Expression<'_>) -> (HashSet<String>, HashSet<String>) {
     if stack_guard::exhausted() {
@@ -374,31 +419,81 @@ fn implied_bound(cond: &Expression<'_>) -> (HashSet<String>, HashSet<String>) {
             let (on_true, on_false) = implied_bound(up.operand);
             (on_false, on_true)
         }
-        Expression::Binary(b)
-            if matches!(b.operator, BinaryOperator::And(_) | BinaryOperator::LowAnd(_)) =>
-        {
+        // `$ok = A` is as true as `A`, and its right side ran first.
+        Expression::Assignment(a) if matches!(a.operator, AssignmentOperator::Assign(_)) => {
+            let (mut on_true, mut on_false) = implied_bound(a.rhs);
+            let own = unconditional();
+            on_true.extend(own.iter().cloned());
+            on_false.extend(own);
+            (on_true, on_false)
+        }
+        Expression::Binary(b) => implied_binary(b).unwrap_or_else(|| (unconditional(), unconditional())),
+        Expression::Conditional(c) if c.then.is_none() => implied_elvis(c),
+        _ => (unconditional(), unconditional()),
+    }
+}
+
+/// [`implied_bound`] for the short-circuit binary operators, or `None` for any other.
+/// Also what a scan of `b` adds to [`VarUsage::uncond_bound`] (the intersection of the two
+/// sides), so the after-state of the operator is the join of its two refinements.
+pub(crate) fn implied_binary(b: &mago_syntax::cst::Binary<'_>) -> Option<(HashSet<String>, HashSet<String>)> {
+    if stack_guard::exhausted() {
+        return Some((HashSet::new(), HashSet::new()));
+    }
+    match &b.operator {
+        BinaryOperator::And(_) | BinaryOperator::LowAnd(_) => {
             let (l_true, l_false) = implied_bound(b.lhs);
             let (r_true, r_false) = implied_bound(b.rhs);
             // False: `A` was false, or `A` was true and `B` false.
             let via_rhs: HashSet<String> = l_true.union(&r_false).cloned().collect();
-            (l_true.union(&r_true).cloned().collect(), l_false.intersection(&via_rhs).cloned().collect())
+            Some((
+                l_true.union(&r_true).cloned().collect(),
+                l_false.intersection(&via_rhs).cloned().collect(),
+            ))
         }
-        Expression::Binary(b)
-            if matches!(b.operator, BinaryOperator::Or(_) | BinaryOperator::LowOr(_)) =>
-        {
+        BinaryOperator::Or(_) | BinaryOperator::LowOr(_) => {
             let (l_true, l_false) = implied_bound(b.lhs);
             let (r_true, r_false) = implied_bound(b.rhs);
             // True: `A` was true, or `A` was false and `B` true.
             let via_rhs: HashSet<String> = l_false.union(&r_true).cloned().collect();
-            (l_true.intersection(&via_rhs).cloned().collect(), l_false.union(&r_false).cloned().collect())
+            Some((
+                l_true.intersection(&via_rhs).cloned().collect(),
+                l_false.union(&r_false).cloned().collect(),
+            ))
         }
-        _ => (unconditional(), unconditional()),
+        op if op.is_null_coalesce() => {
+            // `B` runs only when `A` is null or unset; a root local of `A` is bound on
+            // the path that skips it. The outcome says nothing about which path ran.
+            let mut roots = Vec::new();
+            push_guard_root(b.lhs, &mut roots);
+            let left = expr_uncond_bound(b.lhs);
+            let skipped: HashSet<String> = left.iter().cloned().chain(roots).collect();
+            let ran: HashSet<String> =
+                left.iter().cloned().chain(expr_uncond_bound(b.rhs)).collect();
+            let both: HashSet<String> = skipped.intersection(&ran).cloned().collect();
+            Some((both.clone(), both))
+        }
+        _ => None,
     }
+}
+
+/// [`implied_bound`] for `A ?: B`: `B` runs when `A` is falsy.
+pub(crate) fn implied_elvis(c: &mago_syntax::cst::Conditional<'_>) -> (HashSet<String>, HashSet<String>) {
+    if stack_guard::exhausted() {
+        return (HashSet::new(), HashSet::new());
+    }
+    let (a_true, a_false) = implied_bound(c.condition);
+    let ran: HashSet<String> = a_false.union(&expr_uncond_bound(c.r#else)).cloned().collect();
+    let both: HashSet<String> = a_true.intersection(&ran).cloned().collect();
+    (both.clone(), both)
 }
 
 /// The names every normal completion of `expr` binds ([`VarUsage::uncond_bound`]).
 fn expr_uncond_bound(expr: &Expression<'_>) -> HashSet<String> {
     let mut acc = VarUsage::default();
+    // Nested operators inside an operand add nothing beyond their left side here: asking
+    // each for its own refinement would make the walk exponential in the nesting.
+    acc.in_implied = true;
     scan_var_usage(&Node::Expression(expr), false, &[], &mut acc);
     acc.uncond_bound
 }
@@ -425,8 +520,15 @@ pub(crate) fn push_guard_root(expr: &Expression<'_>, out: &mut Vec<String>) {
 }
 
 fn guarded_names(cond: &Expression<'_>, want_true: bool) -> Vec<String> {
+    let (on_true, on_false) = implied_bound(cond);
+    let mut names: Vec<String> = if want_true { on_true } else { on_false }.into_iter().collect();
+    names.sort();
+    names
+}
+
+fn isset_guarded_names(cond: &Expression<'_>, want_true: bool) -> Vec<String> {
     let mut out = Vec::new();
-    guard_bound_names(cond, want_true, &mut out);
+    isset_bound_names(cond, want_true, &mut out);
     out
 }
 
@@ -611,7 +713,7 @@ fn assert_bound_names(s: &Statement<'_>) -> Vec<String> {
     if first.ellipsis.is_some() {
         return Vec::new();
     }
-    guarded_names(first.value, true)
+    isset_guarded_names(first.value, true)
 }
 
 /// The `if`/`elseif`/`else` chain: each arm is evaluated from the pre-branch state
