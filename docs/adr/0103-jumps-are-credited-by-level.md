@@ -49,7 +49,7 @@ class-like is another scope and is not descended). For a `switch` case body:
 | `break N` / `continue N`, `N == d + 1` | on this switch's **successor**: the arm *lands* |
 | `break N` / `continue N`, `N > d + 1` | on a construct outside the switch: it **ends the arm**, and that loop's own count owns it |
 | level not a positive integer literal | PHP refuses to compile it (`break $n` since 5.4, `break 0` always); read as the worst case, landing and ending the arm |
-| `goto` | its label is unbounded: the arm lands, carrying no fact |
+| `goto` | its label is unbounded: the arm lands, but the edge carries no env (§2.2) |
 | `return` / `throw` / `exit` | ends the arm, never lands |
 
 A `continue` counts a `switch` as a level, and a `continue N` whose `N`th
@@ -57,7 +57,10 @@ level is a `switch` is `break N`. PHP 8.5.11 says so at compile time:
 `"continue" targeting switch is equivalent to "break"`, and
 `"continue 2" targeting switch is equivalent to "break 2"`. A jump out of a
 `try` block or a `catch` runs the `finally` first (witnessed on 8.5.11).
-PHP rejects a jump out of a `finally` at compile time.
+PHP rejects a jump out of a `finally` at compile time. A `finally` that
+terminates replaces the jump: `try { break; } finally { return; }` returns, so
+such a jump lands nowhere, for a switch arm and for a loop's `break_free` and
+`nested_jumps_only` alike, and the presence pass drops the states it parked.
 
 ### 2.2 The walker: `MatchArmT::lands`
 
@@ -68,25 +71,34 @@ The `default` body carries one in `StmtKind::Match::default_lands`.
 whatever the arm's own walk answered. The edge carries the env the arm was
 entered with, forgotten by `loop_entry_forget`'s rule: `writes` dropped, the
 objects named by `reads` swept, and everything cleared when `clears` is set.
-`clears` is set by an ADR-0001 poison or by any `goto`, whose label lowers as
-a barrier wherever it sits. The env is also cleared where the top-level rebind
-rule fires on `runs` (issue #762). The sets are the whole body's, so a
-`finally` the jump runs is forgotten too.
+`clears` is set by an ADR-0001 poison. The env is also cleared where the
+top-level rebind rule fires on `runs` (issue #762). The sets are the whole
+body's, so a `finally` the jump runs is forgotten too.
+
+A `goto` landing carries no env (`by_level` unset when only `goto`s land).
+Every path from a `goto` to the successor passes its label, which lowers as a
+barrier, so the edge adds nothing to the join; `walk_match` adds a cleared env
+only when no other edge reaches the successor, to keep it reachable. A
+trailing `goto` ends its case's trace as a `LoopJump` does. Read as the
+barrier it is elsewhere, it would fall through with a cleared env and erase
+what the other paths know after the switch (round 1 review: `$o = null;
+switch ($k) { case 1: goto out; } $o->m(); out:` lost its `call.on-null`).
 
 The design note spelled the field `Option<Vec<String>>`, the arm's writes.
 Writes alone would keep an object property a method call in the case body
 changed before the jump, and would keep facts at file scope that a userland
 call rebound. The struct carries the three further inputs that close both.
 
-A jump that ends the arm lowers as `StmtKind::LoopJump` and terminates the
-arm's walk. A trailing `break;`/`break 1;`, and now also `continue;`/
+A case runs into the next one unless its own `break` ends it, a `goto` does, or
+`block_end` proves no path leaves its end. A jump that ends the arm lowers as
+`StmtKind::LoopJump` and terminates the arm's walk. A trailing `break;`/`break 1;`, and now also `continue;`/
 `continue 1;`, is stripped as the switch's own end. A trailing `break 2` is
 no longer a refusal: it stays in the body as a `LoopJump`. A `goto` no longer
 refuses the construct. A `switch (true)` chain is an `if`, which has no
 landing edge, so a chain with a landing arm stays `Opaque`.
 
-`switch_end`, the `BodyEnd` row, is unchanged. It still answers `Unknown`
-for a switch with any jump in it, which costs recall only.
+`switch_end`, the `BodyEnd` row, still answers `Unknown` for a switch with
+any jump in it, which costs recall only. It takes D4 (§2.4).
 
 ### 2.3 The presence pass: parked jumps carry their level
 
@@ -112,6 +124,11 @@ although every PHP path binds it.
 A case that runs into a later non-empty case still keeps the construct
 `Opaque`. That fall-through edge is not modelled.
 
+`switch_end` reads the same rule: the last non-empty case's own end is its
+arm, and an empty label after it is an arm that falls through. PHP 8.5.11
+throws "none returned" for `switch ($k) { case 1: return 1; default: }` in an
+`: int` function, which `type.return-maybe-missing` now reports.
+
 ## 3. Consequences
 
 - **Findings can appear:** findings after a switch whose case jumps past it
@@ -119,8 +136,11 @@ A case that runs into a later non-empty case still keeps the construct
   that used to be `Opaque` because of a `break 2`, a `continue`, a `goto`, a
   braced `break`, or a last case without `break` (#944);
   `variable.maybe-undefined` at `strict` after a switch whose case jumps past
-  it, or whose `continue` is its `break`.
-- **Findings can disappear:** findings on code after a `break 2` from a case,
+  it, or whose `continue` is its `break`; `type.return-missing` and
+  `type.return-maybe-missing` where a function ends in a switch whose last case
+  or trailing empty label falls through.
+- **Findings can disappear:** findings on code after a jump that a returning
+  `finally` replaces; findings on code after a `break 2` from a case,
   where every other arm terminates, because the walk used to keep that code
   live through the `Opaque`; `variable.maybe-undefined` where a non-last case
   ran into a binding case, or where a `finally` binds before a jump lands.
