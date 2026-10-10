@@ -100,6 +100,22 @@ landing edge, so a chain with a landing arm stays `Opaque`.
 `switch_end`, the `BodyEnd` row, still answers `Unknown` for a switch with
 any jump in it, which costs recall only. It takes D4 (§2.4).
 
+### 2.2b A `goto` ends its list; a label resumes the walk
+
+An unconditional `goto` lowers as a `LoopJump` in every list, not only in a case
+body: the code after it is reached only through a label. Read as a barrier
+that falls through, it carried dead code into the join (round 2 review:
+`case 1: goto out; $o = null; break;` reported `call.on-null` after the switch,
+and `if ($c) { goto out; $o = null; }` did the same on base). A label lowers as
+`StmtKind::Label`, a barrier, and `Stmt::holds_label` marks it and every `if`
+or `try` holding one; PHP lets a `goto` enter those, never a loop or a
+`switch` ("'goto' into loop or switch statement is disallowed"). `walk_trace`
+walks a list in runs split at label-holding statements: a run that terminates
+marks the rest of its run dead, and the next run starts with nothing known.
+So code after any terminator is dead only up to the next label, which also
+reaches `if ($k) { goto out; } return; out: …`, dead to the walk before. The
+rows, each witnessed on PHP 8.5.11, are tabled in `lower_jump.rs`.
+
 ### 2.3 The presence pass: parked jumps carry their level
 
 `breaks` and `continues` become `(level, state)` pairs. Each loop and

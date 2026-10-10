@@ -55,7 +55,8 @@ an opaque entry keeps the blanket drop.
 | `Assert { cond }` | `assert($expr)` with a lowerable condition |
 | `Throw { span }` / `Exit { span }` | trace terminators |
 | `Opaque { writes, reads, poisons, may_return }` | a recognized control-flow construct whose internals are not modeled but whose write and read sets are; `may_return` is true when the subtree contains a `return` the walk cannot see as a top-level `Return` |
-| `Barrier` | anything unmodeled *and* unbounded — `goto`, labels, `declare`, `__halt_compiler`. Erases all known values |
+| `Barrier` | anything unmodeled *and* unbounded — `declare`, `__halt_compiler`, declarations. Erases all known values |
+| `Label { span }` | a `goto` label (ADR-0103): a barrier, and a point where a walk a terminator stopped resumes. A `goto` lowers as `LoopJump`, ending its list; `Stmt::holds_label` marks a label, or an `if`/`try` holding one, as the next live statement |
 | `Try { body, catches, finally, catches_live, has_goto, body_writes, body_reads, catch_writes, catch_reads, writes, reads, poisons, may_return }` | `try`/`catch`/`finally` (ADR-0027's 2026-10-11 amendment): the block walks straight-line; each `catch` (a `CatchArm`: its `CatchClause` and body) enters with the block's sets forgotten and the caught variable seeded, and `finally` with the block's and the catches' sets forgotten; the successor applies `writes`/`reads` as `Opaque` does. `catches_live` is `false` when no statement of the block can throw, `has_goto` keeps the successor live. The construct terminates when `finally` does or when the block and every live `catch` do |
 
 Compound assignment (`+=`, `.=`) lowers its value to `Other` — the statement is
