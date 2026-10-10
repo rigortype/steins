@@ -614,6 +614,26 @@ fn method_effect_envelope_admits_subsumed_helper_effect() {
     assert_eq!(effects(src).len(), 0, "io.fs.write under io → silent");
 }
 
+/// A `nondet.time` envelope no longer covers the zone readers: `date($f, 0)`, `date('Y')` and
+/// `mktime(...)` read `global.read.setting.timezone`, which `nondet.time` does not admit, so the
+/// tag is exceeded (ADR-0101 §3.14, consistent with §3.5).
+#[test]
+fn a_nondet_time_envelope_is_exceeded_by_the_zone_readers() {
+    for call in ["date('Y', 0)", "date('Y')", "mktime(1, 2, 3, 4, 5, 2020)"] {
+        let name = call.split('(').next().unwrap();
+        let src = format!(
+            "<?php\n#[\\Steins\\Effect('nondet.time')]\nfunction g(): string|int|false {{ return {call}; }}\n"
+        );
+        let messages: Vec<String> = effects(&src).into_iter().map(|d| d.message).collect();
+        assert!(
+            messages.iter().any(|m| m.starts_with(&format!(
+                "{name}() has effect global.read.setting.timezone, but g() is declared"
+            ))),
+            "{call}: {messages:?}"
+        );
+    }
+}
+
 /// The time family's siblings, added when a coverage survey found the catalog's
 /// own module doc claiming `strtotime`/`idate` were `nondet.time` while
 /// `effect_labels` answered `None` for both. Uncatalogued widens, so the gap was

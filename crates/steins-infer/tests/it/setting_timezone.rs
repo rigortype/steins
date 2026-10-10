@@ -182,6 +182,28 @@ fn a_timestamp_that_may_be_null_keeps_the_clock_and_is_no_gap() {
     }
 }
 
+/// A default PHP folds to `null` makes the parameter implicitly nullable, whatever its spelling;
+/// only a plain scalar literal default shows it non-`null`. `has_null_default` sees the bare
+/// `null` alone, so the other spellings must leave the parameter unplaced.
+#[test]
+fn a_null_default_in_any_spelling_keeps_the_clock() {
+    for param in [
+        "int $ts = \\null",
+        "int $ts = \\NULL",
+        "int $ts = null ?? null",
+        "int $ts = true ? null : 0",
+        "int $ts = [null][0]",
+    ] {
+        let s = summary(param, "return date('Y', $ts);");
+        assert!(s.labels.iter().any(|l| l == CLOCK), "{param}: {s:?}");
+        assert!(!s.gaps.contains(&"value-dependent-read"), "{param}: {s:?}");
+    }
+    // The control: a non-null literal default is supplied, and a parameter with none.
+    proves("int $ts = 0", "date('Y', $ts)", &[ZONE]);
+    proves("string $ts = '0'", "date('Y', $ts)", &[ZONE]);
+    proves("int $ts", "date('Y', $ts)", &[ZONE]);
+}
+
 /// The zone accessors, the clock readers and `checkdate`.
 #[test]
 fn the_accessors_and_the_unconditional_clock_readers() {
