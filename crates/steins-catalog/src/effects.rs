@@ -1124,15 +1124,14 @@ pub fn method_effect_labels(class: &str, method: &str) -> Option<&'static [&'sta
         // The readers and setters of a built value (ADR-0101 §3.20): a value always holds the zone
         // its constructor gave it, and these read that zone and the value's own fields. They never
         // read the default zone or the clock, witnessed with a fixed value under two default zones
-        // and two faked clocks: `modify` takes its base from the value (`now`, `tomorrow`, `+1 day`
-        // and a zone name move nothing), and `setTimezone` takes its zone as an argument. The
-        // methods are not final, so a bound receiver gets no answer from the final-method lookup
-        // (the engine's open arm), and an argument the engine coerces through `__toString` is the
-        // argument-reach lane's business, not this row's.
+        // and two faked clocks, and `setTimezone` takes its zone as an argument. `modify` is no row
+        // (ADR-0101 §3.20): on PHP below 8.3 a garbage modifier is an `E_WARNING` a user error handler
+        // receives, so the floor decides the reach and no per-file fact can. The setters' float
+        // arguments raise an `E_DEPRECATED` the same way, and stay rowed as the accepted residue of
+        // §3.20. The methods are not final, so a bound receiver gets no answer from the
+        // final-method lookup (the engine's open arm).
         ("datetime" | "datetimeimmutable", "format" | "gettimestamp" | "gettimezone" | "getoffset"
-        | "settimestamp" | "settime" | "setdate" | "setisodate" | "settimezone" | "modify") => {
-            Some(EMPTY)
-        }
+        | "settimestamp" | "settime" | "setdate" | "setisodate" | "settimezone") => Some(EMPTY),
         // `createFromTimestamp` builds a value in UTC from its argument (PHP 8.4+), witnessed
         // under both default zones and both clocks.
         ("datetime", "createfromtimestamp") => Some(EMPTY),
@@ -2294,11 +2293,12 @@ mod tests {
                 "setDate",
                 "setISODate",
                 "setTimezone",
-                "modify",
             ] {
                 assert_eq!(method_effect_labels(class, method), Some(&[][..]), "{class}::{method}");
                 assert_eq!(final_method_effect_labels(class, method), None, "{class}::{method}");
             }
+            // `modify` warns on PHP below 8.3 (reaches a handler): no row on any version.
+            assert_eq!(method_effect_labels(class, "modify"), None, "{class}::modify");
         }
         assert_eq!(method_effect_labels("DateTime", "createFromTimestamp"), Some(&[][..]));
         for method in ["__construct", "getName", "getOffset"] {

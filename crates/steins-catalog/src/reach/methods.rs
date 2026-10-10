@@ -221,11 +221,12 @@ pub fn method_arg_reach(class: &str, method: &str) -> Option<MethodReachRow> {
             row(&["DateTimeInterface"], false, &[(0, Inert)])
         }
         // The readers and setters of a built value (ADR-0101 §3.20, the empty effect rows). `format`
-        // and `modify` convert an object through `__toString` under coercive typing and are a
-        // `TypeError` under `strict_types=1` (witnessed on 8.5.11 in both modes). The setters take
+        // `format` converts an object through `__toString` under coercive typing and is a
+        // `TypeError` under `strict_types=1` (witnessed on 8.5.11 in both modes). `modify` has no
+        // row (ADR-0101 §3.20: its garbage modifier warns below PHP 8.3). The setters take
         // integers, which an object never converts, and a `DateTimeZone` or `DateTimeInterface`
         // object runs nothing, a user subclass included (witnessed in both modes).
-        ("datetime" | "datetimeimmutable", "format" | "modify") => row(&["string"], false, &[]),
+        ("datetime" | "datetimeimmutable", "format") => row(&["string"], false, &[]),
         ("datetime" | "datetimeimmutable", "settimestamp") => row(&["int"], false, &[]),
         ("datetime" | "datetimeimmutable", "settime") => {
             row(&["int", "int", "int", "int"], false, &[])
@@ -448,14 +449,14 @@ mod tests {
     }
 
     /// ADR-0101 §3.20: the built value's rows and the zone object's answer each argument by what
-    /// PHP 8.5.11 does with it, witnessed in both calling modes. `format`, `modify` and the zone
+    /// PHP 8.5.11 does with it, witnessed in both calling modes. `format` and the zone
     /// constructor's string convert an object through `__toString`; the integers, the zone object
-    /// and the `DateTimeInterface` of `getOffset` run nothing.
+    /// and the `DateTimeInterface` of `getOffset` run nothing. `modify` has no row at all.
     #[test]
     fn the_built_value_and_zone_rows_reach_only_through_a_string() {
         for class in ["DateTime", "DateTimeImmutable"] {
             assert_eq!(at(class, "format", 0), ArgReach::Coerced, "{class}::format");
-            assert_eq!(at(class, "modify", 0), ArgReach::Coerced, "{class}::modify");
+            assert!(method_arg_reach(class, "modify").is_none(), "{class}::modify: no row");
             assert_eq!(at(class, "setTimestamp", 0), ArgReach::Inert);
             assert_eq!(at(class, "setTime", 3), ArgReach::Inert, "$microsecond");
             assert_eq!(at(class, "setDate", 2), ArgReach::Inert);
