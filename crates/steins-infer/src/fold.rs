@@ -1167,7 +1167,7 @@ impl<E: FoldEngine> EngineFolder<E> {
             return None;
         }
         // The ambient-setting gate (ADR-0101 §3.3), before the engine is asked.
-        if fold_reads_ambient_setting(name, &fargs) {
+        if fold_reads_ambient_setting(name, &fargs) || fold_coerces_float_to_string(name, &fargs) {
             return None;
         }
         if !fold_within_allocation_budget(name, &fargs) {
@@ -1376,6 +1376,38 @@ fn fold_reads_ambient_setting(name: &str, args: &[FoldArg]) -> bool {
         Some(FoldArg::Str(format)) => steins_catalog::format_reads_locale(format),
         _ => true,
     }
+}
+
+/// Whether a float literal reaches a parameter the builtin declares as `string` (ADR-0101 §3.21,
+/// #1024): weak mode coerces it to text with the ambient `precision`, which the runner leaves at
+/// the default, so `strlen(1.5)` is left to the row (`global.read.setting.precision`) and not
+/// folded to `3`. A union counts when it names `string` and neither `float` nor `mixed`, since
+/// those keep the float as it is (`string|int` takes `1.5` as text). A non-finite float counts too.
+/// A variadic tail takes the last declared type. A float inside an array argument is not looked
+/// at: which builtins stringify the elements is not in the catalog, so `array_unique([1.5])`
+/// keeps folding (the effect label stays unset, D4).
+fn fold_coerces_float_to_string(name: &str, args: &[FoldArg]) -> bool {
+    fn takes_text(declared: &str) -> bool {
+        let (mut text, mut float) = (false, false);
+        for member in declared.trim_start_matches('?').split('|') {
+            match member.trim() {
+                "string" => text = true,
+                "float" | "mixed" => float = true,
+                _ => {}
+            }
+        }
+        text && !float
+    }
+    if !args.iter().any(|arg| matches!(arg, FoldArg::Float(_))) {
+        return false;
+    }
+    let Some(facts) = steins_catalog::param_facts(name) else { return false };
+    args.iter().enumerate().any(|(position, arg)| {
+        let declared = facts.params.get(position).or_else(|| {
+            facts.variadic.first().filter(|first| **first <= position).and(facts.params.last())
+        });
+        matches!(arg, FoldArg::Float(_)) && declared.is_some_and(|d| takes_text(d))
+    })
 }
 
 /// Whether a call to a float renderer folds a float into its text ([`fold_reads_ambient_setting`]).
@@ -1783,6 +1815,37 @@ mod ambient_gate_tests {
         assert!(fold_reads_ambient_setting("vsprintf", &[s("%f"), FoldArg::Array(vec![])]));
         assert!(fold_reads_ambient_setting("printf", &[s("%g")]));
         assert!(!fold_reads_ambient_setting("vsprintf", &[s("%d"), FoldArg::Array(vec![])]));
+    }
+
+    /// A float at a parameter declared `string` (or a union that takes it as text) does not
+    /// fold, whatever the builtin; a string, an int and a float at a `float` position still do
+    /// (#1024).
+    #[test]
+    fn a_float_at_a_string_parameter_does_not_fold() {
+        use super::fold_coerces_float_to_string as refuses;
+        let f = FoldArg::Float;
+        assert!(refuses("strlen", &[f(1.5)]));
+        assert!(refuses("strlen", &[f(f64::INFINITY)]));
+        assert!(refuses("str_pad", &[f(1.5), FoldArg::Int(5), s("*")]));
+        assert!(refuses("str_repeat", &[f(1.5), FoldArg::Int(2)]));
+        assert!(!refuses("strlen", &[s("1.5")]));
+        assert!(!refuses("strlen", &[FoldArg::Int(1)]));
+        assert!(!refuses("abs", &[f(1.5)]));
+        assert!(!refuses("round", &[f(1.5), FoldArg::Int(1)]));
+        assert!(!refuses("str_repeat", &[s("a"), FoldArg::Int(2)]));
+        assert!(!refuses("no_such_builtin", &[f(1.5)]));
+    }
+
+    /// The gate is in the seam: `strlen(1.5)` never reaches the engine, `strlen('1.5')` and
+    /// `strlen(1)` do.
+    #[test]
+    fn strlen_of_a_float_is_not_asked() {
+        let mut folder = EngineFolder::with_engine(Counting::default());
+        folder.fold("strlen", &[ArgValue::Float(1.5)], false);
+        assert!(folder.engine.folds.is_empty());
+        folder.fold("strlen", &[ArgValue::Str("1.5".into())], false);
+        folder.fold("strlen", &[ArgValue::Int(1)], false);
+        assert_eq!(folder.engine.folds, ["strlen", "strlen"]);
     }
 
     /// A literal pattern that reads the locale tables does not fold, whatever the subject is;
