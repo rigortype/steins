@@ -360,3 +360,20 @@ fn the_fall_through_after_the_loop_is_unchanged() {
         "the entry binding does not ride the fall-through"
     );
 }
+
+#[test]
+fn a_guard_narrows_a_declared_key_within_its_stratum() {
+    // Issue #1037: `is_int` over the docblock key `int|string` leaves an `int`, and
+    // that `int` is still the declaration's claim — `asserted`, never `verified` —
+    // so it cannot premise a proof-layer finding.
+    let src = subject(
+        "array<int|string, mixed>",
+        "    foreach ($xs as $k => $v) {\n        if (!\\is_int($k)) {\n            continue;\n        }\n        \\PHPStan\\dumpType($k);\n    }",
+    );
+    assert_eq!(answers(&src), vec!["int (asserted)".to_owned()]);
+    let other = subject(
+        "array<int|string, mixed>",
+        "    foreach ($xs as $k => $v) {\n        if (\\is_int($k)) {\n            continue;\n        }\n        \\PHPStan\\dumpType($k);\n    }",
+    );
+    assert_eq!(answers(&other), vec!["string (asserted)".to_owned()]);
+}

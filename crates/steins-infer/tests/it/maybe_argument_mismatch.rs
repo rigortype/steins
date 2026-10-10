@@ -609,3 +609,85 @@ fn is_callable_costs_its_out_param_and_nothing_else() {
     assert_eq!(d.len(), 1, "{d:?}");
     assert!(d[0].message.contains("$key"), "the surviving premise is $key's: {}", d[0].message);
 }
+
+// A guard narrows a multi-base union VALUE fact (issue #1037). A docblock key
+// `array<int|string, T>` binds `$k` as an `int|string` fact (no arm lane), and
+// the base-naming predicates used to leave that fact whole.
+
+#[test]
+fn an_is_int_guard_narrows_a_docblock_foreach_key() {
+    let src = strict(
+        "/** @param array<int|string, mixed> $conf */\n\
+         function f(array $conf): void {\n\
+         foreach ($conf as $k => $v) { if (!\\is_int($k)) { throw new \\Exception('x'); } needInt($k); }\n\
+         }\n",
+    );
+    assert!(family(&src).is_empty(), "{:?}", family(&src));
+}
+
+#[test]
+fn the_other_base_predicates_narrow_a_docblock_foreach_key_too() {
+    let by_string = strict(
+        "/** @param array<int|string, mixed> $conf */\n\
+         function f(array $conf): void {\n\
+         foreach ($conf as $k => $v) { if (\\is_string($k)) { needString($k); } else { needInt($k); } }\n\
+         }\n",
+    );
+    assert!(family(&by_string).is_empty(), "{:?}", family(&by_string));
+    // The false branch of `is_int` deletes the int arm and leaves the string one.
+    let negated = strict(
+        "/** @param array<int|string, mixed> $conf */\n\
+         function f(array $conf): void {\n\
+         foreach ($conf as $k => $v) { if (\\is_int($k)) { continue; } needString($k); }\n\
+         }\n",
+    );
+    assert!(family(&negated).is_empty(), "{:?}", family(&negated));
+}
+
+#[test]
+fn an_is_float_and_is_bool_guard_narrow_a_docblock_element() {
+    let src = strict(
+        "function needFloat(float $f): void {}\n\
+         function needBool(bool $b): void {}\n\
+         /** @param array<string, int|float|bool> $xs */\n\
+         function f(array $xs): void {\n\
+         foreach ($xs as $v) {\n\
+         if (\\is_float($v)) { needFloat($v); } elseif (\\is_bool($v)) { needBool($v); } else { needInt($v); }\n\
+         }\n\
+         }\n",
+    );
+    assert!(family(&src).is_empty(), "{:?}", family(&src));
+}
+
+#[test]
+fn an_is_int_guard_narrows_a_docblock_foreach_value() {
+    let src = strict(
+        "/** @param array<string, int|string> $xs */\n\
+         function f(array $xs): void {\n\
+         foreach ($xs as $v) { if (!\\is_int($v)) { continue; } needInt($v); }\n\
+         }\n",
+    );
+    assert!(family(&src).is_empty(), "{:?}", family(&src));
+}
+
+#[test]
+fn without_the_guard_the_docblock_key_still_reports() {
+    // The control: the narrowing is the guard's, not a blanket silence.
+    let src = strict(
+        "/** @param array<int|string, mixed> $conf */\n\
+         function f(array $conf): void {\n\
+         foreach ($conf as $k => $v) { needInt($k); }\n\
+         }\n",
+    );
+    let found = contract(&src);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].message.contains("int|string"), "{}", found[0].message);
+    // A guard for the other base keeps the finding on the branch it guards.
+    let wrong = strict(
+        "/** @param array<int|string, mixed> $conf */\n\
+         function f(array $conf): void {\n\
+         foreach ($conf as $k => $v) { if (\\is_string($k)) { needInt($k); } }\n\
+         }\n",
+    );
+    assert!(proof(&wrong).is_empty(), "an Asserted premise never reaches the proof id");
+}

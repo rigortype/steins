@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 
 use steins_contract::ContractTy;
-use steins_domain::{Base, Certainty, Fact, Refinement, StrPreds, Val, php_is_numeric};
+use steins_domain::{Base, Certainty, Fact, Refinement, StrPreds, UnionArm, Val, php_is_numeric};
 use steins_syntax::{ArgValue, CallExpr, CondExpr};
 
 use crate::cx::Cx;
@@ -1019,6 +1019,15 @@ fn refine_fact_for_pred(
                 .collect();
             return Fact::from_vals(kept);
         }
+        // A multi-base union (`int|string`, a docblock-declared key or a joined
+        // branch) is the one abstract layer whose arms a base-naming predicate
+        // separates exactly (issue #1037); the narrowing keeps the fact's own
+        // stratum, since `refine_fact` takes the minimum.
+        if let Fact::Union { arms, nullable } = f
+            && let Some(base) = pred_base(pred)
+        {
+            return narrow_union_by_base(arms, *nullable, base, positive);
+        }
         if !positive {
             // The abstract layers carry no negative-predicate vocabulary (ADR-0052
             // §2). The exception is the nullable bit, the complement of `is_null`
@@ -1059,6 +1068,29 @@ fn refine_fact_for_pred(
             (_, other) => other.clone(),
         })
     });
+}
+
+/// What `is_int`/`is_string`/`is_float`/`is_bool` leaves of a multi-base union
+/// fact (issue #1037). The arms are per base, and the predicate holds on every
+/// value of its own base's arm and on none of another's, so the true branch keeps
+/// that one arm (without `null`) and the false branch deletes it, nullability
+/// kept. `None` when nothing is left — an unreachable branch, which the verdict
+/// owns (ADR-0052 §2), so the fact drops rather than state a claim about it.
+///
+/// Only the value lane moves: the union's stratum is unchanged, so a docblock
+/// `int|string` (`Asserted`) narrows to an `Asserted` `int` and never premises
+/// the proof layer.
+fn narrow_union_by_base(
+    arms: &[UnionArm],
+    nullable: bool,
+    base: Base,
+    positive: bool,
+) -> Option<Fact> {
+    if positive {
+        Fact::union(arms.iter().filter(|(b, _)| *b == base).cloned().collect(), false)
+    } else {
+        Fact::union(arms.iter().filter(|(b, _)| *b != base).cloned().collect(), nullable)
+    }
 }
 
 /// Value-fact narrowing for the strict literal-haystack `in_array` form.
