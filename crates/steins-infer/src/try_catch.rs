@@ -10,14 +10,15 @@ use std::collections::HashMap;
 use steins_syntax::{CatchClause, NativeType, Param, Span, Stmt, StmtKind, TypeMember};
 
 use crate::annotate::LineFact;
+use crate::assert_harness::MuteObservers;
 use crate::contract::IsA;
-use crate::env::{Descent, Known, Store};
+use crate::env::{Descent, Known, Store, join_envs};
 use crate::fold::Folder;
 use crate::heap::seed_declared_param_object;
 use crate::loops::loop_entry_forget;
 use crate::project::Diagnostic;
 use crate::refine::seed_contract_arms;
-use crate::walk::{Flow, WalkCx, forget_construct_sets, walk_trace};
+use crate::walk::{Flow, WalkCx, forget_construct_sets, push_hidden_exit_floor, walk_trace};
 
 /// Walk one structured `try` statement and answer whether the code after it is
 /// reachable.
@@ -32,18 +33,44 @@ use crate::walk::{Flow, WalkCx, forget_construct_sets, walk_trace};
 ///   caught variable is then bound to the caught classes ([`bind_caught`]). A
 ///   `catch` of a body no statement of which can throw is dead and is not walked.
 /// * **`finally`** is entered from any point of the body or of one `catch`, so its
-///   entry forgets both parts' sets.
-/// * The **successor** forgets the whole construct's sets, an `Opaque`'s rule
-///   ([`forget_construct_sets`]), hidden-exit floor included: what the parts leave
-///   behind is not joined here.
+///   entry forgets both parts' sets. That walk is the one that judges the
+///   `finally`'s own statements.
+/// * The **successor** is reached only through a *normal exit* — the body's end,
+///   or the end of a live `catch`, each reached by falling through — and then
+///   through the `finally`, when there is one, falling through as well. A path
+///   through the body's end ran the whole body; a path through a `catch` ran it from
+///   its forgotten entry. So the successor env is the join of those exits' envs,
+///   carried through the `finally` (S1b of #1033, issue #943's `t6`):
+///
+/// | normal exits that fall through | `finally` | successor |
+/// | --- | --- | --- |
+/// | none | any | dead |
+/// | some | none | the join of their envs |
+/// | some | terminates on its walk over every entry | dead |
+/// | some | falls through on that walk | the `finally` walked from the join: its end env, or dead where that walk terminates |
+/// | a `goto` or label inside | any | reachable; the construct's sets forgotten as an `Opaque`'s |
+///
+/// The second walk of a `finally` ([`walk_for_env`]) holds on the normal paths
+/// only, so it reports nothing and records nothing; the walk over every entry has
+/// already answered for the same statements.
+///
+/// A `return` the parts record is a summary exit, and the hidden-exit floor
+/// ([`push_hidden_exit_floor`]) still goes with it whenever the construct may
+/// return: a `finally` that runs after a `return` in the body or a `catch` can
+/// replace the value, or mutate the returned object and `$this`, after the
+/// return's snapshot was taken. The floor is about the exits, not the successor,
+/// so the join leaves it as it was.
 ///
 /// Where the top-level frame's rebind rule fires (`rebinds`, issue #762), a body
 /// statement may have run user code that rebound any global before the body was
-/// left, so the handler entries and the successor start from nothing; the body
-/// itself applies the rule statement by statement.
+/// left, so the handler entries start from nothing; the body itself applies the
+/// rule statement by statement, so its end env is already the rule's. A construct
+/// that `poisons` leaves nothing behind.
 ///
 /// The construct terminates when its `finally` does, or when the body and every
-/// live `catch` do. A `goto` or a label inside keeps the successor reachable.
+/// live `catch` do. A `goto` or a label inside keeps the successor reachable, with
+/// S1's conservative env (ADR-0103: control may arrive at a label with anything
+/// bound).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn walk_try(
     w: &WalkCx,
@@ -82,11 +109,15 @@ pub(crate) fn walk_try(
         handler_entry(env, store, rebinds, *poisons, &parts)
     });
 
+    // The normal exits: every part that falls through, with the env it ends in.
+    let mut exits: Vec<(HashMap<String, Known>, Store)> = Vec::new();
     let mut benv = env.clone();
     let mut bstore = store.clone();
     let body_flow =
         walk_trace(w, folder, body, &mut benv, &mut bstore, descent, facts, guarded, out);
-    let mut falls = body_flow == Flow::FellThrough;
+    if body_flow == Flow::FellThrough {
+        exits.push((benv, bstore));
+    }
 
     if let Some((cenv, cstore)) = catch_entry {
         for arm in catches {
@@ -96,7 +127,9 @@ pub(crate) fn walk_try(
             let trace = &arm.trace;
             let flow =
                 walk_trace(w, folder, trace, &mut henv, &mut hstore, descent, facts, true, out);
-            falls |= flow == Flow::FellThrough;
+            if flow == Flow::FellThrough {
+                exits.push((henv, hstore));
+            }
         }
     }
 
@@ -107,12 +140,73 @@ pub(crate) fn walk_try(
         finally_terminates = flow == Flow::Terminated;
     }
 
-    if rebinds {
-        env.clear();
-        store.clear();
+    if *has_goto {
+        if rebinds {
+            env.clear();
+            store.clear();
+        }
+        forget_construct_sets(w, writes, reads, *poisons, *may_return, env, store);
+        return Flow::FellThrough;
     }
-    forget_construct_sets(w, writes, reads, *poisons, *may_return, env, store);
-    if !*has_goto && (finally_terminates || !falls) { Flow::Terminated } else { Flow::FellThrough }
+    push_hidden_exit_floor(w, *may_return);
+    if finally_terminates || exits.is_empty() {
+        return Flow::Terminated;
+    }
+    let (mut jenv, mut jstore) = join_envs(exits);
+    if *poisons {
+        jenv.clear();
+        jstore.clear();
+    }
+    if let Some(trace) = finally
+        && walk_for_env(w, folder, trace, &mut jenv, &mut jstore, descent, guarded)
+            == Flow::Terminated
+    {
+        return Flow::Terminated;
+    }
+    *env = jenv;
+    *store = jstore;
+    Flow::FellThrough
+}
+
+/// Walk `trace` for the env it leaves and nothing else: the `finally` carried from
+/// the normal exits of its `try` to the successor ([`walk_try`]).
+///
+/// The env it starts from holds on the normal paths into the `finally` only, not on
+/// the paths an exception or a jump takes through it, so nothing this walk reads
+/// may stand for the statements it walks. Its findings and line facts go nowhere,
+/// the dead regions, uncovered matches and summary exits it adds are cut off again,
+/// and the harness observers are muted for its duration. What it keeps is shared
+/// with the walk over every entry by construction: allocation ids (one counter for
+/// the scope, so a `new` here never collides with one the successor meets later)
+/// and the descent memo, which is keyed by the binding it answers.
+fn walk_for_env(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    trace: &[Stmt],
+    env: &mut HashMap<String, Known>,
+    store: &mut Store,
+    descent: &mut Option<Descent<'_>>,
+    guarded: bool,
+) -> Flow {
+    let dead = w.dead.borrow().len();
+    let uncovered = w.uncovered_matches.borrow().len();
+    let exits = w.summary.as_ref().map(|sc| {
+        (sc.exits.borrow().len(), sc.this_exits.as_ref().map(|te| te.borrow().len()))
+    });
+    let mut discarded = Vec::new();
+    let flow = {
+        let _muted = MuteObservers::new();
+        walk_trace(w, folder, trace, env, store, descent, &mut None, guarded, &mut discarded)
+    };
+    w.dead.borrow_mut().truncate(dead);
+    w.uncovered_matches.borrow_mut().truncate(uncovered);
+    if let (Some(sc), Some((len, this_len))) = (&w.summary, exits) {
+        sc.exits.borrow_mut().truncate(len);
+        if let (Some(te), Some(this_len)) = (&sc.this_exits, this_len) {
+            te.borrow_mut().truncate(this_len);
+        }
+    }
+    flow
 }
 
 /// The env a handler (a `catch` or the `finally`) starts in: the construct's entry
