@@ -455,7 +455,11 @@
 # 566c4326 to f9a91596 (+20 PHP files under the gate's paths); master 603e9450 and #1010's head
 # measure 909 alike on the new revision (+2 `throw.maybe-undeclared`, +3 `variable.maybe-
 # undefined`).
-"phpstan/phpstan-src" = 909
+# 909 → 907  2026-10-11 (issue #1037, #1038): -2 type.maybe-argument-mismatch at
+# `src/Type/ExponentiateHelper.php:103`, both FALSE positives: `if (!is_float($min) &&
+# !is_float($max))` now narrows the `int|float|null` union facts to `int|null` before
+# `IntegerRangeType::fromInterval()`. Measured by the local fp-gate on #1038's head.
+"phpstan/phpstan-src" = 907
 
 # New rows, 2026-10-02 (issues #915, #922): the strict-floor ids of the public packages that
 # had none. Measured under PHP 8.4.25 (CI's posture); the throw lane does not read the sidecar.
