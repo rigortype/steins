@@ -2985,6 +2985,16 @@ pub struct MatchArmT {
     pub trace: Vec<Stmt>,
 }
 
+/// One `catch` clause of a structured [`StmtKind::Try`] (the ADR-0027 `try`
+/// amendment, issue #943): the caught classes and variable exactly as the throw
+/// system reads them ([`CatchClause`], ADR-0040), and the clause body as a sub-trace.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
+pub struct CatchArm {
+    pub clause: CatchClause,
+    pub trace: Vec<Stmt>,
+}
+
 /// One entry of a scope's linear trace IR (ADR-0001). A scope's body lowers to an ordered
 /// list of these; anything unrecognized becomes [`StmtKind::Barrier`] (sound over-lowering).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -3214,7 +3224,7 @@ pub enum StmtKind {
         poisons: bool,
         may_return: bool,
     },
-    /// A recognized control-flow construct (an unstructurable `switch`, `try`, a
+    /// A recognized control-flow construct (an unstructurable `switch`, a
     /// nested block) whose data-flow isn't modeled, but whose write/read sets are
     /// (ADR-0027 ratchet: forgets only touched/branched variables, not all known values).
     ///
@@ -3272,6 +3282,57 @@ pub enum StmtKind {
     /// Any construct the trace can't model *and* can't bound the write set of (`goto`,
     /// labels, `declare`, `__halt_compiler`, unsure cases). Erases all known values — the sound floor.
     Barrier,
+    /// A structured `try`/`catch`/`finally` (the ADR-0027 `try` amendment, issue
+    /// #943): everything [`Self::Opaque`] is, plus the three parts as sub-traces and
+    /// the two entry sets a walker forgets before a handler.
+    ///
+    /// `writes`, `reads`, `poisons` and `may_return` are the whole construct's, with
+    /// the meaning they have on [`Self::Opaque`]; a walker's successor applies them as
+    /// it would there. `body` runs straight-line from the construct's entry.
+    /// `body_writes`/`body_reads` are the sets of the body alone, and
+    /// `catch_writes`/`catch_reads` those of every catch body together: a `catch` is
+    /// entered from any point of the body, so its entry is the construct's entry with
+    /// the body's sets forgotten, and `finally` is entered from any point of the body
+    /// or of one catch, so its entry forgets both.
+    ///
+    /// `catches_live` is `false` when every body statement provably cannot throw
+    /// (`try_body_cannot_throw`): no `catch` can then be entered, and the clauses
+    /// are dead. `has_goto` is `true` when a `goto` or a label stands anywhere in the
+    /// construct, whose edges this variant does not bound.
+    ///
+    /// # Where control leaves each part (witnessed on PHP 8.5.11)
+    ///
+    /// | part ends by            | then                                                         |
+    /// | ----------------------- | ------------------------------------------------------------ |
+    /// | body falls              | `finally` runs, then the successor                           |
+    /// | body `return`/`break`/`continue` | `finally` runs, then the pending exit proceeds      |
+    /// | body throws             | a matching `catch` runs; with none, `finally` runs and the throw proceeds |
+    /// | body `exit`             | nothing else runs                                            |
+    /// | `catch` falls           | `finally` runs, then the successor                           |
+    /// | `catch` exits or jumps  | `finally` runs, then that exit proceeds                      |
+    /// | `finally` falls         | the pending exit (or the successor) proceeds                 |
+    /// | `finally` returns/throws | it replaces whatever was pending, a throw included          |
+    /// | `finally` jumps out     | a compile error ("jump out of a finally block is disallowed") |
+    ///
+    /// So the successor is reachable exactly when `finally` (if any) can fall
+    /// through **and** the body or some live `catch` falls through. A `finally` that
+    /// falls through never rescues a body that terminates; one that terminates
+    /// terminates the construct whatever the other parts do.
+    Try {
+        body: Vec<Stmt>,
+        catches: Vec<CatchArm>,
+        finally: Option<Vec<Stmt>>,
+        catches_live: bool,
+        has_goto: bool,
+        body_writes: Vec<String>,
+        body_reads: Vec<String>,
+        catch_writes: Vec<String>,
+        catch_reads: Vec<String>,
+        writes: Vec<String>,
+        reads: Vec<String>,
+        poisons: bool,
+        may_return: bool,
+    },
 }
 
 // reachability foundation (ADR-0078, issue #199)
@@ -3286,7 +3347,7 @@ pub enum StmtKind {
 ///
 /// # The safe-side asymmetry
 ///
-/// [`Self::Unknown`] is honest when exit edges aren't bounded (`try`/`catch`, `goto`, an
+/// [`Self::Unknown`] is honest when exit edges aren't bounded (`goto`, an
 /// unstructurable `switch`) — but its safe side differs by consumer:
 /// * `type.return-missing` accuses "runs off its end"; only [`Self::FallsThrough`] may be
 ///   accused, so `Unknown` is silence ([`Self::provably_falls_through`]).
@@ -3304,7 +3365,7 @@ pub enum BodyEnd {
     /// Control provably can reach the end — a terminator-free syntactic path exists (an `if`
     /// with no `else`, a loop whose condition can be false, a plain statement).
     FallsThrough,
-    /// Undecided: exit edges aren't bounded (`try`/`catch`/`finally`, `goto`/labels, an
+    /// Undecided: exit edges aren't bounded (`goto`/labels, a `try` holding one, an
     /// unstructurable `switch`). Every consumer must name which way it reads this (see above).
     Unknown,
 }
@@ -3346,8 +3407,8 @@ impl BodyEnd {
 
 /// The terminality of an ordered statement list (ADR-0078, issue #199): reads each entry's
 /// [`Stmt::end`]. Not "the last statement decides": the first [`BodyEnd::Terminates`] wins
-/// outright (everything after is unreachable, so `[try{…}catch{…}, return 1;]` answers
-/// `Terminates`, not the `try`'s `Unknown`); an [`BodyEnd::Unknown`] entry is remembered but
+/// outright (everything after is unreachable, so `[switch{…}, return 1;]` answers
+/// `Terminates`, not the `switch`'s `Unknown`); an [`BodyEnd::Unknown`] entry is remembered but
 /// not stopped on; an empty list answers [`BodyEnd::FallsThrough`] (the identity).
 #[must_use]
 pub fn body_end(stmts: &[Stmt]) -> BodyEnd {
@@ -3406,8 +3467,8 @@ pub struct Stmt {
     /// Where this statement leaves control (ADR-0078, issue #199) — the per-statement half
     /// of the reachability foundation [`body_end`] reads.
     ///
-    /// Computed from the CST, not [`Self::kind`]: the trace IR erases `while`/`try`/`switch`
-    /// into undifferentiated [`StmtKind::Opaque`], so only the CST can tell a no-exit
+    /// Computed from the CST, not [`Self::kind`]: the trace IR erases an unstructurable
+    /// `switch` into an undifferentiated [`StmtKind::Opaque`], so only the CST can tell a no-exit
     /// `while (true)` from an always-exits `foreach`. Independent of `kind` by design: a
     /// `break;` (`Barrier`) and `while (true) {}` (`Opaque`) can both have `end: Terminates`.
     pub end: BodyEnd,
@@ -3543,6 +3604,43 @@ pub enum RunArg {
     Name(String),
     /// Anything else.
     Other,
+}
+
+impl StmtKind {
+    /// Every sub-trace this statement carries, in source order: an `if`'s branches,
+    /// a `match`'s arms, a loop's `init` and body, a `try`'s block, catch bodies
+    /// and `finally`. Empty for a leaf statement.
+    ///
+    /// For a visitor that must see every statement the walk can reach, whatever
+    /// construct holds it — a new structured kind then reaches it through here
+    /// rather than through each visitor's own `match` (issue #943).
+    #[must_use]
+    pub fn sub_traces(&self) -> Vec<&[Stmt]> {
+        match self {
+            Self::If { then_trace, elseifs, else_trace, .. } => {
+                let mut out = vec![then_trace.as_slice()];
+                out.extend(elseifs.iter().map(|(_, t)| t.as_slice()));
+                out.extend(else_trace.as_deref());
+                out
+            }
+            Self::Match { arms, default, .. } => {
+                let mut out: Vec<&[Stmt]> = arms.iter().map(|a| a.trace.as_slice()).collect();
+                out.extend(default.as_deref());
+                out
+            }
+            Self::For { init, body, .. } => vec![init.as_slice(), body.as_slice()],
+            Self::While { body, .. } | Self::Foreach { body, .. } | Self::DoWhile { body, .. } => {
+                vec![body.as_slice()]
+            }
+            Self::Try { body, catches, finally, .. } => {
+                let mut out = vec![body.as_slice()];
+                out.extend(catches.iter().map(|c| c.trace.as_slice()));
+                out.extend(finally.as_deref());
+                out
+            }
+            _ => Vec::new(),
+        }
+    }
 }
 
 impl Stmt {

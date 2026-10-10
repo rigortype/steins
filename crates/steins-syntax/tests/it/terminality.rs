@@ -164,12 +164,45 @@ fn a_switch_with_no_default_falls_through() {
 // from `Terminates`, and the one a dead-code consumer must not mistake for it.
 
 #[test]
-fn a_try_is_undecided_whole() {
-    // `finally` overwrites the exit point (`try { return 1; } finally { return 2; }`
-    // is 2 on 8.5.9), so neither direction is readable off the block ends.
-    assert_eq!(end_of("try { return 1; } catch (Throwable $e) { return 0; }"), BodyEnd::Unknown);
-    assert_eq!(end_of("try { $x = 1; } finally { $y = 2; }"), BodyEnd::Unknown);
-    assert_eq!(end_of("try { return 1; } finally { return 2; }"), BodyEnd::Unknown);
+fn a_try_terminates_when_its_finally_does_or_every_live_arm_does() {
+    // Issue #943; each row witnessed on PHP 8.5.11.
+    use BodyEnd::{FallsThrough, Terminates, Unknown};
+    let rows = [
+        ("try { return 1; } catch (Throwable $e) { return 0; }", Terminates),
+        ("try { $x = f(); } catch (Throwable $e) { return 0; }", FallsThrough),
+        ("try { return f(); } catch (Throwable $e) { echo 1; }", FallsThrough),
+        // A block that cannot throw leaves every catch dead: an empty statement
+        // and a `return` of a literal value are all it may hold.
+        ("try { return 1; } catch (Throwable $e) { echo 1; }", Terminates),
+        ("try { ; return [1 => 'a', 'b' => -1.5]; } catch (Throwable $e) { echo 1; }", Terminates),
+        ("try { return; } catch (Throwable $e) { echo 1; }", Terminates),
+        // An assignment can throw (a destructor, a typed reference), and so can a
+        // sign over a local, a local as an array key, and a returned local.
+        ("try { $a = 1; return 1; } catch (Throwable $e) { echo 1; }", FallsThrough),
+        ("try { return -$x; } catch (Throwable $e) { echo 1; }", FallsThrough),
+        ("try { return [$k => 1]; } catch (Throwable $e) { echo 1; }", FallsThrough),
+        ("try { return $x; } catch (Throwable $e) { echo 1; }", FallsThrough),
+        ("try { $x = 1; } finally { $y = 2; }", FallsThrough),
+        // A returning `finally` replaces whatever was pending.
+        ("try { return 1; } finally { return 2; }", Terminates),
+        ("try { $x = f(); } finally { return 2; }", Terminates),
+        ("try { return f(); } catch (E $e) { echo 1; } finally { return 2; }", Terminates),
+        // A falling `finally` lets the pending exit proceed.
+        ("try { return 1; } finally { echo 1; }", Terminates),
+        ("try { throw new E(); } finally { echo 1; }", Terminates),
+        // An undecided `finally` keeps a terminating join and nothing else.
+        ("try { return f(); } finally { switch ($x) { case 1: break; } }", Terminates),
+        ("try { $x = f(); } finally { switch ($x) { case 1: break; } }", Unknown),
+    ];
+    for (src, want) in rows {
+        assert_eq!(end_of(src), want, "{src}");
+    }
+}
+
+#[test]
+fn a_try_holding_a_goto_or_a_label_is_undecided() {
+    assert_eq!(end_of("try { goto out; } finally { echo 1; }\nout:\n$x = 1;"), BodyEnd::Unknown);
+    assert_eq!(end_of("try { return 1; } finally { a: echo 1; }"), BodyEnd::Unknown);
 }
 
 #[test]
@@ -207,7 +240,7 @@ fn a_switch_with_case_to_case_fall_through_is_undecided() {
 
 #[test]
 fn an_undecided_statement_with_no_later_terminator_leaves_the_list_undecided() {
-    assert_eq!(end_of("try { $x = 1; } finally { $y = 2; }\n$z = 3;"), BodyEnd::Unknown);
+    assert_eq!(end_of("switch ($x) { case 1: $y = 1; break; }\n$z = 3;"), BodyEnd::Unknown);
 }
 
 // The two predicates, and why both exist.

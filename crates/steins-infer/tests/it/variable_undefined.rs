@@ -749,10 +749,14 @@ fn a_terminating_if_stops_shielding_where_its_list_ends() {
         "<?php\nfunction f(bool $c): void { if (!isset($x)) { return; } elseif ($c) { echo 1; } echo $x; }\n",
         "x",
     );
-    // A `try` is `Unknown`, which is never a terminator.
+    // A `try` that falls through is no terminator (issue #943); one whose block
+    // returns under a falling `finally` is, and shields the read after it.
     fires(
-        "<?php\nfunction f(): void { if (!isset($x)) { try { return; } finally {} } echo $x; }\n",
+        "<?php\nfunction f(): void { if (!isset($x)) { try { echo 1; } finally {} } echo $x; }\n",
         "x",
+    );
+    silent(
+        "<?php\nfunction f(): void { if (!isset($x)) { try { return; } finally {} } echo $x; }\n",
     );
     // The guard names another variable.
     fires("<?php\nfunction f(): void { if (!isset($y)) { return; } echo $x; }\n", "x");

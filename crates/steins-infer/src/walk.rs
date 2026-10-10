@@ -55,6 +55,7 @@ use crate::return_arms::return_envelope_arms;
 use crate::shapes::{apply_offset_append, apply_offset_write, apply_shape_narrowing};
 use crate::stmt_calls::{StmtCalls, check_stmt_calls};
 use crate::stmt_checks::{check_read_positions, check_return_value};
+use crate::try_catch::walk_try;
 
 /// Walk one scope's trace with a given initial environment.
 #[allow(clippy::too_many_arguments)]
@@ -457,7 +458,7 @@ pub(crate) fn in_dead(dead: &[Span], pos: u32) -> bool {
 /// `call.on-null` FPs). A walked `while` body keeps contributing it: what that walk
 /// sees is a return read off a forgotten env, which is no stronger than the floor
 /// and must not be mistaken for the whole exit set.
-fn forget_construct_sets(
+pub(crate) fn forget_construct_sets(
     w: &WalkCx,
     writes: &[String],
     reads: &[String],
@@ -596,9 +597,10 @@ pub(crate) fn walk_trace(
         // that body can rebind any of them without the statement naming it. After
         // the checks above, which judge the arguments as they were passed; before
         // step 2, so the statement's own binding (`$x = bump();`) lands after it.
-        // An `if` forgets inside `walk_if` instead, once its condition is judged.
+        // An `if` forgets inside `walk_if` instead, once its condition is judged,
+        // and a `try` inside `walk_try`, after its body has run.
         let rebinds = rebind::top_level_rebind_risk(cx, folder, &stmt.runs);
-        if rebinds && !matches!(stmt.kind, StmtKind::If { .. }) {
+        if rebinds && !matches!(stmt.kind, StmtKind::If { .. } | StmtKind::Try { .. }) {
             env.clear();
             store.clear();
         }
@@ -642,7 +644,7 @@ pub(crate) fn walk_trace(
             // assignment / by-ref call) is in `invalidated` (step 3). Reading a
             // variable in an echo no longer forgets it (ADR-0031 precision payoff).
             StmtKind::Echo(_) => Flow::FellThrough,
-            // A still-`Opaque` construct (loop/switch/try) forgets what it may write
+            // A still-`Opaque` construct (an unstructured `switch`) forgets what it may write
             // AND what it branches on (ADR-0027) since the trace does not model its
             // control flow. When the subtree may `return`, a summary walk
             // contributes the declared floor so hidden exits join the visible ones
@@ -651,6 +653,10 @@ pub(crate) fn walk_trace(
             StmtKind::Opaque { writes, reads, poisons, may_return } => {
                 forget_construct_sets(w, writes, reads, *poisons, *may_return, env, store);
                 Flow::FellThrough
+            }
+            // A structured `try` (the ADR-0027 `try` amendment, issue #943).
+            StmtKind::Try { .. } => {
+                walk_try(w, folder, stmt, rebinds, env, store, descent, facts, guarded, out)
             }
             // The structured loops (ADR-0027 amendment): `walk_loop` holds each one's rule.
             StmtKind::While { .. }

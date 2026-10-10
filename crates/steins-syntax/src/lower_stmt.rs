@@ -3,6 +3,7 @@
 //! (ADR-0088), and the file-wide site collectors (`foreach`, array literals,
 //! operands, opaque constructs).
 
+use std::collections::HashSet;
 use std::rc::Rc;
 
 use mago_span::HasSpan;
@@ -25,7 +26,8 @@ use crate::lower_expr::{
     lower_method_call, lower_opaque, lower_static_call, opaque_sets, prop_fetch_of,
 };
 use crate::lower_guards::guard_regions_of;
-use crate::memo;
+use crate::lower_try::{lower_try, try_end};
+use crate::memo::{self, TryScan};
 use crate::names::name_ref;
 use crate::utf8_loss;
 use crate::{bytes_to_string, children, strip_dollar, to_span};
@@ -113,9 +115,10 @@ pub(crate) fn lower_stmt(s: &Statement<'_>, out: &mut Vec<Stmt>) {
         Statement::For(f) => lower_for(s, f),
         Statement::Foreach(fe) => lower_foreach(s, fe),
         Statement::DoWhile(d) => lower_do_while(s, d),
-        // Every OTHER control-flow construct stays `Opaque` (ADR-0027 ratchet) —
-        // the walk forgets only its write/read set, not the whole env.
-        Statement::Try(_) => lower_opaque(s),
+        // A `try` is structured too (the ADR-0027 `try` amendment, issue #943):
+        // the sets an `Opaque` carries, plus the body, the catches and the
+        // `finally` as sub-traces.
+        Statement::Try(t) => lower_try(s, t),
         // `unset($var[<lit>]);` — a constant-key offset unset (ADR-0062 A-G8).
         // Barrier semantics plus the base and key, exactly as `OffsetWrite`; a
         // multi-target unset, `unset($var)` itself, and a dynamic key all fall
@@ -212,6 +215,24 @@ fn stmt_runs(s: &Statement<'_>, kind: &StmtKind) -> Runs {
 /// Collect `node`'s calls into `out` (see [`Runs`]), stopping at the first one a
 /// function name cannot describe — the record's answer is decided there.
 fn scan_runs(node: &Node<'_, '_>, out: &mut Runs) {
+    // A `try` answers from the per-parse memo (see `memo::TryScan`).
+    if let Node::Try(t) = node
+        && let Some(runs) = memo::try_runs(t, || {
+            let mut fresh = Runs::default();
+            for child in children(node) {
+                scan_runs(&child, &mut fresh);
+                if fresh.other {
+                    break;
+                }
+            }
+            fresh
+        })
+    {
+        out.functions.extend(runs.functions.iter().cloned());
+        out.constructs.extend(runs.constructs.iter().cloned());
+        out.other |= runs.other;
+        return;
+    }
     match node {
         // The callee spelled the way `lower_call` reads it: an identifier is a
         // function name, and anything else is a call through a value.
@@ -323,17 +344,16 @@ fn spells_function_name(s: &str) -> bool {
 /// | the same with a `break`/`goto` somewhere inside | `Unknown` | the jump's target is not resolved here, so whether *this* loop has an exit edge is undecided |
 /// | `do-while` whose body terminates, with every `break`/`continue` in it a single-level jump of a nested construct and no `goto` | `Terminates` | the body runs at least once and no path through it reaches the condition or the successor (issue #679) |
 /// | every other loop | `FallsThrough` | the condition can be false, which is an exit edge |
-/// | `try` | `Unknown` | recorded exclusion — see below |
+/// | `try` | `Terminates` when its `finally` does, or when its block and every live `catch` do; `Unknown` with a `goto`/label inside or an undecided part | a returning `finally` replaces any pending exit; one that falls through lets the pending exit proceed ([`try_end`]) |
 /// | `goto`, a `label:` | `Unknown` | an unbounded jump; a label is an unbounded *incoming* edge, so the tail may be re-entered |
 /// | everything else (assignments, calls, `echo`, `global`, `static`, `unset`, declarations, `use`, `declare`, `namespace`) | `FallsThrough` | straight-line |
 ///
 /// # Recorded obstacles — silences this judgment names rather than hides
 ///
-/// * **`try`/`catch`/`finally` is `Unknown`, full stop.** `finally` *overwrites the
-///   exit point*: witnessed on 8.5.9, `try { return 1; } finally { return 2; }`
-///   returns `2`, and a returning `finally` also swallows an in-flight exception
-///   from the `try`. So a `try` whose block and every `catch` terminate can still
-///   fall through, and vice versa — undecided until a later slice models `finally`.
+/// * **A `try` holding a `goto` or a label is `Unknown`.** Every other `try` is
+///   judged by [`try_end`] (the ADR-0027 `try` amendment, issue #943): a `finally`
+///   that terminates terminates it, and otherwise it terminates when its block and
+///   every live `catch` do.
 /// * **A call to a function proven never to return is not judged here.** A
 ///   statement-position call answers `FallsThrough` — deciding otherwise needs the
 ///   project index (does the callee declare `: never`?), and this judgment is
@@ -356,6 +376,7 @@ pub(crate) fn stmt_end(s: &Statement<'_>) -> BodyEnd {
             | Statement::While(_)
             | Statement::DoWhile(_)
             | Statement::For(_)
+            | Statement::Try(_)
     ) {
         return stmt_end_walk(s);
     }
@@ -391,7 +412,7 @@ fn stmt_end_walk(s: &Statement<'_>) -> BodyEnd {
             let infinite = f.conditions.iter().next_back().is_none_or(|c| expr_is_true(c));
             loop_end(infinite, &Node::Statement(s))
         }
-        Statement::Try(_) => BodyEnd::Unknown,
+        Statement::Try(t) => try_end(s, t),
         Statement::Goto(_) | Statement::Label(_) => BodyEnd::Unknown,
         _ => BodyEnd::FallsThrough,
     }
@@ -835,7 +856,7 @@ fn lower_if(if_stmt: &mago_syntax::cst::If<'_>) -> Stmt {
 /// condition is part of that subtree, so every name the header mentions is
 /// already forgotten before the walk applies the header's own narrowing. The body
 /// lowers by the same statement rules as any other sub-trace, so a nested `if`
-/// recurses and a nested `try` appears as an `Opaque` within it.
+/// recurses and a nested `try` lowers as the structured `try` it is.
 ///
 /// A condition [`lower_cond`] cannot represent becomes [`CondExpr::Opaque`],
 /// which narrows nothing — the body still lowers and still walks. There is no
@@ -1071,7 +1092,7 @@ fn jump_level(level: Option<&Expression<'_>>) -> Option<u32> {
 
 /// Lower a borrowed statement list to a sub-trace (a branch body). Shares the
 /// per-statement lowering with the top-level scope walk.
-fn lower_trace(statements: &[Statement<'_>]) -> Vec<Stmt> {
+pub(crate) fn lower_trace(statements: &[Statement<'_>]) -> Vec<Stmt> {
     let mut out = Vec::new();
     for s in statements {
         lower_stmt(s, &mut out);
@@ -1857,8 +1878,16 @@ pub(crate) fn collect_call_vars(node: &Node<'_, '_>, out: &mut Vec<String>) {
 /// First-occurrence-order union, the dedup [`collect_call_vars_walk`] applies
 /// name by name.
 fn merge_names(out: &mut Vec<String>, names: &[String]) {
+    merge_names_except(out, names, &[]);
+}
+
+/// [`merge_names`] leaving out every name in `except`. Hashed, so merging a deep
+/// `try`'s memoized names is linear in the two lists rather than their product
+/// (issue #943's review): the name lists grow with the nesting.
+fn merge_names_except(out: &mut Vec<String>, names: &[String], except: &[String]) {
+    let mut seen: HashSet<String> = out.iter().chain(except).cloned().collect();
     for name in names {
-        if !out.contains(name) {
+        if seen.insert(name.clone()) {
             out.push(name.clone());
         }
     }
@@ -1866,6 +1895,19 @@ fn merge_names(out: &mut Vec<String>, names: &[String]) {
 
 /// The uncached walk behind [`collect_call_vars`].
 fn collect_call_vars_walk(node: &Node<'_, '_>, out: &mut Vec<String>) {
+    // A `try` answers from the per-parse memo (see `memo::TryScan`).
+    if let Node::Try(t) = node
+        && let Some(names) = memo::try_names(t, TryScan::CallVars, || {
+            let mut fresh = Vec::new();
+            for child in children(node) {
+                collect_call_vars_walk(&child, &mut fresh);
+            }
+            fresh
+        })
+    {
+        merge_names(out, &names);
+        return;
+    }
     let arguments = match node {
         Node::FunctionCall(c) => Some(&c.argument_list),
         Node::MethodCall(c) => Some(&c.argument_list),
@@ -2043,6 +2085,19 @@ fn note_occurrence(out: &mut Vec<InvalidatedVar>, name: String, site: Option<(Na
 /// and `unset` target. Does **not** descend into nested function-like bodies (separate
 /// scopes); their internal writes are not the enclosing construct's concern.
 pub(crate) fn collect_assign_writes(node: &Node<'_, '_>, out: &mut Vec<String>) {
+    // A `try` answers from the per-parse memo (see `memo::TryScan`).
+    if let Node::Try(t) = node
+        && let Some(names) = memo::try_names(t, TryScan::AssignWrites, || {
+            let mut fresh = Vec::new();
+            for child in children(node) {
+                collect_assign_writes(&child, &mut fresh);
+            }
+            fresh
+        })
+    {
+        merge_names(out, &names);
+        return;
+    }
     match node {
         // Any direct variable in an assignment lvalue is a write target
         // (`$a[$i] = …` over-collects `$i` too — sound). Recurse into the rhs
@@ -2138,6 +2193,20 @@ pub(crate) fn collect_direct_vars(node: &Node<'_, '_>, out: &mut Vec<String>) {
 /// more). Nested function-like bodies are their own scopes and are **not**
 /// descended, exactly as [`collect_assign_writes`] treats them.
 pub(crate) fn collect_read_vars(node: &Node<'_, '_>, writes: &[String], out: &mut Vec<String>) {
+    // A `try` answers from the per-parse memo (see `memo::TryScan`): every name it
+    // mentions, filtered here by this caller's `writes` as the walk filters it.
+    if let Node::Try(t) = node
+        && let Some(names) = memo::try_names(t, TryScan::Mentioned, || {
+            let mut fresh = Vec::new();
+            for child in children(node) {
+                collect_read_vars(&child, &[], &mut fresh);
+            }
+            fresh
+        })
+    {
+        merge_names_except(out, &names, writes);
+        return;
+    }
     match node {
         Node::DirectVariable(dv) => {
             let name = strip_dollar(bytes_to_string(dv.name));
@@ -2561,6 +2630,28 @@ pub(crate) fn scan_opaque(node: &Node<'_, '_>, out: &mut Vec<OpaqueSite>, stop_a
 /// construct is the site (`extract(compact($a))` is one `extract`), where the
 /// predicate stops too.
 fn scan_opaque_walk(node: &Node<'_, '_>, out: &mut Vec<OpaqueSite>, stop_at_first: bool) {
+    // A `try` answers from the per-parse memo (see `memo::TryScan`), keyed apart
+    // from the statement that holds it.
+    if let Node::Try(t) = node
+        && memo::enabled()
+    {
+        let key = memo::try_key(t);
+        let sites = memo::opaque_lookup(key).unwrap_or_else(|| {
+            let mut full = Vec::new();
+            for child in children(node) {
+                scan_opaque_walk(&child, &mut full, false);
+            }
+            let sites = Rc::new(full);
+            memo::opaque_store(key, Rc::clone(&sites));
+            sites
+        });
+        if stop_at_first {
+            out.extend(sites.first().copied());
+        } else {
+            out.extend(sites.iter().copied());
+        }
+        return;
+    }
     let direct = match node {
         // Direct markers.
         Node::Global(_) => Some(OpaqueConstruct::Global),

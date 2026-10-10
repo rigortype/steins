@@ -59,9 +59,9 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::rc::Rc;
 
-use mago_syntax::cst::{Node, Statement};
+use mago_syntax::cst::{Node, Statement, Try};
 
-use crate::ast::{BodyEnd, OpaqueSite, UndefinedRead};
+use crate::ast::{BodyEnd, OpaqueSite, Runs, UndefinedRead};
 use crate::stack_guard;
 
 /// A CST node's identity within one parse: its arena address, tagged with the
@@ -83,6 +83,26 @@ pub(crate) fn stmt_key(s: &Statement<'_>) -> NodeKey {
     NodeKey(std::ptr::from_ref(s) as usize, 0)
 }
 
+/// The key of a `try` node. A `Try` sits inside its `Statement` and can share its
+/// address, so it takes a shape tag of its own; two distinct `Try` nodes occupy
+/// disjoint storage, as two statements do.
+pub(crate) fn try_key(t: &Try<'_>) -> NodeKey {
+    NodeKey(std::ptr::from_ref(t) as usize, 2)
+}
+
+/// The whole-subtree scans memoized at a `try` node (issue #943's review). Nested
+/// `try` statements are lowered one level at a time, and each level runs these
+/// scans over its whole subtree, so without a cut at every `try` the work grows
+/// with the square of the nesting depth.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum TryScan {
+    CallVars,
+    AssignWrites,
+    Mentioned,
+    MayReturn,
+    Goto,
+}
+
 /// The per-leaf result the presence pass re-derives on every fixpoint round
 /// (ADR-0081): the reads and bound names of one leaf unit, both pure functions
 /// of the unit's subtree. The judgment against the flowing state stays in
@@ -100,6 +120,9 @@ struct Tables {
     opaque: HashMap<NodeKey, Rc<Vec<OpaqueSite>>>,
     call_vars: HashMap<NodeKey, Rc<Vec<String>>>,
     presence_leaf: HashMap<NodeKey, Rc<PresenceLeaf>>,
+    try_names: HashMap<(NodeKey, TryScan), Rc<Vec<String>>>,
+    try_flags: HashMap<(NodeKey, TryScan), bool>,
+    try_runs: HashMap<NodeKey, Rc<Runs>>,
 }
 
 thread_local! {
@@ -199,6 +222,65 @@ pub(crate) fn call_vars_store(key: NodeKey, vars: Rc<Vec<String>>) {
             t.call_vars.insert(key, vars);
         }
     });
+}
+
+/// The cached names `scan` answers for the `try` node `t`, computing (and caching)
+/// them on a miss; `None` when the memo is inert.
+pub(crate) fn try_names(
+    t: &Try<'_>,
+    scan: TryScan,
+    compute: impl FnOnce() -> Vec<String>,
+) -> Option<Rc<Vec<String>>> {
+    if !enabled() {
+        return None;
+    }
+    let key = (try_key(t), scan);
+    if let Some(hit) = TABLES.with_borrow(|t| t.try_names.get(&key).cloned()) {
+        return Some(hit);
+    }
+    let fresh = Rc::new(compute());
+    TABLES.with_borrow_mut(|t| {
+        if t.active {
+            t.try_names.insert(key, Rc::clone(&fresh));
+        }
+    });
+    Some(fresh)
+}
+
+/// [`try_names`] for a yes/no scan.
+pub(crate) fn try_flag(t: &Try<'_>, scan: TryScan, compute: impl FnOnce() -> bool) -> Option<bool> {
+    if !enabled() {
+        return None;
+    }
+    let key = (try_key(t), scan);
+    if let Some(hit) = TABLES.with_borrow(|t| t.try_flags.get(&key).copied()) {
+        return Some(hit);
+    }
+    let fresh = compute();
+    TABLES.with_borrow_mut(|t| {
+        if t.active {
+            t.try_flags.insert(key, fresh);
+        }
+    });
+    Some(fresh)
+}
+
+/// [`try_names`] for the [`Runs`] record of a `try`'s subtree.
+pub(crate) fn try_runs(t: &Try<'_>, compute: impl FnOnce() -> Runs) -> Option<Rc<Runs>> {
+    if !enabled() {
+        return None;
+    }
+    let key = try_key(t);
+    if let Some(hit) = TABLES.with_borrow(|t| t.try_runs.get(&key).cloned()) {
+        return Some(hit);
+    }
+    let fresh = Rc::new(compute());
+    TABLES.with_borrow_mut(|t| {
+        if t.active {
+            t.try_runs.insert(key, Rc::clone(&fresh));
+        }
+    });
+    Some(fresh)
 }
 
 /// The cached leaf scan for `node`, computing (and caching) it on a miss. The

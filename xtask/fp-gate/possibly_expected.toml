@@ -259,7 +259,8 @@
 # 3306 → 3276  2026-10-03 (issues #860, #991): -30 throw.maybe-undeclared (an `in_array` or `array_search` with a literal `true` 22, a callee that lost `user-code-reach` 6, a printf literal format 2; 2 in vendored copies of `Filesystem.php`), 6 more lost `user-code-reach` from their kind list; the triage is above the composer row.
 # 3276 → 3298  2026-10-03 (issue #882, S6c): +22 throw.maybe-undeclared ((b) -5, (c) +27: a parameter hinted with, or a `new` of a class whose chain reaches, a Composer or PSR name this checkout lacks); the triage is above the composer row.
 # 3298 → 3307  2026-10-07 (issue #868, S5): +9 throw.maybe-undeclared net (+18 sites, -9: 17 in a vendored copy of `symfony/filesystem` under the test fixtures, the callers of `JsonFile::encode()` and `Composer::getVersion()` lost); the triage is above the composer row.
-"composer/composer" = 3307
+# 3307 → 3309  2026-10-11 (issue #943, #1033 S1): +2 phpdoc.maybe-argument-mismatch inside try bodies the walker now reaches, both TRUE: `PharArchiver.php:65` (`realpath` can return false) and `CurlDownloader.php:425` (`stream_get_contents` can return false).
+"composer/composer" = 3309
 
 # 1 — `Application.php:409`, class 4 (`exitWithErrorMessage`).
 # 1 → 2, 2026-09-01 with issue #589 (the cross-lane guard join; see
@@ -341,7 +342,8 @@
 # 493 → 503  2026-10-03 (issue #882, S6c): +10 throw.maybe-undeclared ((a) -8, (c) +1, (d) +17: `OutputInterface` bounds of classes that hold a class this checkout lacks); the triage is above the composer row.
 # 503 → 505  2026-10-03 (issue #1003, S6d): +2 throw.maybe-undeclared, the writes of `Command::$code` (`?InvokableCommand`), and 1 more with the kind in its list; the triage is above the composer row.
 # 505 → 524  2026-10-07 (issue #868, S5): +19 throw.maybe-undeclared net (+22 argument and return sites, -3 gone, 2 reworded); the triage is above the composer row.
-"symfony/console" = 524
+# 524 → 522  2026-10-11 (issue #943, #1033 S1): -2 variable.maybe-undefined FPs at `Application.php:374,378`, where an inner try whose body and catch both terminate now ends that path.
+"symfony/console" = 522
 
 # 6 — every row class 4 (`$this->fail()` in `ProcessTest.php`).
 # Unmoved by issue #599 leg 1 (2026-09-01), and twice over. Every row is
@@ -470,7 +472,8 @@
 # 254 → 272  2026-10-03 (issue #882, S6c): +18 throw.maybe-undeclared ((b) -1, (c) +19, PSR-typed parameters and `new` of a PSR-7 class this checkout lacks); the triage is above the composer row.
 # 272 → 277  2026-10-03 (issue #1003, S6d): +5 throw.maybe-undeclared, the writes of `EasyHandle`'s `?ResponseInterface` and exception properties (a typed property whose hint a class reaching a destructor implements); the triage is above the composer row.
 # 277 → 273  2026-10-07 (issue #868, S5): -4 throw.maybe-undeclared net (callers of `HeaderProcessor`, a call over a `string` accessor and a constant); the triage is above the composer row.
-"guzzle/guzzle" = 273
+# 273 → 274  2026-10-11 (issue #943, #1033 S1): +1 phpdoc.maybe-argument-mismatch at `CurlFactory.php:388`, inside a try body the walker now reaches. FALSE: an `is_int` guard does not narrow a docblock-only `int|string` key; master reports the same line once the try is removed. Tracked as #1037.
+"guzzle/guzzle" = 274
 # 175 → 176  2026-10-03 (issues #880, #875): +1 throw.maybe-undeclared, 1 operator-to-string at an offset write; the triage by kind is above the composer row.
 # 176 → 172  2026-10-03 (issue #877): -4 throw.maybe-undeclared (operator-to-string 3, user-code-reach 1); the triage is above the composer row.
 # 172 → 170  2026-10-03 (issues #860, #991): -2 throw.maybe-undeclared (`in_array` with a literal `true`), 1 more lost `user-code-reach` from its kind list; the triage is above the composer row.

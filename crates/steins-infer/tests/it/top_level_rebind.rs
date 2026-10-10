@@ -184,9 +184,28 @@ fn a_call_nested_in_a_builtin_argument_forgets_the_frame() {
 
 #[test]
 fn a_call_hidden_in_a_try_block_forgets_the_frame() {
-    // The trace does not walk a `try`: it is an opaque construct whose write set
-    // is the names it assigns, and `bump()` assigns none.
+    // The block is walked (issue #943) and its own statement forgets the frame;
+    // the successor forgets it again, since `bump()` assigns nothing the
+    // construct's write set names. A `try` with no such call keeps `$s`.
     silent_after(BUMP, "try { bump(); } catch (\\Throwable $e) {}");
+    silent_after(BUMP, "try { bump(); intdiv($s, 1); } finally {}");
+    convicts_after(BUMP, "try { echo 1; } finally {}");
+}
+
+#[test]
+fn a_call_in_a_try_block_forgets_the_frame_in_its_handlers() {
+    // A `catch` or a `finally` is entered after any part of the block has run,
+    // `bump()` included, so neither may read `$s` as the block's entry held it.
+    for handler in [
+        "try { bump(); } catch (\\Throwable $e) { intdiv($s, 1); }",
+        "try { bump(); } finally { intdiv($s, 1); }",
+    ] {
+        let src = format!("<?php\n{BUMP}$s = 'abc';\n{handler}\n");
+        assert_eq!(mismatch_lines(&src), Vec::<u32>::new(), "expected silence for:\n{src}");
+    }
+    // Control: the same handler after a block that runs no user code.
+    let src = format!("<?php\n{BUMP}$s = 'abc';\ntry {{ echo 1; }} finally {{ intdiv($s, 1); }}\n");
+    assert_eq!(mismatch_lines(&src), vec![4], "expected the finding for:\n{src}");
 }
 
 #[test]

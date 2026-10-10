@@ -203,10 +203,10 @@ One predicate routes the finding, so the two ids are disjoint by
 construction and no site can report both.
 
 **Named silences of the foundation**, so its quiet is measured rather
-than assumed: `try`/`catch`/`finally` is excluded whole (`finally`
-overwrites the exit point — `try { return 1; } finally { return 2; }`
-returns `2` on 8.5.9, and a returning `finally` swallows an in-flight
-exception, so neither direction is readable off the block ends);
+than assumed: `try`/`catch`/`finally` was excluded whole until ADR-0027's
+2026-10-11 amendment (issue #943), which judges it instead: it terminates
+when its `finally` does or when its block and every live `catch` do, and
+a `try` holding a `goto` or a label stays undecided;
 `goto` and labels are unbounded jumps; a `switch` whose case body runs
 into the next case is not modelled; a provably-infinite loop containing a
 `break` whose target is unresolved is undecided. A call to a callee
@@ -389,8 +389,9 @@ The rules:
    above. `isset($x) && $c ? $x : null` and the three disjunction shapes
    of the issue (`isset($x) || isset($y)` as the condition) are silent.
 3. **A terminating `if`.** An `if` with no `elseif` and no `else`, whose
-   body provably terminates (`BodyEnd::provably_terminates`, so a `try`, a
-   `goto` or a `switch` that cannot be structured never counts), shields
+   body provably terminates (`BodyEnd::provably_terminates`, so a `goto`
+   or a `switch` that cannot be structured never counts, and a `try` counts
+   only where ADR-0027's 2026-10-11 rule terminates it), shields
    the statements after it in the same statement list with
    `bound_when(cond, false)`, the only outcome that reaches them:
    `if (!isset($x)) { return; } print($x);`. The shield stops at the end

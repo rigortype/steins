@@ -673,14 +673,12 @@ function f(): int {
     );
 }
 
-// Silence 2: UNDECIDED body — silence *here*; a dead-code consumer reads it the other way.
+// Silence 2: a `try` whose every live arm returns (issue #943).
 
 #[test]
 fn silent_on_a_try_catch_tail() {
-    // `finally` overwrites the exit point — witnessed on 8.5.9: `try { return 1; }
-    // finally { return 2; }` evaluates to 2 and swallows an in-flight exception, so
-    // neither direction is readable off the block ends. Undecided ⇒ silence here;
-    // a dead-code consumer must not call the next statement unreachable either.
+    // The block and the one `catch` both return, and there is no `finally` to
+    // replace either exit, so the construct terminates (`try_end`).
     assert_silent(
         "<?php
 function f(): int {
@@ -691,13 +689,32 @@ function f(): int {
     }
 }
 ",
-        "undecided: `try` is excluded whole, and undecided is silence for this id",
+        "the block and the live catch both return",
     );
 }
 
 #[test]
-fn silent_on_a_try_finally_tail() {
+fn silent_on_a_never_call_inside_a_try() {
+    // #943's review, witnessed on 8.5.11: `g()` and `f()` both end by `fail()`'s
+    // throw. The never-returning veto reads calls in every sub-trace, a `try`'s
+    // block, catches and `finally` included.
     assert_silent(
+        "<?php
+function fail(string $m): never { throw new RuntimeException($m); }
+function g(): int { try { fail('a'); } finally { echo 'cleanup'; } }
+function compute(): int { return 1; }
+function f(): int { try { return compute(); } catch (LogicException $e) { fail($e->getMessage()); } }
+",
+        "a never call in the block or a catch",
+    );
+}
+
+#[test]
+fn fires_on_a_try_finally_tail() {
+    // Witnessed on 8.5.11: the block falls through, the `finally` falls through,
+    // and the call fatals with "none returned" (issue #943). The body exits
+    // nowhere, so this is the unconditional class.
+    definite(
         "<?php
 function f(): int {
     try {
@@ -707,7 +724,24 @@ function f(): int {
     }
 }
 ",
-        "undecided: the excluded-`finally` shape, pinned as silence with its reason",
+    );
+}
+
+#[test]
+fn silent_on_a_try_whose_finally_returns() {
+    // Witnessed on 8.5.11: a returning `finally` replaces whatever the block left
+    // pending, a fall-through included.
+    assert_silent(
+        "<?php
+function f(): int {
+    try {
+        $x = g();
+    } finally {
+        return 1;
+    }
+}
+",
+        "the finally terminates on every path",
     );
 }
 
