@@ -114,32 +114,45 @@ pub(crate) fn try_end(s: &Statement<'_>, t: &Try<'_>) -> BodyEnd {
 /// Whether no statement of a `try` body can throw, so no `catch` of it can ever be
 /// entered (D2 of the walker coverage run, issue #1033).
 ///
-/// Every statement must be [`stmt_cannot_throw`]'s, or a `return` whose value's
-/// type the spelling decides — `return 1;`, `return [];`, a bare `return;`. Such a
-/// `return` throws only when the declared return type rejects that type, which is
-/// a proven `TypeError` the return-type check reports on the statement itself;
-/// reading it as throw-free can only drop a `catch (TypeError)` arm of code that
-/// check already convicts. A `return $x;` is not admitted: what `$x` holds is not
-/// something this syntactic reading can vouch for.
+/// Only three statements are admitted: an empty one, a bare `return;`, and a
+/// `return` of a literal value ([`value_is_literal`]: `return 1;`, `return [];`,
+/// `return ['a' => -1];`). Such a `return` throws only when the declared return
+/// type rejects the literal's type, which is a proven `TypeError` the return-type
+/// check reports on the statement itself, so reading it as throw-free can only
+/// drop a `catch (TypeError)` arm of code that check already convicts. Witnessed
+/// on 8.5.11, a destructor that throws while the function's locals are released
+/// at the `return` throws in the caller, past this `try`.
+///
+/// A plain assignment is not admitted, though [`stmt_cannot_throw`] reads it for
+/// the presence prologue. Two witnesses on 8.5.11 throw from one inside the block:
+/// `$conn = null;` over an object whose `__destruct` throws, and `$ref = "many";`
+/// where `$ref` is a reference to an `int` property (or a by-reference parameter
+/// bound to one), which throws a `TypeError`.
 pub(crate) fn try_body_cannot_throw(stmts: &[Statement<'_>]) -> bool {
     stmts.iter().all(|s| match s {
-        Statement::Return(r) => r.value.is_none_or(|v| {
-            !matches!(v.unparenthesized(), Expression::Variable(_)) && expr_cannot_throw(v)
-        }),
-        _ => stmt_cannot_throw(s),
+        Statement::Noop(_) => true,
+        Statement::Return(r) => r.value.is_none_or(value_is_literal),
+        _ => false,
     })
 }
 
-/// Whether a statement **provably cannot throw**, over a whitelist narrow enough
-/// that no PHP semantics argument is needed to read it.
+/// Whether an assignment statement **leaves its name bound** even if it throws, over
+/// a whitelist narrow enough that no PHP semantics argument is needed to read it —
+/// the presence prologue's question, and not "cannot throw" (see
+/// [`try_body_cannot_throw`] for the two ways one of these does throw).
 ///
-/// Almost every PHP construct can raise something: a call, a property fetch, a
-/// division, a concatenation with an object, an undefined constant. So this answers
-/// `true` only for a plain `=` assignment from a literal, an array of literals or
-/// another local — the prologue idiom (`$count = 0;`, `$out = [];`, `$x = $y;`) and
-/// nothing beyond it. Answering `false` costs precision and never correctness: it
-/// puts the statement back on the "may have thrown before this" side, which is the
-/// conservative reading the presence pass applies to the whole block anyway.
+/// It answers `true` only for an empty statement and a plain `=` assignment to a
+/// local from a literal, an array of literals or another local — the prologue idiom
+/// (`$count = 0;`, `$out = [];`, `$x = $y;`). The value half evaluates without
+/// raising anything of its own. What can still throw does so once the name holds
+/// its new value (a destructor of the value it replaced) or leaves it holding its
+/// old one (a reference to a typed property, which an earlier statement bound), so
+/// either way the name is bound after the statement. One residue is recorded: an
+/// error handler that throws on the "Undefined variable" warning of `$x = $y`
+/// leaves `$x` unassigned. Answering `false` costs precision and never
+/// correctness: it puts the statement back on the "may have thrown before this"
+/// side, which is the conservative reading the presence pass applies to the whole
+/// block anyway.
 pub(crate) fn stmt_cannot_throw(s: &Statement<'_>) -> bool {
     match s {
         Statement::Noop(_) => true,
@@ -152,6 +165,38 @@ pub(crate) fn stmt_cannot_throw(s: &Statement<'_>) -> bool {
             _ => false,
         },
         _ => false,
+    }
+}
+
+/// A value whose evaluation raises nothing and whose type its spelling decides: a
+/// literal, an array literal of such values under literal keys, a `!` over one, or
+/// a sign over a number literal. No variable appears in it.
+fn value_is_literal(expr: &Expression<'_>) -> bool {
+    match expr.unparenthesized() {
+        Expression::Literal(_) => true,
+        Expression::Array(a) => a.elements.iter().all(element_is_literal),
+        Expression::LegacyArray(a) => a.elements.iter().all(element_is_literal),
+        Expression::UnaryPrefix(up) => match up.operator {
+            UnaryPrefixOperator::Not(_) => value_is_literal(up.operand),
+            UnaryPrefixOperator::Negation(_) | UnaryPrefixOperator::Plus(_) => matches!(
+                up.operand.unparenthesized(),
+                Expression::Literal(Literal::Integer(_) | Literal::Float(_))
+            ),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+/// One array-literal element of [`value_is_literal`].
+fn element_is_literal(element: &ArrayElement<'_>) -> bool {
+    match element {
+        ArrayElement::KeyValue(kv) => {
+            matches!(kv.key.unparenthesized(), Expression::Literal(_)) && value_is_literal(kv.value)
+        }
+        ArrayElement::Value(v) => value_is_literal(v.value),
+        ArrayElement::Missing(_) => true,
+        ArrayElement::Variadic(_) => false,
     }
 }
 

@@ -191,6 +191,30 @@ function j(int $c): int {
     assert_eq!(findings(src), vec!["5 type.return-missing"]);
 }
 
+#[test]
+fn an_assignment_in_the_block_keeps_the_catches_live() {
+    // Witnessed on 8.5.11 (#943's review): a plain assignment throws from inside
+    // the block in two ways, so a block of one plus `return 1;` does not make the
+    // catch dead. Overwriting an object whose `__destruct` throws, and writing a
+    // string through a reference to an `int` property: each prints "caught", then
+    // reaches the null receiver.
+    let src = "<?php
+class Conn { public function __destruct() { throw new RuntimeException('d'); } }
+function a(): int {
+    $conn = new Conn();
+    try { $conn = null; return 1; } catch (RuntimeException $e) { echo 'caught'; }
+    $x = null;
+    return $x->count();
+}
+function b(&$ref): int {
+    $x = null;
+    try { $ref = 'many'; return 1; } catch (TypeError $e) { echo 'caught'; }
+    return $x->count();
+}
+";
+    assert_eq!(lines_of(src, "call.on-null"), vec![7, 12]);
+}
+
 // ---- finally ----------------------------------------------------------------
 
 #[test]
