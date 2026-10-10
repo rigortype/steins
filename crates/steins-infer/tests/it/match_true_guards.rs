@@ -458,15 +458,17 @@ fn the_no_match_path_of_a_default_less_chain_falls_through() {
     // no-match path (PHP raises `\UnhandledMatchError`), and the desugared guard
     // chain falls through to the statement after it instead. Falling through only
     // widens the join — `$foo` below is the entry union joined with both arms, so
-    // nothing downstream claims a narrowing — and teaching the chain to terminate
-    // means giving the throw accounting a contribution ADR-0088 §5 has not ruled
-    // on. The day that changes, this fixture is the one to edit on purpose.
+    // nothing downstream claims a narrowing (it read `unknown` before #946 only
+    // because the literal arms were barriers, which forgot it) — and teaching the
+    // chain to terminate means giving the throw accounting a contribution ADR-0088
+    // §5 has not ruled on. The day that changes, this fixture is the one to edit on
+    // purpose.
     assert_eq!(
         dumps(&over_union(
             "\techo match (true) {\n\t\tis_string($foo) => 1,\n\t\tis_int($foo) => 2,\n\t};\n\t\\PHPStan\\dumpType($foo);"
         )),
-        vec!["dumped type: unknown"],
-        "the tail is reachable and its lane claims nothing"
+        vec!["dumped type: int|string"],
+        "the tail is reachable and its lane claims nothing beyond the entry union"
     );
 }
 

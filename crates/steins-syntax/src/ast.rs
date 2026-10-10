@@ -3057,8 +3057,9 @@ pub enum StmtKind {
     /// value (or `return` itself), for the return-type check's diagnostic.
     Return { value: ArgValue, call: Option<CallExpr>, span: Span },
     /// `echo e1, e2, …;` — carries the statically-named calls among its operands so
-    /// propagation checks/descends them. Echo assigns nothing, so its env effect stays a
-    /// conservative `Barrier`-equivalent clear.
+    /// propagation checks/descends them. Echo assigns nothing, so it leaves the env alone.
+    /// With no calls it is also the no-op entry for a pure expression statement or a
+    /// literal match arm (`1;`, `1 => 10`; `lower_pure`, issue #946).
     Echo(Vec<CallExpr>),
     /// A structured `if`/`elseif`/`else` (ADR-0031): models control flow instead of erasing
     /// it. `then_trace` is the primary branch; `elseifs` are `(condition, branch)` pairs in
