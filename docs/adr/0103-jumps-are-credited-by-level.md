@@ -116,6 +116,29 @@ So code after any terminator is dead only up to the next label, which also
 reaches `if ($k) { goto out; } return; out: …`, dead to the walk before. The
 rows, each witnessed on PHP 8.5.11, are tabled in `lower_jump.rs`.
 
+The syntactic folds agree: `block_end` answers `Unknown`, not `Terminates`, for
+a terminator followed by any later `goto` or label in its list, and `body_end`
+does the same for a later statement that holds a label. Without that, the
+non-last case `case 1: if ($c) { goto out; } return; out: $o = null;` read as
+ending, was structured, and its resumed run fell onto the switch's successor
+instead of into case 2 (round 3: `call.on-null` on a line no PHP path reaches).
+The CST fold is wider than `holds_label` (it counts labels in loops too), which
+only leaves such a case unstructured.
+
+Known false negatives, each a path dropped from a join and so silence only:
+
+- a label inside an `if` arm the walk decides is dead is never walked, so the
+  path a `goto` takes into it drops out of the join;
+- `holds_label` is false for an `Opaque` construct that can hold a reachable
+  label, such as a `declare` block, so the walk does not resume there;
+- `walk_match` drops the `goto` path into a label-holding arm whose condition
+  is `No` when another arm falls through.
+
+Known limitation, older than this ADR (S1): "dead up to the next label" does
+not hold inside a `try`. `walk_try` answers `FellThrough` for any construct
+holding a `goto` (`try_catch.rs`), so `$o = null; try { goto out; } finally {
+echo 1; } $o->m(); out:` walks and reports the dead `$o->m()`, as base does.
+
 ### 2.3 The presence pass: parked jumps carry their level
 
 `breaks` and `continues` become `(level, state)` pairs. Each loop and
@@ -160,6 +183,12 @@ throws "none returned" for `switch ($k) { case 1: return 1; default: }` in an
   where every other arm terminates, because the walk used to keep that code
   live through the `Opaque`; `variable.maybe-undefined` where a non-last case
   ran into a binding case, or where a `finally` binds before a jump lands.
+- **A shape shared with base (follow-up):** `case 1: if ($k) { goto out; }
+  $o = null; break;` reports `call.on-null` after the switch, and so does its
+  `=== 1` twin and the `return` twin on base. PHP never assigns null there, since
+  `$k` is `1` inside `case 1`; `refine_match_arm` does not refine the subject of
+  a loose case, so the `if` reads as undecided. The `goto` form was `Opaque` on
+  base and is structured now.
 - `phpdoc-honesty` refuses a body with a landing arm. The landing edge is not
   in the arm's trace, so its returns are not the function's whole set.
 - The trace payload changes shape. Under the 2026-09-27 narrowing
