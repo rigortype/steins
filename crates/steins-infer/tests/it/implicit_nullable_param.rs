@@ -145,3 +145,47 @@ class FileNotFoundException extends IOException {
 ";
     assert!(mismatches(src).is_empty(), "{:?}", mismatches(src));
 }
+
+// Defaults PHP folds to `null` at compile time without the bare keyword (issue #1023). Each is
+// witnessed on PHP 8.5.9 in a namespace: `d(null)` and `d()` both print `NULL`.
+const FOLDED_SPELLINGS: [&str; 7] = [
+    "\\null",
+    "\\NULL",
+    "null ?? null",
+    "true ? null : 0",
+    "[null][0]",
+    "false ?: null",
+    "(\\null)",
+];
+
+#[test]
+fn a_default_that_folds_to_null_makes_the_parameter_nullable_at_the_argument() {
+    for default in FOLDED_SPELLINGS {
+        let src = format!(
+            "<?php\ndeclare(strict_types=1);\nnamespace A;\nfunction f(int $x = {default}): void {{}}\nf(null);\n"
+        );
+        assert!(mismatches(&src).is_empty(), "{default}: {:?}", mismatches(&src));
+    }
+}
+
+#[test]
+fn a_default_that_folds_to_null_seeds_the_parameter_type_with_null() {
+    for default in FOLDED_SPELLINGS {
+        let src = format!(
+            "<?php\nnamespace A;\nfunction f(int $x = {default}): void {{ \\PHPStan\\dumpType($x); }}\n"
+        );
+        assert_eq!(one_type(&src), "dumped type: int|null", "{default}");
+    }
+}
+
+#[test]
+fn a_default_that_does_not_fold_to_null_stays_non_nullable() {
+    // `const N = null` is not substituted at compile time (omitting the argument is a
+    // `TypeError`), and `0 ?? null` is `0`: neither makes the parameter nullable.
+    for default in ["N", "0 ?? null", "PHP_INT_SIZE ? null : 0", "true ? 1 : null"] {
+        let src = format!(
+            "<?php\ndeclare(strict_types=1);\nnamespace A;\nconst N = null;\nfunction f(int $x = {default}): void {{}}\nf(null);\n"
+        );
+        assert_eq!(mismatches(&src).len(), 1, "{default}");
+    }
+}

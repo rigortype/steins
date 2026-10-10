@@ -212,9 +212,9 @@ impl Frame<'_> {
                     let Some(param) = self.params.iter().find(|p| &p.name == name) else {
                         return false;
                     };
-                    // A default PHP folds to `null` at compile time makes the parameter
-                    // implicitly nullable, whatever its spelling (`\null`, `null ?? null`,
-                    // `true ? null : 0`), and `has_null_default` sees only the bare literal. So
+                    // `has_null_default` folds the literal forms PHP evaluates to `null` at
+                    // compile time (`\null`, `null ?? null`, `true ? null : 0`), but not a
+                    // default it cannot read (a call, a constant the compiler leaves alone). So
                     // only a parameter with no default, or a plain scalar literal one, is placed.
                     let default_non_null = !param.has_default
                         || matches!(

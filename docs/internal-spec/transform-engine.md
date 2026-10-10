@@ -65,7 +65,7 @@ agent reads and can act on. The taxonomy in use today includes:
 | `type-not-renderable` | no faithful phpdoc spelling exists |
 | `native-contradicts-proven` | the existing native type disagrees with the evidence |
 | `phpdoc-finer-than-native` | promoting would *lose* information |
-| `default-not-admitted-by-native` / `implicit-nullable-default` | the parameter default would break under the new type |
+| `default-not-admitted-by-native` / `implicit-nullable-default` | the parameter default would break under the new type; a default PHP folds to `null` at compile time (`\null`, `true ? null : 0`, `[null][0]`) counts as `= null` |
 | `escape-not-proven` | every envelope-relevant escape is Maybe — never annotated |
 | `already-declared` | every proven escape is already covered (the idempotent no-op) |
 | `docblock-not-round-trippable` | no lossless insertion point, or the seeded tag fails the re-parse round-trip |

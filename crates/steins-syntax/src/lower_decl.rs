@@ -7,7 +7,7 @@ use std::collections::HashSet;
 
 use mago_span::HasSpan;
 use mago_syntax::cst::{
-    Access, Argument, Attribute, Class, ClassLikeMember, ClassLikeMemberSelector, Expression,
+    Access, Argument, ArrayElement, Attribute, BinaryOperator, Class, ClassLikeMember, ClassLikeMemberSelector, Expression,
     Function, FunctionCall, Hint, Identifier, Literal, MagicConstant, Method, MethodBody, Modifier,
     Node, PartialArgument, PlainProperty, Program, Property, PropertyItem, Statement,
     TraitUseAdaptation, TraitUseSpecification, TriviaKind,
@@ -690,10 +690,7 @@ pub(crate) fn lower_params(list: &mago_syntax::cst::FunctionLikeParameterList<'_
             hint_span: p.hint.as_ref().map(|h| to_span(h.span())),
             variadic: p.is_variadic(),
             by_ref: p.is_reference(),
-            has_null_default: p
-                .default_value
-                .as_ref()
-                .is_some_and(|d| matches!(d.value.unparenthesized(), Expression::Literal(Literal::Null(_)))),
+            has_null_default: p.default_value.as_ref().is_some_and(|d| matches!(fold_default(d.value), Fold::Null)),
             has_default: p.default_value.is_some(),
             default: p
                 .default_value
@@ -703,6 +700,91 @@ pub(crate) fn lower_params(list: &mago_syntax::cst::FunctionLikeParameterList<'_
             span: to_span(p.span()),
         })
         .collect()
+}
+
+/// What a parameter default folds to at compile time, as far as `null` is concerned.
+enum Fold {
+    Null,
+    /// A scalar literal, with its truthiness.
+    Scalar(bool),
+    /// An unkeyed list literal of foldable elements.
+    List(Vec<Fold>),
+    /// Anything PHP does not fold here (a user constant, a call, a keyed or spread array).
+    Unknown,
+}
+
+impl Fold {
+    fn truthy(&self) -> Option<bool> {
+        match self {
+            Fold::Null => Some(false),
+            Fold::Scalar(t) => Some(*t),
+            Fold::List(items) => Some(!items.is_empty()),
+            Fold::Unknown => None,
+        }
+    }
+}
+
+/// Fold a parameter default far enough to tell whether PHP evaluates it to `null` at compile
+/// time, which makes the parameter implicitly nullable (issue #1023): the keyword in any case
+/// and with or without a leading `\`, and the compound forms over literals (`null ?? null`,
+/// `true ? null : 0`, `[null][0]`). A user constant (`= N` with `const N = null`) is not folded
+/// at compile time, so it is [`Fold::Unknown`] and the parameter is not nullable.
+fn fold_default(e: &Expression<'_>) -> Fold {
+    match e.unparenthesized() {
+        Expression::Literal(Literal::Null(_)) => Fold::Null,
+        Expression::Literal(Literal::True(_)) => Fold::Scalar(true),
+        Expression::Literal(Literal::False(_)) => Fold::Scalar(false),
+        Expression::Literal(Literal::Integer(li)) => Fold::Scalar(li.value != Some(0)),
+        Expression::Literal(Literal::Float(lf)) => Fold::Scalar(lf.value.0 != 0.0),
+        Expression::Literal(Literal::String(ls)) => {
+            ls.value.map_or(Fold::Unknown, |v| Fold::Scalar(!(v.is_empty() || v == b"0")))
+        }
+        // `\null` lexes as a constant fetch, and so do the other keywords when qualified.
+        Expression::ConstantAccess(ca) => match bytes_to_string(ca.name.value()).as_str() {
+            n if n.eq_ignore_ascii_case("\\null") => Fold::Null,
+            n if n.eq_ignore_ascii_case("\\true") => Fold::Scalar(true),
+            n if n.eq_ignore_ascii_case("\\false") => Fold::Scalar(false),
+            _ => Fold::Unknown,
+        },
+        Expression::Array(a) => fold_list(a.elements.iter()),
+        Expression::LegacyArray(a) => fold_list(a.elements.iter()),
+        Expression::ArrayAccess(aa) => match (fold_default(aa.array), aa.index.unparenthesized()) {
+            (Fold::List(mut items), Expression::Literal(Literal::Integer(li))) => {
+                match li.value.and_then(|i| usize::try_from(i).ok()) {
+                    Some(i) if i < items.len() => items.swap_remove(i),
+                    _ => Fold::Unknown,
+                }
+            }
+            _ => Fold::Unknown,
+        },
+        Expression::Binary(b) if matches!(b.operator, BinaryOperator::NullCoalesce(_)) => {
+            match fold_default(b.lhs) {
+                Fold::Null => fold_default(b.rhs),
+                other => other,
+            }
+        }
+        Expression::Conditional(c) => {
+            let cond = fold_default(c.condition);
+            match (cond.truthy(), c.then) {
+                (Some(true), Some(then)) => fold_default(then),
+                (Some(true), None) => cond,
+                (Some(false), _) => fold_default(c.r#else),
+                (None, _) => Fold::Unknown,
+            }
+        }
+        _ => Fold::Unknown,
+    }
+}
+
+fn fold_list<'a>(elements: impl Iterator<Item = &'a ArrayElement<'a>>) -> Fold {
+    let mut items = Vec::new();
+    for el in elements {
+        match el {
+            ArrayElement::Value(v) => items.push(fold_default(v.value)),
+            _ => return Fold::Unknown,
+        }
+    }
+    Fold::List(items)
 }
 
 /// Lower every `class`/`interface`/`enum`/`trait` declaration reachable from `node`
