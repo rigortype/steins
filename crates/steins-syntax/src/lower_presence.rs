@@ -14,7 +14,7 @@ use mago_syntax::cst::{
 use crate::ast::{Comment, CommentKind, UndefinedRead, UnsetSeedFacts, UnsetSeedRead};
 use crate::lower_scope::{Shield, VarUsage, bind_lvalue_roots, scan_var_usage};
 use crate::lower_jump::parked_level;
-use crate::lower_stmt::{body_has_nested_jumps_only, expr_is_false, expr_is_true, stmt_end};
+use crate::lower_stmt::{body_jumps_stay_inside, expr_is_false, expr_is_true, stmt_end};
 use crate::lower_try::{stmt_cannot_throw, try_body_cannot_throw};
 use crate::memo::{self, TryScan};
 use crate::stack_guard;
@@ -589,9 +589,9 @@ where
 /// in `return`/`throw`/`exit`, with no `break` and no `continue` of this loop,
 /// never evaluates the condition and never reaches the successor, so the construct
 /// answers [`PresenceFlow::Terminated`] and a branch join subtracts it like a
-/// `return`. The lowering's [`body_has_nested_jumps_only`] gates it as it gates the
-/// walker's `do_while_flow`; it still refuses multi-level jumps, which this pass has
-/// credited by level since ADR-0103 (relaxing it is #1033 S2b).
+/// `return`. The lowering's [`body_jumps_stay_inside`] gates it as it gates the
+/// walker's `do_while_flow`: no jump of the body targets this loop or leaves it,
+/// counted by level (ADR-0103).
 fn presence_do_while(
     d: &mago_syntax::cst::DoWhile<'_>,
     state: &mut PresenceState,
@@ -601,7 +601,7 @@ fn presence_do_while(
     let entry = state.clone();
     let exits = presence_loop_body(body, &entry, cx);
     let terminates =
-        exits.broke.is_empty() && !exits.reaches_back_edge && body_has_nested_jumps_only(body);
+        exits.broke.is_empty() && !exits.reaches_back_edge && body_jumps_stay_inside(body);
     *state = join_loop_exit(&entry, exits, true);
     if terminates {
         return PresenceFlow::Terminated;

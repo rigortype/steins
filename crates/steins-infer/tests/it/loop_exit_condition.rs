@@ -277,6 +277,17 @@ fn a_do_while_body_that_terminates_on_every_path_makes_the_successor_unreachable
         "do { switch ($k) { case 1: echo 1; break; } return; } while (rand() > 0);",
         // A bare `continue` inside a `switch` acts on the switch and lands after it.
         "do { switch ($k) { case 1: continue; } return; } while (rand() > 0);",
+        // A jump that climbs levels but stays inside the body (#904 step 3).
+        "do { foreach ([1] as $v) { foreach ([1] as $w) { break 2; } } return; } \
+         while (rand() > 0);",
+        "do { foreach ([1] as $v) { foreach ([1] as $w) { continue 2; } } return; } \
+         while (rand() > 0);",
+        "do { foreach ([1] as $v) { switch ($k) { case 1: continue 2; } } return; } \
+         while (rand() > 0);",
+        "do { switch ($k) { case 1: switch ($k) { case 2: break 2; } } return; } \
+         while (rand() > 0);",
+        // A jump a terminating `finally` replaces lands nowhere.
+        "do { try { break; } finally { return; } } while (rand() > 0);",
     ] {
         assert_eq!(on_null_after(stmt), 0, "`{stmt}` never reaches its successor");
     }
@@ -297,6 +308,12 @@ fn a_do_while_whose_body_can_come_back_keeps_its_successor_live() {
         "do { while (rand() > 0) { break 2; } return; } while (rand() > 0);",
         "do { foreach ([1] as $ignored) { continue 2; } return; } while (rand() > 0);",
         "do { switch ($k) { case 1: continue 2; } return; } while (rand() > 0);",
+        "do { foreach ([1] as $v) { foreach ([1] as $w) { break 3; } } return; } \
+         while (rand() > 0);",
+        "do { foreach ([1] as $v) { foreach ([1] as $w) { continue 3; } } return; } \
+         while (rand() > 0);",
+        // A `finally` that does not terminate replaces nothing.
+        "do { try { break; } finally { echo 1; } return; } while (rand() > 0);",
     ] {
         assert_eq!(on_null_after(stmt), 1, "`{stmt}` can reach its successor");
     }
@@ -341,8 +358,8 @@ fn a_multi_level_jump_in_the_body_keeps_the_do_while_successor_live() {
     // `break 2` / `continue 2` inside a loop inside a case leave the SWITCH and land
     // after it, so that case does not end in its `return` — but the walker's
     // structured `switch` credits the jump to the innermost loop and reads the case
-    // as returning (#904). The `nested_jumps_only` gate refuses any multi-level jump,
-    // so the `do`-`while` does not trust that answer and its successor stays live.
+    // as returning (#904). The switch counts levels now (ADR-0103), so the case
+    // lands after the switch and the `do`-`while` successor stays live.
     for jump in ["break 2;", "continue 2;"] {
         let looped = format!(
             "do {{ switch ($k) {{ case 1: foreach ([1] as $v) {{ {jump} }} return; \
@@ -358,12 +375,11 @@ fn a_multi_level_jump_in_the_body_keeps_the_do_while_successor_live() {
     let own = "do { switch ($k) { case 1: foreach ([1] as $v) { break; } return; \
                default: return; } } while (rand() > 0);";
     assert_eq!(on_null_after(own), 0, "the `foreach` owns its `break`");
-    // The documented precision cost: this `break 2` leaves only the outer `foreach`,
-    // still inside the body, and the body does end in `return` — but the gate
-    // refuses every multi-level jump until the passes it trusts count levels.
+    // This `break 2` leaves only the outer `foreach`, still inside the body, and the
+    // body does end in `return`: the gate counts levels and accepts it (#904 step 3).
     let nested = "do { foreach ([1] as $v) { foreach ([1] as $w) { break 2; } } return; } \
                   while (rand() > 0);";
-    assert_eq!(on_null_after(nested), 1, "refused by the gate, a precision cost");
+    assert_eq!(on_null_after(nested), 0, "the `break 2` stays inside the body");
 }
 
 #[test]

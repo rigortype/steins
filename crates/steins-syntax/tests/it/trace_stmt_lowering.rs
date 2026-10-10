@@ -66,15 +66,17 @@ fn a_do_while_keeps_its_body() {
 }
 
 #[test]
-fn a_do_while_records_whether_every_jump_in_it_is_a_nested_constructs() {
-    // Issue #679: `nested_jumps_only` is read off the CST body. Every `break` and
-    // `continue` must have level 1 and sit inside a nested loop or `switch`, and no
-    // `goto` may appear; nested function-likes are not descended. A multi-level jump
-    // is refused even where it stays inside the body (#904).
-    let nested_jumps_only = |body: &str| {
+fn a_do_while_records_whether_no_jump_in_it_comes_back_to_the_loop() {
+    // Issue #679, relaxed by #904 step 3: the gate is `break_free && continue_free`,
+    // read off the CST body with jumps credited by level (ADR-0103). A jump aimed at
+    // a nested loop or `switch` is that construct's, however many levels it climbs
+    // inside the body; one aimed at this loop, an outer one, or a `goto` is refused.
+    let gate = |body: &str| {
         let got = stmts("int $n", &format!("do {{ {body} }} while ($n > 0);"));
         match &got[..] {
-            [Stmt { kind: StmtKind::DoWhile { nested_jumps_only, .. }, .. }] => *nested_jumps_only,
+            [Stmt { kind: StmtKind::DoWhile { break_free, continue_free, .. }, .. }] => {
+                *break_free && *continue_free
+            }
             other => panic!("the `do`-`while` lowered to {other:?}"),
         }
     };
@@ -85,8 +87,16 @@ fn a_do_while_records_whether_every_jump_in_it_is_a_nested_constructs() {
         "switch ($n) { case 1: continue; }",
         "switch ($n) { case 1: break; }",
         "$f = function () { foreach ([1] as $v) { continue; } };",
+        // Multi-level jumps that stay inside the body.
+        "while ($n) { while ($n) { break 2; } }",
+        "while ($n) { while ($n) { continue 2; } }",
+        "while ($n) { switch ($n) { case 1: continue 2; } }",
+        "switch ($n) { case 1: switch ($n) { case 2: break 2; } }",
+        // A jump a terminating `finally` replaces lands nowhere.
+        "try { break; } finally { return; }",
+        "try { continue; } finally { throw new Exception(); }",
     ] {
-        assert!(nested_jumps_only(body), "every jump in `{body}` is a nested construct's");
+        assert!(gate(body), "no jump in `{body}` comes back to the loop");
     }
     for body in [
         "continue;",
@@ -95,10 +105,15 @@ fn a_do_while_records_whether_every_jump_in_it_is_a_nested_constructs() {
         "while ($n) { continue 2; }",
         "while ($n) { break 2; }",
         "switch ($n) { case 1: continue 2; }",
+        "switch ($n) { case 1: break 2; }",
         "foreach ([1] as $v) { switch ($v) { case 1: continue 3; } }",
+        "while ($n) { while ($n) { break 3; } }",
+        "while ($n) { while ($n) { continue 4; } }",
+        "while ($n) { break $n; }",
         "goto done; done: return;",
+        "try { break; } finally { echo 1; }",
     ] {
-        assert!(!nested_jumps_only(body), "`{body}` holds a jump this gate refuses");
+        assert!(!gate(body), "`{body}` holds a jump that comes back or leaves");
     }
 }
 

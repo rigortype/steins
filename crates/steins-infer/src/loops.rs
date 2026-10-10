@@ -128,7 +128,7 @@ pub(crate) fn walk_loop(
             cond,
             body,
             break_free,
-            nested_jumps_only,
+            continue_free,
             writes,
             reads,
             poisons,
@@ -140,7 +140,7 @@ pub(crate) fn walk_loop(
             loop_fallthrough_forget(w, writes, reads, *poisons, *may_return, env, store);
             apply_loop_exit_negation(w, folder, cond, *break_free, env, store);
             let body_flow = walk_loop_body(w, folder, body, benv, bstore, descent, facts, out);
-            do_while_flow(*nested_jumps_only, body_flow)
+            do_while_flow(*break_free && *continue_free, body_flow)
         }
         _ => unreachable!("walk_trace hands walk_loop the four loop kinds only"),
     }
@@ -171,14 +171,13 @@ fn loop_flow(break_free: bool, verdict: Certainty) -> Flow {
 /// The body needs a jump gate. `body_flow` counts a `break` or `continue` as
 /// terminating its path — it leaves the block it is written in — but a `break` of
 /// this loop lands on the successor and a `continue` of it lands on the condition,
-/// which may fail. `nested_jumps_only` admits only single-level jumps inside a
-/// nested loop or `switch`, so every jump the body walk stopped at belongs to a
-/// nested construct whose own walk already answered for it. What is left is
-/// `return`, `throw`, `exit` and a `never` call, none of which comes back. It also
-/// refuses a multi-level jump out of a nested loop, which the walker's structured
-/// `switch` credits to the innermost breakable (#904); see the field's docs.
-fn do_while_flow(nested_jumps_only: bool, body_flow: Flow) -> Flow {
-    if nested_jumps_only && body_flow == Flow::Terminated {
+/// which may fail. `jumps_stay_inside` is `break_free && continue_free`: no jump
+/// targets this loop or leaves it, so every jump the body walk stopped at belongs to
+/// a nested construct whose own walk already answered for it, however many levels
+/// it climbs inside the body (ADR-0103). What is left is `return`, `throw`, `exit`
+/// and a `never` call, none of which comes back.
+fn do_while_flow(jumps_stay_inside: bool, body_flow: Flow) -> Flow {
+    if jumps_stay_inside && body_flow == Flow::Terminated {
         Flow::Terminated
     } else {
         Flow::FellThrough

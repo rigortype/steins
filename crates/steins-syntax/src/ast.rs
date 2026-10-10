@@ -3246,21 +3246,21 @@ pub enum StmtKind {
     /// A walker still gets everything else a `while` gives it: the same sets, the
     /// same entry forgetting, `break_free`, and a body to walk.
     ///
-    /// `nested_jumps_only` is the one fact a `while` has no use for (issue #679). The
-    /// body runs at least once, so a body that terminates on every path decides the
-    /// construct's successor — provided none of those paths is a jump that comes back
-    /// to it (a `break` of this loop lands on the successor, a `continue` of it on the
-    /// condition). It is `true` when the body holds no `goto` and every
-    /// `break`/`continue` in it has the literal level 1 and sits inside a nested loop
-    /// or `switch`; it implies `break_free`. Multi-level jumps out of a nested loop are
-    /// refused as well, because the walker's structured `switch` and the presence pass
-    /// credit a jump to the innermost breakable and mis-credit those (#904); once they
-    /// count levels, this relaxes to "`break_free` and no `continue` of this loop".
+    /// `continue_free` is the one fact a `while` has no use for (issue #679, relaxed
+    /// by #904 step 3). The body runs at least once, so a body that terminates on every
+    /// path decides the construct's successor, provided none of those paths is a jump
+    /// that comes back to it (a `break` of this loop lands on the successor, a
+    /// `continue` of it on the condition). `break_free && continue_free` says so: no
+    /// `break` or `goto` leaves the body, and no `continue` targets this loop. Jumps
+    /// are credited by level (ADR-0103), so a jump aimed at a nested loop or `switch`
+    /// counts for nothing, `break 2` out of an inner loop's own inner loop included.
+    /// `continue_free` alone is `true` of a body whose only jumps leave for an outer
+    /// loop, which `break_free` refuses.
     DoWhile {
         cond: CondExpr,
         body: Vec<Stmt>,
         break_free: bool,
-        nested_jumps_only: bool,
+        continue_free: bool,
         writes: Vec<String>,
         reads: Vec<String>,
         poisons: bool,

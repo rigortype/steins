@@ -90,6 +90,19 @@ fn a_do_while_whose_body_terminates_terminates() {
         end_of("do { foreach ($xs as $x) { continue; } return 1; } while ($c);"),
         BodyEnd::Terminates
     );
+    // …however many levels it climbs, so long as it stays inside the body (#904 step 3).
+    assert_eq!(
+        end_of("do { while ($c) { while ($c) { break 2; } } return 1; } while ($c);"),
+        BodyEnd::Terminates
+    );
+    assert_eq!(
+        end_of("do { while ($c) { switch ($c) { case 1: continue 2; } } return 1; } while ($c);"),
+        BodyEnd::Terminates
+    );
+    assert_eq!(
+        end_of("do { try { continue; } finally { return 1; } } while ($c);"),
+        BodyEnd::Terminates
+    );
 }
 
 #[test]
@@ -147,6 +160,10 @@ fn a_do_while_whose_body_can_come_back_falls_through() {
     assert_eq!(end_of("do { continue; } while ($c);"), BodyEnd::FallsThrough);
     assert_eq!(
         end_of("do { while ($c) { break 2; } return 1; } while ($c);"),
+        BodyEnd::FallsThrough
+    );
+    assert_eq!(
+        end_of("do { while ($c) { continue 2; } return 1; } while ($c);"),
         BodyEnd::FallsThrough
     );
 }
