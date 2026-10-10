@@ -18,7 +18,7 @@
 //! | literal (int, float, string, `true`, `false`, `null`), magic constant | yes | nothing to evaluate |
 //! | `$x;` as a whole statement (not `$this`)                | yes    | compiled away: no read, so no undefined-variable warning |
 //! | `isset($x)`, `empty($x)` over bare variables            | yes    | never warns, never calls `offsetExists` without a fetch |
-//! | `[…]` / `array(…)` of allowed values; keys, if any, are distinct int or string literals | yes | no `Illegal offset` and no overwrite to reason about |
+//! | `[…]` / `array(…)` of allowed values; keys, if any, are distinct int literals within i64 or non-numeric string literals | yes | no `Illegal offset` and no overwrite to reason about |
 //! | `!a`, `a === b`, `a !== b` over allowed values with no variable | yes | identity and negation convert nothing |
 //! | `$x` anywhere inside a larger expression                | no     | an undefined variable warns: `$zz ? 1 : 2;`, `-$zz;`, `(int)$zz;`, `$zz instanceof Foo;` |
 //! | `$x;` as a match arm                                    | no     | the arm's value is consumed, so the read warns |
@@ -104,10 +104,12 @@ fn is_array_literal<'a, 'arena: 'a>(
                         Some(v) if !v.iter().any(u8::is_ascii_digit) => v,
                         _ => return false,
                     },
-                    // `0x1`, `1_0` and `01` spell keys another way.
+                    // `0x1`, `1_0` and `01` spell keys another way, and a literal past
+                    // `i64` is a float key (an implicit-conversion deprecation).
                     Expression::Literal(Literal::Integer(i))
                         if i.raw.iter().all(u8::is_ascii_digit)
-                            && (i.raw == b"0" || i.raw.first() != Some(&b'0')) =>
+                            && (i.raw == b"0" || i.raw.first() != Some(&b'0'))
+                            && std::str::from_utf8(i.raw).is_ok_and(|r| r.parse::<i64>().is_ok()) =>
                     {
                         i.raw
                     }
