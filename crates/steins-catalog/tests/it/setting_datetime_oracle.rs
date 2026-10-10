@@ -349,6 +349,29 @@ const ROWS: &[Row] = &[
         &[Some(Str("e !Y-m-d H:i")), Some(Omitted)],
         (true, false),
     ),
+    // A `|` anywhere does not undo it.
+    row(
+        "F3b and a trailing reset",
+        "DateTime::createFromFormat('e !Y-m-d H:i|', 'Europe/London 2024-10-27 01:30')",
+        FORMAT,
+        &[Some(Str("e !Y-m-d H:i|")), Some(Omitted)],
+        (true, false),
+    ),
+    row(
+        "F3c and a leading reset",
+        "DateTime::createFromFormat('|e !Y-m-d H:i', 'Europe/London 2024-10-27 01:30')",
+        FORMAT,
+        &[Some(Str("|e !Y-m-d H:i")), Some(Omitted)],
+        (true, false),
+    ),
+    // A `|` with no `!` after the zone conversion resets, and the parsed zone stays.
+    row(
+        "F4 a leading reset before a zone",
+        "DateTime::createFromFormat('|e Y-m-d H:i', 'Europe/London 2024-10-27 01:30')",
+        FORMAT,
+        &[Some(Str("|e Y-m-d H:i")), Some(Omitted)],
+        (false, false),
+    ),
 ];
 
 /// The bare ini the table runs under.
@@ -437,11 +460,31 @@ fn the_clock_verdicts_match_the_engine() {
 /// CI does not install.
 #[test]
 fn the_faketime_clock_rows() {
-    const PROBES: [(&str, &str, bool); 5] = [
+    const PROBES: [(&str, &str, bool); 9] = [
         (
             "DateTime::createFromFormat('e !Y-m-d H:i', 'Europe/London 2024-10-27 01:30')",
             "e !Y-m-d H:i",
             true,
+        ),
+        (
+            "DateTime::createFromFormat('e !Y-m-d H:i|', 'Europe/London 2024-10-27 01:30')",
+            "e !Y-m-d H:i|",
+            true,
+        ),
+        (
+            "DateTime::createFromFormat('|e !Y-m-d H:i', 'Europe/London 2024-10-27 01:30')",
+            "|e !Y-m-d H:i",
+            true,
+        ),
+        (
+            "DateTime::createFromFormat('|e Y-m-d H:i', 'Europe/London 2024-10-27 01:30')",
+            "|e Y-m-d H:i",
+            false,
+        ),
+        (
+            "DateTime::createFromFormat('!e Y-m-d H:i', 'Europe/London 2024-10-27 01:30')",
+            "!e Y-m-d H:i",
+            false,
         ),
         (
             "DateTime::createFromFormat('!Y-m-d H:i e', '2024-10-27 01:30 Europe/London')",
