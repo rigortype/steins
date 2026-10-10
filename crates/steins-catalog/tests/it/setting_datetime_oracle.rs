@@ -339,6 +339,16 @@ const ROWS: &[Row] = &[
         &[Some(Str("Y-m-d H:i:s")), Some(Omitted)],
         (true, false),
     ),
+    // A `!` after a zone conversion clears the parsed zone (the default fills it back in) and keeps
+    // the clock's DST flag: undecided, both kept. A second's sleep cannot reach the repeated hour,
+    // so the faketime test below witnesses the clock.
+    row(
+        "F3 a reset after a zone conversion",
+        "DateTime::createFromFormat('e !Y-m-d H:i', 'Europe/London 2024-10-27 01:30')",
+        FORMAT,
+        &[Some(Str("e !Y-m-d H:i")), Some(Omitted)],
+        (true, false),
+    ),
 ];
 
 /// The bare ini the table runs under.
@@ -417,6 +427,64 @@ fn the_clock_verdicts_match_the_engine() {
         let label = row.label;
         assert!(reads != Some(false) || !moved, "{label}: moved with the clock, and it is dropped");
         assert_eq!(moved, row.clock_moves, "{label}: expected clock_moves = {}", row.clock_moves);
+    }
+}
+
+/// The clock rows a second's sleep cannot reach, under `faketime` at two clocks with the default
+/// zone `Europe/London`: the repeated hour of 2024-10-27 resolves by the clock's DST flag where a
+/// zone conversion precedes the `!` (the gate keeps the clock), and does not where the reset or
+/// the literal fills every field (the gate drops it). Skips without `faketime` on `PATH`, which
+/// CI does not install.
+#[test]
+fn the_faketime_clock_rows() {
+    const PROBES: [(&str, &str, bool); 5] = [
+        (
+            "DateTime::createFromFormat('e !Y-m-d H:i', 'Europe/London 2024-10-27 01:30')",
+            "e !Y-m-d H:i",
+            true,
+        ),
+        (
+            "DateTime::createFromFormat('!Y-m-d H:i e', '2024-10-27 01:30 Europe/London')",
+            "!Y-m-d H:i e",
+            false,
+        ),
+        (
+            "DateTime::createFromFormat('Y-m-d H:i e|', '2024-10-27 01:30 Europe/London')",
+            "Y-m-d H:i e|",
+            false,
+        ),
+        ("DateTime::createFromFormat('!Y-m-d H:i', '2024-10-27 01:30')", "!Y-m-d H:i", false),
+        ("new DateTime('2024-10-27 01:30')", "", false),
+    ];
+    if Command::new("faketime").arg("--version").output().is_err() || !php_ready() {
+        eprintln!("SKIP: faketime is not on PATH; the faketime clock rows not run");
+        return;
+    }
+    let probes: Vec<&str> = PROBES.iter().map(|(probe, ..)| *probe).collect();
+    let script = format!(
+        "date_default_timezone_set('Europe/London'); \
+         foreach ([{}] as $d) {{ echo $d->getTimestamp(), ' '; }}",
+        probes.join(", ")
+    );
+    let at = |clock: &str| {
+        let out = Command::new("faketime")
+            .args(["-f", clock, "php", "-d", "error_reporting=0", "-r", &script])
+            .output()
+            .expect("run faketime");
+        assert!(out.status.success(), "faketime php failed at {clock}");
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        text.split_whitespace().map(str::to_owned).collect::<Vec<_>>()
+    };
+    let (july, january) = (at("@2024-07-01 12:00:00"), at("@2024-01-15 12:00:00"));
+    assert_eq!(july.len(), PROBES.len(), "{july:?}");
+    let gate = FORMAT.gate();
+    for (i, (probe, format, moves)) in PROBES.iter().enumerate() {
+        let moved = july[i] != january[i];
+        assert_eq!(moved, *moves, "{probe}: {} vs {}", july[i], january[i]);
+        if !format.is_empty() {
+            let reads = gate.reads_clock(&[Some(Str(format)), Some(Omitted)]);
+            assert!(reads != Some(false) || !moved, "{probe}: moved, and the clock is dropped");
+        }
     }
 }
 
