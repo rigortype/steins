@@ -28,7 +28,9 @@
 //!   it.
 //!
 //! Everything else the walk consults is fixed for the run (`reportable`, `seeds`) or
-//! is saved, cleared and restored around the body (`breaks`, `continues`, `silent`).
+//! is saved, cleared and restored around the body (`breaks`, `continues`, `silent`);
+//! the jumps that leave the body for an enclosing construct are part of the answer
+//! (`LoopExits::escaped`) and are re-parked on a hit as on a walk.
 //! `seen` is consulted only by a recording walk, so it is not an input. A hit replays
 //! the exits and the rewritten `seeded_at` entries.
 //!
@@ -143,8 +145,23 @@ impl LoopMemo {
 }
 
 /// Walk a loop body, or replay the answer of an earlier silent walk of the same body
-/// from the same entry.
+/// from the same entry, and re-park the jumps that leave the loop for an enclosing
+/// construct (ADR-0103) — on a replay as on a walk, since they are part of the
+/// answer.
 pub(super) fn presence_loop_body(
+    body: &[Statement<'_>],
+    entry: &PresenceState,
+    cx: &mut PresenceCx,
+) -> LoopExits {
+    let exits = loop_body_exits(body, entry, cx);
+    let (breaks, continues) = &exits.escaped;
+    cx.breaks.extend(breaks.iter().cloned());
+    cx.continues.extend(continues.iter().cloned());
+    exits
+}
+
+/// [`presence_loop_body`]'s answer, from the table or from a walk.
+fn loop_body_exits(
     body: &[Statement<'_>],
     entry: &PresenceState,
     cx: &mut PresenceCx,

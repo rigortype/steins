@@ -347,6 +347,80 @@ fn a_switch_case_is_entered_directly_rather_than_fallen_into() {
     assert_eq!(maybe("switch ($c) { case 1: $x = 1; case 2: echo $x; }"), one("x"));
 }
 
+// Jumps credited by level (ADR-0103, issue #904). Every row is witnessed on PHP
+// 8.5.11.
+
+#[test]
+fn a_multi_level_jump_lands_on_the_construct_it_targets() {
+    // w904b `p`: the `break 2` leaves the `foreach` AND the switch, so the `else`
+    // arm reaches the read with `$y` unbound (PHP: "Undefined variable $y").
+    let p = "if ($c) { $y = 1; } else { switch ($d) { case 1: foreach ($c as $v) { break 2; } \
+             return; default: return; } } echo $y;";
+    assert_eq!(maybe(p), one("y"));
+    // `continue 2` whose second level is the switch is its `break 2`.
+    let q = "if ($c) { $y = 1; } else { switch ($d) { case 1: foreach ($c as $v) { continue 2; } \
+             return; default: return; } } echo $y;";
+    assert_eq!(maybe(q), one("y"));
+    // Control: a `break 1` belongs to the `foreach`, and the arm ends in `return`.
+    let own = "if ($c) { $y = 1; } else { switch ($d) { case 1: foreach ($c as $v) { break; } \
+               return; default: return; } } echo $y;";
+    assert_eq!(maybe(own), none());
+}
+
+#[test]
+fn a_jump_past_a_switch_leaves_the_switch_s_join() {
+    // `break 2` from a case leaves the enclosing loop: its state reaches the read
+    // after the loop, not the one after the switch.
+    let body = "while (true) { switch ($c) { case 1: break 2; default: $x = 1; } echo $x; \
+                return; } echo $x;";
+    // The read inside the loop sees only `default`'s binding; the one after the
+    // loop is reached only by the `break 2`, with `$x` unbound.
+    assert_eq!(maybe(body), one("x"));
+}
+
+#[test]
+fn a_continue_in_a_switch_is_its_break() {
+    // PHP warns `"continue" targeting switch is equivalent to "break"` and runs the
+    // read after the switch, where the first iteration has no `$y`.
+    let body = "foreach ($c as $v) { switch ($d) { case 1: continue; default: $y = 1; } \
+                echo $y; }";
+    assert_eq!(maybe(body), one("y"));
+    // Control: `continue 2` is the loop's, so the read is reached only past `default`.
+    let control = "foreach ($c as $v) { switch ($d) { case 1: continue 2; default: $y = 1; } \
+                   echo $y; }";
+    assert_eq!(maybe(control), none());
+}
+
+#[test]
+fn only_the_last_case_running_off_its_end_reaches_the_successor() {
+    // `case 1` runs into `case 2`, which binds; PHP binds `$x` on every path.
+    assert_eq!(
+        maybe("switch ($c) { case 1: $y = 0; case 2: $x = 1; break; default: $x = 2; } echo $x;"),
+        none()
+    );
+    // The last case runs off its end without binding: the read is `Maybe`.
+    assert_eq!(
+        maybe("switch ($c) { case 1: $x = 1; break; default: echo 1; } echo $x;"),
+        one("x")
+    );
+}
+
+#[test]
+fn a_jump_out_of_a_try_takes_the_finally_s_bindings() {
+    // PHP 8.5.11: the `finally` runs before the `break` lands, so `$x` is bound.
+    assert_eq!(maybe("while (true) { try { break; } finally { $x = 1; } } echo $x;"), none());
+    assert_eq!(
+        maybe("switch ($c) { case 1: try { break; } finally { $x = 1; } return; default: \
+               $x = 2; } echo $x;"),
+        none()
+    );
+    // Control: a binding in the block itself is skipped by the jump.
+    assert_eq!(
+        maybe("while (true) { try { if ($d) { break; } $x = 1; } finally { } return; } echo $x;"),
+        one("x")
+    );
+}
+
 // Unmodelled constructs read as unconditional bindings — the silent side.
 
 #[test]

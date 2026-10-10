@@ -13,6 +13,7 @@ use mago_syntax::cst::{
 
 use crate::ast::{Comment, CommentKind, UndefinedRead, UnsetSeedFacts, UnsetSeedRead};
 use crate::lower_scope::{Shield, VarUsage, bind_lvalue_roots, scan_var_usage};
+use crate::lower_jump::parked_level;
 use crate::lower_stmt::{body_has_nested_jumps_only, expr_is_false, expr_is_true, stmt_end};
 use crate::lower_try::{stmt_cannot_throw, try_body_cannot_throw};
 use crate::memo::{self, TryScan};
@@ -136,16 +137,41 @@ struct PresenceCx<'a> {
     silent: bool,
     /// Read spans already reported — a loop body is walked more than once.
     seen: HashSet<u32>,
-    /// The states carried out by `break`, waiting for the enclosing loop or switch
-    /// to join them into its successor. Saved and cleared around each such
-    /// construct, so a jump is never credited to the wrong one.
-    breaks: Vec<PresenceState>,
-    /// The states carried out by `continue`, waiting for the enclosing loop's back
-    /// edge — and, for a loop that can exit by its condition, its successor too.
-    continues: Vec<PresenceState>,
+    /// The states carried out by `break`, each with the number of loops and
+    /// `switch`es it still has to leave (ADR-0103), waiting for the construct it
+    /// targets to join it into its successor. Saved and cleared around each such
+    /// construct, which takes the level-1 entries as its own and re-parks the rest
+    /// one level lower ([`credit_level`]), so a jump is never credited to the wrong
+    /// one.
+    breaks: Vec<Parked>,
+    /// The states carried out by `continue`, levelled the same way, waiting for the
+    /// targeted loop's back edge — and, for a loop that can exit by its condition,
+    /// its successor too. A `switch` a `continue` targets takes it as a `break`.
+    continues: Vec<Parked>,
     /// The loop-body answers this run has already computed (issue #793), or `None`
     /// when memoization is off. See [`LoopMemo`].
     loop_memo: Option<LoopMemo>,
+}
+
+/// A parked jump state: the number of breakable constructs (loops and `switch`es)
+/// the jump still has to leave, counting the one it is in, and the state it carries.
+type Parked = (u32, PresenceState);
+
+/// Split the jumps parked inside one breakable construct into the states it takes
+/// as its own (level 1) and those that leave it for an enclosing construct, one
+/// level lower — the module table of `crate::lower_jump`, applied as each
+/// construct is left.
+fn credit_level(parked: Vec<Parked>) -> (Vec<PresenceState>, Vec<Parked>) {
+    let mut own = Vec::new();
+    let mut outer = Vec::new();
+    for (level, state) in parked {
+        if level <= 1 {
+            own.push(state);
+        } else {
+            outer.push((level - 1, state));
+        }
+    }
+    (own, outer)
 }
 
 impl PresenceCx<'_> {
@@ -352,9 +378,9 @@ where
 /// in `return`/`throw`/`exit`, with no `break` and no `continue` of this loop,
 /// never evaluates the condition and never reaches the successor, so the construct
 /// answers [`PresenceFlow::Terminated`] and a branch join subtracts it like a
-/// `return`. This pass credits every `break`/`continue` to the innermost loop
-/// whatever its level (#904), so the lowering's [`body_has_nested_jumps_only`]
-/// gates it as it gates the walker's `do_while_flow`.
+/// `return`. The lowering's [`body_has_nested_jumps_only`] gates it as it gates the
+/// walker's `do_while_flow`; it still refuses multi-level jumps, which this pass has
+/// credited by level since ADR-0103 (relaxing it is #1033 S2b).
 fn presence_do_while(
     d: &mago_syntax::cst::DoWhile<'_>,
     state: &mut PresenceState,
@@ -381,12 +407,12 @@ fn presence_stmt(
 ) -> PresenceFlow {
     apply_presence_seeds(s, state, cx);
     match s {
-        Statement::Break(_) => {
-            cx.breaks.push(state.clone());
+        Statement::Break(b) => {
+            cx.breaks.push((parked_level(b.level), state.clone()));
             PresenceFlow::Broke
         }
-        Statement::Continue(_) => {
-            cx.continues.push(state.clone());
+        Statement::Continue(c) => {
+            cx.continues.push((parked_level(c.level), state.clone()));
             PresenceFlow::Continued
         }
         Statement::Block(b) => presence_seq(b.statements.iter(), state, cx),
@@ -581,6 +607,12 @@ fn presence_if(
 /// Case entry is deliberately the **pre-switch** state, not the previous case's
 /// exit: PHP enters a case directly on a match, so a name the previous case bound
 /// is genuinely absent there. Fall-through only ever *adds* a path.
+///
+/// The jumps that target this switch (ADR-0103) are joined in: every `break` and
+/// `continue` whose level runs out here — a `continue` that targets a `switch` is
+/// its `break` — and the jumps that target an enclosing construct are re-parked
+/// one level lower. The last non-empty case running off its end leaves the switch
+/// as a `break` would, so its state joins too.
 fn presence_switch(
     sw: &mago_syntax::cst::Switch<'_>,
     state: &mut PresenceState,
@@ -588,12 +620,13 @@ fn presence_switch(
 ) -> PresenceFlow {
     presence_leaf(&Node::Expression(sw.expression), state, cx);
     let pre = state.clone();
-    // A `break` in a case body targets THIS switch, so its state is ours to join.
-    // A `continue` targets the enclosing loop and must stay parked for it.
     let outer_breaks = std::mem::take(&mut cx.breaks);
+    let outer_continues = std::mem::take(&mut cx.continues);
     let mut arms: Vec<PresenceState> = Vec::new();
     let mut has_default = false;
-    for case in sw.body.cases() {
+    let cases = sw.body.cases();
+    let last_body = cases.iter().rposition(|c| !c.is_empty());
+    for (position, case) in cases.iter().enumerate() {
         match case.expression() {
             Some(e) => {
                 let mut probe = pre.clone();
@@ -609,15 +642,23 @@ fn presence_switch(
         // A case body that falls off its end runs into the NEXT case rather than
         // past the switch, so only its `break` state — already parked — reaches the
         // successor. Keeping the fall-off state here would be the fall-through edge
-        // this pass does not model.
-        if presence_seq(case.statements().iter(), &mut arm, cx) == PresenceFlow::Fell {
+        // this pass does not model. The last body has no next case to run into.
+        let flow = presence_seq(case.statements().iter(), &mut arm, cx);
+        if flow == PresenceFlow::Fell && Some(position) == last_body {
             arms.push(arm);
         }
     }
     if !has_default {
         arms.push(pre);
     }
-    arms.extend(std::mem::replace(&mut cx.breaks, outer_breaks));
+    let (own_breaks, escaped_breaks) =
+        credit_level(std::mem::replace(&mut cx.breaks, outer_breaks));
+    let (own_continues, escaped_continues) =
+        credit_level(std::mem::replace(&mut cx.continues, outer_continues));
+    cx.breaks.extend(escaped_breaks);
+    cx.continues.extend(escaped_continues);
+    arms.extend(own_breaks);
+    arms.extend(own_continues);
     let Some(joined) = arms.into_iter().reduce(|a, b| join_states(&a, &b)) else {
         return PresenceFlow::Terminated;
     };
@@ -641,12 +682,17 @@ fn presence_switch(
 /// ([`try_body_cannot_throw`]), and the construct is [`PresenceFlow::Terminated`]
 /// when its `finally` terminates or no live arm falls through. A `goto` or a label
 /// in it keeps the successor reachable, as it keeps `try_end` undecided.
+///
+/// A `break` or `continue` out of the block or a `catch` runs the `finally` before
+/// it lands (ADR-0103), so the states parked since the construct began take its
+/// bindings as the normal-completion path does.
 fn presence_try(
     s: &Statement<'_>,
     t: &mago_syntax::cst::Try<'_>,
     state: &mut PresenceState,
     cx: &mut PresenceCx,
 ) -> PresenceFlow {
+    let parked_from = (cx.breaks.len(), cx.continues.len());
     let mut certain = state.clone();
     let mut block_flow = PresenceFlow::Fell;
     let mut rest = t.block.statements.iter().peekable();
@@ -696,9 +742,13 @@ fn presence_try(
         if presence_seq(f.block.statements.iter(), &mut fin, cx) == PresenceFlow::Terminated {
             terminates = true;
         }
-        for (name, presence) in &fin {
-            if *presence == BindingPresence::Bound {
-                result.insert(name.clone(), BindingPresence::Bound);
+        let jumped =
+            cx.breaks[parked_from.0..].iter_mut().chain(&mut cx.continues[parked_from.1..]);
+        for parked in std::iter::once(&mut result).chain(jumped.map(|(_, state)| state)) {
+            for (name, presence) in &fin {
+                if *presence == BindingPresence::Bound {
+                    parked.insert(name.clone(), BindingPresence::Bound);
+                }
             }
         }
     }
@@ -728,12 +778,16 @@ struct LoopExits {
     /// The state at the back edge: the body's fall-through end joined with every
     /// `continue`.
     looped: PresenceState,
-    /// Every `break` state, in order.
+    /// Every `break` state of this loop, in order.
     broke: Vec<PresenceState>,
     /// Whether any path reaches the back edge at all — the body's end, or a
     /// `continue`. `false` means every path left by `break` or terminated, which
     /// is what lets a `do`-`while` terminate (issue #679).
     reaches_back_edge: bool,
+    /// The `break`s and `continue`s that leave this loop for an enclosing construct
+    /// (ADR-0103), one level lower, for the caller to re-park
+    /// ([`loop_memo::presence_loop_body`] does).
+    escaped: (Vec<Parked>, Vec<Parked>),
 }
 
 /// The walk itself, uncached; [`presence_loop_body`] is the entry the statements
@@ -744,8 +798,8 @@ fn presence_loop_walk(
     entry: &PresenceState,
     cx: &mut PresenceCx,
 ) -> LoopExits {
-    // A jump inside this body targets THIS loop; anything parked by an enclosing
-    // one must not be credited to it, and vice versa.
+    // A level-1 jump inside this body targets THIS loop; anything parked by an
+    // enclosing one must not be credited to it, and a deeper jump leaves it.
     let outer_breaks = std::mem::take(&mut cx.breaks);
     let outer_continues = std::mem::take(&mut cx.continues);
 
@@ -755,7 +809,7 @@ fn presence_loop_walk(
     for _ in 0..2 {
         let mut s = body_entry.clone();
         let flow = presence_seq(body.iter(), &mut s, cx);
-        let mut back = std::mem::take(&mut cx.continues);
+        let (mut back, _) = credit_level(std::mem::take(&mut cx.continues));
         if flow == PresenceFlow::Fell {
             back.push(s);
         }
@@ -775,14 +829,15 @@ fn presence_loop_walk(
 
     let mut fell = body_entry.clone();
     let flow = presence_seq(body.iter(), &mut fell, cx);
-    let mut back = std::mem::replace(&mut cx.continues, outer_continues);
+    let (mut back, escaped_continues) =
+        credit_level(std::mem::replace(&mut cx.continues, outer_continues));
     if flow == PresenceFlow::Fell {
         back.push(fell);
     }
     let reaches_back_edge = !back.is_empty();
     let looped = back.into_iter().reduce(|a, b| join_states(&a, &b)).unwrap_or(body_entry);
-    let broke = std::mem::replace(&mut cx.breaks, outer_breaks);
-    LoopExits { looped, broke, reaches_back_edge }
+    let (broke, escaped_breaks) = credit_level(std::mem::replace(&mut cx.breaks, outer_breaks));
+    LoopExits { looped, broke, reaches_back_edge, escaped: (escaped_breaks, escaped_continues) }
 }
 
 /// Join a loop's exits into the state after it. `entry` is folded in for the

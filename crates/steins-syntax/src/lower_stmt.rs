@@ -13,11 +13,11 @@ use mago_syntax::cst::{
 };
 
 use crate::ast::{
-    AppendStmt, ArgValue, ArrayKey, ArrayLiteralElement, ArrayLiteralSite, BinaryOperandOp, BodyEnd,
-    CallExpr, Callee, CondExpr, CondOperand, ForeachBodyShape, ForeachSite, InvalidatedVar,
-    MatchArmT, NameRef, OpaqueConstruct, OpaqueSite, OperandSite, OperandSiteKind, OperandSpan,
-    PrevStmt, RunArg, RunCall, Runs, Span, Stmt, StmtKind, StringContextKind, StringContextSite,
-    UnaryOperandOp,
+    AppendStmt, ArgValue, ArmLanding, ArrayKey, ArrayLiteralElement, ArrayLiteralSite,
+    BinaryOperandOp, BodyEnd, CallExpr, Callee, CondExpr, CondOperand, ForeachBodyShape,
+    ForeachSite, InvalidatedVar, MatchArmT, NameRef, OpaqueConstruct, OpaqueSite, OperandSite,
+    OperandSiteKind, OperandSpan, PrevStmt, RunArg, RunCall, Runs, Span, Stmt, StmtKind,
+    StringContextKind, StringContextSite, UnaryOperandOp,
 };
 use crate::lower_expr::{
     append_base, assert_stmt_cond, const_key_offset, const_key_offset_path, destructure_reads,
@@ -26,6 +26,7 @@ use crate::lower_expr::{
     lower_method_call, lower_opaque, lower_static_call, opaque_sets, prop_fetch_of,
 };
 use crate::lower_guards::guard_regions_of;
+use crate::lower_jump::{arm_landing, body_has_jump, ends_own_switch, jump_level};
 use crate::lower_try::{lower_try, try_end};
 use crate::memo::{self, TryScan};
 use crate::names::name_ref;
@@ -96,17 +97,17 @@ pub(crate) fn lower_stmt(s: &Statement<'_>, out: &mut Vec<Stmt>) {
         // is modeled, not erased.
         Statement::If(if_stmt) => lower_if(if_stmt),
         // A `switch` is structured (ADR-0031 Part B) when its subject and every
-        // case condition lower to a variable/literal AND every non-empty case
-        // ends in break/return/throw/exit (no fall-through); else it stays
-        // `Opaque` like the loop constructs below.
+        // case condition lower to a variable/literal AND no non-empty case runs
+        // into the next one (ADR-0103: the last may); else it stays `Opaque`.
         Statement::Switch(sw) => lower_switch(sw).unwrap_or_else(|| lower_opaque(s)),
         // A `while` is structured (ADR-0027 amendment, issue #649): the sets an
         // `Opaque` carries, plus its condition and its body as a sub-trace.
         Statement::While(wh) => lower_while(s, wh),
         // `break;` / `continue;` terminate the block they sit in (issue #649).
-        // A trailing `break` in a `switch` case never reaches here —
+        // A trailing `break;` in a `switch` case never reaches here —
         // `strip_trailing_break` takes it before the arm body is lowered — so this
-        // is the mid-block form, the one a guarded `break` inside a loop body is.
+        // is the mid-block form, the one a guarded `break` inside a loop body is,
+        // or a jump of another level (ADR-0103: `crate::lower_jump`).
         Statement::Break(_) | Statement::Continue(_) => {
             Stmt::lowered(StmtKind::LoopJump { span: stmt_span }, Vec::new())
         }
@@ -214,7 +215,7 @@ fn stmt_runs(s: &Statement<'_>, kind: &StmtKind) -> Runs {
 
 /// Collect `node`'s calls into `out` (see [`Runs`]), stopping at the first one a
 /// function name cannot describe — the record's answer is decided there.
-fn scan_runs(node: &Node<'_, '_>, out: &mut Runs) {
+pub(crate) fn scan_runs(node: &Node<'_, '_>, out: &mut Runs) {
     // A `try` answers from the per-parse memo (see `memo::TryScan`).
     if let Node::Try(t) = node
         && let Some(runs) = memo::try_runs(t, || {
@@ -1019,11 +1020,11 @@ fn body_is_break_free(body: &[Statement<'_>]) -> bool {
 ///
 /// Stricter than the truth on purpose. A jump of this loop comes back (a `break`
 /// lands on the successor, a `continue` on the condition), so `break_free` plus "no
-/// `continue` of this loop" would be the exact question. But the walker's
-/// structured `switch` and the presence pass credit a jump to the INNERMOST
-/// breakable, so a multi-level jump out of a nested loop is mis-credited by both
-/// (#904), and a body that holds one cannot have its end trusted. It is refused here
-/// until they count levels, when this relaxes to `break_free && continue_free`.
+/// `continue` of this loop" would be the exact question. The walker's structured
+/// `switch` and the presence pass used to credit a jump to the INNERMOST breakable,
+/// mis-crediting a multi-level jump out of a nested loop (#904), so a body holding
+/// one could not have its end trusted. Both count levels now (ADR-0103); relaxing
+/// this to `break_free && continue_free` is its own step (#1033 S2b).
 pub(crate) fn body_has_nested_jumps_only(body: &[Statement<'_>]) -> bool {
     !body.iter().any(|s| body_has_jump(&Node::Statement(s), 0, &jump_not_innermost))
 }
@@ -1046,47 +1047,6 @@ fn jump_escapes_loop(jump: &Node<'_, '_>, depth: u32) -> bool {
         Node::Break(b) => jump_level(b.level).is_none_or(|n| n > depth),
         Node::Continue(c) => jump_level(c.level).is_none_or(|n| n > depth + 1),
         _ => true,
-    }
-}
-
-/// The scan behind [`body_is_break_free`] and [`body_has_nested_jumps_only`]: whether any
-/// `break`, `continue` or `goto` under `node` answers `hit`. `depth` is the number
-/// of breakable structures (loops and `switch`es) between this node and the body's
-/// top level.
-fn body_has_jump(
-    node: &Node<'_, '_>,
-    depth: u32,
-    hit: &dyn Fn(&Node<'_, '_>, u32) -> bool,
-) -> bool {
-    match node {
-        Node::Break(_) | Node::Continue(_) | Node::Goto(_) => hit(node, depth),
-        // A nested breakable structure absorbs one level of every jump beneath it.
-        Node::While(_) | Node::For(_) | Node::Foreach(_) | Node::DoWhile(_) | Node::Switch(_) => {
-            children(node).iter().any(|c| body_has_jump(c, depth + 1, hit))
-        }
-        // Separate scopes: their bodies do not run here, and PHP does not let a jump
-        // in one target a structure out here.
-        Node::Function(_)
-        | Node::Closure(_)
-        | Node::ArrowFunction(_)
-        | Node::AnonymousClass(_)
-        | Node::Class(_)
-        | Node::Interface(_)
-        | Node::Trait(_)
-        | Node::Enum(_) => false,
-        other => children(other).iter().any(|c| body_has_jump(c, depth, hit)),
-    }
-}
-
-/// A `break`/`continue` level as written: `None` for one this lowering cannot read
-/// as a literal count, which every caller must treat as the worst case.
-fn jump_level(level: Option<&Expression<'_>>) -> Option<u32> {
-    match level {
-        None => Some(1),
-        Some(e) => match lower_arg_value(e) {
-            ArgValue::Int(n) => u32::try_from(n).ok(),
-            _ => None,
-        },
     }
 }
 
@@ -1258,7 +1218,8 @@ fn lower_match_by_value(m: &mago_syntax::cst::Match<'_>) -> Option<Stmt> {
                 for c in a.conditions.iter() {
                     conditions.push(usable_operand(c)?);
                 }
-                arms.push(MatchArmT { conditions, trace: lower_expr_position(a.expression) });
+                let trace = lower_expr_position(a.expression);
+                arms.push(MatchArmT { conditions, trace, lands: None });
             }
             mago_syntax::cst::MatchArm::Default(a) => {
                 if default.is_some() {
@@ -1268,7 +1229,8 @@ fn lower_match_by_value(m: &mago_syntax::cst::Match<'_>) -> Option<Stmt> {
             }
         }
     }
-    Some(Stmt::lowered(StmtKind::Match { subject, arms, default, loose: false }, Vec::new()))
+    let kind = StmtKind::Match { subject, arms, default, default_lands: None, loose: false };
+    Some(Stmt::lowered(kind, Vec::new()))
 }
 
 /// Structure `match (true) { <guard> => …, … }` — an `if`/`elseif` chain written
@@ -1438,50 +1400,69 @@ fn arm_cond_is_bool_valued(cond: &CondExpr) -> bool {
 /// Structure a `switch ($subject) { … }` (ADR-0031 Part B) into the same
 /// [`StmtKind::Match`] node with `loose: true`. Returns `None` — falling back to
 /// `Opaque` — unless the subject and every case condition lower to a
-/// variable/literal AND every non-empty case ends in `break`/`return`/`throw`/
-/// `exit` with no fall-through. Empty case labels stack onto the following
-/// non-empty case as extra conditions (`case 1: case 2: body`), matching PHP
-/// fall-through-to-the-body semantics; a trailing `break` is stripped (end-of-arm,
-/// not a trace terminator). A stray `break`/`continue`/`goto` inside a case body
-/// makes the whole construct opaque — modeling it as an arm would be unsound.
+/// variable/literal AND every non-empty case but the last ends in a jump or a
+/// terminator, with no fall-through into the next case ([`collect_switch_arms`]).
+/// Empty case labels stack onto the following non-empty case as extra conditions
+/// (`case 1: case 2: body`), matching PHP fall-through-to-the-body semantics; a
+/// trailing `break;` is stripped (end-of-arm, not a trace terminator).
+///
+/// A jump inside a case is credited by its level (ADR-0103, `crate::lower_jump`): one
+/// that lands on this switch's successor sets the arm's [`MatchArmT::lands`], and one
+/// that leaves for an outer construct ends the arm like a `return`.
 ///
 /// A `switch (true)` whose cases are not all variables and literals is offered to
 /// [`lower_switch_true`] before it is given up (issue #928).
 fn lower_switch(sw: &mago_syntax::cst::Switch<'_>) -> Option<Stmt> {
     let by_value = usable_operand(sw.expression)
-        .and_then(|subject| Some((subject, collect_switch_arms(sw, false, usable_operand)?)));
+        .and_then(|subject| Some((subject, collect_switch_arms(sw, usable_operand)?)));
     let Some((subject, SwitchArms { arms, default })) = by_value else {
         return lower_switch_true(sw);
     };
     let arms = arms
         .into_iter()
-        .map(|(conditions, trace)| MatchArmT { conditions, trace })
+        .map(|SwitchArm { labels: conditions, trace, lands }| MatchArmT { conditions, trace, lands })
         .collect();
-    Some(Stmt::lowered(StmtKind::Match { subject, arms, default, loose: true }, Vec::new()))
+    let (default, default_lands) = match default {
+        Some(SwitchArm { trace, lands, .. }) => (Some(trace), lands),
+        None => (None, None),
+    };
+    let kind = StmtKind::Match { subject, arms, default, default_lands, loose: true };
+    Some(Stmt::lowered(kind, Vec::new()))
 }
 
-/// The case arms of a structured `switch`, generic over what a case label lowers to:
-/// each arm carries its labels (stacked empty labels in front) and its body, and
-/// `default` is the default body when there is one.
+/// One arm of a structured `switch`: its labels (stacked empty labels in front; none
+/// for the `default` body), its body, and the landing a jump in it owes the
+/// successor.
+struct SwitchArm<C> {
+    labels: Vec<C>,
+    trace: Vec<Stmt>,
+    lands: Option<ArmLanding>,
+}
+
+/// The case arms of a structured `switch`, generic over what a case label lowers to,
+/// and the `default` body when there is one.
 struct SwitchArms<C> {
-    arms: Vec<(Vec<C>, Vec<Stmt>)>,
-    default: Option<Vec<Stmt>>,
+    arms: Vec<SwitchArm<C>>,
+    default: Option<SwitchArm<C>>,
 }
 
 /// Read a `switch`'s cases into [`SwitchArms`], under the conditions
 /// [`lower_switch`] documents: every label lowers through `lower_label`, and every
-/// non-empty case ends in `break`/`return`/`throw`/`exit` with no stray jump.
+/// non-empty case but the last ends without running into the next one.
 ///
-/// `last_may_end` lets the **last** case end without any of those — it has no next case
-/// to fall into, so running off its end leaves the switch exactly as a `break` does —
-/// and lets trailing empty labels stand for the no-op bodies they are.
+/// A case ends cleanly when its last statement is the switch's own `break` (or a
+/// `continue` of level 1, which is one there), which is stripped, or when its trace
+/// ends in a `return`/`throw`/`exit`/[`StmtKind::LoopJump`] or its body in a `goto`.
+/// The **last** non-empty case may also run off its end (ADR-0103 D4): only empty
+/// labels follow it, so it leaves the switch exactly as a `break` does, and those
+/// trailing labels stand for the no-op bodies they are — an empty arm, or an empty
+/// `default`.
 fn collect_switch_arms<C>(
     sw: &mago_syntax::cst::Switch<'_>,
-    last_may_end: bool,
     lower_label: impl Fn(&Expression<'_>) -> Option<C>,
 ) -> Option<SwitchArms<C>> {
-    let mut arms: Vec<(Vec<C>, Vec<Stmt>)> = Vec::new();
-    let mut default: Option<Vec<Stmt>> = None;
+    let mut arms: Vec<SwitchArm<C>> = Vec::new();
+    let mut default: Option<SwitchArm<C>> = None;
     // Conditions of consecutive empty case labels, waiting to stack onto the next
     // non-empty case body; `pending_default` records an empty `default:` label.
     let mut pending: Vec<C> = Vec::new();
@@ -1489,6 +1470,7 @@ fn collect_switch_arms<C>(
 
     let cases = sw.body.cases();
     let last = cases.len().checked_sub(1);
+    let last_body = cases.iter().rposition(|c| !c.is_empty());
     for (position, case) in cases.iter().enumerate() {
         // The case's own label (None for `default`), rejected early if it does not
         // lower.
@@ -1509,31 +1491,21 @@ fn collect_switch_arms<C>(
             }
             continue;
         }
-        // A non-empty case must end cleanly: strip a trailing plain `break;`, else
-        // require a terminator; a stray jump anywhere in the body is unsound.
         let raw = case.statements();
-        let (body, ends_break) = strip_trailing_break(raw)?;
-        if case_has_stray_jump(body) {
+        let (body, ends_break) = strip_trailing_break(raw);
+        let trace = lower_trace(body);
+        if !ends_break && Some(position) != last_body && !case_body_ends(body, &trace) {
+            // The body would fall through to the next case, which structuring
+            // cannot model.
             return None;
         }
-        let trace = lower_trace(body);
-        if !ends_break && !(last_may_end && Some(position) == last) {
-            // No break: the body must terminate, or it would fall through to the
-            // next case (which structuring cannot model).
-            let terminates = matches!(
-                trace.last().map(|s| &s.kind),
-                Some(StmtKind::Return { .. } | StmtKind::Throw { .. } | StmtKind::Exit { .. })
-            );
-            if !terminates {
-                return None;
-            }
-        }
+        let arm = SwitchArm { labels: Vec::new(), trace, lands: arm_landing(body) };
         // Build this arm, stacking any pending empty-label conditions in front.
         match cond {
             Some(c) if !pending_default => {
-                let mut conditions = std::mem::take(&mut pending);
-                conditions.push(c);
-                arms.push((conditions, trace));
+                let mut labels = std::mem::take(&mut pending);
+                labels.push(c);
+                arms.push(SwitchArm { labels, ..arm });
             }
             // This body is (or is reached by fall-through from) `default:`. A default
             // that shares its body with case labels is the `else` only when it is the
@@ -1546,30 +1518,41 @@ fn collect_switch_arms<C>(
                 {
                     return None;
                 }
-                default = Some(trace);
+                default = Some(arm);
             }
         }
         pending.clear();
         pending_default = false;
     }
-    // Trailing empty labels with no following body do nothing at runtime. The by-value
-    // `Match` does not model them as no-op arms (fiddly there) and bails to `Opaque`; a
-    // chain reads a trailing `default:` as an empty `else` and trailing `case`s as an
-    // empty arm.
-    if last_may_end {
-        if pending_default {
-            if default.is_some() {
-                return None;
-            }
-            default = Some(Vec::new());
-            pending.clear();
-        } else if !pending.is_empty() {
-            arms.push((std::mem::take(&mut pending), Vec::new()));
+    // Trailing empty labels with no following body do nothing at runtime: a trailing
+    // `default:` is an empty `default` (absorbing any labels stacked on it), trailing
+    // `case`s an empty arm.
+    if pending_default {
+        if default.is_some() {
+            return None;
         }
-    } else if !pending.is_empty() || pending_default {
-        return None;
+        default = Some(SwitchArm { labels: Vec::new(), trace: Vec::new(), lands: None });
+    } else if !pending.is_empty() {
+        arms.push(SwitchArm { labels: pending, trace: Vec::new(), lands: None });
     }
     Some(SwitchArms { arms, default })
+}
+
+/// Whether a case body that is not stripped of a `break` still cannot run into the
+/// next case: its trace ends in a `return`/`throw`/`exit` or in a jump (every
+/// `break`/`continue` leaves the case, whatever its level), or its last statement is
+/// a `goto`, which lowers as a barrier but never falls through.
+fn case_body_ends(body: &[Statement<'_>], trace: &[Stmt]) -> bool {
+    matches!(body.last(), Some(Statement::Goto(_)))
+        || matches!(
+            trace.last().map(|s| &s.kind),
+            Some(
+                StmtKind::Return { .. }
+                    | StmtKind::Throw { .. }
+                    | StmtKind::Exit { .. }
+                    | StmtKind::LoopJump { .. }
+            )
+        )
 }
 
 /// Structure a `switch (true) { case <test>: … }` as the `if`/`elseif`/`else` chain it
@@ -1577,7 +1560,10 @@ fn collect_switch_arms<C>(
 /// label lowers as the condition an `if` would carry, stacked labels join with `||`, and
 /// the `default` body — taken only when no case matches, wherever it is written — is the
 /// `else`. Under [`collect_switch_arms`]'s conditions, so no case falls through into the
-/// next and none jumps out of the construct.
+/// next.
+///
+/// An `if` has no landing edge to carry, so a chain with a case whose jump lands on
+/// the successor ([`MatchArmT::lands`]) stays `Opaque`.
 ///
 /// What this buys is the same guard discharge an `if` has: `case defined('X'): return X;`
 /// is a call in guard position, folded and pruned as an `if` condition is. A `switch`
@@ -1587,8 +1573,11 @@ fn lower_switch_true(sw: &mago_syntax::cst::Switch<'_>) -> Option<Stmt> {
         return None;
     }
     let SwitchArms { arms, default } =
-        collect_switch_arms(sw, true, |e| Some((lower_cond(e), to_span(e.span()))))?;
-    let mut links = arms.into_iter().map(|(labels, trace)| {
+        collect_switch_arms(sw, |e| Some((lower_cond(e), to_span(e.span()))))?;
+    if arms.iter().chain(&default).any(|a| a.lands.is_some()) {
+        return None;
+    }
+    let mut links = arms.into_iter().map(|SwitchArm { labels, trace, .. }| {
         let cond = labels
             .into_iter()
             .reduce(|(acc, _), (one, span)| {
@@ -1599,8 +1588,9 @@ fn lower_switch_true(sw: &mago_syntax::cst::Switch<'_>) -> Option<Stmt> {
         (cond, trace)
     });
     let (cond, then_trace) = links.next()?;
+    let else_trace = default.map(|d| d.trace);
     Some(Stmt::lowered(
-        StmtKind::If { cond, then_trace, elseifs: links.collect(), else_trace: default },
+        StmtKind::If { cond, then_trace, elseifs: links.collect(), else_trace },
         Vec::new(),
     ))
 }
@@ -1624,71 +1614,17 @@ fn usable_operand(expr: &Expression<'_>) -> Option<CondOperand> {
     }
 }
 
-/// Split a case body into (body-without-terminating-break, ended-in-break). A
-/// trailing `break;` / `break 1;` is stripped; a `break N` (N > 1) or a
-/// non-literal level targets an outer construct — unrepresentable, so `None`.
+/// Split a case body into (body-without-its-own-break, ended-in-it): a trailing
+/// `break;`/`break 1;`, or `continue;`/`continue 1;` (a `break` there, ADR-0103), is
+/// stripped. Any other trailing jump stays in the body, where it lowers as a
+/// [`StmtKind::LoopJump`] that ends the arm, and lands or not by its level.
 fn strip_trailing_break<'a, 'arena>(
     raw: &'a [Statement<'arena>],
-) -> Option<(&'a [Statement<'arena>], bool)> {
-    match raw.last() {
-        Some(Statement::Break(b)) => {
-            if break_is_plain(b) { Some((&raw[..raw.len() - 1], true)) } else { None }
-        }
-        _ => Some((raw, false)),
+) -> (&'a [Statement<'arena>], bool) {
+    match raw.split_last() {
+        Some((last, rest)) if ends_own_switch(last) => (rest, true),
+        _ => (raw, false),
     }
-}
-
-/// Whether a `break` targets its immediately-enclosing construct (`break;` or
-/// `break 1;`) as opposed to an outer one (`break 2;`, `break $n;`).
-fn break_is_plain(b: &mago_syntax::cst::Break<'_>) -> bool {
-    match b.level {
-        None => true,
-        Some(e) => matches!(lower_arg_value(e), ArgValue::Int(1)),
-    }
-}
-
-/// Whether a switch-case body contains a `break`/`continue`/`goto` that would
-/// target the switch from inside the case (making arm modeling unsound). Nested
-/// loops and switches consume their own `break`/`continue`, so the scan does not
-/// descend into them; nested function-likes are separate scopes. Any `goto` at
-/// all disqualifies (its target is unbounded).
-fn case_has_stray_jump(body: &[Statement<'_>]) -> bool {
-    body.iter().any(|s| stmt_has_stray_jump(s))
-}
-
-fn stmt_has_stray_jump(s: &Statement<'_>) -> bool {
-    match s {
-        Statement::Break(_) | Statement::Continue(_) | Statement::Goto(_) => true,
-        // Nested loops/switch absorb their own break/continue — do not descend.
-        Statement::While(_)
-        | Statement::For(_)
-        | Statement::Foreach(_)
-        | Statement::DoWhile(_)
-        | Statement::Switch(_) => false,
-        _ => node_has_stray_jump(&Node::Statement(s)),
-    }
-}
-
-/// Recurse through a node's children looking for a stray jump, stopping at nested
-/// loops/switches (which consume their own) and nested function-like scopes.
-fn node_has_stray_jump(node: &Node<'_, '_>) -> bool {
-    children(node).iter().any(|child| match child {
-        Node::Break(_) | Node::Continue(_) | Node::Goto(_) => true,
-        Node::While(_)
-        | Node::For(_)
-        | Node::Foreach(_)
-        | Node::DoWhile(_)
-        | Node::Switch(_)
-        | Node::Function(_)
-        | Node::Closure(_)
-        | Node::ArrowFunction(_)
-        | Node::AnonymousClass(_)
-        | Node::Class(_)
-        | Node::Interface(_)
-        | Node::Trait(_)
-        | Node::Enum(_) => false,
-        other => node_has_stray_jump(other),
-    })
 }
 
 /// What an offset write or append invalidates besides its base (issue #641). The
