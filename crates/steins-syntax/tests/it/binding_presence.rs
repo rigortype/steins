@@ -434,14 +434,98 @@ fn a_jump_out_of_a_try_takes_the_finally_s_bindings() {
     );
 }
 
-// Unmodelled constructs read as unconditional bindings — the silent side.
+// A binding under an operand that may not run is `Maybe` after the expression
+// (issue #948). The rule table lives on `implied_bound`; one row per test below.
 
 #[test]
-fn an_expression_level_branch_is_read_as_an_unconditional_binding() {
-    // `?:` and `match` are judged as leaf units here, so a binding inside an arm
-    // is unconditional — costs recall, never manufactures a finding (only that direction).
-    assert_eq!(maybe("$c ? $x = 1 : null; echo $x;"), none());
-    assert_eq!(maybe("match ($c) { 1 => $x = 1, default => null }; echo $x;"), none());
+fn a_short_circuit_right_operand_binds_on_some_paths_only() {
+    // The #948 witnesses: each warns on some input (`$c` false, `$c` true, `$d` set).
+    assert_eq!(maybe("$c && ($x = 1); echo $x;"), one("x"));
+    assert_eq!(maybe("$c || ($x = 1); echo $x;"), one("x"));
+    assert_eq!(maybe("$d ?? ($x = 1); echo $x;"), one("x"));
+    // The low-precedence spellings are the same operators.
+    assert_eq!(maybe("$c and ($x = 1); echo $x;"), one("x"));
+    assert_eq!(maybe("$c or ($x = 1); echo $x;"), one("x"));
+    // The read is where the binding ran: silence.
+    assert_eq!(maybe("$c && ($x = 1) && print($x);"), none());
+    assert_eq!(maybe("$c || ($x = 1) || print($x);"), none());
+}
+
+#[test]
+fn a_ternary_or_match_arm_binds_on_some_paths_only() {
+    assert_eq!(maybe("$c ?: ($x = 1); echo $x;"), one("x"));
+    assert_eq!(maybe("$c ? ($x = 1) : null; echo $x;"), one("x"));
+    assert_eq!(maybe("$c ? null : ($x = 1); echo $x;"), one("x"));
+    // Every completing arm binds: bound after.
+    assert_eq!(maybe("$c ? ($x = 1) : ($x = 2); echo $x;"), none());
+    assert_eq!(maybe("$c ? ($x = 1) : throw new Exception(); echo $x;"), none());
+    assert_eq!(maybe("match ($c) { 1 => $x = 1, default => null }; echo $x;"), one("x"));
+    assert_eq!(maybe("match ($c) { 1 => $x = 1, default => $x = 2 }; echo $x;"), none());
+    assert_eq!(maybe("match ($c) { 1 => $x = 1, default => throw new Exception() }; echo $x;"), none());
+    // The subject and the first condition always run; a later condition only on a miss.
+    assert_eq!(maybe("match ($x = $c) { default => 1 }; echo $x;"), none());
+    assert_eq!(maybe("match ($c) { ($x = 1) => 1, default => 2 }; echo $x;"), none());
+    assert_eq!(maybe("match ($c) { 1, ($x = 2) => 1, default => 2 }; echo $x;"), one("x"));
+}
+
+#[test]
+fn coalesce_assign_and_nullsafe_arguments_are_conditional() {
+    // `??=` binds its target either way and runs its right side on a miss only.
+    assert_eq!(maybe("$y ??= ($x = 1); echo $y;"), none());
+    assert_eq!(maybe("$y ??= ($x = 1); echo $x;"), one("x"));
+    // A null receiver skips the call, arguments and all.
+    assert_eq!(maybe("$c?->m($x = 1); echo $x;"), one("x"));
+    assert_eq!(maybe("$c->m($x = 1); echo $x;"), none());
+}
+
+#[test]
+fn the_always_evaluated_side_and_xor_bind_unconditionally() {
+    assert_eq!(maybe("($x = 1) && $c; echo $x;"), none());
+    assert_eq!(maybe("($x = 1) || $c; echo $x;"), none());
+    assert_eq!(maybe("($x = $d) ?? 1; echo $x;"), none());
+    assert_eq!(maybe("($x = $d) ?: 1; echo $x;"), none());
+    assert_eq!(maybe("($x = $c) ? 1 : 2; echo $x;"), none());
+    // `xor` does not short-circuit.
+    assert_eq!(maybe("$c xor ($x = 1); echo $x;"), none());
+    // A name already bound, or bound again afterwards, stays bound.
+    assert_eq!(maybe("$x = 0; $c && ($x = 1); echo $x;"), none());
+    assert_eq!(maybe("$c && ($x = 1); $x = 2; echo $x;"), none());
+    // A conditional bind does not promote a `Maybe` to `Bound`.
+    assert_eq!(maybe("$c && ($x = 1); $c || ($x = 2); echo $x;"), one("x"));
+    // The same name bound on both sides: the left one is unconditional.
+    assert_eq!(maybe("($x = 1) && ($x = 2); echo $x;"), none());
+}
+
+#[test]
+fn nested_short_circuits_compose() {
+    assert_eq!(maybe("$c && ($b = 1) || ($e = 2); echo $b; echo $e;"), vec!["b", "e"]);
+    assert_eq!(maybe("$c && ($d || ($x = 1)); echo $x;"), one("x"));
+    assert_eq!(maybe("$c && ($d && ($x = 1)); echo $x;"), one("x"));
+    assert_eq!(maybe("f($c && ($x = 1)); echo $x;"), one("x"));
+    assert_eq!(maybe("$y = $c && ($x = 1); echo $x;"), one("x"));
+    assert_eq!(maybe("return $c ? ($x = 1) : 0; echo $x;"), none());
+}
+
+#[test]
+fn a_condition_refines_the_branch_its_outcome_implies() {
+    // The true branch of `A && B` ran `B`; the false branch of `A || B` ran `B`.
+    assert_eq!(maybe("if ($c && ($x = 1)) { echo $x; }"), none());
+    assert_eq!(maybe("if ($c && ($x = 1) && ($y = 2)) { echo $x, $y; }"), none());
+    assert_eq!(maybe("if ($c || ($x = 1)) {} else { echo $x; }"), none());
+    assert_eq!(maybe("if (!($c || ($x = 1))) { echo $x; }"), none());
+    assert_eq!(maybe("if (!($c && ($x = 1))) { return; } echo $x;"), none());
+    assert_eq!(maybe("while ($c && ($x = 1)) { echo $x; break; }"), none());
+    // The other branch and the join after the `if` do not.
+    assert_eq!(maybe("if ($c && ($x = 1)) {} else { echo $x; }"), one("x"));
+    assert_eq!(maybe("if ($c || ($x = 1)) { echo $x; }"), one("x"));
+    assert_eq!(maybe("if ($c && ($x = 1)) {} echo $x;"), one("x"));
+    assert_eq!(maybe("if ($c && ($x = 1)) { return; } echo $x;"), one("x"));
+    // A nested disjunction on the right does not imply its right side ran.
+    assert_eq!(maybe("if ($c && ($d || ($x = 1))) { echo $x; }"), one("x"));
+    assert_eq!(maybe("if ($c && ($d && ($x = 1))) { echo $x; }"), none());
+    // Ternary, `??` and `?:` conditions refine nothing.
+    assert_eq!(maybe("if ($d ?? ($x = 1)) { echo $x; }"), one("x"));
+    assert_eq!(maybe("assert($c && ($x = 1)); echo $x;"), none());
 }
 
 #[test]

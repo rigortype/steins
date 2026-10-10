@@ -7,7 +7,7 @@ use std::collections::HashSet;
 
 use mago_span::HasSpan;
 use mago_syntax::cst::{
-    Access, Argument, ArrayElement, ClassLikeMember, Construct, Expression, ExpressionStatement,
+    Access, Argument, ArrayElement, AssignmentOperator, ClassLikeMember, Construct, Expression, ExpressionStatement,
     Hint, MethodBody, Node, PartialArgument, Program, Property, PropertyHookBody,
     PropertyHookConcreteBody, Statement, UnaryPrefixOperator, Variable,
 };
@@ -737,6 +737,12 @@ fn scan_var_mentions(
 #[derive(Default)]
 pub(crate) struct VarUsage {
     pub(crate) bound: std::collections::HashSet<String>,
+    /// The subset of [`Self::bound`] that every normal completion of the scanned
+    /// subtree binds: a name bound only under the right operand of a short-circuit
+    /// operator, in one arm of a ternary or `match`, or by a `??=` right-hand side is in
+    /// `bound` and not here. Maintained through [`Self::branch`]; the presence pass reads
+    /// the difference as `Maybe` (issue #948).
+    pub(crate) uncond_bound: std::collections::HashSet<String>,
     pub(crate) reads: Vec<UndefinedRead>,
     /// See [`Scope::ref_arg_candidates`] — collected in the same walk but on its own
     /// terms, because a binding form must not depend on a read being recorded.
@@ -765,7 +771,7 @@ impl VarUsage {
     fn bind_variable(&mut self, var: &mago_syntax::cst::Variable<'_>) {
         match var {
             mago_syntax::cst::Variable::Direct(dv) => {
-                self.bound.insert(strip_dollar(bytes_to_string(dv.name)));
+                self.bind_direct(dv);
             }
             mago_syntax::cst::Variable::Indirect(_) | mago_syntax::cst::Variable::Nested(_) => {
                 self.dammed = true;
@@ -774,7 +780,33 @@ impl VarUsage {
     }
 
     fn bind_direct(&mut self, dv: &mago_syntax::cst::DirectVariable<'_>) {
-        self.bound.insert(strip_dollar(bytes_to_string(dv.name)));
+        let name = strip_dollar(bytes_to_string(dv.name));
+        self.uncond_bound.insert(name.clone());
+        self.bound.insert(name);
+    }
+
+    /// Run `scan` over a conditionally evaluated part and answer the names it binds on
+    /// every path through it. Those names are in [`Self::bound`] either way and are not
+    /// put in [`Self::uncond_bound`] here: the caller decides whether the part runs
+    /// always (never, for a branch), or is joined with its sibling arms.
+    fn branch(&mut self, scan: impl FnOnce(&mut Self)) -> std::collections::HashSet<String> {
+        let outer = std::mem::take(&mut self.uncond_bound);
+        scan(self);
+        std::mem::replace(&mut self.uncond_bound, outer)
+    }
+
+    /// Scan arms of which exactly one runs (a ternary's, a `match`'s): a name every
+    /// completing arm binds is bound after the expression. `None` is an arm that never
+    /// completes (a `throw` expression), the identity of the intersection.
+    fn join_arms(&mut self, arms: Vec<Option<std::collections::HashSet<String>>>) {
+        let mut joined: Option<std::collections::HashSet<String>> = None;
+        for arm in arms.into_iter().flatten() {
+            joined = Some(match joined {
+                None => arm,
+                Some(acc) => acc.intersection(&arm).cloned().collect(),
+            });
+        }
+        self.uncond_bound.extend(joined.unwrap_or_default());
     }
 
     /// Record a read of `$x`, unless the engine binds the name unconditionally or
@@ -1205,14 +1237,57 @@ pub(crate) fn scan_var_usage(node: &Node<'_, '_>, guarded: bool, shielded: &[Shi
             let base = extended.as_deref().unwrap_or(shielded);
             // `?:` has no `then` arm; its condition IS the value, already walked. Each
             // arm also takes what the condition proves on its own side (issue #929).
+            let mut arms = Vec::new();
             if let Some(then) = c.then {
                 let proved = extend_shield(base, bound_when(c.condition, true));
                 let inner = proved.as_deref().unwrap_or(base);
-                scan_var_usage(&Node::Expression(then), guarded, inner, acc);
+                let bound = acc.branch(|a| scan_var_usage(&Node::Expression(then), guarded, inner, a));
+                arms.push((!matches!(then, Expression::Throw(_))).then_some(bound));
             }
             let proved = extend_shield(base, bound_when(c.condition, false));
             let inner = proved.as_deref().unwrap_or(base);
-            scan_var_usage(&Node::Expression(c.r#else), guarded, inner, acc);
+            let bound = acc.branch(|a| scan_var_usage(&Node::Expression(c.r#else), guarded, inner, a));
+            arms.push((!matches!(c.r#else, Expression::Throw(_))).then_some(bound));
+            // Only the full ternary completes through exactly one arm; `?:` may complete
+            // on the condition alone, so its `else` binds nothing unconditionally.
+            if c.then.is_some() {
+                acc.join_arms(arms);
+            }
+            return;
+        }
+        // `match` evaluates its subject, then the first condition of the first arm, then
+        // whatever the earlier conditions leave. One arm's result is the value and an
+        // unmatched subject throws, so a name every completing arm binds is bound after.
+        Node::Match(m) => {
+            scan_var_usage(&Node::Expression(m.expression), guarded, shielded, acc);
+            let mut arms = Vec::new();
+            let mut first_condition = true;
+            for arm in m.arms.iter() {
+                if let mago_syntax::cst::MatchArm::Expression(e) = arm {
+                    for cond in e.conditions.iter() {
+                        if std::mem::take(&mut first_condition) {
+                            scan_var_usage(&Node::Expression(cond), guarded, shielded, acc);
+                        } else {
+                            acc.branch(|a| scan_var_usage(&Node::Expression(cond), guarded, shielded, a));
+                        }
+                    }
+                }
+                first_condition = false;
+                let body = arm.expression();
+                let bound = acc.branch(|a| scan_var_usage(&Node::Expression(body), guarded, shielded, a));
+                arms.push((!matches!(body, Expression::Throw(_))).then_some(bound));
+            }
+            acc.join_arms(arms);
+            return;
+        }
+        // `$o?->m($x = 1)`: a null receiver short-circuits the call, arguments included.
+        Node::NullSafeMethodCall(c) => {
+            scan_var_usage(&Node::Expression(c.object), guarded, shielded, acc);
+            scan_var_usage(&Node::ClassLikeMemberSelector(&c.method), guarded, shielded, acc);
+            acc.branch(|a| {
+                bind_call_arguments(&c.argument_list, a);
+                scan_var_usage(&Node::ArgumentList(&c.argument_list), guarded, shielded, a);
+            });
             return;
         }
         // The statement spelling of the same idiom. The bare `isset`/`empty` tests need
@@ -1260,7 +1335,7 @@ pub(crate) fn scan_var_usage(node: &Node<'_, '_>, guarded: bool, shielded: &[Shi
         }
         Node::Binary(b) if b.operator.is_null_coalesce() => {
             scan_var_usage(&Node::Expression(b.lhs), true, shielded, acc);
-            scan_var_usage(&Node::Expression(b.rhs), guarded, shielded, acc);
+            acc.branch(|a| scan_var_usage(&Node::Expression(b.rhs), guarded, shielded, a));
             return;
         }
         // The operands of a short-circuit operator are the guard idiom in expression
@@ -1276,12 +1351,20 @@ pub(crate) fn scan_var_usage(node: &Node<'_, '_>, guarded: bool, shielded: &[Shi
             scan_var_usage(&Node::Expression(b.lhs), guarded, shielded, acc);
             let proved = extend_shield(shielded, bound_when(b.lhs, is_logical_and(&b.operator)));
             let inner = proved.as_deref().unwrap_or(shielded);
-            scan_var_usage(&Node::Expression(b.rhs), guarded, inner, acc);
+            acc.branch(|a| scan_var_usage(&Node::Expression(b.rhs), guarded, inner, a));
             return;
         }
 
         // --- Binding forms. None of these return: the main recursion may re-visit
         // the very same token as a read, which the final set difference discards. ---
+        // `$a ??= <rhs>` binds `$a` whichever way it goes (a set non-null `$a` is bound
+        // already), but runs `<rhs>` only when `$a` is null or unset.
+        Node::Assignment(a) if matches!(a.operator, AssignmentOperator::Coalesce(_)) => {
+            bind_lvalue_roots(a.lhs, acc);
+            scan_var_usage(&Node::Expression(a.lhs), guarded, shielded, acc);
+            acc.branch(|x| scan_var_usage(&Node::Expression(a.rhs), guarded, shielded, x));
+            return;
+        }
         Node::Assignment(a) => bind_lvalue_roots(a.lhs, acc),
         Node::Global(g) => {
             for v in g.variables.iter() {
@@ -1318,7 +1401,6 @@ pub(crate) fn scan_var_usage(node: &Node<'_, '_>, guarded: bool, shielded: &[Shi
         Node::UnaryPostfix(up) => bind_lvalue_roots(up.operand, acc),
         // Calls whose target cannot be named here — see `bind_call_arguments`.
         Node::MethodCall(c) => bind_call_arguments(&c.argument_list, acc),
-        Node::NullSafeMethodCall(c) => bind_call_arguments(&c.argument_list, acc),
         Node::StaticMethodCall(c) => bind_call_arguments(&c.argument_list, acc),
         Node::Instantiation(i) => {
             if let Some(list) = i.argument_list.as_ref() {

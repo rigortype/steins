@@ -110,6 +110,9 @@ pub(crate) enum TryScan {
 pub(crate) struct PresenceLeaf {
     pub(crate) reads: Vec<UndefinedRead>,
     pub(crate) bound: HashSet<String>,
+    /// The subset of `bound` that every normal completion of the unit binds; the rest
+    /// is bound under a short-circuit operand, a ternary or `match` arm.
+    pub(crate) uncond: HashSet<String>,
 }
 
 #[derive(Default)]
