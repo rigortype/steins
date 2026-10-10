@@ -1167,10 +1167,10 @@ of the honest `no-effect-row` gap. It supersedes §3.16's "keep no row" for `bcc
 - **Rows (`effects.rs`).** `bcceil`, `bcfloor` and `bcround` (`scale_free_row`, a helper chained after `ini_row` so
   `effect_labels` stays under `too-many-lines-threshold`). On a built `DateTime` and `DateTimeImmutable`, as method rows
   of `method_effect_labels`: `format`, `getTimestamp`, `getTimezone`, `getOffset`, `setTimestamp`, `setTime`, `setDate`,
-  `setISODate`, `setTimezone` and `modify`. `DateTime::createFromTimestamp`. `DateTimeZone::__construct`, `getName` and
-  `getOffset`. Each is `{}`. The reach rows for the same methods (`reach/methods.rs`) are required by the lockstep
-  between the three method tables: `format` and `modify` take a `string` (coerced, so an object reaches `__toString` in
-  coercive code, witnessed), the setters and `createFromTimestamp` take integers (an object is a `TypeError` in both
+  `setISODate` and `setTimezone`. `DateTime::createFromTimestamp`. `DateTimeZone::__construct`, `getName` and
+  `getOffset`. Each is `{}`. `modify` is **not** rowed (see the floor bullet below). The reach rows for the same
+  methods (`reach/methods.rs`) are required by the lockstep between the three method tables: `format` takes a `string`
+  (coerced, so an object reaches `__toString` in coercive code, witnessed), the setters and `createFromTimestamp` take integers (an object is a `TypeError` in both
   modes, witnessed), and the `DateTimeZone` and `DateTimeInterface` positions are `Inert` by the override the module
   documents (a user subclass runs nothing, witnessed).
 - **The witnesses (PHP 8.5.11, nix libfaketime 0.9.10).** A 2 x 2 grid: the default zone `UTC` or `Asia/Tokyo` set by
@@ -1182,11 +1182,21 @@ of the honest `no-effect-row` gap. It supersedes §3.16's "keep no row" for `bcc
   clock (`tomorrow UTC` on the clock alone, since its zone is fixed). `date.timezone` set by `-d` (no
   `date_default_timezone_set`) moves neither `format`, `createFromTimestamp` nor the bc rounders (a subset of the probes). `bcceil`, `bcfloor` and `bcround` are the same under
   `bcmath.scale` 0 and 7, where `bcadd` moves (so the probe is sensitive to the scale cell).
-- **Moved: none.** Each candidate in the brief was checked and none moved. `modify('now')`, `modify('tomorrow')`,
+- **Moved: none on the zone and clock.** Each candidate was checked and none moved. `modify('now')`, `modify('tomorrow')`,
   `modify('+1 day')`, `modify('10:00')`, `modify('monday')`, `modify('first day of next month')`, `modify('@86400')`,
   `modify('UTC')`, `modify('Europe/London')`, `modify('EST')` and the setters all give one answer across the grid. The
   zone-reading constructor (`new DateTime('now GMT')`) is not a candidate and keeps its label (§3.17). So no candidate
   stays unrowed for a read, and nothing is left unrowed on this ground.
+- **The PHP floor: `modify` is not rowed.** Witnessed with `set_error_handler` on PHP 8.1.32 (nix) and PHP 8.5.11.
+  `modify('garbage')` and `modify('')` on `DateTime` and `DateTimeImmutable`: on 8.1 an `E_WARNING` ("Failed to parse
+  time string …") reaches the handler and the call returns `false`; on 8.5 it throws `DateMalformedStringException`
+  and the handler is not called. A diagnostic that reaches a handler is reach, as the `ctype_*` STRING_LITERAL_ONLY
+  reasoning treats it, and a per-file fact cannot know the floor (the PHP-versions rule: a gap when the floor is
+  unknown). So `modify` keeps `no-effect-row` on every version, and its reach row and its tests go with it. The other
+  rowed methods were probed on 8.1 under the handler and keep their rows: `new DateTimeZone('bad')`, `''` and `'0'`
+  throw `Exception` on 8.1 (no handler call; `DateInvalidTimeZoneException` on 8.5), `setDate(2020, 13, 40)`,
+  `setISODate(2020, 60, 1)` and `setTime(25, 70, 70)` overflow silently on both, and `format`, `getTimezone`,
+  `getOffset` raise nothing. `DateTime::createFromTimestamp` is 8.4+ only, so 8.1 has no such method to probe.
 - **Throws are an independent table.** `throws_of` (`knowledge.rs`) reads `builtin_throws` and `THROWLESS_NAMES`, and
   `method_throws` (`builtins.rs`) reads its own rows; the effect table feeds neither, so an effect row cannot make a call
   throw-free. Pinned by `an_empty_row_states_no_throw`. The throws are real and the catalog states none of them:
@@ -1224,6 +1234,12 @@ of the honest `no-effect-row` gap. It supersedes §3.16's "keep no row" for `bcc
   `phpunit` 1 (`OtrXmlLogger::timestamp`, `new DateTimeImmutable('now', new DateTimeZone('UTC'))->format(...)`, whose
   clock label already came from the constructor, so only the coverage moved). The rerun on the final binary (after the
   helper refactor) gives the same numbers.
+- **Revised after the review of #1032 (supersedes the chronos line above).** With `modify` unrowed, the strict `check` of
+  `cakephp/chronos` and `briannesbitt/Carbon` is **byte-identical to a78171af** again: the `throw.maybe-undeclared` at
+  `src/Chronos.php:966` (`parent::modify($modifier)`) returns, because the call's reach is the base's gap. That removal
+  was a consequence of the row the review rejected, not a fix. The other eight packages and the `effect-diff` tally were
+  not rerun on this revision; the effect-diff events for `modify` (the Carbon fixture methods and `chronos`'s
+  `parent::modify`) are expected to return to the base's gap, and are not counted here.
 - **Not measured.** The private corpus (not run). PHP 8.4 and earlier for these rows: the witnesses are 8.5.11 (8.4.25
   agreed on the S6b-2 probes, not rerun here). A glibc build (the bundled zone database only). `DateTimeImmutable::createFromTimestamp`
   (not rowed, per the brief). The fp-gate baselines and the CLI snapshot tests: not run, and the A/B covers the ten
