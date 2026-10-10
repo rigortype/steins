@@ -111,7 +111,13 @@ and `if ($c) { goto out; $o = null; }` did the same on base). A label lowers as
 or `try` holding one; PHP lets a `goto` enter those, never a loop or a
 `switch` ("'goto' into loop or switch statement is disallowed"). `walk_trace`
 walks a list in runs split at label-holding statements: a run that terminates
-marks the rest of its run dead, and the next run starts with nothing known.
+marks the rest of its run dead, and the next run starts with nothing known —
+at the label itself, or, for an `if` or `try` holding one, after that
+statement, which is marked dead whole. A `goto` enters it at the label, so
+what precedes the label inside it is dead; walking it whole checked that dead
+code (round 3 review, `a3`: `if ($c) goto l; return; if ($c) { $o = null;
+$o->m(); l: … }` reported `call.on-null`). `body_end` keys its
+terminator-then-label rule on the same `holds_label` predicate.
 So code after any terminator is dead only up to the next label, which also
 reaches `if ($k) { goto out; } return; out: …`, dead to the walk before. The
 rows, each witnessed on PHP 8.5.11, are tabled in `lower_jump.rs`.
@@ -129,6 +135,8 @@ Known false negatives, each a path dropped from a join and so silence only:
 
 - a label inside an `if` arm the walk decides is dead is never walked, so the
   path a `goto` takes into it drops out of the join;
+- after a terminator, the tail after a label inside an `if` or `try` is not
+  walked: the statement is marked dead whole and the walk resumes after it;
 - `holds_label` is false for an `Opaque` construct that can hold a reachable
   label, such as a `declare` block, so the walk does not resume there;
 - `walk_match` drops the `goto` path into a label-holding arm whose condition
