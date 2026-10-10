@@ -318,8 +318,9 @@ drops each read the call rules out. The zone goes for a zone object shown not `n
 timestamp, an absolute `YYYY-MM-DD` date (optionally with a time) followed by ` UTC`, ` GMT`, `Z` or an offset, or a
 keyword (`now`, `today`, ...) followed by ` UTC` in capitals. The clock goes for an `@` timestamp and for an absolute
 date with or without a zone (every field is set, so `php_time()`'s value is overwritten), and for a `createFromFormat`
-format with an unescaped `|`, or an unescaped `!` that no zone conversion (`e`, `T`, `O`, `P`, `p`) precedes (a
-`!` after one keeps `have_zone` and copies the clock's DST flag). A keyword, or an absolute date with no zone, is the proven read; any other
+format with an unescaped `!` or `|`, unless some unescaped `!` follows a zone conversion (`e`, `T`, `O`, `P`, `p`):
+such a `!` keeps `have_zone` and copies the clock's DST flag, and keeps the clock even when the format also has a
+`|`. A keyword, or an absolute date with no zone, is the proven read; any other
 literal, any string the scan does not spell, an alias of the class and a named or spread list **keep both labels and
 raise no gap**, as the clock gate does. A zone the string names but that is not an identifier (`'now GMT'`, `'today
 utc'`, `'now +01:00'`) still copies the default zone's wall clock for the fields it leaves out, and timelib reads
