@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use steins_syntax::{CatchClause, NativeType, Param, Span, Stmt, StmtKind, TypeMember};
 
 use crate::annotate::LineFact;
-use crate::assert_harness::MuteObservers;
+use crate::assert_harness::{MuteObservers, observers_muted};
 use crate::contract::IsA;
 use crate::env::{Descent, Known, Store, join_envs};
 use crate::fold::Folder;
@@ -53,6 +53,16 @@ use crate::walk::{Flow, WalkCx, forget_construct_sets, push_hidden_exit_floor, w
 /// The second walk of a `finally` ([`walk_for_env`]) holds on the normal paths
 /// only, so it reports nothing and records nothing; the walk over every entry has
 /// already answered for the same statements.
+///
+/// That second walk is taken at the outermost `try` only. A `try` with a `finally`
+/// met *inside* a second walk takes the end env of its first `finally` walk as its
+/// successor instead: that walk started from the entry every path into the
+/// `finally` shares, so its end covers the normal paths as well, and the env is one
+/// this call already holds. Walking the inner `finally` twice too would double the
+/// work at every level of `finally` nested in a `finally` (2^depth walks); with the
+/// cut, depth n costs O(n²). The inner successor forgets what the block and the
+/// catches wrote, which costs precision only, and only to the outer second walk,
+/// which reports nothing.
 ///
 /// A `return` the parts record is a summary exit, and the hidden-exit floor
 /// ([`push_hidden_exit_floor`]) still goes with it whenever the construct may
@@ -134,10 +144,12 @@ pub(crate) fn walk_try(
     }
 
     let mut finally_terminates = false;
+    let mut finally_end = None;
     if let (Some(trace), Some((mut fenv, mut fstore))) = (finally, finally_entry) {
         let flow =
             walk_trace(w, folder, trace, &mut fenv, &mut fstore, descent, facts, guarded, out);
         finally_terminates = flow == Flow::Terminated;
+        finally_end = Some((fenv, fstore));
     }
 
     if *has_goto {
@@ -151,6 +163,16 @@ pub(crate) fn walk_try(
     push_hidden_exit_floor(w, *may_return);
     if finally_terminates || exits.is_empty() {
         return Flow::Terminated;
+    }
+    // Inside a walk that is itself carrying an outer `finally` to its successor, the
+    // end of the walk over every entry stands in for the second walk: it covers the
+    // normal paths too, and walking again here would double the work at every level.
+    if let Some((fenv, fstore)) = finally_end
+        && observers_muted()
+    {
+        *env = fenv;
+        *store = fstore;
+        return Flow::FellThrough;
     }
     let (mut jenv, mut jstore) = join_envs(exits);
     if *poisons {

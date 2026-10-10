@@ -251,6 +251,33 @@ function f(): void {}
 }
 
 #[test]
+fn a_finally_nested_thirty_deep_walks_in_polynomial_time() {
+    // Each `finally` holds the next `try`. Walking every inner `finally` twice
+    // again inside the outer one's second walk is 2^30 walks; the cut keeps it
+    // quadratic. The walk runs on its own thread, so a regression fails here on
+    // the deadline instead of hanging the suite.
+    let mut body = String::from("$x = -1;");
+    for i in 0..30 {
+        body = format!("try {{ f(); $x = {i}; }} catch (E $e) {{ $x = 0; }} finally {{ {body} }}");
+    }
+    let src = format!(
+        "<?php
+final class E extends Exception {{}}
+function f(): void {{}}
+function t(): void {{ $x = 1; {body} \\PHPStan\\dumpType($x); }}
+"
+    );
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(dumps(&src));
+    });
+    let got = rx
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .expect("thirty nested finallys must walk in polynomial time");
+    assert_eq!(got, vec!["4: -1"]);
+}
+
+#[test]
 fn a_finally_that_returns_on_the_normal_path_ends_the_construct() {
     // PHP: `r(true)` returns 7 from the finally; the line after never runs. The
     // finally's walk over every entry cannot decide `$x`, the walk from the
