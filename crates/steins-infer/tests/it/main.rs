@@ -167,6 +167,7 @@ mod returned_allocation;
 mod s6_routing;
 mod same_this_descent;
 mod setting_cells;
+mod setting_datetime;
 mod setting_encoding;
 mod setting_residue;
 mod setting_precision;

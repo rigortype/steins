@@ -568,19 +568,21 @@ pub struct ConstArgs {
     /// For a call to a builtin whose spelling starts `mb_`, `iconv`, `html` or `get_html` (the
     /// names that take an `$encoding` or read the encoding cell), or that is one of the time
     /// family whose timestamp decides the clock read (`date`, `idate`, `gmdate`, `gmmktime`,
-    /// `strtotime`, `getdate`, `localtime`, `strftime`, `gmstrftime`; ADR-0101 §3.14): the
-    /// positions 0 to 5 whose argument is a string, integer, `null`, boolean, float or array
+    /// `strtotime`, `getdate`, `localtime`, `strftime`, `gmstrftime`; ADR-0101 §3.14), or that
+    /// builds a date (`date_create*`, and a `DateTime` constructor or `createFromFormat`, §3.17):
+    /// the positions 0 to 5 whose argument is a string, integer, `null`, boolean, float or array
     /// literal, as `(position, literal)` in position order (ADR-0101 §3.13). An argument that is
-    /// anything else is simply absent, and so is every one of a named or spread argument list. Appended after
-    /// [`Self::patterns`].
+    /// anything else is simply absent, and so is every one of a named or spread argument list.
+    /// Appended after [`Self::patterns`].
     pub literals: Vec<(u8, ArgLiteral)>,
-    /// For a call to one of the time-family names [`Self::literals`] covers, or to a residue
-    /// function whose `$scale` decides its read (ADR-0101 §3.14, §3.16): what the scan shows of
-    /// whether the argument at each position 0 to 5 is **non-null**, as `(position, evidence)` in
-    /// position order. A timestamp that is shown non-null is
-    /// supplied, and the call does not read the clock for it. An argument the scan shows nothing
-    /// of is absent, and so is every one of a named or spread argument list. Appended after
-    /// [`Self::literals`].
+    /// For a call to one of the time-family names [`Self::literals`] covers, to a residue
+    /// function whose `$scale` decides its read, or to a `DateTime` constructor or its function
+    /// spelling (ADR-0101 §3.14, §3.16, §3.17): what the scan shows of whether the argument at
+    /// each position 0 to 5 is **non-null**, as `(position, evidence)` in position order. A
+    /// timestamp that is shown non-null is supplied, and the call does not read the clock for it;
+    /// a zone object shown non-null is passed, and the call does not read the default zone. An
+    /// argument the scan shows nothing of is absent, and so is every one of a named or spread
+    /// argument list. Appended after [`Self::literals`].
     pub timestamps: Vec<(u8, NullEvidence)>,
     /// For a call to a function that renders a value through the `precision` or
     /// `serialize_precision` ini (`strval`, `implode`, `join`, `print_r`, `var_export`,
@@ -1306,7 +1308,10 @@ pub struct SiteOrigin {
     /// The lvalue root of each positional argument of a named-function call
     /// ([`EffectOrigin::Call`]'s `arg_targets`); `None` for every other kind.
     pub ref_targets: Option<Vec<RefTarget>>,
-    /// The proven-constant leading arguments of a named-function call; empty for every other kind.
+    /// The proven-constant leading arguments of a named-function call. A `new DateTime(...)` or
+    /// `new DateTimeImmutable(...)` and a static `__construct` or `createFromFormat` call carry
+    /// their [`ConstArgs::literals`] and [`ConstArgs::timestamps`] (ADR-0101 §3.17); every other
+    /// kind carries none.
     pub const_args: ConstArgs,
     /// What each argument of a call, method call or `new` is, in source order, for the
     /// coercion the callee's parameter types run on it (ADR-0099 §4.3's Coerce row, issue

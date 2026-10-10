@@ -202,26 +202,34 @@ fn a_project_exception_inherits_the_engine_constructor() {
 }
 
 #[test]
-fn a_datetime_reads_the_clock() {
+fn a_datetime_reads_the_zone_and_the_clock() {
     let src = "<?php\n#[\\Steins\\Pure]\nfunction now(): \\DateTimeImmutable { return new \\DateTimeImmutable(); }\n";
-    let d = one(src);
-    assert_eq!(d.message, "new DateTimeImmutable has effect nondet.time, but now() is declared #[\\Steins\\Pure]");
+    let f = exceeded(src);
+    let messages: Vec<&str> = f.iter().map(|d| d.message.as_str()).collect();
+    let pure = "but now() is declared #[\\Steins\\Pure]";
+    assert_eq!(
+        messages,
+        [
+            format!("new DateTimeImmutable has effect global.read.setting.timezone, {pure}"),
+            format!("new DateTimeImmutable has effect nondet.time, {pure}"),
+        ]
+    );
     let s = summary(src, "now");
-    assert_eq!(s.labels, ["nondet.time"]);
+    assert_eq!(s.labels, ["global.read.setting.timezone", "nondet.time"]);
     assert!(s.exhaustive);
 }
 
 #[test]
-fn a_subclass_forwarding_to_datetime_carries_the_clock() {
+fn a_subclass_forwarding_to_datetime_carries_the_zone_and_the_clock() {
     let src = "<?php\nclass Moment extends \\DateTime {\n    \
                public function __construct() { parent::__construct('now'); }\n}\n\
                #[\\Steins\\Pure]\nfunction now(): Moment { return new Moment(); }\n";
-    let d = one(src);
-    assert!(
-        d.message.starts_with("Moment::__construct() has effect nondet.time (via parent::__construct"),
-        "{}",
-        d.message
-    );
+    let f = exceeded(src);
+    assert_eq!(f.len(), 2, "{f:#?}");
+    for (d, label) in f.iter().zip(["global.read.setting.timezone", "nondet.time"]) {
+        let expected = format!("Moment::__construct() has effect {label} (via parent::__construct");
+        assert!(d.message.starts_with(&expected), "{}", d.message);
+    }
 }
 
 #[test]

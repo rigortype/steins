@@ -23,8 +23,8 @@
 //! project declares shadows the global one, and a twin the scan cannot read is the gap.
 
 use steins_catalog::{
-    GateArg, IniAccess, PrecisionGate, Rendered, SettingCell, SettingReadGate, clock_gate,
-    ini_call, precision_gate, setting_read_gate,
+    DateGate, GateArg, IniAccess, PrecisionGate, Rendered, SettingCell, SettingReadGate,
+    clock_gate, ini_call, precision_gate, setting_read_gate,
 };
 use steins_domain::{Fact, Val};
 use steins_syntax::{ArgLiteral, CallTarget, ConstArgs, ConstInt, NameRef, NotText, RefKind};
@@ -177,6 +177,62 @@ fn timestamp<'c>(
 
 /// The time family's clock label.
 const CLOCK_LABEL: &str = "nondet.time";
+
+/// The two reads of a `DateTime` constructor-side call (ADR-0101 §3.17): `new DateTime(...)`,
+/// `new DateTimeImmutable(...)`, `createFromFormat`, `date_create*`. The row carries the default
+/// zone and the clock as the upper bound; each is dropped where the call shows it is not read
+/// ([`DateGate::reads_zone`], [`DateGate::reads_clock`]): a zone object shown passed, a literal
+/// string that names its zone and every field, a format that resets the fields it does not
+/// parse. Anything the call does not show keeps the label and raises no gap, as the clock does
+/// (§3.14). `positional` is the call's argument count, `None` for a named or spread list, which
+/// keeps both.
+pub(super) fn narrow_date(
+    (cx, frame): (&Cx, &Frame),
+    gate: DateGate,
+    (positional, consts): (Option<usize>, &ConstArgs),
+    labels: &mut Vec<&'static str>,
+) {
+    let Some(arity) = positional else { return };
+    let args: Vec<Option<GateArg<'_>>> = gate
+        .positions()
+        .iter()
+        .map(|&position| {
+            if position >= arity {
+                Some(GateArg::Omitted)
+            } else {
+                date_argument((cx, frame), consts, position)
+            }
+        })
+        .collect();
+    if gate.reads_zone(&args) == Some(false) {
+        let read = SettingCell::Timezone.read_label();
+        labels.retain(|label| *label != read);
+    }
+    if gate.reads_clock(&args) == Some(false) {
+        labels.retain(|label| *label != CLOCK_LABEL);
+    }
+}
+
+/// What a constructor-side call shows of its argument at `position`: a literal (a string, an
+/// integer, `null`, or another literal), or a value shown not to be `null` (a `new` expression, a
+/// parameter or property declared so).
+fn date_argument<'c>(
+    (cx, frame): (&Cx, &Frame),
+    consts: &'c ConstArgs,
+    position: usize,
+) -> Option<GateArg<'c>> {
+    let at = u8::try_from(position).ok()?;
+    if let Some((_, literal)) = consts.literals.iter().find(|(p, _)| *p == at) {
+        return Some(match literal {
+            ArgLiteral::Str(text) => GateArg::Str(text),
+            ArgLiteral::Int(v) => GateArg::Int(*v),
+            ArgLiteral::Null => GateArg::Null,
+            ArgLiteral::Other => GateArg::NotText,
+        });
+    }
+    let (_, evidence) = consts.timestamps.iter().find(|(p, _)| *p == at)?;
+    frame.non_null(cx, evidence).then_some(GateArg::NonNull)
+}
 
 /// The row of a gated reader handed over as a callback, which its invoker calls with arguments of
 /// its choosing, or called with arguments the scan cannot read: the read depends on them, so it

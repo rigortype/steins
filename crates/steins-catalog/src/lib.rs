@@ -148,8 +148,8 @@ pub use setting::{IniAccess, IniCall, SettingCell, ini_call, ini_cell, narrowed_
 
 mod setting_reads;
 pub use setting_reads::{
-    ClockGate, GateArg, PrecisionGate, RenderDepth, Rendered, SettingReadGate, clock_gate,
-    precision_gate, setting_read_gate,
+    ClockGate, DateGate, GateArg, PrecisionGate, RenderDepth, Rendered, SettingReadGate,
+    clock_gate, date_gate, date_method_gate, precision_gate, setting_read_gate,
 };
 
 mod knowledge;

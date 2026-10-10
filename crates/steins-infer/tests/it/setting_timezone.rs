@@ -212,9 +212,10 @@ fn the_accessors_and_the_unconditional_clock_readers() {
     assert_eq!(s.labels, [ZONE_WRITE], "{s:?}");
     proves("", "time()", &[CLOCK]);
     proves("", "microtime(true)", &[CLOCK]);
-    // The constructors' function spellings keep the argument-blind clock until S6b-2.
-    proves("", "date_create('2020-01-01')", &[CLOCK]);
-    proves("", "date_create('@0')", &[CLOCK]);
+    // The constructors' function spellings decide both reads by their string (S6b-2, §3.17).
+    proves("", "date_create('2020-01-01')", &[ZONE]);
+    proves("", "date_create('@0')", &[]);
+    proves("", "date_create()", &[ZONE, CLOCK]);
 }
 
 /// A function of the project's own namespace that shares a time-family name is that function

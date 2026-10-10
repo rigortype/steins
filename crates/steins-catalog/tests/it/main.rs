@@ -2,6 +2,7 @@
 
 mod locale_oracle;
 mod locale_readers_oracle;
+mod setting_datetime_oracle;
 mod setting_encoding_oracle;
 mod setting_env_oracle;
 mod setting_ini_oracle;
