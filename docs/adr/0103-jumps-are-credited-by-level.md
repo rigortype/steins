@@ -137,7 +137,7 @@ Known false negatives, each a path dropped from a join and so silence only:
 Known limitation, older than this ADR (S1): "dead up to the next label" does
 not hold inside a `try`. `walk_try` answers `FellThrough` for any construct
 holding a `goto` (`try_catch.rs`), so `$o = null; try { goto out; } finally {
-echo 1; } $o->m(); out:` walks and reports the dead `$o->m()`, as base does.
+echo 1; } $o->m(); out:` walks and reports the dead `$o->m()`, as base does. Tracked in #1039.
 
 ### 2.3 The presence pass: parked jumps carry their level
 
@@ -183,7 +183,7 @@ throws "none returned" for `switch ($k) { case 1: return 1; default: }` in an
   where every other arm terminates, because the walk used to keep that code
   live through the `Opaque`; `variable.maybe-undefined` where a non-last case
   ran into a binding case, or where a `finally` binds before a jump lands.
-- **A shape shared with base (follow-up):** `case 1: if ($k) { goto out; }
+- **A shape shared with base (follow-up #1041):** `case 1: if ($k) { goto out; }
   $o = null; break;` reports `call.on-null` after the switch, and so does its
   `=== 1` twin and the `return` twin on base. PHP never assigns null there, since
   `$k` is `1` inside `case 1`; `refine_match_arm` does not refine the subject of
