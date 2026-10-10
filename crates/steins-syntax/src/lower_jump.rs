@@ -53,7 +53,14 @@
 //! | in an enclosing list | the statement after the construct holds it, or follows it: resumed there as above |
 //!
 //! A `switch` arm's `goto` also lands on the successor (the table above), with no
-//! env: every path from it to the successor passes its label.
+//! env: every path from it to the successor passes its label. `block_end` and
+//! `body_end` read a terminator followed by a label as undecided, as the walk does.
+//!
+//! Known false negatives (ADR-0103 §2.2b): a label in an `if` arm the walk decides is
+//! dead is not walked; an `Opaque` that holds a label (a `declare` block) does not
+//! resume the walk; a `goto` path into a `No` arm drops out of a `match` join. A
+//! `try` holding a `goto` still falls through as a whole (`walk_try`), so code after
+//! it is walked even where the `goto` makes it dead.
 //!
 //! The same counting answers the loop questions: a loop body is the case body
 //! with the loop itself as the construct, and a `continue N` with `N == d + 1`

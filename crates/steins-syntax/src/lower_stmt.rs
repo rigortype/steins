@@ -26,6 +26,7 @@ use crate::lower_expr::{
     lower_method_call, lower_opaque, lower_static_call, opaque_sets, prop_fetch_of,
 };
 use crate::lower_guards::guard_regions_of;
+use crate::lower_presence::subtree_has_goto;
 use crate::lower_jump::{arm_landing, body_has_jump, ends_own_switch, jump_level};
 use crate::lower_try::{lower_try, try_end};
 use crate::memo::{self, TryScan};
@@ -429,11 +430,22 @@ fn stmt_end_walk(s: &Statement<'_>) -> BodyEnd {
 /// earlier. Kept separate from [`body_end`] (which reads lowered [`Stmt`]s) because
 /// a branch body is judged here *before* it is lowered, and the two must agree by
 /// sharing this shape rather than by coincidence.
+///
+/// A terminator followed by a label is not the end of the list (ADR-0103): a `goto`
+/// may land on the label and run on past it, as the walk does when it resumes there.
+/// Any later `goto` or label makes the answer [`BodyEnd::Unknown`] — wider than the
+/// walk's `holds_label`, which only costs a case being left unstructured.
 pub(crate) fn block_end(statements: &[Statement<'_>]) -> BodyEnd {
     let mut undecided = false;
-    for s in statements {
+    for (i, s) in statements.iter().enumerate() {
         match stmt_end(s) {
-            BodyEnd::Terminates => return BodyEnd::Terminates,
+            BodyEnd::Terminates => {
+                let rest = &statements[i + 1..];
+                if rest.iter().any(|r| subtree_has_goto(&Node::Statement(r))) {
+                    return BodyEnd::Unknown;
+                }
+                return BodyEnd::Terminates;
+            }
             BodyEnd::Unknown => undecided = true,
             BodyEnd::FallsThrough => {}
         }

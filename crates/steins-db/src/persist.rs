@@ -702,7 +702,7 @@ mod tests {
         vec![
             (
                 "src/app.php",
-                "<?php\nnamespace App;\nuse Lib\\A\\Widget;\n/** @param int $n @return string */\nfunction run(int $n): string {\n  $f = 1e999;\n  $g = 2.5;\n  $s = \"\\xC0\\xC1\";\n  $i = (int) $g;\n  $t = \"x $s\";\n  $a = [1 => 'one', 'k' => $s];\n  $a[] = $t;\n  $a['k'] = $i;\n  unset($a['k']);\n  if ($n === 1) { echo $s; } else { exit; }\n  while ($n > 0) { $n--; }\n  for ($j = 0, $w = 'abc'; $j < $n; $j++) { $b[] = $w; }\n  foreach ($a as $k => $v) { $b[] = $v; }\n  foreach ($b as &$r) { $r = 1; }\n  foreach ($a[1] as [$p, $q]) { $b[] = $p; }\n  do { $n--; } while ($n > 0);\n  switch ($n) { case 1: foreach ($a as $e) { break 2; } return 'x'; default: $n++; }\n  $c = fn (int $x): int => $x + 1;\n  return dup((string) $n);\n}\nconst LIMIT = 3;\n$k->written = 1;\nclass_alias('lib\\\\a\\\\widget', 'app\\\\widget');\n",
+                "<?php\nnamespace App;\nuse Lib\\A\\Widget;\n/** @param int $n @return string */\nfunction run(int $n): string {\n  $f = 1e999;\n  $g = 2.5;\n  $s = \"\\xC0\\xC1\";\n  $i = (int) $g;\n  $t = \"x $s\";\n  $a = [1 => 'one', 'k' => $s];\n  $a[] = $t;\n  $a['k'] = $i;\n  unset($a['k']);\n  if ($n === 1) { echo $s; } else { exit; }\n  while ($n > 0) { $n--; }\n  for ($j = 0, $w = 'abc'; $j < $n; $j++) { $b[] = $w; }\n  foreach ($a as $k => $v) { $b[] = $v; }\n  foreach ($b as &$r) { $r = 1; }\n  foreach ($a[1] as [$p, $q]) { $b[] = $p; }\n  do { $n--; } while ($n > 0);\n  switch ($n) { case 1: foreach ($a as $e) { break 2; } return 'x'; default: $n++; }\n  if ($n > 9) { goto done; }\n  if ($n < 0) { done: $n = 0; }\n  $c = fn (int $x): int => $x + 1;\n  return dup((string) $n);\n}\nconst LIMIT = 3;\n$k->written = 1;\nclass_alias('lib\\\\a\\\\widget', 'app\\\\widget');\n",
             ),
             (
                 "src/dynamic.php",
@@ -793,6 +793,11 @@ mod tests {
         ("a try with a body, a catch and a finally", |k| {
             matches!(k, StmtKind::Try { body, catches, finally: Some(_), .. }
                 if !body.is_empty() && catches.iter().any(|c| !c.trace.is_empty()))
+        }),
+        ("a goto", |k| matches!(k, StmtKind::LoopJump { .. })),
+        ("an if holding a label", |k| {
+            let label = |s: &Stmt| s.holds_label && matches!(s.kind, StmtKind::Label { .. });
+            matches!(k, StmtKind::If { then_trace, .. } if then_trace.iter().any(label))
         }),
         ("a switch arm with a landing jump, and a default", |k| {
             matches!(k, StmtKind::Match { arms, default: Some(_), .. }
