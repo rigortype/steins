@@ -1138,6 +1138,26 @@ this note records the witness for that and the one place the floor matters (§7)
   stands. The §1.4 table said `strcasecmp` is read on 8.1; this probe finds it is not, under either German locale
   (re-witnessed by the orchestrator with `strcasecmp("\xC4", "\xE4")`), so §1.4 now lists it as stable on 8.1 too.
 
+### 3.19 `setlocale` reads the environment through the env cell (2026-10-10) — PENDING ratification
+
+Landed as issue #1020, the follow-up that §3.12 deferred: the S6c note kept `setlocale`'s environment read on the coarse
+`global.read` because narrowing it would move the locale verdicts' pinned labels. It is narrowed now.
+
+- **Witness (php 8.5.11, NTS, the CLI).** `putenv('LC_ALL=de_DE.ISO8859-1'); setlocale(LC_ALL, '')` answers
+  `de_DE.ISO8859-1`, and `setlocale(LC_ALL, null)` the same. A later `$_ENV['LC_ALL'] = 'C'` leaves `setlocale(LC_ALL, '')`
+  at `de_DE.ISO8859-1`: the block is read, not the superglobal, as §3.12 found for `getenv`. The probe is scratch and not
+  committed.
+- **Row (`effects.rs`).** `setlocale` is `{global.write.setting.locale, global.read.setting.env}`, was
+  `{global.write.setting.locale, global.read}`. `narrowed_setlocale_labels` is unchanged in what it decides: a call with
+  exactly two arguments whose locale is a written non-empty string drops the env read and keeps the write; `''`, `null`,
+  a fallback locale, an array, a variable and the `"\0"` forms keep both. The query `'0'` still narrows to
+  `global.read.setting.locale` alone, with no write and no env read.
+- **Effect.** An envelope `#[Effect('global.write.setting.locale', 'global.read.setting.env')]` now admits
+  `setlocale(LC_ALL, '')`. It refused before, because `global.read.setting.env` does not admit the coarse `global.read`.
+  A `global.read` envelope still admits it, since the env label is a child of `global.read` by prefix.
+- **Not done.** `exec`, `proc_open` and `shell_exec` hand the environment to a child, and gettext reads `LANGUAGE`;
+  neither row names the env cell yet (the second paragraph of #1020, left for its own slice).
+
 ## 4. Decision: ADR-0021 Decision 2 is amended
 
 Decision 2's bar — "reads only its arguments: no ini setting, locale, clock,
