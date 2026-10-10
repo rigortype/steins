@@ -30,6 +30,7 @@ use crate::lower_stmt::{
 use crate::names::name_ref;
 use crate::stack_guard;
 use crate::utf8_loss;
+use crate::memo::{self, TryScan};
 use crate::{bytes_to_string, children, strip_dollar, to_span};
 
 pub(crate) fn lower_call(c: &FunctionCall<'_>) -> CallExpr {
@@ -1556,6 +1557,13 @@ pub(crate) fn opaque_sets(node: &Node<'_, '_>) -> (Vec<String>, Vec<String>, boo
 /// `may_return`. Nested function / method / closure / arrow bodies are their own
 /// scopes and are not descended (their returns are not this scope's exits).
 fn node_may_return(node: &Node<'_, '_>) -> bool {
+    // A `try` answers from the per-parse memo (see `memo::TryScan`).
+    if let Node::Try(t) = node
+        && let Some(hit) =
+            memo::try_flag(t, TryScan::MayReturn, || children(node).iter().any(node_may_return))
+    {
+        return hit;
+    }
     match node {
         Node::Return(_) => true,
         Node::Function(_) | Node::Method(_) | Node::Closure(_) | Node::ArrowFunction(_) => false,

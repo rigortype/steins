@@ -3,6 +3,7 @@
 //! (ADR-0088), and the file-wide site collectors (`foreach`, array literals,
 //! operands, opaque constructs).
 
+use std::collections::HashSet;
 use std::rc::Rc;
 
 use mago_span::HasSpan;
@@ -26,7 +27,7 @@ use crate::lower_expr::{
 };
 use crate::lower_guards::guard_regions_of;
 use crate::lower_try::{lower_try, try_end};
-use crate::memo;
+use crate::memo::{self, TryScan};
 use crate::names::name_ref;
 use crate::utf8_loss;
 use crate::{bytes_to_string, children, strip_dollar, to_span};
@@ -214,6 +215,24 @@ fn stmt_runs(s: &Statement<'_>, kind: &StmtKind) -> Runs {
 /// Collect `node`'s calls into `out` (see [`Runs`]), stopping at the first one a
 /// function name cannot describe — the record's answer is decided there.
 fn scan_runs(node: &Node<'_, '_>, out: &mut Runs) {
+    // A `try` answers from the per-parse memo (see `memo::TryScan`).
+    if let Node::Try(t) = node
+        && let Some(runs) = memo::try_runs(t, || {
+            let mut fresh = Runs::default();
+            for child in children(node) {
+                scan_runs(&child, &mut fresh);
+                if fresh.other {
+                    break;
+                }
+            }
+            fresh
+        })
+    {
+        out.functions.extend(runs.functions.iter().cloned());
+        out.constructs.extend(runs.constructs.iter().cloned());
+        out.other |= runs.other;
+        return;
+    }
     match node {
         // The callee spelled the way `lower_call` reads it: an identifier is a
         // function name, and anything else is a call through a value.
@@ -1859,8 +1878,16 @@ pub(crate) fn collect_call_vars(node: &Node<'_, '_>, out: &mut Vec<String>) {
 /// First-occurrence-order union, the dedup [`collect_call_vars_walk`] applies
 /// name by name.
 fn merge_names(out: &mut Vec<String>, names: &[String]) {
+    merge_names_except(out, names, &[]);
+}
+
+/// [`merge_names`] leaving out every name in `except`. Hashed, so merging a deep
+/// `try`'s memoized names is linear in the two lists rather than their product
+/// (issue #943's review): the name lists grow with the nesting.
+fn merge_names_except(out: &mut Vec<String>, names: &[String], except: &[String]) {
+    let mut seen: HashSet<String> = out.iter().chain(except).cloned().collect();
     for name in names {
-        if !out.contains(name) {
+        if seen.insert(name.clone()) {
             out.push(name.clone());
         }
     }
@@ -1868,6 +1895,19 @@ fn merge_names(out: &mut Vec<String>, names: &[String]) {
 
 /// The uncached walk behind [`collect_call_vars`].
 fn collect_call_vars_walk(node: &Node<'_, '_>, out: &mut Vec<String>) {
+    // A `try` answers from the per-parse memo (see `memo::TryScan`).
+    if let Node::Try(t) = node
+        && let Some(names) = memo::try_names(t, TryScan::CallVars, || {
+            let mut fresh = Vec::new();
+            for child in children(node) {
+                collect_call_vars_walk(&child, &mut fresh);
+            }
+            fresh
+        })
+    {
+        merge_names(out, &names);
+        return;
+    }
     let arguments = match node {
         Node::FunctionCall(c) => Some(&c.argument_list),
         Node::MethodCall(c) => Some(&c.argument_list),
@@ -2045,6 +2085,19 @@ fn note_occurrence(out: &mut Vec<InvalidatedVar>, name: String, site: Option<(Na
 /// and `unset` target. Does **not** descend into nested function-like bodies (separate
 /// scopes); their internal writes are not the enclosing construct's concern.
 pub(crate) fn collect_assign_writes(node: &Node<'_, '_>, out: &mut Vec<String>) {
+    // A `try` answers from the per-parse memo (see `memo::TryScan`).
+    if let Node::Try(t) = node
+        && let Some(names) = memo::try_names(t, TryScan::AssignWrites, || {
+            let mut fresh = Vec::new();
+            for child in children(node) {
+                collect_assign_writes(&child, &mut fresh);
+            }
+            fresh
+        })
+    {
+        merge_names(out, &names);
+        return;
+    }
     match node {
         // Any direct variable in an assignment lvalue is a write target
         // (`$a[$i] = …` over-collects `$i` too — sound). Recurse into the rhs
@@ -2140,6 +2193,20 @@ pub(crate) fn collect_direct_vars(node: &Node<'_, '_>, out: &mut Vec<String>) {
 /// more). Nested function-like bodies are their own scopes and are **not**
 /// descended, exactly as [`collect_assign_writes`] treats them.
 pub(crate) fn collect_read_vars(node: &Node<'_, '_>, writes: &[String], out: &mut Vec<String>) {
+    // A `try` answers from the per-parse memo (see `memo::TryScan`): every name it
+    // mentions, filtered here by this caller's `writes` as the walk filters it.
+    if let Node::Try(t) = node
+        && let Some(names) = memo::try_names(t, TryScan::Mentioned, || {
+            let mut fresh = Vec::new();
+            for child in children(node) {
+                collect_read_vars(&child, &[], &mut fresh);
+            }
+            fresh
+        })
+    {
+        merge_names_except(out, &names, writes);
+        return;
+    }
     match node {
         Node::DirectVariable(dv) => {
             let name = strip_dollar(bytes_to_string(dv.name));
@@ -2563,6 +2630,28 @@ pub(crate) fn scan_opaque(node: &Node<'_, '_>, out: &mut Vec<OpaqueSite>, stop_a
 /// construct is the site (`extract(compact($a))` is one `extract`), where the
 /// predicate stops too.
 fn scan_opaque_walk(node: &Node<'_, '_>, out: &mut Vec<OpaqueSite>, stop_at_first: bool) {
+    // A `try` answers from the per-parse memo (see `memo::TryScan`), keyed apart
+    // from the statement that holds it.
+    if let Node::Try(t) = node
+        && memo::enabled()
+    {
+        let key = memo::try_key(t);
+        let sites = memo::opaque_lookup(key).unwrap_or_else(|| {
+            let mut full = Vec::new();
+            for child in children(node) {
+                scan_opaque_walk(&child, &mut full, false);
+            }
+            let sites = Rc::new(full);
+            memo::opaque_store(key, Rc::clone(&sites));
+            sites
+        });
+        if stop_at_first {
+            out.extend(sites.first().copied());
+        } else {
+            out.extend(sites.iter().copied());
+        }
+        return;
+    }
     let direct = match node {
         // Direct markers.
         Node::Global(_) => Some(OpaqueConstruct::Global),
