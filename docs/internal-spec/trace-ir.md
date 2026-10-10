@@ -51,7 +51,7 @@ an opaque entry keeps the blanket drop.
 | `Return { value, call, span }` | `return <value>` (`Other` for bare `return`) |
 | `Echo(Vec<CallExpr>)` | `echo e1, e2` — carries named calls among the operands |
 | `If { cond, then_trace, elseifs, else_trace }` | structured branches, recursively lowered |
-| `Match { subject, arms, default, loose }` | `match` (strict, first-match, throws on no match) and `switch` (loose, falls through) |
+| `Match { subject, arms, default, default_lands, loose }` | `match` (strict, first-match, throws on no match) and `switch` (loose, falls through). Each `MatchArmT` carries `lands`, and the `default` body `default_lands`: an `ArmLanding` (the case body's `writes`, `reads`, `clears` and `runs`) when a jump in it lands on the successor (ADR-0103), which adds a fall-through edge from the arm's entry with those sets forgotten |
 | `Assert { cond }` | `assert($expr)` with a lowerable condition |
 | `Throw { span }` / `Exit { span }` | trace terminators |
 | `Opaque { writes, reads, poisons, may_return }` | a recognized control-flow construct whose internals are not modeled but whose write and read sets are; `may_return` is true when the subtree contains a `return` the walk cannot see as a top-level `Return` |
@@ -86,7 +86,10 @@ body gets the same treatment, so a `match` nested inside one is walked too.
 
 `match`/`switch` reaches the structured form only when the subject and every arm
 condition lower to a bare variable or a literal, and (for `switch`) every
-non-empty case terminates without fall-through. One unrepresentable arm makes
+non-empty case but the last ends without running into the next (ADR-0103: the
+last may run off its end, and trailing empty labels are empty arms). A jump in a
+case is credited by its level and never refuses the construct, except in a
+`switch (true)` chain, whose `if` has no landing edge. One unrepresentable arm makes
 the **whole** construct `Opaque`. Partial structuring would be unsound for
 `match`'s first-match rule and its `\UnhandledMatchError` on no match. A refused
 `match` in value position is not descended into either, for the same reason: an
