@@ -7,13 +7,14 @@ use std::collections::HashSet;
 
 use mago_span::HasSpan;
 use mago_syntax::cst::{
-    Access, Argument, ArrayElement, BinaryOperator, Call, Construct, Expression, Node, Statement,
+    Access, Argument, BinaryOperator, Call, Construct, Expression, Node, Statement,
     UnaryPrefixOperator, Variable,
 };
 
 use crate::ast::{Comment, CommentKind, UndefinedRead, UnsetSeedFacts, UnsetSeedRead};
 use crate::lower_scope::{Shield, VarUsage, bind_lvalue_roots, scan_var_usage};
 use crate::lower_stmt::{body_has_nested_jumps_only, expr_is_false, expr_is_true, stmt_end};
+use crate::lower_try::{stmt_cannot_throw, try_body_cannot_throw};
 use crate::memo;
 use crate::{bytes_to_string, strip_dollar, to_span};
 
@@ -458,7 +459,7 @@ fn presence_stmt(
             *state = join_states(state, &after);
             PresenceFlow::Fell
         }
-        Statement::Try(t) => presence_try(t, state, cx),
+        Statement::Try(t) => presence_try(s, t, state, cx),
         _ => {
             presence_leaf(&Node::Statement(s), state, cx);
             refine_bound(state, &assert_bound_names(s));
@@ -634,7 +635,14 @@ fn presence_switch(
 /// $x = 0; } echo $x;`, where every path does bind. `finally` runs on every path,
 /// so its bindings apply unconditionally while its reads are judged against the
 /// weakened state.
+///
+/// Where control leaves is `try_end`'s rule (the ADR-0027 `try` amendment, issue
+/// #943): a block no statement of which can throw has no live `catch`
+/// ([`try_body_cannot_throw`]), and the construct is [`PresenceFlow::Terminated`]
+/// when its `finally` terminates or no live arm falls through. A `goto` or a label
+/// in it keeps the successor reachable, as it keeps `try_end` undecided.
 fn presence_try(
+    s: &Statement<'_>,
     t: &mago_syntax::cst::Try<'_>,
     state: &mut PresenceState,
     cx: &mut PresenceCx,
@@ -667,7 +675,8 @@ fn presence_try(
     if block_flow == PresenceFlow::Fell {
         arms.push(block);
     }
-    for clause in t.catch_clauses.iter() {
+    let catches_live = !try_body_cannot_throw(t.block.statements.as_slice());
+    for clause in t.catch_clauses.iter().filter(|_| catches_live) {
         let mut arm = thrown.clone();
         if let Some(v) = clause.variable.as_ref() {
             arm.insert(strip_dollar(bytes_to_string(v.name)), BindingPresence::Bound);
@@ -676,6 +685,7 @@ fn presence_try(
             arms.push(arm);
         }
     }
+    let mut terminates = arms.is_empty();
     let mut result = arms
         .into_iter()
         .reduce(|a, b| join_states(&a, &b))
@@ -683,7 +693,9 @@ fn presence_try(
 
     if let Some(f) = t.finally_clause.as_ref() {
         let mut fin = join_states(&thrown, &result);
-        presence_seq(f.block.statements.iter(), &mut fin, cx);
+        if presence_seq(f.block.statements.iter(), &mut fin, cx) == PresenceFlow::Terminated {
+            terminates = true;
+        }
         for (name, presence) in &fin {
             if *presence == BindingPresence::Bound {
                 result.insert(name.clone(), BindingPresence::Bound);
@@ -691,8 +703,9 @@ fn presence_try(
         }
     }
     *state = result;
-    // A `try` never stops the enclosing scan: `stmt_end` calls it `Unknown`, and
-    // `Unknown` on the safe side here means "the successor may run".
+    if terminates && !subtree_has_goto(&Node::Statement(s)) {
+        return PresenceFlow::Terminated;
+    }
     PresenceFlow::Fell
 }
 
@@ -1079,60 +1092,6 @@ fn collect_name_dam(node: &Node<'_, '_>, best: &mut Option<u32>) {
 }
 
 // end unset pseudo-type (ADR-0087 §4, issue #396)
-
-/// Whether a statement **provably cannot throw**, over a whitelist narrow enough
-/// that no PHP semantics argument is needed to read it.
-///
-/// Almost every PHP construct can raise something: a call, a property fetch, a
-/// division, a concatenation with an object, an undefined constant. So this answers
-/// `true` only for a plain `=` assignment from a literal, an array of literals or
-/// another local — the prologue idiom (`$count = 0;`, `$out = [];`, `$x = $y;`) and
-/// nothing beyond it. Answering `false` costs precision and never correctness: it
-/// puts the statement back on the "may have thrown before this" side, which is the
-/// conservative reading [`presence_try`] applies to the whole block anyway.
-fn stmt_cannot_throw(s: &Statement<'_>) -> bool {
-    match s {
-        Statement::Noop(_) => true,
-        Statement::Expression(es) => match es.expression.unparenthesized() {
-            Expression::Assignment(a) => {
-                a.operator.is_assign()
-                    && matches!(a.lhs.unparenthesized(), Expression::Variable(Variable::Direct(_)))
-                    && expr_cannot_throw(a.rhs)
-            }
-            _ => false,
-        },
-        _ => false,
-    }
-}
-
-/// The value half of [`stmt_cannot_throw`]: a literal, an array literal of such
-/// values, another local, or a sign/negation over one.
-fn expr_cannot_throw(expr: &Expression<'_>) -> bool {
-    match expr.unparenthesized() {
-        Expression::Literal(_) => true,
-        Expression::Variable(Variable::Direct(_)) => true,
-        Expression::Array(a) => a.elements.iter().all(element_cannot_throw),
-        Expression::LegacyArray(a) => a.elements.iter().all(element_cannot_throw),
-        Expression::UnaryPrefix(up) => {
-            matches!(
-                up.operator,
-                UnaryPrefixOperator::Not(_)
-                    | UnaryPrefixOperator::Negation(_)
-                    | UnaryPrefixOperator::Plus(_)
-            ) && expr_cannot_throw(up.operand)
-        }
-        _ => false,
-    }
-}
-
-fn element_cannot_throw(element: &ArrayElement<'_>) -> bool {
-    match element {
-        ArrayElement::KeyValue(kv) => expr_cannot_throw(kv.key) && expr_cannot_throw(kv.value),
-        ArrayElement::Value(v) => expr_cannot_throw(v.value),
-        ArrayElement::Missing(_) => true,
-        ArrayElement::Variadic(_) => false,
-    }
-}
 
 /// Whether a `goto` or a label stands anywhere in this subtree, without descending
 /// into a nested scope.

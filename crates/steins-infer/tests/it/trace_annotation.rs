@@ -440,12 +440,13 @@ fn a_loop_body_annotation_reads_what_the_loop_cannot_change() {
 
 #[test]
 fn a_try_body_annotation_mirrors_the_dump_surface() {
-    // Same parity for `try`/`catch` bodies: the construct is `Opaque`,
-    // so trace and dump mirror are equally silent — the annotation is never
-    // chattier than the question's call spelling at the mirror position.
-    let trace_src = "<?php\ntry {\n/** @psalm-trace $x */\n$x = 1;\n} catch (Exception $e) {\n\
+    // Same parity for `try`/`catch` bodies, now that they are walked (issue
+    // #943). Both blocks open with a call, so on both sides the `catch` is live:
+    // a block that cannot throw has dead catches, and the dump's own call would
+    // otherwise be the only thing keeping one side's alive.
+    let trace_src = "<?php\ntry {\nf();\n/** @psalm-trace $x */\n$x = 1;\n} catch (Exception $e) {\n\
                      /** @psalm-trace $e */\n$z = 1;\n}\n";
-    let dump_src = "<?php\ntry {\n$x = 1;\n\\PHPStan\\dumpType($x);\n} catch (Exception $e) {\n\
+    let dump_src = "<?php\ntry {\nf();\n$x = 1;\n\\PHPStan\\dumpType($x);\n} catch (Exception $e) {\n\
                     $z = 1;\n\\PHPStan\\dumpType($e);\n}\n";
     assert_eq!(
         rendered_facts(trace_src, DEBUG_TRACE_ID),

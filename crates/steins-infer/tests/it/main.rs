@@ -200,6 +200,7 @@ mod top_level_rebind;
 mod trace_annotation;
 mod transfer_value_composition;
 mod truth_table;
+mod try_bodies;
 mod type_aliases;
 mod type_predicate_guards;
 mod undefined_function;
