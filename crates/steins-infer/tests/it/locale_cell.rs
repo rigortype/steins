@@ -135,8 +135,8 @@ fn the_v_spellings_follow_their_siblings_and_printf_keeps_its_output_label() {
 
 /// `setlocale` writes the cell; `localeconv`, `nl_langinfo` and `strcoll` read it.
 /// A locale of `''` or `null`, or one the call does not show, also reads the
-/// environment block, a coarse `global.read` until the environment cell has a
-/// label; a written non-empty locale reads none.
+/// environment block through the env cell (`global.read.setting.env`, #1020); a
+/// written non-empty locale reads none.
 #[test]
 fn setlocale_writes_the_cell_and_its_readers_read_it() {
     for call in ["setlocale(LC_ALL, 'de_DE.UTF-8')", "setlocale(LC_ALL, 'C')", "\\setlocale(LC_ALL, \"C\")"] {
@@ -159,7 +159,8 @@ fn setlocale_writes_the_cell_and_its_readers_read_it() {
         "setlocale(LC_ALL, \"0\\0x\")",
     ] {
         let s = summary(&body("string $l", &format!("return {call};")), "f");
-        assert_eq!(s.labels, ["global.read", "global.write.setting.locale"], "{call}: {s:?}");
+        let want = ["global.read.setting.env", "global.write.setting.locale"];
+        assert_eq!(s.labels, want, "{call}: {s:?}");
     }
     for call in ["localeconv()", "nl_langinfo(CODESET)", "strcoll('a', 'b')"] {
         let s = summary(&body("", &format!("return {call};")), "f");
@@ -228,7 +229,19 @@ fn a_pure_envelope_over_the_read_is_exceeded_and_a_global_read_envelope_admits_i
     let write_only = format!("<?php\n#[\\Steins\\Effect('global.write')]\n{call}");
     let found: Vec<String> = findings(&write_only).into_iter().map(|d| d.message).collect();
     assert_eq!(found.len(), 1, "a global.write envelope is no read: {found:#?}");
-    assert!(found[0].contains("setlocale() has effect global.read,"), "{found:#?}");
+    assert!(found[0].contains("setlocale() has effect global.read.setting.env,"), "{found:#?}");
     let both = format!("<?php\n#[\\Steins\\Effect('global')]\n{call}");
     assert!(findings(&both).is_empty(), "global admits the write and the read");
+}
+
+/// #1020: `setlocale('')` reads the environment block through the env cell, so an envelope
+/// naming the locale write and the env read admits it. Before the row narrowed, the coarse
+/// `global.read` it carried was not admitted by `global.read.setting.env`, and this refused.
+#[test]
+fn an_envelope_naming_the_env_read_admits_setlocale_with_an_empty_locale() {
+    let call = "function f(): void { setlocale(LC_ALL, ''); }\n";
+    let src = format!(
+        "<?php\n#[\\Steins\\Effect('global.write.setting.locale', 'global.read.setting.env')]\n{call}"
+    );
+    assert!(findings(&src).is_empty(), "{:#?}", findings(&src));
 }

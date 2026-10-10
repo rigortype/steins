@@ -369,12 +369,13 @@ fn setlocale_with_a_literal_zero_is_a_read_and_no_write() {
         "setlocale(LC_ALL, ['0'])",
     ] {
         let s = row("string $l", &format!("return {call};"));
-        assert_eq!(s.labels, ["global.read", "global.write.setting.locale"], "{call}: {s:?}");
+        let want = ["global.read.setting.env", "global.write.setting.locale"];
+        assert_eq!(s.labels, want, "{call}: {s:?}");
     }
     // The write of a named locale is unchanged, and the environment read of `''` stays.
     proves("", "setlocale(LC_ALL, 'C')", &["global.write.setting.locale"]);
     let s = row("", "return setlocale(LC_ALL, '');");
-    assert_eq!(s.labels, ["global.read", "global.write.setting.locale"], "{s:?}");
+    assert_eq!(s.labels, ["global.read.setting.env", "global.write.setting.locale"], "{s:?}");
 }
 
 /// A builtin handed over as a callback is called with arguments the invoker chooses: the
