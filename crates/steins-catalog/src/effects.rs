@@ -391,7 +391,7 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
     };
 
     colored
-        .or_else(|| precision_row(name).or_else(|| ini_row(name)))
+        .or_else(|| precision_row(name).or_else(|| ini_row(name)).or_else(|| scale_free_row(name)))
         .or_else(|| (foldable(name) || certified_pure(name)).then_some(EMPTY))
 }
 
@@ -402,6 +402,18 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
 /// old value), `set_time_limit` writes `max_execution_time`, and `ini_get_all` reads the parent
 /// `global.read.setting`: its default lists every entry, `precision` and `date.timezone` among
 /// them, so no one cell names its read.
+/// The scale-free bcmath rounders (PHP 8.4+, ADR-0101 §3.20): `bcceil`, `bcfloor` and `bcround`
+/// take no scale and read no cell, witnessed under `bcscale` 0 and 7 and under two default zones
+/// and two clocks, so they carry the empty row. A malformed number raises `ValueError`, which the
+/// throw table states, not this row.
+fn scale_free_row(name: &str) -> Option<&'static [&'static str]> {
+    const EMPTY: &[&str] = &[];
+    match name.to_ascii_lowercase().as_str() {
+        "bcceil" | "bcfloor" | "bcround" => Some(EMPTY),
+        _ => None,
+    }
+}
+
 fn ini_row(name: &str) -> Option<&'static [&'static str]> {
     const INI_READ: &[&str] = &["global.read.setting.ini"];
     const INI_WRITE: &[&str] = &["global.write.setting.ini"];
@@ -1109,6 +1121,25 @@ pub fn method_effect_labels(class: &str, method: &str) -> Option<&'static [&'sta
         }
         ("datetime", "createfromimmutable" | "createfrominterface")
         | ("datetimeimmutable", "createfrommutable" | "createfrominterface") => Some(EMPTY),
+        // The readers and setters of a built value (ADR-0101 §3.20): a value always holds the zone
+        // its constructor gave it, and these read that zone and the value's own fields. They never
+        // read the default zone or the clock, witnessed with a fixed value under two default zones
+        // and two faked clocks: `modify` takes its base from the value (`now`, `tomorrow`, `+1 day`
+        // and a zone name move nothing), and `setTimezone` takes its zone as an argument. The
+        // methods are not final, so a bound receiver gets no answer from the final-method lookup
+        // (the engine's open arm), and an argument the engine coerces through `__toString` is the
+        // argument-reach lane's business, not this row's.
+        ("datetime" | "datetimeimmutable", "format" | "gettimestamp" | "gettimezone" | "getoffset"
+        | "settimestamp" | "settime" | "setdate" | "setisodate" | "settimezone" | "modify") => {
+            Some(EMPTY)
+        }
+        // `createFromTimestamp` builds a value in UTC from its argument (PHP 8.4+), witnessed
+        // under both default zones and both clocks.
+        ("datetime", "createfromtimestamp") => Some(EMPTY),
+        // The zone object: its constructor reads the bundled zone database and nothing ambient, and
+        // `getName` and `getOffset` answer from the object (ADR-0101 §3.20). A bad name throws, which
+        // the throw table does not state.
+        ("datetimezone", "__construct" | "getname" | "getoffset") => Some(EMPTY),
         (
             "stdclass" | "arrayobject" | "arrayiterator" | "spldoublylinkedlist" | "splstack"
             | "splqueue" | "splobjectstorage" | "splfixedarray" | "splpriorityqueue"
@@ -2225,7 +2256,8 @@ mod tests {
     /// ADR-0101 S6e: the residue cell's rows. The bcmath functions carry the read as an upper
     /// bound their `$scale` narrows; `bcscale` and `error_reporting` read and write; the include
     /// path pair reads and writes; `set_time_limit` writes `max_execution_time`; `ini_get_all`
-    /// reads the parent. `bcceil`, `bcfloor` and `bcround` take no scale and keep no row.
+    /// reads the parent. `bcceil`, `bcfloor` and `bcround` take no scale and carry the empty row
+    /// (ADR-0101 §3.20).
     #[test]
     fn the_residue_cell_has_its_rows() {
         let read = "global.read.setting.ini";
@@ -2239,7 +2271,57 @@ mod tests {
         assert_eq!(effect_labels("set_time_limit"), Some(&[write][..]));
         assert_eq!(effect_labels("ini_get_all"), Some(&["global.read.setting"][..]));
         for name in ["bcceil", "bcfloor", "bcround"] {
-            assert_eq!(effect_labels(name), None, "{name} takes no scale");
+            assert_eq!(effect_labels(name), Some(&[][..]), "{name} takes no scale: empty row");
+        }
+    }
+
+    /// ADR-0101 §3.20 (issue #1000): the readers and setters of a built `DateTime` or
+    /// `DateTimeImmutable`, `DateTimeZone`'s constructor, `getName` and `getOffset`, and
+    /// `DateTime::createFromTimestamp` read neither the default zone nor the clock, so each carries
+    /// the empty row. The methods are not final, so a bound receiver gets no answer from
+    /// `final_method_effect_labels`, and a subclass is a different class key.
+    #[test]
+    fn the_built_value_and_zone_rows_are_empty() {
+        use super::final_method_effect_labels;
+        for class in ["DateTime", "DateTimeImmutable"] {
+            for method in [
+                "format",
+                "getTimestamp",
+                "getTimezone",
+                "getOffset",
+                "setTimestamp",
+                "setTime",
+                "setDate",
+                "setISODate",
+                "setTimezone",
+                "modify",
+            ] {
+                assert_eq!(method_effect_labels(class, method), Some(&[][..]), "{class}::{method}");
+                assert_eq!(final_method_effect_labels(class, method), None, "{class}::{method}");
+            }
+        }
+        assert_eq!(method_effect_labels("DateTime", "createFromTimestamp"), Some(&[][..]));
+        for method in ["__construct", "getName", "getOffset"] {
+            assert_eq!(method_effect_labels("DateTimeZone", method), Some(&[][..]), "{method}");
+        }
+        assert_eq!(method_effect_labels("App\\MyDate", "format"), None, "a user subclass");
+    }
+
+    /// An empty effect row says nothing about throws (ADR-0101 §3.20, issue #1000). The throw lane
+    /// reads `throws_of` and `method_throws`, and the effect table feeds neither. `bcround('x')`
+    /// raises `ValueError` and the catalog states no throw for it, so the empty row must not make it
+    /// throw-free, and `new DateTimeZone('bad')` raises `DateInvalidTimeZoneException`, which the
+    /// catalog does not state either.
+    #[test]
+    fn an_empty_row_states_no_throw() {
+        use crate::builtins::method_throws;
+        use crate::knowledge::throws_of;
+        for name in ["bcceil", "bcfloor", "bcround"] {
+            assert_eq!(effect_labels(name), Some(&[][..]), "{name}");
+            assert_eq!(throws_of(name), None, "{name} raises ValueError on a malformed number");
+        }
+        for (class, method) in [("DateTimeZone", "__construct"), ("DateTime", "modify")] {
+            assert_eq!(method_throws(class, method), None, "{class}::{method} can raise");
         }
     }
 
@@ -2453,7 +2535,6 @@ mod tests {
         // Each copy goes one way only, and the other factories stay uncatalogued.
         assert_eq!(method_effect_labels("DateTime", "createFromMutable"), None);
         assert_eq!(method_effect_labels("DateTimeImmutable", "createFromImmutable"), None);
-        assert_eq!(method_effect_labels("DateTime", "createFromTimestamp"), None);
         assert_eq!(method_effect_labels("DateTime", "__set_state"), None);
     }
 
@@ -2465,7 +2546,6 @@ mod tests {
         }
         // A user class, and an engine class with no row, stay uncatalogued.
         assert_eq!(method_effect_labels("App\\Exception", "__construct"), None);
-        assert_eq!(method_effect_labels("DateTimeZone", "__construct"), None);
         assert_eq!(method_effect_labels("SplFileObject", "__construct"), None);
         // A constructor row says nothing about the class's other methods.
         assert_eq!(method_effect_labels("ArrayObject", "getIterator"), None);
