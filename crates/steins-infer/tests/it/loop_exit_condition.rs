@@ -313,9 +313,10 @@ fn a_do_while_terminating_only_by_continue_is_not_terminated() {
 #[test]
 fn a_do_while_never_reads_its_condition_for_reachability() {
     // Only the body decides (issue #679's review). The condition, read on the
-    // entry env, can miss a write through an alias the loop's sets do not name:
-    // at file scope `$GLOBALS['go']` IS `$go`, so this loop ends and the finding
-    // after it is true.
+    // entry env, can miss a write through an alias the loop's sets do not name
+    // (the `$GLOBALS['go']` spelling is named since #902; the header stays unread
+    // until that is trusted): at file scope `$GLOBALS['go']` IS `$go`, so this loop
+    // ends and the finding after it is true.
     let file_scope = |stmt: &str| {
         let src = format!(
             "<?php

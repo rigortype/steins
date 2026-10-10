@@ -25,6 +25,10 @@ use crate::lower_expr::{
     lower_array_key, lower_call, lower_cond, lower_cond_operand, lower_construct_call,
     lower_method_call, lower_opaque, lower_static_call, opaque_sets, prop_fetch_of,
 };
+use crate::lower_globals::{
+    GlobalsKey, argument_globals, call_hands_dynamic_globals, node_writes_dynamic_globals,
+    push_globals_writes,
+};
 use crate::lower_guards::guard_regions_of;
 use crate::lower_presence::subtree_has_goto;
 use crate::lower_jump::{arm_landing, body_has_jump, ends_own_switch, jump_level};
@@ -1899,6 +1903,11 @@ fn collect_call_vars_walk(node: &Node<'_, '_>, out: &mut Vec<String>) {
                 if !out.contains(&name) {
                     out.push(name);
                 }
+            } else if let Some(GlobalsKey::Literal(name)) = argument_globals(arg.value())
+                && !out.contains(&name)
+            {
+                // `f($GLOBALS['x'])` hands global `x` to the call (issue #902).
+                out.push(name);
             }
         }
     }
@@ -2016,6 +2025,10 @@ fn scan_invalidated(node: &Node<'_, '_>, out: &mut Vec<InvalidatedVar>, nested: 
 /// stays unrecorded: the value such a callee can reach is shared object state,
 /// never the local binding this channel forgets.
 fn offset_argument_root(expr: &Expression<'_>) -> Option<String> {
+    // `$GLOBALS['x'][…]` roots in global `x`, not in the `GLOBALS` table (issue #902).
+    if let Some(GlobalsKey::Literal(name)) = argument_globals(expr) {
+        return Some(name);
+    }
     let mut e = expr;
     let mut through_offset = false;
     while let Expression::ArrayAccess(aa) = e {
@@ -2073,6 +2086,8 @@ pub(crate) fn collect_assign_writes(node: &Node<'_, '_>, out: &mut Vec<String>) 
         merge_names(out, &names);
         return;
     }
+    // A write through `$GLOBALS['lit']` is a write of `lit` (issue #902).
+    push_globals_writes(node, out);
     match node {
         // Any direct variable in an assignment lvalue is a write target
         // (`$a[$i] = …` over-collects `$i` too — sound). Recurse into the rhs
@@ -2645,14 +2660,25 @@ fn scan_opaque_walk(node: &Node<'_, '_>, out: &mut Vec<OpaqueSite>, stop_at_firs
                 match bytes_to_string(id.last_segment()).as_str() {
                     "extract" => Some(OpaqueConstruct::Extract),
                     "compact" => Some(OpaqueConstruct::Compact),
-                    _ => None,
+                    _ => call_hands_dynamic_globals(node)
+                        .then_some(OpaqueConstruct::VariableVariable),
                 }
             } else {
-                None
+                call_hands_dynamic_globals(node).then_some(OpaqueConstruct::VariableVariable)
             }
         }
-        // Reference assignment `$x = &$y`.
-        Node::Assignment(a) => a.rhs.is_reference().then_some(OpaqueConstruct::ReferenceAssign),
+        // Reference assignment `$x = &$y`; any other assignment (or increment, `unset`,
+        // `foreach` target) through `$GLOBALS[$k]` writes a global named at run time.
+        Node::Assignment(a) if a.rhs.is_reference() => Some(OpaqueConstruct::ReferenceAssign),
+        Node::Assignment(_)
+        | Node::UnaryPostfix(_)
+        | Node::Unset(_)
+        | Node::ForeachValueTarget(_)
+        | Node::ForeachKeyValueTarget(_)
+            if node_writes_dynamic_globals(node) =>
+        {
+            Some(OpaqueConstruct::VariableVariable)
+        }
         // A `&` standing anywhere else (issue #641). [`Expression::is_reference`] is a
         // top-level test, so the arm above sees `$b = &$a` and nothing more: `['key' => &$a]`
         // has an `Expression::Array` right-hand side and `foreach ($rows as &$row)` is not an
@@ -2665,6 +2691,18 @@ fn scan_opaque_walk(node: &Node<'_, '_>, out: &mut Vec<OpaqueSite>, stop_at_firs
         // assignment is never recorded twice.
         Node::UnaryPrefix(u) if matches!(u.operator, UnaryPrefixOperator::Reference(_)) => {
             Some(OpaqueConstruct::ReferenceBinding)
+        }
+        Node::UnaryPrefix(_) if node_writes_dynamic_globals(node) => {
+            Some(OpaqueConstruct::VariableVariable)
+        }
+        // A dynamic-key `$GLOBALS` fetch handed to a call may reach a by-ref parameter.
+        Node::MethodCall(_)
+        | Node::NullSafeMethodCall(_)
+        | Node::StaticMethodCall(_)
+        | Node::Instantiation(_)
+            if call_hands_dynamic_globals(node) =>
+        {
+            Some(OpaqueConstruct::VariableVariable)
         }
         // Closure: inspect its `use (&$x)` capture list, but do not descend into
         // its body (a separate scope).
