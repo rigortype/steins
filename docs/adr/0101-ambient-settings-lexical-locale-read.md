@@ -107,7 +107,7 @@ ADR's witness directory. Stable means the result did not move.
 | `sprintf`/`vsprintf` `%f` `%g` `%G` (any flags, width, precision, `n$`) | `%F` `%e` `%E` `%h` `%H` `%d` `%s`, and `%%` |
 | `strcoll`, `localeconv`, `setlocale(LC_x, '0')` | `number_format` (also at 8.1; php-src renders with `%.*F`, `ext/standard/math.c`) |
 | `ctype_*` on a byte ≥ 0x80, `strftime`, `sort(…, SORT_LOCALE_STRING)` | `(string) $float`, `strval`, `var_export`, `json_encode`, `serialize`, `round` |
-| `preg_match('/\w/', "\xE4")` without `/u`, once a `setlocale` has run (`php_pcre.c`: tables are rebuilt from `BG(ctype_string)`, which only `setlocale` with `LC_CTYPE` or `LC_ALL` writes) | `strtoupper`, `strtolower`, `ucfirst`, `ucwords`, `strcasecmp` (8.2+; **8.1 reads it**, witnessed) |
+| `preg_match('/\w/', "\xE4")` without `/u`, once a `setlocale` has run (`php_pcre.c`: tables are rebuilt from `BG(ctype_string)`, which only `setlocale` with `LC_CTYPE` or `LC_ALL` writes) | `strtoupper`, `strtolower`, `ucfirst`, `ucwords` (8.2+; **8.1 reads them**, witnessed), `strcasecmp` (8.1 too; corrected by §3.18) |
 | | `basename`, `pathinfo`, `escapeshellarg`, `strip_tags`, `parse_url`, `strnatcmp`, `substr_compare` on this platform; php-src reads `php_mblen`/C `isdigit` etc., so the row stays on the php-src evidence (§4) |
 
 Two other process facts the design rests on. The PHP CLI resets only
@@ -1135,8 +1135,8 @@ this note records the witness for that and the one place the floor matters (§7)
   under-reports on 8.1 and matches 8.2 and later, where none of the six reads. The four names that did not move, and
   `strnatcasecmp` and `substr_compare` (S4 rows, which read on both), are not affected by this.
 - **Not witnessed here.** `strnatcasecmp`: the probe's input did not separate the locales, so its S4 witness (§3.9)
-  stands. The §1.4 table (line 110) says `strcasecmp` is read on 8.1; this probe finds it is not, under either German
-  locale, which agrees with D-S6f. §1.4 is left unedited for the owner to correct.
+  stands. The §1.4 table said `strcasecmp` is read on 8.1; this probe finds it is not, under either German locale
+  (re-witnessed by the orchestrator with `strcasecmp("\xC4", "\xE4")`), so §1.4 now lists it as stable on 8.1 too.
 
 ## 4. Decision: ADR-0021 Decision 2 is amended
 
