@@ -757,6 +757,8 @@ fn scopes_by_function(tree: &SourceTree) -> HashMap<String, &Scope> {
 /// or `foreach` is reached only on an iteration that may never happen, and a
 /// `do`-`while`'s first iteration is one this pass does not model either, so every
 /// loop body stays as invisible as an `Opaque`'s (`contains_opaque` refuses first).
+/// A structured `try` (issue #943) is the same: a `finally` that returns replaces
+/// the body's return value, so the body's returns are not the function's.
 fn collect_returns<'a>(stmts: &'a [Stmt], out: &mut Vec<&'a ArgValue>) {
     for s in stmts {
         match &s.kind {
@@ -791,9 +793,16 @@ fn collect_returns<'a>(stmts: &'a [Stmt], out: &mut Vec<&'a ArgValue>) {
 /// not model the construct's data flow — what a loop-carried binding holds on the
 /// second iteration is still unknown — and this predicate is asked the latter
 /// question.
+///
+/// A structured `try` (issue #943) answers `true` too, and must: its body's
+/// `return`s are not the function's return set — a `finally` that returns
+/// replaces them, and a `catch` may return something else — so reading the
+/// statements beside it as the whole set would make `@return` judge a fraction of
+/// what the function returns.
 fn contains_opaque(stmts: &[Stmt]) -> bool {
     stmts.iter().any(|s| match &s.kind {
         StmtKind::Opaque { .. }
+        | StmtKind::Try { .. }
         | StmtKind::While { .. }
         | StmtKind::For { .. }
         | StmtKind::Foreach { .. }

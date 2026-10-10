@@ -718,7 +718,7 @@ mod tests {
             ),
             (
                 "vendor/lib/b/src/origins.php",
-                "<?php\nnamespace Lib\\A;\nclass Origins {\n  public function each(array $a, $obj, $dyn): void {\n    $this->each($a, $obj, $dyn);\n    $obj->$dyn();\n    \\array_map('strlen', $a);\n    $f = static function (): int { return 1; };\n    $f();\n    $g = function (): iterable { return []; };\n    $g();\n    try { throw new \\RuntimeException(); } catch (\\Exception $e) { throw $e; }\n  }\n}\n",
+                "<?php\nnamespace Lib\\A;\nclass Origins {\n  public function each(array $a, $obj, $dyn): void {\n    $this->each($a, $obj, $dyn);\n    $obj->$dyn();\n    \\array_map('strlen', $a);\n    $f = static function (): int { return 1; };\n    $f();\n    $g = function (): iterable { return []; };\n    $g();\n    try { throw new \\RuntimeException(); } catch (\\Exception $e) { throw $e; } finally {}\n  }\n}\n",
             ),
             (
                 "vendor/lib/b/src/state.php",
@@ -790,6 +790,10 @@ mod tests {
         ("a do-while with a body", |k| {
             matches!(k, StmtKind::DoWhile { body, .. } if !body.is_empty())
         }),
+        ("a try with a body, a catch and a finally", |k| {
+            matches!(k, StmtKind::Try { body, catches, finally: Some(_), .. }
+                if !body.is_empty() && catches.iter().any(|c| !c.trace.is_empty()))
+        }),
     ];
 
     /// Every statement kind in the parsed fixture's scopes, nested bodies
@@ -811,6 +815,11 @@ mod tests {
                     StmtKind::While { body, .. }
                     | StmtKind::Foreach { body, .. }
                     | StmtKind::DoWhile { body, .. } => walk(body, out),
+                    StmtKind::Try { body, catches, finally, .. } => {
+                        walk(body, out);
+                        catches.iter().for_each(|c| walk(&c.trace, out));
+                        walk(finally.as_deref().unwrap_or_default(), out);
+                    }
                     _ => {}
                 }
             }

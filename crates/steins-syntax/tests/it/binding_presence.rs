@@ -309,6 +309,21 @@ fn a_finally_binding_applies_unconditionally() {
     assert_eq!(maybe("try { g(); } catch (Throwable $e) { echo $e; } $e = 1;"), none());
 }
 
+#[test]
+fn a_try_that_terminates_drops_out_of_the_branch_join() {
+    // Issue #943: the construct is `Terminated` when its `finally` terminates or no
+    // live arm falls through, so a branch ending in one subtracts like a `return`.
+    let arm = |t: &str| format!("if ($c) {{ $x = 1; }} else {{ {t} }} echo $x;");
+    assert_eq!(maybe(&arm("try { return 1; } finally { echo 1; }")), none());
+    assert_eq!(maybe(&arm("try { g(); } finally { return 1; }")), none());
+    assert_eq!(maybe(&arm("try { return g(); } catch (Throwable $e) { return 0; }")), none());
+    // A block that cannot throw has dead catches (D2 of #1033).
+    assert_eq!(maybe(&arm("try { return 1; } catch (Throwable $e) { }")), none());
+    // Controls: a live catch that falls through, and a falling block.
+    assert_eq!(maybe(&arm("try { return g(); } catch (Throwable $e) { }")), one("x"));
+    assert_eq!(maybe(&arm("try { g(); } finally { echo 1; }")), one("x"));
+}
+
 // `switch` — the arm that ends in `break` still reaches the successor.
 
 #[test]

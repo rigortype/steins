@@ -265,7 +265,7 @@ fn loop_fallthrough_forget(
 ///
 /// `poisons` clears everything, exactly as it does for the fall-through: a scope
 /// that aliases, `extract`s or `eval`s has no binding worth carrying anywhere.
-fn loop_entry_forget(
+pub(crate) fn loop_entry_forget(
     writes: &[String],
     reads: &[String],
     carried: &[String],

@@ -179,10 +179,12 @@ fn a_proven_throw_refuses_even_though_pure_admits_throw() {
 }
 
 #[test]
-fn a_loop_inside_a_try_refuses_before_the_throw_gate_is_reached() {
-    // `catch` guards stripped (region_purity.rs); `try` opaque, earlier gate answers first.
+fn a_loop_inside_a_try_reaches_the_throw_gate_and_refuses_there() {
+    // A `try` body is walked straight-line (issue #943), so the subject is proven
+    // there as it is outside one; the `catch` guards are stripped (region_purity.rs),
+    // so the throw the `catch` would absorb still refuses the loop.
     let src = "<?php\nfunction boom(int $n): int { throw new RuntimeException('no'); }\nfunction run(): array {\n    $out = [];\n    try {\n        $xs = [1, 2];\n        $out = [];\n        foreach ($xs as $x) {\n            $out[] = boom($x);\n        }\n    } catch (RuntimeException $e) {\n    }\n    return $out;\n}\n";
-    assert_eq!(refusal_for(src), REASON_SUBJECT_NOT_PROVEN_ARRAY);
+    assert_eq!(refusal_for(src), REASON_BODY_THROWS);
 }
 
 #[test]

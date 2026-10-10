@@ -108,17 +108,33 @@ fn the_contribution_propagates_to_an_undammed_caller() {
     assert!(by_origin.contains(&Some(Facet::Origin(Origin::Propagated))), "outer() inherits it up the call edge");
 }
 
-#[test]
-fn a_try_catch_wrapper_dams_the_contribution() {
-    let src = format!(
+/// A `match` in a `try` block with `catch` clause `catch_class`.
+fn wrapped(catch_class: &str) -> String {
+    format!(
         "<?php\n{SUIT}\n/** @throws \\RuntimeException */\nfunction f(Suit $s): int {{\n\
          \ttry {{\n\
          \t\treturn match ($s) {{ Suit::Hearts => 1, Suit::Spades => 2, }};\n\
-         \t}} catch (\\RuntimeException $e) {{\n\
+         \t}} catch (\\{catch_class} $e) {{\n\
          \t\treturn 0;\n\
          \t}}\n}}\n"
-    );
-    assert_eq!(undeclared(&src), Vec::new(), "the try/catch around the match kills the contribution");
+    )
+}
+
+#[test]
+fn a_try_catch_wrapper_dams_the_contribution() {
+    // Witnessed on 8.5.11: `f(Suit::Clubs)` returns 0 under this catch.
+    let src = wrapped("UnhandledMatchError");
+    assert_eq!(undeclared(&src), Vec::new(), "the catch absorbs the UnhandledMatchError");
+}
+
+#[test]
+fn a_catch_of_another_class_does_not_dam_it() {
+    // Witnessed on 8.5.11: `f(Suit::Clubs)` lets the `UnhandledMatchError` escape
+    // past a `catch (RuntimeException)`. The block was not walked before issue
+    // #943, so the match was never judged and this was silent.
+    let ds = undeclared(&wrapped("RuntimeException"));
+    assert_eq!(ds.len(), 1, "got: {ds:#?}");
+    assert_eq!(ds[0].facet, Some(Facet::Origin(Origin::Direct)));
 }
 
 // ---------------------------------------------------------------------------

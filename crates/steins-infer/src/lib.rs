@@ -112,6 +112,7 @@ mod entry_state;
 mod loops;
 mod stmt_calls;
 mod stmt_checks;
+mod try_catch;
 
 pub use dam::{DamFacts, DamKind, DamSite, dam_facts};
 pub use ids::*;

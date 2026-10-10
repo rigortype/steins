@@ -20,6 +20,7 @@ mod lower_presence;
 mod lower_scope;
 mod lower_site;
 mod lower_stmt;
+mod lower_try;
 mod memo;
 mod names;
 #[cfg(feature = "persist")]
