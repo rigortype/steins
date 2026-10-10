@@ -63,12 +63,8 @@ pub(crate) fn is_pure_expr(expr: &Expression<'_>) -> bool {
         Expression::ArrayAccess(a) => {
             is_literal_receiver(a.array) && is_pure_expr(a.array) && is_pure_expr(a.index)
         }
-        Expression::Construct(Construct::Isset(i)) => {
-            i.values.iter().all(|v| matches!(v.unparenthesized(), Expression::Variable(v) if is_plain_variable(v)))
-        }
-        Expression::Construct(Construct::Empty(e)) => {
-            matches!(e.value.unparenthesized(), Expression::Variable(v) if is_plain_variable(v))
-        }
+        Expression::Construct(Construct::Isset(i)) => i.values.iter().all(|v| is_plain_read(v)),
+        Expression::Construct(Construct::Empty(e)) => is_plain_read(e.value),
         _ => false,
     }
 }
@@ -76,6 +72,12 @@ pub(crate) fn is_pure_expr(expr: &Expression<'_>) -> bool {
 /// A direct variable that is not `$this`.
 fn is_plain_variable(v: &Variable<'_>) -> bool {
     matches!(v, Variable::Direct(d) if bytes_to_string(d.name) != "$this")
+}
+
+/// A bare local read: `isset($x)` and `empty($x)` reach `offsetExists` and `__isset` only
+/// through a fetch.
+fn is_plain_read(e: &Expression<'_>) -> bool {
+    matches!(e.unparenthesized(), Expression::Variable(v) if is_plain_variable(v))
 }
 
 /// An array literal's element: a value or a key/value pair of pure parts.
@@ -89,11 +91,10 @@ fn is_pure_element(e: &ArrayElement<'_>) -> bool {
 
 /// An array literal or a string literal: a fetch on one never reaches `ArrayAccess`.
 fn is_literal_receiver(e: &Expression<'_>) -> bool {
-    match e.unparenthesized() {
-        Expression::Array(_) | Expression::LegacyArray(_) => true,
-        Expression::Literal(Literal::String(_)) => true,
-        _ => false,
-    }
+    matches!(
+        e.unparenthesized(),
+        Expression::Array(_) | Expression::LegacyArray(_) | Expression::Literal(Literal::String(_))
+    )
 }
 
 fn is_pure_prefix(op: &UnaryPrefixOperator<'_>, operand: &Expression<'_>) -> bool {
