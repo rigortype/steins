@@ -15,7 +15,7 @@ use crate::ast::{Comment, CommentKind, UndefinedRead, UnsetSeedFacts, UnsetSeedR
 use crate::lower_scope::{Shield, VarUsage, bind_lvalue_roots, scan_var_usage};
 use crate::lower_stmt::{body_has_nested_jumps_only, expr_is_false, expr_is_true, stmt_end};
 use crate::lower_try::{stmt_cannot_throw, try_body_cannot_throw};
-use crate::memo;
+use crate::memo::{self, TryScan};
 use crate::{bytes_to_string, strip_dollar, to_span};
 
 mod loop_memo;
@@ -1096,6 +1096,13 @@ fn collect_name_dam(node: &Node<'_, '_>, best: &mut Option<u32>) {
 /// Whether a `goto` or a label stands anywhere in this subtree, without descending
 /// into a nested scope.
 pub(crate) fn subtree_has_goto(node: &Node<'_, '_>) -> bool {
+    // A `try` answers from the per-parse memo (see `memo::TryScan`).
+    if let Node::Try(t) = node
+        && let Some(hit) =
+            memo::try_flag(t, TryScan::Goto, || node.children().iter().any(subtree_has_goto))
+    {
+        return hit;
+    }
     match node {
         Node::Goto(_) | Node::Label(_) => true,
         Node::Function(_)
