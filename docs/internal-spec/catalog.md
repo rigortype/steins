@@ -436,7 +436,7 @@ writes `max_execution_time` and reads nothing, and `set_include_path` reads and 
 every entry, so it reads the parent `global.read.setting` and no one cell. `ini_restore` and `ini_set` of a name the
 call does not spell keep the coarse row (S6-core). The `@` operator sets `error_reporting` for the call it silences
 without touching the ini entry, so `@error_reporting()` is `4437` while `ini_get('error_reporting')` is unchanged; the
-operator is not coloured (D4), and the read of `error_reporting()` is the cell's either way.
+operator is not coloured (D4), and the read of `error_reporting()` is the cell's either way. The other readers of `include_path` are not coloured either: `include`/`require` resolve through it, `fopen`, `file_get_contents` and the other stream openers read it with `$use_include_path`, and `stream_resolve_include_path` and `spl_autoload` read it; the openers keep `io.fs.read` alone and the last two still have no row.
 
 `fprintf` and `vfprintf` still have no row. Both reads of a printf row are **conditional on the
 call** (`'%d'` reads neither), so the row is an upper bound and not a claim about every call: the
