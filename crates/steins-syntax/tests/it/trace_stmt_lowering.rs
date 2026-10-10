@@ -193,3 +193,44 @@ fn a_last_case_may_end_and_trailing_labels_are_empty_arms() {
     let got = stmts("int $n", "switch ($n) { case 1: echo 1; case 2: echo 2; }");
     assert!(matches!(&got[..], [Stmt { kind: StmtKind::Opaque { .. }, .. }]), "{got:?}");
 }
+
+#[test]
+fn a_jump_a_terminating_finally_replaces_lands_nowhere() {
+    // ADR-0103: `try { break; } finally { return; }` returns (PHP 8.5.11), so the
+    // `break` neither lands on a switch's successor nor leaves a loop.
+    let (arms, _) = switch_landings(
+        "switch ($n) { case 1: try { break; } finally { return; } \
+         case 2: try { break; } finally { echo 1; } return; }",
+    );
+    assert_eq!(arms, vec![None, Some(Vec::new())]);
+    let got = stmts("int $n", "while ($n > 0) { try { break; } finally { return; } }");
+    match &got[..] {
+        [Stmt { kind: StmtKind::While { break_free, .. }, .. }] => assert!(*break_free),
+        other => panic!("the `while` lowered to {other:?}"),
+    }
+    let got = stmts("int $n", "while ($n > 0) { try { break; } finally { echo 1; } }");
+    match &got[..] {
+        [Stmt { kind: StmtKind::While { break_free, .. }, .. }] => assert!(!*break_free),
+        other => panic!("the `while` lowered to {other:?}"),
+    }
+}
+
+#[test]
+fn a_goto_landing_carries_no_env() {
+    // Only a `break`/`continue` landing sets `by_level`; a `goto` keeps the
+    // successor reachable and nothing more.
+    let by_level = |body: &str| match &stmts("int $n, bool $c", body)[..] {
+        [Stmt { kind: StmtKind::Match { arms, .. }, .. }, ..] => {
+            arms.iter().map(|a| a.lands.as_ref().map(|l| l.by_level)).collect::<Vec<_>>()
+        }
+        other => panic!("the `switch` lowered to {other:?}"),
+    };
+    assert_eq!(
+        by_level("switch ($n) { case 1: goto out; case 2: if ($c) { goto out; } break; } out: return;"),
+        vec![Some(false), Some(false)]
+    );
+    assert_eq!(
+        by_level("switch ($n) { case 1: if ($c) { goto out; } if ($c) { break; } return; } out: return;"),
+        vec![Some(true)]
+    );
+}

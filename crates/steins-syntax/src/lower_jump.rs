@@ -20,7 +20,7 @@
 //! | `break N` / `continue N`, `N == d + 1` | this switch's **successor**: the arm *lands* |
 //! | `break N` / `continue N`, `N > d + 1` | a construct outside this switch: it **ends the arm** and the enclosing loop's own count owns it |
 //! | `break` / `continue` with a level that is not a positive integer literal | a compile error in PHP (`break $n` since 5.4, `break 0` always); read as the worst case, landing **and** ending the arm |
-//! | `goto` | its label is not bounded here, so the arm **lands**, carrying no fact (the label itself lowers as a barrier) |
+//! | `goto` | its label is not bounded here, so the arm **lands**; the edge carries no env, since every path from it to the successor passes the label, which lowers as a barrier — it only keeps the successor reachable when nothing else does |
 //! | `return` / `throw` / `exit` | leaves the function: **ends the arm**, never lands |
 //!
 //! `continue` counts a `switch` as a level exactly as `break` does, and a `continue
@@ -32,7 +32,9 @@
 //! (witnessed on PHP 8.5.11); a `finally` cannot itself hold a jump that leaves
 //! it, which PHP rejects at compile time. The landing edge therefore forgets what
 //! the **whole** case body writes, `finally` included, and never only what runs
-//! before the jump.
+//! before the jump. A `finally` that terminates replaces the jump: `try { break; }
+//! finally { return; }` returns, so such a jump lands nowhere, for a loop's count
+//! as for a switch's ([`body_has_jump`]).
 //!
 //! The same counting answers the loop questions: a loop body is the case body
 //! with the loop itself as the construct, and a `continue N` with `N == d + 1`
@@ -40,10 +42,10 @@
 
 use mago_syntax::cst::{Expression, Node, Statement};
 
-use crate::ast::{ArgValue, ArmLanding, Runs};
+use crate::ast::{ArgValue, ArmLanding, BodyEnd, Runs};
 use crate::children;
 use crate::lower_expr::lower_arg_value;
-use crate::lower_stmt::{node_poisons, scan_runs};
+use crate::lower_stmt::{block_end, node_poisons, scan_runs};
 use crate::lower_try::list_sets;
 
 /// A `break`/`continue` level as written: `Some(n)` for a positive integer literal
@@ -73,6 +75,11 @@ pub(crate) fn node_jump_level(jump: &Node<'_, '_>) -> Option<u32> {
 /// The scan every level question shares: whether any `break`, `continue` or `goto`
 /// under `node` answers `hit`. `depth` is the number of breakable structures (loops
 /// and `switch`es) between this node and the list the question is about.
+///
+/// A `try` whose `finally` terminates contributes only the jumps in that `finally`:
+/// a jump out of its block or a `catch` runs the `finally`, whose `return`, `throw`
+/// or `exit` replaces the jump (the module table's `finally` row), so it lands
+/// nowhere.
 pub(crate) fn body_has_jump(
     node: &Node<'_, '_>,
     depth: u32,
@@ -80,6 +87,14 @@ pub(crate) fn body_has_jump(
 ) -> bool {
     match node {
         Node::Break(_) | Node::Continue(_) | Node::Goto(_) => hit(node, depth),
+        Node::Try(t)
+            if t.finally_clause.as_ref().is_some_and(|f| {
+                block_end(f.block.statements.as_slice()) == BodyEnd::Terminates
+            }) =>
+        {
+            let f = t.finally_clause.as_ref().expect("guarded above");
+            f.block.statements.iter().any(|s| body_has_jump(&Node::Statement(s), depth, hit))
+        }
         // A nested breakable structure absorbs one level of every jump beneath it.
         Node::While(_) | Node::For(_) | Node::Foreach(_) | Node::DoWhile(_) | Node::Switch(_) => {
             children(node).iter().any(|c| body_has_jump(c, depth + 1, hit))
@@ -108,21 +123,22 @@ fn jump_lands_on_switch(jump: &Node<'_, '_>, depth: u32) -> bool {
     }
 }
 
-/// Whether some jump in a `switch` case body lands on the switch's successor.
-pub(crate) fn case_lands(body: &[Statement<'_>]) -> bool {
-    body.iter().any(|s| body_has_jump(&Node::Statement(s), 0, &jump_lands_on_switch))
+/// The `break`/`continue` rows of [`jump_lands_on_switch`] alone: the jumps whose
+/// landing carries an env.
+fn level_lands_on_switch(jump: &Node<'_, '_>, depth: u32) -> bool {
+    !matches!(jump, Node::Goto(_)) && jump_lands_on_switch(jump, depth)
 }
 
 /// The landing a case body owes its switch's successor (see [`ArmLanding`]), or
 /// `None` when no jump in it lands there.
 pub(crate) fn arm_landing(body: &[Statement<'_>]) -> Option<ArmLanding> {
-    if !case_lands(body) {
+    let nodes: Vec<Node<'_, '_>> = body.iter().map(Node::Statement).collect();
+    if !nodes.iter().any(|n| body_has_jump(n, 0, &jump_lands_on_switch)) {
         return None;
     }
-    let nodes: Vec<Node<'_, '_>> = body.iter().map(Node::Statement).collect();
+    let by_level = nodes.iter().any(|n| body_has_jump(n, 0, &level_lands_on_switch));
     let (writes, reads) = list_sets(&nodes);
-    let is_goto = |jump: &Node<'_, '_>, _: u32| matches!(jump, Node::Goto(_));
-    let clears = nodes.iter().any(|n| node_poisons(n) || body_has_jump(n, 0, &is_goto));
+    let clears = nodes.iter().any(node_poisons);
     let mut runs = Runs::default();
     for n in &nodes {
         scan_runs(n, &mut runs);
@@ -131,7 +147,7 @@ pub(crate) fn arm_landing(body: &[Statement<'_>]) -> Option<ArmLanding> {
         runs.functions = Vec::new();
         runs.constructs = Vec::new();
     }
-    Some(ArmLanding { writes, reads, clears, runs })
+    Some(ArmLanding { writes, reads, clears, by_level, runs })
 }
 
 /// Whether a trailing jump of a case body is the switch's own `break` — `break;`,

@@ -685,7 +685,8 @@ fn presence_switch(
 ///
 /// A `break` or `continue` out of the block or a `catch` runs the `finally` before
 /// it lands (ADR-0103), so the states parked since the construct began take its
-/// bindings as the normal-completion path does.
+/// bindings as the normal-completion path does — or are dropped, when the `finally`
+/// terminates and so replaces the jump.
 fn presence_try(
     s: &Statement<'_>,
     t: &mago_syntax::cst::Try<'_>,
@@ -741,6 +742,10 @@ fn presence_try(
         let mut fin = join_states(&thrown, &result);
         if presence_seq(f.block.statements.iter(), &mut fin, cx) == PresenceFlow::Terminated {
             terminates = true;
+            // A terminating `finally` replaces every jump out of the block or a
+            // `catch` (ADR-0103): those jumps land nowhere.
+            cx.breaks.truncate(parked_from.0);
+            cx.continues.truncate(parked_from.1);
         }
         let jumped =
             cx.breaks[parked_from.0..].iter_mut().chain(&mut cx.continues[parked_from.1..]);
