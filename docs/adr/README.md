@@ -140,3 +140,4 @@ list in one place.
 | ADR-0100 | [Exhaustiveness has a floor: the maybe- siblings of the envelope checks, and destructors](0100-exhaustiveness-has-a-floor.md) |
 | ADR-0101 | [A locale read is an effect, decided lexically: ambient settings, their labelled reads and writes, and the `%F` remedy](0101-ambient-settings-lexical-locale-read.md) |
 | ADR-0102 | [A call's result is remembered on its key until a site invalidates it: the value-lane half of "remembering and forgetting"](0102-remembered-call-results.md) |
+| ADR-0103 | [Jumps are credited by level](0103-jumps-are-credited-by-level.md) |
