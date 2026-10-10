@@ -133,3 +133,63 @@ fn a_foreach_keeps_its_header_and_body() {
         ],
     );
 }
+
+/// One arm's landing writes, `None` for an arm whose jumps do not land on the
+/// successor.
+type Landing = Option<Vec<String>>;
+
+/// The arms of the one structured `switch` in `body`: each arm's [`Landing`], then
+/// the `default` body's.
+fn switch_landings(body: &str) -> (Vec<Landing>, Option<Landing>) {
+    let got = stmts("int $n, bool $c", body);
+    match &got[..] {
+        [Stmt { kind: StmtKind::Match { arms, default, default_lands, loose: true, .. }, .. }, ..] => {
+            let arms = arms.iter().map(|a| a.lands.as_ref().map(|l| l.writes.clone())).collect();
+            let default = default.as_ref().map(|_| default_lands.as_ref().map(|l| l.writes.clone()));
+            (arms, default)
+        }
+        other => panic!("the `switch` lowered to {other:?}"),
+    }
+}
+
+#[test]
+fn a_switch_arm_carries_the_jumps_that_land_on_its_successor() {
+    // ADR-0103: a `break N`/`continue N` written N - 1 breakable constructs deep lands
+    // on the successor, and so does any `goto`; a deeper jump ends the arm.
+    let lands = |writes: &[&str]| Some(writes.iter().map(|w| (*w).to_owned()).collect());
+    let (arms, default) = switch_landings(
+        "switch ($n) { case 1: $a = 1; foreach ([1] as $v) { break 2; } return; \
+         case 2: foreach ([1] as $v) { break 3; } return; \
+         case 3: if ($c) { continue; } return; \
+         case 4: while ($c) { continue 2; } return; \
+         case 5: goto out; \
+         default: switch ($c) { case true: break 2; } return; } out: return;",
+    );
+    assert_eq!(arms, vec![lands(&["a", "v"]), None, lands(&[]), lands(&[]), lands(&[])]);
+    assert_eq!(default, Some(lands(&[])));
+}
+
+#[test]
+fn a_last_case_may_end_and_trailing_labels_are_empty_arms() {
+    // ADR-0103 D4: the last non-empty case runs off its end; the empty labels after
+    // it become an empty arm and an empty `default`.
+    let body = "switch ($n) { case 1: echo 1; break; case 2: echo 2; case 3: default: }";
+    match &stmts("int $n", body)[..] {
+        [Stmt { kind: StmtKind::Match { arms, default: Some(default), .. }, .. }] => {
+            assert_eq!(arms.len(), 2, "{arms:?}");
+            assert!(default.is_empty(), "{default:?}");
+        }
+        other => panic!("the `switch` lowered to {other:?}"),
+    }
+    match &stmts("int $n", "switch ($n) { case 1: echo 1; break; case 2: case 3: }")[..] {
+        [Stmt { kind: StmtKind::Match { arms, default: None, .. }, .. }] => {
+            assert_eq!(arms.len(), 2, "{arms:?}");
+            assert_eq!(arms[1].conditions.len(), 2, "{arms:?}");
+            assert!(arms[1].trace.is_empty(), "{arms:?}");
+        }
+        other => panic!("the `switch` lowered to {other:?}"),
+    }
+    // A case that runs into a non-empty one stays unstructured.
+    let got = stmts("int $n", "switch ($n) { case 1: echo 1; case 2: echo 2; }");
+    assert!(matches!(&got[..], [Stmt { kind: StmtKind::Opaque { .. }, .. }]), "{got:?}");
+}

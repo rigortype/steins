@@ -215,15 +215,34 @@ fn a_default_sharing_the_last_body_is_the_else() {
 }
 
 #[test]
-fn a_by_value_switch_keeps_its_old_shape() {
-    // The relaxation is the chain's alone: a `switch ($x)` whose last case runs off
-    // its end stays `Opaque`, as it was.
+fn a_by_value_switch_takes_the_same_last_case_rule() {
+    // ADR-0103 D4 extends the chain's relaxation to `switch ($x)`: a last case that
+    // runs off its end leaves the switch, so the construct is structured.
     let (got, _) = lowered("int $x", "switch ($x) { case 1: take(1); }");
-    assert!(matches!(&got[..], [Stmt { kind: StmtKind::Opaque { .. }, .. }]), "{got:?}");
+    let by_value = matches!(&got[..], [Stmt { kind: StmtKind::Match { loose: true, .. }, .. }]);
+    assert!(by_value, "{got:?}");
     let (got, _) =
         lowered("int $x", "switch ($x) { case 1: take(1); break; default: take(2); break; }");
     let by_value = matches!(&got[..], [Stmt { kind: StmtKind::Match { loose: true, .. }, .. }]);
     assert!(by_value, "{got:?}");
+}
+
+#[test]
+fn a_chain_with_a_landing_jump_stays_opaque() {
+    // An `if` has no landing edge to carry (ADR-0103), so a `switch (true)` case whose
+    // jump lands on the successor keeps the construct `Opaque`; a jump that only
+    // ends the arm does not.
+    let (got, _) = lowered(
+        "",
+        "switch (true) { case defined('A'): foreach ([1] as $v) { break 2; } return; default: take(1); }",
+    );
+    assert!(matches!(&got[..], [Stmt { kind: StmtKind::Opaque { .. }, .. }]), "{got:?}");
+    let (got, _) = lowered(
+        "",
+        "while (true) { switch (true) { case defined('A'): break 2; default: take(1); } }",
+    );
+    let [Stmt { kind: StmtKind::While { body, .. }, .. }] = &got[..] else { panic!("{got:?}") };
+    assert!(matches!(&body[..], [Stmt { kind: StmtKind::If { .. }, .. }]), "{body:?}");
 }
 
 #[test]

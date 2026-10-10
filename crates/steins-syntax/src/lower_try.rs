@@ -67,7 +67,7 @@ pub(crate) fn lower_try(s: &Statement<'_>, t: &Try<'_>) -> Stmt {
 /// The write and read sets of a list of sibling nodes, with the meaning
 /// [`opaque_sets`] gives one node's: the writes are every assignment target and
 /// every name handed to a call, the reads every other name mentioned.
-fn list_sets(nodes: &[Node<'_, '_>]) -> (Vec<String>, Vec<String>) {
+pub(crate) fn list_sets(nodes: &[Node<'_, '_>]) -> (Vec<String>, Vec<String>) {
     let mut writes = Vec::new();
     for n in nodes {
         collect_call_vars(n, &mut writes);
