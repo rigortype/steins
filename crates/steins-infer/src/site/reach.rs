@@ -168,8 +168,17 @@ impl Frame<'_> {
                     let Some(param) = self.params.iter().find(|p| &p.name == name) else {
                         return false;
                     };
-                    // `int $t = null` is implicitly nullable.
-                    !param.has_null_default
+                    // A default PHP folds to `null` at compile time makes the parameter
+                    // implicitly nullable, whatever its spelling (`\null`, `null ?? null`,
+                    // `true ? null : 0`), and `has_null_default` sees only the bare literal. So
+                    // only a parameter with no default, or a plain scalar literal one, is placed.
+                    let default_non_null = !param.has_default
+                        || matches!(
+                            param.default,
+                            Some(ArgValue::Int(_) | ArgValue::Float(_) | ArgValue::Str(_) | ArgValue::Bool(_))
+                        );
+                    default_non_null
+                        && !param.has_null_default
                         && !self.rebound_by_call(cx, name)
                         && param
                             .hint_span
