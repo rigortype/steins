@@ -694,6 +694,22 @@ function f(): int {
 }
 
 #[test]
+fn silent_on_a_never_call_inside_a_try() {
+    // #943's review, witnessed on 8.5.11: `g()` and `f()` both end by `fail()`'s
+    // throw. The never-returning veto reads calls in every sub-trace, a `try`'s
+    // block, catches and `finally` included.
+    assert_silent(
+        "<?php
+function fail(string $m): never { throw new RuntimeException($m); }
+function g(): int { try { fail('a'); } finally { echo 'cleanup'; } }
+function compute(): int { return 1; }
+function f(): int { try { return compute(); } catch (LogicException $e) { fail($e->getMessage()); } }
+",
+        "a never call in the block or a catch",
+    );
+}
+
+#[test]
 fn fires_on_a_try_finally_tail() {
     // Witnessed on 8.5.11: the block falls through, the `finally` falls through,
     // and the call fatals with "none returned" (issue #943). The body exits

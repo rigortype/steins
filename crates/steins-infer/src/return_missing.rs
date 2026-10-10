@@ -6,8 +6,8 @@
 use std::collections::HashSet;
 
 use steins_syntax::{
-    CallExpr, Callee, OpaqueConstruct, RefKind, RetHintKind, Scope, ScopeOwner, Stmt, StmtKind,
-    body_end, body_has_terminator,
+    CallExpr, Callee, OpaqueConstruct, RefKind, RetHintKind, Scope, ScopeOwner, Stmt, body_end,
+    body_has_terminator,
 };
 
 use crate::cx::Cx;
@@ -183,25 +183,18 @@ fn falls_back_to_global(cx: &Cx, call: &CallExpr) -> bool {
     !ctx.namespace.is_empty() && !ctx.fn_imports.contains_key(&r.raw.to_ascii_lowercase())
 }
 
-/// `true` when any statement-position call in `stmts` (or in a structured
-/// sub-trace beneath it) satisfies `pred`.
+/// `true` when any statement-position call in `stmts` (or in any structured
+/// sub-trace beneath it: an `if`, a `match`, a loop, a `try`'s block, catches and
+/// `finally`) satisfies `pred`.
+///
+/// Every sub-trace is descended, because the veto is the larger-silence direction
+/// and a `: never` call anywhere can be what keeps a body from falling through:
+/// `try { fail(); } finally { … }` terminates although its `BodyEnd` says the
+/// block falls through (issue #943's review).
 fn trace_calls_any(stmts: &[Stmt], pred: &impl Fn(&CallExpr) -> bool) -> bool {
     stmts.iter().any(|stmt| {
-        if checkable_calls(&stmt.kind).into_iter().any(pred) {
-            return true;
-        }
-        match &stmt.kind {
-            StmtKind::If { then_trace, elseifs, else_trace, .. } => {
-                trace_calls_any(then_trace, pred)
-                    || elseifs.iter().any(|(_, t)| trace_calls_any(t, pred))
-                    || else_trace.as_deref().is_some_and(|t| trace_calls_any(t, pred))
-            }
-            StmtKind::Match { arms, default, .. } => {
-                arms.iter().any(|a| trace_calls_any(&a.trace, pred))
-                    || default.as_deref().is_some_and(|t| trace_calls_any(t, pred))
-            }
-            _ => false,
-        }
+        checkable_calls(&stmt.kind).into_iter().any(pred)
+            || stmt.kind.sub_traces().into_iter().any(|t| trace_calls_any(t, pred))
     })
 }
 
