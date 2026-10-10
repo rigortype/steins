@@ -190,6 +190,7 @@ mod stratum;
 mod strict_floor;
 mod string_context;
 mod sweep_carriage;
+mod switch_jumps;
 mod ternary_value;
 mod this_exactness;
 mod throw_knowledge;

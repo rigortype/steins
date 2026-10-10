@@ -2978,11 +2978,44 @@ pub enum CondExpr {
 /// arm's comparison operands (may list several: `1, 2 => …` / stacked `case`s); taken when
 /// the subject equals any of them (`===` for match, loose `==` for switch). `trace` is the
 /// arm body, lowered like any sub-trace; a switch arm's terminating `break` is stripped.
+/// `lands` is set when a jump inside the arm lands on the construct's successor
+/// (ADR-0103): a `match` arm never has one.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub struct MatchArmT {
     pub conditions: Vec<CondOperand>,
     pub trace: Vec<Stmt>,
+    pub lands: Option<ArmLanding>,
+}
+
+/// A `switch` arm with a jump in it that lands on the switch's successor (ADR-0103,
+/// issue #904): a `break N` or `continue N` written `N - 1` loops or `switch`es deep
+/// in the case body, a level PHP refuses to compile, or any `goto`.
+///
+/// The walk of the arm's trace stops at that jump (it is a [`StmtKind::LoopJump`]
+/// that ends its block, or a `goto`'s barrier), so the arm's own `Flow` does not say
+/// that the successor is reached. The landing does: a walker adds one more
+/// fall-through edge, the arm's entry env with the case body's sets forgotten by
+/// the rule a loop body's entry uses — `writes` dropped, the objects `reads` names
+/// swept, everything cleared when `clears` is set — and cleared as well where the
+/// top-level rebind rule fires on `runs`. The sets are the whole case body's, so a
+/// `finally` that runs on the way out is forgotten too.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
+pub struct ArmLanding {
+    /// Every name the case body assigns or hands to a call.
+    pub writes: Vec<String>,
+    /// Every other name the case body mentions.
+    pub reads: Vec<String>,
+    /// Whether the edge carries nothing at all: the case body holds a construct on
+    /// the ADR-0001 give-up list, or a `goto`. A label lowers as a barrier wherever
+    /// it is written, so the successor is reached from a `goto` only through one —
+    /// the label is the successor, or sits in another case that runs into it — or
+    /// not at all, and a fact carried along the edge could only be one PHP never
+    /// holds there.
+    pub clears: bool,
+    /// What the case body evaluates, for the top-level rebind rule (issue #762).
+    pub runs: Runs,
 }
 
 /// One `catch` clause of a structured [`StmtKind::Try`] (the ADR-0027 `try`
@@ -3043,13 +3076,17 @@ pub enum StmtKind {
     /// `\UnhandledMatchError`) from `switch` (`true`: loose `==`, falls through).
     ///
     /// Only fully-modelable constructs reach here — subject and every arm condition must
-    /// lower to a bare variable or literal, and (for `switch`) every non-empty case must
-    /// end in `break`/`return`/`throw`/`exit` with no fall-through. Any failure stays
-    /// [`StmtKind::Opaque`] wholesale — an unrepresentable arm opaques the whole construct.
+    /// lower to a bare variable or literal, and (for `switch`) every non-empty case but
+    /// the last one must end in `break`/`continue`/`return`/`throw`/`exit`/`goto` with
+    /// no fall-through (ADR-0103: the last may run off its end, which leaves the
+    /// switch). Any failure stays [`StmtKind::Opaque`] wholesale — an unrepresentable
+    /// arm opaques the whole construct. A jump that lands on the successor is carried
+    /// on its arm ([`MatchArmT::lands`]), or in `default_lands` for the `default` body.
     Match {
         subject: CondOperand,
         arms: Vec<MatchArmT>,
         default: Option<Vec<Stmt>>,
+        default_lands: Option<ArmLanding>,
         loose: bool,
     },
     /// `assert(<expr>);` (ADR-0052 §5). `cond` is the lowered guard; the walk applies its
@@ -3072,10 +3109,12 @@ pub enum StmtKind {
     /// bodies were unwalked; it is the first thing a real body hits now that they
     /// are.
     ///
-    /// Which loop a `break 2;` leaves is still unmodelled, and does not need to be:
-    /// a walker only asks whether the code after it in THIS block is reachable, and
-    /// the answer is no for every level. The statement after the loop stays
-    /// reachable either way — the loop can also end by its own condition.
+    /// Where the jump lands is not carried here, and does not need to be: a walker
+    /// only asks whether the code after it in THIS block is reachable, and the answer
+    /// is no for every level. The construct it lands on answers for the edge — a
+    /// loop through `break_free`, a `switch` arm through [`MatchArmT::lands`]
+    /// (ADR-0103) — and the statement after a loop stays reachable either way, since
+    /// the loop can also end by its own condition.
     LoopJump { span: Span },
     /// `exit;` / `die;` (as an expression-statement) — a trace terminator; `span` points at it.
     Exit { span: Span },

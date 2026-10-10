@@ -6,7 +6,9 @@ use std::collections::HashMap;
 use steins_contract::normalize;
 use steins_domain::{Certainty, Fact, Val};
 use steins_phpdoc::AssertKind;
-use steins_syntax::{ArgValue, CallExpr, CmpOp, CondExpr, CondOperand, MatchArmT, Span, Stmt};
+use steins_syntax::{
+    ArgValue, ArmLanding, CallExpr, CmpOp, CondExpr, CondOperand, MatchArmT, Span, Stmt,
+};
 
 use crate::fold::Folder;
 use crate::annotate::LineFact;
@@ -30,6 +32,8 @@ use crate::refine::{
     collect_same_expr_call_guards, else_refinements, subtract_contract_lane, then_refinements,
 };
 use crate::shapes::{ShapeGuard, apply_shape_guard, apply_shape_narrowing, guard_key};
+use crate::loops::loop_entry_forget;
+use crate::rebind::top_level_rebind_risk;
 use crate::walk::{Flow, WalkCx, mark_dead, walk_trace};
 
 /// Walk a structured `if`/`elseif`/`else` (ADR-0031 stage 1). Evaluates the guard
@@ -434,6 +438,10 @@ fn push_cond_operand_var(op: &CondOperand, out: &mut Vec<String>) {
 /// successor env is the join of every branch that falls through; if none does, the
 /// construct terminates.
 ///
+/// A live arm (or `default`) whose case body holds a jump that lands on the
+/// successor (ADR-0103, [`ArmLanding`]) adds one more fall-through edge, whatever
+/// its own walk answered: [`landing_env`] over the env the arm was entered with.
+///
 /// A default-less `match` (not `switch`) additionally asks ADR-0088 §5's question
 /// (issue #433): does the subtraction above prove the subject's Verified domain is
 /// NOT exhausted? When it does — on the plain per-scope walk only, per
@@ -447,7 +455,7 @@ pub(crate) fn walk_match(
     folder: &mut dyn Folder,
     subject: &CondOperand,
     arms: &[MatchArmT],
-    default: Option<&[Stmt]>,
+    default: Option<(&[Stmt], Option<&ArmLanding>)>,
     loose: bool,
     match_span: Span,
     env: &mut HashMap<String, Known>,
@@ -522,27 +530,31 @@ pub(crate) fn walk_match(
                 true,
             );
         }
+        let landed = arm.lands.as_ref().map(|l| landing_env(w, folder, l, &benv, &bclasses));
         if walk_trace(w, folder, &arm.trace, &mut benv, &mut bclasses, descent, facts, true, out)
             == Flow::FellThrough
         {
             fell.push((benv, bclasses));
         }
+        fell.extend(landed);
     }
 
     // 3. The "no arm matched" outcome.
     match default {
-        Some(dtrace) => {
+        Some((dtrace, dlands)) => {
             if no_match_taken == Certainty::No {
                 mark_dead(w, &[dtrace]);
             } else {
                 let mut benv = env.clone();
                 let mut bclasses = store.clone();
                 let _ = subtract_no_match_path(w, subject, arms, loose, &mut benv, &mut bclasses);
+                let landed = dlands.map(|l| landing_env(w, folder, l, &benv, &bclasses));
                 if walk_trace(w, folder, dtrace, &mut benv, &mut bclasses, descent, facts, true, out)
                     == Flow::FellThrough
                 {
                     fell.push((benv, bclasses));
                 }
+                fell.extend(landed);
             }
         }
         None => {
@@ -606,6 +618,32 @@ pub(crate) fn walk_match(
     *env = jenv;
     *store = jclasses;
     Flow::FellThrough
+}
+
+/// The env a jump that lands on a `switch`'s successor (ADR-0103) carries there:
+/// the env its arm was entered with, with the case body's sets forgotten by
+/// [`loop_entry_forget`]'s rule — the jump may leave from any point of the body, so
+/// a name it writes may hold anything and the object a name it reads may have been
+/// mutated through it. In the frame whose locals are the globals, a body that runs
+/// userland may have rebound any of them (issue #762), and nothing is carried; nor
+/// is anything along a `goto`'s edge or out of a poisoned body
+/// ([`ArmLanding::clears`]).
+fn landing_env(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    landing: &ArmLanding,
+    env: &HashMap<String, Known>,
+    store: &Store,
+) -> (HashMap<String, Known>, Store) {
+    let mut lenv = env.clone();
+    let mut lstore = store.clone();
+    if top_level_rebind_risk(w.cx, folder, &landing.runs) {
+        lenv.clear();
+        lstore.clear();
+    }
+    let ArmLanding { writes, reads, clears, .. } = landing;
+    loop_entry_forget(writes, reads, &[], *clears, &mut lenv, &mut lstore);
+    (lenv, lstore)
 }
 
 /// The certainty that a `match`/`switch` arm is the one taken *by value* — i.e.

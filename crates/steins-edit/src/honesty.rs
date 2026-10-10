@@ -814,8 +814,11 @@ fn contains_opaque(stmts: &[Stmt]) -> bool {
                 || elseifs.iter().any(|(_, b)| contains_opaque(b))
                 || else_trace.as_ref().is_some_and(|e| contains_opaque(e))
         }
-        StmtKind::Match { arms, default, .. } => {
-            arms.iter().any(|a| contains_opaque(&a.trace))
+        // A `switch` arm whose jump lands on the successor (ADR-0103) leaves by an
+        // edge its trace does not show.
+        StmtKind::Match { arms, default, default_lands, .. } => {
+            default_lands.is_some()
+                || arms.iter().any(|a| a.lands.is_some() || contains_opaque(&a.trace))
                 || default.as_ref().is_some_and(|d| contains_opaque(d))
         }
         _ => false,
@@ -836,9 +839,10 @@ fn stmt_terminates(s: &Stmt) -> bool {
                 && stmts_terminate(then_trace)
                 && elseifs.iter().all(|(_, b)| stmts_terminate(b))
         }
-        StmtKind::Match { arms, default, .. } => {
-            default.as_ref().is_some_and(|d| stmts_terminate(d))
-                && arms.iter().all(|a| stmts_terminate(&a.trace))
+        StmtKind::Match { arms, default, default_lands, .. } => {
+            default_lands.is_none()
+                && default.as_ref().is_some_and(|d| stmts_terminate(d))
+                && arms.iter().all(|a| a.lands.is_none() && stmts_terminate(&a.trace))
         }
         _ => false,
     }

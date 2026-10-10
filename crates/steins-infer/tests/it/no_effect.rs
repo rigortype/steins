@@ -476,21 +476,29 @@ fn a_switch_body_is_structured_and_reports() {
 }
 
 #[test]
-fn a_switch_arm_the_lowering_cannot_structure_is_silence() {
-    // `lower_switch` structures an arm only when it ends in a plain `break;`
-    // or terminates; a trailing arm without one, a `default:` without one and
-    // a braced body leave the whole `switch` opaque, so a discarded call
-    // inside is silence — a missed true positive, not a wrong claim, and a
-    // property of the lowering (ADR-0096 §5). Pinned so the next change to
-    // the lowering moves this deliberately.
+fn a_last_case_without_break_and_a_braced_break_are_structured() {
+    // ADR-0103: the last case may run off its end, which leaves the switch, and a
+    // `break` inside a braced body lands on the successor like a stripped one. The
+    // three shapes this test used to pin as opaque now report.
     for body in [
         "switch ($n) {\n\t\tcase 1:\n\t\t\tstrlen('x');\n\t}",
         "switch ($n) {\n\t\tdefault:\n\t\t\tstrlen('x');\n\t}",
         "switch ($n) {\n\t\tcase 1: {\n\t\t\tstrlen('x');\n\t\t\tbreak;\n\t\t}\n\t}",
     ] {
         let src = format!("<?php\nfunction f(int $n): void {{\n\t{body}\n}}\n");
-        assert_eq!(dead(&src).len(), 0, "an unstructured switch arm is opaque: {body}");
+        assert_eq!(dead(&src).len(), 1, "a structured switch arm reports: {body}");
     }
+}
+
+#[test]
+fn a_switch_arm_the_lowering_cannot_structure_is_silence() {
+    // A case that runs into the next non-empty one is the fall-through edge the
+    // lowering does not model, so the whole `switch` stays opaque and a discarded
+    // call inside is silence — a missed true positive, not a wrong claim, and a
+    // property of the lowering (ADR-0096 §5).
+    let body = "switch ($n) {\n\t\tcase 1:\n\t\t\tstrlen('x');\n\t\tcase 2:\n\t\t\techo 1;\n\t}";
+    let src = format!("<?php\nfunction f(int $n): void {{\n\t{body}\n}}\n");
+    assert_eq!(dead(&src).len(), 0, "an unstructured switch arm is opaque");
 }
 
 #[test]

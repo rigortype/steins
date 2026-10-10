@@ -815,10 +815,13 @@ pub(crate) fn walk_trace(
                     rebinds, env, store, descent, facts, out,
                 )
             }
-            StmtKind::Match { subject, arms, default, loose } => walk_match(
-                w, folder, subject, arms, default.as_deref(), *loose, stmt.span, env, store,
-                descent, facts, out,
-            ),
+            StmtKind::Match { subject, arms, default, default_lands, loose } => {
+                let default = default.as_deref().map(|d| (d, default_lands.as_ref()));
+                walk_match(
+                    w, folder, subject, arms, default, *loose, stmt.span, env, store, descent,
+                    facts, out,
+                )
+            }
         };
 
         // A write to a place a remembered call result names that no `unbind` saw: the
