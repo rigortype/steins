@@ -283,6 +283,11 @@ that a call is pure, and Decision 2's bar for an **empty** row is unchanged.
 | `print_r`, `var_export`, `var_dump`, `debug_zval_dump` | `{io.output.buffer, global.read.setting.precision}`; `print_r` and `var_export` in return mode narrow to `{global.read.setting.precision}` (S6a, below) |
 | `preg_match`, `preg_match_all`, `preg_replace`, `preg_replace_callback`, `preg_replace_callback_array`, `preg_filter`, `preg_split`, `preg_grep` | `{global.read.setting.locale}` as the upper bound the **literal pattern** decides (S5, below). `preg_quote` compiles nothing and keeps its empty row; `preg_last_error` and `preg_last_error_msg` have no row |
 | `ctype_digit`, `ctype_xdigit` | none: C fixes their sets in every locale and no byte moved, so they read no setting that changes an answer (left uncatalogued, not certified) |
+| `bcadd`, `bccomp`, `bcdiv`, `bcdivmod`, `bcmod`, `bcmul`, `bcpow`, `bcpowmod`, `bcsqrt`, `bcsub` | `{global.read.setting.ini}` as the upper bound the **`$scale`** decides (S6e, below) |
+| `bcscale`, `error_reporting` | `{global.read.setting.ini, global.write.setting.ini}`: the old value is read on every call, and the write happens when a non-`null` value is given (S6e) |
+| `get_include_path`, `set_include_path` | `{global.read.setting.ini}`, and `{global.read.setting.ini, global.write.setting.ini}` for `set_include_path`, which returns the old value |
+| `set_time_limit` | `{global.write.setting.ini}` (it writes `max_execution_time`, which `ini_get` then reports) |
+| `ini_get_all` | `{global.read.setting}`: its default lists every entry, `precision` and `date.timezone` among them (S6e) |
 | `setlocale` | `{global.write.setting.locale, global.read}` (the argument-blind row: the write, and the environment block read for `''` and `null`, coarse until the env cell has a label; a call with exactly two arguments whose locale is a written non-empty string other than `'0'` narrows to `{global.write.setting.locale}`, and the exact string `'0'`, the query form, narrows to `{global.read.setting.locale}` with no write (ADR-0101 D6, `narrowed_setlocale_labels`; `"0\0x"` is not the query, php-src compares the whole string) |
 
 **The time family** (S6b-1, `setting_reads/clock.rs` in `steins-catalog`; ADR-0101 §3.14). The row was
@@ -416,6 +421,22 @@ the mb-regex encoding and options), with no gate; `mb_ereg` and `mb_eregi` also 
 `html` or `get_html`, at any position up to the fifth. `mb_detect_encoding`, `mb_get_info`, `mb_http_input`,
 `mb_encode_mimeheader`, `mb_ereg_search*` (which keep a search state outside the cell) and `mb_ereg_replace_callback`
 (which runs user code) are not coloured.
+
+**The residue cell** (S6e, `setting_reads/ini.rs` in `steins-catalog`; ADR-0101 §3.16). The cell is the ini entries no
+other cell owns: `bcmath.scale`, `include_path`, `error_reporting` and `max_execution_time`. The ten bcmath functions
+with a `$scale` carry `global.read.setting.ini` as an upper bound, and the gate reads the scale at the position the
+generated table names (`param_facts_generated.rs`; `bcsqrt` at 1, `bcpowmod` at 3, the rest at 2): omitted or `null`
+is the read, and a value shown not to be `null` (a literal, a typed parameter, arithmetic) drops it, through the same
+null evidence the time family uses (`ConstArgs::timestamps`, which a residue call now records too). A scale the scan
+cannot show keeps the label, as the clock gate keeps `nondet.time`: no `value-dependent-read` gap is raised, because
+the label is the upper bound there. `bcscale` and `error_reporting` return the old value, so they read on every call,
+and they write only when the argument is given and is not `null`; both gate kinds are `Ini` in `SettingReadGate`.
+`bcceil`, `bcfloor` and `bcround` take no scale and read nothing (witnessed), so they keep no row. `set_time_limit`
+writes `max_execution_time` and reads nothing, and `set_include_path` reads and writes its entry. `ini_get_all` lists
+every entry, so it reads the parent `global.read.setting` and no one cell. `ini_restore` and `ini_set` of a name the
+call does not spell keep the coarse row (S6-core). The `@` operator sets `error_reporting` for the call it silences
+without touching the ini entry, so `@error_reporting()` is `4437` while `ini_get('error_reporting')` is unchanged; the
+operator is not coloured (D4), and the read of `error_reporting()` is the cell's either way.
 
 `fprintf` and `vfprintf` still have no row. Both reads of a printf row are **conditional on the
 call** (`'%d'` reads neither), so the row is an upper bound and not a claim about every call: the
