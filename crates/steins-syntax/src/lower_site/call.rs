@@ -36,6 +36,25 @@ const TIME_FAMILY: [&str; 9] = [
     "gmstrftime",
 ];
 
+/// The residue cell's gated functions (ADR-0101 §3.16): the bcmath calls whose `$scale` decides
+/// the read, and the two that return the old value of the entry they may rewrite. The catalog's
+/// `setting_read_gate` names the same set; the literal arguments show a `null` scale, and the null
+/// evidence shows a non-`null` one.
+const INI_RESIDUE: [&str; 12] = [
+    "bcadd",
+    "bccomp",
+    "bcdiv",
+    "bcdivmod",
+    "bcmod",
+    "bcmul",
+    "bcpow",
+    "bcpowmod",
+    "bcscale",
+    "bcsqrt",
+    "bcsub",
+    "error_reporting",
+];
+
 /// The functions that render a value through the `precision` or `serialize_precision` ini
 /// (ADR-0101 §3.15): the catalog's `precision_gate` names the same set.
 const PRECISION_RENDERERS: [&str; 10] = [
@@ -81,11 +100,12 @@ pub(super) fn function_call(fc: &FunctionCall<'_>, sx: &SiteScope<'_>, out: &mut
         }
         if ["mb_", "iconv", "html", "get_html"].iter().any(|prefix| simple.starts_with(prefix))
             || TIME_FAMILY.contains(&simple.as_str())
+            || INI_RESIDUE.contains(&simple.as_str())
         {
             // The encoding argument can sit at any position up to the fifth (ADR-0101 §3.13), and
             // so can a time-family timestamp or field (`gmmktime` takes six, §3.14).
             site.const_args.literals = literals_of_call(fc);
-            if TIME_FAMILY.contains(&simple.as_str()) {
+            if TIME_FAMILY.contains(&simple.as_str()) || INI_RESIDUE.contains(&simple.as_str()) {
                 site.const_args.timestamps = null_evidence_of_args(&fc.argument_list, cx);
             }
         }

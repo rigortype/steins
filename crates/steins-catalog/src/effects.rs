@@ -395,8 +395,31 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
     };
 
     colored
-        .or_else(|| precision_row(name))
+        .or_else(|| precision_row(name).or_else(|| ini_row(name)))
         .or_else(|| (foldable(name) || certified_pure(name)).then_some(EMPTY))
+}
+
+/// The residue cell's rows (ADR-0101 §3.16, S6e): the bcmath functions read the scale cell where
+/// their `$scale` is omitted or `null` ([`setting_read_gate`](crate::setting_read_gate)), and
+/// `bcscale` and `error_reporting` read it on every call and write it when given a value. The
+/// `include_path` pair reads and writes its entry on every call (`set_include_path` returns the
+/// old value), `set_time_limit` writes `max_execution_time`, and `ini_get_all` reads the parent
+/// `global.read.setting`: its default lists every entry, `precision` and `date.timezone` among
+/// them, so no one cell names its read.
+fn ini_row(name: &str) -> Option<&'static [&'static str]> {
+    const INI_READ: &[&str] = &["global.read.setting.ini"];
+    const INI_WRITE: &[&str] = &["global.write.setting.ini"];
+    const INI_READ_WRITE: &[&str] = &["global.read.setting.ini", "global.write.setting.ini"];
+    const SETTING_READ: &[&str] = &["global.read.setting"];
+    match name.to_ascii_lowercase().as_str() {
+        "bcadd" | "bccomp" | "bcdiv" | "bcdivmod" | "bcmod" | "bcmul" | "bcpow" | "bcpowmod"
+        | "bcsqrt" | "bcsub" => Some(INI_READ),
+        "bcscale" | "error_reporting" | "set_include_path" => Some(INI_READ_WRITE),
+        "get_include_path" => Some(INI_READ),
+        "set_time_limit" => Some(INI_WRITE),
+        "ini_get_all" => Some(SETTING_READ),
+        _ => None,
+    }
 }
 
 /// The float renderers' rows (ADR-0101 §3.15, S6a): they read the precision cell when the value
@@ -2191,6 +2214,27 @@ mod tests {
         for name in ["apache_getenv", "apache_setenv", "setlocale", "ini_get"] {
             let labels = effect_labels(name).unwrap_or(&[]);
             assert!(!labels.iter().any(|l| l.contains(".setting.env")), "{name}: {labels:?}");
+        }
+    }
+
+    /// ADR-0101 S6e: the residue cell's rows. The bcmath functions carry the read as an upper
+    /// bound their `$scale` narrows; `bcscale` and `error_reporting` read and write; the include
+    /// path pair reads and writes; `set_time_limit` writes `max_execution_time`; `ini_get_all`
+    /// reads the parent. `bcceil`, `bcfloor` and `bcround` take no scale and keep no row.
+    #[test]
+    fn the_residue_cell_has_its_rows() {
+        let read = "global.read.setting.ini";
+        let write = "global.write.setting.ini";
+        for name in ["bcadd", "bcsub", "bcpowmod", "bcsqrt", "bcdivmod", "get_include_path"] {
+            assert_eq!(effect_labels(name), Some(&[read][..]), "{name}");
+        }
+        for name in ["bcscale", "error_reporting", "set_include_path"] {
+            assert_eq!(effect_labels(name), Some(&[read, write][..]), "{name}");
+        }
+        assert_eq!(effect_labels("set_time_limit"), Some(&[write][..]));
+        assert_eq!(effect_labels("ini_get_all"), Some(&["global.read.setting"][..]));
+        for name in ["bcceil", "bcfloor", "bcround"] {
+            assert_eq!(effect_labels(name), None, "{name} takes no scale");
         }
     }
 

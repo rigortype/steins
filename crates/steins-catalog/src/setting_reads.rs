@@ -40,6 +40,7 @@
 
 mod clock;
 mod encoding;
+mod ini;
 mod precision;
 
 pub use clock::{ClockGate, clock_gate};
@@ -94,6 +95,7 @@ enum Kind {
     Strftime,
     PregPattern,
     Encoding(encoding::Gate),
+    Ini(ini::Gate),
 }
 
 const SORT_FLAG_CASE: i64 = 8;
@@ -109,6 +111,9 @@ const PATHINFO_BASENAME_PARTS: i64 = 2 | 4 | 8;
 #[must_use]
 pub fn setting_read_gate(name: &str) -> Option<SettingReadGate> {
     let lower = name.to_ascii_lowercase();
+    if let Some(gate) = ini::gate_of(&lower) {
+        return Some(SettingReadGate { cell: SettingCell::Ini, kind: Kind::Ini(gate) });
+    }
     let kind = match lower.as_str() {
         "sort" | "rsort" | "asort" | "arsort" => Kind::DataSortFlags,
         "ksort" | "krsort" => Kind::KeySortFlags,
@@ -146,6 +151,7 @@ impl SettingReadGate {
             Kind::CaseInsensitive => &[4],
             Kind::StrNat => &[0, 1],
             Kind::Encoding(gate) => gate.positions(),
+            Kind::Ini(gate) => gate.positions(),
             Kind::Ctype
             | Kind::EscapeShellArg
             | Kind::StripTags
@@ -207,7 +213,29 @@ impl SettingReadGate {
                 _ => None,
             },
             Kind::Encoding(gate) => gate.reads(args),
+            Kind::Ini(gate) => gate.reads(args),
         }
+    }
+
+    /// Whether the read happens whatever the deciding argument is, so the caller need not show
+    /// it (`bcscale`, `error_reporting`: both return the old value).
+    #[must_use]
+    pub const fn always_reads(self) -> bool {
+        matches!(self.kind, Kind::Ini(ini::Gate::OldValue))
+    }
+
+    /// Whether an argument the scan cannot show keeps the read label, rather than raising the
+    /// `value-dependent-read` gap: the clock gate's rule (ADR-0101 §3.16), for a bcmath scale.
+    #[must_use]
+    pub const fn keeps_undecided(self) -> bool {
+        matches!(self.kind, Kind::Ini(ini::Gate::Scale(_)))
+    }
+
+    /// Whether the deciding argument is read as a value shown **not to be `null`**, through the
+    /// time family's null evidence, rather than as a literal alone (ADR-0101 §3.16).
+    #[must_use]
+    pub const fn reads_on_null(self) -> bool {
+        matches!(self.kind, Kind::Ini(ini::Gate::Scale(_)))
     }
 
     /// Whether the call may write the cell the gate names, at a call whose deciding arguments
@@ -218,6 +246,7 @@ impl SettingReadGate {
     pub fn writes(self, args: &[Option<GateArg<'_>>]) -> bool {
         match self.kind {
             Kind::Encoding(gate) => gate.writes(args),
+            Kind::Ini(gate) => gate.writes(args),
             _ => true,
         }
     }
