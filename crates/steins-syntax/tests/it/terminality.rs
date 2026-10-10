@@ -171,12 +171,17 @@ fn a_try_terminates_when_its_finally_does_or_every_live_arm_does() {
         ("try { return 1; } catch (Throwable $e) { return 0; }", Terminates),
         ("try { $x = f(); } catch (Throwable $e) { return 0; }", FallsThrough),
         ("try { return f(); } catch (Throwable $e) { echo 1; }", FallsThrough),
-        // A block that cannot throw leaves every catch dead.
+        // A block that cannot throw leaves every catch dead: an empty statement
+        // and a `return` of a literal value are all it may hold.
         ("try { return 1; } catch (Throwable $e) { echo 1; }", Terminates),
-        ("try { $a = [1 => $k]; return 1; } catch (Throwable $e) { echo 1; }", Terminates),
-        // A sign over a local, and a local as an array key, can throw.
+        ("try { ; return [1 => 'a', 'b' => -1.5]; } catch (Throwable $e) { echo 1; }", Terminates),
+        ("try { return; } catch (Throwable $e) { echo 1; }", Terminates),
+        // An assignment can throw (a destructor, a typed reference), and so can a
+        // sign over a local, a local as an array key, and a returned local.
+        ("try { $a = 1; return 1; } catch (Throwable $e) { echo 1; }", FallsThrough),
         ("try { return -$x; } catch (Throwable $e) { echo 1; }", FallsThrough),
-        ("try { $a = [$k => 1]; return 1; } catch (Throwable $e) { echo 1; }", FallsThrough),
+        ("try { return [$k => 1]; } catch (Throwable $e) { echo 1; }", FallsThrough),
+        ("try { return $x; } catch (Throwable $e) { echo 1; }", FallsThrough),
         ("try { $x = 1; } finally { $y = 2; }", FallsThrough),
         // A returning `finally` replaces whatever was pending.
         ("try { return 1; } finally { return 2; }", Terminates),
