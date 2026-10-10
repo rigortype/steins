@@ -367,6 +367,11 @@
 # strict-floor id in POSSIBLY_EXPECTED, by the registry's floor. Same findings, other table.
 "thephpleague/flysystem" = 3
 
+# symfony/process: 0 → 1  2026-10-11 (issue #943, #1033 S1): +1 phpdoc.param-mismatch at
+# `Tests/ExecutableFinderTest.php:155`, inside a try body the walker now reaches. TRUE: the
+# test passes `false` to a parameter declared `@param string|null`.
+"symfony/process" = 1
+
 # 0 → 1 (+1) with ADR-0043 stage 4. `ChoiceQuestionTest` passes a literal array
 # `[..., null]` to `ChoiceQuestion::__construct(@param array<string|bool|int|
 # float|\Stringable> $choices)`; `null` is a member of none of the union arms —
