@@ -99,7 +99,7 @@ impl SettingCell {
 /// | precision | `precision`, `serialize_precision` | `EG(precision)` (`smart_str_append_double`, the float-to-string conversions) and `PG(serialize_precision)` (`var_export`, `json_encode`, `serialize`, `var_dump`) |
 /// | timezone | `date.timezone` | `guess_timezone`, once no `date_default_timezone_set` has run |
 /// | encoding | `default_charset`, `internal_encoding`, `input_encoding`, `output_encoding`, `mbstring.internal_encoding`, `iconv.{internal,input,output}_encoding`, `mbstring.{language,detect_order,http_input,http_output,substitute_character,strict_detection}` | the defaults of the `mb_*`, `iconv_*` and HTML functions that take an `$encoding`, of `mb_ereg*` and `mb_split`, and of `mb_detect_encoding`, `mb_language`, `mb_http_input`, `mb_http_output` and `mb_substitute_character` |
-/// | ini | `bcmath.scale`, `include_path`, `error_reporting` | `bc*` without a scale, `get_include_path`, `error_reporting()` |
+/// | ini | `bcmath.scale`, `include_path`, `error_reporting`, `max_execution_time` | `bc*` without a scale, `get_include_path`, `error_reporting()`; `set_time_limit` writes `max_execution_time` (ADR-0101 §3.16) |
 ///
 /// Five more entries feed the encoding readers and also reset the mb-regex encoding:
 /// `default_charset`, `internal_encoding`, `input_encoding`, `output_encoding` and
@@ -139,6 +139,7 @@ const INI_NAMES: &[(&str, SettingCell)] = &[
     ("bcmath.scale", SettingCell::Ini),
     ("include_path", SettingCell::Ini),
     ("error_reporting", SettingCell::Ini),
+    ("max_execution_time", SettingCell::Ini),
 ];
 
 /// The cell the ini entry `name` feeds, or `None` for a name no cell owns.
@@ -295,11 +296,12 @@ mod tests {
             ("bcmath.scale", Ini),
             ("include_path", Ini),
             ("error_reporting", Ini),
+            ("max_execution_time", Ini),
         ] {
             assert_eq!(ini_cell(name), Some(cell), "{name}");
         }
         for name in [
-            "", "display_errors", "memory_limit", "max_execution_time", "pcre.backtrack_limit",
+            "", "display_errors", "memory_limit", "pcre.backtrack_limit",
             "mbstring.encoding_translation", "mbstring.foo",
             "date.default_latitude", "intl.default_locale", "setlocale", "locale",
             // The engine finds an entry by an exact, case-sensitive lookup.

@@ -51,13 +51,17 @@ pub(super) fn narrow_labels(
         let write = gate.cell().write_label();
         labels.retain(|label| *label != write);
     }
-    match args.and_then(|args| gate.reads(&args)) {
+    let verdict = if gate.always_reads() { Some(true) } else { args.and_then(|a| gate.reads(&a)) };
+    match verdict {
         Some(true) => None,
         Some(false) => {
             let read = gate.cell().read_label();
             labels.retain(|label| *label != read);
             None
         }
+        // A residue read the call leaves open keeps its label, as the clock's does (ADR-0101
+        // §3.14, §3.16): the label is the upper bound, and no gap is raised.
+        None if gate.keeps_undecided() => None,
         None => unreadable_mode(builtin, labels),
     }
 }
@@ -240,6 +244,8 @@ fn gate_args<'c>(
             .map(|&position| {
                 if position >= arity {
                     Some(GateArg::Omitted)
+                } else if gate.reads_on_null() {
+                    timestamp((cx, frame), name, consts, position)
                 } else {
                     argument((cx, frame), name, consts, position)
                 }
