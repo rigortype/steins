@@ -755,7 +755,9 @@ fn a_terminating_if_stops_shielding_where_its_list_ends() {
         "<?php\nfunction f(): void { if (!isset($x)) { try { echo 1; } finally {} } echo $x; }\n",
         "x",
     );
-    silent("<?php\nfunction f(): void { if (!isset($x)) { try { return; } finally {} } echo $x; }\n");
+    silent(
+        "<?php\nfunction f(): void { if (!isset($x)) { try { return; } finally {} } echo $x; }\n",
+    );
     // The guard names another variable.
     fires("<?php\nfunction f(): void { if (!isset($y)) { return; } echo $x; }\n", "x");
     // The shield does not climb out of the list the guard sits in.

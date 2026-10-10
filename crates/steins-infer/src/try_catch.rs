@@ -93,15 +93,17 @@ pub(crate) fn walk_try(
             let mut henv = cenv.clone();
             let mut hstore = cstore.clone();
             bind_caught(w, &arm.clause, &mut henv, &mut hstore);
+            let trace = &arm.trace;
             let flow =
-                walk_trace(w, folder, &arm.trace, &mut henv, &mut hstore, descent, facts, true, out);
+                walk_trace(w, folder, trace, &mut henv, &mut hstore, descent, facts, true, out);
             falls |= flow == Flow::FellThrough;
         }
     }
 
     let mut finally_terminates = false;
     if let (Some(trace), Some((mut fenv, mut fstore))) = (finally, finally_entry) {
-        let flow = walk_trace(w, folder, trace, &mut fenv, &mut fstore, descent, facts, guarded, out);
+        let flow =
+            walk_trace(w, folder, trace, &mut fenv, &mut fstore, descent, facts, guarded, out);
         finally_terminates = flow == Flow::Terminated;
     }
 
