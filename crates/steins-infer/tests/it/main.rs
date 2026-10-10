@@ -62,6 +62,7 @@ mod dump_surface;
 mod dynamic_code_effects;
 mod effects;
 mod embedded_writes;
+mod empty_effect_rows;
 mod engine_hierarchy_keys;
 mod engine_method_reach;
 mod enforced_top_return;
