@@ -60,7 +60,7 @@ level is a `switch` is `break N`. PHP 8.5.11 says so at compile time:
 PHP rejects a jump out of a `finally` at compile time. A `finally` that
 terminates replaces the jump: `try { break; } finally { return; }` returns, so
 such a jump lands nowhere, for a switch arm and for a loop's `break_free` and
-`nested_jumps_only` alike, and the presence pass drops the states it parked.
+`continue_free` alike, and the presence pass drops the states it parked.
 
 ### 2.2 The walker: `MatchArmT::lands`
 

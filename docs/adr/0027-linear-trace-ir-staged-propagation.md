@@ -385,9 +385,19 @@ jump lands after the switch. The gate therefore refuses every multi-level
 jump until those passes count levels, and then relaxes to the exact one. The
 cost is precision only: such a `do`-`while` keeps its successor live.
 
-*Pointer (2026-10-11):* ADR-0103 makes both passes count levels (#904). This
-gate is unchanged by it; the relaxation to `break_free && continue_free` is its
-own slice (#1033 S2b) and waits on ADR-0103's ratification.
+*Amendment (2026-10-11, PENDING ratification with ADR-0103):* ADR-0103 makes
+both passes count levels (#904), and the gate relaxes to the exact question
+above (#1033 S2b). `StmtKind::DoWhile::nested_jumps_only` is replaced by
+`continue_free`, "no `continue` targets this loop", and the walker, the
+`stmt_end` row and the presence pass all read `break_free && continue_free`.
+A jump aimed at a nested loop or `switch` is that construct's own, however many
+levels it climbs inside the body, so `foreach (…) { foreach (…) { break 2; } }
+return;` now terminates the loop. `break N`, `continue N` aimed at this loop,
+an outer loop, a level that is not a literal, and every `goto` are still
+refused (`break_free` owns all but the `continue`); a `break` or `continue` in
+a `try` whose `finally` terminates lands nowhere and no longer refuses.
+`continue` in a `switch` is `break` there (PHP 8.5.11 warns at compile time),
+so it is the switch's at level 1 and this loop's at level 2.
 
 **The header is not read.** The `while (true)` rule above is deliberately not
 extended to `do`-`while`, so `do { … } while (true);` still falls through in
@@ -398,7 +408,7 @@ would silence a successor PHP does reach. The same hole exists for `while`
 and is tracked on its own (#902); this amendment does not widen it.
 
 **The syntactic and presence passes agree.** The `stmt_end` row for
-`do`-`while` answers `Terminates` when the body passes `nested_jumps_only`
+`do`-`while` answers `Terminates` when the body passes `break_free && continue_free`
 and its `block_end` terminates, and otherwise keeps the infinite-loop row it
 had. `type.return-missing` and its `maybe-` sibling stop reporting a function
 that ends in such a loop. A body whose end is undecided, such as one holding
