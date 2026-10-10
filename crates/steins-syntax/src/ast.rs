@@ -3456,12 +3456,17 @@ impl BodyEnd {
 /// [`Stmt::end`]. Not "the last statement decides": the first [`BodyEnd::Terminates`] wins
 /// outright (everything after is unreachable, so `[switch{…}, return 1;]` answers
 /// `Terminates`, not the `switch`'s `Unknown`); an [`BodyEnd::Unknown`] entry is remembered but
-/// not stopped on; an empty list answers [`BodyEnd::FallsThrough`] (the identity).
+/// not stopped on; an empty list answers [`BodyEnd::FallsThrough`] (the identity). A
+/// terminator followed by a statement that holds a label ([`Stmt::holds_label`]) is
+/// `Unknown`: a `goto` may land there and run on (ADR-0103, the CST fold's rule).
 #[must_use]
 pub fn body_end(stmts: &[Stmt]) -> BodyEnd {
     let mut undecided = false;
-    for stmt in stmts {
+    for (i, stmt) in stmts.iter().enumerate() {
         match stmt.end {
+            BodyEnd::Terminates if stmts[i + 1..].iter().any(|s| s.holds_label) => {
+                return BodyEnd::Unknown;
+            }
             BodyEnd::Terminates => return BodyEnd::Terminates,
             BodyEnd::Unknown => undecided = true,
             BodyEnd::FallsThrough => {}

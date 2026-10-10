@@ -431,3 +431,32 @@ function into_case(int $k): void {
     // lets it, even when `$c` is false); 20 the reviewer's case-to-case `goto`.
     assert_eq!(lines_of(src, "call.on-null"), vec![4, 12, 20]);
 }
+
+#[test]
+fn a_terminator_then_a_label_does_not_end_a_case() {
+    // The architect's `p1` (round 3). Case 1 runs on past `out:` into case 2, so every
+    // PHP path through `p1` returns and line 10 is dead; `p1b` reaches line 18 with an
+    // `X`. Read as terminating, case 1 was structured and its resumed run fell onto
+    // the successor with `$o` null.
+    let src = "<?php
+final class X { public function m(): int { return 1; } }
+function p1(int $k, bool $c): void {
+    $o = new X();
+    switch ($k) {
+        case 1: if ($c) { goto out; } return; out: $o = null;
+        case 2: $o = new X(); return;
+        default: return;
+    }
+    $o->m();
+}
+function p1b(int $k, bool $c): void {
+    $o = new X();
+    switch ($k) {
+        case 1: if ($c) { goto out; } return; out: $o = null;
+        case 2: $o = new X(); break;
+    }
+    $o->m();
+}
+";
+    assert_eq!(lines_of(src, "call.on-null"), Vec::<u32>::new());
+}
