@@ -1378,35 +1378,67 @@ fn fold_reads_ambient_setting(name: &str, args: &[FoldArg]) -> bool {
     }
 }
 
-/// Whether a float literal reaches a parameter the builtin declares as `string` (ADR-0101 §3.21,
-/// #1024): weak mode coerces it to text with the ambient `precision`, which the runner leaves at
-/// the default, so `strlen(1.5)` is left to the row (`global.read.setting.precision`) and not
-/// folded to `3`. A union counts when it names `string` and neither `float` nor `mixed`, since
-/// those keep the float as it is (`string|int` takes `1.5` as text). A non-finite float counts too.
-/// A variadic tail takes the last declared type. A float inside an array argument is not looked
-/// at: which builtins stringify the elements is not in the catalog, so `array_unique([1.5])`
-/// keeps folding (the effect label stays unset, D4).
+/// Whether a float literal reaches a place where the builtin turns it into text with the ambient
+/// `precision` (ADR-0101 §3.21, #1024), so the call is left to the row
+/// (`global.read.setting.precision`) and not folded at the runner's default: `strlen(1.5)` is not
+/// `3`. Three places count, all by what the call shows and none by the effect labels, which the
+/// fold seam does not see:
+///
+/// - a parameter declared `string`, or a union naming `string` and neither `float` nor `mixed`
+///   (`string|int` takes `1.5` as text), with a float literal at it, finite or not; a variadic
+///   tail takes the last declared type;
+/// - a parameter declared `array|string` with an array literal holding a float at any depth
+///   (`str_replace('x', 'y', [1.5])` stringifies the element);
+/// - a printf-family call whose literal format has a `%s` that names a float value (`%d`, `%e` and
+///   `%F` render a float without `precision`; a format the reader declines is already refused for
+///   the locale). A vector (`vsprintf`) counts when its array holds a float and the format has any
+///   `%s`.
+///
+/// An array handed to a parameter declared plain `array` is not looked at: which builtins
+/// stringify the elements (`array_unique`, loose `in_array`) is not in the declared type, so those
+/// keep folding (the effect label stays unset, D4).
 fn fold_coerces_float_to_string(name: &str, args: &[FoldArg]) -> bool {
-    fn takes_text(declared: &str) -> bool {
-        let (mut text, mut float) = (false, false);
-        for member in declared.trim_start_matches('?').split('|') {
-            match member.trim() {
-                "string" => text = true,
-                "float" | "mixed" => float = true,
-                _ => {}
-            }
+    fn holds_float(arg: &FoldArg) -> bool {
+        match arg {
+            FoldArg::Float(_) => true,
+            FoldArg::Array(entries) => entries.iter().any(|(_, entry)| holds_float(entry)),
+            _ => false,
         }
-        text && !float
     }
-    if !args.iter().any(|arg| matches!(arg, FoldArg::Float(_))) {
+    fn members(declared: &str) -> impl Iterator<Item = &str> {
+        declared.trim_start_matches('?').split('|').map(str::trim)
+    }
+    fn takes_text(declared: &str) -> bool {
+        let named = |want: &str| members(declared).any(|m| m == want);
+        named("string") && !named("float") && !named("mixed")
+    }
+    fn takes_text_array(declared: &str) -> bool {
+        members(declared).any(|m| m == "array") && members(declared).any(|m| m == "string")
+    }
+    if !args.iter().any(holds_float) {
         return false;
+    }
+    if let Some(family) = steins_catalog::printf_family(name) {
+        let Some(FoldArg::Str(format)) = args.get(family.format_position()) else { return false };
+        let Some(reach) = steins_catalog::format_reach(format) else { return false };
+        let shown = &args[family.format_position() + 1..];
+        let is_text = |r: &steins_catalog::ArgReach| *r == steins_catalog::ArgReach::Object;
+        return if family.is_vector() {
+            reach.iter().any(is_text) && shown.iter().any(holds_float)
+        } else {
+            reach.iter().zip(shown).any(|(r, v)| is_text(r) && holds_float(v))
+        };
     }
     let Some(facts) = steins_catalog::param_facts(name) else { return false };
     args.iter().enumerate().any(|(position, arg)| {
         let declared = facts.params.get(position).or_else(|| {
             facts.variadic.first().filter(|first| **first <= position).and(facts.params.last())
         });
-        matches!(arg, FoldArg::Float(_)) && declared.is_some_and(|d| takes_text(d))
+        declared.is_some_and(|d| match arg {
+            FoldArg::Float(_) => takes_text(d),
+            FoldArg::Array(_) => takes_text_array(d) && holds_float(arg),
+            _ => false,
+        })
     })
 }
 
@@ -1834,6 +1866,18 @@ mod ambient_gate_tests {
         assert!(!refuses("round", &[f(1.5), FoldArg::Int(1)]));
         assert!(!refuses("str_repeat", &[s("a"), FoldArg::Int(2)]));
         assert!(!refuses("no_such_builtin", &[f(1.5)]));
+        let list = |v| FoldArg::Array(vec![(None, v)]);
+        assert!(refuses("str_replace", &[s("x"), s("y"), list(f(1.5))]));
+        assert!(!refuses("str_replace", &[s("x"), s("y"), list(s("1.5"))]));
+        assert!(refuses("sprintf", &[s("%s"), f(1.5)]));
+        assert!(refuses("sprintf", &[s("%5s"), f(1.5)]));
+        assert!(refuses("sprintf", &[s("%-5s|"), f(1.5)]));
+        assert!(refuses("sprintf", &[s("%1$s"), f(1.5)]));
+        assert!(refuses("sprintf", &[s("%d %s"), FoldArg::Int(1), f(1.5)]));
+        assert!(!refuses("sprintf", &[s("%d"), f(1.5)]));
+        assert!(!refuses("sprintf", &[s("%s %d"), s("a"), f(1.5)]));
+        assert!(!refuses("sprintf", &[s("%s"), s("1.5")]));
+        assert!(!refuses("array_unique", &[list(f(1.5))]));
     }
 
     /// The gate is in the seam: `strlen(1.5)` never reaches the engine, `strlen('1.5')` and
