@@ -559,3 +559,26 @@ fn a_function_call_argument_is_left_for_the_checker() {
         "the out-parameter candidate must survive onto the scope"
     );
 }
+
+// A write through `$GLOBALS['lit']` binds the global `$lit` (issue #902): at file scope
+// that is the local, and elsewhere binding it too only silences. A key named at run time
+// binds a name nobody can list, so the pass dams.
+
+#[test]
+fn a_write_through_dollar_globals_with_a_literal_key_binds_that_name() {
+    assert_eq!(definite("echo $n;"), one("n"), "the control");
+    assert_eq!(definite("$GLOBALS['n'] = 1; echo $n;"), none());
+    assert_eq!(definite("$GLOBALS['n']['k'] = 1; echo $n;"), none());
+    assert_eq!(definite("[$GLOBALS['n'], $m] = [1, 2]; echo $n;"), none());
+    assert_eq!(definite("foreach ([1] as $GLOBALS['n']) {} echo $n;"), none());
+    // The twin: another name stays unbound.
+    assert_eq!(definite("$GLOBALS['other'] = 1; echo $n;"), one("n"));
+    // A branch keeps its some-paths verdict.
+    assert_eq!(maybe("if ($c) { $GLOBALS['n'] = 1; } echo $n;"), one("n"));
+}
+
+#[test]
+fn a_write_through_dollar_globals_with_a_dynamic_key_dams_the_pass() {
+    assert_eq!(definite("$GLOBALS[$c] = 1; echo $n;"), none());
+    assert_eq!(maybe("if ($d) { $GLOBALS[$c] = 1; } echo $n;"), none());
+}

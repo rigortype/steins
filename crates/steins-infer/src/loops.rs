@@ -162,9 +162,11 @@ fn loop_flow(break_free: bool, verdict: Certainty) -> Flow {
 /// least once, so a body that terminates on every path decides the successor.
 ///
 /// The header's verdict is deliberately not consulted, unlike [`loop_flow`]'s: a
-/// `do { … } while (true);` falls through here. The entry env misses writes that
-/// reach a tested name through an alias the sets do not name (`$GLOBALS['go']` at
-/// file scope), so a `Yes` on it would silence a successor PHP does reach.
+/// `do { … } while (true);` falls through here. The writes sets name a
+/// `$GLOBALS['go']` write as a write of `go` (issue #902), but the entry env can
+/// still miss a write that reaches a tested name through an alias they cannot name
+/// (an include, a callee), so a `Yes` on it would silence a successor PHP does
+/// reach. Reading the header once the sets are trusted is a precision follow-up.
 ///
 /// The body needs a jump gate. `body_flow` counts a `break` or `continue` as
 /// terminating its path — it leaves the block it is written in — but a `break` of

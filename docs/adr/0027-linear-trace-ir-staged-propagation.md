@@ -544,3 +544,29 @@ and an interface, and a `catch` without a variable. Also
 amendment flips in `return_missing.rs`, `variable_undefined.rs`,
 `trace_annotation.rs` and `match_unhandled_throw.rs` (a `catch
 (RuntimeException)` does not absorb an `UnhandledMatchError`, witnessed).
+
+## Amendment (2026-10-11): a `$GLOBALS` write is a write of the aliased name — PENDING ratification
+
+Issue #902, slice S3 of the walker coverage run (#1033, decision D5). At file
+scope `$GLOBALS['go']` is the local `$go`, but the writes sets recorded
+`$GLOBALS['go'] = false` as a write of `GLOBALS`. The entry env of a loop
+kept `$go = true`, the header read `Yes`, and the successor was dead to the
+walk while PHP reaches it. Witnessed on PHP 8.5.11: assignment, compound
+assignment, `??=`, `unset`, `[]`, an offset or property write, `++`/`--`, a
+destructuring or `foreach` target, a reference (`$r = &$GLOBALS['x']`) and a
+by-reference argument all write the global; `$GLOBALS = []` is a compile-time
+fatal since 8.1, so only element writes exist.
+
+The rule table lives in one module (`lower_globals.rs`), and every writes
+collector asks it. A literal key is a write of that name in every scope: in a
+function it also forgets a same-named local, which costs precision only. A key
+that is not a literal (or is a string with no UTF-8 spelling) is recorded as
+`OpaqueConstruct::VariableVariable`, a variable named at run time, and poisons
+the scope as `extract` and `$$v` do; a dynamic-key element handed to any call
+poisons too, because the callee's signature cannot be asked for an unnamed
+variable. The collectors changed: `collect_assign_writes`,
+`collect_call_vars`, the by-ref argument root of `call_invalidation`,
+`scan_opaque_walk`, `bind_lvalue_roots` (binding presence) and the callback
+write count of `collect_callable_assigns`. A `do`-`while` header is still not
+read for reachability (ADR-0027's 2026-10-02 amendment); trusting the sets
+there is a precision follow-up.

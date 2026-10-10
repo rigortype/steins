@@ -26,6 +26,7 @@ use crate::lower_expr::{
     first_class_method_ref, first_class_static_ref, lower_int_literal, lower_method_call,
     lower_static_call, prop_fetch_of,
 };
+use crate::lower_globals::push_lvalue_globals;
 use crate::lower_scope::{arrow_def_offset, closure_def_offset};
 use crate::lower_stmt::{
     collect_assign_writes, collect_call_vars, collect_direct_vars, node_poisons,
@@ -661,6 +662,7 @@ fn collect_callable_assigns(
             // Count every direct-variable write target in the lvalue.
             let mut targets = Vec::new();
             collect_direct_vars(&Node::Expression(a.lhs), &mut targets);
+            push_lvalue_globals(a.lhs, &mut targets);
             for t in &targets {
                 *writes.entry(t.clone()).or_insert(0) += 1;
             }
@@ -682,6 +684,7 @@ fn collect_callable_assigns(
             ) {
                 let mut t = Vec::new();
                 collect_direct_vars(&Node::Expression(u.operand), &mut t);
+                push_lvalue_globals(u.operand, &mut t);
                 for v in t {
                     *writes.entry(v).or_insert(0) += 1;
                 }
@@ -690,6 +693,7 @@ fn collect_callable_assigns(
         Node::UnaryPostfix(u) => {
             let mut t = Vec::new();
             collect_direct_vars(&Node::Expression(u.operand), &mut t);
+            push_lvalue_globals(u.operand, &mut t);
             for v in t {
                 *writes.entry(v).or_insert(0) += 1;
             }
@@ -697,6 +701,7 @@ fn collect_callable_assigns(
         Node::ForeachValueTarget(t) => {
             let mut vs = Vec::new();
             collect_direct_vars(&Node::Expression(t.value), &mut vs);
+            push_lvalue_globals(t.value, &mut vs);
             for v in vs {
                 *writes.entry(v).or_insert(0) += 1;
             }
@@ -705,6 +710,8 @@ fn collect_callable_assigns(
             let mut vs = Vec::new();
             collect_direct_vars(&Node::Expression(t.key), &mut vs);
             collect_direct_vars(&Node::Expression(t.value), &mut vs);
+            push_lvalue_globals(t.key, &mut vs);
+            push_lvalue_globals(t.value, &mut vs);
             for v in vs {
                 *writes.entry(v).or_insert(0) += 1;
             }

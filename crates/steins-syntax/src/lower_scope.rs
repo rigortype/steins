@@ -22,6 +22,7 @@ use crate::lower_effect::{
     EffectScanCx, ReceiverWrites, body_aliased, collect_body_callables, scan_method_calls,
 };
 use crate::lower_expr::lower_arg_value;
+use crate::lower_globals::{GlobalsKey, globals_fetch};
 use crate::lower_guards::scan_guard_regions;
 use crate::lower_presence::{maybe_undefined_reads, push_guard_root, subtree_has_goto};
 use crate::lower_site::{
@@ -1013,7 +1014,19 @@ pub(crate) fn bind_lvalue_roots(expr: &Expression<'_>, acc: &mut VarUsage) {
     }
     match expr.unparenthesized() {
         Expression::Variable(v) => acc.bind_variable(v),
-        Expression::ArrayAccess(aa) => bind_lvalue_roots(aa.array, acc),
+        // `$GLOBALS['x'] = …` binds the global `$x` (issue #902): at file scope that is the
+        // local, and elsewhere binding it too only silences. A key named at run time
+        // binds a name nobody can list.
+        Expression::ArrayAccess(aa) => {
+            match globals_fetch(expr) {
+                Some(GlobalsKey::Literal(name)) => {
+                    acc.bound.insert(name);
+                }
+                Some(GlobalsKey::Dynamic) => acc.dammed = true,
+                None => {}
+            }
+            bind_lvalue_roots(aa.array, acc);
+        }
         Expression::ArrayAppend(ap) => bind_lvalue_roots(ap.array, acc),
         Expression::Access(Access::Property(pa)) => bind_lvalue_roots(pa.object, acc),
         Expression::Access(Access::NullSafeProperty(pa)) => bind_lvalue_roots(pa.object, acc),

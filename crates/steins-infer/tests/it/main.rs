@@ -81,6 +81,7 @@ mod foreach_elements;
 mod foreach_non_iterable;
 mod function_identity;
 mod generics_carry;
+mod globals_write;
 mod guard_conjunct_writes;
 mod guard_join_cross_lane;
 mod guard_positions;
