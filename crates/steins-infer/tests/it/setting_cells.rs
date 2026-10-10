@@ -314,7 +314,7 @@ fn the_locale_verdicts_of_s1_to_s5_are_unchanged() {
     }
     labels("", "setlocale(LC_ALL, 'C')", &[write]);
     labels("", "setlocale(LC_ALL, '0')", &[LOCALE_READ]);
-    labels("", "setlocale(LC_ALL, '')", &[COARSE_READ, write]);
+    labels("", "setlocale(LC_ALL, '')", &[ENV_READ, write]);
     // A reader the call cannot decide is the gap and no label, whatever cell the ini calls name.
     let s = row("string $p, string $s", "return preg_match($p, $s);");
     assert!(s.labels.is_empty() && s.gaps.contains(&"value-dependent-read"), "{s:?}");
