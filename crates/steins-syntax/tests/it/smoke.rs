@@ -1327,6 +1327,41 @@ fn top_level_and_namespaced_declarations_are_unconditional() {
 }
 
 #[test]
+fn a_braced_namespace_body_is_unconditional_like_an_unbraced_one() {
+    // ADR-0049 A2i, issue #973: `namespace A { … }` is the same declaration scope
+    // as `namespace A;`. The braced body is a `Block` node, and before the fix it
+    // tainted every declaration beneath it.
+    let braced = SourceTree::parse(
+        "<?php\nnamespace A {\n  class C {}\n  function f(): void {}\n}\nnamespace {\n  class G {}\n}\n",
+    );
+    let unbraced = SourceTree::parse("<?php\nnamespace A;\nclass C {}\nfunction f(): void {}\n");
+    assert!(!class(&braced, "C").conditional, "a class in a braced namespace is unconditional");
+    assert!(!class(&braced, "G").conditional, "a class in a braced global namespace is unconditional");
+    assert!(!braced.functions()[0].conditional, "a function in a braced namespace is unconditional");
+    assert_eq!(class(&braced, "C").conditional, class(&unbraced, "C").conditional);
+    assert_eq!(braced.functions()[0].conditional, unbraced.functions()[0].conditional);
+}
+
+#[test]
+fn a_declaration_under_a_statement_in_a_braced_namespace_stays_conditional() {
+    // The fix admits the namespace BODY, not the statements in it: an `if` inside
+    // the braces still makes its class conditional, exactly as it does unbraced.
+    let tree = SourceTree::parse(
+        "<?php\nnamespace A {\n  if (!class_exists('C')) {\n    class C {}\n  }\n}\n",
+    );
+    assert!(class(&tree, "C").conditional, "a class inside `if` in a braced namespace is conditional");
+}
+
+#[test]
+fn a_function_in_a_top_level_bare_block_is_hoisted_like_php_hoists_it() {
+    // PHP's `zend_compile_top_stmt` recurses into a statement list, so a `{ … }`
+    // at file level declares its functions at compile time (verified on PHP 8.5:
+    // a call above the block succeeds). Admitting `Block` lowers them as such.
+    let tree = SourceTree::parse("<?php\n{ function hoisted(): int { return 1; } }\n");
+    assert!(!tree.functions()[0].conditional);
+}
+
+#[test]
 fn a_class_guarded_by_class_exists_is_conditional() {
     let tree = SourceTree::parse(
         "<?php\nif (!class_exists('C')) {\n  class C {}\n}\n",

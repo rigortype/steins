@@ -15,6 +15,7 @@ mod assign_margin;
 mod binding;
 mod bool_literal_narrowing;
 mod branch_analysis;
+mod braced_namespace_never;
 mod builtin_call_ladder;
 mod builtin_method_returns;
 mod builtin_param_types;
