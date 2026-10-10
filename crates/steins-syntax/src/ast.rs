@@ -3374,6 +3374,12 @@ pub enum StmtKind {
         poisons: bool,
         may_return: bool,
     },
+    /// A `goto` label (ADR-0103). A walker treats it as [`Self::Barrier`]: control
+    /// may arrive from any `goto` naming it, with anything bound. It is a variant of
+    /// its own so that the statement that holds it ([`Stmt::holds_label`]) can resume
+    /// a walk a terminator ended — a `goto` lowers as a [`Self::LoopJump`] that ends
+    /// its list, and the code after it is dead only up to the next label.
+    Label { span: Span },
 }
 
 // reachability foundation (ADR-0078, issue #199)
@@ -3538,6 +3544,13 @@ pub struct Stmt {
     /// (issue #928) — see [`GuardRegion`]. Read off the CST by `lower_stmt`'s central fill,
     /// for the four statement kinds [`Self::string_contexts`] reads and no other.
     pub guards: Vec<GuardRegion>,
+    /// Whether a `goto` from outside this statement can land in it (ADR-0103): it is
+    /// a [`StmtKind::Label`], or a structured `if` or `try` one of whose sub-traces
+    /// holds one. PHP refuses a `goto` into a loop or a `switch`, so a label inside
+    /// one is reached only from within it and does not count here. A walker that a
+    /// terminator stopped resumes at the next statement that holds a label, with
+    /// nothing known, instead of calling the rest of the list dead.
+    pub holds_label: bool,
 }
 
 /// The functions the analyzer folds as **existence guards** (ADR-0049 §4 / N3, issues #198
@@ -3701,6 +3714,7 @@ impl Stmt {
             has_terminator: false,
             runs: Runs::default(),
             guards: Vec::new(),
+            holds_label: false,
         }
     }
 }

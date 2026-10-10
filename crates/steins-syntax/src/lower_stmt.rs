@@ -111,6 +111,11 @@ pub(crate) fn lower_stmt(s: &Statement<'_>, out: &mut Vec<Stmt>) {
         Statement::Break(_) | Statement::Continue(_) => {
             Stmt::lowered(StmtKind::LoopJump { span: stmt_span }, Vec::new())
         }
+        // An unconditional `goto` ends its list too (ADR-0103): what follows it is
+        // reached only through a label, which resumes the walk ([`StmtKind::Label`]).
+        // The table of rows is on [`crate::lower_jump`].
+        Statement::Goto(_) => Stmt::lowered(StmtKind::LoopJump { span: stmt_span }, Vec::new()),
+        Statement::Label(_) => Stmt::lowered(StmtKind::Label { span: stmt_span }, Vec::new()),
         // The other three loop forms are structured too (issue #650), each with the
         // one difference its own semantics forces — see the variant docs.
         Statement::For(f) => lower_for(s, f),
@@ -136,7 +141,7 @@ pub(crate) fn lower_stmt(s: &Statement<'_>, out: &mut Vec<Stmt>) {
                 .expect("guarded above");
             Stmt::lowered(StmtKind::OffsetUnset { base, key }, Vec::new())
         }
-        // Everything else (declarations, `goto`, labels, `declare`, other unsets,
+        // Everything else (declarations, `declare`, other unsets,
         // `__halt_compiler`, …) stays a full Barrier: the sound floor for
         // anything whose write set the lowering cannot bound.
         _ => Stmt::lowered(StmtKind::Barrier, Vec::new()),
@@ -151,6 +156,7 @@ pub(crate) fn lower_stmt(s: &Statement<'_>, out: &mut Vec<Stmt>) {
         end: stmt_end(s),
         has_terminator: subtree_has_function_exit(&Node::Statement(s)),
         runs,
+        holds_label: holds_label(&stmt.kind),
         ..stmt
     });
 }
@@ -1503,7 +1509,7 @@ fn collect_switch_arms<C>(
         }
         let raw = case.statements();
         let (body, ends_break) = strip_trailing_break(raw);
-        let trace = lower_case_trace(body);
+        let trace = lower_trace(body);
         if !ends_break && Some(position) != last_body && !case_body_ends(body) {
             // The body would fall through to the next case, which structuring
             // cannot model.
@@ -1548,24 +1554,23 @@ fn collect_switch_arms<C>(
     Some(SwitchArms { arms, default })
 }
 
-/// Lower a case body, with a trailing `goto` as the sub-trace terminator it is there.
-///
-/// Anywhere else a `goto` lowers as a [`StmtKind::Barrier`], which falls through with
-/// everything forgotten: the statements after it in its list are reached only through
-/// a label, itself a barrier. At the end of a case nothing follows it but the next
-/// case, which is entered only by its own match, so the goto ends the arm's path
-/// exactly as a [`StmtKind::LoopJump`] does. Where it lands is the arm's
-/// [`ArmLanding`]; read as a barrier instead, its cleared env would join the
-/// successor and erase what every other path knows there.
-fn lower_case_trace(body: &[Statement<'_>]) -> Vec<Stmt> {
-    let Some((Statement::Goto(g), rest)) = body.split_last() else {
-        return lower_trace(body);
-    };
-    let mut trace = lower_trace(rest);
-    let span = to_span(g.span());
-    let jump = Stmt::lowered(StmtKind::LoopJump { span }, Vec::new());
-    trace.push(Stmt { span, end: stmt_end(body.last().expect("split above")), ..jump });
-    trace
+/// Whether a `goto` from outside a lowered statement can land in it (see
+/// [`Stmt::holds_label`]): a label, or an `if` or `try` with a sub-trace that holds
+/// one. Read off the already-lowered sub-traces, so the fill is linear in the nest.
+fn holds_label(kind: &StmtKind) -> bool {
+    let any = |trace: &[Stmt]| trace.iter().any(|s| s.holds_label);
+    match kind {
+        StmtKind::Label { .. } => true,
+        StmtKind::If { then_trace, elseifs, else_trace, .. } => {
+            any(then_trace)
+                || elseifs.iter().any(|(_, t)| any(t))
+                || else_trace.as_deref().is_some_and(any)
+        }
+        StmtKind::Try { body, catches, finally, .. } => {
+            any(body) || catches.iter().any(|c| any(&c.trace)) || finally.as_deref().is_some_and(any)
+        }
+        _ => false,
+    }
 }
 
 /// Whether a case body that is not stripped of a `break` still cannot run into the

@@ -36,6 +36,25 @@
 //! finally { return; }` returns, so such a jump lands nowhere, for a loop's count
 //! as for a switch's ([`body_has_jump`]).
 //!
+//! # A `goto` and the list it ends
+//!
+//! An unconditional `goto` ends the list it is written in, wherever that list is (a
+//! case body, an `if` arm, a loop body, a `try` part, a scope's top level): it
+//! lowers as a [`StmtKind::LoopJump`], and the walk stops there. Where its label is
+//! decides only where the walk resumes. Every row is witnessed on PHP 8.5.11.
+//!
+//! | label | lowering and walk |
+//! | --- | --- |
+//! | none after it in its list | the rest of the list is dead (`if ($c) { goto out; $o = null; }` never assigns) |
+//! | later in the same list | dead up to the label; the label ([`StmtKind::Label`]) resumes the walk with nothing known, today's barrier reading |
+//! | inside a later `if` or `try` in the list | that statement holds the label ([`Stmt::holds_label`]) and is walked from nothing known; PHP lets a `goto` enter an `if` arm or a `try` block, even one whose condition is false |
+//! | before it (a backward `goto`) | the rest of its list is dead; the label, walked earlier, is a barrier, so the loop it forms carries no fact into its second pass |
+//! | inside a loop or a `switch` | PHP refuses it at compile time ("'goto' into loop or switch statement is disallowed"), so such a label resumes nothing outside its construct |
+//! | in an enclosing list | the statement after the construct holds it, or follows it: resumed there as above |
+//!
+//! A `switch` arm's `goto` also lands on the successor (the table above), with no
+//! env: every path from it to the successor passes its label.
+//!
 //! The same counting answers the loop questions: a loop body is the case body
 //! with the loop itself as the construct, and a `continue N` with `N == d + 1`
 //! re-enters that loop rather than leaving it.
@@ -43,6 +62,8 @@
 use mago_syntax::cst::{Expression, Node, Statement};
 
 use crate::ast::{ArgValue, ArmLanding, BodyEnd, Runs};
+#[cfg(doc)]
+use crate::ast::{Stmt, StmtKind};
 use crate::children;
 use crate::lower_expr::lower_arg_value;
 use crate::lower_stmt::{block_end, node_poisons, scan_runs};
