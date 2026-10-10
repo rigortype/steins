@@ -385,6 +385,10 @@ jump lands after the switch. The gate therefore refuses every multi-level
 jump until those passes count levels, and then relaxes to the exact one. The
 cost is precision only: such a `do`-`while` keeps its successor live.
 
+*Pointer (2026-10-11):* ADR-0103 makes both passes count levels (#904). This
+gate is unchanged by it; the relaxation to `break_free && continue_free` is its
+own slice (#1033 S2b) and waits on ADR-0103's ratification.
+
 **The header is not read.** The `while (true)` rule above is deliberately not
 extended to `do`-`while`, so `do { … } while (true);` still falls through in
 the walker. The entry env misses a write that reaches a tested name through
