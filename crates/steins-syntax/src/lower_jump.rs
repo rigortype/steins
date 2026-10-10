@@ -47,7 +47,7 @@
 //! | --- | --- |
 //! | none after it in its list | the rest of the list is dead (`if ($c) { goto out; $o = null; }` never assigns) |
 //! | later in the same list | dead up to the label; the label ([`StmtKind::Label`]) resumes the walk with nothing known, today's barrier reading |
-//! | inside a later `if` or `try` in the list | that statement holds the label ([`Stmt::holds_label`]) and is walked from nothing known; PHP lets a `goto` enter an `if` arm or a `try` block, even one whose condition is false |
+//! | inside a later `if` or `try` in the list | that statement holds the label ([`Stmt::holds_label`]). PHP lets a `goto` enter an `if` arm or a `try` block, even one whose condition is false, so what precedes the label in it is dead: after a terminator the statement is marked dead whole and the walk resumes after it with nothing known; reached by falling through, it is walked as usual |
 //! | before it (a backward `goto`) | the rest of its list is dead; the label, walked earlier, is a barrier, so the loop it forms carries no fact into its second pass |
 //! | inside a loop or a `switch` | PHP refuses it at compile time ("'goto' into loop or switch statement is disallowed"), so such a label resumes nothing outside its construct |
 //! | in an enclosing list | the statement after the construct holds it, or follows it: resumed there as above |

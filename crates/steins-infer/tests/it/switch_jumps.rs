@@ -427,9 +427,11 @@ function into_case(int $k): void {
     $o->count();
 }
 ";
-    // Line 4 is the resumed list; 12 the twin inside the `if` a `goto` enters (PHP
-    // lets it, even when `$c` is false); 20 the reviewer's case-to-case `goto`.
-    assert_eq!(lines_of(src, "call.on-null"), vec![4, 12, 20]);
+    // Line 4 is the resumed list; 20 the reviewer's case-to-case `goto`. Line 12,
+    // the twin inside the `if` a `goto` enters (PHP lets it, even when `$c` is
+    // false), is a known false negative: an `if` holding a label is dead up to the
+    // label, and the walk does not enter it there (ADR-0103 §2.2b).
+    assert_eq!(lines_of(src, "call.on-null"), vec![4, 20]);
 }
 
 #[test]
@@ -459,4 +461,27 @@ function p1b(int $k, bool $c): void {
 }
 ";
     assert_eq!(lines_of(src, "call.on-null"), Vec::<u32>::new());
+}
+
+#[test]
+fn an_if_holding_a_label_is_dead_before_the_label() {
+    // The reviewer's `a3` (PHP 8.5.11 prints `a3`; `$o->m()` never runs): after the
+    // `return`, a `goto` enters the `if` at `l:`, so what precedes the label in it is
+    // dead. The walk resumes after the `if` with nothing known; `b3` is the twin that
+    // shows the code after it is still walked.
+    let src = "<?php
+final class X { public function m(): int { return 1; } }
+function a3(bool $c): void {
+    if ($c) goto l;
+    return;
+    if ($c) { $o = null; $o->m(); l: echo 1; }
+}
+function b3(bool $c): void {
+    if ($c) goto l;
+    return;
+    if ($c) { l: echo 1; }
+    $n = null; $n->m();
+}
+";
+    assert_eq!(lines_of(src, "call.on-null"), vec![12]);
 }

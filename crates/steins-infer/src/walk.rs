@@ -502,7 +502,10 @@ pub(crate) fn push_hidden_exit_floor(w: &WalkCx, may_return: bool) {
 /// Statements after a terminator are unreachable and are **not** walked (ADR-0031
 /// closes ADR-0027's dead-fallthrough gap) — up to the next statement that holds a
 /// `goto` label ([`Stmt::holds_label`], ADR-0103), where control may arrive from a
-/// `goto` with anything bound: the walk resumes there with nothing known.
+/// `goto` with anything bound. A label itself resumes the walk there with nothing
+/// known. An `if` or `try` holding one is dead up to its label, which this walk
+/// cannot enter mid-statement, so it is marked dead whole and the walk resumes
+/// after it with nothing known (the label's tail inside it goes unwalked).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn walk_trace(
     w: &WalkCx,
@@ -522,11 +525,19 @@ pub(crate) fn walk_trace(
         if cut == rest.len() {
             return flow;
         }
+        rest = &rest[cut..];
         if flow == Flow::Terminated {
             env.clear();
             store.clear();
+            if !matches!(rest[0].kind, StmtKind::Label { .. }) {
+                mark_dead(w, &[&rest[..1]]);
+                rest = &rest[1..];
+                if rest.is_empty() {
+                    // The `goto` into it may fall out of it: the list's end is reached.
+                    return Flow::FellThrough;
+                }
+            }
         }
-        rest = &rest[cut..];
     }
 }
 
