@@ -39,11 +39,13 @@
 //! depend on the project's PHP floor.
 
 mod clock;
+mod datetime;
 mod encoding;
 mod ini;
 mod precision;
 
 pub use clock::{ClockGate, clock_gate};
+pub use datetime::{DateGate, date_gate, date_method_gate};
 pub use precision::{Depth as RenderDepth, PrecisionGate, Rendered, precision_gate};
 
 use crate::SettingCell;

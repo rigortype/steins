@@ -12,8 +12,9 @@ use std::collections::HashSet;
 
 use mago_span::HasSpan;
 use mago_syntax::cst::{
-    Access, AnonymousClass, Argument, ArrayElement, BinaryOperator, ClassLikeMember, Expression,
-    FunctionCall, Hint, Literal, Node, PartialApplication, Statement, UnaryPrefixOperator, Variable,
+    Access, AnonymousClass, Argument, ArgumentList, ArrayElement, BinaryOperator, ClassLikeMember,
+    Expression, FunctionCall, Hint, Literal, Node, PartialApplication, Statement,
+    UnaryPrefixOperator, Variable,
 };
 
 use crate::ast::{
@@ -148,8 +149,13 @@ pub(crate) fn const_args_of_call(fc: &FunctionCall<'_>) -> ConstArgs {
 /// argument is a string, integer, `null`, boolean, float or array literal. Empty for a named or
 /// spread argument list, whose positions cannot be read.
 pub(crate) fn literals_of_call(fc: &FunctionCall<'_>) -> Vec<(u8, ArgLiteral)> {
+    literals_of_args(&fc.argument_list)
+}
+
+/// [`literals_of_call`] over any argument list: a `new` or a static call's (ADR-0101 §3.17).
+pub(crate) fn literals_of_args(list: &ArgumentList<'_>) -> Vec<(u8, ArgLiteral)> {
     let mut out = Vec::new();
-    for (pos, arg) in fc.argument_list.arguments.iter().enumerate() {
+    for (pos, arg) in list.arguments.iter().enumerate() {
         let Argument::Positional(p) = arg else { return Vec::new() };
         if p.ellipsis.is_some() {
             return Vec::new();

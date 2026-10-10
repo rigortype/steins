@@ -60,12 +60,14 @@ fn a_throwable_constructor_coerces_its_message_in_both_lanes() {
 
 #[test]
 fn the_row_is_kept_beside_the_gap() {
+    // The string is not one the call spells, so the row's zone read and clock both stay.
+    let row = ["global.read.setting.timezone", "nondet.time"];
     let s = summary(&file(false, "Name $o", "return new \\DateTime($o);"), "f");
     assert_eq!(s.gaps, ["user-code-reach"], "{s:?}");
-    assert_eq!(s.labels, ["nondet.time"], "{s:?}");
+    assert_eq!(s.labels, row, "{s:?}");
     let s = summary(&file(true, "Name $o", "return new \\DateTime($o);"), "f");
     assert!(s.gaps.is_empty() && s.exhaustive, "{s:?}");
-    assert_eq!(s.labels, ["nondet.time"], "{s:?}");
+    assert_eq!(s.labels, row, "{s:?}");
 }
 
 #[test]

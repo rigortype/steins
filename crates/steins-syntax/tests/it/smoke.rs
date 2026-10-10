@@ -721,8 +721,8 @@ fn scans_the_literal_arguments_of_an_encoding_call() {
 }
 
 /// ADR-0101 §3.14: the time family's timestamp arguments are recorded the same way, at the
-/// position they sit, for the nine names that decide the clock by one; `mktime`, `time` and
-/// the constructors' function spellings record nothing.
+/// position they sit, for the nine names that decide the clock by one; `mktime` and `time` record
+/// nothing (the constructors' function spellings record theirs since §3.17).
 #[test]
 fn scans_the_timestamp_arguments_of_a_time_family_call() {
     use steins_syntax::ArgLiteral::{Int, Null, Other, Str};
@@ -756,6 +756,51 @@ fn scans_the_timestamp_arguments_of_a_time_family_call() {
     assert_eq!(literals("date(...$p);"), []);
     assert_eq!(literals("mktime(1, 2, 3, 4, 5, 2020);"), []);
     assert_eq!(literals("time();"), []);
+}
+
+/// ADR-0101 §3.17: a `DateTime` constructor-side call records its literal arguments and its null
+/// evidence on the site, whether it is a function call, a `new` or a static call; any other `new`
+/// or static call records nothing.
+#[test]
+fn scans_the_arguments_of_a_date_constructor() {
+    use steins_syntax::ArgLiteral::{Null, Str};
+    use steins_syntax::NullEvidence;
+    fn consts(body: &str) -> steins_syntax::ConstArgs {
+        let src = format!(
+            "<?php class D extends \\DateTime {{ function f($p, \\DateTimeZone $z) {{ {body} }} }}"
+        );
+        let tree = SourceTree::parse(&src);
+        let class = tree.classes().iter().find(|c| c.name == "D").expect("D").clone();
+        let f = class.methods.iter().find(|m| m.name == "f").expect("f").clone();
+        let call = |s: &&steins_syntax::SiteOrigin| {
+            matches!(
+                s.kind,
+                steins_syntax::SiteKind::Call { .. }
+                    | steins_syntax::SiteKind::New { .. }
+                    | steins_syntax::SiteKind::MethodCall { .. }
+            )
+        };
+        f.sites.iter().find(call).expect("one call site").const_args.clone()
+    }
+    let text = |s: &str| Str(s.to_owned());
+    for body in [
+        "new \\DateTime('@0', $z);",
+        "new DateTimeImmutable('@0', $z);",
+        "date_create('@0', $z);",
+        "parent::__construct('@0', $z);",
+        "\\DateTime::createFromFormat('@0', $z);",
+    ] {
+        let c = consts(body);
+        assert_eq!(c.literals, [(0, text("@0"))], "{body}");
+        assert_eq!(c.timestamps.len(), 2, "{body}: {c:?}");
+        assert_eq!(c.timestamps[0], (0, NullEvidence::NonNull), "{body}");
+    }
+    assert_eq!(consts("new \\DateTime('now', null);").literals, [(0, text("now")), (1, Null)]);
+    assert_eq!(consts("new \\DateTime(...$p);").literals, []);
+    for body in ["new \\ArrayObject('x');", "\\DateTime::modify('x');", "new D('x');"] {
+        let c = consts(body);
+        assert!(c.literals.is_empty() && c.timestamps.is_empty(), "{body}: {c:?}");
+    }
 }
 
 /// ADR-0101 §3.15: a float renderer records the float evidence of each positional argument, an

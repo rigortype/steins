@@ -339,6 +339,9 @@ impl<'a> Resolver<'a, '_, '_> {
             self.gap(gap);
         }
         setting::narrow_clock(read, spelled, (positional, args.consts), &mut labels);
+        if let Some(gate) = steins_catalog::date_gate(builtin) {
+            setting::narrow_date(read, gate, (positional, args.consts), &mut labels);
+        }
         if let Some(gap) =
             setting::narrow_precision(read, spelled, (positional, args.consts), &mut labels)
         {
@@ -611,8 +614,9 @@ impl<'a> Resolver<'a, '_, '_> {
     ) {
         let (cx, frame) = (self.cx, self.frame);
         let gap = match engine_method(cx, frame.class_fqn, frame.params, receiver, method) {
-            EngineMethod::Row { hit, hooked } => {
+            EngineMethod::Row { mut hit, hooked } => {
                 self.engine_operands(&hit.callee, &hit.method);
+                self.narrow_engine_date(&hit.callee, &hit.method, &mut hit.labels);
                 self.hooked_engine_code(hooked);
                 if !hit.labels.is_empty() {
                     self.push(Target::Engine(hit));
@@ -668,14 +672,27 @@ impl<'a> Resolver<'a, '_, '_> {
             NewTarget::Engine(fqn) if self.effects() => match engine::constructor_effects(&fqn) {
                 Some(labels) => {
                     self.engine_operands(&fqn, "__construct");
+                    let mut labels = labels.to_vec();
+                    self.narrow_engine_date(&fqn, "__construct", &mut labels);
                     let origin = new_origin(class);
-                    self.constructor_hit(fqn, origin, labels, &[]);
+                    self.constructor_hit(fqn, origin, &labels, &[]);
                 }
                 None => self.gap(engine::missing_row(&fqn, GapKind::NoEffectRow)),
             },
             NewTarget::Engine(fqn) => self.engine_constructor_throws(&fqn, new_origin(class)),
             NewTarget::Unknown(kind) => self.gap(kind),
         }
+    }
+
+    /// The reads of an engine `DateTime` constructor or `createFromFormat` call that this site's
+    /// arguments rule out (ADR-0101 §3.17): the default zone where a zone object is passed or the
+    /// literal string names its zone and every field, the clock where it fills every field. Any
+    /// other engine method decides nothing here.
+    fn narrow_engine_date(&self, class: &str, method: &str, labels: &mut Vec<&'static str>) {
+        let Some(gate) = steins_catalog::date_method_gate(class, method) else { return };
+        let positional = self.site.operands.as_ref().map(Vec::len);
+        let read = (self.cx, self.frame);
+        setting::narrow_date(read, gate, (positional, &self.site.const_args), labels);
     }
 
     /// The engine's own code, run on an object whose class chain hooks a property,

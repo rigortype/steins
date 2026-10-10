@@ -89,8 +89,9 @@ const OUTPUT_BUFFER_PRECISION_READ: &[&str] =
 ///   `nondet.time` as an upper bound and a literal timestamp drops the clock
 ///   ([`clock_gate`](crate::clock_gate)). `gmdate`, `gmmktime` and `gmstrftime` read UTC and carry
 ///   the clock alone. `date_default_timezone_get` reads the cell and `date_default_timezone_set`
-///   writes it; `checkdate` reads nothing. The `DateTime` constructors and `date_create*` keep
-///   the argument-blind `nondet.time` until their per-method table (S6b-2).
+///   writes it; `checkdate` reads nothing. `date_create*` and the `DateTime` constructors
+///   (S6b-2, ADR-0101 §3.17) carry both as the upper bound their call site narrows
+///   ([`date_gate`](crate::date_gate)).
 /// * The float renderers (ADR-0101 §3.15, S6a): `strval`, `settype`, `implode`, `join`, `print_r`,
 ///   `var_export`, `json_encode`, `serialize`, `var_dump` and `debug_zval_dump` read
 ///   `global.read.setting.precision` when the value they render is a float (`precision` for the
@@ -194,14 +195,13 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
             Some(TIMEZONE_READ_CLOCK)
         }
         // The function spellings of `new DateTime(...)` and of the static
-        // `createFromFormat` factories (issue #848), on the constructors'
-        // argument-blind row for `date`'s reason above: `date_create()` reads
-        // the clock unless its string names an absolute time, a format fills
-        // every field it leaves out from the current time unless it resets
-        // them with `!` or `|`, and a string naming no zone reads the ambient
-        // one either way.
+        // `createFromFormat` factories (issue #848), on the constructors' row (ADR-0101
+        // §3.17): the default zone unless a `DateTimeZone` is passed or the string names
+        // its zone and every field, and the clock unless the string or the format's reset
+        // fills every field. The row is the upper bound and the call site narrows it
+        // (`date_gate`).
         "date_create" | "date_create_immutable" | "date_create_from_format"
-        | "date_create_immutable_from_format" => Some(NONDET_TIME),
+        | "date_create_immutable_from_format" => Some(TIMEZONE_READ_CLOCK),
         // The **wrapper-capable** family (issue #318): every filesystem row.
         // Each reaches whatever the stream layer resolves its target to, so the
         // argument-blind row can only be the `io` parent (a stricter row would
@@ -1076,15 +1076,18 @@ fn scheme_of(target: &str) -> Option<&str> {
 ///
 /// `__construct` rows (issue #804) are what `new C(...)` and a subclass's
 /// `parent::__construct(...)` run. `new PDO(...)` connects (`io.db`), and
-/// `new DateTime(...)` reads the clock unless its argument names an absolute
-/// time, and the ambient timezone either way, so it takes `date`'s
-/// argument-blind `nondet.time` (ADR-0021). Every engine `Throwable`'s
+/// `new DateTime(...)` reads the default zone unless a `DateTimeZone` is passed
+/// or its string names a zone and every field, and the clock unless the string
+/// fills every field, so its row is `{global.read.setting.timezone,
+/// nondet.time}` as the upper bound the call site narrows (ADR-0101 §3.17,
+/// [`date_method_gate`](crate::date_method_gate)). Every engine `Throwable`'s
 /// constructor only stores its arguments, and so does each constructor of the
 /// catalogued-pure containers here; `stdClass` has none. Any other engine
 /// class stays uncatalogued.
 ///
 /// The static `createFromFormat` factories (issue #848) take the constructors'
-/// row: a field the format leaves out is filled from the current time. The
+/// row: a field the format leaves out is filled from the current time, unless
+/// the format resets it with `!` or `|`. The
 /// factories that copy an existing value (`createFromImmutable`,
 /// `createFromMutable`, `createFromInterface`) read no clock and no zone, and
 /// are pure.
@@ -1098,7 +1101,7 @@ fn scheme_of(target: &str) -> Option<&str> {
 pub fn method_effect_labels(class: &str, method: &str) -> Option<&'static [&'static str]> {
     const EMPTY: &[&str] = &[];
     const IO_DB: &[&str] = &["io.db"];
-    const NONDET_TIME: &[&str] = &["nondet.time"];
+    const TIMEZONE_READ_CLOCK: &[&str] = &["global.read.setting.timezone", "nondet.time"];
     const MUTATE: &[&str] = &["mutate"];
 
     match (class.to_ascii_lowercase().as_str(), method.to_ascii_lowercase().as_str()) {
@@ -1106,7 +1109,7 @@ pub fn method_effect_labels(class: &str, method: &str) -> Option<&'static [&'sta
         ("pdostatement", "execute" | "fetch" | "fetchall") => Some(IO_DB),
         ("pdostatement", "setfetchmode") => Some(MUTATE),
         ("datetime" | "datetimeimmutable", "__construct" | "createfromformat") => {
-            Some(NONDET_TIME)
+            Some(TIMEZONE_READ_CLOCK)
         }
         ("datetime", "createfromimmutable" | "createfrominterface")
         | ("datetimeimmutable", "createfrommutable" | "createfrominterface") => Some(EMPTY),
@@ -2198,9 +2201,10 @@ mod tests {
         );
         assert_eq!(effect_labels("checkdate"), None);
         for name in ["date_create", "date_create_immutable", "date_create_from_format"] {
-            assert_eq!(effect_labels(name), Some(&["nondet.time"][..]), "{name}");
+            assert_eq!(effect_labels(name), Some(&[ZONE, "nondet.time"][..]), "{name}");
         }
-        assert_eq!(method_effect_labels("DateTime", "__construct"), Some(&["nondet.time"][..]));
+        let row = Some(&[ZONE, "nondet.time"][..]);
+        assert_eq!(method_effect_labels("DateTime", "__construct"), row);
     }
 
     /// ADR-0101 S6c: the environment block. `getenv` reads it at every arity and `putenv` writes
@@ -2414,19 +2418,19 @@ mod tests {
     #[test]
     fn constructor_rows_cover_the_connection_the_clock_and_the_stores() {
         assert_eq!(method_effect_labels("PDO", "__construct"), Some(&["io.db"][..]));
-        let time = Some(&["nondet.time"][..]);
+        let time = Some(&["global.read.setting.timezone", "nondet.time"][..]);
         assert_eq!(method_effect_labels("DateTimeImmutable", "__CONSTRUCT"), time);
         assert_eq!(method_effect_labels("datetime", "__construct"), time);
         assert_eq!(method_effect_labels("ArrayObject", "__construct"), Some(&[][..]));
         assert_eq!(method_effect_labels("stdClass", "__construct"), Some(&[][..]));
     }
 
-    /// Every spelling of "build a date from a string" reads the clock the way
-    /// `new DateTime(...)` does (issue #848), and the copying factories read
-    /// nothing.
+    /// Every spelling of "build a date from a string" reads the zone and the clock
+    /// the way `new DateTime(...)` does (issue #848, ADR-0101 §3.17), and the
+    /// copying factories read nothing.
     #[test]
     fn the_date_factories_share_the_constructors_clock_row() {
-        let time = Some(&["nondet.time"][..]);
+        let time = Some(&["global.read.setting.timezone", "nondet.time"][..]);
         for name in [
             "date_create",
             "date_create_immutable",
