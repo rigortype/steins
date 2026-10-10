@@ -112,7 +112,10 @@ spots and they are worth stating:
 - **An ini both builds happen to share.** Both report `precision = 14` and
   `serialize_precision = -1`, so a float-rendering name agrees here and would
   not on a project that sets either differently. That exposure is named per row
-  (`strval`, `implode`, `array_unique`) rather than pretended away.
+  (`strval`, `implode`, `array_unique`) rather than pretended away. Since S6a
+  (ADR-0101 §3.15) the seam refuses the float renderers it can name when a literal
+  argument holds a float (`strval(1.5)`, `json_encode([1.5])`), so the exposure
+  that remains is `array_unique` and the coercion of a float to a `string` parameter.
 - **An extension one build lacks.** Visible, but as a decline rather than a
   divergence: php-wasm 0.1.0 loads 25 extensions to the native build's 70, so
   `mb_*` answered `widen: unknown function` for all eleven probes.
@@ -165,7 +168,8 @@ argument is a `TypeError` on the narrow engine — a decline, which is sound.
 - `nondet` builtins (`time`, `rand`, `microtime`) — excluded by definition.
 
 One ini is **not** excluded and is worth knowing about: `precision` decides how
-a float renders, so `strval`, `implode` and `array_unique` all fold under it.
+a float renders, so `strval`, `implode` and `array_unique` all fold under it
+(`strval` and `implode` of a literal that holds a float no longer do: S6a, below).
 `array_unique` is the one where it changes the array's *length* rather than a
 spelling, since its default `SORT_STRING` compares string casts. All three are
 admitted together or not at all; closing the seam is ADR-0008's opt-in
@@ -275,6 +279,8 @@ that a call is pure, and Decision 2's bar for an **empty** row is unchanged.
 | `date`, `idate`, `mktime`, `strtotime`, `getdate`, `localtime` | `{global.read.setting.timezone, nondet.time}` (S6b-1: every call reads the timezone cell; the clock only where the timestamp is left out, below) |
 | `gmdate`, `gmmktime` | `{nondet.time}` as the upper bound a supplied timestamp drops to `{}` (below) |
 | `date_default_timezone_get`, `date_default_timezone_set` | `{global.read.setting.timezone}`, `{global.write.setting.timezone}` |
+| `strval`, `settype`, `implode`, `join`, `json_encode`, `serialize` | `{global.read.setting.precision}` as the upper bound the **value rendered** decides (S6a, below) |
+| `print_r`, `var_export`, `var_dump`, `debug_zval_dump` | `{io.output.buffer, global.read.setting.precision}`; `print_r` and `var_export` in return mode narrow to `{global.read.setting.precision}` (S6a, below) |
 | `preg_match`, `preg_match_all`, `preg_replace`, `preg_replace_callback`, `preg_replace_callback_array`, `preg_filter`, `preg_split`, `preg_grep` | `{global.read.setting.locale}` as the upper bound the **literal pattern** decides (S5, below). `preg_quote` compiles nothing and keeps its empty row; `preg_last_error` and `preg_last_error_msg` have no row |
 | `ctype_digit`, `ctype_xdigit` | none: C fixes their sets in every locale and no byte moved, so they read no setting that changes an answer (left uncatalogued, not certified) |
 | `setlocale` | `{global.write.setting.locale, global.read}` (the argument-blind row: the write, and the environment block read for `''` and `null`, coarse until the env cell has a label; a call with exactly two arguments whose locale is a written non-empty string other than `'0'` narrows to `{global.write.setting.locale}`, and the exact string `'0'`, the query form, narrows to `{global.read.setting.locale}` with no write (ADR-0101 D6, `narrowed_setlocale_labels`; `"0\0x"` is not the query, php-src compares the whole string) |
@@ -296,6 +302,28 @@ an upper bound there, as it always was. `ConstArgs::literals` carries the litera
 `checkdate` reads nothing and has no row. The `DateTime` constructors and `date_create*` keep the argument-blind
 `nondet.time` until their per-method table (S6b-2). None of these names is on the fold or the remembered
 allowlist, so a call that reads a setting is neither folded nor remembered.
+
+**The float renderers** (S6a, `setting_reads/precision.rs` in `steins-catalog`; ADR-0101 §3.15). A float becomes
+text through `precision` (`strval`, `settype` to a string, `implode`, `print_r`) or `serialize_precision`
+(`var_export`, `json_encode`, `serialize`, `var_dump`, `debug_zval_dump`); the catalog gives both the one
+`global.read.setting.precision` label. The read is **value-conditional**: a renderer reads the entry only if the
+value it renders is a float, so the row is the upper bound and a **precision gate** (`PrecisionGate`,
+`precision_gate`) names which positions are rendered and how deep the renderer reads each (`RenderDepth`): `Value`
+(`strval`, `settype`, `implode`'s separator: converted whole, an array is `"Array"`), `Elements` (`implode`'s array:
+each element converted whole, one level) and `Nested` (`print_r`, `var_export`, `json_encode`, `serialize`,
+`var_dump`, `debug_zval_dump`: every array and every object property). The call site reads each rendered position's
+float evidence (`ConstArgs::rendered`, a `FloatEvidence` with a `Members` variant for an array literal) at that
+depth, three-way as a printf `%s` is: a float, or an array literal holding one at the depth walked, is the proven
+read; every value shown to hold none drops it; any other is `value-dependent-read`. Beyond what S3 reads (forms,
+declared parameter and property types, constants, declared returns), a walked value is shown to hold no float by a
+scalar-only declared type, a mined `list<string>`-shaped return, or an array literal of such members; `array`, a
+class, `mixed`, a local (the scan reads a local's writes for the value, not for what an array in it holds) and a
+parameter the frame writes are not. `json_encode` adds two arguments: `JSON_NUMERIC_CHECK`, or flags the scan cannot
+evaluate, makes a float-free value undecided (a numeric string becomes a float), and a `$depth` makes a float
+undecided (a deep value is refused before it is written). `settype` renders only to the type `'string'`; its
+variable is rebound by the call itself, so it is always the gap. `number_format`, `round`, `intval` and the operator
+sites (`(string) $f`, `"$f"`, `.`, `echo`; D4) carry no label. The fold refuses a renderer whose literal arguments
+hold a finite float at the depth it renders them, and `json_encode` with `JSON_NUMERIC_CHECK`.
 
 **Call-decided readers** (S4, `setting_read_gate` in `steins-catalog`, `site/setting.rs` in `steins-infer`).
 Apart from `basename`, a locale reader reads only where the call reaches the routine that consults the
