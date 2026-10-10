@@ -558,13 +558,21 @@ by-reference argument all write the global; `$GLOBALS = []` is a compile-time
 fatal since 8.1, so only element writes exist.
 
 The rule table lives in one module (`lower_globals.rs`), and every writes
-collector asks it. A literal key is a write of that name in every scope: in a
-function it also forgets a same-named local, which costs precision only. A key
-that is not a literal (or is a string with no UTF-8 spelling) is recorded as
-`OpaqueConstruct::VariableVariable`, a variable named at run time, and poisons
-the scope as `extract` and `$$v` do; a dynamic-key element handed to any call
-poisons too, because the callee's signature cannot be asked for an unnamed
-variable. The collectors changed: `collect_assign_writes`,
+collector asks it. At file scope a literal key is a write of that name. Inside
+a function, method, closure or arrow-function body it writes nothing local:
+the global `$x` is not the function's variable, and forgetting a local there
+turns an infinite loop's `Yes` header unknown and invents a `call.on-null`
+(`$go = true; while ($go) { $GLOBALS['go'] = false; }` never ends in a
+function; witnessed on PHP 8.5.11). The ways a local really is the global
+(`global $x`, `$r = &$GLOBALS['x']`, a by-ref `use (&$x)`) are give-up
+constructs that already poison the scope. A key that is not a literal (or is a
+string with no UTF-8 spelling) is recorded as `OpaqueConstruct::VariableVariable`,
+a variable named at run time, and poisons the scope as `extract` and `$$v` do;
+as a call argument it poisons at file scope only, because the syntax layer
+cannot ask the catalog whether the callee's parameter is by-reference and no
+callee reaches a local through it. The function-like ranges are recorded once per
+parse, so the answer depends on a node's position alone and the per-parse memo
+stays sound. The collectors changed: `collect_assign_writes`,
 `collect_call_vars`, the by-ref argument root of `call_invalidation`,
 `scan_opaque_walk`, `bind_lvalue_roots` (binding presence) and the callback
 write count of `collect_callable_assigns`. A `do`-`while` header is still not

@@ -164,12 +164,77 @@ $x->bar();
     assert_eq!(n, 1);
 }
 
+fn count_on_null(src: &str) -> usize {
+    let tree = SourceTree::parse(src);
+    check(&tree, &[], "t.php").into_iter().filter(|d| d.id == "call.on-null").count()
+}
+
 #[test]
-fn a_literal_key_in_a_function_forgets_the_same_named_local_harmlessly() {
-    // In a function `$GLOBALS['go']` is the global, not the local: the local keeps
-    // `true` and the loop never ends. The walk forgets it anyway (D5's
-    // over-approximation) and reports the successor, which is the price of one rule
-    // for every scope.
-    assert_eq!(on_null_after_loop("$go = true;", "$GLOBALS['go'] = false;", true), 1);
-    assert_eq!(on_null_after_loop("$go = true;", "echo 1;", true), 0);
+fn a_literal_key_in_a_function_body_writes_no_local() {
+    // `$GLOBALS['go']` there is the global, not the local: the local keeps `true`, the
+    // loop never ends, and the successor is dead (PHP 8.5.11: `var_dump($go)` prints
+    // `bool(true)`). Forgetting the local would turn the `Yes` header unknown and report.
+    let body = "$go = true; $x = null; while ($go) { $GLOBALS['go'] = false; } $x->bar();";
+    let src = |wrap: &str| {
+        format!(
+            "<?php
+final class Foo {{ public function bar(): void {{}} }}
+{}
+",
+            wrap.replace("BODY", body)
+        )
+    };
+    assert_eq!(count_on_null(&src("function a(): void { BODY }")), 0);
+    assert_eq!(count_on_null(&src("final class K { public function m(): void { BODY } }")), 0);
+    assert_eq!(count_on_null(&src("$f = function (): void { BODY };")), 0);
+    assert_eq!(count_on_null(&src("$f = static fn () => 1; function b(): void { BODY }")), 0);
+    // The control: the same function with a header that can fail reports.
+    let live = "$go = true; $x = null; while (rand() > 0) { $GLOBALS['go'] = false; } $x->bar();";
+    assert_eq!(count_on_null(&src(&format!("function a(): void {{ {live} }}"))), 1);
+}
+
+#[test]
+fn the_ways_a_local_is_bound_to_the_global_stay_silent() {
+    // `global $go;` and a by-ref `use (&$go)` make the local the global (PHP reaches
+    // `bar()` in both); each is a give-up construct, so the scope holds no `Yes`.
+    let src = |wrap: &str| {
+        format!(
+            "<?php
+final class Foo {{ public function bar(): void {{}} }}
+{wrap}
+"
+        )
+    };
+    let global = "function a(): void { global $go; $x = null; while ($go) { $GLOBALS['go'] = false; } $x->bar(); }";
+    let capture = "$go = true; $f = function () use (&$go): void { $x = null; while ($go) { $GLOBALS['go'] = false; } $x->bar(); };";
+    assert_eq!(count_on_null(&src(global)), 0);
+    assert_eq!(count_on_null(&src(capture)), 0);
+}
+
+#[test]
+fn a_dynamic_key_handed_to_a_call_inside_a_function_does_not_poison() {
+    // No callee can reach a local through `$GLOBALS[$k]`, so a by-value builtin (the
+    // idiomatic `isset($GLOBALS[$k]) && is_array($GLOBALS[$k])`) keeps the findings.
+    for call in ["is_array($GLOBALS[$k])", "strlen($GLOBALS[$k])", "count($GLOBALS[$k])", "sort($GLOBALS[$k])"] {
+        let src = format!(
+            "<?php
+final class Foo {{ public function bar(): void {{}} }}
+function f(string $k): void {{ $x = null; if ({call}) {{ echo 1; }} $x->bar(); }}
+"
+        );
+        assert_eq!(count_on_null(&src), 1, "`{call}` inside a function");
+    }
+}
+
+#[test]
+fn a_dynamic_key_handed_to_a_call_at_file_scope_poisons() {
+    // Conservative: the syntax layer cannot ask whether the callee's parameter is by-ref.
+    let src = "<?php
+final class Foo { public function bar(): void {} }
+$k = 'x';
+sort($GLOBALS[$k]);
+$x = null;
+$x->bar();
+";
+    assert_eq!(count_on_null(src), 0);
 }

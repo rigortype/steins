@@ -152,6 +152,8 @@ impl SourceTree {
         // File-level `use` imports binding `Steins\Pure`/`Steins\Effect` to a local name, so
         // `#[Pure]`/aliased `#[P]`/`#[Effect(...)]` attributes are recognized.
         let aliases = collect_steins_aliases(&Node::Program(program));
+        // Where the function-like bodies are, for `$GLOBALS['lit']` (issue #902).
+        let _bodies = crate::lower_globals::FunctionBodies::enter(&Node::Program(program));
 
         // Namespace contexts (name + `use` imports) and their byte regions, so every
         // declaration/reference resolves in the right scope.
