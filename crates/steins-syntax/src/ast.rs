@@ -3606,6 +3606,43 @@ pub enum RunArg {
     Other,
 }
 
+impl StmtKind {
+    /// Every sub-trace this statement carries, in source order: an `if`'s branches,
+    /// a `match`'s arms, a loop's `init` and body, a `try`'s block, catch bodies
+    /// and `finally`. Empty for a leaf statement.
+    ///
+    /// For a visitor that must see every statement the walk can reach, whatever
+    /// construct holds it — a new structured kind then reaches it through here
+    /// rather than through each visitor's own `match` (issue #943).
+    #[must_use]
+    pub fn sub_traces(&self) -> Vec<&[Stmt]> {
+        match self {
+            Self::If { then_trace, elseifs, else_trace, .. } => {
+                let mut out = vec![then_trace.as_slice()];
+                out.extend(elseifs.iter().map(|(_, t)| t.as_slice()));
+                out.extend(else_trace.as_deref());
+                out
+            }
+            Self::Match { arms, default, .. } => {
+                let mut out: Vec<&[Stmt]> = arms.iter().map(|a| a.trace.as_slice()).collect();
+                out.extend(default.as_deref());
+                out
+            }
+            Self::For { init, body, .. } => vec![init.as_slice(), body.as_slice()],
+            Self::While { body, .. } | Self::Foreach { body, .. } | Self::DoWhile { body, .. } => {
+                vec![body.as_slice()]
+            }
+            Self::Try { body, catches, finally, .. } => {
+                let mut out = vec![body.as_slice()];
+                out.extend(catches.iter().map(|c| c.trace.as_slice()));
+                out.extend(finally.as_deref());
+                out
+            }
+            _ => Vec::new(),
+        }
+    }
+}
+
 impl Stmt {
     /// A statement under construction: `kind` and by-ref evidence set; span, string-context
     /// sites, and terminality left for `lower_stmt` to fill centrally (`span` is

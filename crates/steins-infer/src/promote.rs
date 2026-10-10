@@ -156,7 +156,7 @@ pub fn sweep_free_functions(db: &dyn Db, project: Project) -> FreeFnSweep {
 }
 
 /// Scan every scope for function-name-shaped values escaping through
-/// assignment/return, recursing into `if`/`match`.
+/// assignment/return, recursing into every sub-trace.
 fn scan_scope_values(tree: &SourceTree, path: &str, map: &mut HashMap<String, Vec<SweepSite>>) {
     for scope in tree.scopes() {
         scan_stmts(&scope.stmts, tree, path, map);
@@ -177,24 +177,13 @@ fn scan_stmts(
                 let p = tree.position(s.span.start);
                 collect_value_names(value, &SweepSite::new(path, p.line, p.column), map);
             }
-            StmtKind::If { then_trace, elseifs, else_trace, .. } => {
-                scan_stmts(then_trace, tree, path, map);
-                for (_, branch) in elseifs {
-                    scan_stmts(branch, tree, path, map);
-                }
-                if let Some(e) = else_trace {
-                    scan_stmts(e, tree, path, map);
+            // Every sub-trace, loop and `try` bodies included (issue #943's
+            // review): a name escaping as a value anywhere blocks the promotion.
+            kind => {
+                for trace in kind.sub_traces() {
+                    scan_stmts(trace, tree, path, map);
                 }
             }
-            StmtKind::Match { arms, default, .. } => {
-                for arm in arms {
-                    scan_stmts(&arm.trace, tree, path, map);
-                }
-                if let Some(d) = default {
-                    scan_stmts(d, tree, path, map);
-                }
-            }
-            _ => {}
         }
     }
 }
@@ -577,7 +566,7 @@ fn collect_method_value_names(
 }
 
 /// Scan a scope's trace for callable values escaping through assignment or
-/// return, recursing into `if`/`match`.
+/// return, recursing into every sub-trace.
 fn scan_scope_method_values(
     scope: &Scope,
     tree: &SourceTree,
@@ -608,24 +597,12 @@ fn scan_stmts_method_values(
                     dynamic,
                 );
             }
-            StmtKind::If { then_trace, elseifs, else_trace, .. } => {
-                scan_stmts_method_values(then_trace, tree, path, set, dynamic);
-                for (_, branch) in elseifs {
-                    scan_stmts_method_values(branch, tree, path, set, dynamic);
-                }
-                if let Some(e) = else_trace {
-                    scan_stmts_method_values(e, tree, path, set, dynamic);
+            // Every sub-trace, loop and `try` bodies included (issue #943's review).
+            kind => {
+                for trace in kind.sub_traces() {
+                    scan_stmts_method_values(trace, tree, path, set, dynamic);
                 }
             }
-            StmtKind::Match { arms, default, .. } => {
-                for arm in arms {
-                    scan_stmts_method_values(&arm.trace, tree, path, set, dynamic);
-                }
-                if let Some(d) = default {
-                    scan_stmts_method_values(d, tree, path, set, dynamic);
-                }
-            }
-            _ => {}
         }
     }
 }
