@@ -140,8 +140,7 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
     // `setlocale` also reads the environment block when its locale is `''` or
     // `null` (`putenv("LC_ALL=fr_FR.ISO8859-1"); setlocale(LC_ALL, "")` answers
     // `fr_FR`), so the row carries the env cell's read (ADR-0101 S6c) beside the write.
-    const LOCALE_WRITE_ENV_READ: &[&str] =
-        &["global.write.setting.locale", "global.read.setting.env"];
+    const LOCALE_WRITE_ENV: &[&str] = &["global.write.setting.locale", "global.read.setting.env"];
     // The environment block (ADR-0101 S6c): `getenv` reads it at every arity and `putenv` writes
     // it. `$_ENV` is a startup copy that no call here reaches, so no row names it.
     const ENV_READ: &[&str] = &["global.read.setting.env"];
@@ -302,7 +301,7 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
         // environment, and [`narrowed_setlocale_labels`] drops the env read
         // there. `setlocale($c, '0')`, which only queries
         // the cell, narrows to the locale read alone (ADR-0101 D6, S4).
-        "setlocale" => Some(LOCALE_WRITE_ENV_READ),
+        "setlocale" => Some(LOCALE_WRITE_ENV),
         // Process-global state, no channel: seeding pair replaces RNG state;
         // `clearstatcache` empties the stat cache. Drawing stays `nondet.random`.
         "srand" | "mt_srand" | "clearstatcache" => Some(GLOBAL_WRITE),
