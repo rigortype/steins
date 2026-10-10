@@ -139,8 +139,9 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
     const PRINTF_READS: &[&str] = &["global.read.setting.locale", "global.read.setting.precision"];
     // `setlocale` also reads the environment block when its locale is `''` or
     // `null` (`putenv("LC_ALL=fr_FR.ISO8859-1"); setlocale(LC_ALL, "")` answers
-    // `fr_FR`), so the row carries the coarse `global.read` beside the write.
-    const LOCALE_WRITE_ENV_READ: &[&str] = &["global.write.setting.locale", "global.read"];
+    // `fr_FR`), so the row carries the env cell's read (ADR-0101 S6c) beside the write.
+    const LOCALE_WRITE_ENV_READ: &[&str] =
+        &["global.write.setting.locale", "global.read.setting.env"];
     // The environment block (ADR-0101 S6c): `getenv` reads it at every arity and `putenv` writes
     // it. `$_ENV` is a startup copy that no call here reaches, so no row names it.
     const ENV_READ: &[&str] = &["global.read.setting.env"];
@@ -295,15 +296,11 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
         // entry it names is the one `getenv` reads back.
         "putenv" => Some(ENV_WRITE),
         // `setlocale` rewrites the locale cell, and with `''` or `null` as its
-        // locale it also takes the name from the environment block, which is a
-        // read. The environment cell has its own labels since ADR-0101 S6c, but this row keeps
-        // the coarse `global.read` for that read: narrowing it to `global.read.setting.env` is a
-        // follow-up that would move the locale verdicts' pinned labels. The row is
-        // argument-blind, so both stand at every call.
+        // locale it also takes the name from the environment block, a read of the
+        // env cell (ADR-0101 S6c). The row is argument-blind, so both stand at every call.
         // A call whose only locale is a written non-empty string reads no
-        // environment, and [`narrowed_setlocale_labels`] drops the coarse read
-        // there. The environment read is still the coarse label (see above), and
-        // `setlocale($c, '0')`, which only queries
+        // environment, and [`narrowed_setlocale_labels`] drops the env read
+        // there. `setlocale($c, '0')`, which only queries
         // the cell, narrows to the locale read alone (ADR-0101 D6, S4).
         "setlocale" => Some(LOCALE_WRITE_ENV_READ),
         // Process-global state, no channel: seeding pair replaces RNG state;
@@ -2054,7 +2051,7 @@ mod tests {
         assert_eq!(effect_labels("error_log"), Some(&["io"][..]));
         assert_eq!(
             effect_labels("setlocale"),
-            Some(&["global.write.setting.locale", "global.read"][..])
+            Some(&["global.write.setting.locale", "global.read.setting.env"][..])
         );
         assert_eq!(effect_labels("getenv"), Some(&["global.read.setting.env"][..]));
         assert_eq!(effect_labels("srand"), Some(&["global.write"][..]));
@@ -2086,7 +2083,7 @@ mod tests {
         assert_eq!(effect_labels("vprintf"), effect_labels("printf"));
         assert_eq!(
             effect_labels("setlocale"),
-            Some(&["global.write.setting.locale", "global.read"][..]),
+            Some(&["global.write.setting.locale", "global.read.setting.env"][..]),
             "the write, and the environment read of `''` and `null`"
         );
         // Every label the rows use is a registry entry.
@@ -2208,14 +2205,19 @@ mod tests {
     }
 
     /// ADR-0101 S6c: the environment block. `getenv` reads it at every arity and `putenv` writes
-    /// it, so both carry the env cell's labels, and no other function row names the cell. The
-    /// `$_ENV` superglobal is not a function and has no row; the `apache_*` pair is SAPI-provided
-    /// and has none either (see `docs/internal-spec/catalog.md`).
+    /// it, so both carry the env cell's labels. `setlocale` also names the cell, for its
+    /// environment read (`''` and `null`, #1020), beside its write. The `$_ENV` superglobal is not
+    /// a function and has no row; the `apache_*` pair is SAPI-provided and has none either (see
+    /// `docs/internal-spec/catalog.md`).
     #[test]
     fn the_env_cell_has_a_read_row_and_a_write_row() {
         assert_eq!(effect_labels("getenv"), Some(&["global.read.setting.env"][..]));
         assert_eq!(effect_labels("putenv"), Some(&["global.write.setting.env"][..]));
-        for name in ["apache_getenv", "apache_setenv", "setlocale", "ini_get"] {
+        assert_eq!(
+            effect_labels("setlocale"),
+            Some(&["global.write.setting.locale", "global.read.setting.env"][..])
+        );
+        for name in ["apache_getenv", "apache_setenv", "ini_get"] {
             let labels = effect_labels(name).unwrap_or(&[]);
             assert!(!labels.iter().any(|l| l.contains(".setting.env")), "{name}: {labels:?}");
         }
