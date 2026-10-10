@@ -431,7 +431,7 @@ fn contract_float_class_at(ty: &ContractTy, depth: RenderDepth) -> FloatClass {
         return contract_float_class(ty);
     }
     let elements = |elem: &ContractTy, non_empty: bool| {
-        let class = if depth == RenderDepth::Nested {
+        let class = if depth.walks() {
             contract_float_class_at(elem, depth)
         } else {
             contract_float_class(elem)
@@ -448,7 +448,8 @@ fn contract_float_class_at(ty: &ContractTy, depth: RenderDepth) -> FloatClass {
         | ContractTy::LitStr(_)
         | ContractTy::LitBool(_) => FloatClass::No,
         ContractTy::Base(Base::Float) => FloatClass::Yes,
-        ContractTy::LitFloat(f) if f.is_finite() => FloatClass::Yes,
+        ContractTy::LitFloat(f) if f.is_finite() || depth.reads_non_finite() => FloatClass::Yes,
+        ContractTy::LitFloat(_) => FloatClass::No,
         ContractTy::Base(Base::Int | Base::String | Base::Bool) => FloatClass::No,
         ContractTy::ListOf { elem, non_empty } => elements(elem, *non_empty),
         ContractTy::MapOf { val, non_empty, .. } => elements(val, *non_empty),

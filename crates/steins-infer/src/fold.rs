@@ -1355,8 +1355,9 @@ fn fold_shape_refusal(name: &str, args: &[FoldArg]) -> Option<FoldShapeRefusal> 
 /// [`steins_catalog::precision_gate`], ADR-0101 §3.15) whose literal arguments hold a float at the
 /// depth it renders them does not fold either: the runner renders under the default `precision`
 /// and `serialize_precision`, which the project never promised, so `strval(1.5)` is left to the
-/// row (`global.read.setting.precision`). A value that holds none folds as before, and so does a
-/// non-finite float, which is written without either entry. `json_encode` with
+/// row (`global.read.setting.precision`). A value that holds none folds as before. A non-finite
+/// float counts as one (the entry cuts `-INF` to `-IN`), except for `json_encode`, `var_dump` and
+/// `debug_zval_dump`, which write it whole or refuse it. `json_encode` with
 /// `JSON_NUMERIC_CHECK` does not fold at all, since the flag turns a numeric string into a float.
 fn fold_reads_ambient_setting(name: &str, args: &[FoldArg]) -> bool {
     if let Some(gate) = steins_catalog::precision_gate(name) {
@@ -1381,16 +1382,16 @@ fn fold_reads_ambient_setting(name: &str, args: &[FoldArg]) -> bool {
 fn fold_renders_float(gate: steins_catalog::PrecisionGate, args: &[FoldArg]) -> bool {
     /// `JSON_NUMERIC_CHECK`.
     const NUMERIC_CHECK: i64 = 32;
-    /// Whether `arg`, rendered at `depth`, writes a finite float.
+    /// Whether `arg`, rendered at `depth`, writes a float the entry shapes.
     fn holds_float(arg: &FoldArg, depth: steins_catalog::RenderDepth) -> bool {
-        use steins_catalog::RenderDepth::{Elements, Nested, Value};
+        use steins_catalog::RenderDepth::{Elements, Nested, NestedFinite, Value};
         match (arg, depth) {
-            (FoldArg::Float(f), _) => f.is_finite(),
+            (FoldArg::Float(f), _) => f.is_finite() || depth.reads_non_finite(),
             (FoldArg::Array(entries), Elements) => {
                 entries.iter().any(|(_, entry)| holds_float(entry, Value))
             }
-            (FoldArg::Array(entries), Nested) => {
-                entries.iter().any(|(_, entry)| holds_float(entry, Nested))
+            (FoldArg::Array(entries), Nested | NestedFinite) => {
+                entries.iter().any(|(_, entry)| holds_float(entry, depth))
             }
             _ => false,
         }
@@ -1849,8 +1850,15 @@ mod ambient_gate_tests {
             assert!(!fold_reads_ambient_setting(name, &ints), "{name}");
         }
         assert!(!fold_reads_ambient_setting("json_encode", &[list(vec![s("a"), FoldArg::Int(1)])]));
-        assert!(!fold_reads_ambient_setting("strval", &[FoldArg::Float(f64::NAN)]));
-        assert!(!fold_reads_ambient_setting("strval", &[FoldArg::Float(f64::INFINITY)]));
+        // `-INF` is `-IN` at `precision=3`: a non-finite float is a read, except where the
+        // renderer writes it whole or refuses it.
+        assert!(fold_reads_ambient_setting("strval", &[FoldArg::Float(f64::NAN)]));
+        assert!(fold_reads_ambient_setting("serialize", &[FoldArg::Float(f64::NEG_INFINITY)]));
+        let inf = list(vec![FoldArg::Float(f64::INFINITY)]);
+        assert!(fold_reads_ambient_setting("implode", &[s(","), inf]));
+        assert!(!fold_reads_ambient_setting("json_encode", &[FoldArg::Float(f64::INFINITY)]));
+        let nan = list(vec![FoldArg::Float(f64::NAN)]);
+        assert!(!fold_reads_ambient_setting("json_encode", &[nan]));
         assert!(!fold_reads_ambient_setting("round", &[float()]));
         assert!(!fold_reads_ambient_setting("floatval", &[float()]));
     }

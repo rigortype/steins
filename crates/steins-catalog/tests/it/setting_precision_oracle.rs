@@ -122,10 +122,17 @@ const ROWS: &[Row] = &[
     // A depth too small for the value ends the walk before it reaches the float.
     gate("Q18f json_encode past its depth", "echo var_export(json_encode([[$f]], 0, 1), true);", ("json_encode", 3), (&[Some(Float)], &[Some(Int(0)), Some(Int(1))]), Neither),
     gate("Q18g json_encode with a depth it fits", "echo json_encode([[$f]], 0, 5);", ("json_encode", 3), (&[Some(Float)], &[Some(Int(0)), Some(Int(5))]), Serialize),
-    // A non-finite float is written without either entry.
-    gate("Q18h json_encode of NAN", "echo var_export(json_encode(NAN), true);", ("json_encode", 1), (&[None], NO_FLAGS), Neither),
-    gate("Q18i var_export of NAN", "echo var_export(NAN, true);", ("var_export", 2), (&[None], &[]), Neither),
-    gate("Q18j strval of INF", "echo strval(INF);", ("strval", 1), (&[None], &[]), Neither),
+    // A non-finite float is cut by the entry (`-INF` is `-IN` at 3 digits) for six renderers.
+    gate("Q18h strval of -INF", "echo strval(-INF);", ("strval", 1), (&[Some(Float)], &[]), Precision),
+    gate("Q18i implode of -INF", "echo implode(',', [-INF]);", ("implode", 2), (&[Some(NoFloat), Some(Float)], &[]), Precision),
+    gate("Q18j print_r of -INF", "echo print_r(-INF, true);", ("print_r", 2), (&[Some(Float)], &[]), Precision),
+    gate("Q18k settype of -INF", "$x = -INF; settype($x, 'string'); echo $x;", ("settype", 2), (&[Some(Float)], &[Some(Str("string"))]), Precision),
+    gate("Q18l var_export of -INF", "echo var_export(-INF, true);", ("var_export", 2), (&[Some(Float)], &[]), Serialize),
+    gate("Q18m serialize of -INF", "echo serialize(-INF);", ("serialize", 1), (&[Some(Float)], &[]), Serialize),
+    // Written whole or refused: no read.
+    gate("Q18n json_encode of -INF", "echo var_export(json_encode(-INF), true);", ("json_encode", 1), (&[Some(NoFloat)], NO_FLAGS), Neither),
+    gate("Q18o var_dump of -INF", "var_dump(-INF);", ("var_dump", 1), (&[Some(NoFloat)], &[]), Neither),
+    gate("Q18p debug_zval_dump of -INF", "debug_zval_dump(-INF);", ("debug_zval_dump", 1), (&[Some(NoFloat)], &[]), Neither),
     gate("Q19 serialize of a float", "echo serialize($f);", ("serialize", 1), (&[Some(Float)], &[]), Serialize),
     gate("Q20 serialize of an object", "echo serialize($o);", ("serialize", 1), (&[None], &[]), Serialize),
     gate("Q20b serialize of ints and strings", "echo serialize([1, 'a']);", ("serialize", 1), (&[Some(NoFloat)], &[]), Neither),
