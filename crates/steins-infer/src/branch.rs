@@ -504,8 +504,10 @@ pub(crate) fn walk_match(
         Certainty::Maybe
     };
 
-    // 2. Walk each live arm on a cloned env; record `No` arms dead.
+    // 2. Walk each live arm on a cloned env; record `No` arms dead. `goto_lands`
+    // records a live `goto` landing, which carries no env (see `landing_env`).
     let mut fell: Vec<(HashMap<String, Known>, Store)> = Vec::new();
+    let mut goto_lands = false;
     for (arm, taken) in arms.iter().zip(&takens) {
         if *taken == Certainty::No {
             mark_dead(w, &[arm.trace.as_slice()]);
@@ -530,7 +532,8 @@ pub(crate) fn walk_match(
                 true,
             );
         }
-        let landed = arm.lands.as_ref().map(|l| landing_env(w, folder, l, &benv, &bclasses));
+        let landed = arm.lands.as_ref().and_then(|l| landing_env(w, folder, l, &benv, &bclasses));
+        goto_lands |= arm.lands.as_ref().is_some_and(|l| !l.by_level);
         if walk_trace(w, folder, &arm.trace, &mut benv, &mut bclasses, descent, facts, true, out)
             == Flow::FellThrough
         {
@@ -548,7 +551,8 @@ pub(crate) fn walk_match(
                 let mut benv = env.clone();
                 let mut bclasses = store.clone();
                 let _ = subtract_no_match_path(w, subject, arms, loose, &mut benv, &mut bclasses);
-                let landed = dlands.map(|l| landing_env(w, folder, l, &benv, &bclasses));
+                let landed = dlands.and_then(|l| landing_env(w, folder, l, &benv, &bclasses));
+                goto_lands |= dlands.is_some_and(|l| !l.by_level);
                 if walk_trace(w, folder, dtrace, &mut benv, &mut bclasses, descent, facts, true, out)
                     == Flow::FellThrough
                 {
@@ -610,7 +614,11 @@ pub(crate) fn walk_match(
         }
     }
 
-    // 4. Merge. No live fall-through → the successor is unreachable.
+    // 4. Merge. No live fall-through → the successor is unreachable, unless a
+    // `goto` lands there, past its label's barrier: a cleared env.
+    if fell.is_empty() && goto_lands {
+        fell.push((HashMap::new(), Store::default()));
+    }
     if fell.is_empty() {
         return Flow::Terminated;
     }
@@ -626,15 +634,22 @@ pub(crate) fn walk_match(
 /// a name it writes may hold anything and the object a name it reads may have been
 /// mutated through it. In the frame whose locals are the globals, a body that runs
 /// userland may have rebound any of them (issue #762), and nothing is carried; nor
-/// is anything along a `goto`'s edge or out of a poisoned body
-/// ([`ArmLanding::clears`]).
+/// is anything out of a poisoned body ([`ArmLanding::clears`]).
+///
+/// `None` for a landing of `goto`s alone: every path from a `goto` to the successor
+/// passes its label, which lowers as a barrier, so the edge adds no env to the join
+/// — [`walk_match`] keeps the successor reachable with a cleared one only when no
+/// other edge does.
 fn landing_env(
     w: &WalkCx,
     folder: &mut dyn Folder,
     landing: &ArmLanding,
     env: &HashMap<String, Known>,
     store: &Store,
-) -> (HashMap<String, Known>, Store) {
+) -> Option<(HashMap<String, Known>, Store)> {
+    if !landing.by_level {
+        return None;
+    }
     let mut lenv = env.clone();
     let mut lstore = store.clone();
     if top_level_rebind_risk(w.cx, folder, &landing.runs) {
@@ -643,7 +658,7 @@ fn landing_env(
     }
     let ArmLanding { writes, reads, clears, .. } = landing;
     loop_entry_forget(writes, reads, &[], *clears, &mut lenv, &mut lstore);
-    (lenv, lstore)
+    Some((lenv, lstore))
 }
 
 /// The certainty that a `match`/`switch` arm is the one taken *by value* — i.e.

@@ -414,6 +414,19 @@ fn a_jump_out_of_a_try_takes_the_finally_s_bindings() {
                $x = 2; } echo $x;"),
         none()
     );
+    // A `finally` that returns replaces the jump, which lands nowhere (the
+    // reviewer's `r3`; PHP 8.5.11 binds `$a` on every path that reaches the read).
+    assert_eq!(
+        maybe("switch ($c) { case 1: try { break; } finally { return; } default: $a = 2; } \
+               echo $a;"),
+        none()
+    );
+    // `r5`: a `break 2` through a `finally` that binds.
+    assert_eq!(
+        maybe("switch ($c) { case 1: foreach ($d as $v) { try { break 2; } finally { $a = 1; } } \
+               return; default: $a = 2; } echo $a;"),
+        none()
+    );
     // Control: a binding in the block itself is skipped by the jump.
     assert_eq!(
         maybe("while (true) { try { if ($d) { break; } $x = 1; } finally { } return; } echo $x;"),

@@ -2999,7 +2999,8 @@ pub struct MatchArmT {
 /// the rule a loop body's entry uses — `writes` dropped, the objects `reads` names
 /// swept, everything cleared when `clears` is set — and cleared as well where the
 /// top-level rebind rule fires on `runs`. The sets are the whole case body's, so a
-/// `finally` that runs on the way out is forgotten too.
+/// `finally` that runs on the way out is forgotten too. A landing of `goto`s alone
+/// (`by_level` unset) carries no env: it only keeps the successor reachable.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub struct ArmLanding {
@@ -3008,12 +3009,13 @@ pub struct ArmLanding {
     /// Every other name the case body mentions.
     pub reads: Vec<String>,
     /// Whether the edge carries nothing at all: the case body holds a construct on
-    /// the ADR-0001 give-up list, or a `goto`. A label lowers as a barrier wherever
-    /// it is written, so the successor is reached from a `goto` only through one —
-    /// the label is the successor, or sits in another case that runs into it — or
-    /// not at all, and a fact carried along the edge could only be one PHP never
-    /// holds there.
+    /// the ADR-0001 give-up list.
     pub clears: bool,
+    /// Whether a `break` or `continue` lands, so that the edge carries the env above.
+    /// `false` when only `goto`s land: every path from one to the successor passes
+    /// its label, which lowers as a barrier, so the edge carries no env and a walker
+    /// adds a cleared one only when nothing else reaches the successor.
+    pub by_level: bool,
     /// What the case body evaluates, for the top-level rebind rule (issue #762).
     pub runs: Runs,
 }
@@ -3077,8 +3079,8 @@ pub enum StmtKind {
     ///
     /// Only fully-modelable constructs reach here — subject and every arm condition must
     /// lower to a bare variable or literal, and (for `switch`) every non-empty case but
-    /// the last one must end in `break`/`continue`/`return`/`throw`/`exit`/`goto` with
-    /// no fall-through (ADR-0103: the last may run off its end, which leaves the
+    /// the last one may run into the next: each ends in its own `break`, a `goto`, or
+    /// on no path at all (ADR-0103: the last may run off its end, which leaves the
     /// switch). Any failure stays [`StmtKind::Opaque`] wholesale — an unrepresentable
     /// arm opaques the whole construct. A jump that lands on the successor is carried
     /// on its arm ([`MatchArmT::lands`]), or in `default_lands` for the `default` body.

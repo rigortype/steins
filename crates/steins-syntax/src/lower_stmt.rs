@@ -499,21 +499,31 @@ fn if_end(i: &mago_syntax::cst::If<'_>) -> BodyEnd {
 ///   case-to-case fall-through is a real control-flow edge, not modelled; an empty
 ///   case label (`case 1: case 2: body`) is that shape used deliberately, and
 ///   contributes no arm of its own.
+///
+/// The last non-empty case has no next case (ADR-0103 D4): its own end is its arm,
+/// whatever it is. An empty label after it is an arm that reaches the successor
+/// at once — `case 1: return 1; default:` falls through on a non-match, and PHP
+/// rejects an `: int` function ending there with "none returned".
 fn switch_end(sw: &mago_syntax::cst::Switch<'_>) -> BodyEnd {
     if subtree_has_switch_jump(&Node::Switch(sw)) {
         return BodyEnd::Unknown;
     }
     let mut arms = Vec::new();
     let mut has_default = false;
-    for case in sw.body.cases() {
+    let cases = sw.body.cases();
+    let last_body = cases.iter().rposition(|c| !c.is_empty());
+    for (position, case) in cases.iter().enumerate() {
         if case.expression().is_none() {
             has_default = true;
         }
         if case.is_empty() {
+            if last_body.is_none_or(|last| position > last) {
+                arms.push(BodyEnd::FallsThrough);
+            }
             continue;
         }
         let end = block_end(case.statements());
-        if !end.provably_terminates() {
+        if !end.provably_terminates() && Some(position) != last_body {
             // The body runs off its end — into the next case, not past the switch.
             return BodyEnd::Unknown;
         }
@@ -1451,8 +1461,8 @@ struct SwitchArms<C> {
 /// non-empty case but the last ends without running into the next one.
 ///
 /// A case ends cleanly when its last statement is the switch's own `break` (or a
-/// `continue` of level 1, which is one there), which is stripped, or when its trace
-/// ends in a `return`/`throw`/`exit`/[`StmtKind::LoopJump`] or its body in a `goto`.
+/// `continue` of level 1, which is one there), which is stripped, or when no path
+/// runs off its end ([`case_body_ends`]).
 /// The **last** non-empty case may also run off its end (ADR-0103 D4): only empty
 /// labels follow it, so it leaves the switch exactly as a `break` does, and those
 /// trailing labels stand for the no-op bodies they are — an empty arm, or an empty
@@ -1493,8 +1503,8 @@ fn collect_switch_arms<C>(
         }
         let raw = case.statements();
         let (body, ends_break) = strip_trailing_break(raw);
-        let trace = lower_trace(body);
-        if !ends_break && Some(position) != last_body && !case_body_ends(body, &trace) {
+        let trace = lower_case_trace(body);
+        if !ends_break && Some(position) != last_body && !case_body_ends(body) {
             // The body would fall through to the next case, which structuring
             // cannot model.
             return None;
@@ -1538,21 +1548,33 @@ fn collect_switch_arms<C>(
     Some(SwitchArms { arms, default })
 }
 
+/// Lower a case body, with a trailing `goto` as the sub-trace terminator it is there.
+///
+/// Anywhere else a `goto` lowers as a [`StmtKind::Barrier`], which falls through with
+/// everything forgotten: the statements after it in its list are reached only through
+/// a label, itself a barrier. At the end of a case nothing follows it but the next
+/// case, which is entered only by its own match, so the goto ends the arm's path
+/// exactly as a [`StmtKind::LoopJump`] does. Where it lands is the arm's
+/// [`ArmLanding`]; read as a barrier instead, its cleared env would join the
+/// successor and erase what every other path knows there.
+fn lower_case_trace(body: &[Statement<'_>]) -> Vec<Stmt> {
+    let Some((Statement::Goto(g), rest)) = body.split_last() else {
+        return lower_trace(body);
+    };
+    let mut trace = lower_trace(rest);
+    let span = to_span(g.span());
+    let jump = Stmt::lowered(StmtKind::LoopJump { span }, Vec::new());
+    trace.push(Stmt { span, end: stmt_end(body.last().expect("split above")), ..jump });
+    trace
+}
+
 /// Whether a case body that is not stripped of a `break` still cannot run into the
-/// next case: its trace ends in a `return`/`throw`/`exit` or in a jump (every
-/// `break`/`continue` leaves the case, whatever its level), or its last statement is
-/// a `goto`, which lowers as a barrier but never falls through.
-fn case_body_ends(body: &[Statement<'_>], trace: &[Stmt]) -> bool {
-    matches!(body.last(), Some(Statement::Goto(_)))
-        || matches!(
-            trace.last().map(|s| &s.kind),
-            Some(
-                StmtKind::Return { .. }
-                    | StmtKind::Throw { .. }
-                    | StmtKind::Exit { .. }
-                    | StmtKind::LoopJump { .. }
-            )
-        )
+/// next case: [`block_end`] proves it has no edge off its end — every path ends in a
+/// `return`/`throw`/`exit` or a jump (every `break`/`continue` leaves the case,
+/// whatever its level, and one that lands is the arm's [`ArmLanding`]) — or its last
+/// statement is a `goto`, which lowers as a barrier but never falls through.
+fn case_body_ends(body: &[Statement<'_>]) -> bool {
+    matches!(body.last(), Some(Statement::Goto(_))) || block_end(body) == BodyEnd::Terminates
 }
 
 /// Structure a `switch (true) { case <test>: … }` as the `if`/`elseif`/`else` chain it

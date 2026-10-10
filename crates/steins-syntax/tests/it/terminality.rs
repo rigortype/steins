@@ -239,6 +239,24 @@ fn a_switch_with_case_to_case_fall_through_is_undecided() {
 }
 
 #[test]
+fn trailing_empty_labels_and_the_last_case_reach_the_successor() {
+    // ADR-0103 D4. PHP 8.5.11 throws "none returned" for `s1(2)`, `s6(3)` and the
+    // last-case shape: the switch falls through.
+    use BodyEnd::{FallsThrough, Terminates};
+    for (body, end) in [
+        ("switch ($x) { case 1: return 1; default: }", FallsThrough),
+        ("switch ($x) { case 1: return 1; default: return 2; case 3: }", FallsThrough),
+        ("switch ($x) { case 1: return 1; default: $y = 2; }", FallsThrough),
+        ("switch ($x) { default: }", FallsThrough),
+        // An empty label stacked onto a later body is not an arm of its own.
+        ("switch ($x) { case 1: default: return 2; }", Terminates),
+        ("switch ($x) { case 1: return 1; default: return 2; }", Terminates),
+    ] {
+        assert_eq!(end_of(body), end, "{body}");
+    }
+}
+
+#[test]
 fn an_undecided_statement_with_no_later_terminator_leaves_the_list_undecided() {
     assert_eq!(end_of("switch ($x) { case 1: $y = 1; break; }\n$z = 3;"), BodyEnd::Unknown);
 }

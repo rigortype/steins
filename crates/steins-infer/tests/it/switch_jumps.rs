@@ -303,3 +303,73 @@ function w4(int $n): void {
     assert_eq!(lines_of(src, "call.undefined-function"), Vec::<u32>::new());
     assert_eq!(dumps(src), Vec::<String>::new());
 }
+
+// ---- round 1 review: goto edges, terminating finally ------------------------------
+
+#[test]
+fn a_goto_landing_does_not_erase_what_the_other_paths_know() {
+    // The reviewer's `g3`/`g4`: `g3(2)` and `g4(2)` reach line 4 and 7 with `$o`
+    // null (PHP 8.5.11: "Call to a member function m() on null"). Every path from the
+    // `goto` to the call passes the label, so the `goto` adds nothing to the join.
+    let src = "<?php
+function g3(int $k): void {
+    $o = null; switch ($k) { case 1: goto out; }
+    $o->m();
+    out: echo 1;
+}
+function g4(int $k): void {
+    $o = null; $p = 1; switch ($k) { case 1: $p = 2; goto out; }
+    $o->m();
+    out: echo 1;
+}
+";
+    assert_eq!(lines_of(src, "call.on-null"), vec![4, 9]);
+}
+
+#[test]
+fn a_goto_alone_keeps_the_successor_reachable_with_nothing_known() {
+    // Every other arm returns: only the `goto` reaches past the switch, through the
+    // label's barrier, so line 4 is reachable and nothing is known there.
+    let src = "<?php
+function g(int $k): void {
+    $o = null; switch ($k) { case 1: goto out; default: return; }
+    \\PHPStan\\dumpType($o);
+    out: echo 1;
+}
+";
+    assert_eq!(dumps(src), vec!["4: unknown"]);
+}
+
+#[test]
+fn a_jump_replaced_by_a_returning_finally_does_not_land() {
+    // The reviewer's `r4` (PHP 8.5.11: `r4(1)` returns from the `finally`, and line 6
+    // never runs). Base and the first S2 head both reported it.
+    let src = "<?php
+function r4(int $k): void {
+    switch ($k) {
+        case 1: try { break; } finally { return; }
+        default: return;
+    }
+    $n = null; $n->foo();
+}
+";
+    assert_eq!(lines_of(src, "call.on-null"), Vec::<u32>::new());
+    // Control: a `finally` that falls through lets the `break` land.
+    let control = src.replace("finally { return; }", "finally { echo 1; } return;");
+    assert_eq!(lines_of(&control, "call.on-null"), vec![7]);
+}
+
+#[test]
+fn a_switch_whose_trailing_label_falls_through_misses_a_return() {
+    // The reviewer's `s1`, `s3`, `s6` (PHP 8.5.11: TypeError "none returned").
+    let src = "<?php
+function s1(int $k): int { switch ($k) { case 1: return 1; default: } }
+function s3(int $k, bool $c): int { do { switch ($k) { case 1: return 1; default: } } while ($c); }
+function s6(int $k): int { switch ($k) { case 1: return 1; default: return 2; case 3: } }
+function ok(int $k): int { switch ($k) { case 1: return 1; default: return 2; } }
+";
+    let mut lines = lines_of(src, "type.return-missing");
+    lines.extend(lines_of(src, "type.return-maybe-missing"));
+    lines.sort_unstable();
+    assert_eq!(lines, vec![2, 3, 4]);
+}
