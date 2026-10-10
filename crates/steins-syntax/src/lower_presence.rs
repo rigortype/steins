@@ -79,7 +79,7 @@ fn join_states(a: &PresenceState, b: &PresenceState) -> PresenceState {
 /// Refine a state by a boundness guard: every listed name is [`BindingPresence::Bound`]
 /// on this continuation. Guards only ever refine *toward* boundness (ADR-0081 §5) —
 /// `isset` is false on a bound null, so no polarity can prove absence.
-fn refine_bound(state: &mut PresenceState, names: &[String]) {
+fn refine_bound<'a>(state: &mut PresenceState, names: impl IntoIterator<Item = &'a String>) {
     for name in names {
         state.insert(name.clone(), BindingPresence::Bound);
     }
@@ -194,7 +194,7 @@ impl PresenceCx<'_> {
 
 /// Judge one **leaf unit** — a statement with no control-flow structure of its
 /// own, or a branch condition — against `state`, then apply its bindings. A binding
-/// under an operand that may not run is `Maybe` ([`implied_bound`]'s table).
+/// under an operand that may not run is `Maybe` ([`operand_info`]'s table).
 ///
 /// Reads are judged against the *pre-unit* state and bindings applied after, which
 /// is what makes `$y = $x; $x = 1;` report at the first statement. **Within** a
@@ -202,7 +202,11 @@ impl PresenceCx<'_> {
 /// anywhere has its reads in that unit withheld, so `$a = ($b = 1) + $b;` and
 /// `$x .= 'a'` cannot manufacture a finding out of an intra-expression evaluation
 /// order this pass does not model.
-fn presence_leaf(node: &Node<'_, '_>, state: &mut PresenceState, cx: &mut PresenceCx) {
+fn presence_leaf(
+    node: &Node<'_, '_>,
+    state: &mut PresenceState,
+    cx: &mut PresenceCx,
+) -> std::rc::Rc<memo::PresenceLeaf> {
     // The shield-and-scan pair is a pure function of the unit's subtree, and a
     // loop body re-walks its units once per fixpoint round (up to two silent
     // rounds plus the reporting one, compounding under nesting), so the pair is
@@ -219,7 +223,18 @@ fn presence_leaf(node: &Node<'_, '_>, state: &mut PresenceState, cx: &mut Presen
         // unit tests, which subsumes any disjunctive shield the scan raised, so nothing is
         // parked; settling keeps that true if the two ever diverge.
         acc.settle();
-        memo::PresenceLeaf { reads: acc.reads, bound: acc.bound, uncond: acc.uncond_bound }
+        // A branch condition: what it proves bound on each continuation, from the one scan.
+        let (on_true, on_false) = match node {
+            Node::Expression(e) => operand_info(&acc.infos, e, &acc.uncond_bound),
+            _ => (HashSet::new(), HashSet::new()),
+        };
+        memo::PresenceLeaf {
+            reads: acc.reads,
+            bound: acc.bound,
+            uncond: acc.uncond_bound,
+            on_true,
+            on_false,
+        }
     });
     for read in &leaf.reads {
         if leaf.bound.contains(&read.name) {
@@ -237,6 +252,7 @@ fn presence_leaf(node: &Node<'_, '_>, state: &mut PresenceState, cx: &mut Presen
         };
         state.insert(name.clone(), presence);
     }
+    leaf
 }
 
 /// Every name an `isset`/`empty` construct anywhere in this unit tests — the shield
@@ -337,9 +353,12 @@ fn isset_bound_names(cond: &Expression<'_>, want_true: bool, out: &mut Vec<Strin
 }
 
 /// The names a condition proves bound on its true and its false continuation, in that
-/// order: its `isset`/`empty` guards ([`guard_bound_names`]) and the bindings its
-/// evaluation implies (issue #948). Both polarities come from one walk, since the false
-/// side of `A && B` needs both polarities of `A`.
+/// order: its `isset`/`empty` guards ([`isset_bound_names`]) and the bindings its
+/// evaluation implies (issue #948). Both polarities come from the one scan of the
+/// expression: each short-circuit operator's pair is computed when the scan leaves it,
+/// from its operands' pairs and unconditional bindings, and stored by span in
+/// [`VarUsage::infos`]; this function reads the stored pair and never walks an operand,
+/// so the cost is linear in the expression.
 ///
 /// What a binding inside an expression does to the names after it:
 ///
@@ -388,62 +407,83 @@ fn isset_bound_names(cond: &Expression<'_>, want_true: bool, out: &mut Vec<Strin
 /// `B` ran, and negation swaps them. `?:`, `??`, the ternary and `match` as a condition
 /// refine only by the same intersection, which says nothing about which arm ran.
 ///
+/// A statement-position `assert($c && ($x = 1))` is **not** a row: it refines by
+/// `isset`/`empty` guards alone ([`isset_bound_names`]), so a read after it is flagged
+/// under the strict floor, because the assertion may be compiled out
+/// (`zend.assertions=-1`) and the assignment then never runs.
+///
+/// Known residuals, all in the silent-direction-lost sense (a correlation between two
+/// conditions this pass does not track): `is_null($a ?? null) && ($a = 2); echo $a;` and
+/// `if ($c && ($x = 1)) {} elseif ($c || ($x = 2)) {} echo $x;` are flagged although
+/// every path binds.
+///
 /// Witnessed on PHP 8.5: each `Maybe` cell warns `Undefined variable` on some input
 /// (`$c && ($x = 1); echo $x;` with `$c` false; `$c || ($x = 1)` with `$c` true;
 /// `$n ?? ($x = 1)` with `$n` set; `$c ? ($x = 1) : 0` with `$c` false;
 /// `$a ??= ($x = 1)` with `$a` set), and `$a && ($b = 1) || ($c = 2)`
 /// composes: `$b` and `$c` are both `Maybe`.
-fn implied_bound(cond: &Expression<'_>) -> (HashSet<String>, HashSet<String>) {
+pub(crate) fn operand_info(infos: &InfoMap, expr: &Expression<'_>, unconditional: &HashSet<String>) -> Refinement {
     if stack_guard::exhausted() {
         return (HashSet::new(), HashSet::new());
     }
-    let unconditional = || expr_uncond_bound(cond);
-    match cond.unparenthesized() {
+    let own = || (unconditional.clone(), unconditional.clone());
+    match expr.unparenthesized() {
         Expression::Construct(Construct::Isset(i)) => {
             let mut roots = Vec::new();
             for value in i.values.iter() {
                 push_guard_root(value, &mut roots);
             }
-            let mut on_true = unconditional();
+            let mut on_true = unconditional.clone();
             on_true.extend(roots);
-            (on_true, unconditional())
+            (on_true, unconditional.clone())
         }
         Expression::Construct(Construct::Empty(e)) => {
             let mut roots = Vec::new();
             push_guard_root(e.value, &mut roots);
-            let mut on_false = unconditional();
+            let mut on_false = unconditional.clone();
             on_false.extend(roots);
-            (unconditional(), on_false)
+            (unconditional.clone(), on_false)
         }
         Expression::UnaryPrefix(up) if matches!(up.operator, UnaryPrefixOperator::Not(_)) => {
-            let (on_true, on_false) = implied_bound(up.operand);
+            let (on_true, on_false) = operand_info(infos, up.operand, unconditional);
             (on_false, on_true)
         }
         // `$ok = A` is as true as `A`, and its right side ran first.
         Expression::Assignment(a) if matches!(a.operator, AssignmentOperator::Assign(_)) => {
-            let (mut on_true, mut on_false) = implied_bound(a.rhs);
-            let own = unconditional();
-            on_true.extend(own.iter().cloned());
-            on_false.extend(own);
-            (on_true, on_false)
+            operand_info(infos, a.rhs, unconditional)
         }
-        Expression::Binary(b) => implied_binary(b).unwrap_or_else(|| (unconditional(), unconditional())),
-        Expression::Conditional(c) if c.then.is_none() => implied_elvis(c),
-        _ => (unconditional(), unconditional()),
+        // An operator already scanned: its refinement was computed from its operands'.
+        Expression::Binary(b) => infos.get(&span_key(b.span())).cloned().unwrap_or_else(own),
+        Expression::Conditional(c) => infos.get(&span_key(c.span())).cloned().unwrap_or_else(own),
+        _ => own(),
     }
 }
 
-/// [`implied_bound`] for the short-circuit binary operators, or `None` for any other.
-/// Also what a scan of `b` adds to [`VarUsage::uncond_bound`] (the intersection of the two
-/// sides), so the after-state of the operator is the join of its two refinements.
-pub(crate) fn implied_binary(b: &mago_syntax::cst::Binary<'_>) -> Option<(HashSet<String>, HashSet<String>)> {
-    if stack_guard::exhausted() {
-        return Some((HashSet::new(), HashSet::new()));
-    }
+/// The key a scanned operator's refinement is stored under.
+pub(crate) fn span_key(span: mago_span::Span) -> (u32, u32) {
+    (span.start.offset, span.end.offset)
+}
+
+/// A pair of name sets: the names proved bound on the true and on the false continuation.
+pub(crate) type Refinement = (HashSet<String>, HashSet<String>);
+
+/// Every scanned short-circuit operator's refinement, by span.
+pub(crate) type InfoMap = HashMap<(u32, u32), Refinement>;
+
+/// The refinement of `A && B` / `A || B` / `A ?? B` from what a scan of its operands
+/// produced: `unconditional_l` and `unconditional_r` are the names each operand binds
+/// whenever it is evaluated. `None` for any other binary operator. Nothing here walks an
+/// operand: a nested operator's refinement was stored when the scan left it.
+pub(crate) fn binary_info(
+    infos: &InfoMap,
+    b: &mago_syntax::cst::Binary<'_>,
+    unconditional_l: &HashSet<String>,
+    unconditional_r: &HashSet<String>,
+) -> Option<Refinement> {
     match &b.operator {
         BinaryOperator::And(_) | BinaryOperator::LowAnd(_) => {
-            let (l_true, l_false) = implied_bound(b.lhs);
-            let (r_true, r_false) = implied_bound(b.rhs);
+            let (l_true, l_false) = operand_info(infos, b.lhs, unconditional_l);
+            let (r_true, r_false) = operand_info(infos, b.rhs, unconditional_r);
             // False: `A` was false, or `A` was true and `B` false.
             let via_rhs: HashSet<String> = l_true.union(&r_false).cloned().collect();
             Some((
@@ -452,8 +492,8 @@ pub(crate) fn implied_binary(b: &mago_syntax::cst::Binary<'_>) -> Option<(HashSe
             ))
         }
         BinaryOperator::Or(_) | BinaryOperator::LowOr(_) => {
-            let (l_true, l_false) = implied_bound(b.lhs);
-            let (r_true, r_false) = implied_bound(b.rhs);
+            let (l_true, l_false) = operand_info(infos, b.lhs, unconditional_l);
+            let (r_true, r_false) = operand_info(infos, b.rhs, unconditional_r);
             // True: `A` was true, or `A` was false and `B` true.
             let via_rhs: HashSet<String> = l_false.union(&r_true).cloned().collect();
             Some((
@@ -466,36 +506,31 @@ pub(crate) fn implied_binary(b: &mago_syntax::cst::Binary<'_>) -> Option<(HashSe
             // the path that skips it. The outcome says nothing about which path ran.
             let mut roots = Vec::new();
             push_guard_root(b.lhs, &mut roots);
-            let left = expr_uncond_bound(b.lhs);
-            let skipped: HashSet<String> = left.iter().cloned().chain(roots).collect();
-            let ran: HashSet<String> =
-                left.iter().cloned().chain(expr_uncond_bound(b.rhs)).collect();
-            let both: HashSet<String> = skipped.intersection(&ran).cloned().collect();
+            let mut skipped = unconditional_l.clone();
+            skipped.extend(roots);
+            let both: HashSet<String> = skipped
+                .into_iter()
+                .filter(|n| unconditional_l.contains(n) || unconditional_r.contains(n))
+                .collect();
             Some((both.clone(), both))
         }
         _ => None,
     }
 }
 
-/// [`implied_bound`] for `A ?: B`: `B` runs when `A` is falsy.
-pub(crate) fn implied_elvis(c: &mago_syntax::cst::Conditional<'_>) -> (HashSet<String>, HashSet<String>) {
-    if stack_guard::exhausted() {
-        return (HashSet::new(), HashSet::new());
-    }
-    let (a_true, a_false) = implied_bound(c.condition);
-    let ran: HashSet<String> = a_false.union(&expr_uncond_bound(c.r#else)).cloned().collect();
-    let both: HashSet<String> = a_true.intersection(&ran).cloned().collect();
+/// The refinement of `A ?: B`: `B` runs when `A` is falsy.
+pub(crate) fn elvis_info(
+    infos: &InfoMap,
+    c: &mago_syntax::cst::Conditional<'_>,
+    unconditional_l: &HashSet<String>,
+    unconditional_r: &HashSet<String>,
+) -> Refinement {
+    let (a_true, a_false) = operand_info(infos, c.condition, unconditional_l);
+    let both: HashSet<String> = a_true
+        .into_iter()
+        .filter(|n| a_false.contains(n) || unconditional_r.contains(n))
+        .collect();
     (both.clone(), both)
-}
-
-/// The names every normal completion of `expr` binds ([`VarUsage::uncond_bound`]).
-fn expr_uncond_bound(expr: &Expression<'_>) -> HashSet<String> {
-    let mut acc = VarUsage::default();
-    // Nested operators inside an operand add nothing beyond their left side here: asking
-    // each for its own refinement would make the walk exponential in the nesting.
-    acc.in_implied = true;
-    scan_var_usage(&Node::Expression(expr), false, &[], &mut acc);
-    acc.uncond_bound
 }
 
 /// The **root local** a guarded expression reads through: `$x`, `$x['a']['b']`,
@@ -517,13 +552,6 @@ pub(crate) fn push_guard_root(expr: &Expression<'_>, out: &mut Vec<String>) {
         Expression::Access(Access::NullSafeProperty(pa)) => push_guard_root(pa.object, out),
         _ => {}
     }
-}
-
-fn guarded_names(cond: &Expression<'_>, want_true: bool) -> Vec<String> {
-    let (on_true, on_false) = implied_bound(cond);
-    let mut names: Vec<String> = if want_true { on_true } else { on_false }.into_iter().collect();
-    names.sort();
-    names
 }
 
 fn isset_guarded_names(cond: &Expression<'_>, want_true: bool) -> Vec<String> {
@@ -602,9 +630,9 @@ fn presence_stmt(
         Statement::If(i) => presence_if(i, state, cx),
         Statement::Switch(sw) => presence_switch(sw, state, cx),
         Statement::While(w) => {
-            presence_leaf(&Node::Expression(w.condition), state, cx);
+            let cond = presence_leaf(&Node::Expression(w.condition), state, cx);
             let mut entry = state.clone();
-            refine_bound(&mut entry, &guarded_names(w.condition, true));
+            refine_bound(&mut entry, &cond.on_true);
             let exits = presence_loop_body(w.body.statements(), &entry, cx);
             if expr_is_true(w.condition) {
                 // No false-condition exit edge: zero iterations is impossible and
@@ -614,7 +642,7 @@ fn presence_stmt(
             } else {
                 let after = join_loop_exit(&entry, exits, true);
                 *state = join_states(state, &after);
-                refine_bound(state, &guarded_names(w.condition, false));
+                refine_bound(state, &cond.on_false);
             }
             PresenceFlow::Fell
         }
@@ -623,13 +651,14 @@ fn presence_stmt(
             for init in f.initializations.iter() {
                 presence_leaf(&Node::Expression(init), state, cx);
             }
+            let mut last_leaf = None;
             for cond in f.conditions.iter() {
-                presence_leaf(&Node::Expression(cond), state, cx);
+                last_leaf = Some(presence_leaf(&Node::Expression(cond), state, cx));
             }
             let last = f.conditions.iter().next_back();
             let mut entry = state.clone();
-            if let Some(cond) = last {
-                refine_bound(&mut entry, &guarded_names(cond, true));
+            if let Some(leaf) = &last_leaf {
+                refine_bound(&mut entry, &leaf.on_true);
             }
             let mut exits = presence_loop_body(f.body.statements(), &entry, cx);
             // The increments run on the back edge, not on a `break`.
@@ -738,13 +767,13 @@ fn presence_if(
     let mut arms: Vec<PresenceState> = Vec::new();
     let mut open = true;
     for (cond, stmts) in chain {
-        presence_leaf(&Node::Expression(cond), state, cx);
+        let leaf = presence_leaf(&Node::Expression(cond), state, cx);
         if expr_is_false(cond) {
             // The arm can never be taken; it contributes no path (`if_end`'s rule).
             continue;
         }
         let mut arm = state.clone();
-        refine_bound(&mut arm, &guarded_names(cond, true));
+        refine_bound(&mut arm, &leaf.on_true);
         // Only a fall-through arm reaches THIS statement's successor. A `break` or
         // `continue` arm leaves for an enclosing construct, which joins its state
         // where it actually arrives — keeping it here is what would report
@@ -758,7 +787,7 @@ fn presence_if(
             open = false;
             break;
         }
-        refine_bound(state, &guarded_names(cond, false));
+        refine_bound(state, &leaf.on_false);
     }
     if open {
         match body.else_statements() {
