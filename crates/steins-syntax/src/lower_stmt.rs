@@ -31,7 +31,7 @@ use crate::lower_globals::{
 };
 use crate::lower_guards::guard_regions_of;
 use crate::lower_presence::subtree_has_goto;
-use crate::lower_pure::is_pure_expr;
+use crate::lower_pure::{is_pure_expr, is_pure_statement};
 use crate::lower_jump::{arm_landing, body_has_jump, ends_own_switch, jump_level};
 use crate::lower_try::{lower_try, try_end};
 use crate::memo::{self, TryScan};
@@ -65,6 +65,11 @@ pub(crate) fn lower_stmt(s: &Statement<'_>, out: &mut Vec<Stmt>) {
         | Statement::Inline(_)
         | Statement::Noop(_)
         | Statement::Use(_) => return,
+        // A bare `$x;` is compiled away, so only the statement form is a no-op
+        // (`lower_pure`); as a match arm the read is consumed and may warn.
+        Statement::Expression(es) if is_pure_statement(es.expression) => {
+            Stmt::lowered(StmtKind::Echo(Vec::new()), Vec::new())
+        }
         Statement::Expression(es) => lower_expr_stmt(es.expression),
         Statement::Return(r) => {
             let value = r.value.map_or(ArgValue::Other, lower_arg_value);

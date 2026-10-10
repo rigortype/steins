@@ -589,18 +589,21 @@ finding that reads a local after `$v = match ($i) { 1 => 10, default => 20 }`
 went dark, and `$s = "a"; 1; return $s;` in an `: int` function (a `TypeError`
 on PHP 8.5.11) was not reported.
 
-An expression that runs no user code, writes nothing, prints nothing and does
-not change `error_reporting` now lowers to the no-op entry (an `Echo` with no
-calls), which keeps its `guards` and `runs` and leaves the env alone. The
-predicate is a table in `lower_pure.rs`, each row witnessed on PHP 8.5.11.
-Refused, and so still a barrier: every call, `new`, `include`, `eval`, `print`,
-`echo`, an assignment of any kind, `++`/`--`, `@`, `clone`, `yield`, `throw`,
-`exit`, a closure; any array, property or static fetch on a receiver that is not
-a literal (`offsetGet`, `__get`, autoload); any constant fetch (an undefined one
-throws, and whether one is defined is not known here); and `.`, a string or
-array cast and a loose comparison over an operand the lowering cannot prove is
-not an object (`__toString` runs for `$o . 'a'`, `$o == 'x'`, `$o < 'y'`). An
-error the engine itself raises (`1/0`, an array operand of `-`) is not user
-code: it leaves the scope as an uncaught call's does, which the walk already
-models. Not covered, and a follow-up: a variable compared or concatenated is
-still a barrier, because the lowering has no types.
+An expression that can neither raise a diagnostic nor throw now lowers to the
+no-op entry (an `Echo` with no calls), which keeps its `guards` and `runs` and
+leaves the env alone. This is the bar ADR-0096 sets for a dead statement: a
+warning, notice or deprecation reaches `set_error_handler`, which is user code
+that may rebind any local (`~1.5;`, `'ab'[5];`, `'1a' + 1;`, a read of an
+undefined variable inside a larger expression), and a throw (`1/0;`, `-[1];`)
+leaves the scope, so the code after it is not reached with the values before
+it. The set is small and closed (`lower_pure.rs`, each row witnessed on PHP
+8.5.11 with a handler that rebinds a local): literals and magic constants, a bare
+`$x;` as a whole statement (compiled away, so it does not warn), `isset`/`empty`
+over bare variables, array literals of those with distinct int or non-numeric
+string keys, and `!`, `===`, `!==` over variable-free operands. Everything else,
+arithmetic, casts, `.`, loose comparison, `??`, `?:`, every fetch and every call
+included, stays a barrier. A literal arm is covered; a variable arm is not, since
+its read is consumed. ADR-0096's discardable-call predicate lives in the
+inference crate over catalogued calls and judges no expression, so the two are
+not shared; a variable compared or concatenated, and arithmetic over literals
+that cannot fail, are follow-ups.
