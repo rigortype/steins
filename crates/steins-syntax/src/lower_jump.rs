@@ -3,7 +3,7 @@
 //! constructs it is written in.
 //!
 //! Every pass that asks where a jump goes asks it here, so the lowering of loops
-//! (`break_free`, `nested_jumps_only`), the structured `switch` arm
+//! (`break_free`, `continue_free`), the structured `switch` arm
 //! ([`ArmLanding`]) and the binding-presence pass's parked jump states count the
 //! same levels.
 //!

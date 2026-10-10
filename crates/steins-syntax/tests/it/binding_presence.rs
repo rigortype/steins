@@ -201,10 +201,19 @@ fn a_do_while_whose_body_terminates_terminates_its_arm() {
     assert_eq!(maybe("do { $y = 1; return; } while ($c); echo $y;"), none());
     assert_eq!(definite("do { $y = 1; return; } while ($c); echo $y;"), none());
     // A `continue` of the loop reaches the condition, and `break 2` out of a nested
-    // loop reaches the successor. This pass credits that `break` to the inner loop,
-    // so the lowering's level-counting gate is what catches it.
+    // loop reaches the successor: both target this loop, which the gate refuses.
     assert_eq!(else_arm("do { if ($d) { continue; } return; } while ($d);"), one("y"));
     assert_eq!(else_arm("do { while ($d) { break 2; } return; } while ($d);"), one("y"));
+    assert_eq!(else_arm("do { while ($d) { continue 2; } return; } while ($d);"), one("y"));
+    // Jumps that climb levels but stay inside the body leave it terminating (#904
+    // step 3), and so do those a terminating `finally` replaces.
+    for body in [
+        "while ($d) { while ($d) { break 2; } } return;",
+        "while ($d) { switch ($d) { case 1: continue 2; } } return;",
+    ] {
+        assert_eq!(else_arm(&format!("do {{ {body} }} while ($d);")), none(), "{body}");
+    }
+    assert_eq!(else_arm("do { try { break; } finally { return; } } while ($d);"), none());
 }
 
 #[test]

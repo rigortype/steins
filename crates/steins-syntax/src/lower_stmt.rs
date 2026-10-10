@@ -603,14 +603,13 @@ fn loop_end(infinite: bool, node: &Node<'_, '_>) -> BodyEnd {
 /// terminates on every path leaves no edge to the successor — unless one of those
 /// "terminating" paths is a jump that comes back: a `break` of this loop lands on
 /// the successor and a `continue` of it on the condition, which may fail. The gate
-/// is the lowering's `nested_jumps_only` (the same scan, see
-/// [`body_has_nested_jumps_only`]): with it, every `break`/`continue` [`block_end`]
-/// counts as terminating belongs to a nested construct, whose own row has already
-/// judged it.
+/// is the lowering's `break_free && continue_free` ([`body_jumps_stay_inside`]): with
+/// it, every `break`/`continue` [`block_end`] counts as terminating belongs to a
+/// nested construct, whose own row has already judged it.
 fn do_while_end(s: &Statement<'_>, d: &mago_syntax::cst::DoWhile<'_>) -> BodyEnd {
     let body = std::slice::from_ref(d.statement);
     let by_condition = loop_end(expr_is_true(d.condition), &Node::Statement(s));
-    if !body_has_nested_jumps_only(body) {
+    if !body_jumps_stay_inside(body) {
         return by_condition;
     }
     if block_end(body) == BodyEnd::Terminates { BodyEnd::Terminates } else { by_condition }
@@ -1004,13 +1003,13 @@ fn lower_do_while(s: &Statement<'_>, d: &mago_syntax::cst::DoWhile<'_>) -> Stmt 
     let cond = lower_cond(d.condition);
     let body = lower_trace(std::slice::from_ref(d.statement));
     let break_free = body_is_break_free(std::slice::from_ref(d.statement));
-    let nested_jumps_only = body_has_nested_jumps_only(std::slice::from_ref(d.statement));
+    let continue_free = body_is_continue_free(std::slice::from_ref(d.statement));
     Stmt::lowered(
         StmtKind::DoWhile {
             cond,
             body,
             break_free,
-            nested_jumps_only,
+            continue_free,
             writes,
             reads,
             poisons,
@@ -1048,34 +1047,47 @@ fn body_is_break_free(body: &[Statement<'_>]) -> bool {
     !body.iter().any(|s| body_has_jump(&Node::Statement(s), 0, &jump_escapes_loop))
 }
 
-/// Whether every jump in a `do`-`while` body belongs to a construct nested in it
-/// (issue #679) — the gate on letting the body's own end decide the loop's.
+/// Whether no `continue` in a `do`-`while` body targets this loop (issue #679, relaxed
+/// by #904 step 3) — together with [`body_is_break_free`], the gate on letting the
+/// body's own end decide the loop's.
 ///
-/// `true` when the body holds no `goto` and every `break`/`continue` in it has the
-/// literal level 1 and sits inside a nested loop or `switch` (`depth >= 1`, counted as
-/// [`body_is_break_free`] counts it). Nested function-likes are not descended. It
-/// implies `break_free`.
+/// A jump of this loop comes back: a `break` lands on the successor and a `continue`
+/// on the condition, which may fail. So a body whose paths all end in a jump that
+/// [`block_end`] counts as terminating still reaches the successor unless no such
+/// jump is this loop's. [`body_is_break_free`] answers for `break` (and for every
+/// jump that leaves the loop for an outer one, and for a `goto` or a level that is
+/// not a literal); this answers for the `continue` it deliberately lets through.
+/// Jumps are credited by level (ADR-0103), so a jump aimed at a nested loop or
+/// `switch` is that construct's own row and does not count, however many levels it
+/// climbs inside the body.
 ///
-/// Stricter than the truth on purpose. A jump of this loop comes back (a `break`
-/// lands on the successor, a `continue` on the condition), so `break_free` plus "no
-/// `continue` of this loop" would be the exact question. The walker's structured
-/// `switch` and the presence pass used to credit a jump to the INNERMOST breakable,
-/// mis-crediting a multi-level jump out of a nested loop (#904), so a body holding
-/// one could not have its end trusted. Both count levels now (ADR-0103); relaxing
-/// this to `break_free && continue_free` is its own step (#1033 S2b).
-pub(crate) fn body_has_nested_jumps_only(body: &[Statement<'_>]) -> bool {
-    !body.iter().any(|s| body_has_jump(&Node::Statement(s), 0, &jump_not_innermost))
+/// The rule, for a jump `depth` breakable structures below the body's top level,
+/// witnessed on PHP 8.5.11 (the loop is accepted when no row refuses):
+///
+/// | jump | target | refuses |
+/// | --- | --- | --- |
+/// | `break N`, `N <= depth` | an inner loop or `switch` | no |
+/// | `break N`, `N == depth + 1` | this loop | yes (`break_free`) |
+/// | `break N`, `N > depth + 1`, or no literal level | an outer construct, or nothing | yes (`break_free`) |
+/// | `continue N`, `N <= depth` | an inner loop, or an inner `switch` (where it is `break`) | no |
+/// | `continue N`, `N == depth + 1` | this loop | yes (here) |
+/// | `continue N`, `N > depth + 1` | an outer loop | yes (`break_free`) |
+/// | `goto` | an unbounded label | yes (`break_free`) |
+/// | any of the above in a `try` whose `finally` terminates | replaced by the `finally`, lands nowhere | no |
+pub(crate) fn body_is_continue_free(body: &[Statement<'_>]) -> bool {
+    !body.iter().any(|s| body_has_jump(&Node::Statement(s), 0, &jump_continues_loop))
 }
 
-/// [`body_has_nested_jumps_only`]'s question about one jump node `depth` breakable
-/// structures below the body's top level: a jump of this loop, a multi-level one
-/// (or one whose level is not a literal), or a `goto`.
-fn jump_not_innermost(jump: &Node<'_, '_>, depth: u32) -> bool {
-    match jump {
-        Node::Break(b) => depth == 0 || jump_level(b.level) != Some(1),
-        Node::Continue(c) => depth == 0 || jump_level(c.level) != Some(1),
-        _ => true,
-    }
+/// The one gate both consumers of a `do`-`while` body's end share: the body holds no
+/// jump of this loop, so its end is the loop's.
+pub(crate) fn body_jumps_stay_inside(body: &[Statement<'_>]) -> bool {
+    body_is_break_free(body) && body_is_continue_free(body)
+}
+
+/// [`body_is_continue_free`]'s question about one jump node `depth` breakable
+/// structures below the body's top level.
+fn jump_continues_loop(jump: &Node<'_, '_>, depth: u32) -> bool {
+    matches!(jump, Node::Continue(c) if jump_level(c.level) == Some(depth + 1))
 }
 
 /// [`body_is_break_free`]'s question about one jump node `depth` breakable
