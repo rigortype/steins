@@ -1015,15 +1015,15 @@ pub(crate) fn bind_lvalue_roots(expr: &Expression<'_>, acc: &mut VarUsage) {
     match expr.unparenthesized() {
         Expression::Variable(v) => acc.bind_variable(v),
         // `$GLOBALS['x'] = …` binds the global `$x` (issue #902): at file scope that is the
-        // local, and elsewhere binding it too only silences. A key named at run time
-        // binds a name nobody can list.
+        // local; in a function body it binds no local. A key named at run time binds a
+        // name nobody can list.
         Expression::ArrayAccess(aa) => {
             match globals_fetch(expr) {
                 Some(GlobalsKey::Literal(name)) => {
                     acc.bound.insert(name);
                 }
                 Some(GlobalsKey::Dynamic) => acc.dammed = true,
-                None => {}
+                Some(GlobalsKey::Inert) | None => {}
             }
             bind_lvalue_roots(aa.array, acc);
         }
