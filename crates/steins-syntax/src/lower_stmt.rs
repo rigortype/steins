@@ -159,7 +159,7 @@ pub(crate) fn lower_stmt(s: &Statement<'_>, out: &mut Vec<Stmt>) {
         _ => Stmt::lowered(StmtKind::Barrier, Vec::new()),
     };
     let runs = stmt_runs(s, &stmt.kind);
-    out.push(Stmt {
+    let stmt = Stmt {
         span: stmt_span,
         string_contexts: string_context_sites(s),
         guards: guard_regions_of(s),
@@ -169,16 +169,141 @@ pub(crate) fn lower_stmt(s: &Statement<'_>, out: &mut Vec<Stmt>) {
         has_terminator: subtree_has_function_exit(&Node::Statement(s)),
         runs,
         holds_label: holds_label(&stmt.kind),
-        unspelled: unspelled_reads(&stmt.kind, &Node::Statement(s)).map(Box::new),
         ..stmt
-    });
+    };
+    let mut stmt = with_heap_fill(stmt, &Node::Statement(s), &own_expressions(s));
+    // `foreach ($xs as $q->p)` writes through `$q` on every iteration.
+    if let Statement::Foreach(fe) = s {
+        let mut writes = stmt.writes_through.take().map_or_else(Vec::new, |w| *w);
+        push_prop_base(fe.target.value(), &mut writes);
+        if let Some(key) = fe.target.key() {
+            push_prop_base(key, &mut writes);
+        }
+        stmt.writes_through = (!writes.is_empty()).then(|| Box::new(writes));
+    }
+    out.push(stmt);
+}
+
+/// The expressions a statement evaluates itself, before or instead of any nested
+/// statement: an expression statement's, `echo`'s and `return`'s operands, an `if`
+/// chain's conditions, a loop header, a `switch` subject. Nested statements carry
+/// their own.
+fn own_expressions<'a, 'arena>(s: &'a Statement<'arena>) -> Vec<&'a Expression<'arena>> {
+    match s {
+        Statement::Expression(es) => vec![es.expression],
+        Statement::Return(r) => r.value.into_iter().collect(),
+        Statement::Echo(e) => e.values.iter().copied().collect(),
+        Statement::EchoTag(e) => e.values.iter().copied().collect(),
+        Statement::If(i) => {
+            let elseifs = i.body.else_if_clauses().into_iter().map(|(c, _)| c);
+            std::iter::once(i.condition).chain(elseifs).collect()
+        }
+        Statement::While(w) => vec![w.condition],
+        Statement::DoWhile(d) => vec![d.condition],
+        Statement::For(f) => {
+            let header = f.initializations.iter().chain(f.conditions.iter());
+            header.chain(f.increments.iter()).copied().collect()
+        }
+        Statement::Foreach(fe) => vec![fe.expression],
+        Statement::Switch(sw) => vec![sw.expression],
+        _ => Vec::new(),
+    }
+}
+
+/// Fill a lowered statement's heap-effect fields (issue #1048) from the expressions
+/// it evaluates itself — [`Stmt::unspelled`], [`Stmt::suspends`] and
+/// [`Stmt::writes_through`] — with `node` the subtree whose names `unspelled`
+/// collects. Shared by every route that mints a statement.
+pub(crate) fn with_heap_fill(mut stmt: Stmt, node: &Node<'_, '_>, own: &[&Expression<'_>]) -> Stmt {
+    let suspends = own.iter().any(|e| node_is_generator(&Node::Expression(e)));
+    // A statement-level `$q->p = …` is the kind's own, spelled write.
+    let spelled_top = matches!(stmt.kind, StmtKind::PropAssign { .. });
+    let mut writes = Vec::new();
+    for e in own {
+        match e.unparenthesized() {
+            Expression::Assignment(a) if spelled_top => {
+                collect_prop_writes(&Node::Expression(a.rhs), &mut writes);
+            }
+            _ => collect_prop_writes(&Node::Expression(e), &mut writes),
+        }
+    }
+    stmt.unspelled = unspelled_reads(&stmt.kind, node, suspends).map(Box::new);
+    stmt.suspends = suspends;
+    stmt.writes_through = (!writes.is_empty()).then(|| Box::new(writes));
+    stmt
+}
+
+/// The receivers `node` writes a property through: the leftmost variable of every
+/// assigned, compound-assigned, incremented or decremented property chain. Nested
+/// function-like bodies run only when called, as calls, and are not descended.
+fn collect_prop_writes(node: &Node<'_, '_>, out: &mut Vec<String>) {
+    match node {
+        Node::Function(_)
+        | Node::Method(_)
+        | Node::Closure(_)
+        | Node::ArrowFunction(_)
+        | Node::AnonymousClass(_) => return,
+        Node::Assignment(a) => push_prop_base(a.lhs, out),
+        Node::UnaryPrefix(u)
+            if matches!(
+                u.operator,
+                UnaryPrefixOperator::PreIncrement(_) | UnaryPrefixOperator::PreDecrement(_)
+            ) =>
+        {
+            push_prop_base(u.operand, out);
+        }
+        Node::UnaryPostfix(u) => push_prop_base(u.operand, out),
+        _ => {}
+    }
+    for child in children(node) {
+        collect_prop_writes(&child, out);
+    }
+}
+
+/// Push the leftmost variable of `lvalue` when it writes through a property
+/// (`$q->p`, `$q->a->b`, `$q->arr[0]`, `$a[0]->p`), `""` when such a chain starts
+/// at no variable, and nothing for a plain variable or array write.
+fn push_prop_base(lvalue: &Expression<'_>, out: &mut Vec<String>) {
+    let mut through_prop = false;
+    let mut cur = lvalue.unparenthesized();
+    let base = loop {
+        match cur {
+            Expression::Access(Access::Property(pa)) => {
+                through_prop = true;
+                cur = pa.object.unparenthesized();
+            }
+            Expression::Access(Access::NullSafeProperty(pa)) => {
+                through_prop = true;
+                cur = pa.object.unparenthesized();
+            }
+            Expression::ArrayAccess(aa) => cur = aa.array.unparenthesized(),
+            Expression::Variable(Variable::Direct(dv)) => {
+                break strip_dollar(bytes_to_string(dv.name));
+            }
+            _ => break String::new(),
+        }
+    };
+    if through_prop && !out.contains(&base) {
+        out.push(base);
+    }
 }
 
 /// [`Stmt::unspelled`] for a statement lowered to `kind` from `node`: every direct
 /// variable `node` mentions when one of the values `kind` carries lowered to
-/// [`ArgValue::Other`], and `None` otherwise.
-pub(crate) fn unspelled_reads(kind: &StmtKind, node: &Node<'_, '_>) -> Option<Vec<String>> {
-    let hides = match kind {
+/// [`ArgValue::Other`] or the statement `suspends` (a `yield` hands its operand to
+/// the consumer), and `None` otherwise.
+fn unspelled_reads(kind: &StmtKind, node: &Node<'_, '_>, suspends: bool) -> Option<Vec<String>> {
+    if !suspends && !kind_hides(kind) {
+        return None;
+    }
+    let mut out = Vec::new();
+    collect_direct_vars(node, &mut out);
+    (!out.is_empty()).then_some(out)
+}
+
+/// Whether a value `kind` carries lowered to [`ArgValue::Other`] anywhere.
+fn kind_hides(kind: &StmtKind) -> bool {
+    match kind {
         StmtKind::Assign { value, call, .. } | StmtKind::Return { value, call, .. } => {
             value_hides(value) || call.as_ref().is_some_and(call_hides)
         }
@@ -188,13 +313,7 @@ pub(crate) fn unspelled_reads(kind: &StmtKind, node: &Node<'_, '_>) -> Option<Ve
         StmtKind::Call(c) => call_hides(c),
         StmtKind::Echo(calls) => calls.iter().any(call_hides),
         _ => false,
-    };
-    if !hides {
-        return None;
     }
-    let mut out = Vec::new();
-    collect_direct_vars(node, &mut out);
-    (!out.is_empty()).then_some(out)
 }
 
 /// Whether a lowered value has an [`ArgValue::Other`] anywhere inside it.
@@ -1202,7 +1321,7 @@ fn lower_expr_position(expr: &Expression<'_>) -> Vec<Stmt> {
     // This path bypasses `lower_stmt`, so it owns its own terminality fill
     // (ADR-0078, issue #199) — from the arm's expression, the same `expr_end` a
     // statement-position expression gets.
-    out.push(Stmt {
+    let st = Stmt {
         span: to_span(expr.span()),
         end: expr_end(expr),
         has_terminator: subtree_has_function_exit(&Node::Expression(expr)),
@@ -1211,9 +1330,9 @@ fn lower_expr_position(expr: &Expression<'_>) -> Vec<Stmt> {
         // `echo match (…)` lowers to a `StmtKind::Call` whose result the `echo`
         // consumes. Marked here, at the one site that mints these.
         value_position: true,
-        unspelled: unspelled_reads(&st.kind, &Node::Expression(expr)).map(Box::new),
         ..st
-    });
+    };
+    out.push(with_heap_fill(st, &Node::Expression(expr), &[expr]));
     out
 }
 
@@ -1807,12 +1926,6 @@ fn note_embedded_writes(node: &Node<'_, '_>, out: &mut Vec<InvalidatedVar>) {
 
 /// Lower an expression-statement to a trace entry.
 pub(crate) fn lower_expr_stmt(expr: &Expression<'_>) -> Stmt {
-    // A `yield` suspends the generator mid-expression: its consumer runs any code
-    // it likes — a write through the yielded handle among it — before the
-    // expression resumes (issue #1048), so the statement is the sound floor.
-    if node_is_generator(&Node::Expression(expr)) {
-        return Stmt::lowered(StmtKind::Barrier, Vec::new());
-    }
     match expr.unparenthesized() {
         Expression::Assignment(a) => {
             if let Expression::Variable(Variable::Direct(dv)) = a.lhs.unparenthesized() {

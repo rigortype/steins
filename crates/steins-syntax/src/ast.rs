@@ -3569,6 +3569,19 @@ pub struct Stmt {
     /// here only escapes its object. Boxed so the common empty case costs one word
     /// per statement; read it through [`Self::unspelled_reads`].
     pub unspelled: Option<Box<Vec<String>>>,
+    /// Whether this statement's own expressions `yield` (issue #1048): the generator
+    /// suspends there and its consumer runs any code before the statement resumes —
+    /// a write through the yielded handle among it. A `yield` inside a nested
+    /// function-like body does not count. Read with [`Scope::yields_by_ref`], which
+    /// says whether the consumer can also reach a local by reference.
+    pub suspends: bool,
+    /// The receivers this statement's own expressions write a property through in a
+    /// position its [`Self::kind`] does not spell (issue #1048): `$y = $q->p = 1`,
+    /// `echo $o->r = 2`, `if ($q->p = f())`, `++$q->n`. The leftmost variable of each
+    /// written property chain, or `""` where the chain starts at no variable
+    /// (`f()->p = 1`). A statement-level `$q->p = …` is spelled as
+    /// [`StmtKind::PropAssign`] and is not listed. `None` when there is none.
+    pub writes_through: Option<Box<Vec<String>>>,
 }
 
 /// The functions the analyzer folds as **existence guards** (ADR-0049 §4 / N3, issues #198
@@ -3734,7 +3747,15 @@ impl Stmt {
             guards: Vec::new(),
             holds_label: false,
             unspelled: None,
+            suspends: false,
+            writes_through: None,
         }
+    }
+
+    /// The names in [`Self::writes_through`], empty where there are none.
+    #[must_use]
+    pub fn writes_through(&self) -> &[String] {
+        self.writes_through.as_deref().map_or(&[], Vec::as_slice)
     }
 
     /// The names in [`Self::unspelled`], empty where every value was spelled.
@@ -4041,6 +4062,10 @@ pub struct Scope {
     /// `true` when the body has `yield`/`yield from` — the call result is a `Generator`,
     /// not the trailing `return` value (ADR-0057 §5); return summaries refuse such scopes.
     pub is_generator: bool,
+    /// Whether this scope is a generator declared to return by reference
+    /// (`function &g()`), whose consumer can write the yielded local itself
+    /// (issue #1048): a [`Stmt::suspends`] statement then forgets every local.
+    pub yields_by_ref: bool,
     /// `true` if the scope has any construct defeating local value tracking (`extract`/
     /// `compact`, `global`, `static $x`, variable-variables, ref assignment, by-ref closure
     /// capture, `include`/`require`/`eval`) — no variable is ever known when poisoned.

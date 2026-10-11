@@ -34,7 +34,7 @@ use crate::lower_site::{
 use crate::lower_stmt::{
     block_end, call_invalidation, expr_end, lower_expr_stmt, lower_stmt, named_call, node_poisons,
     push_byref_captures, scan_guard_chain_no_default, scan_opaque, scan_string_contexts,
-    subtree_has_function_exit, unspelled_reads,
+    subtree_has_function_exit, with_heap_fill,
 };
 use crate::names::{RefResolver, ctx_of};
 use crate::stack_guard;
@@ -112,12 +112,14 @@ fn collect_scopes(
             } else {
                 format!("{}\\{}", ctx.namespace, name)
             };
-            out.push(build_scope(
+            let mut scope = build_scope(
                 ScopeOwner::Function { name, fqn },
                 f.body.statements.as_slice(),
                 ret_hint_of(f.return_type_hint.as_ref()),
                 Some(&f.parameter_list),
-            ));
+            );
+            scope.yields_by_ref = scope.is_generator && f.ampersand.is_some();
+            out.push(scope);
         }
         Node::Class(c) => {
             let simple = bytes_to_string(c.name.value);
@@ -136,12 +138,14 @@ fn collect_scopes(
                             let method = bytes_to_string(m.name.value);
                             let owner =
                                 ScopeOwner::Method { class: class_fqn.clone(), method };
-                            out.push(build_scope(
+                            let mut scope = build_scope(
                                 owner,
                                 block.statements.as_slice(),
                                 ret_hint_of(m.return_type_hint.as_ref()),
                                 Some(&m.parameter_list),
-                            ));
+                            );
+                            scope.yields_by_ref = scope.is_generator && m.ampersand.is_some();
+                            out.push(scope);
                         }
                         // A promoted parameter's hooks are the constructor's syntax but
                         // the property's semantics (issue #544) — same scopes as the
@@ -307,6 +311,7 @@ fn build_scope_from(
         owner,
         ret_hint,
         is_generator,
+        yields_by_ref: false,
         poisoned,
         opaque,
         stmts,
@@ -481,9 +486,8 @@ fn build_hook_expr_scope(
                 call: named_call(expr),
                 span: to_span(expr.span()),
             };
-            Stmt {
+            let stmt = Stmt {
                 span: to_span(expr.span()),
-                unspelled: unspelled_reads(&kind, &node).map(Box::new),
                 kind,
                 invalidated: call_invalidation(&node),
                 string_contexts,
@@ -496,19 +500,23 @@ fn build_hook_expr_scope(
                 // A hook body is never the top-level frame (issue #762).
                 runs: Runs::default(),
                 holds_label: false,
-            }
+                unspelled: None,
+                suspends: false,
+                writes_through: None,
+            };
+            with_heap_fill(stmt, &node, &[expr])
         }
         HookKind::Set => {
             let base = lower_expr_stmt(expr);
-            Stmt {
+            let stmt = Stmt {
                 span: to_span(expr.span()),
                 string_contexts,
                 guards,
                 end: expr_end(expr),
                 has_terminator: subtree_has_function_exit(&node),
-                unspelled: unspelled_reads(&base.kind, &node).map(Box::new),
                 ..base
-            }
+            };
+            with_heap_fill(stmt, &node, &[expr])
         }
     };
     Scope {
@@ -516,6 +524,7 @@ fn build_hook_expr_scope(
         owner,
         ret_hint,
         is_generator: node_is_generator(&node),
+        yields_by_ref: false,
         // The flag IS the inventory being non-empty (never a second computation).
         poisoned: !opaque.is_empty(),
         opaque,
@@ -647,6 +656,7 @@ fn build_closure_scope_from_closure(
         owner: ScopeOwner::Closure { def_offset },
         ret_hint: ret_hint_of(cl.return_type_hint.as_ref()),
         is_generator,
+        yields_by_ref: is_generator && cl.ampersand.is_some(),
         poisoned,
         opaque,
         stmts,
@@ -1658,7 +1668,6 @@ fn build_closure_scope_from_arrow(
     let kind = StmtKind::Return { value, call, span };
     let ret = Stmt {
         span,
-        unspelled: unspelled_reads(&kind, &Node::Expression(af.expression)).map(Box::new),
         kind,
         invalidated,
         string_contexts,
@@ -1672,7 +1681,11 @@ fn build_closure_scope_from_arrow(
         // An arrow body is never the top-level frame (issue #762).
         runs: Runs::default(),
         holds_label: false,
+        unspelled: None,
+        suspends: false,
+        writes_through: None,
     };
+    let ret = with_heap_fill(ret, &Node::Expression(af.expression), &[af.expression]);
     let mut opaque = Vec::new();
     scan_opaque(&Node::Expression(af.expression), &mut opaque, false);
     let poisoned = !opaque.is_empty();
@@ -1683,6 +1696,7 @@ fn build_closure_scope_from_arrow(
         owner: ScopeOwner::Closure { def_offset },
         ret_hint: ret_hint_of(af.return_type_hint.as_ref()),
         is_generator,
+        yields_by_ref: is_generator && af.ampersand.is_some(),
         poisoned,
         opaque,
         stmts: vec![ret],
