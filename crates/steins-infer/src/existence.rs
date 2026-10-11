@@ -449,6 +449,9 @@ pub(crate) fn existence_vouch(cx: &Cx, store: &Store, call: &CallExpr) -> Vec<Vo
     if let Some(vouches) = member_guard_vouch(cx, store, call) {
         return vouches;
     }
+    if let Some(vouches) = callable_name_vouch(cx, call) {
+        return vouches;
+    }
     let Some(pred) = existence_predicate(cx, call) else {
         return Vec::new();
     };
@@ -486,6 +489,29 @@ pub(crate) fn existence_vouch(cx: &Cx, store: &Store, call: &CallExpr) -> Vec<Vo
                 .collect()
         }
     }
+}
+
+/// The vouch of `is_callable('<name>')` with a literal string (the #1060 review): the
+/// function it names, or `C::m` for a `"C::m"` string — the same symbols
+/// `function_exists('f')` and `method_exists('C', 'm')` vouch, since a true answer
+/// proves exactly that the name is callable. The array form is a member guard
+/// ([`member_guard_shape`]). `None` when `call` is not this guard.
+fn callable_name_vouch(cx: &Cx, call: &CallExpr) -> Option<Vec<Vouch>> {
+    let callee = global_function_callee(cx, call)?;
+    if !callee.eq_ignore_ascii_case("is_callable") || !call.positional_only {
+        return None;
+    }
+    let [arg] = call.args.as_slice() else { return None };
+    let ArgValue::Str(name) = &arg.value else { return None };
+    let Some(name) = name.as_str() else { return Some(Vec::new()) };
+    let name = name.trim_start_matches('\\');
+    Some(match name.split_once("::") {
+        Some((class, method)) => vec![Vouch::Method {
+            class: class.trim_start_matches('\\').to_ascii_lowercase(),
+            method: method.to_ascii_lowercase(),
+        }],
+        None => vec![Vouch::Function(name.to_ascii_lowercase())],
+    })
 }
 
 /// Which member a member guard asks about.

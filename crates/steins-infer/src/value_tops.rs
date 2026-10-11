@@ -59,25 +59,25 @@ pub(crate) fn resolve_native_value(
 /// cell of it depends on `strict_types`):
 ///
 /// ```text
-/// value                    array      object     iterable                callable
-/// ------------------------ ---------- ---------- ----------------------- ------------------------
-/// int/float/bool           TypeError  TypeError  TypeError               TypeError
-/// string                   TypeError  TypeError  TypeError               TypeError iff no function
-///                                                                        (or `C::m` method) by that
-///                                                                        name exists — absence
-///                                                                        ladder; else decline
-/// null, not nullable       TypeError  TypeError  TypeError               TypeError
-/// null, `?T` / `= null`    accept     accept     accept                  accept
-/// array literal            accept     TypeError  accept                  TypeError iff provably no
-///                                                                        callable pair (below)
-/// closure                  TypeError  accept     TypeError (not          accept
-///                                                Traversable)
-/// `new C`                  TypeError  accept     TypeError iff C is-a    TypeError iff C's chain is
-///                                                `Traversable` is No     enumerated with no
-///                                                                        `__invoke`/`__call`; else
-///                                                                        decline (`stdClass` too)
-/// enum case                TypeError  accept     as `new C`              decline
-/// anything else            decline    decline    decline                 decline
+/// value                 array      object     iterable                callable
+/// --------------------- ---------- ---------- ----------------------- ------------------------
+/// int/float/bool        TypeError  TypeError  TypeError               TypeError
+/// string                TypeError  TypeError  TypeError               TypeError iff no function
+///                                                                     (or `C::m` method) by that
+///                                                                     name exists — absence
+///                                                                     ladder; else decline
+/// null, not nullable    TypeError  TypeError  TypeError               TypeError
+/// null, `?T` / `= null` accept     accept     accept                  accept
+/// array literal         accept     TypeError  accept                  TypeError iff provably no
+///                                                                     callable pair (below)
+/// closure               TypeError  accept     TypeError (not          accept
+///                                             Traversable)
+/// `new C`               TypeError  accept     TypeError iff C is-a    TypeError iff C's chain is
+///                                             `Traversable` is No     enumerated with no
+///                                                                     `__invoke`/`__call`; else
+///                                                                     decline (`stdClass` too)
+/// enum case             TypeError  accept     as `new C`              decline
+/// anything else         decline    decline    decline                 decline
 /// ```
 ///
 /// The callable leg's string and array rows convict only what the absence family
@@ -107,13 +107,17 @@ pub(crate) fn top_is_type_error(
         ArgValue::Str(s) => match top.kind {
             Array | Object | Iterable => true,
             Callable => {
-                written && s.as_str().is_some_and(|n| callable_string_absent(cx, folder, n, store))
+                let (true, Some(store)) = (written, store) else { return false };
+                s.as_str().is_some_and(|n| callable_string_absent(cx, folder, n, store))
             }
         },
         ArgValue::Array(items) => match top.kind {
             Array | Iterable => false,
             Object => true,
-            Callable => written && callable_array_rejected(cx, folder, items),
+            Callable => {
+                let (true, Some(store)) = (written, store) else { return false };
+                callable_array_rejected(cx, folder, items, store)
+            }
         },
         ArgValue::Closure(c) => {
             closure_is_certain(cx, c) && matches!(top.kind, Array | Iterable)
@@ -129,8 +133,8 @@ pub(crate) fn top_is_type_error(
                 Object => false,
                 Iterable => cx.is_a(&class, "traversable") == IsA::No,
                 Callable => {
-                    matches!(value, ArgValue::New(..))
-                        && callable_method_absent(cx, folder, &class, "__invoke")
+                    let (ArgValue::New(..), Some(store)) = (value, store) else { return false };
+                    callable_method_absent(cx, folder, &class, "__invoke", store)
                 }
             }
         }
@@ -141,31 +145,37 @@ pub(crate) fn top_is_type_error(
 /// Whether a callable string provably names nothing PHP can call: a function, or a
 /// `Class::method` whose class or method is provably absent. A `self`/`parent`/
 /// `static` class half, or a method half that itself holds `::`, declines.
-fn callable_string_absent(
-    cx: &Cx,
-    folder: &mut dyn Folder,
-    name: &str,
-    store: Option<&Store>,
-) -> bool {
+fn callable_string_absent(cx: &Cx, folder: &mut dyn Folder, name: &str, store: &Store) -> bool {
     match name.split_once("::") {
-        Some((class, method)) => callable_static_pair_absent(cx, folder, class, method),
+        Some((class, method)) => callable_static_pair_absent(cx, folder, class, method, store),
         None => callable_function_absent(cx, folder, name, store),
     }
 }
 
 /// Whether `[class, method]` (or `"class::method"`) provably names nothing.
-fn callable_static_pair_absent(cx: &Cx, folder: &mut dyn Folder, class: &str, method: &str) -> bool {
+fn callable_static_pair_absent(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    class: &str,
+    method: &str,
+    store: &Store,
+) -> bool {
     let class = class.trim_start_matches('\\');
     if method.contains("::")
         || ["self", "parent", "static"].iter().any(|k| class.eq_ignore_ascii_case(k))
     {
         return false;
     }
-    if callable_class_absent(cx, folder, class) {
+    let lclass = class.to_ascii_lowercase();
+    // A vouch for the pair covers its class as well: `is_callable('C::m')` true
+    // proves C exists, whatever the index says.
+    if store.vouches_method(&lclass, method) {
+        return false;
+    }
+    if callable_class_absent(cx, folder, class, store) {
         return true;
     }
-    let lclass = class.to_ascii_lowercase();
-    cx.find_class(&lclass).is_some() && callable_method_absent(cx, folder, &lclass, method)
+    cx.find_class(&lclass).is_some() && callable_method_absent(cx, folder, &lclass, method, store)
 }
 
 /// Whether an array literal provably is no callable pair (see [`top_is_type_error`]).
@@ -173,6 +183,7 @@ fn callable_array_rejected(
     cx: &Cx,
     folder: &mut dyn Folder,
     items: &[(ArrayKey, ArgValue)],
+    store: &Store,
 ) -> bool {
     // A key the source does not spell declines: it may be `0` or `1`.
     let Some(entries) = normalize_array(items) else { return false };
@@ -191,20 +202,30 @@ fn callable_array_rejected(
     match target {
         ArgValue::Str(class) => class
             .as_str()
-            .is_some_and(|c| callable_static_pair_absent(cx, folder, c, method)),
+            .is_some_and(|c| callable_static_pair_absent(cx, folder, c, method, store)),
         ArgValue::New(..) => {
             if method.contains("::") {
                 return false;
             }
             let Some(class) = cx.proven_object_class(target) else { return false };
             let class = class.trim_start_matches('\\').to_ascii_lowercase();
-            cx.find_class(&class).is_some() && callable_method_absent(cx, folder, &class, method)
+            cx.find_class(&class).is_some()
+                && callable_method_absent(cx, folder, &class, method, store)
         }
         // The first half must be a class name or an object.
         ArgValue::Int(_) | ArgValue::Float(_) | ArgValue::Bool(_) | ArgValue::Null
         | ArgValue::Array(_) => true,
         _ => false,
     }
+}
+
+/// Whether judging `value` against `param`'s top needs the branch store: a `callable`
+/// name (a string or array literal) or object, whose absence legs read the path's
+/// `function_exists`/`method_exists`/`is_callable` vouches. The env-free direct pass
+/// has no store, so it leaves these to the propagation pass (the #1060 review).
+pub(crate) fn top_needs_branch_store(param: &Param, value: &ArgValue) -> bool {
+    param.top.is_some_and(|t| t.kind == ParamTopKind::Callable)
+        && matches!(value, ArgValue::Str(_) | ArgValue::Array(_) | ArgValue::New(..))
 }
 
 /// The argument value a top is judged against, with its provenance, and whether it

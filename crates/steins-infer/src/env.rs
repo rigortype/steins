@@ -1028,6 +1028,12 @@ impl Store {
         })
     }
 
+    /// Whether a positive `class_exists('N')` (or its interface/trait/enum twin) guard
+    /// on this path vouched the class-like `N` (case-insensitively).
+    pub(crate) fn vouches_class(&self, fqn: &str) -> bool {
+        self.vouched.contains(&Vouch::Class(fqn.trim_start_matches('\\').to_ascii_lowercase()))
+    }
+
     /// Whether a positive `property_exists($var, 'p')` guard on this path vouched
     /// `$var->p` for the binding `var` holds now (issue #930). The property name is
     /// matched exactly.

@@ -1182,18 +1182,18 @@ pub(crate) fn check_undefined_function(
 
 /// Whether the function a callable string names is provably absent — the
 /// `call.undefined-function` ladder for one fully-qualified candidate. `store` is
-/// the branch's when the caller has one, for the `function_exists` vouch.
+/// the branch's, for the `function_exists` / `is_callable` vouch.
 pub(crate) fn callable_function_absent(
     cx: &Cx,
     folder: &mut dyn Folder,
     name: &str,
-    store: Option<&Store>,
+    store: &Store,
 ) -> bool {
     let lname = name.trim_start_matches('\\').to_ascii_lowercase();
     if steins_catalog::effect_labels(&lname).is_some()
         || !matches!(cx.index.resolve_function(&lname), Res::Absent)
         || is_sapi_provided_function(&lname)
-        || store.is_some_and(|s| s.vouches_function(&lname))
+        || store.vouches_function(&lname)
     {
         return false;
     }
@@ -1203,11 +1203,18 @@ pub(crate) fn callable_function_absent(
 }
 
 /// Whether the class a callable's class half names is provably absent — the
-/// `class.undefined` ladder ([`check_undefined_class`]).
-pub(crate) fn callable_class_absent(cx: &Cx, folder: &mut dyn Folder, name: &str) -> bool {
+/// `class.undefined` ladder ([`check_undefined_class`]), plus the branch's
+/// `class_exists` vouch, which that file-wide id takes from dead-region pruning.
+pub(crate) fn callable_class_absent(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    name: &str,
+    store: &Store,
+) -> bool {
     let lname = name.trim_start_matches('\\').to_ascii_lowercase();
     if !matches!(cx.index.resolve_class(&lname), Res::Absent)
         || steins_catalog::builtin_class_supers(&lname).is_some()
+        || store.vouches_class(&lname)
     {
         return false;
     }
@@ -1227,8 +1234,11 @@ pub(crate) fn callable_method_absent(
     folder: &mut dyn Folder,
     class_fqn: &str,
     method: &str,
+    store: &Store,
 ) -> bool {
-    if !folder.absence_family_available() {
+    // The guard-respect leg: `method_exists('C', 'm')`, `is_callable(['C', 'm'])` or
+    // `is_callable('C::m')` on this path vouched the method.
+    if store.vouches_method(class_fqn, method) || !folder.absence_family_available() {
         return false;
     }
     let mut chain: Vec<String> = Vec::new();
