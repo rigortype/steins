@@ -229,3 +229,45 @@ fn generator_bodies_are_declined() {
 fn property_hook_bodies_are_declined() {
     silent("<?php\nclass A { public int $v { get { return; } } }\n");
 }
+
+// --- property hooks are their own bodies ---------------------------------------------
+
+#[test]
+fn a_return_inside_a_hook_is_not_the_enclosing_scopes() {
+    // `php -l` is clean on each: the hook's `return 5;` / `return;` belong to the hook.
+    silent(
+        "<?php\nfunction f(): void { $o = new class { public int $x { get { return 5; } } }; }\n",
+    );
+    silent(
+        "<?php\nfunction f(): int { $o = new class { public int $x { get => 5; set { return; } } }; return 1; }\n",
+    );
+    silent("<?php\nfunction f(): void { class H { public int $x { get { return 5; } } } }\n");
+    silent(
+        "<?php\n$g = function (): void { $o = new class { public int $x { get { return 5; } } }; };\n",
+    );
+    silent(
+        "<?php\nclass A { function m(): int { $o = new class { public int $y { set { return; } } }; return 1; } }\n",
+    );
+}
+
+#[test]
+fn a_bare_return_in_a_hook_of_a_named_class_in_a_method_is_silent() {
+    silent(
+        "<?php\nclass C { function m(): int { class D { public int $y { set { return; } } } return 1; } }\n",
+    );
+}
+
+#[test]
+fn a_yield_in_a_hook_does_not_make_the_enclosing_function_a_generator() {
+    // The hook is the generator (a fatal of its own); the outer bare `return;` is still
+    // judged.
+    fires(
+        "<?php\nfunction f(): int { $o = new class { public int $x { get => yield 1; } }; return; }\n",
+        MISSING_FN,
+    );
+}
+
+#[test]
+fn a_constructor_with_a_written_hint_is_judged_like_any_method() {
+    fires("<?php\nclass A { function __construct(): void { return 5; } }\n", VOID_METHOD);
+}

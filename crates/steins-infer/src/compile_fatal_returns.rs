@@ -34,7 +34,9 @@ use crate::RETURN_COMPILE_FATAL_ID;
 /// | `: ?void`, `: int\|void` | any | silent: a different fatal ("Void can only be used as a standalone type") |
 /// | no written hint | any | silent |
 /// | any hint, the scope contains `yield` | any | silent: a different fatal ("Generator return type must be a supertype of Generator") |
-/// | constructor or destructor, which cannot write a hint | `return 5;` | silent: no written hint, and it compiles |
+/// | constructor or destructor, no written hint | `return 5;` | silent: it compiles |
+/// | constructor or destructor, a written hint (`__construct(): void`) | as in any method | fire: PHP fatals with the same sentence |
+/// | a return inside a property hook nested in the body (plain, promoted or anonymous-class property) | any | belongs to the hook, never charged to the enclosing scope |
 /// | abstract / interface method | none | silent: no body, no scope |
 /// | a closure nested in the body | its own `return` | judged by the closure's own hint only |
 /// | property hook body | any | silent: not judged (declined) |

@@ -560,7 +560,7 @@ fn build_hook_expr_scope(
 pub(crate) fn node_is_generator(node: &Node<'_, '_>) -> bool {
     match node {
         Node::Yield(_) | Node::YieldFrom(_) | Node::YieldPair(_) | Node::YieldValue(_) => true,
-        Node::Function(_) | Node::Method(_) | Node::Closure(_) | Node::ArrowFunction(_) => false,
+        _ if opens_function_like(node) => false,
         _ => {
             for child in children(node) {
                 if node_is_generator(&child) {
@@ -572,6 +572,32 @@ pub(crate) fn node_is_generator(node: &Node<'_, '_>) -> bool {
     }
 }
 
+/// Whether `node` opens a function-like body PHP compiles separately, so a `return` or
+/// `yield` inside it belongs to that body's own scope and never to the enclosing one.
+/// The one boundary `scan_returns` and `node_is_generator` share.
+///
+/// Boundaries (the parser's complete list of such nodes): `Function`, `Method`,
+/// `Closure`, `ArrowFunction`, and `PropertyHook` (a `get`/`set` hook in block or short
+/// `=>` form, on a plain, promoted or anonymous-class property: the hook node holds the
+/// whole body, and a promoted-property hook sits inside its constructor's `Method`).
+///
+/// Not boundaries, so a walk descends them and meets any boundary inside: class,
+/// interface, trait, enum and anonymous-class bodies (they hold members, never a
+/// statement-level `return`), `HookedProperty` and `PropertyHookList` (the list around
+/// the hooks), attribute arguments, class and global constant expressions, enum case
+/// values, and parameter default values (all expressions, where a closure or an
+/// anonymous class may appear and is then its own boundary).
+pub(crate) fn opens_function_like(node: &Node<'_, '_>) -> bool {
+    matches!(
+        node,
+        Node::Function(_)
+            | Node::Method(_)
+            | Node::Closure(_)
+            | Node::ArrowFunction(_)
+            | Node::PropertyHook(_)
+    )
+}
+
 /// Every `return` statement of `node`'s subtree, in source order, into `out`. Nested
 /// function / method / closure / arrow bodies are their own scopes and are not descended.
 fn scan_returns(node: &Node<'_, '_>, out: &mut Vec<ReturnSite>) {
@@ -580,7 +606,7 @@ fn scan_returns(node: &Node<'_, '_>, out: &mut Vec<ReturnSite>) {
             let form = if r.value.is_some() { ReturnForm::Valued } else { ReturnForm::Bare };
             out.push(ReturnSite { form, span: to_span(r.span()) });
         }
-        Node::Function(_) | Node::Method(_) | Node::Closure(_) | Node::ArrowFunction(_) => {}
+        _ if opens_function_like(node) => {}
         _ => {
             if stack_guard::exhausted() {
                 return;
