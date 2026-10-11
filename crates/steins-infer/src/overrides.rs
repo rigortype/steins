@@ -8,8 +8,12 @@ use std::collections::HashSet;
 
 use steins_contract::normalize;
 use steins_domain::Certainty;
+use steins_sidecar::{
+    ReflectedClass, ReflectedClassKind, ReflectedMethod, Visibility as EngineVisibility,
+};
 use steins_syntax::{ClassDecl, MethodDecl, NameRef, NativeType, Param, Span, Visibility};
 
+use crate::fold::Folder;
 use crate::generics::native_to_contract;
 use crate::cx::Cx;
 use crate::project::{Diagnostic, Res};
@@ -46,7 +50,9 @@ use crate::{
 // A2's identification legs still apply: every consulted ancestor and the subject's
 // own FQN must resolve UNIQUELY, and a `conditional` declaration anywhere re-dams
 // the claim (the `if (!class_exists('F')) { final class F {} }` polyfill-stub
-// leaves which declaration binds to load order). No sidecar leg needed.
+// leaves which declaration binds to load order). No sidecar leg for PROJECT
+// ancestors; an ENGINE ancestor (issue #939) is read off the analysing PHP's own
+// reflection under the rule table below.
 //
 // Silence legs: a `use`d trait ANYWHERE in the chain (members not flattened, leg
 // (e) — could implement the method invisibly); an unresolvable/ambiguous PARENT
@@ -59,10 +65,10 @@ use crate::{
 // only (`new class` lowers edge-only, ADR-0049 A4 — no members, unimplemented
 // claim unfounded; `class.extends-final` needs no members and covers them).
 //
-// The one deliberate asymmetry: an unresolvable INTERFACE is dropped rather than
-// silencing the class — it can only ADD requirements (no bodies), so dropping it
+// The one deliberate asymmetry: an unresolvable INTERFACE (one neither the project
+// nor the analysing PHP declares) is dropped rather than silencing the class — it can only ADD requirements (no bodies), so dropping it
 // loses findings but never manufactures one. A parent is a *definition* source, so
-// an unresolvable one silences the whole claim.
+// an unresolvable one (project- and engine-absent) silences the whole claim.
 // ---------------------------------------------------------------------------
 
 /// How many unimplemented method names a `class.abstract-unimplemented` message
@@ -78,6 +84,73 @@ struct AbstractRequirement {
     declarer: String,
 }
 
+// engine ancestors (ADR-0078 amendment, issue #939)
+// ---------------------------------------------------------------------------
+// ENGINE ANCESTORS — the rule table. An ancestor no project file declares is asked
+// of the analysing PHP (`Folder::reflected_class`); the answer is the engine's own
+// declaration, and the pass JUDGES from it only where the engine's fatal is
+// witnessed (PHP 8.5.11, `php -r`, each row), DECLINES where the fatal is a
+// different one, and stays SILENT where PHP only deprecates.
+//
+// ancestor kind × check                      → verdict
+//   engine PARENT, final                     → judge `class.extends-final` (Closure,
+//                                              Generator, WeakMap); every other check
+//                                              declines (one fatal, one finding)
+//   engine PARENT, not a plain class         → decline (`extends` naming an interface
+//                                              or enum is its own fatal)
+//   engine PARENT abstract method, unimpl.   → judge `class.abstract-unimplemented`
+//                                              (FilterIterator::accept); a concrete
+//                                              reflected method discharges a
+//                                              requirement (ArrayIterator::count)
+//   engine INTERFACE method, unimplemented   → judge `class.abstract-unimplemented`
+//                                              (Countable, JsonSerializable, Stringable,
+//                                              IteratorAggregate, a project interface
+//                                              extending one)
+//   engine final method overridden           → judge `override.final`
+//   engine method made static/non-static     → judge `override.static-mismatch`
+//   engine visibility narrowed               → judge `override.visibility-weakened`
+//   engine parameter COUNT incompatible      → judge `override.parameter-variance`:
+//                                              required count above the engine's, or
+//                                              fewer parameters than the engine's with
+//                                              no variadic. Reflection carries counts
+//                                              only, so a parameter TYPE mismatch has
+//                                              no engine-side premise: silence
+//   engine return type vs a child's          → SILENT, never `override.return-variance`:
+//                                              a tentative return type mismatch is a
+//                                              deprecation that reaches
+//                                              `set_error_handler` (D7), and a real
+//                                              (non-tentative) engine return type is
+//                                              not parsed here either
+//   Throwable / Traversable / DateTimeInterface / UnitEnum / BackedEnum named directly
+//     in an `implements` list or an interface's `extends`, and Iterator together with
+//     IteratorAggregate anywhere in the set → decline (each is its own fatal)
+//   engine class absent from the analysing PHP, no live engine, an origin that is not
+//     internal, or a run where the absence family is unavailable → silence
+//
+// The gate is `Folder::absence_family_available`: a live engine inside the declared
+// target range with no runtime-redefinition extension, the same witness the
+// absence family asks for. A reflected declaration was envelope-grade (the
+// 2026-08-09 "resolves, does not convict" ruling); this amendment promotes it to a
+// premise for these ids only, each backed by a fatal PHP raised on the witness run.
+// ---------------------------------------------------------------------------
+
+/// The interfaces whose direct `implements`/`extends` naming is a different fatal
+/// from this pass's ids (witnessed e1–e4, e10): refused, not judged.
+const REFUSED_ENGINE_INTERFACES: [&str; 5] =
+    ["throwable", "traversable", "datetimeinterface", "unitenum", "backedenum"];
+
+/// The engine class-likes a subject's chain ends in, as the analysing PHP declares
+/// them. Owned: the folder's memo is mutably borrowed per query.
+#[derive(Default)]
+struct EngineAncestry {
+    /// The engine class the `extends` chain terminates in, if any. Its method list is
+    /// the RESOLVED set, inherited members and the interfaces it implements included.
+    parent: Option<ReflectedClass>,
+    /// Engine interfaces named by a project class or interface in the chain: each a
+    /// requirement source whose methods are all abstract.
+    interfaces: Vec<ReflectedClass>,
+}
+
 /// A subject class's enumerated ancestry (ADR-0078 / issue #183).
 struct Ancestry<'a> {
     /// The `extends` chain, SUBJECT FIRST. The only member source that can define a
@@ -88,16 +161,37 @@ struct Ancestry<'a> {
     /// each interface's own `extends` list). Requirement sources only; unresolvable
     /// ones are dropped, per the asymmetry above.
     interfaces: Vec<&'a ClassDecl>,
+    /// The engine declarations behind the project's edges (issue #939).
+    engine: EngineAncestry,
     /// Whether any consulted declaration is `conditional` (ADR-0049 A2i): the claim
     /// is re-dammed when one is.
     any_conditional: bool,
 }
 
+/// The engine's own declaration of `fqn`, when the analysing PHP has it as an
+/// INTERNAL class-like. `None` — absent, unanswerable, or user-land (a class a
+/// bootstrap loaded is project code this pass has no declaration of).
+fn engine_class(folder: &mut dyn Folder, fqn: &str) -> Option<ReflectedClass> {
+    let decl = folder.reflected_class(fqn.trim_start_matches('\\'))?.declaration?;
+    decl.internal.then_some(decl)
+}
+
+/// Whether `fqn` names no project class and the analysing PHP may be asked about it.
+fn engine_askable(cx: &Cx, engine_ok: bool, fqn: &str) -> bool {
+    engine_ok && cx.class_absent(fqn)
+}
+
 /// Enumerate `subject`'s ancestry, or `None` when any obstacle taints it (silence).
-fn enumerate_ancestry<'a>(cx: &Cx<'a>, subject: &'a ClassDecl) -> Option<Ancestry<'a>> {
+fn enumerate_ancestry<'a>(
+    cx: &Cx<'a>,
+    folder: &mut dyn Folder,
+    subject: &'a ClassDecl,
+) -> Option<Ancestry<'a>> {
+    let engine_ok = folder.absence_family_available();
     let mut chain: Vec<&'a ClassDecl> = Vec::new();
     let mut iface_refs: Vec<String> = Vec::new();
     let mut any_conditional = false;
+    let mut engine = EngineAncestry::default();
     let mut seen: HashSet<String> = HashSet::new();
     let mut cur: Option<(usize, &'a ClassDecl)> = Some((cx.cur, subject));
 
@@ -120,8 +214,25 @@ fn enumerate_ancestry<'a>(cx: &Cx<'a>, subject: &'a ClassDecl) -> Option<Ancestr
         chain.push(cd);
         cur = match &cd.parent {
             None => None,
-            // A2 leg (header above): Absent or Ambiguous parent ⇒ silence.
-            Some(pref) => Some(cx.find_class(&cx.units[file].tree.resolve_class_fqn(pref))?),
+            Some(pref) => {
+                let fqn = cx.units[file].tree.resolve_class_fqn(pref);
+                if let Some(found) = cx.find_class(&fqn) {
+                    Some(found)
+                } else if engine_askable(cx, engine_ok, &fqn) {
+                    // An engine parent ends the chain. Its resolved method list stands
+                    // in for every ancestor above it; a final or non-class parent is a
+                    // different fatal (`class.extends-final` / "cannot extend").
+                    let parent = engine_class(folder, &fqn)?;
+                    if parent.kind != ReflectedClassKind::Class || parent.is_final {
+                        return None;
+                    }
+                    engine.parent = Some(parent);
+                    None
+                } else {
+                    // A2 leg (header above): Absent or Ambiguous parent ⇒ silence.
+                    return None;
+                }
+            }
         };
     }
 
@@ -131,8 +242,22 @@ fn enumerate_ancestry<'a>(cx: &Cx<'a>, subject: &'a ClassDecl) -> Option<Ancestr
         if !iseen.insert(fqn.to_ascii_lowercase()) {
             continue; // interface diamonds are legal PHP — dedupe, never an obstacle.
         }
-        // The interface asymmetry (header above): dropped, not an obstacle.
-        let Some((ifile, idecl)) = cx.find_class(&fqn) else { continue };
+        let Some((ifile, idecl)) = cx.find_class(&fqn) else {
+            // The interface asymmetry (header above): an interface nothing declares is
+            // dropped, not an obstacle — unless the analysing PHP has it (issue #939).
+            if engine_askable(cx, engine_ok, &fqn) {
+                if REFUSED_ENGINE_INTERFACES.contains(&fqn.to_ascii_lowercase().as_str()) {
+                    return None;
+                }
+                if let Some(decl) = engine_class(folder, &fqn) {
+                    if decl.kind != ReflectedClassKind::Interface {
+                        return None; // "cannot implement X - it is not an interface".
+                    }
+                    engine.interfaces.push(decl);
+                }
+            }
+            continue;
+        };
         // `implements` naming a non-interface is another fatal entirely ("I cannot
         // implement F - it is not an interface", witnessed).
         if !idecl.is_interface || idecl.uses_traits {
@@ -147,8 +272,19 @@ fn enumerate_ancestry<'a>(cx: &Cx<'a>, subject: &'a ClassDecl) -> Option<Ancestr
         interfaces.push(idecl);
     }
 
-    Some(Ancestry { chain, interfaces, any_conditional })
+    // `Iterator` together with `IteratorAggregate` is its own fatal (witnessed e9).
+    let mut engine_names: HashSet<String> = HashSet::new();
+    for decl in engine.interfaces.iter().chain(engine.parent.iter()) {
+        engine_names.insert(decl.name.to_ascii_lowercase());
+        engine_names.extend(decl.interfaces.iter().map(|n| n.to_ascii_lowercase()));
+    }
+    if engine_names.contains("iterator") && engine_names.contains("iteratoraggregate") {
+        return None;
+    }
+
+    Some(Ancestry { chain, interfaces, engine, any_conditional })
 }
+// end engine ancestors (ADR-0078 amendment, issue #939)
 
 /// Whether a requirement is discharged by the enumerated class chain.
 enum Satisfaction {
@@ -167,9 +303,9 @@ enum Satisfaction {
 /// — the same first-wins rule [`resolve_in_chain`] applies to dispatch.
 ///
 /// [`resolve_in_chain`]: crate::resolve_in_chain
-fn method_satisfaction(chain: &[&ClassDecl], name: &str) -> Satisfaction {
+fn method_satisfaction(anc: &Ancestry, name: &str) -> Satisfaction {
     let mut saw_abstract = false;
-    for node in chain {
+    for node in &anc.chain {
         let Some(m) = node.methods.iter().find(|m| m.name.eq_ignore_ascii_case(name)) else {
             continue;
         };
@@ -178,7 +314,63 @@ fn method_satisfaction(chain: &[&ClassDecl], name: &str) -> Satisfaction {
         }
         saw_abstract = true;
     }
+    // The chain's engine tail: the reflected parent's resolved method set. A private
+    // method is not inherited, so it neither satisfies nor is judged — refuse.
+    if let Some(m) = anc.engine.parent.as_ref().and_then(|p| engine_method(p, name)) {
+        if m.visibility == EngineVisibility::Private {
+            return Satisfaction::Refused;
+        }
+        if !m.is_abstract {
+            return if saw_abstract { Satisfaction::Refused } else { Satisfaction::Concrete };
+        }
+    }
     Satisfaction::Missing
+}
+
+/// The class-like that DECLARES the engine method `name` the subject inherits through
+/// `class` — the name PHP's own fatal renders. Reflection carries no declaring class,
+/// so this climbs the `extends` chain while the parent reflects the same member
+/// shape, then (for an abstract member) prefers the interface that carries it.
+/// A best-effort display name: it never changes a verdict.
+fn engine_declarer(folder: &mut dyn Folder, class: &ReflectedClass, name: &str) -> String {
+    let mut cur = class.clone();
+    let Some(mut shape) = engine_method(&cur, name).cloned() else { return class.name.clone() };
+    while let Some(parent) = cur.parent.clone() {
+        let Some(up) = engine_class(folder, &parent) else { break };
+        match engine_method(&up, name) {
+            Some(m) if same_shape(m, &shape) => {
+                shape = m.clone();
+                cur = up;
+            }
+            _ => break,
+        }
+    }
+    if shape.is_abstract {
+        for iface in cur.interfaces.clone() {
+            if let Some(decl) = engine_class(folder, &iface)
+                && engine_method(&decl, name).is_some()
+            {
+                return decl.name;
+            }
+        }
+    }
+    cur.name
+}
+
+/// The reflected method `name` on `class`, case-insensitively.
+fn engine_method<'r>(class: &'r ReflectedClass, name: &str) -> Option<&'r ReflectedMethod> {
+    class.methods.iter().find(|m| m.name.eq_ignore_ascii_case(name))
+}
+
+/// Whether two reflections of one method name are the same declaration to the eye.
+fn same_shape(a: &ReflectedMethod, b: &ReflectedMethod) -> bool {
+    a.is_abstract == b.is_abstract
+        && a.is_final == b.is_final
+        && a.is_static == b.is_static
+        && a.visibility == b.visibility
+        && a.params_total == b.params_total
+        && a.params_required == b.params_required
+        && a.return_type == b.return_type
 }
 
 /// The display FQN of a class-like declaration (its declared casing and namespace),
@@ -189,7 +381,12 @@ fn decl_display(cd: &ClassDecl) -> String {
 
 /// Run the ADR-0078 ladder for one class-like declaration and emit
 /// `class.abstract-unimplemented` iff every leg holds.
-fn check_abstract_unimplemented(cx: &Cx, cd: &ClassDecl, out: &mut Vec<Diagnostic>) {
+fn check_abstract_unimplemented(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    cd: &ClassDecl,
+    out: &mut Vec<Diagnostic>,
+) {
     // Declaration-site gate: only a CONCRETE class must implement everything. An
     // abstract class and an interface may carry abstract methods (witnessed silent);
     // a trait's and an enum's members are not lowered at all (an enum cannot be
@@ -201,7 +398,7 @@ fn check_abstract_unimplemented(cx: &Cx, cd: &ClassDecl, out: &mut Vec<Diagnosti
     if !matches!(cx.index.resolve_class(&cd.fqn), Res::Unique(_)) {
         return;
     }
-    let Some(anc) = enumerate_ancestry(cx, cd) else { return };
+    let Some(anc) = enumerate_ancestry(cx, folder, cd) else { return };
 
     // Requirements: every abstract method on the chain plus every interface method
     // (an interface method lowers with `is_abstract` set — it has no body). Deduped
@@ -216,10 +413,20 @@ fn check_abstract_unimplemented(cx: &Cx, cd: &ClassDecl, out: &mut Vec<Diagnosti
             }
         }
     }
+    // The engine's requirements (issue #939): the reflected parent's abstract methods,
+    // then every method of an engine interface a project edge names.
+    for engine in anc.engine.parent.iter().chain(anc.engine.interfaces.iter()) {
+        for m in engine.methods.iter().filter(|m| m.is_abstract) {
+            if seen.insert(m.name.to_ascii_lowercase()) {
+                let declarer = engine_declarer(folder, engine, &m.name);
+                required.push(AbstractRequirement { name: m.name.clone(), declarer });
+            }
+        }
+    }
 
     let mut missing: Vec<String> = Vec::new();
     for req in &required {
-        match method_satisfaction(&anc.chain, &req.name) {
+        match method_satisfaction(&anc, &req.name) {
             Satisfaction::Concrete => {}
             Satisfaction::Missing => missing.push(format!("{}::{}", req.declarer, req.name)),
             Satisfaction::Refused => return,
@@ -260,9 +467,12 @@ fn check_abstract_unimplemented(cx: &Cx, cd: &ClassDecl, out: &mut Vec<Diagnosti
 }
 
 /// Emit `class.extends-final` for one `extends` edge (a named class declaration's
-/// or an anonymous class's), iff the parent resolves uniquely to a `final` class.
+/// or an anonymous class's), iff the parent resolves uniquely to a `final` class —
+/// or, when no project file declares it, the analysing PHP reflects it as a final
+/// internal class (`Closure`, `Generator`, `WeakMap`; issue #939).
 fn check_extends_final(
     cx: &Cx,
+    folder: &mut dyn Folder,
     subject: &str,
     subject_conditional: bool,
     pref: &NameRef,
@@ -270,17 +480,34 @@ fn check_extends_final(
 ) {
     let fqn = cx.class_fqn(pref);
     // A2 leg: Absent (issue #182's `class.undefined` territory) or Ambiguous ⇒ the
-    // parent's finality is not proven.
-    let Some((_, parent)) = cx.find_class(&fqn) else { return };
-    // An enum lowers with `is_final` set (enums are implicitly final), but extending
-    // one is the different fatal `Class C cannot extend enum E` (witnessed) — out.
-    if !parent.is_final || parent.is_enum {
-        return;
-    }
-    // A2i: a conditionally-declared `final class F` may not be the F that binds.
-    if (subject_conditional || parent.conditional) && !cx.dam.is_clear() {
-        return;
-    }
+    // parent's finality is not proven — except an Absent name the engine declares.
+    let parent_display = match cx.find_class(&fqn) {
+        Some((_, parent)) => {
+            // An enum lowers with `is_final` set (enums are implicitly final), but
+            // extending one is the different fatal `Class C cannot extend enum E`
+            // (witnessed) — out.
+            if !parent.is_final || parent.is_enum {
+                return;
+            }
+            // A2i: a conditionally-declared `final class F` may not be the F that binds.
+            if (subject_conditional || parent.conditional) && !cx.dam.is_clear() {
+                return;
+            }
+            decl_display(parent)
+        }
+        None => {
+            if !folder.absence_family_available() || !cx.class_absent(&fqn) {
+                return;
+            }
+            if subject_conditional && !cx.dam.is_clear() {
+                return;
+            }
+            match engine_class(folder, &fqn) {
+                Some(d) if d.kind == ReflectedClassKind::Class && d.is_final => d.name,
+                _ => return,
+            }
+        }
+    };
     let pos = cx.tree().position(pref.offset);
     out.push(Diagnostic {
         id: CLASS_EXTENDS_FINAL_ID,
@@ -288,8 +515,7 @@ fn check_extends_final(
         line: pos.line,
         column: pos.column,
         message: format!(
-            "class {subject} cannot extend final class {} — fatal when the class is loaded",
-            decl_display(parent),
+            "class {subject} cannot extend final class {parent_display} — fatal when the class is loaded",
         ),
         facet: None,
         fix: None,
@@ -299,7 +525,12 @@ fn check_extends_final(
 /// The per-file declaration-fatal pass (ADR-0078 / issue #183). Declarations in a
 /// proven-dead region are skipped, exactly as the `class.undefined` pass skips
 /// references in one.
-pub(crate) fn check_declaration_fatals(cx: &Cx, dead: &[Span], out: &mut Vec<Diagnostic>) {
+pub(crate) fn check_declaration_fatals(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    dead: &[Span],
+    out: &mut Vec<Diagnostic>,
+) {
     for cd in cx.tree().classes() {
         if in_dead(dead, cd.span.start) {
             continue;
@@ -311,11 +542,11 @@ pub(crate) fn check_declaration_fatals(cx: &Cx, dead: &[Span], out: &mut Vec<Dia
             && !cd.is_trait
             && let Some(pref) = cd.parent.as_ref()
         {
-            check_extends_final(cx, &decl_display(cd), cd.conditional, pref, out);
+            check_extends_final(cx, folder, &decl_display(cd), cd.conditional, pref, out);
         }
-        check_abstract_unimplemented(cx, cd, out);
+        check_abstract_unimplemented(cx, folder, cd, out);
         // overriding family (ADR-0078, issue #184)
-        check_override_family(cx, cd, out);
+        check_override_family(cx, folder, cd, out);
         // end overriding family (ADR-0078, issue #184)
     }
     // Anonymous classes carry the same extends-final fatal (`Class F@anonymous cannot
@@ -327,7 +558,7 @@ pub(crate) fn check_declaration_fatals(cx: &Cx, dead: &[Span], out: &mut Vec<Dia
             continue;
         }
         if let Some(pref) = edge.parent.as_ref() {
-            check_extends_final(cx, "anonymous class", false, pref, out);
+            check_extends_final(cx, folder, "anonymous class", false, pref, out);
         }
     }
 }
@@ -388,8 +619,17 @@ pub(crate) fn check_declaration_fatals(cx: &Cx, dead: &[Span], out: &mut Vec<Dia
 /// A parent-side declaration a subject method overrides: the method and the display
 /// FQN of the class-like that declares it.
 struct OverrideParent<'a> {
-    method: &'a MethodDecl,
+    sig: ParentSig<'a>,
     declarer: String,
+}
+
+/// Where a parent-side signature comes from: a project declaration, or the analysing
+/// PHP's reflection of an engine class-like (issue #939).
+enum ParentSig<'a> {
+    Source(&'a MethodDecl),
+    /// The reflected method and the reflected class it was read off (the display
+    /// declarer is resolved lazily, only when a finding names it).
+    Engine(&'a ReflectedMethod, &'a ReflectedClass),
 }
 
 /// Order visibility for the weakening test: `public` (2) is the widest.
@@ -420,20 +660,38 @@ fn visibility_word(v: Visibility) -> &'static str {
 /// m(int|string $x) {} } class B extends A { private function m() {} } class C
 /// extends B { public function m(int $x) {} }` fatals at **B**, naming B::m's access
 /// level — naming C would misname it).
-fn override_parents<'a>(anc: &Ancestry<'a>, name: &str) -> Option<Vec<OverrideParent<'a>>> {
-    let mut parents: Vec<OverrideParent<'a>> = Vec::new();
+fn override_parents<'s>(anc: &'s Ancestry, name: &str) -> Option<Vec<OverrideParent<'s>>> {
+    let mut parents: Vec<OverrideParent<'s>> = Vec::new();
+    let mut found = false;
     for node in anc.chain.iter().skip(1) {
         if let Some(m) = node.methods.iter().find(|m| m.name.eq_ignore_ascii_case(name)) {
             if m.visibility == Visibility::Private {
                 return None;
             }
-            parents.push(OverrideParent { method: m, declarer: decl_display(node) });
+            parents.push(OverrideParent { sig: ParentSig::Source(m), declarer: decl_display(node) });
+            found = true;
             break; // nearest declaration binds; farther ones are already compatible.
         }
     }
+    // The chain's engine tail binds after every project node: the reflected parent's
+    // resolved method set. A private engine method is not inherited either.
+    if !found
+        && let Some(ep) = &anc.engine.parent
+        && let Some(m) = engine_method(ep, name)
+    {
+        if m.visibility == EngineVisibility::Private {
+            return None;
+        }
+        parents.push(OverrideParent { sig: ParentSig::Engine(m, ep), declarer: ep.name.clone() });
+    }
     for node in &anc.interfaces {
         if let Some(m) = node.methods.iter().find(|m| m.name.eq_ignore_ascii_case(name)) {
-            parents.push(OverrideParent { method: m, declarer: decl_display(node) });
+            parents.push(OverrideParent { sig: ParentSig::Source(m), declarer: decl_display(node) });
+        }
+    }
+    for ei in &anc.engine.interfaces {
+        if let Some(m) = engine_method(ei, name) {
+            parents.push(OverrideParent { sig: ParentSig::Engine(m, ei), declarer: ei.name.clone() });
         }
     }
     Some(parents)
@@ -510,12 +768,18 @@ fn override_return_widens(child: &MethodDecl, parent: &MethodDecl) -> bool {
 /// stops at one finding per overriding method — one runtime fatal, one finding.
 fn emit_override_violation(
     cx: &Cx,
+    folder: &mut dyn Folder,
     subject: &ClassDecl,
     cm: &MethodDecl,
     parent: &OverrideParent,
     out: &mut Vec<Diagnostic>,
 ) -> bool {
-    let pm = parent.method;
+    let pm = match &parent.sig {
+        ParentSig::Source(pm) => *pm,
+        ParentSig::Engine(pm, class) => {
+            return emit_engine_violation(cx, folder, subject, cm, (pm, class), out);
+        }
+    };
     let pos = cx.tree().position(cm.span.start);
     let child_name = format!("{}::{}", decl_display(subject), cm.name);
     let parent_name = format!("{}::{}", parent.declarer, pm.name);
@@ -609,8 +873,120 @@ fn emit_override_violation(
     false
 }
 
+/// The required parameter count a project method declares: the positions without a
+/// default that are not variadic.
+fn required_params(params: &[Param]) -> usize {
+    params.iter().filter(|p| !p.has_default && !p.variadic).count()
+}
+
+/// Whether a project override is provably INCOMPATIBLE in arity with an engine method
+/// (witnessed: `ArrayIterator::count()` overridden as `count($x)`; `seek(int $offset)`
+/// overridden as `seek()` or `seek(int $a, int $b)`; `count(int $x = 1)` is fine):
+/// the child demands more arguments than the engine's callers always pass, or accepts
+/// fewer than the engine's declaration without a variadic to collect the rest.
+/// Reflection carries counts only, so types and by-reference shapes are not judged.
+fn engine_arity_violation(cm: &MethodDecl, pm: &ReflectedMethod) -> Option<String> {
+    let child_required = required_params(&cm.params);
+    let child_total = cm.params.len();
+    let child_variadic = cm.params.iter().any(|p| p.variadic);
+    if child_required > pm.params_required as usize {
+        return Some(format!(
+            "requires {child_required} parameters where the engine's declaration requires {}",
+            pm.params_required
+        ));
+    }
+    if !child_variadic && child_total < pm.params_total as usize {
+        return Some(format!(
+            "accepts {child_total} parameters where the engine's declaration accepts {}",
+            pm.params_total
+        ));
+    }
+    None
+}
+
+/// The engine twin of [`emit_override_violation`]: one subject method against a
+/// reflected engine method, in the same precedence (final ≻ static ≻ visibility ≻
+/// parameter), with the return comparison DROPPED — a tentative return mismatch is a
+/// deprecation (D7), so no `override.return-variance` is ever premised on a reflection.
+fn emit_engine_violation(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    subject: &ClassDecl,
+    cm: &MethodDecl,
+    (pm, class): (&ReflectedMethod, &ReflectedClass),
+    out: &mut Vec<Diagnostic>,
+) -> bool {
+    let pos = cx.tree().position(cm.span.start);
+    let child_name = format!("{}::{}", decl_display(subject), cm.name);
+    let parent_name = format!("{}::{}", engine_declarer(folder, class, &pm.name), pm.name);
+    let mut emit = |id: &'static str, message: String| {
+        out.push(Diagnostic {
+            id,
+            path: cx.path().to_owned(),
+            line: pos.line,
+            column: pos.column,
+            message,
+            facet: None,
+            fix: None,
+        });
+    };
+    if pm.is_final {
+        emit(
+            OVERRIDE_FINAL_ID,
+            format!(
+                "{child_name}() overrides final method {parent_name}() — fatal when the class is loaded"
+            ),
+        );
+        return true;
+    }
+    if cm.is_abstract && !pm.is_abstract {
+        return false;
+    }
+    if cm.is_static != pm.is_static && !cm.is_constructor {
+        let adj = if cm.is_static { "static" } else { "non-static" };
+        emit(
+            OVERRIDE_STATIC_MISMATCH_ID,
+            format!("{child_name}() makes {parent_name}() {adj} — fatal when the class is loaded"),
+        );
+        return true;
+    }
+    if cm.is_constructor && !pm.is_abstract {
+        return false;
+    }
+    let (parent_rank, from) = match pm.visibility {
+        EngineVisibility::Public => (2, "public"),
+        EngineVisibility::Protected => (1, "protected"),
+        EngineVisibility::Private => (0, "private"),
+    };
+    if visibility_rank(cm.visibility) < parent_rank {
+        emit(
+            OVERRIDE_VISIBILITY_WEAKENED_ID,
+            format!(
+                "{child_name}() weakens the visibility of {parent_name}() from {from} to {} — fatal when the class is loaded",
+                visibility_word(cm.visibility),
+            ),
+        );
+        return true;
+    }
+    if let Some(why) = engine_arity_violation(cm, pm) {
+        emit(
+            OVERRIDE_PARAMETER_VARIANCE_ID,
+            format!(
+                "{child_name}() {why} and is not compatible with {parent_name}() — fatal when the class is loaded"
+            ),
+        );
+        return true;
+    }
+    false
+}
+
 /// Run the overriding family over one class declaration's own methods.
-fn check_override_family(cx: &Cx, cd: &ClassDecl, out: &mut Vec<Diagnostic>) {
+fn check_override_family(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    cd: &ClassDecl,
+    out: &mut Vec<Diagnostic>,
+) {
     // Only a CLASS declaration is the subject in v1. An enum's and a trait's members
     // are not lowered (ADR-0043); `interface I extends J` re-declaring a method is
     // the same fatal, but the ancestry walk `enumerate_ancestry` performs is
@@ -623,7 +999,7 @@ fn check_override_family(cx: &Cx, cd: &ClassDecl, out: &mut Vec<Diagnostic>) {
     if !matches!(cx.index.resolve_class(&cd.fqn), Res::Unique(_)) {
         return;
     }
-    let Some(anc) = enumerate_ancestry(cx, cd) else { return };
+    let Some(anc) = enumerate_ancestry(cx, folder, cd) else { return };
     // A2i, as the tracer's: a conditional declaration among the consulted set leaves
     // which signature binds to load order, so a standing dam re-dams the claim.
     if anc.any_conditional && !cx.dam.is_clear() {
@@ -632,7 +1008,7 @@ fn check_override_family(cx: &Cx, cd: &ClassDecl, out: &mut Vec<Diagnostic>) {
     for cm in &cd.methods {
         let Some(parents) = override_parents(&anc, &cm.name) else { continue };
         for parent in &parents {
-            if emit_override_violation(cx, cd, cm, parent, out) {
+            if emit_override_violation(cx, folder, cd, cm, parent, out) {
                 break; // one runtime fatal, one finding.
             }
         }
