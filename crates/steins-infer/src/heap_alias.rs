@@ -42,6 +42,9 @@
 //! | generator `foreach (gen($o) as $q)` | the argument escaped at the call |
 //! | a join whose branches bind a name to different objects | the dropped name's object ([`join_stores`]) |
 //! | a loop or unwalked construct forgetting a written name | the forgotten name's object |
+//! | any other forgetting of a name the walk can no longer read: a by-ref call, an embedded write `echo $o->r = 2`, a guard's own write `if ($o->r = 2)` | `Store::unbind` escapes the object it drops; a name given a new value takes `Store::release` |
+//! | an escape inside a loop body (`foreach (…) { $f = fn() => $o; }`) | the body's escapes reach the fall-through (`EscapeRecorder`) |
+//! | `yield $o` | the statement names its operands (`Stmt::unspelled`) |
 //!
 //! # Write: how a write reaches the object through the unresolved name
 //!
@@ -52,6 +55,8 @@
 //! | `unset($q->p)`, `$q->r->p = v`, `$a[0]->p = v`, `$q->$name = v` | a barrier: the heap is cleared |
 //! | `f($q->p)` where `f` may take the argument by reference | `$q` bound: its `p` goes; unbound: sweep the escape set |
 //! | `f($q)` to a resolved callee, `$q` possibly an object the store cannot name | sweep the escape set ([`may_carry_unnamed_object`]) |
+//! | a property written inside an expression: `$y = $q->p = v`, `echo ($q->p = v)`, `if ($q->p = v)`, `++$q->n`, `foreach ($xs as $q->p)` | `Stmt::writes_through`: a bound receiver's mutable props go; an unbound one sweeps the escape set ([`apply_hidden_heap_effects`]) |
+//! | a `yield` anywhere in a statement's own expressions (`echo (yield $o)`, `$r = yield`, a condition) | the consumer runs: sweep the escape set, keeping the locals; in a generator that yields by reference (`function &g()`), forget every local too |
 //! | any of the above in a loop body | the fall-through sweeps when the body walk did (`WalkCx::heap_sweeps`) |
 //! | any of the above in an unwalked (`Opaque`) construct | the construct sweeps the escape set |
 //!
@@ -72,7 +77,7 @@ use std::collections::HashMap;
 
 use steins_contract::ContractTy;
 use steins_domain::Fact;
-use steins_syntax::{ArgValue, Callee, ClosureRef, NamedArg, Receiver};
+use steins_syntax::{ArgValue, Callee, ClosureRef, NamedArg, Receiver, Stmt};
 
 use crate::env::{Known, Store, Stratum};
 use crate::walk::WalkCx;
@@ -269,4 +274,37 @@ fn is_scalar_arm(ty: &ContractTy) -> bool {
 pub(crate) fn sweep_for_unresolved_write(w: &WalkCx, store: &mut Store) {
     store.sweep_escaped();
     w.note_heap_sweep();
+}
+
+/// The heap effects a statement has beyond what its kind spells (issue #1048).
+///
+/// - A property written inside an expression ([`Stmt::writes_through`]): through a
+///   bound object, that object's mutable props go; through any other name, the
+///   escape set is swept, as for a statement-level write.
+/// - A suspension ([`Stmt::suspends`]): the generator's consumer runs any code,
+///   so the escape set is swept as for an unknown call. In a generator that yields
+///   by reference the consumer can write the yielded local itself, so every local
+///   is forgotten.
+pub(crate) fn apply_hidden_heap_effects(
+    w: &WalkCx,
+    stmt: &Stmt,
+    env: &mut HashMap<String, Known>,
+    store: &mut Store,
+) {
+    for v in stmt.writes_through() {
+        if store.is_object(v) {
+            store.sweep_object(v);
+        } else {
+            sweep_for_unresolved_write(w, store);
+        }
+    }
+    if stmt.suspends {
+        if w.scope.yields_by_ref {
+            env.clear();
+            store.clear();
+        } else {
+            store.sweep_escaped();
+        }
+        w.note_heap_sweep();
+    }
 }

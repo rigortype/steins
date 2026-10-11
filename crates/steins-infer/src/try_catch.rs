@@ -275,7 +275,7 @@ fn bind_caught(
     let Some(var) = clause.var.as_deref() else { return };
     store.escape_resource(var);
     env.remove(var);
-    store.unbind(var);
+    store.release(var);
     if clause.has_unresolvable || clause.classes.is_empty() {
         return;
     }

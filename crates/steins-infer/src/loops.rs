@@ -12,7 +12,7 @@ use crate::fold::Folder;
 use crate::annotate::LineFact;
 use crate::branch::apply_cond_side;
 use crate::cond::eval_cond;
-use crate::env::{Descent, Known, Store};
+use crate::env::{Descent, EscapeRecorder, Known, Store};
 use crate::foreach_bind::element_binding;
 use crate::project::Diagnostic;
 use crate::walk::{Flow, WalkCx, push_hidden_exit_floor, walk_trace};
@@ -49,7 +49,7 @@ pub(crate) fn walk_loop(
             loop_entry_forget(writes, reads, &[], *poisons, &mut benv, &mut bstore);
             loop_fallthrough_forget(w, writes, reads, *poisons, *may_return, env, store);
             apply_loop_exit_negation(w, folder, cond, *break_free, env, store);
-            let swept = w.heap_sweeps.get();
+            let swept = BodyMark::start(w);
             let verdict = walk_while_body(w, folder, cond, body, benv, bstore, descent, facts, out);
             sweep_after_body(w, swept, store);
             loop_flow(*break_free, verdict)
@@ -75,7 +75,7 @@ pub(crate) fn walk_loop(
             let mut benv = env.clone();
             let mut bstore = store.clone();
             // Read before `init`: it runs on every path, into the body's env only.
-            let swept = w.heap_sweeps.get();
+            let swept = BodyMark::start(w);
             let _ =
                 walk_trace(w, folder, init, &mut benv, &mut bstore, descent, facts, guarded, out);
             loop_entry_forget(writes, reads, carried, *poisons, &mut benv, &mut bstore);
@@ -125,7 +125,7 @@ pub(crate) fn walk_loop(
                 &mut bstore,
             );
             loop_fallthrough_forget(w, writes, reads, *poisons, *may_return, env, store);
-            let swept = w.heap_sweeps.get();
+            let swept = BodyMark::start(w);
             let _ = walk_loop_body(w, folder, body, benv, bstore, descent, facts, out);
             sweep_after_body(w, swept, store);
             Flow::FellThrough
@@ -154,7 +154,7 @@ pub(crate) fn walk_loop(
             loop_entry_forget(writes, reads, &[], *poisons, &mut benv, &mut bstore);
             loop_fallthrough_forget(w, writes, reads, *poisons, *may_return, env, store);
             apply_loop_exit_negation(w, folder, cond, *break_free, env, store);
-            let swept = w.heap_sweeps.get();
+            let swept = BodyMark::start(w);
             let body_flow = walk_loop_body(w, folder, body, benv, bstore, descent, facts, out);
             sweep_after_body(w, swept, store);
             do_while_flow(*break_free && *continue_free, body_flow)
@@ -201,17 +201,39 @@ fn do_while_flow(jumps_stay_inside: bool, body_flow: Flow) -> Flow {
     }
 }
 
+/// What [`sweep_after_body`] compares a loop body's walk against: the sweep count
+/// before it and the escapes recorded during it.
+struct BodyMark {
+    swept: u64,
+    escapes: EscapeRecorder,
+}
+
+impl BodyMark {
+    fn start(w: &WalkCx) -> Self {
+        BodyMark { swept: w.heap_sweeps.get(), escapes: EscapeRecorder::start() }
+    }
+}
+
 /// What a loop body's walk did to the escaped heap, applied to the fall-through
 /// (issue #1048). The fall-through is built from the write sets before the body is
 /// walked and nothing the body computes reaches it, so a sweep the body made — an
 /// unknown call, a write through an unresolved name, a barrier, on any path
 /// including one that `break`s — would otherwise leave the escaped objects' facts
-/// standing after the loop. `swept` is [`WalkCx::heap_sweeps`] read before the body
+/// standing after the loop. `mark.swept` is [`WalkCx::heap_sweeps`] read before the body
 /// walk; a change means some statement of the body swept, and the fall-through
 /// takes the same sweep, `$this` included where it is the unescaped one the call
 /// sweep also clears.
-fn sweep_after_body(w: &WalkCx, swept: u64, store: &mut Store) {
-    if w.heap_sweeps.get() == swept {
+///
+/// The escapes travel the same way, first: an object the body handed to a closure
+/// or an array on any path is escaped after the loop too, and so swept with the
+/// rest when the body also swept.
+fn sweep_after_body(w: &WalkCx, mark: BodyMark, store: &mut Store) {
+    for id in mark.escapes.finish() {
+        if let Some(o) = store.heap.get_mut(&id) {
+            o.escaped = true;
+        }
+    }
+    if w.heap_sweeps.get() == mark.swept {
         return;
     }
     store.sweep_escaped();

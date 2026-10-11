@@ -34,11 +34,15 @@ use crate::descent::{
 use crate::dispatch::resolve_call_target;
 use crate::dump::{adopted_trace_docblock, emit_trace_annotations};
 use crate::entry_state::seed_entry_state;
-use crate::env::{AllocId, Descent, ExitContribution, HeapRes, Known, Store, Stratum, SummaryCtx};
+use crate::env::{
+    AllocId, Descent, EscapeLogFrame, ExitContribution, HeapRes, Known, Store, Stratum, SummaryCtx,
+};
 use crate::foreach_check::check_foreach_subject;
 use crate::guard_sweep::sweep_guard_regions;
 use crate::heap::apply_prop_assign;
-use crate::heap_alias::{escape_stored_objects, escape_unspelled_reads};
+use crate::heap_alias::{
+    apply_hidden_heap_effects, escape_stored_objects, escape_unspelled_reads,
+};
 use crate::loops::walk_loop;
 use crate::operands::check_operand_sites;
 use crate::out_params::{
@@ -129,6 +133,8 @@ pub(crate) fn analyze_scope(
         remember: RememberCache::default(),
     };
     let _frame = FrameGuard::enter(scope);
+    // A nested walk's escapes name its own allocations (issue #1048).
+    let _escapes = EscapeLogFrame::enter();
     let flow =
         walk_trace(&w, folder, &scope.stmts, &mut env, &mut store, &mut descent, &mut facts, false, out);
     if let Some(out) = ret_exits
@@ -646,6 +652,9 @@ fn walk_run(
         // handed on by it (issue #1048) — before the sweep, which then covers it.
         escape_unspelled_reads(stmt.unspelled_reads(), store);
         apply_call_escape_and_sweep(w, &stmt.kind, env, store, &stmt_calls.this_backs);
+        // The writes and the suspension the statement's kind does not spell: a
+        // property written inside an expression, a `yield` (issue #1048).
+        apply_hidden_heap_effects(w, stmt, env, store);
 
         // 1b. Return-type check (native + phpdoc contract).
         check_return_value(w, folder, stmt, env, store, descent, out);

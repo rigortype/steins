@@ -282,3 +282,97 @@ fn the_same_mismatch_without_the_alias_is_reported() {
     );
     assert_eq!(findings(&src), vec!["8 type.argument-mismatch"]);
 }
+
+// ---- review round 1 (PR #1056): the reviewer's witnesses, PHP 8.5.11 ----------
+
+const F_PRELUDE: &str = "<?php
+final class F { public $p = 0; public $r = 0; }
+";
+
+/// `F_PRELUDE` plus one function body; the dump is on line 3.
+fn f_case(sig: &str, body: &str) -> String {
+    format!("{F_PRELUDE}function {sig} {{ {body} }}\n")
+}
+
+#[test]
+fn a_property_written_inside_an_expression_reaches_the_original() {
+    // S1: `eb4`, `exprw`, `exprw2`, `exprw4`, `forw`. PHP: 'changed' in each.
+    let shapes = [
+        "foreach ($arr as $q) { $y = $q->p = 'changed'; }",
+        "$q = $arr[0]; echo ($q->p = 'changed');",
+        "$q = $arr[0]; if ($q->p = 'changed') {}",
+        "$q = $arr[0]; $y = $q->p = 'changed';",
+        "$q = $arr[0]; foreach (['changed'] as $q->p) {}",
+    ];
+    for shape in shapes {
+        let dump = "\\PHPStan\\dumpType($o->p);";
+        let body = format!("$o = new F(); $o->p = 1; $arr = [$o]; {shape} {dump}");
+        assert_eq!(dumps(&f_case("t(): void", &body)), vec!["3: unknown"], "{shape}");
+    }
+}
+
+#[test]
+fn a_yield_anywhere_in_a_statement_suspends_the_generator() {
+    // S2: `yw1` (PHP: 'changed'), and a condition and a return operand.
+    for shape in ["echo (yield $o);", "if (yield $o) {}", "$x = [yield $o];"] {
+        let body = format!("$o = new F(); $o->p = 1; {shape} \\PHPStan\\dumpType($o->p);");
+        assert_eq!(dumps(&f_case("g(): \\Generator", &body)), vec!["3: unknown"], "{shape}");
+    }
+}
+
+#[test]
+fn a_by_ref_generator_forgets_its_locals_at_a_yield() {
+    // S6, `refgen` and `refgen2`: the consumer writes `$x` through the reference.
+    // PHP: int(2).
+    for shape in ["$r = yield $x;", "echo (yield $x);"] {
+        let body = format!("$x = 1; {shape} \\PHPStan\\dumpType($x);");
+        assert_eq!(dumps(&f_case("&g()", &body)), vec!["3: unknown"], "{shape}");
+    }
+}
+
+#[test]
+fn a_by_value_generator_keeps_its_locals_at_a_yield() {
+    // S6's precision half (the reviewer's `y2.php`): only objects can be reached.
+    // (A bare `yield $x;` statement is a barrier, as on the base.)
+    for shape in ["$r = yield;", "$r = yield $x;", "$r = yield from inner();"] {
+        let body = format!("$x = 1; {shape} \\PHPStan\\dumpType($x);");
+        let src = format!("{}function inner() {{ yield 1; }}\n", f_case("g()", &body));
+        assert_eq!(dumps(&src), vec!["3: 1"], "{shape}");
+    }
+}
+
+#[test]
+fn a_name_forgotten_by_an_embedded_write_escapes_its_object() {
+    // S3: `ub1`, `ub10`, `ub16`, `ub17`, `ub18`. PHP: 'changed' in each.
+    let shapes = [
+        "$y = $o->p = 'changed';",
+        "echo $o->r = 2; $o->p = 'changed';",
+        "if ($o->r = 2) {} $o->p = 'changed';",
+        "if (($o->r = 2) && true) { $o->p = 'changed'; }",
+        "assert(($o->r = 2) > 0); $o->p = 'changed';",
+    ];
+    for shape in shapes {
+        let body = format!("$o = new F(); $o->p = 1; $b = $o; {shape} \\PHPStan\\dumpType($b->p);");
+        assert_eq!(dumps(&f_case("t(): void", &body)), vec!["3: unknown"], "{shape}");
+    }
+}
+
+#[test]
+fn an_escape_inside_a_loop_body_reaches_the_fall_through() {
+    // S4: `lb20` and `sl6d`. PHP: 'changed' in both.
+    let shapes = [
+        "foreach ($items as $i) { $f = fn() => $o; } $q = $f(); $q->p = 'changed';",
+        "foreach ([1] as $_) { $f = fn() => $o; $q = $f(); $q->p = 'changed'; }",
+    ];
+    for shape in shapes {
+        let body = format!("$o = new F(); $o->p = 1; {shape} \\PHPStan\\dumpType($o->p);");
+        assert_eq!(dumps(&f_case("t(array $items): void", &body)), vec!["3: unknown"], "{shape}");
+    }
+}
+
+#[test]
+fn a_reassigned_alias_does_not_escape_the_object() {
+    // `release`, not `unbind`: `$q` stops holding `$o` and no name can write it.
+    let body = "$o = new F(); $o->p = 1; $q = $o; $q = 5; \\PHPStan\\dumpType($o->p);";
+    assert_eq!(dumps(&f_case("t(): void", body)), vec!["3: 1"]);
+}
