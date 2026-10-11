@@ -493,6 +493,7 @@ fn build_hook_expr_scope(
                 call: named_call(expr),
                 span: to_span(expr.span()),
             };
+            let reads = read_positions_of_expr(expr, &kind);
             let stmt = Stmt {
                 span: to_span(expr.span()),
                 kind,
@@ -510,7 +511,7 @@ fn build_hook_expr_scope(
                 unspelled: None,
                 suspends: false,
                 writes_through: None,
-                read_positions: read_positions_of_expr(expr).map(Box::new),
+                read_positions: reads,
             };
             with_heap_fill(stmt, &node, &[expr])
         }
@@ -522,7 +523,7 @@ fn build_hook_expr_scope(
                 guards,
                 end: expr_end(expr),
                 has_terminator: subtree_has_function_exit(&node),
-                read_positions: read_positions_of_expr(expr).map(Box::new),
+                read_positions: read_positions_of_expr(expr, &base.kind),
                 ..base
             };
             with_heap_fill(stmt, &node, &[expr])
@@ -1727,6 +1728,7 @@ fn build_closure_scope_from_arrow(
     let mut guards = Vec::new();
     scan_guard_regions(&Node::Expression(af.expression), &mut guards);
     let kind = StmtKind::Return { value, call, span };
+    let reads = read_positions_of_expr(af.expression, &kind);
     let ret = Stmt {
         span,
         kind,
@@ -1745,7 +1747,7 @@ fn build_closure_scope_from_arrow(
         unspelled: None,
         suspends: false,
         writes_through: None,
-        read_positions: read_positions_of_expr(af.expression).map(Box::new),
+        read_positions: reads,
     };
     let ret = with_heap_fill(ret, &Node::Expression(af.expression), &[af.expression]);
     let mut opaque = Vec::new();

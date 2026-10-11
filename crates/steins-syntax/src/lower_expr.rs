@@ -34,20 +34,7 @@ use crate::memo::{self, TryScan};
 use crate::{bytes_to_string, children, strip_dollar, to_span};
 
 pub(crate) fn lower_call(c: &FunctionCall<'_>) -> CallExpr {
-    let (callee, callee_ref) = match c.function {
-        Expression::Identifier(id) => (Some(bytes_to_string(id.last_segment())), Some(name_ref(id))),
-        _ => (None, None),
-    };
-    // Receiver: a named function (`f(...)`), a variable call (`$fn(...)` — the
-    // closure/callable dispatch of ADR-0033), or an unresolvable dynamic callee.
-    let receiver = match (&callee, c.function.unparenthesized()) {
-        (Some(name), _) => Callee::Function(name.clone()),
-        (None, Expression::Variable(Variable::Direct(dv))) => {
-            Callee::DynamicVar(strip_dollar(bytes_to_string(dv.name)))
-        }
-        (None, _) => Callee::Dynamic,
-    };
-
+    let (callee, callee_ref, receiver) = function_callee(c.function);
     let dynamic_callee = match receiver {
         Callee::Dynamic => in_place_callee(c.function.unparenthesized()),
         _ => None,
@@ -84,6 +71,43 @@ fn in_place_callee(callee: &Expression<'_>) -> Option<ArgValue> {
     match lower_arg_value(callee) {
         v @ (ArgValue::Closure(_) | ArgValue::Str(_)) => Some(v),
         _ => None,
+    }
+}
+
+/// The callee of a function call: the simple name, the reference for project-wide
+/// resolution, and the receiver dimension. A named function (`f(...)`), a variable call
+/// (`$fn(...)` — the closure/callable dispatch of ADR-0033) or an unresolvable dynamic callee.
+fn function_callee(function: &Expression<'_>) -> (Option<String>, Option<NameRef>, Callee) {
+    let (callee, callee_ref) = match function {
+        Expression::Identifier(id) => (Some(bytes_to_string(id.last_segment())), Some(name_ref(id))),
+        _ => (None, None),
+    };
+    let receiver = match (&callee, function.unparenthesized()) {
+        (Some(name), _) => Callee::Function(name.clone()),
+        (None, Expression::Variable(Variable::Direct(dv))) => {
+            Callee::DynamicVar(strip_dollar(bytes_to_string(dv.name)))
+        }
+        (None, _) => Callee::Dynamic,
+    };
+    (callee, callee_ref, receiver)
+}
+
+/// Lower a **function first-class callable** `f(...)` into a reference-"call": a
+/// [`CallExpr`] with no arguments and `positional_only = false`, the shape
+/// [`first_class_method_ref`] gives a method's. It builds a `Closure`; it invokes nothing.
+pub(crate) fn first_class_function_ref(function: &Expression<'_>, span: Span) -> CallExpr {
+    let (callee, callee_ref, receiver) = function_callee(function);
+    CallExpr {
+        callee,
+        callee_ref,
+        receiver,
+        args: Vec::new(),
+        named_args: Vec::new(),
+        has_spread: false,
+        positional_only: false,
+        span,
+        arg_conds: Vec::new(),
+        dynamic_callee: None,
     }
 }
 

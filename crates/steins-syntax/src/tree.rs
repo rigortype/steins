@@ -348,6 +348,13 @@ impl SourceTree {
         &self.calls
     }
 
+    /// The function call at exactly `span`, as [`Self::calls`] lists it. `None` for any
+    /// other span.
+    #[must_use]
+    pub fn call_at(&self, span: Span) -> Option<&CallExpr> {
+        crate::ast::call_at_span(&self.calls, span)
+    }
+
     /// The analysis scopes (top-level script + one per function body), each with
     /// its linear trace IR and poison flag (ADR-0001 value propagation).
     #[must_use]
