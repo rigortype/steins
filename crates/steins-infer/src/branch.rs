@@ -24,7 +24,7 @@ use crate::descent::escape_and_sweep_calls;
 use crate::env::{ContractArm, Descent, Known, Store, Stratum, join_envs, val_of};
 use crate::existence::existence_vouch;
 use crate::out_params::{check_preg_pattern, seed_out_params, seed_produced_places};
-use crate::predicates::apply_type_narrowing;
+use crate::predicates::{apply_type_narrowing, pred_holds_on_fact, type_predicate};
 use crate::project::Diagnostic;
 use crate::remembered;
 use crate::refine::{
@@ -225,6 +225,7 @@ pub(crate) fn apply_cond_side(
 ) {
     let masked = mask_stale_conjuncts(w.cx, cond);
     let cond = masked.as_ref();
+    forget_unmodelled_tests(w, folder, cond, env, store);
     apply_type_narrowing(w.cx, cond, then, env, store);
     let refs = if then {
         then_refinements(cond)
@@ -272,6 +273,163 @@ pub(crate) fn apply_cond_side(
     // key so that the next identical call answers it (ADR-0102). After every
     // vocabulary above, which may have forgotten a name a key stands on.
     remembered::produce(w, folder, cond, then, env, store);
+}
+
+/// Forget every variable a condition **tests without deciding**, though the walk holds
+/// its exact value (ADR-0043's 2026-10-11 amendment, the #1060 review).
+///
+/// PHP decides every type predicate on a known value, so an atom that reads only
+/// proven values and still evaluates `Maybe` is one the walk does not model: the branch
+/// it guards may be one PHP never enters, and a verdict on the tested variable inside
+/// it would be a finding on dead code. The walk narrows the rows below already — they
+/// decide on a proven value and prune the dead side — and forgets the binding on both
+/// sides of every other one, so no value finding is premised on it there. Measured on
+/// PHP 8.5.11 over `null`, `'abc'`, `1`, `[]`, `false` and a class-name string
+/// (`tests/it/value_relation_openings.rs` pins a row of each):
+///
+/// ```text
+/// predicate                                  decided on a proven value?
+/// ------------------------------------------ ---------------------------------------
+/// is_null, is_int/string/float/bool/array,   yes (DR2 type vocabulary)
+/// is_object/iterable/scalar/numeric/resource
+/// is_callable, non-string value              yes; on a string: no -> forgotten
+/// !empty($x), truthiness, === / !== / == / != yes (comparison and truthiness folds)
+/// gettype($x) === '…', instanceof C          yes
+/// isset($x)                                  yes (`cond::eval_cond`, the #1060 review)
+/// is_countable, is_a, is_subclass_of         no  -> forgotten
+/// get_debug_type($x) === '…', ($x ?? d) …,   no  -> forgotten
+/// $x?->p …, any user or unfolded call
+/// ```
+///
+/// `isset($x)` itself is decided on a proven value (`cond::eval_cond`), so only an
+/// offset `isset($x['k'])` reaches this. An atom that reads a variable without a proven
+/// value is left alone: its undecided verdict is that variable's, and forgetting the
+/// proven one would only lose facts. Only an atom that tests a type is suspect
+/// ([`atom_tests_type`]): `count($a) === 2` left unfolded is a question about the value
+/// and keeps `$a`. The test is per atom of a `&&`/`||`/`!` tree, so
+/// `is_countable($x) && $y` forgets `$x`.
+fn forget_unmodelled_tests(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    cond: &CondExpr,
+    env: &mut HashMap<String, Known>,
+    store: &mut Store,
+) {
+    let mut forget = Vec::new();
+    collect_unmodelled_tests(w, folder, cond, env, store, &mut forget);
+    for v in forget {
+        env.remove(&v);
+        store.release(&v);
+    }
+}
+
+/// The variables of every atom of `cond` that reads only proven values and is still
+/// undecided (see [`forget_unmodelled_tests`]).
+fn collect_unmodelled_tests(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    cond: &CondExpr,
+    env: &HashMap<String, Known>,
+    store: &Store,
+    out: &mut Vec<String>,
+) {
+    match cond {
+        CondExpr::And(a, b, _) | CondExpr::Or(a, b, _) => {
+            collect_unmodelled_tests(w, folder, a, env, store, out);
+            collect_unmodelled_tests(w, folder, b, env, store, out);
+        }
+        CondExpr::Not(c) => collect_unmodelled_tests(w, folder, c, env, store, out),
+        atom => {
+            let mut reads = Vec::new();
+            collect_cond_vars(atom, &mut reads);
+            collect_other_operand_reads(atom, &mut reads);
+            let proven = |v: &String| {
+                env.get(v).is_some_and(|k| k.singleton().is_some() || k.closure.is_some())
+            };
+            if !reads.is_empty()
+                && atom_tests_type(atom)
+                && reads.iter().all(proven)
+                && atom_verdict(w, folder, atom, env, store) == Certainty::Maybe
+            {
+                out.extend(reads);
+            }
+        }
+    }
+}
+
+/// The verdict of one atom on proven values. A type predicate over a variable
+/// (`is_string($x)`) is decided by the DR2 vocabulary on the variable's fact, which
+/// is what narrows its branches, not by [`eval_cond`], which answers `Maybe` for
+/// every call it does not fold.
+fn atom_verdict(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    atom: &CondExpr,
+    env: &HashMap<String, Known>,
+    store: &Store,
+) -> Certainty {
+    if let CondExpr::Call { call, .. } = atom
+        && let Some(pred) = type_predicate(w.cx, call)
+        && let [arg] = call.args.as_slice()
+        && let ArgValue::Var(v) = &arg.value
+        && let Some(fact) = env.get(v).and_then(|k| k.fact.as_ref())
+    {
+        return pred_holds_on_fact(pred, fact);
+    }
+    eval_cond(w, folder, atom, env, store, w.scope.poisoned)
+}
+
+/// Whether an atom asks a question about its operand's **type** — one whose answer
+/// on a proven value PHP fixes, and whose `true` branch the value may never reach:
+/// a predicate call (`is_*`, `ctype_*`, `method_exists`, `property_exists`), an
+/// offset `isset`, a dynamic `instanceof`, an unlowered condition, or a comparison
+/// or truthiness test of a type-inspecting call (`gettype`, `get_debug_type`,
+/// `get_class`, `get_parent_class`) or of an operand that is no call at all (`$x ??
+/// d`, `$x?->p`). A comparison of any other call (`count($a) === 2`,
+/// `strlen($s) > 0`) is a question about the value, which an unfolded builtin leaves
+/// open without making the branch suspect, and keeps its operands.
+fn atom_tests_type(atom: &CondExpr) -> bool {
+    let type_call = |name: &str| {
+        let n = name.trim_start_matches('\\').to_ascii_lowercase();
+        n.starts_with("is_")
+            || n.starts_with("ctype_")
+            || ["method_exists", "property_exists", "gettype", "get_debug_type", "get_class"]
+                .contains(&n.as_str())
+            || n == "get_parent_class"
+    };
+    let operand_tests_type = |op: &CondOperand| match op {
+        CondOperand::Other { call: Some(call), .. } => call.callee.as_deref().is_none_or(type_call),
+        CondOperand::Other { call: None, .. } => true,
+        _ => false,
+    };
+    match atom {
+        CondExpr::Call { call, .. } => call.callee.as_deref().is_none_or(type_call),
+        CondExpr::Isset { .. }
+        | CondExpr::IssetVar { .. }
+        | CondExpr::InstanceofDyn { .. }
+        | CondExpr::Opaque { .. } => true,
+        CondExpr::Cmp { lhs, rhs, .. } => operand_tests_type(lhs) || operand_tests_type(rhs),
+        CondExpr::Truthy(op) | CondExpr::Instanceof { operand: op, .. } => operand_tests_type(op),
+        CondExpr::Not(_) | CondExpr::And(..) | CondExpr::Or(..) => false,
+    }
+}
+
+/// The variables an atom's unrepresentable operands read (`get_debug_type($x) === …`,
+/// `($x ?? 1) !== …`, `$x?->p !== …`), which [`collect_cond_vars`] leaves out.
+fn collect_other_operand_reads(atom: &CondExpr, out: &mut Vec<String>) {
+    let mut push = |op: &CondOperand| {
+        if let CondOperand::Other { reads, .. } = op {
+            out.extend(reads.iter().cloned());
+        }
+    };
+    match atom {
+        CondExpr::Cmp { lhs, rhs, .. } => {
+            push(lhs);
+            push(rhs);
+        }
+        CondExpr::Truthy(op) | CondExpr::Instanceof { operand: op, .. } => push(op),
+        _ => {}
+    }
 }
 
 /// One name's pre-branch value and declared-arm lanes, held across the branches
