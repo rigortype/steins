@@ -19,6 +19,7 @@ mod lower_globals;
 mod lower_guards;
 mod lower_jump;
 mod lower_presence;
+mod lower_read;
 mod lower_pure;
 mod lower_scope;
 mod lower_site;

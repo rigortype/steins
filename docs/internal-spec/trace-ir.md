@@ -57,6 +57,23 @@ expressions write a property through where the kind does not spell it
 variable of the chain, or `""` for a chain that starts at no variable.
 `Scope::yields_by_ref` marks a generator declared `function &g()`.
 
+`read_positions` (ADR-0104, issue #1050) lists every call, offset read, property
+read and class-constant read the statement's own expressions write, each as a
+`ReadPosition { kind, span, carrier }` at the read's own span, outermost first and
+in source order. The kind is `Call(CallExpr)`, `Offset { base, key }`,
+`Prop { var, prop }` or `ClassConst(class, name)`; every level of an access chain
+and every nested call is a position, and the shapes the lowering cannot spell
+(a dynamic receiver, `?->`, `Class::class`) are not. The carrier names the
+construct around the read: `Plain`, `Argument { callee, position }` (`position`
+is `None` for a named argument or one at or after a spread), `Conditional`,
+`IssetLike`, `Suppressed`, `Write`, `CompoundRead` and `FirstClassCallable`;
+under several constructs the weakest claim wins, in the order on `Carrier`.
+It is read for an expression statement, `return`, `echo` and `<?= ?>` and a
+`static` initializer, and for an arrow function's body, a hook's and a hoisted
+`match` arm's; a header is not read yet. The scan stops at a function-like, a
+class-like (an anonymous class keeps its constructor arguments) and a `match`.
+`None` when there is none. Nothing reads it yet.
+
 ## Statement kinds
 
 | Kind | Models |

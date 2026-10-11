@@ -31,6 +31,7 @@ use crate::lower_globals::{
 };
 use crate::lower_guards::guard_regions_of;
 use crate::lower_presence::subtree_has_goto;
+use crate::lower_read::{read_positions_of, read_positions_of_expr};
 use crate::lower_pure::{is_pure_expr, is_pure_statement};
 use crate::lower_scope::node_is_generator;
 use crate::lower_jump::{arm_landing, body_has_jump, ends_own_switch, jump_level};
@@ -163,6 +164,7 @@ pub(crate) fn lower_stmt(s: &Statement<'_>, out: &mut Vec<Stmt>) {
         span: stmt_span,
         string_contexts: string_context_sites(s),
         guards: guard_regions_of(s),
+        read_positions: read_positions_of(s).map(Box::new),
         // The reachability foundation's central fill (ADR-0078, issue #199) — read
         // off the CST statement, never off the lowered `kind`. See `stmt_end`.
         end: stmt_end(s),
@@ -1332,6 +1334,7 @@ fn lower_expr_position(expr: &Expression<'_>) -> Vec<Stmt> {
         value_position: true,
         ..st
     };
+    let st = Stmt { read_positions: read_positions_of_expr(expr).map(Box::new), ..st };
     out.push(with_heap_fill(st, &Node::Expression(expr), &[expr]));
     out
 }

@@ -24,6 +24,7 @@ use crate::lower_effect::{
 use crate::lower_expr::lower_arg_value;
 use crate::lower_globals::{GlobalsKey, globals_fetch};
 use crate::lower_guards::scan_guard_regions;
+use crate::lower_read::read_positions_of_expr;
 use crate::lower_presence::{
     InfoMap, Refinement, binary_info, elvis_info, maybe_undefined_reads, push_guard_root, span_key,
     subtree_has_goto,
@@ -508,6 +509,7 @@ fn build_hook_expr_scope(
                 unspelled: None,
                 suspends: false,
                 writes_through: None,
+                read_positions: read_positions_of_expr(expr).map(Box::new),
             };
             with_heap_fill(stmt, &node, &[expr])
         }
@@ -519,6 +521,7 @@ fn build_hook_expr_scope(
                 guards,
                 end: expr_end(expr),
                 has_terminator: subtree_has_function_exit(&node),
+                read_positions: read_positions_of_expr(expr).map(Box::new),
                 ..base
             };
             with_heap_fill(stmt, &node, &[expr])
@@ -1741,6 +1744,7 @@ fn build_closure_scope_from_arrow(
         unspelled: None,
         suspends: false,
         writes_through: None,
+        read_positions: read_positions_of_expr(af.expression).map(Box::new),
     };
     let ret = with_heap_fill(ret, &Node::Expression(af.expression), &[af.expression]);
     let mut opaque = Vec::new();

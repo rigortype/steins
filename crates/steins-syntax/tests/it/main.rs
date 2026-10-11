@@ -21,6 +21,7 @@ mod method_call_value;
 mod null_default;
 mod operator_sites;
 mod operator_value;
+mod read_positions;
 mod relative_names;
 mod site_oracle;
 mod smoke;
