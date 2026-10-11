@@ -148,7 +148,7 @@ is the authoritative answer for a given binary — two lines out of its
 ```
 $ steins doctor --no-php .
   active profile: `default` (from built-in default)
-  surface: layers [mechanics, proof], 48 checked id(s)
+  surface: layers [mechanics, proof], 49 checked id(s)
 ```
 
 Today that count runs 48 ids at `default`, 49 at `throws-direct`, 66 at

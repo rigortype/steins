@@ -479,3 +479,39 @@ class), so `RecursiveFilterIterator` reports `FilterIterator::accept`, as PHP
 does; the name is display only and never changes a verdict. The arity verdict
 reuses `override.parameter-variance` because a count incompatibility is the
 same `Declaration … must be compatible` fatal; the message states the counts.
+
+## Amendment (2026-10-11): compile-time return fatals are `return.compile-fatal` (issues #952, #1051)
+
+**Status: PENDING ratification.** `type.return-missing` judges a body that
+falls off its end, and `type.return-mismatch` a returned value against the
+hint. Three `return` statements fall under neither because PHP refuses them
+before any code runs, and they were silent: `function f(): void { return 5; }`,
+`function f(): int { return; }`, `function f(): never { return; }`. One new id,
+`return.compile-fatal`, proof layer, `Default` floor: the premise is a written
+hint and the statement's form, both syntactic, and the verdict never demotes.
+It is env-free, folder-free and has no dead-region filter, because the
+compiler judges dead code as it judges live code (`if (false) { return 5; }`
+in a `: void` body is the same fatal). Each row was run on PHP 8.5.11.
+
+| written hint | `return` form | verdict |
+| --- | --- | --- |
+| `: void` | `return <expr>;`, `return null;` included | fire: "A void function must not return a value" |
+| `: void` | `return;` | silent |
+| `: never` | `return;` or `return <expr>;` | fire: "A never-returning function must not return" |
+| `: never` arrow function | the body expression | silent: it compiles |
+| `: void` arrow function | the body expression | fire |
+| any other written hint (`int`, `?int`, `mixed`, `array`, `static`, `self`, `null`, `false`, `true`, a class, a union) | `return;` | fire: "A function with return type must return a value" |
+| the same hints | `return <expr>;`, `return null;` included | silent: `return null;` under `: int` is `type.return-mismatch`'s |
+| `: ?void`, `: int\|void` | any | decline: a different fatal ("Void can only be used as a standalone type") |
+| a generator body | any | decline: a different fatal |
+| a constructor or destructor with no hint | `return 5;` | silent: it compiles |
+| a property hook body | any | decline |
+| trait, enum and anonymous-class methods | any | silent: their bodies have no scope yet (#1051, R1) |
+
+PHP says "method" for a method and "function" for a function or closure; the
+message quotes the sentence for the scope's own kind. The rule is per scope: a
+closure inside a `: void` body is judged by its own hint. The syntax layer
+carries the statement's form as `Scope::returns` (a `ReturnSite` per `return`,
+found on the syntax tree rather than the trace, so dead code and constructs the
+trace leaves opaque are covered); an arrow function's body is one
+`ReturnForm::ArrowBody`.

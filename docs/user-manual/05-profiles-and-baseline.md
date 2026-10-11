@@ -181,21 +181,21 @@ its `Config + active surface` section:
 ```
 $ steins doctor --no-php .
   active profile: `default` (from built-in default)
-  surface: layers [mechanics, proof], 48 checked id(s)
+  surface: layers [mechanics, proof], 49 checked id(s)
 ```
 
 | Profile | Base | What it adds | Checked ids |
 | --- | --- | --- | --- |
-| `default` | — | — | 48 |
-| `throws-direct` | `default` | `throw.undeclared`, direct escapes only | 49 |
-| `contracts` | `default` | the contract layer, except the strict and pedantic rungs | 66 |
-| `strict` | `contracts` | the some-paths-only claims — `offset.maybe-missing`, `variable.maybe-undefined`, `property.maybe-undefined`, `type.return-maybe-missing`, `type.maybe-argument-mismatch`, `phpdoc.maybe-argument-mismatch`, `type.maybe-return-mismatch`, `phpdoc.maybe-return-mismatch`, `effect.maybe-envelope-exceeded`, `throw.maybe-undeclared` | 76 |
-| `pedantic` | `contracts` | the house-style asks — `untyped.class-constant` | 67 |
+| `default` | — | — | 49 |
+| `throws-direct` | `default` | `throw.undeclared`, direct escapes only | 50 |
+| `contracts` | `default` | the contract layer, except the strict and pedantic rungs | 67 |
+| `strict` | `contracts` | the some-paths-only claims — `offset.maybe-missing`, `variable.maybe-undefined`, `property.maybe-undefined`, `type.return-maybe-missing`, `type.maybe-argument-mismatch`, `phpdoc.maybe-argument-mismatch`, `type.maybe-return-mismatch`, `phpdoc.maybe-return-mismatch`, `effect.maybe-envelope-exceeded`, `throw.maybe-undeclared` | 77 |
+| `pedantic` | `contracts` | the house-style asks — `untyped.class-constant` | 68 |
 
 Only the `default` / `contracts` / `strict` rows nest. `throws-direct` and
 `pedantic` branch off their base, so neither contains nor is contained by
-`strict` — 67 and 76 are not steps on one scale, they are two different
-supersets of the same 66.
+`strict` — 68 and 77 are not steps on one scale, they are two different
+supersets of the same 67.
 
 `boundary` is a reserved name (ADR-0050 §5, deferred to ADR-0042). Selecting
 it or defining `[profile.boundary]` is a config error until its design lands.
