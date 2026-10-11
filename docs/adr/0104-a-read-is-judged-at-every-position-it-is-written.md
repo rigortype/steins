@@ -102,7 +102,7 @@ S3 own that table.
 | `IssetLike` | a class constant under `isset`, `empty`, `??` or `??=` (an offset or property there is not recorded) |
 | `Suppressed` | under `@` |
 | `CompoundRead` | the target of `++`, `--` or a compound assignment |
-| (kind `CallRef`) | `f(...)`, `$o->m(...)`, `C::m(...)`: its own kind, not a carrier, with the carrier folded like a call's (`$f && missing(...)` is `Conditional`) |
+| (kind `CallRef`) | `f(...)`, `$o->m(...)`, `C::m(...)`: its own kind, not a carrier, with the carrier folded like a call's (`$f && missing(...)` is `Conditional`); the run's S2 row "FCC existence" consumes `kind == CallRef` |
 
 A read can sit under several constructs at once. The lowering keeps the
 **weakest claim**, in the order write (not recorded), `IssetLike`, `Conditional`,
@@ -124,6 +124,13 @@ row. Beyond the order above:
   (`$n?->m(missing(), A::NOPE, $a['k'])` evaluates nothing). Everything past a
   `?->` is recorded `Conditional`; the receiver itself keeps the inherited
   claim.
+- **The class operand of a static call is part of the chain.**
+  `$n?->s::m($a['k'])` and `($n?->p)::m($a['k'])` short-circuit their arguments
+  like a method call on `$n?->s` does.
+- **Known IR gap, not a false positive.** A key that sits under a write target
+  and past a `?->` (`$a[$n?->p]['k'] = 1`) is recorded as an ordinary read of
+  its operands without the short-circuit; PHP also raises a deprecation there
+  that no position models.
 - **An append writes its base.** `$a['k'][] = 1` creates `$a['k']`; no level of
   its base is recorded.
 

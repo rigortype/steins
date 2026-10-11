@@ -51,6 +51,8 @@
 //! | | `e` | `Conditional` | evaluated only when `T` is unset or null |
 //! | `a ?-> b ...` | the receiver `a` | inherited | evaluated |
 //! | | the rest of the chain: the member, its arguments, its keys, every later link | `Conditional` | none of it is evaluated when `a` is null |
+//! | `a ?-> b::m(x)`, `(a ?-> b)::m(x)`, `a ?-> b::C` | the class operand | inherited | evaluated |
+//! | | the call and its arguments | `Conditional` | a null class operand short-circuits them too |
 //! | `a && b`, `a \|\| b`, `a and b`, `a or b` | `a` | inherited | evaluated |
 //! | | `b` | `Conditional` | may not run |
 //! | `c ? a : b` | `c` | inherited | evaluated |
@@ -346,6 +348,7 @@ impl Scan {
         let inner = match node {
             Node::NullSafeMethodCall(_) => ctx.conditional(),
             Node::MethodCall(mc) => past_nullsafe(mc.object, ctx),
+            Node::StaticMethodCall(sc) => past_nullsafe(sc.class, ctx),
             _ => ctx,
         };
         // Recorded by span alone and before its operands, so an argument can name it by index.
@@ -538,6 +541,11 @@ fn has_nullsafe(e: &Expression<'_>) -> bool {
         Expression::Access(Access::Property(pa)) => has_nullsafe(pa.object),
         Expression::ArrayAccess(aa) => has_nullsafe(aa.array),
         Expression::Call(Call::Method(mc)) => has_nullsafe(mc.object),
+        // The class operand of `X::m()`, `X::$p` and `X::C` is evaluated first and
+        // short-circuits the same way: `$n?->s::m($a['k'])`, `($n?->p)::m(...)`.
+        Expression::Call(Call::StaticMethod(sc)) => has_nullsafe(sc.class),
+        Expression::Access(Access::StaticProperty(sp)) => has_nullsafe(sp.class),
+        Expression::Access(Access::ClassConstant(cc)) => has_nullsafe(cc.class),
         _ => false,
     }
 }
