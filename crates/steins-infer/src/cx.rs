@@ -945,6 +945,9 @@ impl<'a> Cx<'a> {
             return None;
         }
         if !literal_memo::worth_memoising(value) {
+            if let ArgValue::Array(_) = value {
+                literal_memo::note(value);
+            }
             return self.resolve_literal_once(value, env, folder, descent, out);
         }
         literal_memo::resolve(self, value, env, folder, descent, out, |folder, descent, out| {

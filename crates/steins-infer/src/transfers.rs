@@ -261,6 +261,26 @@ pub(crate) fn transfer_arg_known(
     env: &HashMap<String, Known>,
     store: Option<&Store>,
 ) -> Option<(Fact, Stratum)> {
+    // A variable reads the env and the arm lane, and a literal names itself:
+    // neither resolves anything, so neither needs the memo's extent.
+    if matches!(value, ArgValue::Var(_)) || value.is_literal() {
+        return transfer_arg_known_once(cx, folder, value, env, store);
+    }
+    // The literal reads below, and the per-element reads of an array literal,
+    // share one memo (issue #1063): see `literal_memo`.
+    crate::literal_memo::within(cx, value, env, folder, |folder| {
+        transfer_arg_known_once(cx, folder, value, env, store)
+    })
+}
+
+/// One fact-seam read of `value` ([`transfer_arg_known`]).
+fn transfer_arg_known_once(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    value: &ArgValue,
+    env: &HashMap<String, Known>,
+    store: Option<&Store>,
+) -> Option<(Fact, Stratum)> {
     if let ArgValue::Var(v) = value {
         let known = env.get(v);
         let env_fact = known.and_then(|k| k.fact.clone());

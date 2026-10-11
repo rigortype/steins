@@ -6,7 +6,9 @@ use std::collections::{HashMap, HashSet};
 
 use steins_contract::{ContractTy, normalize};
 use steins_domain::Certainty;
-use steins_syntax::{ArgValue, ArrayKey, NameRef, NormKey, Scope, StaticClass, normalize_array};
+use steins_syntax::{
+    ArgValue, ArrayKey, NameRef, NormKey, Scope, StaticClass, normalize_array, normalize_array_refs,
+};
 
 use crate::fold::Folder;
 use crate::fold_args::FOLD_ARRAY_MAX_DEPTH;
@@ -209,7 +211,7 @@ fn array_literal_fact_within(
     if items.iter().any(|(k, _)| matches!(k, ArrayKey::Expr(_))) {
         return open_keyed_literal_fact(cx, folder, items, env, poisoned, store, depth);
     }
-    let normalized = normalize_array(items)?;
+    let normalized = normalize_array_refs(items)?;
     let mut entries: Vec<(VKey, Option<Fact>)> = Vec::with_capacity(normalized.len());
     let mut stratum = Stratum::Verified;
     for (key, value) in &normalized {
