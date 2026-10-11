@@ -10,7 +10,7 @@ use steins_syntax::{CondExpr, Stmt, StmtKind};
 
 use crate::fold::Folder;
 use crate::annotate::LineFact;
-use crate::branch::apply_cond_side;
+use crate::branch::{apply_cond_side, forget_in_branch, unmodelled_tests};
 use crate::cond::eval_cond;
 use crate::env::{Descent, EscapeRecorder, Known, Store};
 use crate::foreach_bind::element_binding;
@@ -503,6 +503,8 @@ fn walk_while_body(
     if verdict == Certainty::No {
         return verdict;
     }
+    let untested = unmodelled_tests(w, folder, cond, &benv, &bstore);
+    forget_in_branch(&untested, &mut benv, &mut bstore);
     apply_cond_side(w, folder, cond, true, &mut benv, &mut bstore);
     let _ = walk_loop_body(w, folder, body, benv, bstore, descent, facts, out);
     verdict

@@ -148,6 +148,13 @@ pub(crate) fn walk_if(
         store.contract.insert(var, arms);
     }
     apply_resource_effects(&guard_resources, store);
+    // A tested, undecided, proven binding is forgotten inside each guarded side and
+    // handed back at its exit, with the presence guard's keys (`unmodelled_tests`).
+    let untested = unmodelled_tests(w, folder, cond, env, store);
+    let untested_lanes: Vec<BranchScopedLanes> = untested
+        .iter()
+        .map(|v| (v.clone(), env.get(v).cloned(), store.contract.get(v).cloned()))
+        .collect();
     // The top-level rebind rule (issue #762): the condition's userland call may
     // have rebound any name of the frame, the presence guard's key included, so
     // nothing is handed back at a branch exit either.
@@ -168,6 +175,7 @@ pub(crate) fn walk_if(
     if verdict != Certainty::No {
         let mut benv = env.clone();
         let mut bclasses = store.clone();
+        forget_in_branch(&untested, &mut benv, &mut bclasses);
         apply_cond_side(w, folder, cond, true, &mut benv, &mut bclasses);
         if walk_trace(w, folder, then_trace, &mut benv, &mut bclasses, descent, facts, true, out)
             == Flow::FellThrough
@@ -180,6 +188,7 @@ pub(crate) fn walk_if(
     if verdict != Certainty::Yes {
         let mut benv = env.clone();
         let mut bclasses = store.clone();
+        forget_in_branch(&untested, &mut benv, &mut bclasses);
         apply_cond_side(w, folder, cond, false, &mut benv, &mut bclasses);
         if walk_else(w, folder, elseifs, else_trace, chain, &mut benv, &mut bclasses, descent, facts, out)
             == Flow::FellThrough
@@ -192,6 +201,15 @@ pub(crate) fn walk_if(
     // 4. Merge. No live fall-through → the successor is unreachable.
     if fell.is_empty() {
         return Flow::Terminated;
+    }
+    // A tested binding comes back only when every side the walk kept falls through:
+    // then the code after the join runs whichever side PHP took. Reached through one
+    // side alone (`if (!T) { return; }`), it is as suspect as that side was.
+    let live = usize::from(verdict != Certainty::No) + usize::from(verdict != Certainty::Yes);
+    if !rebinds && fell.len() == live {
+        for (benv, bstore) in &mut fell {
+            restore_branch_scoped(&untested_lanes, benv, bstore);
+        }
     }
     let (jenv, jclasses) = join_envs(fell);
     *env = jenv;
@@ -225,7 +243,6 @@ pub(crate) fn apply_cond_side(
 ) {
     let masked = mask_stale_conjuncts(w.cx, cond);
     let cond = masked.as_ref();
-    forget_unmodelled_tests(w, folder, cond, env, store);
     apply_type_narrowing(w.cx, cond, then, env, store);
     let refs = if then {
         then_refinements(cond)
@@ -275,15 +292,37 @@ pub(crate) fn apply_cond_side(
     remembered::produce(w, folder, cond, then, env, store);
 }
 
-/// Forget every variable a condition **tests without deciding**, though the walk holds
-/// its exact value (ADR-0043's 2026-10-11 amendment, the #1060 review).
+/// The variables a condition **tests without deciding**, though the walk holds their
+/// exact value (ADR-0043's 2026-10-11 amendment, the #1060 review and re-review).
 ///
 /// PHP decides every type predicate on a known value, so an atom that reads only
 /// proven values and still evaluates `Maybe` is one the walk does not model: the branch
 /// it guards may be one PHP never enters, and a verdict on the tested variable inside
 /// it would be a finding on dead code. The walk narrows the rows below already — they
-/// decide on a proven value and prune the dead side — and forgets the binding on both
-/// sides of every other one, so no value finding is premised on it there. Measured on
+/// decide on a proven value and prune the dead side — and forgets the binding inside
+/// both guarded sides of every other one, so no value finding is premised on it there.
+/// A type test changes no value, so the binding is handed back at the construct's join
+/// when every side falls through ([`walk_if`]), and the code after it, which PHP
+/// reaches on whichever side it took, keeps its findings:
+///
+/// ```text
+/// position                                     binding of a tested, proven $x
+/// -------------------------------------------- ------------------------------------
+/// then side of `if (T)` / `if (!T)`, elseif    forgotten (the side may be dead)
+/// else side of the same                        forgotten (the other side may be dead)
+/// either side of `T && U`, `T || U`, `!(T…)`   forgotten (per atom: T's reads only)
+/// a `match (true)` arm (desugared to `if`)     forgotten
+/// a `while (T)` body                           forgotten (the body's env is discarded)
+/// after the join, every kept side falling      restored, unless a side rebound $x
+/// through
+/// after the join, reached through one side     forgotten (`if (!T) { return; } f($x)`:
+/// only                                         that side may be the dead one)
+/// after the loop                               untouched (the header's sides are not
+///                                              the loop's exit)
+/// T decided on the value (table below)         untouched: the dead side is pruned
+/// ```
+///
+/// Measured on
 /// PHP 8.5.11 over `null`, `'abc'`, `1`, `[]`, `false` and a class-name string
 /// (`tests/it/value_relation_openings.rs` pins a row of each):
 ///
@@ -296,7 +335,10 @@ pub(crate) fn apply_cond_side(
 /// !empty($x), truthiness, === / !== / == / != yes (comparison and truthiness folds)
 /// gettype($x) === '…', instanceof C          yes
 /// isset($x)                                  yes (`cond::eval_cond`, the #1060 review)
-/// is_countable, is_a, is_subclass_of         no  -> forgotten
+/// is_countable; is_a/is_subclass_of over a    yes (`cond::eval_literal_type_test`)
+/// non-class-name value
+/// is_a/is_subclass_of over a string naming a  no  -> forgotten
+/// class that may exist; ctype_*, method_exists
 /// get_debug_type($x) === '…', ($x ?? d) …,   no  -> forgotten
 /// $x?->p …, any user or unfolded call
 /// ```
@@ -307,24 +349,36 @@ pub(crate) fn apply_cond_side(
 /// proven one would only lose facts. Only an atom that tests a type is suspect
 /// ([`atom_tests_type`]): `count($a) === 2` left unfolded is a question about the value
 /// and keeps `$a`. The test is per atom of a `&&`/`||`/`!` tree, so
-/// `is_countable($x) && $y` forgets `$x`.
-fn forget_unmodelled_tests(
+/// `is_a($x, $c) && $y` forgets `$x`.
+pub(crate) fn unmodelled_tests(
     w: &WalkCx,
     folder: &mut dyn Folder,
     cond: &CondExpr,
+    env: &HashMap<String, Known>,
+    store: &Store,
+) -> Vec<String> {
+    let masked = mask_stale_conjuncts(w.cx, cond);
+    let mut out = Vec::new();
+    collect_unmodelled_tests(w, folder, masked.as_ref(), env, store, &mut out);
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Drop the [`unmodelled_tests`] of a condition from one guarded side's pair.
+pub(crate) fn forget_in_branch(
+    vars: &[String],
     env: &mut HashMap<String, Known>,
     store: &mut Store,
 ) {
-    let mut forget = Vec::new();
-    collect_unmodelled_tests(w, folder, cond, env, store, &mut forget);
-    for v in forget {
-        env.remove(&v);
-        store.release(&v);
+    for v in vars {
+        env.remove(v);
+        store.release(v);
     }
 }
 
 /// The variables of every atom of `cond` that reads only proven values and is still
-/// undecided (see [`forget_unmodelled_tests`]).
+/// undecided (see [`unmodelled_tests`]).
 fn collect_unmodelled_tests(
     w: &WalkCx,
     folder: &mut dyn Folder,
