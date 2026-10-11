@@ -1450,3 +1450,27 @@ else.
   `!defined(…) { define(…) }` idiom), a `Maybe` guard still leans on the
   vouch, and `function_exists` on a conditional polyfill still answers `Yes`
   with the dam clear (#978).
+
+*Amendment 2026-10-11 (read-position run S0c, #1050; PENDING ratification).*
+`defined('C::K')` folds against the class-constant reach and the scope's
+visibility instead of answering `Maybe`. Witnessed on PHP 8.5.11: `defined()`
+autoloads nothing it cannot find and answers `false` for an unknown class, an
+absent constant, and a constant the calling scope cannot access (`private`
+from outside, an ancestor's `private`, `protected` from an unrelated scope); it
+answers `true` for a public constant, an enum case and an interface constant,
+and a `protected` one from a related scope or a `private` one from its own
+class. The class name is case-insensitive and may open with `\`; the constant
+name is case-sensitive.
+- **`No`** (the true branch is dead, so `class-const.undefined` and
+  `class-const.inaccessible` are silent inside it, and the code after
+  `if (!defined('C::K')) return;` is dead): the reach (parents and interfaces)
+  provides `K` nowhere, or provides it once and the scope cannot see it.
+- **`Yes`** (the false branch is dead): `K` is provided once and the scope
+  provably sees it.
+- **`Maybe`**, as before, for `self::`/`static::`/`parent::` spellings, a
+  non-class-const argument, a constant provided twice, and any obstacle of the
+  `class-const.undefined` reach (unresolvable edge, trait node, incomplete
+  file, conditional declaration with the dam standing, boot-surface homonym).
+  A closure scope is unprovable for a non-public constant.
+- `defined('X')` on a global constant is unchanged (`No` or `Maybe`). A
+  `defined('C::K') || die;` statement is still not a guard region.
