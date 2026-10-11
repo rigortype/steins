@@ -55,20 +55,31 @@ write it covers, each witnessed on PHP 8.5.11.
   `match`, an `(object)` cast, a computed key — the statement now names the
   variables inside such a value, `Stmt::unspelled`); handing it to a call inside
   an array or a nested call; iterating over it; a join whose branches bind one
-  name to different objects; a loop or an unwalked construct forgetting a name
-  that held it.
+  name to different objects; and any forgetting of a name the walk can no
+  longer read — a loop or an unwalked construct, a by-reference call, an
+  embedded write such as `echo $o->r = 2` or a guard's own write. `Store::unbind`
+  escapes the object it drops; a name being given a new value (an assignment, a
+  `catch` binding, an out-parameter) takes `Store::release`, which does not.
+  An escape on any path of a loop body reaches the fall-through.
+  A `yield` hands its operand to the consumer and escapes it.
 - **Write.** A write through a name the store does not resolve sweeps the escape
   set, exactly as an unknown call does: a property write or a by-reference pass
   of a property through an unbound receiver, an argument a resolved callee may
   write through (an unbound name with no `Verified` scalar fact, a call's
   result, a general spread). A by-reference pass of a bound object's property
-  forgets that property.
+  forgets that property. A property written inside an expression the kind does
+  not spell (`$y = $q->p = 1`, `echo ($q->p = 1)`, `if ($q->p = f())`,
+  `foreach ($xs as $q->p)`) is listed on the statement (`Stmt::writes_through`)
+  and treated the same way.
 - **Constructs the walk does not see whole.** A loop's fall-through is built
   from the write sets before its body is walked, so a sweep the body makes
   (on any path, one that `break`s included) is applied to the fall-through too
   (`WalkCx::heap_sweeps`). An `Opaque` construct sweeps the escape set and the
-  objects its names refer to. An expression statement that `yield`s is a
-  barrier: the consumer runs before the expression resumes.
+  objects its names refer to. A statement whose own expressions `yield`
+  (`Stmt::suspends`) sweeps the escape set, since the consumer runs before the
+  statement resumes; in a generator that yields by reference
+  (`function &g()`, `Scope::yields_by_ref`) the consumer can write the yielded
+  local too, and every local is forgotten.
 
 The sweep is the escape set, not a class or a property name: an unresolved
 receiver has no class the walk can trust, and a write can run `__set` or a hook.
@@ -78,5 +89,7 @@ The public corpus moves by nothing at `strict` or `default`.
 
 Not covered: a resolved callee that writes an escaped object through a static
 property or a global it reaches itself (the callee is trusted with the heap
-today), an object converted by `.` whose `__toString` writes itself, and a
-`yield` in a condition or a `return`.
+today), an object converted by `.` whose `__toString` writes itself, a method
+that returns `$this`, `get_defined_vars()`, a `__set` or a hook on a bound
+receiver writing an escaped object, `__destruct`, and two bound entry objects
+that may be the same object (`$a->f($a)`).

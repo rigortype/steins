@@ -46,8 +46,15 @@ value its kind carries — an `Assign`, `PropAssign` or `Return` value, a call's
 argument or receiver — lowered to `Other`. A `match`, an `(object)` cast or an
 array with a computed key can store an object handle as surely as an array
 literal can, and the walk escapes each object these names hold. `None` when
-every value was spelled. An expression statement that contains a `yield` lowers
-to `Barrier`: the generator's consumer runs before the expression resumes.
+every value was spelled. `suspends` says that the statement's own expressions
+(an expression, an `echo` or `return` operand, an `if` condition, a loop header,
+a `switch` subject) `yield`: the generator's consumer runs before the statement
+resumes, and with `unspelled` naming the operands the walk escapes them and
+sweeps the escaped objects. `writes_through` lists the receivers those
+expressions write a property through where the kind does not spell it
+(`$y = $q->p = 1`, `if ($q->p = f())`, `foreach ($xs as $q->p)`); the leftmost
+variable of the chain, or `""` for a chain that starts at no variable.
+`Scope::yields_by_ref` marks a generator declared `function &g()`.
 
 ## Statement kinds
 
