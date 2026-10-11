@@ -496,6 +496,13 @@ fn declared_in_chain<'a, T>(
 /// `write` selects the magic fallback PHP would route through (`__set` for a write,
 /// `__get` for a read) and the sentence's verb; both are witnessed to swallow the
 /// access entirely.
+///
+/// The read side is judged at every property read position the statement records
+/// (ADR-0104), at the read's own span: the receiver's exact allocation is a fact no
+/// test changes, so a conditional and an `@` operand judge too (the fatal is not
+/// suppressible), and so does a by-reference argument, which PHP fetches through the
+/// same `__get` route as a read (witnessed PHP 8.5). A compound write
+/// (`$x->p .= 'v'`), whose write half takes `__set`, declines.
 pub(crate) fn check_inaccessible_property(
     w: &WalkCx,
     var: &str,
@@ -585,6 +592,11 @@ pub(crate) fn check_inaccessible_property(
 }
 
 /// `class-const.inaccessible` (ADR-0078, issue #185) at a `C::K` fetch.
+///
+/// Judged at every class-constant read position the statement records (ADR-0104),
+/// at the fetch's own span, whatever carries it: the answer depends on no env, and PHP
+/// throws under `isset`-like constructs and `@` alike (`A::P ?? 1` is the Error). Only a
+/// fetch inside an extent a decided guard proved dead is not judged.
 ///
 /// Only an explicitly **named** class is a subject. `self::` and `parent::` are
 /// lexically fixed and could be read here too, but neither can ever fire: `self::K`

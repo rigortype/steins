@@ -636,10 +636,11 @@ fn walk_run(
         // pre-statement env (`check_read_positions`), once per site in the plain
         // per-scope pass.
         if descent.is_none() {
-            check_read_positions(w, folder, stmt, env, store, out);
             // The ternaries and `&&`/`||` the statement evaluates, in any position: a
             // decided guard proves the arm or operand it skips dead (issue #928).
+            // Swept first, so a read position in a dead extent is not judged.
             sweep_guard_regions(w, folder, stmt);
+            check_read_positions(w, folder, stmt, env, store, out);
         }
 
         // 1a. Escape + sweep (ADR-0036): passing an object into a call escapes it;

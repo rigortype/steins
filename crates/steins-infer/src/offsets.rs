@@ -32,24 +32,35 @@ use crate::{
 // `General`/`Refined`, objects, string bases, and any non-`Verified` fact
 // (N2) are silent.
 //
-// **Read-context whitelist (A7).** Called ONLY from a plain assignment-RHS,
-// a return operand, and the SOURCE of a destructuring assignment (issue
-// #288). Every silence context (`isset`/`??`/`array_key_exists`/`unset`,
-// write lvalues, by-ref/unresolved-callee argument positions, array
-// elements) never reaches here by construction of the lowering. Destructure
-// source: `[$a, $b] = $m;` reads `$m[0]`/`$m[1]` (witnessed PHP 8.5.9,
-// `Undefined array key`); keys are PHP's own — positional (a hole `[, $b]`
-// skips its index), explicit for `['a' => $x] = $m`, nested patterns
-// recurse; TARGETS stay silent (write positions, ADR-0049/0052 audit note
-// G7(e)). A SCALAR destructure source is not a plain read (issue #931): `null`
-// is silent on every version and int/float/bool/string warn `Cannot use <type> as
-// array` from PHP 8.5 only, so it has its own rule on the version interval.
-// See [`StmtKind::Destructure`] / [`check_destructure_source`].
+// **Read positions (A7, rewritten by ADR-0104 / issue #949).** The proof leg
+// and the strict leg judge every offset read the statement records
+// (`Stmt::read_positions`), at the read's own span, through the carrier table in
+// `stmt_checks`: a plain operand (`echo`, an operator, a cast, an interpolation,
+// an array element, `return`, the right of `=`), an argument whose parameter is
+// provably by value, and the read half of a compound assignment or `++`/`--`
+// judge; an argument that may be by reference (it creates the key, and the
+// levels below it), a conditional operand, an `@` operand and a read whose base
+// the same statement may rebind decline. `isset`/`empty`/`??`/`??=` operands and
+// write targets are never recorded. Every level of a chain is a read of its own:
+// `$a['n']['zz']` judges `$a['n']` against `$a` and `['zz']` against the proven
+// value of `$a['n']` ([`offset_base_fact`]).
+//
+// The SOURCE of a destructuring assignment (issue #288) has its own rule:
+// `[$a, $b] = $m;` reads `$m[0]`/`$m[1]` (witnessed PHP 8.5.9, `Undefined array
+// key`); keys are PHP's own — positional (a hole `[, $b]` skips its index),
+// explicit for `['a' => $x] = $m`, nested patterns recurse; TARGETS stay silent
+// (write positions, ADR-0049/0052 audit note G7(e)). A SCALAR destructure source
+// is not a plain read (issue #931): `null` is silent on every version and
+// int/float/bool/string warn `Cannot use <type> as array` from PHP 8.5 only, so
+// it has its own rule on the version interval. See [`StmtKind::Destructure`] /
+// [`check_destructure_source`].
 //
 // v1 scope (deferred, all safe silence): Error-grade object case (needs
-// ArrayAccess is-a), TypeError string-key-on-string, string-base offset
-// reads, call-argument read position (autovivification, A7), compound-
-// assignment read half, destructure source below the first pattern level.
+// ArrayAccess is-a), TypeError string-key-on-string, string-base offset reads,
+// a base that is not a variable or a keyed level of one (a literal array, a
+// property, a call result), a key that is not a literal or a variable, an
+// argument of a method or constructor call (by-reference evidence, issue
+// #1050's S5), destructure source below the first pattern level.
 // ---------------------------------------------------------------------------
 
 /// Severity grade of an offset finding (ADR-0049 §7 verified table). The
@@ -202,8 +213,46 @@ fn render_offset_key(k: &VKey) -> (String, String) {
     }
 }
 
-/// Judge a single whitelisted offset read `base[key]` and emit at most one finding
-/// (ADR-0049 §7 / S3). `span` locates the diagnostic (the enclosing statement).
+/// The proven `Verified` whole value of an offset read's **base**: the
+/// [`offset_operand_fact`] of a variable or a literal, and for a nested level
+/// (`$a['n']` under `$a['n']['zz']`, issue #949) the fact of its own base
+/// projected through its proven key.
+///
+/// The projection needs the key present in **every** member: a member that lacks
+/// it is the inner read's own finding (`Undefined array key "n"`), and the null it
+/// reads is a cascade this level does not claim. A member that is not an array
+/// declines the same way.
+fn offset_base_fact(
+    base: &ArgValue,
+    env: &HashMap<String, Known>,
+    poisoned: bool,
+) -> Option<Fact> {
+    let ArgValue::OffsetRead { base: inner, key } = base else {
+        return offset_operand_fact(base, env, poisoned);
+    };
+    let Some(Fact::Singleton(key_val)) = offset_operand_fact(key, env, poisoned) else {
+        return None;
+    };
+    let canon = offset_key_of(&key_val)?;
+    let pick = |v: &Val| match v {
+        Val::Array(entries) => entries.iter().find(|(k, _)| *k == canon).map(|(_, v)| v.clone()),
+        _ => None,
+    };
+    match offset_base_fact(inner, env, poisoned)? {
+        Fact::Singleton(v) => pick(&v).map(Fact::Singleton),
+        Fact::OneOf(members) => Fact::from_vals(members.iter().map(pick).collect::<Option<_>>()?),
+        _ => None,
+    }
+}
+
+/// Judge a single offset read `base[key]` at a read position that judges it and
+/// emit at most one finding (ADR-0049 §7 / S3). `span` locates the diagnostic:
+/// the read's own (ADR-0104 D1).
+///
+/// `compound` is the read half of `++`, `--` or a compound assignment: PHP reads
+/// the key there with the same `Undefined array key` warning, but a null base is
+/// autovivified to an array and a scalar one throws, so the on-unsupported case
+/// (which claims the read warning) is not judged (witnessed PHP 8.5).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn check_offset_read(
     cx: &Cx,
@@ -212,6 +261,7 @@ pub(crate) fn check_offset_read(
     key: &ArgValue,
     env: &HashMap<String, Known>,
     poisoned: bool,
+    compound: bool,
     span: Span,
     out: &mut Vec<Diagnostic>,
 ) {
@@ -222,13 +272,14 @@ pub(crate) fn check_offset_read(
     // Legs (b)/(e): base must be a proven `Verified` whole value (N2). An
     // object base (fact `None`, state lives in the heap) is silent — the
     // ArrayAccess/non-ArrayAccess object split is the deferred case.
-    let Some(base_fact) = offset_operand_fact(base, env, poisoned) else {
+    let Some(base_fact) = offset_base_fact(base, env, poisoned) else {
         return;
     };
 
     // Case 1 — proven non-offsetable scalar/null base (`offset.on-unsupported`,
     // warning-grade): warns regardless of key. Only `Singleton` fires.
     if let Fact::Singleton(v) = &base_fact
+        && !compound
         && let Some(word) = unsupported_base_word(v)
     {
         emit_offset(
@@ -448,17 +499,17 @@ pub(crate) fn shape_read_at(
 // The offset family's STRICT leg (ADR-0062 S6 / A-G10, issue #51).
 //
 // Two contract-layer ids, both at `Floor::Strict`, emitted from the SAME
-// whitelisted read positions the proof leg uses (plain assignment-RHS,
-// return operand) plus one the proof leg does not judge: the right-most arm
-// of a `??` chain. Every finding reads a `Fact::Shape` — `Asserted` — so
+// read positions the proof leg judges (see the family header) plus one the
+// proof leg does not judge: the right-most arm of a `??` chain. Every finding reads a `Fact::Shape` — `Asserted` — so
 // A-G9's corollary holds by construction: nothing below consults or
 // produces a proof-layer fact/id.
 //
 // Silent, and why: `ShapeRead::Present` (proved clean, never by skip);
 // `ShapeRead::Tail` (unsealed tail's value bound, OUT of v1 scope, A-G10, a
-// future id mirroring PHPStan's two-flag split); every non-whitelisted read
-// position (`isset`/`array_key_exists`/`unset` argument, write lvalue,
-// array element, non-final `??` arm) never reaches these emitters (A7).
+// future id mirroring PHPStan's two-flag split); every read position the
+// carrier table declines (`isset`/`unset` operand, write lvalue, possibly
+// by-reference argument, conditional or `@` operand, non-final `??` arm) never
+// reaches these emitters.
 //
 // **The `??` split** (issue #51 §2): PHP protects only the arms it may fall
 // *through*; the right-most arm is a plain read under the premise `¬isset`
@@ -488,7 +539,7 @@ fn strict_leg_message(kind: &str, base: &str, shape: &ShapeFact, canon: &VKey) -
     }
 }
 
-/// Judge one whitelisted **plain** read `base[key]` against the declared
+/// Judge one **plain** read `base[key]` against the declared
 /// shape and emit at most one strict-leg finding (ADR-0062 S6).
 ///
 /// Deliberately NOT gated on [`Folder::absence_family_available`], unlike

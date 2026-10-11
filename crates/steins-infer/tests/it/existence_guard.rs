@@ -389,10 +389,11 @@ class SC { private const SP = 1; }
 $g = Closure::bind(function() { if (defined('SC::SP')) { return SC::NOPE; } return 0; }, null, SC::class);
 ";
     assert_eq!(class_const_findings(bound).len(), 1, "{:?}", class_const_findings(bound));
-    // An arrow fn: a `Maybe` ternary guard is silent on both arms (the guard-respect leg),
-    // while a wrong `No` would leave the else arm live and report.
+    // An arrow fn: a `Maybe` ternary guard leaves both arms live, and an env-independent
+    // family judges a conditional arm (ADR-0104, D3), while a wrong `No` would make the
+    // then-arm dead and silent.
     let arrow = "<?php
-class SC { private const SP = 1; function a() { return fn() => defined('SC::SP') ? 0 : SC::NOPE; } }
+class SC { private const SP = 1; function a() { return fn() => defined('SC::SP') ? SC::NOPE : 0; } }
 ";
-    assert_eq!(class_const_findings(arrow).len(), 0, "{:?}", class_const_findings(arrow));
+    assert_eq!(class_const_findings(arrow).len(), 1, "{:?}", class_const_findings(arrow));
 }

@@ -765,7 +765,10 @@ $c = new C();
 var_dump(in_array(1, [$c->zz]));
 $x = $c->zz;
 ";
-    assert_eq!(exact_props(read).len(), 1, "{:#?}", props(read));
+    // Both reads warn: an array literal's element is a plain read wherever the literal
+    // sits (ADR-0104), so the argument position reports too.
+    let lines: Vec<u32> = exact_props(read).iter().map(|d| d.line).collect();
+    assert_eq!(lines, [4, 5], "{:#?}", props(read));
     let by_ref = "<?php
 class C { public int $a = 1; }
 function f($xs) {}

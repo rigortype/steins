@@ -265,17 +265,35 @@ fn a_general_map_read_does_not_fire() {
 
 #[test]
 fn the_silence_contexts_stay_silent() {
-    // None lowers into a whitelisted value slot, so none is judged (same A7
-    // whitelist the proof leg rides).
+    // None is a read PHP warns on: a guard operand, an argument the key is only a
+    // string of, an unset, a write target, and a read the carrier table declines.
     for body in [
         "if (isset($d['a'])) { return; }",
         "$b = array_key_exists('a', $d);",
         "unset($d['a']);",
         "$d['a'] = 'w';",
-        "$arr = [$d['a']];",
+        "$x = rand() ? $d['a'] : '';",
+        "$x = @$d['a'];",
+        "$x = $d['b'] ?? $d['a'] ?? '';",
+        "unknown_fn($d['a']);",
     ] {
         let src = fixture(AB, body);
         assert!(ids(&src).is_empty(), "`{body}` must be silent: {:?}", strict(&src));
+    }
+}
+
+#[test]
+fn every_plain_read_position_is_judged() {
+    // ADR-0104: the leg judges the read wherever it is written, at the read's own span.
+    for body in [
+        "$arr = [$d['a']];",
+        "echo $d['a'];",
+        "$x = $d['a'] . 'x';",
+        "$x = strlen($d['a']);",
+        "$d['a'] .= 'x';",
+    ] {
+        let src = fixture(AB, body);
+        assert_eq!(ids(&src), [OFFSET_MAYBE_MISSING_ID], "`{body}`: {:?}", strict(&src));
     }
 }
 

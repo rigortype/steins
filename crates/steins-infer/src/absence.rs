@@ -354,6 +354,16 @@ pub(crate) fn check_undefined_method(
 //   echo C::NOPE;                Error: Undefined constant C::NOPE       → fatal
 //   echo C::$nope;               Error: Access to undeclared static property C::$nope
 //
+// Both read ids are judged at every read position the statement records
+// (ADR-0104, issues #936 and #949), at the read's own span, through the carrier
+// table in `stmt_checks`. `class-const.undefined` reads no env, so every carrier
+// judges it (`A::NOPE ?? 1` and `@A::NOPE` throw too); only a dead extent of a
+// decided guard does not. `property.undefined` is value-dependent: a plain operand
+// and a by-value function argument judge, while a conditional, `@`, compound or
+// possibly-by-reference argument position declines (a by-reference parameter
+// creates the property), as does a read whose receiver the same statement may
+// rebind.
+//
 // The static-property row is recorded, not implemented: `C::$prop` on an
 // undeclared static property is a fatal (a different consequence from the
 // instance read, so it could not ride `property.undefined` anyway), and the

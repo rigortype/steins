@@ -119,6 +119,7 @@ mod match_value_position;
 mod maybe_argument_mismatch;
 mod maybe_return_mismatch;
 mod member_absence;
+mod member_read_positions;
 mod method_effects;
 mod method_summary;
 mod methods;
