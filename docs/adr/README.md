@@ -141,3 +141,4 @@ list in one place.
 | ADR-0101 | [A locale read is an effect, decided lexically: ambient settings, their labelled reads and writes, and the `%F` remedy](0101-ambient-settings-lexical-locale-read.md) |
 | ADR-0102 | [A call's result is remembered on its key until a site invalidates it: the value-lane half of "remembering and forgetting"](0102-remembered-call-results.md) |
 | ADR-0103 | [Jumps are credited by level](0103-jumps-are-credited-by-level.md) |
+| ADR-0104 | [A read is judged at every position it is written, through its carrier](0104-a-read-is-judged-at-every-position-it-is-written.md) |

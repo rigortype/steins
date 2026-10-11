@@ -3582,6 +3582,14 @@ pub struct Stmt {
     /// (`f()->p = 1`). A statement-level `$q->p = …` is spelled as
     /// [`StmtKind::PropAssign`] and is not listed. `None` when there is none.
     pub writes_through: Option<Box<Vec<String>>>,
+    /// Every call, offset read, property read and class-constant read this statement's own
+    /// expressions write, each at its own span and with the construct that carries it
+    /// (ADR-0104, issue #1050); `None` when there is none. Read off the CST for the four
+    /// statement kinds [`Self::string_contexts`] reads, plus a `static` initializer, and for
+    /// the entries that bypass `lower_stmt` (an arrow body, a `get` hook, a hoisted `match`
+    /// arm). Boxed so the common empty case costs one word per statement; read it through
+    /// [`Self::read_positions`].
+    pub read_positions: Option<Box<Vec<ReadPosition>>>,
 }
 
 /// The functions the analyzer folds as **existence guards** (ADR-0049 §4 / N3, issues #198
@@ -3749,7 +3757,14 @@ impl Stmt {
             unspelled: None,
             suspends: false,
             writes_through: None,
+            read_positions: None,
         }
+    }
+
+    /// The positions in [`Self::read_positions`], empty where there are none.
+    #[must_use]
+    pub fn read_positions(&self) -> &[ReadPosition] {
+        self.read_positions.as_deref().map_or(&[], Vec::as_slice)
     }
 
     /// The names in [`Self::writes_through`], empty where there are none.
@@ -3779,6 +3794,82 @@ pub struct StringContextSite {
     pub span: Span,
     /// Which conversion this is, for the finding's own words.
     pub kind: StringContextKind,
+}
+
+/// One place a statement reads a call result, an offset, a property or a class constant
+/// (ADR-0104, issue #1050): what is read, where it is written, and what carries it.
+///
+/// The syntax layer only records the position and classifies its carrier; whether a
+/// finding about it is due is the inference layer's judgement, per family and carrier.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
+pub struct ReadPosition {
+    pub kind: ReadKind,
+    /// The span of the read itself, not of the statement or the enclosing expression: the
+    /// text a finding points at (the owner's decision D1).
+    pub span: Span,
+    pub carrier: Carrier,
+}
+
+/// What a [`ReadPosition`] reads.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
+pub enum ReadKind {
+    /// A call, a method call, a static call or a `new` with a statically named class, or a
+    /// first-class callable (an argument-less reference, see [`Carrier::FirstClassCallable`]).
+    /// A call whose receiver the lowering cannot represent is not a position.
+    Call(CallExpr),
+    /// `$base[$key]`, every level of a chain a position of its own. Both operands are
+    /// lowered like a call argument.
+    Offset { base: Box<ArgValue>, key: Box<ArgValue> },
+    /// `$var->prop` with a bare-variable receiver and a statically named property; a deeper
+    /// chain `$a->b->c` is the position `$a->b` and nothing for the outer access. A
+    /// `?->` fetch is not a position.
+    Prop { var: String, prop: String },
+    /// `Class::NAME` with a statically named class and constant. `Class::class` is not one.
+    ClassConst(StaticClass, String),
+}
+
+/// The construct that carries a [`ReadPosition`]: what PHP does with the read, which decides
+/// whether a missing key, property or function is a diagnostic there (ADR-0104).
+///
+/// A read can sit under several constructs at once (`@f($a['k'] && $b['j'])`). The lowering
+/// keeps the **weakest claim** any of them makes, in this order: [`Self::Write`],
+/// [`Self::IssetLike`], [`Self::Conditional`], [`Self::Suppressed`], [`Self::CompoundRead`],
+/// [`Self::Argument`], then [`Self::Plain`]. It is the order a consumer that declines on doubt
+/// wants: each variant before [`Self::Plain`] is a reason for a value-dependent family to
+/// decline or fall silent. An environment-free family (an undefined function, an undeclared
+/// constant) judges in all of them except where a decided guard makes the extent dead, which
+/// the guard regions and their spans say.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
+pub enum Carrier {
+    /// An operand PHP evaluates unconditionally and reads: an operand of an operator, a cast,
+    /// an interpolation, `echo`, `return`, the right-hand side of `=`, an array element, the
+    /// test of a ternary, the left of `&&`.
+    Plain,
+    /// An argument of a call. `callee` is the function reference when the call names a plain
+    /// function, `None` for a method, a static call, a constructor or a dynamic callee.
+    /// `position` is the zero-based position among the written arguments, `None` for a named
+    /// argument and for any argument at or after a spread, whose position the callee binds.
+    /// A by-reference parameter creates the key or property instead of reading it.
+    Argument { callee: Option<NameRef>, position: Option<u32> },
+    /// Evaluated only when something else holds: an arm of a ternary, the right operand of
+    /// `&&`, `||`, `and`, `or`, `??` and `??=`. A `?:` left operand is [`Self::Plain`].
+    Conditional,
+    /// The operand of `isset` or `empty`, the left of `??` and `??=`: the read is silent for
+    /// an offset and a property (but not for a class constant, which throws).
+    IssetLike,
+    /// Under `@`.
+    Suppressed,
+    /// An assignment target, a `&` operand, a destructuring target: written, not read.
+    Write,
+    /// The target of `++`, `--` and a compound assignment (`.=`, `+=`, ...): read, then
+    /// written.
+    CompoundRead,
+    /// `f(...)`, `$o->m(...)`, `C::m(...)`: PHP throws at creation when the callee is missing,
+    /// but evaluates no call.
+    FirstClassCallable,
 }
 
 /// The syntactic form of a [`StringContextSite`]. PHP converts identically in all of
