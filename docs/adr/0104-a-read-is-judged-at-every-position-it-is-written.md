@@ -206,3 +206,70 @@ of peak RSS): PHPUnit 439 MB to 450 MB (+2.5%), Carbon 411 MB to 412 MB
 `crates/steins-syntax/tests/it/read_positions.rs` pins every carrier and
 every boundary. The public corpus A/B for S1 is byte-identical under the strict
 and default postures.
+
+## Amendment (2026-10-11): the S3 consumer for offset, property and class-constant reads — PENDING ratification
+
+Slice S3 (issues #936, #949) is the first consumer of the offset, property and
+class-constant positions. It changes the IR in one place and fixes the
+consumer rules below.
+
+**`Key::Var`.** §2.2 says a key is an integer or string literal. A key is
+now also a bare variable, `Key::Var(name)`, which the consumer resolves against
+the env it judges the read in, as the offset family always did for
+`$x = $a[$k]`. Without it, removing the `Assign`/`Return` arms would have
+silenced that read. Any other key is `Key::Other`, including a literal float,
+bool or null (`$a[true]`, `$a[null]`). Those were judged before, as the whole
+value of `=` or `return`, and are now silent: a known, accepted loss.
+
+**The carrier × family table** (`stmt_checks.rs`'s module doc holds it with
+the PHP behaviour per cell):
+
+| Carrier | offset, property value | `property.inaccessible` | class constant |
+| --- | --- | --- | --- |
+| `Plain` | judge | judge | judge |
+| `Argument`, by-value parameter of a resolved function | judge | judge | judge |
+| `Argument`, by-reference, method, constructor, unresolved, `position: None` | decline | judge | judge |
+| `Conditional` | decline (D3) | judge | judge |
+| `IssetLike` | not recorded | not recorded | judge |
+| `Suppressed` | decline (D2) | judge | judge |
+| `CompoundRead` | offsets: judge `offset.missing` and the strict leg, not `offset.on-unsupported`; properties: decline | decline | not a target |
+
+`property.inaccessible` judges a conditional, an `@` and a by-reference
+argument position because it reads the receiver's exact allocation, which no
+test changes, and PHP routes a by-reference fetch of an inaccessible property
+through the same `__get` lookup as a read. Witnessed on PHP 8.5:
+`byref($c->priv)` throws `Cannot access private property`, and with only
+`__get` declared it calls `__get`. A compound write takes `__set` on its
+write half, which the check does not model, so it declines.
+
+**Two rules across the table.** First, a position inside an extent the guard
+sweep proves dead is not judged; the sweep now runs before the reads. Second,
+a read of a variable (offset base or key, property receiver) declines when
+the same statement may rebind that variable before the read runs. That covers
+a name handed to a by-reference or unresolved call, or written by an embedded
+assignment (an entry of `Stmt::invalidated` that `by_value_survivors` does not
+keep), and every name in the top-level frame when the statement may run
+userland. It also covers a by-reference parameter when the statement may run
+userland, which can write through the caller's alias. The userland question
+is `rebind::may_run_userland`, the frame-free half of
+`top_level_rebind_risk`. A finding the position pass would raise at an
+`(id, line, column)` that the statement's other checks (the `??` final arm, the
+destructure source) already raised is not raised twice.
+
+**Argument callee lookup.** An argument's call is found by its span in
+`SourceTree::calls()`, by binary search on the start offset. This assumes the
+file's calls are collected in source order, as the pre-order collector does.
+If that ever breaks, the lookup misses, and the argument declines as one
+whose parameter is unknowable: silence, never a false positive.
+
+**A base false positive removed.** A guard that proves present a key a sealed
+declared shape cannot carry (`@param array{type: string} $s`, then
+`isset($s['url'])`) left the shape unchanged. The guarded read was then
+reported as `offset.undeclared`, a read PHP makes without a warning. This
+false positive was on the base already; S3 would have raised it at more
+positions (two on the public corpus). The guard now widens the shape to carry
+the key, with no value and no order, count or cover claim (`shapes.rs`).
+
+Measured: on the ten public packages, under strict with vendor diagnostics,
+default, and strict without PHP, the only difference is one strict finding
+that moves to its read's column.

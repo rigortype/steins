@@ -61,7 +61,8 @@ variable of the chain, or `""` for a chain that starts at no variable.
 read and class-constant read the statement's own expressions write, each as a
 `ReadPosition { span, carrier, kind }` (40 bytes) at the read's own span, outermost
 first and in source order. The kind is `Call` (by span alone; no lowered call is
-copied), `Offset(place, key)`, `Prop(var, prop)` or `ClassConst(class, name)`; every
+copied), `Offset(place, key)` (a key is an integer or string literal, a bare
+variable `Key::Var` resolved against the env, or `Other`), `Prop(var, prop)` or `ClassConst(class, name)`; every
 level of an access chain and every call is a position, and `?->` and `Class::class`
 are not. A write target, and an offset or property under `isset`, `empty`, `??`
 or `??=`, are not recorded. The carrier names the construct around the read:
