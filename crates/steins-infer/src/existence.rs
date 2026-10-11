@@ -12,7 +12,7 @@ use steins_syntax::{
 use crate::cx::Cx;
 use crate::dam::DamKind;
 use crate::declared_receiver::declared_receiver_lacks_method;
-use crate::env::{Store, Vouch};
+use crate::env::{GuardVar, Store, Vouch};
 use crate::fold::Folder;
 use crate::project::{FnResolution, Res};
 use crate::walk::WalkCx;
@@ -616,6 +616,63 @@ fn member_guard_shape<'a>(cx: &Cx, call: &'a CallExpr) -> Option<MemberShape<'a>
     } else {
         None
     }
+}
+
+/// Bind `var` to the existence guard `call` is, when the assignment `$var = call` stores
+/// one ([`Store::guard_vars`]): an existence predicate or a member guard whose arguments are
+/// literals or bare variables other than `var` itself. Called after the assignment's own
+/// rebind of `var`, which dropped any earlier guard.
+pub(crate) fn remember_guard_var(cx: &Cx, store: &mut Store, var: &str, call: &CallExpr) {
+    if existence_predicate(cx, call).is_none() && member_guard_shape(cx, call).is_none() {
+        return;
+    }
+    let mut deps = Vec::new();
+    for arg in call.args.iter().map(|a| &a.value) {
+        if !guard_arg_deps(arg, &mut deps) {
+            return;
+        }
+    }
+    if deps.iter().any(|d| d == var) || !call.positional_only {
+        return;
+    }
+    store.guard_vars.insert(var.to_owned(), GuardVar { call: call.clone(), deps });
+}
+
+/// The variables a guard argument names, or `false` for an argument that is not a literal, a
+/// bare variable or an array of them.
+fn guard_arg_deps(arg: &ArgValue, deps: &mut Vec<String>) -> bool {
+    match arg {
+        ArgValue::Var(v) => {
+            deps.push(v.clone());
+            true
+        }
+        ArgValue::Str(_) | ArgValue::Int(_) | ArgValue::Bool(_) | ArgValue::Null => true,
+        ArgValue::Array(items) => items.iter().all(|(_, v)| guard_arg_deps(v, deps)),
+        ArgValue::ClassConst(..) => true,
+        _ => false,
+    }
+}
+
+/// `store` with the vouches every guard stored in a variable would give if it held: the view
+/// a position that may run under any of those variables' tests is judged in (ADR-0104). The
+/// statement's own tests are not modeled in an expression, so which variable it tests is not
+/// asked; vouching more only silences.
+pub(crate) fn with_stored_guard_vouches(
+    cx: &Cx,
+    store: &Store,
+    rebound: &dyn Fn(&str) -> bool,
+) -> Store {
+    let mut out = store.clone();
+    for (var, g) in &store.guard_vars {
+        // A guard the statement itself may rebind is not the one its tests read.
+        if rebound(var) || g.deps.iter().any(|d| rebound(d)) {
+            continue;
+        }
+        for v in existence_vouch(cx, &out, &g.call) {
+            out.vouch(v);
+        }
+    }
+    out
 }
 
 /// Whether `call` is a member-existence guard (`method_exists`, `property_exists`,

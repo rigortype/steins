@@ -15,7 +15,7 @@ use crate::by_value::by_value_survivors;
 use crate::descent::checkable_calls;
 use crate::declared_receiver::check_phpdoc_undefined_method;
 use crate::env::{Known, Store};
-use crate::existence::is_member_guard_call;
+use crate::existence::{is_member_guard_call, with_stored_guard_vouches};
 use crate::fold::Folder;
 use crate::inaccessible::check_inaccessible_method;
 use crate::non_object::{check_call_on_non_object, check_call_on_null};
@@ -109,6 +109,11 @@ pub(super) fn check_nested_calls(
     }
     let own: Vec<Span> = checkable_calls(&stmt.kind).iter().map(|c| c.span).collect();
     let blocked = Blocked::of(w, stmt, env, store);
+    // A position that may run under the test of a variable holding a stored guard
+    // (`$has ? f() : 0`) is judged with those guards' vouches (ADR-0104).
+    let rebound = |n: &str| stmt.invalidated.iter().any(|e| e.name == n);
+    let vouched = (!store.guard_vars.is_empty())
+        .then(|| with_stored_guard_vouches(w.cx, store, &rebound));
     let guarded = positions
         .iter()
         .filter_map(|p| call_at(w, stmt, p))
@@ -124,6 +129,10 @@ pub(super) fn check_nested_calls(
         if in_dead(&w.dead.borrow(), pos.span.start) {
             continue;
         }
+        let store = match (&vouched, reach) {
+            (Some(v), Reach::Existence) => v,
+            _ => store,
+        };
         let site = Site { w, folder, call, env, store, blocked: &blocked, reach, guarded };
         match pos.kind {
             ReadKind::Call => site.judge_call(out),

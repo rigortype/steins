@@ -448,6 +448,25 @@ pub(crate) fn collect_guard_calls<'a>(cond: &'a CondExpr, then: bool, out: &mut 
     }
 }
 
+/// The variables a condition tests truthy on this branch polarity (`$has`, `!$has`), with
+/// the polarity they hold at, for the ones that may hold a stored existence guard
+/// ([`crate::env::Store::guard_vars`]). Distributes as [`collect_guard_calls`] does.
+pub(crate) fn collect_guard_vars<'a>(cond: &'a CondExpr, then: bool, out: &mut Vec<(&'a str, bool)>) {
+    match cond {
+        CondExpr::Truthy(CondOperand::Var(v)) => out.push((v, then)),
+        CondExpr::Not(c) => collect_guard_vars(c, !then, out),
+        CondExpr::And(a, b, _) if then => {
+            collect_guard_vars(a, true, out);
+            collect_guard_vars(b, true, out);
+        }
+        CondExpr::Or(a, b, _) if !then => {
+            collect_guard_vars(a, false, out);
+            collect_guard_vars(b, false, out);
+        }
+        _ => {}
+    }
+}
+
 /// The calls this branch proves returned a truthy value — the witness the
 /// out-parameter seed (ADR-0077 §3.2) consumes, in source order.
 ///

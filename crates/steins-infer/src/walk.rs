@@ -633,7 +633,7 @@ fn walk_run(
         // decided guard proves the arm or operand it skips dead (issue #928). Before the
         // calls are judged, because a call in a dead arm is not (ADR-0104).
         if descent.is_none() {
-            sweep_guard_regions(w, folder, stmt);
+            sweep_guard_regions(w, folder, stmt, store);
         }
         // 1. Check + descend every statically-named call this statement carries.
         let stmt_calls = check_stmt_calls(w, folder, stmt, env, store, descent, out);
@@ -855,6 +855,9 @@ fn walk_run(
                     stmt_calls.return_arms.as_deref(),
                     out,
                 );
+                if let Some(call) = call {
+                    crate::existence::remember_guard_var(w.cx, store, var, call);
+                }
                 Flow::FellThrough
             }
             StmtKind::PropAssign { target_var, prop, value, span, .. } => {

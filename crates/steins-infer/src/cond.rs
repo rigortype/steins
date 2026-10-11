@@ -188,12 +188,23 @@ pub(crate) fn eval_cond(
                 _ => Certainty::Maybe,
             }
         }
-        CondExpr::Truthy(op) => match operand_values(op, env, poisoned)
-            .or_else(|| remembered::candidates(w, op, store))
-        {
-            Some(vs) => all_agree(vs.iter().map(php_truthy)),
-            None => Certainty::Maybe,
-        },
+        CondExpr::Truthy(op) => {
+            // A variable that holds an existence guard (`$has = function_exists('f')`)
+            // is that guard (ADR-0104).
+            if let CondOperand::Var(v) = op
+                && let Some(g) = store.guard_vars.get(v)
+            {
+                let verdict = eval_existence_call(w, folder, store, &g.call);
+                if verdict != Certainty::Maybe {
+                    return verdict;
+                }
+            }
+            match operand_values(op, env, poisoned).or_else(|| remembered::candidates(w, op, store))
+            {
+                Some(vs) => all_agree(vs.iter().map(php_truthy)),
+                None => Certainty::Maybe,
+            }
+        }
         CondExpr::Instanceof { operand, class_ref } => {
             eval_instanceof(w, operand, class_ref, env, store, poisoned)
         }

@@ -7,7 +7,8 @@ use std::collections::{HashMap, HashSet};
 use steins_contract::{ContractTy, normalize};
 use steins_domain::Certainty;
 use steins_syntax::{
-    ArgValue, ArrayKey, NameRef, NormKey, Scope, StaticClass, normalize_array, normalize_array_refs,
+    ArgValue, ArrayKey, CallExpr, NameRef, NormKey, Scope, StaticClass, normalize_array,
+    normalize_array_refs,
 };
 
 use crate::fold::Folder;
@@ -701,6 +702,21 @@ pub(crate) struct Store {
     /// nearly every frame, so a scan stands in for the place-to-keys reverse index
     /// ADR-0102 §2.4 names.
     pub(crate) remembered: HashMap<String, Remembered>,
+    /// **Guards stored in a variable** (ADR-0104 amendment): `$has = function_exists('f')`
+    /// binds the existence call to the name, so `if ($has)`, `$has ? … : …` and `$has && …`
+    /// test that guard. Dropped by the funnel every rebind of the name passes
+    /// ([`Self::release`]) and by a rebind of any variable the guard's arguments name,
+    /// emptied by a Barrier, and intersected at a join like `vouched`.
+    pub(crate) guard_vars: HashMap<String, GuardVar>,
+}
+
+/// An existence guard a variable holds the result of (see [`Store::guard_vars`]).
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct GuardVar {
+    /// The guard call as written (`function_exists('f')`, `method_exists($o, 'm')`).
+    pub(crate) call: CallExpr,
+    /// The variables its arguments name; a rebind of one of them voids the guard.
+    pub(crate) deps: Vec<String>,
 }
 
 /// A symbol a positive existence guard vouches for (ADR-0049 §4 guard-respect leg).
@@ -895,6 +911,11 @@ impl Store {
         self.narrowed.remove(var);
         // A property vouch is about the binding too (issue #930).
         self.vouched.retain(|v| !matches!(v, Vouch::VarProperty { var: x, .. } if x == var));
+        // A guard stored in this name, or one whose arguments name it, is about the old value.
+        if !self.guard_vars.is_empty() {
+            self.guard_vars.remove(var);
+            self.guard_vars.retain(|_, g| !g.deps.iter().any(|d| d == var));
+        }
     }
 
     /// Drop every element place under `var` (ADR-0098 §2.3). Called wherever
@@ -949,6 +970,7 @@ impl Store {
         self.may_hold_places = false;
         // Nothing is reachable after a Barrier, a remembered call result included.
         self.remembered.clear();
+        self.guard_vars.clear();
     }
 
     /// Forget every remembered call result whose key names the place `var` — a
@@ -1798,6 +1820,8 @@ pub(crate) fn join_stores(first: &Store, rest: &[&Store]) -> Store {
     // disagreed on, so a branch that bound one is enough to keep sweeping.
     let may_hold_places = first.may_hold_places || rest.iter().any(|s| s.may_hold_places);
 
+    let guard_vars = join_guard_vars(first, rest);
+
     Store {
         refs,
         heap,
@@ -1809,7 +1833,18 @@ pub(crate) fn join_stores(first: &Store, rest: &[&Store]) -> Store {
         guarded_calls,
         remembered,
         may_hold_places,
+        guard_vars,
     }
+}
+
+/// A guard stored in a variable survives a join only where every branch holds the same.
+fn join_guard_vars(first: &Store, rest: &[&Store]) -> HashMap<String, GuardVar> {
+    first
+        .guard_vars
+        .iter()
+        .filter(|(k, g)| rest.iter().all(|s| s.guard_vars.get(*k) == Some(*g)))
+        .map(|(k, g)| (k.clone(), g.clone()))
+        .collect()
 }
 
 /// Remove contract arms another surviving arm subsumes (`Certainty::Yes`) — the

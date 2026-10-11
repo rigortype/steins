@@ -113,14 +113,38 @@ fn a_test_that_could_not_decide_without_an_environment_is_not_carried() {
     // Variables are not in the sweep's (empty) environment, so these could only ever be
     // `Maybe` there; carrying them would only grow the trace.
     for body in [
-        "return $x ? 1 : 2;",
-        "$x && take(1);",
         "return $x === 1 ? 1 : 2;",
         "return isset($x) ? 1 : 2;",
     ] {
         let (stmts, _) = lowered("mixed $x", body);
         let [stmt] = &stmts[..] else { panic!("{stmts:?}") };
         assert!(stmt.guards.is_empty(), "`{body}`: {:?}", stmt.guards);
+    }
+}
+
+#[test]
+fn a_bare_variable_test_is_carried_for_the_guard_it_may_hold() {
+    // `$has = function_exists('f')` stores a guard in `$has`; the sweep reads it from the
+    // store (ADR-0104), so a bare truthy test of a variable is a region.
+    for body in ["return $x ? 1 : 2;", "$x && take(1);", "return !$x || take(1);"] {
+        let (stmts, _) = lowered("mixed $x", body);
+        let [stmt] = &stmts[..] else { panic!("{stmts:?}") };
+        assert_eq!(stmt.guards.len(), 1, "`{body}`: {:?}", stmt.guards);
+    }
+}
+
+#[test]
+fn a_non_null_literal_left_of_coalesce_is_a_region_that_kills_the_right() {
+    let (stmts, _) = lowered("", "return 1 ?? take(1);");
+    let [stmt] = &stmts[..] else { panic!("{stmts:?}") };
+    assert_eq!(stmt.guards.len(), 1, "{:?}", stmt.guards);
+    assert!(stmt.guards[0].dead_if_true.is_some() && stmt.guards[0].dead_if_false.is_none());
+    for body in ["return null ?? take(1);", "return $x ?? take(1);"] {
+        let (stmts, _) = lowered("mixed $x", body);
+        let [stmt] = &stmts[..] else { panic!("{stmts:?}") };
+        // `null ?? b` is a region too (the test is a literal), but one that kills nothing
+        // when evaluated: its verdict is `No`, and the dead extent is for `Yes`.
+        assert!(stmt.guards.iter().all(|g| g.dead_if_false.is_none()), "{body}");
     }
 }
 
