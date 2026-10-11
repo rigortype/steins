@@ -272,3 +272,14 @@ id = "variable.undefined"
 path_suffix = "event/_files/PhpWarningTest.php"
 line = 18
 message_contains = "$b is never bound"
+
+# ADR-0043's 2026-10-11 amendment (issues #952 l1, #1051), triaged 2026-10-11: a
+# TRUE positive. PHPUnit's end-to-end TypeError fixture writes `new DateTime` to a
+# `DateTimeImmutable` property on purpose, to observe the engine's TypeError
+# (`Cannot assign DateTime to property … of type DateTimeImmutable`, PHP 8.5.11).
+[[finding]]
+package = "sebastianbergmann/phpunit"
+id = "type.property-mismatch"
+path_suffix = "logging/_files/TypeErrorTest.php"
+line = 22
+message_contains = "Cannot assign new DateTime() to property TypeErrorTest::$dateTime"
