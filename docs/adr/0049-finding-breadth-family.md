@@ -1471,6 +1471,6 @@ name is case-sensitive.
   non-class-const argument, a constant provided twice, and any obstacle of the
   `class-const.undefined` reach (unresolvable edge, trait node, incomplete
   file, conditional declaration with the dam standing, boot-surface homonym).
-  A closure scope is unprovable for a non-public constant.
+  A scope that is not exactly known (a closure or arrow fn, which can be bound to any class, or a trait method, which runs in its user) is `Maybe` for a non-public constant; only an ancestor's `private`, which is never inherited, answers `No` from any scope.
 - `defined('X')` on a global constant is unchanged (`No` or `Maybe`). A
   `defined('C::K') || die;` statement is still not a guard region.
