@@ -117,8 +117,10 @@ fn union_message_renders_all_members() {
 fn unmodeled_union_member_silences_whole_type() {
     // A member that doesn't lower to a `TypeMember` (`array`/`mixed`/`callable`/
     // `iterable`) lowers the WHOLE type to `None` → silence (zero-FP), even for an
-    // obvious mismatch.
-    for ty in ["int|array", "int|mixed", "int|callable", "iterable"] {
+    // obvious mismatch. A *bare* top (`iterable`, `?array`) is judged on its own
+    // since ADR-0043's 2026-10-11 amendment (`value_relation_openings.rs`); a union
+    // of one with anything but `null` still declines.
+    for ty in ["int|array", "int|mixed", "int|callable", "iterable|int", "array|string"] {
         let src = format!("<?php\ndeclare(strict_types=1);\nfunction f({ty} $v): void {{}}\nf(1.5);\n");
         assert_eq!(n(&src), 0, "type `{ty}` must lower to silence");
     }
