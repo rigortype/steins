@@ -15,6 +15,7 @@ use steins_syntax::{
 };
 
 use crate::cx::Cx;
+use crate::project::Res;
 use crate::env::{Known, Store, val_of};
 use crate::fold::Folder;
 use crate::contract_touches_class;
@@ -1308,6 +1309,22 @@ impl<'a> Cx<'a> {
         ty.members.iter().all(|m| self.member_rejects_object(m, class_fqn))
     }
 
+    /// Whether `fqn` is the alias name of a literal `class_alias` in the universe that
+    /// minted no class — its target is not a project class (an engine class, or a
+    /// name nothing declares). Asked only of a name the index does not resolve, so a
+    /// project's ordinary classes never pay for the scan.
+    pub(crate) fn is_unminted_alias(&self, fqn: &str) -> bool {
+        let fqn = fqn.trim_start_matches('\\');
+        matches!(self.index.resolve_class(fqn), Res::Absent)
+            // A catalog name cannot be minted, so it keeps its identity (ADR-0043).
+            && steins_catalog::builtin_class_supers(&fqn.to_ascii_lowercase()).is_none()
+            && self.units.iter().any(|u| {
+                u.tree.class_alias_edges().iter().any(|e| {
+                    e.alias_fqn.trim_start_matches('\\').eq_ignore_ascii_case(fqn)
+                })
+            })
+    }
+
     /// Whether the native type `ty` **definitively rejects** a resource
     /// (ADR-0056 §8) — every union member does, and `ty.nullable` is irrelevant
     /// because no resource is null.
@@ -1354,16 +1371,22 @@ impl<'a> Cx<'a> {
     ///   (Unknown), the FP-safe choice.
     /// - `Instance { fqn, .. }`: rejects iff the trinary is-a oracle proves non-membership
     ///   (`IsA::No`); `Yes` accepts and `Unknown` (incomplete hierarchy) is silent.
+    ///
+    /// A declared class that is the alias name of a literal `class_alias` the index
+    /// does not mint — one whose target is an engine class (`class_alias('Closure',
+    /// 'MyClosure')`) — rejects nothing (the #1060 review): an object passed to a
+    /// `MyClosure` parameter may well be the class it names. A name nothing aliases
+    /// keeps its proof, as ADR-0043's class-identity amendment rules.
     fn member_rejects_object(&self, m: &TypeMember, class_fqn: &str) -> bool {
+        let rejects =
+            |fqn: &str| !self.is_unminted_alias(fqn) && self.is_a(class_fqn, fqn) == IsA::No;
         match m {
-            TypeMember::Instance { fqn, .. } => self.is_a(class_fqn, fqn) == IsA::No,
+            TypeMember::Instance { fqn, .. } => rejects(fqn),
             // An intersection (`A&B&…`) demands membership in **every** conjunct,
             // so it definitively rejects the moment the is-a oracle proves
             // non-membership in **any** one — an incomplete hierarchy on the rest
             // stays silent.
-            TypeMember::InstanceInter(cs) => {
-                cs.iter().any(|c| self.is_a(class_fqn, &c.fqn) == IsA::No)
-            }
+            TypeMember::InstanceInter(cs) => cs.iter().any(|c| rejects(&c.fqn)),
             TypeMember::Scalar(ScalarType::String) => self.strict(),
             TypeMember::Scalar(_) | TypeMember::BoolLiteral(_) => true,
         }
