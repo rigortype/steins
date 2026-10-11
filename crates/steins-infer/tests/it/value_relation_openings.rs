@@ -833,3 +833,103 @@ fn an_alias_of_an_engine_class_declines_and_an_unknown_name_keeps_its_proof() {
     );
     fires(&strict("class Real {}\nfunction f(Minted $m): void {}\nf(new Real());\n"), ARG);
 }
+
+// ---------------------------------------------------------------------------
+// The #1060 re-review's rows: the forgetting is branch-scoped, the
+// `is_callable` vouch binds its arguments as PHP does, and a trait without
+// `__set` does not hide a typed property.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_type_test_changes_no_value_so_the_join_keeps_it() {
+    // Strict: every call after (or beside) the guard runs with `'abc'` on PHP.
+    let decl = "class Foo {}\nfunction i(int $i): void {}\n";
+    for body in [
+        "if (is_countable($x)) { echo 1; } i($x);",
+        "if (is_a($x, 'Foo', true)) { echo 1; } else { i($x); }",
+        "$y = match (true) { is_countable($x) => 1, default => 2 }; i($x);",
+        "if (get_debug_type($x) === 'array') { echo 1; } i($x);",
+        "if (is_callable($x)) { echo 1; } i($x);",
+        "if (ctype_digit($x)) { echo 1; } i($x);",
+        "if (is_string($x) && is_countable($x)) {} i($x);",
+        "if (is_a($x, 'Foo')) {} i($x);",
+        "if (!is_subclass_of($x, 'Foo', false)) { i($x); }",
+    ] {
+        fires(&strict(&format!("{decl}function g(): void {{ $x = 'abc'; {body} }}\n")), ARG);
+    }
+    fires(
+        &strict(&format!("{decl}function g(): void {{ $x = '5'; if (method_exists($x, 'f')) {{}} i($x); }}\n")),
+        ARG,
+    );
+}
+
+#[test]
+fn a_type_test_left_undecided_still_forgets_inside_its_branches() {
+    // `ctype_digit` is undecided on a string: either side may be the dead one.
+    let decl = "function i(int $i): void {}\n";
+    silent(&strict(&format!(
+        "{decl}function g(): void {{ $x = 'abc'; if (ctype_digit($x)) {{ i($x); }} else {{ i($x); }} }}\n"
+    )));
+    // A rebinding side does not get the old value back.
+    silent(&strict(&format!(
+        "{decl}function g(): void {{ $x = 'abc'; if (ctype_digit($x)) {{ $x = 1; }} else {{ $x = 2; }} i($x); }}\n"
+    )));
+}
+
+#[test]
+fn a_disjunction_of_decided_predicates_prunes_its_branch() {
+    silent_both_modes(
+        "function a(array $a): void {}\nfunction g(): void { $x = null; if (is_countable($x) || is_iterable($x)) { a($x); } }\n",
+    );
+}
+
+#[test]
+fn is_callable_vouches_only_a_real_callability_check() {
+    let decl = format!("{FOO}class K {{}}\n");
+    for guard in [
+        "is_callable('zz', false)",
+        "is_callable(value: 'zz')",
+        "is_callable('zz', syntax_only: false)",
+        "\\is_callable('zz')",
+        "is_callable('\\zz')",
+    ] {
+        silent_both_modes(&format!("{decl}if ({guard}) {{ foo('zz'); }}\n"));
+    }
+    silent_both_modes(&format!("{decl}function g(): void {{ if (is_callable('zz', false, $n)) {{ foo('zz'); }} }}\n"));
+    silent_both_modes(&format!("{decl}if (is_callable(['K', 'zz'], false)) {{ foo(['K', 'zz']); }}\n"));
+    // `syntax_only` true asks about the spelling only, so the call still throws.
+    for (guard, arg) in [
+        ("is_callable('zz', true)", "'zz'"),
+        ("is_callable('K::zz', true)", "'K::zz'"),
+        ("is_callable(['K', 'zz'], true)", "['K', 'zz']"),
+        ("is_callable('zz', syntax_only: true)", "'zz'"),
+    ] {
+        fires_both_modes(&format!("{decl}if ({guard}) {{ foo({arg}); }}\n"), ARG);
+    }
+    // Outside the guarded side the vouch does not reach.
+    fires_both_modes(&format!("{decl}if (is_callable('zz')) {{ }} foo('zz');\n"), ARG);
+    fires_both_modes(&format!("{decl}if (is_callable('zz')) {{ echo 1; }} else {{ foo('zz'); }}\n"), ARG);
+}
+
+#[test]
+fn a_trait_without_set_keeps_the_typed_property_write_judged() {
+    fires_both_modes(
+        "trait T { public function hi(): void {} }\nclass C { use T; public int $n = 0; }\nfunction g(): void { $c = new C(); $c->n = 'x'; }\n",
+        PROP,
+    );
+    // A trait that declares or aliases `__set`, through another trait too, declines.
+    for t in [
+        "trait T { public function __set($n, $v) {} }",
+        "trait U { public function __set($n, $v) {} }\ntrait T { use U; }",
+        "trait T { public function put($n, $v) {} }",
+    ] {
+        let using = if t.contains("put") { "use T { put as __set; }" } else { "use T;" };
+        silent_both_modes(&format!(
+            "{t}\nclass C {{ {using} public int $n = 0; }}\nfunction g(): void {{ $c = new C(); $c->n = 'x'; }}\n"
+        ));
+    }
+    // A trait the index cannot resolve may hold one.
+    silent_both_modes(
+        "class C { use Missing; public int $n = 0; }\nfunction g(): void { $c = new C(); $c->n = 'x'; }\n",
+    );
+}
