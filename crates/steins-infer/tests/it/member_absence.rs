@@ -685,3 +685,55 @@ fn the_maybe_sibling_never_doubles_up_on_a_definite_finding() {
         );
     }
 }
+
+// property.undefined — property-creating positions beyond assignment (issue #1050, S0b).
+// Each is witnessed on PHP 8.5: the position creates the property (a deprecation at most),
+// so the following read is silent. The rule table is the doc comment of
+// `PropertyWrites::push_lvalue`.
+
+#[test]
+fn property_creating_positions_silence_a_later_read() {
+    let prelude = "<?php
+class C { public int $a = 1; }
+function byref(&$v) { $v = 1; }
+$c = new C();
+$d = [1, 2];
+$it = [[1, 2]];
+";
+    for (what, stmt) in [
+        ("by-ref argument", "byref($c->nope);"),
+        ("settype", "settype($c->nope, 'int');"),
+        ("preg_match out-param", "preg_match('/a/', 'a', $c->nope);"),
+        ("reference binding", "$r = &$c->nope;"),
+        ("destructure", "[$c->nope] = $d;"),
+        ("keyed destructure", "['k' => $c->nope] = ['k' => 1];"),
+        ("nested destructure", "[[$c->nope]] = $it;"),
+        ("list()", "list($c->nope) = $d;"),
+        ("foreach value", "foreach ($d as $c->nope) {}"),
+        ("foreach key", "foreach ($d as $c->nope => $v) {}"),
+        ("foreach destructure", "foreach ($it as [$c->nope]) {}"),
+        ("by-ref array element", "$xs = [&$c->nope];"),
+        ("offset base of a by-ref argument", "byref($c->nope['x']);"),
+        ("offset append", "$c->nope[] = 1;"),
+    ] {
+        let src = format!("{prelude}{stmt}\n$x = $c->nope;\n");
+        assert!(props(&src).is_empty(), "{what}: {:#?}", props(&src));
+    }
+}
+
+#[test]
+fn a_plain_read_of_a_never_written_property_still_fires_beside_the_writes() {
+    // The control: the same file with the creating positions pointed at other names.
+    let src = "<?php
+class C { public int $a = 1; }
+function byref(&$v) { $v = 1; }
+$c = new C();
+$x = $c->nope;
+$e = new C();
+byref($e->other);
+[$e->another] = [1];
+";
+    let d = exact_props(src);
+    assert_eq!(d.len(), 1, "{d:#?}");
+    assert!(d[0].message.contains("$c->nope"), "{}", d[0].message);
+}

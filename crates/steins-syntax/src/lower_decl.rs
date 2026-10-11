@@ -225,7 +225,9 @@ pub(crate) fn walk(
         Node::UnaryPrefix(u) => {
             if matches!(
                 u.operator,
-                UnaryPrefixOperator::PreIncrement(_) | UnaryPrefixOperator::PreDecrement(_)
+                UnaryPrefixOperator::PreIncrement(_)
+                    | UnaryPrefixOperator::PreDecrement(_)
+                    | UnaryPrefixOperator::Reference(_)
             ) {
                 out.property_writes.push_lvalue(u.operand);
             }
@@ -237,6 +239,10 @@ pub(crate) fn walk(
             out.property_writes.push_lvalue(t.key);
             out.property_writes.push_lvalue(t.value);
         }
+        // Issue #1050 (S0b): an argument can be a by-reference parameter, which creates the
+        // property it names; the callee's by-ref-ness is unknown here, so every argument is.
+        Node::PositionalArgument(a) => out.property_writes.push_lvalue(a.value),
+        Node::NamedArgument(a) => out.property_writes.push_lvalue(a.value),
         // end member absence (ADR-0078, issue #197)
         // A bare constant fetch (ADR-0078, issue #198): the one read position, fatal
         // `Error: Undefined constant "X"` since PHP 8.0 (`php -r`-witnessed on 8.5.9).
