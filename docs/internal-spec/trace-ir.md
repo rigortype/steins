@@ -41,6 +41,14 @@ for a non-opaque entry whose every site resolves to a by-value parameter
 certifies) and whose binding is value-semantic rather than an object handle;
 an opaque entry keeps the blanket drop.
 
+`unspelled` (issue #1048) names every variable the statement mentions when a
+value its kind carries — an `Assign`, `PropAssign` or `Return` value, a call's
+argument or receiver — lowered to `Other`. A `match`, an `(object)` cast or an
+array with a computed key can store an object handle as surely as an array
+literal can, and the walk escapes each object these names hold. `None` when
+every value was spelled. An expression statement that contains a `yield` lowers
+to `Barrier`: the generator's consumer runs before the expression resumes.
+
 ## Statement kinds
 
 | Kind | Models |
