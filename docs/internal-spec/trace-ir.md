@@ -68,7 +68,12 @@ or `??=`, are not recorded. The carrier names the construct around the read:
 `Plain`, `Argument { call, position }` (`call` indexes the call's own position
 in the list; `position` is `None` for a named argument or one at or after a
 spread), `Conditional`, `IssetLike` (class constants only), `Suppressed`,
-`CompoundRead` and `FirstClassCallable`; under several constructs the weakest
+and `CompoundRead` (a first-class callable is the kind `CallRef`, its carrier folded
+like a call's); everything past a `?->` is `Conditional`, and the base of an append
+is a write. A by-reference argument also silences the base levels of its chain
+(`f($a['x']['y'])` gives both levels `Argument`), and `position: None` means the
+by-reference parameter is unknowable, so a value-dependent family declines. The
+rule table is in `lower_read.rs`. Under several constructs the weakest
 claim wins, in the order on `Carrier`.
 It is read for an expression statement, `return`, `echo` and `<?= ?>` and a
 `static` initializer, and for an arrow function's body, a hook's and a hoisted

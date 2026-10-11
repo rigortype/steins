@@ -23,7 +23,6 @@ fn render_carrier(src: &str, all: &[ReadPosition], c: &Carrier) -> String {
         Carrier::IssetLike => "isset".to_owned(),
         Carrier::Suppressed => "suppressed".to_owned(),
         Carrier::CompoundRead => "compound".to_owned(),
-        Carrier::FirstClassCallable => "fcc".to_owned(),
     }
 }
 
@@ -33,7 +32,13 @@ fn render(src: &str, positions: &[ReadPosition]) -> Vec<String> {
         .iter()
         .map(|p| {
             let text = &src[p.span.start as usize..p.span.end as usize];
-            format!("{text} [{}]", render_carrier(src, positions, &p.carrier))
+            let carrier = render_carrier(src, positions, &p.carrier);
+            // A first-class callable is its own kind; its carrier folds like a call's.
+            match (&p.kind, p.carrier) {
+                (ReadKind::CallRef, Carrier::Plain) => format!("{text} [fcc]"),
+                (ReadKind::CallRef, _) => format!("{text} [fcc,{carrier}]"),
+                _ => format!("{text} [{carrier}]"),
+            }
         })
         .collect()
 }
@@ -227,7 +232,9 @@ fn a_first_class_callable_is_its_own_carrier() {
     assert_eq!(reads("$r = $o->m(...);"), ["$o->m(...) [fcc]"]);
     assert_eq!(reads("$r = C::m(...);"), ["C::m(...) [fcc]"]);
     // Whatever surrounds it: it evaluates no call.
-    assert_eq!(reads("$r = $x ? strlen(...) : 0;"), ["strlen(...) [fcc]"]);
+    assert_eq!(reads("$r = $x ? strlen(...) : 0;"), ["strlen(...) [fcc,cond]"]);
+    assert_eq!(reads("$r = $x && missing(...);"), ["missing(...) [fcc,cond]"]);
+    assert_eq!(reads("$r = @missing(...);"), ["missing(...) [fcc,suppressed]"]);
 }
 
 #[test]
@@ -324,6 +331,59 @@ fn a_position_records_the_read_and_not_the_statement() {
     let pos = &stmt.read_positions()[0];
     assert!(matches!(pos.kind, ReadKind::Offset(_)), "{pos:?}");
     assert!(pos.span.start > stmt.span.start && pos.span.end < stmt.span.end, "{pos:?} in {:?}", stmt.span);
+}
+
+#[test]
+fn the_base_of_an_append_is_written_not_read() {
+    let none = Vec::<String>::new();
+    assert_eq!(reads("$a['k'][] = 1;"), none);
+    assert_eq!(reads("$a['x']['y'][] = 1;"), none);
+    assert_eq!(reads("$o->p[] = 3;"), none);
+    assert_eq!(reads("[$a['x'][]] = [1];"), none);
+    // The key operands inside the base are ordinary reads.
+    assert_eq!(reads("$a[$x['i']][] = 1;"), ["$x['i'] [plain]"]);
+}
+
+#[test]
+fn nothing_after_a_nullsafe_is_unconditional() {
+    // Arguments of a `?->` call.
+    assert_eq!(
+        reads("$o?->m(missing(), A::NOPE, $a['k']);"),
+        [
+            "$o?->m(missing(), A::NOPE, $a['k']) [cond]",
+            "missing() [cond]",
+            "A::NOPE [cond]",
+            "$a['k'] [cond]",
+        ]
+    );
+    // The key of an access past a `?->`, and the access itself.
+    assert_eq!(
+        reads("echo $o?->p[$a['nm']];"),
+        ["$o?->p[$a['nm']] [cond]", "$a['nm'] [cond]"]
+    );
+    // Every later link of the chain, and its arguments.
+    assert_eq!(
+        reads("$o?->m()->q($a['chain']);"),
+        ["$o?->m()->q($a['chain']) [cond]", "$o?->m() [cond]", "$a['chain'] [cond]"]
+    );
+    // The receiver itself is evaluated.
+    assert_eq!(reads("$a['r']?->m();"), ["$a['r']?->m() [cond]", "$a['r'] [plain]"]);
+    // Under `??` the access is silent and not recorded.
+    assert_eq!(reads("$r = $o?->p['nsidx'] ?? 0;"), Vec::<String>::new());
+}
+
+#[test]
+fn unset_is_not_a_scanned_statement() {
+    assert_eq!(reads("unset($a['k'][$x['i']]);"), Vec::<String>::new());
+}
+
+#[test]
+fn a_match_subject_and_arm_conditions_are_not_read_here() {
+    // S4's scope: the arm conditions join the subject there.
+    assert_eq!(
+        reads("echo match ($a['subj']) { $a['arm'] => 1, default => 2 };"),
+        Vec::<String>::new()
+    );
 }
 
 #[test]

@@ -3818,11 +3818,16 @@ pub struct ReadPosition {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub enum ReadKind {
-    /// A call, a method call, a static call, a `new`, or a first-class callable, identified
-    /// by [`ReadPosition::span`] alone: the position carries no copy of the lowered call, and
-    /// a consumer resolves the span to a call it lowers itself. Every call is recorded, so a
-    /// [`Carrier::Argument`] can name its call by index.
+    /// A call, a method call, a static call or a `new`, identified by [`ReadPosition::span`]
+    /// alone: the position carries no copy of the lowered call, and a consumer resolves the
+    /// span to a call it lowers itself. Every call is recorded, so a [`Carrier::Argument`]
+    /// can name its call by index.
     Call,
+    /// A first-class callable, `f(...)`, `$o->m(...)`, `C::m(...)`: PHP throws at creation
+    /// when the callee is missing, but evaluates no call, so arity, types and effects do not
+    /// apply. Its carrier is folded like any read's (`$f && missing(...)` is
+    /// [`Carrier::Conditional`]).
+    CallRef,
     /// `$base[$key]`, every level of a chain a position of its own.
     Offset(Box<(Place, Key)>),
     /// `$var->prop` with a bare-variable receiver and a statically named property; a deeper
@@ -3896,9 +3901,6 @@ pub enum Carrier {
     /// The target of `++`, `--` and a compound assignment (`.=`, `+=`, ...): read, then
     /// written.
     CompoundRead,
-    /// `f(...)`, `$o->m(...)`, `C::m(...)`: PHP throws at creation when the callee is missing,
-    /// but evaluates no call.
-    FirstClassCallable,
 }
 
 /// The syntactic form of a [`StringContextSite`]. PHP converts identically in all of

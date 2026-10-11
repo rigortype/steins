@@ -25,12 +25,48 @@
 //! lowered kind would have to re-derive the same table at every site. Constructs combine
 //! by the order on [`Carrier`].
 //!
+//! # The rules
+//!
+//! One row per construct that writes, silences or short-circuits a read. "Inherited" is the
+//! claim of the construct around it; a row says what the construct makes of each operand.
+//! `tests/it/read_positions.rs` has a test per row.
+//!
+//! | Construct | Operand | Recorded as | PHP |
+//! | --- | --- | --- | --- |
+//! | `T = e` | `T` and its base levels | not recorded (write) | fetched for write, silent |
+//! | | keys inside `T`, `e` | inherited, Plain keys | ordinary reads |
+//! | `T op= e`, `++T`, `T--` | `T` | `CompoundRead` | read, then written: warns |
+//! | | base levels of `T` | not recorded (write) | fetched for write |
+//! | `T[] = e` | `T` and its base levels | not recorded (write) | `T` is created, silent |
+//! | `[T1, k => T2] = e` | each target | not recorded (write) | silent |
+//! | | each key `k` | Plain | ordinary read |
+//! | `f(T)`, by-ref parameter | `T` and its base levels | `Argument` | the key or property is created: silent |
+//! | | `position: None` | `Argument`, position unknown | the parameter is unknowable: a value-dependent family declines |
+//! | `&T` | `T` and its base levels | not recorded (write) | reference taken: created, silent |
+//! | `unset(T)` | the whole statement | not a scanned statement kind | silent for an absent key |
+//! | `isset(T)`, `empty(T)` | offset and property levels | not recorded | silent |
+//! | | class constant | `IssetLike` | throws |
+//! | | keys inside `T` | Plain | ordinary reads |
+//! | `T ?? e`, `T ??= e` | `T` | as `isset`, silent | silent |
+//! | | `e` | `Conditional` | evaluated only when `T` is unset or null |
+//! | `a ?-> b ...` | the receiver `a` | inherited | evaluated |
+//! | | the rest of the chain: the member, its arguments, its keys, every later link | `Conditional` | none of it is evaluated when `a` is null |
+//! | `a && b`, `a \|\| b`, `a and b`, `a or b` | `a` | inherited | evaluated |
+//! | | `b` | `Conditional` | may not run |
+//! | `c ? a : b` | `c` | inherited | evaluated |
+//! | | `a`, `b` | `Conditional` | one of them runs |
+//! | `c ?: b` | `c` | inherited | evaluated |
+//! | | `b` | `Conditional` | runs only when `c` is falsy |
+//! | `@e` | everything in `e` | `Suppressed` unless a weaker claim holds | warns and runs the handler |
+//! | `match (s) { ... }` | the whole `match` | not descended | arms are statements of their own; conditions belong to the headers |
+//! | `f(...)`, `$o->m(...)`, `C::m(...)` | the callable | kind `CallRef`, folded like a call | throws at creation if missing; no call runs |
+//!
 //! [`string_context_sites`]: crate::lower_stmt
 //! [`scan_string_contexts`]: crate::lower_stmt::scan_string_contexts
 
 use mago_span::HasSpan;
 use mago_syntax::cst::{
-    Access, ArgumentList, ArrayElement, AssignmentOperator, BinaryOperator, Expression, Node,
+    Access, ArgumentList, ArrayElement, Call, AssignmentOperator, BinaryOperator, Expression, Node,
     PartialArgument, PartialArgumentList, Statement, StaticItem, UnaryPrefixOperator, Variable,
 };
 
@@ -217,6 +253,8 @@ impl Scan {
                 i.values.iter().for_each(|v| self.expr(v, ctx, &Local::IssetLike));
             }
             Node::EmptyConstruct(e) => self.expr(e.value, ctx, &Local::IssetLike),
+            // `T[] = e` creates `T`: its levels are fetched for write, never read.
+            Node::ArrayAppend(aa) => self.base(aa.array, ctx, &Local::Write),
             _ => self.descend(node, ctx, &Local::Plain),
         }
     }
@@ -242,27 +280,32 @@ impl Scan {
     fn access(&mut self, node: &Node<'_, '_>, ctx: Ctx, local: &Local) {
         match node {
             Node::ArrayAccess(aa) => {
+                // Past a `?->` below, the access and its key run only for a non-null receiver.
+                let inner = past_nullsafe(aa.array, ctx);
                 // Not recorded when no consumer judges it, so the place is not built either.
-                if let Some(carrier) = resolve(*local, ctx, false) {
+                if let Some(carrier) = resolve(*local, inner, false) {
                     let kind = ReadKind::Offset(Box::new((place_of(aa.array), key_of(aa.index))));
                     self.push(kind, to_span(aa.span()), Some(carrier));
                 }
                 self.base(aa.array, ctx, local);
-                self.expr(aa.index, ctx, &Local::Plain);
+                self.expr(aa.index, inner, &Local::Plain);
             }
             Node::PropertyAccess(pa) => {
-                if let Some(carrier) = resolve(*local, ctx, false)
+                let inner = past_nullsafe(pa.object, ctx);
+                if let Some(carrier) = resolve(*local, inner, false)
                     && let Some(names) = prop_fetch_of(pa.object, &pa.property)
                 {
                     let span = to_span(pa.span());
                     self.push(ReadKind::Prop(Box::new(names)), span, Some(carrier));
                 }
                 self.base(pa.object, ctx, local);
-                self.descend(&Node::ClassLikeMemberSelector(&pa.property), ctx, &Local::Plain);
+                self.descend(&Node::ClassLikeMemberSelector(&pa.property), inner, &Local::Plain);
             }
+            // The member of a `?->` is itself evaluated only for a non-null receiver.
             Node::NullSafePropertyAccess(pa) => {
                 self.base(pa.object, ctx, local);
-                self.descend(&Node::ClassLikeMemberSelector(&pa.property), ctx, &Local::Plain);
+                let inner = ctx.conditional();
+                self.descend(&Node::ClassLikeMemberSelector(&pa.property), inner, &Local::Plain);
             }
             Node::ClassConstantAccess(cc) => {
                 if let (Some(class), Some(name)) =
@@ -298,20 +341,27 @@ impl Scan {
             }
             _ => return,
         };
+        // A `?->` call, and any call further along a chain that has one, runs, with its
+        // arguments, only for a non-null receiver.
+        let inner = match node {
+            Node::NullSafeMethodCall(_) => ctx.conditional(),
+            Node::MethodCall(mc) => past_nullsafe(mc.object, ctx),
+            _ => ctx,
+        };
         // Recorded by span alone and before its operands, so an argument can name it by index.
         let index = u32::try_from(self.out.len()).ok();
-        self.push(ReadKind::Call, to_span(span), resolve(*local, ctx, false));
+        self.push(ReadKind::Call, to_span(span), resolve(*local, inner, false));
         match operand {
             // A plain function or class name is no operand; a computed one is.
             Operand::Callee(Expression::Identifier(_)) => {}
             Operand::Callee(e) => self.expr(e, ctx, &Local::Plain),
             Operand::Member(object, selector) => {
                 self.expr(object, ctx, &Local::Plain);
-                self.descend(&Node::ClassLikeMemberSelector(selector), ctx, &Local::Plain);
+                self.descend(&Node::ClassLikeMemberSelector(selector), inner, &Local::Plain);
             }
         }
         if let Some(list) = args {
-            self.args(list, index, ctx);
+            self.args(list, index, inner);
         }
     }
 
@@ -357,10 +407,14 @@ impl Scan {
     /// checks at creation. A partial application with placeholders is not one.
     fn first_class_callable(&mut self, node: &Node<'_, '_>, ctx: Ctx) {
         let (span, object, selector) = match node {
-            Node::FunctionPartialApplication(fpa) if fpa.argument_list.is_first_class_callable() => {
+            Node::FunctionPartialApplication(fpa)
+                if fpa.argument_list.is_first_class_callable() =>
+            {
                 (fpa.span(), None, None)
             }
-            Node::MethodPartialApplication(mpa) if mpa.argument_list.is_first_class_callable() => {
+            Node::MethodPartialApplication(mpa)
+                if mpa.argument_list.is_first_class_callable() =>
+            {
                 (mpa.span(), Some(mpa.object), Some(&mpa.method))
             }
             Node::StaticMethodPartialApplication(spa)
@@ -373,13 +427,14 @@ impl Scan {
                 return;
             }
         };
+        let inner = object.map_or(ctx, |o| past_nullsafe(o, ctx));
         if let Some(object) = object {
             self.expr(object, ctx, &Local::Plain);
         }
         if let Some(selector) = selector {
-            self.descend(&Node::ClassLikeMemberSelector(selector), ctx, &Local::Plain);
+            self.descend(&Node::ClassLikeMemberSelector(selector), inner, &Local::Plain);
         }
-        self.push(ReadKind::Call, to_span(span), Some(Carrier::FirstClassCallable));
+        self.push(ReadKind::CallRef, to_span(span), resolve(Local::Plain, inner, false));
     }
 
     /// The binary, ternary and assignment operators: the ones that decide which of their
@@ -465,6 +520,25 @@ impl Scan {
             Node::UnaryPostfix(u) => self.expr(u.operand, ctx, &Local::CompoundRead),
             _ => {}
         }
+    }
+}
+
+/// `ctx` for the operands of a chain link whose base is `base`: conditional when a `?->`
+/// lies below, because PHP then evaluates nothing further along the chain (its keys, its
+/// arguments, its later links) once the receiver is null.
+fn past_nullsafe(base: &Expression<'_>, ctx: Ctx) -> Ctx {
+    if has_nullsafe(base) { ctx.conditional() } else { ctx }
+}
+
+/// Whether the chain `e` (property, offset and method links) contains a `?->`.
+fn has_nullsafe(e: &Expression<'_>) -> bool {
+    match e.unparenthesized() {
+        Expression::Access(Access::NullSafeProperty(_))
+        | Expression::Call(Call::NullSafeMethod(_)) => true,
+        Expression::Access(Access::Property(pa)) => has_nullsafe(pa.object),
+        Expression::ArrayAccess(aa) => has_nullsafe(aa.array),
+        Expression::Call(Call::Method(mc)) => has_nullsafe(mc.object),
+        _ => false,
     }
 }
 
