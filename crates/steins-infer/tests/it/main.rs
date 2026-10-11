@@ -126,6 +126,7 @@ mod methods;
 mod mutate_local;
 mod namespaced_engine_classes;
 mod narrowing_n4;
+mod nested_call_depth;
 mod never_callee_prunes;
 mod never_sentinel;
 mod no_effect;
