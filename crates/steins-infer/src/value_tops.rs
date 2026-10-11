@@ -229,7 +229,10 @@ pub(crate) fn top_arg_value(
         };
         return Some((v, Some(prov), false));
     }
-    resolve_native_value(cx, value, None).map(|v| (v, None, true))
+    // Only a string or array literal is a name as written; a class constant that
+    // resolves to one is a name an unmodeled guard may test just as a variable is.
+    let written = matches!(value, ArgValue::Str(_) | ArgValue::Array(_));
+    resolve_native_value(cx, value, None).map(|v| (v, None, written))
 }
 
 /// Judge one argument against a parameter's top and push `type.argument-mismatch`
