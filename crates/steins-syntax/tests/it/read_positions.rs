@@ -7,18 +7,21 @@
 
 use steins_syntax::{Carrier, ReadKind, ReadPosition, SourceTree, Stmt};
 
-fn render_carrier(c: &Carrier) -> String {
+/// The carrier as a word; an argument names its call by the text before the `(` of the call
+/// position it points at (`strlen`, `$o->m`, `new C`).
+fn render_carrier(src: &str, all: &[ReadPosition], c: &Carrier) -> String {
     match c {
         Carrier::Plain => "plain".to_owned(),
-        Carrier::Argument { callee, position } => format!(
-            "arg({},{})",
-            callee.as_ref().map_or("-", |c| c.raw.as_str()),
-            position.map_or("-".to_owned(), |p| p.to_string())
-        ),
+        Carrier::Argument { call, position } => {
+            let callee = call.map_or("-", |i| {
+                let s = all[i as usize].span;
+                src[s.start as usize..s.end as usize].split('(').next().unwrap_or("")
+            });
+            format!("arg({callee},{})", position.map_or("-".to_owned(), |p| p.to_string()))
+        }
         Carrier::Conditional => "cond".to_owned(),
         Carrier::IssetLike => "isset".to_owned(),
         Carrier::Suppressed => "suppressed".to_owned(),
-        Carrier::Write => "write".to_owned(),
         Carrier::CompoundRead => "compound".to_owned(),
         Carrier::FirstClassCallable => "fcc".to_owned(),
     }
@@ -30,7 +33,7 @@ fn render(src: &str, positions: &[ReadPosition]) -> Vec<String> {
         .iter()
         .map(|p| {
             let text = &src[p.span.start as usize..p.span.end as usize];
-            format!("{text} [{}]", render_carrier(&p.carrier))
+            format!("{text} [{}]", render_carrier(src, positions, &p.carrier))
         })
         .collect()
 }
@@ -103,9 +106,9 @@ fn an_argument_carries_its_callee_and_position() {
         ["f2(1, $a['k']) [plain]", "$a['k'] [arg(f2,1)]"]
     );
     // A method, a static call and a constructor name no function.
-    assert_eq!(reads("$o->m($a['k']);"), ["$o->m($a['k']) [plain]", "$a['k'] [arg(-,0)]"]);
-    assert_eq!(reads("C::m($a['k']);"), ["C::m($a['k']) [plain]", "$a['k'] [arg(-,0)]"]);
-    assert_eq!(reads("$r = new C($a['k']);"), ["new C($a['k']) [plain]", "$a['k'] [arg(-,0)]"]);
+    assert_eq!(reads("$o->m($a['k']);"), ["$o->m($a['k']) [plain]", "$a['k'] [arg($o->m,0)]"]);
+    assert_eq!(reads("C::m($a['k']);"), ["C::m($a['k']) [plain]", "$a['k'] [arg(C::m,0)]"]);
+    assert_eq!(reads("$r = new C($a['k']);"), ["new C($a['k']) [plain]", "$a['k'] [arg(new C,0)]"]);
 }
 
 #[test]
@@ -157,13 +160,11 @@ fn a_call_in_a_conditional_position_is_conditional() {
 
 #[test]
 fn isset_empty_and_the_left_of_coalesce_are_issetlike() {
-    assert_eq!(
-        reads("$r = isset($a['k']['j']);"),
-        ["$a['k']['j'] [isset]", "$a['k'] [isset]"]
-    );
-    assert_eq!(reads("$r = empty($o->p);"), ["$o->p [isset]"]);
-    assert_eq!(reads("$r = $a['k'] ?? $a['j'];"), ["$a['k'] [isset]", "$a['j'] [cond]"]);
-    assert_eq!(reads("$a['k'] ??= $a['j'];"), ["$a['k'] [isset]", "$a['j'] [cond]"]);
+    // Every family is silent on an offset or a property there: not recorded at all.
+    assert_eq!(reads("$r = isset($a['k']['j']);"), Vec::<String>::new());
+    assert_eq!(reads("$r = empty($o->p);"), Vec::<String>::new());
+    assert_eq!(reads("$r = $a['k'] ?? $a['j'];"), ["$a['j'] [cond]"]);
+    assert_eq!(reads("$a['k'] ??= $a['j'];"), ["$a['j'] [cond]"]);
     // A class constant is a position under `??` too: PHP throws there, so the carrier says
     // where it sits and the family decides.
     assert_eq!(reads("$r = C::B ?? 1;"), ["C::B [isset]"]);
@@ -173,7 +174,7 @@ fn isset_empty_and_the_left_of_coalesce_are_issetlike() {
 fn a_key_inside_an_isset_is_an_ordinary_read() {
     assert_eq!(
         reads("$r = isset($a[$x['i']]);"),
-        ["$a[$x['i']] [isset]", "$x['i'] [plain]"]
+        ["$x['i'] [plain]"]
     );
 }
 
@@ -191,29 +192,31 @@ fn an_at_operand_is_suppressed() {
 
 #[test]
 fn a_target_is_a_write() {
-    assert_eq!(reads("$a['k'] = 1;"), ["$a['k'] [write]"]);
-    assert_eq!(reads("$o->p = 1;"), ["$o->p [write]"]);
-    assert_eq!(reads("$a['n']['k'] = 1;"), ["$a['n']['k'] [write]", "$a['n'] [write]"]);
-    assert_eq!(reads("$r = &$a['k'];"), ["$a['k'] [write]"]);
-    assert_eq!(reads("$r = f2(...[&$a['k']]);"), ["f2(...[&$a['k']]) [plain]", "$a['k'] [write]"]);
+    // A write is not recorded: every family is silent on it.
+    let none = Vec::<String>::new();
+    assert_eq!(reads("$a['k'] = 1;"), none);
+    assert_eq!(reads("$o->p = 1;"), none);
+    assert_eq!(reads("$a['n']['k'] = 1;"), none);
+    assert_eq!(reads("$r = &$a['k'];"), none);
+    assert_eq!(reads("$r = f2(...[&$a['k']]);"), ["f2(...[&$a['k']]) [plain]"]);
 }
 
 #[test]
 fn the_key_of_a_target_and_the_value_assigned_are_reads() {
-    assert_eq!(reads("$a[$x['i']] = $o->p;"), ["$a[$x['i']] [write]", "$x['i'] [plain]", "$o->p [plain]"]);
+    assert_eq!(reads("$a[$x['i']] = $o->p;"), ["$x['i'] [plain]", "$o->p [plain]"]);
 }
 
 #[test]
 fn a_destructuring_target_is_a_write_and_its_key_a_read() {
-    assert_eq!(reads("[$o->p, $a['k']] = $x;"), ["$o->p [write]", "$a['k'] [write]"]);
-    assert_eq!(reads("['i' => $a['k']] = $x;"), ["$a['k'] [write]"]);
-    assert_eq!(reads("[$a[$x['i']]] = f2();"), ["$a[$x['i']] [write]", "$x['i'] [plain]", "f2() [plain]"]);
+    assert_eq!(reads("[$o->p, $a['k']] = $x;"), Vec::<String>::new());
+    assert_eq!(reads("['i' => $a['k']] = $x;"), Vec::<String>::new());
+    assert_eq!(reads("[$a[$x['i']]] = f2();"), ["$x['i'] [plain]", "f2() [plain]"]);
 }
 
 #[test]
 fn a_compound_target_and_an_increment_are_compound_reads() {
     assert_eq!(reads("$a['k'] .= 'x';"), ["$a['k'] [compound]"]);
-    assert_eq!(reads("$a['n']['k'] += 1;"), ["$a['n']['k'] [compound]", "$a['n'] [write]"]);
+    assert_eq!(reads("$a['n']['k'] += 1;"), ["$a['n']['k'] [compound]"]);
     assert_eq!(reads("$o->n++;"), ["$o->n [compound]"]);
     assert_eq!(reads("--$a['k'];"), ["$a['k'] [compound]"]);
 }
@@ -247,7 +250,7 @@ fn a_nested_call_is_a_position_at_its_own_span() {
         reads("$r = [nope_fn() => 1];"),
         ["nope_fn() [plain]"]
     );
-    assert_eq!(reads("throw new E(nope_fn());"), ["new E(nope_fn()) [plain]", "nope_fn() [arg(-,0)]"]);
+    assert_eq!(reads("throw new E(nope_fn());"), ["new E(nope_fn()) [plain]", "nope_fn() [arg(new E,0)]"]);
 }
 
 #[test]
@@ -319,8 +322,29 @@ fn a_position_records_the_read_and_not_the_statement() {
     let f = tree.scopes().iter().find(|sc| sc.stmts.iter().any(|s| !s.read_positions().is_empty()));
     let stmt = &f.expect("the scope with a read").stmts[0];
     let pos = &stmt.read_positions()[0];
-    assert!(matches!(pos.kind, ReadKind::Offset { .. }), "{pos:?}");
+    assert!(matches!(pos.kind, ReadKind::Offset(_)), "{pos:?}");
     assert!(pos.span.start > stmt.span.start && pos.span.end < stmt.span.end, "{pos:?} in {:?}", stmt.span);
+}
+
+#[test]
+fn a_position_stays_small() {
+    // 8 (span) + 16 (carrier) + 16 (kind) at the time of writing; the bound is the contract.
+    let size = std::mem::size_of::<ReadPosition>();
+    assert!(size <= 40, "a ReadPosition grew to {size} bytes");
+}
+
+#[test]
+fn an_offset_names_its_place_and_literal_key() {
+    use steins_syntax::{Key, Place};
+    let src = "<?php\nfunction f($a) { echo $a['n'][3]; }\n";
+    let tree = SourceTree::parse(src);
+    let f = tree.scopes().iter().find(|sc| sc.stmts.iter().any(|s| !s.read_positions().is_empty()));
+    let positions = f.expect("scope").stmts[0].read_positions();
+    let ReadKind::Offset(outer) = &positions[0].kind else { panic!("{positions:?}") };
+    assert_eq!(outer.1, Key::Int(3));
+    let Place::Index(inner) = &outer.0 else { panic!("{outer:?}") };
+    assert_eq!(inner.0, Place::Var("a".to_owned()));
+    assert!(matches!(&inner.1, Key::Str(_)), "{inner:?}");
 }
 
 #[test]

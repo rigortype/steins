@@ -59,15 +59,17 @@ variable of the chain, or `""` for a chain that starts at no variable.
 
 `read_positions` (ADR-0104, issue #1050) lists every call, offset read, property
 read and class-constant read the statement's own expressions write, each as a
-`ReadPosition { kind, span, carrier }` at the read's own span, outermost first and
-in source order. The kind is `Call(CallExpr)`, `Offset { base, key }`,
-`Prop { var, prop }` or `ClassConst(class, name)`; every level of an access chain
-and every nested call is a position, and the shapes the lowering cannot spell
-(a dynamic receiver, `?->`, `Class::class`) are not. The carrier names the
-construct around the read: `Plain`, `Argument { callee, position }` (`position`
-is `None` for a named argument or one at or after a spread), `Conditional`,
-`IssetLike`, `Suppressed`, `Write`, `CompoundRead` and `FirstClassCallable`;
-under several constructs the weakest claim wins, in the order on `Carrier`.
+`ReadPosition { span, carrier, kind }` (40 bytes) at the read's own span, outermost
+first and in source order. The kind is `Call` (by span alone; no lowered call is
+copied), `Offset(place, key)`, `Prop(var, prop)` or `ClassConst(class, name)`; every
+level of an access chain and every call is a position, and `?->` and `Class::class`
+are not. A write target, and an offset or property under `isset`, `empty`, `??`
+or `??=`, are not recorded. The carrier names the construct around the read:
+`Plain`, `Argument { call, position }` (`call` indexes the call's own position
+in the list; `position` is `None` for a named argument or one at or after a
+spread), `Conditional`, `IssetLike` (class constants only), `Suppressed`,
+`CompoundRead` and `FirstClassCallable`; under several constructs the weakest
+claim wins, in the order on `Carrier`.
 It is read for an expression statement, `return`, `echo` and `<?= ?>` and a
 `static` initializer, and for an arrow function's body, a hook's and a hoisted
 `match` arm's; a header is not read yet. The scan stops at a function-like, a
