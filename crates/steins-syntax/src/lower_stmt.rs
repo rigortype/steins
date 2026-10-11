@@ -16,7 +16,7 @@ use crate::ast::{
     AppendStmt, ArgValue, ArmLanding, ArrayKey, ArrayLiteralElement, ArrayLiteralSite,
     BinaryOperandOp, BodyEnd, CallExpr, Callee, CondExpr, CondOperand, ForeachBodyShape,
     ForeachSite, InvalidatedVar, MatchArmT, NameRef, OpaqueConstruct, OpaqueSite, OperandSite,
-    OperandSiteKind, OperandSpan, PrevStmt, RunArg, RunCall, Runs, Span, Stmt, StmtKind,
+    OperandSiteKind, OperandSpan, PrevStmt, Receiver, RunArg, RunCall, Runs, Span, Stmt, StmtKind,
     StringContextKind, StringContextSite, UnaryOperandOp,
 };
 use crate::lower_expr::{
@@ -32,6 +32,7 @@ use crate::lower_globals::{
 use crate::lower_guards::guard_regions_of;
 use crate::lower_presence::subtree_has_goto;
 use crate::lower_pure::{is_pure_expr, is_pure_statement};
+use crate::lower_scope::node_is_generator;
 use crate::lower_jump::{arm_landing, body_has_jump, ends_own_switch, jump_level};
 use crate::lower_try::{lower_try, try_end};
 use crate::memo::{self, TryScan};
@@ -168,8 +169,76 @@ pub(crate) fn lower_stmt(s: &Statement<'_>, out: &mut Vec<Stmt>) {
         has_terminator: subtree_has_function_exit(&Node::Statement(s)),
         runs,
         holds_label: holds_label(&stmt.kind),
+        unspelled_reads: unspelled_reads(&stmt.kind, &Node::Statement(s)),
         ..stmt
     });
+}
+
+/// [`Stmt::unspelled_reads`] for a statement lowered to `kind` from `node`: every
+/// direct variable `node` mentions when one of the values `kind` carries lowered to
+/// [`ArgValue::Other`], and nothing otherwise.
+pub(crate) fn unspelled_reads(kind: &StmtKind, node: &Node<'_, '_>) -> Vec<String> {
+    let hides = match kind {
+        StmtKind::Assign { value, call, .. } | StmtKind::Return { value, call, .. } => {
+            value_hides(value) || call.as_ref().is_some_and(call_hides)
+        }
+        StmtKind::PropAssign { value, value_call, .. } => {
+            value_hides(value) || value_call.as_ref().is_some_and(call_hides)
+        }
+        StmtKind::Call(c) => call_hides(c),
+        StmtKind::Echo(calls) => calls.iter().any(call_hides),
+        _ => false,
+    };
+    let mut out = Vec::new();
+    if hides {
+        collect_direct_vars(node, &mut out);
+    }
+    out
+}
+
+/// Whether a lowered value has an [`ArgValue::Other`] anywhere inside it.
+fn value_hides(value: &ArgValue) -> bool {
+    match value {
+        ArgValue::Other => true,
+        ArgValue::Array(items) => items.iter().any(|(k, v)| {
+            matches!(k, ArrayKey::Expr(k) if value_hides(k)) || value_hides(v)
+        }),
+        ArgValue::Ternary { then_val: a, else_val: b, .. }
+        | ArgValue::Coalesce(a, b, _)
+        | ArgValue::Concat(a, b)
+        | ArgValue::Binary { lhs: a, rhs: b, .. }
+        | ArgValue::Logical { lhs: a, rhs: b, .. }
+        | ArgValue::OffsetRead { base: a, key: b } => value_hides(a) || value_hides(b),
+        ArgValue::Not(v) | ArgValue::Cast { operand: v, .. } => value_hides(v),
+        ArgValue::Call(_, args) => args.iter().any(value_hides),
+        ArgValue::New(_, args, named) => {
+            args.iter().chain(named.iter().map(|n| &n.value)).any(value_hides)
+        }
+        ArgValue::MethodCall { callee, args, named } => {
+            callee_hides(callee) || args.iter().chain(named.iter().map(|n| &n.value)).any(value_hides)
+        }
+        _ => false,
+    }
+}
+
+/// Whether a call hides a value it is handed: an argument that lowered to
+/// [`ArgValue::Other`], a general spread, or a receiver the vocabulary cannot spell.
+fn call_hides(call: &CallExpr) -> bool {
+    call.has_spread
+        || callee_hides(&call.receiver)
+        || call.args.iter().map(|a| &a.value).chain(call.named_args.iter().map(|n| &n.value)).any(value_hides)
+}
+
+/// Whether a callee's receiver hides an expression ([`Callee::Dynamic`], or a
+/// `new` whose arguments do).
+fn callee_hides(callee: &Callee) -> bool {
+    match callee {
+        Callee::Dynamic => true,
+        Callee::Method { receiver: Receiver::New { args, named, .. }, .. } => {
+            args.iter().chain(named.iter().map(|n| &n.value)).any(value_hides)
+        }
+        _ => false,
+    }
 }
 
 // top-level rebind rule (issue #762)
@@ -1137,6 +1206,7 @@ fn lower_expr_position(expr: &Expression<'_>) -> Vec<Stmt> {
         // `echo match (…)` lowers to a `StmtKind::Call` whose result the `echo`
         // consumes. Marked here, at the one site that mints these.
         value_position: true,
+        unspelled_reads: unspelled_reads(&st.kind, &Node::Expression(expr)),
         ..st
     });
     out
@@ -1732,6 +1802,12 @@ fn note_embedded_writes(node: &Node<'_, '_>, out: &mut Vec<InvalidatedVar>) {
 
 /// Lower an expression-statement to a trace entry.
 pub(crate) fn lower_expr_stmt(expr: &Expression<'_>) -> Stmt {
+    // A `yield` suspends the generator mid-expression: its consumer runs any code
+    // it likes — a write through the yielded handle among it — before the
+    // expression resumes (issue #1048), so the statement is the sound floor.
+    if node_is_generator(&Node::Expression(expr)) {
+        return Stmt::lowered(StmtKind::Barrier, Vec::new());
+    }
     match expr.unparenthesized() {
         Expression::Assignment(a) => {
             if let Expression::Variable(Variable::Direct(dv)) = a.lhs.unparenthesized() {
