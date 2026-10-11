@@ -24,7 +24,7 @@ use crate::contract::IsA;
 use crate::cx::Cx;
 use crate::env::{Known, Member, Store, Stratum, arg_of_val, singleton_fact};
 use crate::absence::callable_class_absent;
-use crate::predicates::{pred_holds_on_fact, type_predicate};
+use crate::predicates::{TypePred, pred_holds_on_fact, type_predicate};
 use crate::existence::{eval_existence_call, global_function_callee};
 use crate::offsets::{ShapeRead, offset_key_of, offset_operand_fact, shape_read_at};
 use crate::predicates::apply_type_narrowing;
@@ -1684,6 +1684,29 @@ fn val_is_non_object(v: &Val) -> bool {
 ///
 /// The value is a literal argument or a variable's `Verified` singleton; an object is
 /// never a singleton, so it stays `Maybe`. Anything else is `Maybe`.
+///
+/// **A verdict must hold on every PHP the project may run on** (the #1060 third
+/// review): Steins' floor is 7.4, so a value whose answer moved between 7.4 and the
+/// analysing PHP stays `Maybe`. Measured on 7.4.33, 8.0.28 and 8.5.11 over `null`,
+/// both bools, `0`, `1`, `1.5`, `NAN`, `[]`, `[1]`, a closure and the strings `''`,
+/// `'1'`, `'1 '`, `' 1'`, `"1\n"`, `'1e3'`, `'0x1A'`, `' '`, `'abc'`, `'1abc'`, `'.5'`,
+/// `'5.'`, `'Foo'`, `'strlen'` (`probe/predgrid.php` in the run's scratch notes):
+///
+/// ```text
+/// predicate                              version where an answer moves
+/// -------------------------------------- ---------------------------------------------
+/// is_numeric                             8.0: a numeric string with trailing
+///                                        whitespace (`'1 '`, `"1\n"`) turns true —
+///                                        decided only off such strings
+/// is_int/string/bool/float/array/object/ none
+/// scalar/iterable/countable/callable/
+/// resource/null, isset
+/// is_a, is_subclass_of (either           none over these values; a class-name string
+/// allow_string)                          is decided only through the absence ladder
+/// ```
+///
+/// Leading whitespace (`' 1'`) is numeric on all three, and `8.0` to `8.5` agree on
+/// every cell, so one check covers the floor range.
 fn eval_literal_type_test(
     w: &WalkCx,
     folder: &mut dyn Folder,
@@ -1712,6 +1735,9 @@ fn eval_literal_type_test(
     if let Some(pred) = type_predicate(w.cx, call)
         && let Some(fact) = singleton_fact(&value)
     {
+        if pred == TypePred::Numeric && numeric_answer_moved_at_8_0(&value) {
+            return Certainty::Maybe;
+        }
         return pred_holds_on_fact(pred, &fact);
     }
     match callee.as_str() {
@@ -1734,4 +1760,15 @@ fn eval_literal_type_test(
         }
         _ => Certainty::Maybe,
     }
+}
+
+/// Whether `is_numeric(value)` answers differently on PHP 7.4 and on 8.0+: a string
+/// the 8.0 rules read as numeric only because whitespace trails it, which 7.4 rejects
+/// (measured: `is_numeric('1 ')` and `is_numeric("1\n")` are false on 7.4.33, true on
+/// 8.0.28 and 8.5.11).
+fn numeric_answer_moved_at_8_0(value: &ArgValue) -> bool {
+    let ArgValue::Str(s) = value else { return false };
+    let bytes = s.as_bytes();
+    let is_ws = |b: &u8| b" \t\n\r\x0b\x0c".contains(b);
+    bytes.last().is_some_and(is_ws) && steins_domain::php_is_numeric(bytes)
 }

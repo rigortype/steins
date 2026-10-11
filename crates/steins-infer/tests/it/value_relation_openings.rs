@@ -933,3 +933,39 @@ fn a_trait_without_set_keeps_the_typed_property_write_judged() {
         "class C { use Missing; public int $n = 0; }\nfunction g(): void { $c = new C(); $c->n = 'x'; }\n",
     );
 }
+
+// ---------------------------------------------------------------------------
+// The #1060 third review: a type test is decided on a proven value only where
+// every PHP from the 7.4 floor up answers alike (measured on 7.4.33, 8.0.28 and
+// 8.5.11). The verdict does not read the declared platform: a row that moved
+// stays undecided whatever the project targets.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn is_numeric_on_a_trailing_whitespace_string_stays_undecided() {
+    // `is_numeric('1 ')` is false on 7.4 and true from 8.0: either side may run.
+    let decl = "class Foo {}\nfunction take(Foo $f): void {}\n";
+    for v in ["'1 '", "\"1\\n\"", "\"2.5\\t\""] {
+        silent_both_modes(&format!(
+            "{decl}function g(): void {{ $x = {v}; $y = new Foo(); if (is_numeric($x)) {{ $y = null; }} take($y); }}\n"
+        ));
+    }
+}
+
+#[test]
+fn is_numeric_rows_every_version_agrees_on_stay_decided() {
+    // `'1'`, `' 1'` (leading whitespace) and `'1e3'` are numeric on 7.4 and 8.x alike,
+    // `'abc'` on neither: the guard is decided and the branch PHP takes is the one judged.
+    let decl = "class Foo {}\nfunction take(Foo $f): void {}\n";
+    for v in ["'1'", "' 1'", "'1e3'"] {
+        fires_both_modes(
+            &format!(
+                "{decl}function g(): void {{ $x = {v}; $y = new Foo(); if (is_numeric($x)) {{ $y = null; }} take($y); }}\n"
+            ),
+            ARG,
+        );
+    }
+    silent_both_modes(&format!(
+        "{decl}function g(): void {{ $x = 'abc'; $y = new Foo(); if (is_numeric($x)) {{ $y = null; }} take($y); }}\n"
+    ));
+}
