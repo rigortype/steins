@@ -313,8 +313,33 @@ fn a_spelled_rvalue_names_nothing() {
 }
 
 #[test]
-fn a_statement_that_yields_is_a_barrier() {
-    // The generator's consumer runs before the expression resumes.
-    let got = stmts("", "$r = yield $o;");
-    assert!(matches!(&got[..], [Stmt { kind: StmtKind::Barrier, .. }]), "{got:?}");
+fn a_statement_that_yields_suspends_and_names_its_operand() {
+    // The generator's consumer runs before the statement resumes: the statement
+    // keeps its kind, says it suspends, and names what it hands over.
+    let got = stmts("", "$r = yield $o; echo (yield $p); if (yield) {} $s = 1;");
+    let flags: Vec<(bool, Vec<String>)> =
+        got.iter().map(|s| (s.suspends, s.unspelled_reads().to_vec())).collect();
+    assert_eq!(
+        flags,
+        [
+            (true, vec!["r".to_owned(), "o".to_owned()]),
+            (true, vec!["p".to_owned()]),
+            (true, vec![]),
+            (false, vec![]),
+        ],
+        "{got:?}"
+    );
+    assert!(matches!(got[0].kind, StmtKind::Assign { .. }), "{got:?}");
+}
+
+#[test]
+fn a_property_written_inside_an_expression_names_its_receiver() {
+    let got = stmts(
+        "",
+        "$y = $q->p = 1; echo ($r->p = 2); if ($s->a->b = 3) {} $t->p = 4; \
+         foreach ($xs as $u->p) {} ++$v->n; $w[0] = 5; f()->p = 6;",
+    );
+    let writes: Vec<Vec<String>> = got.iter().map(|s| s.writes_through().to_vec()).collect();
+    let want: [&[&str]; 8] = [&["q"], &["r"], &["s"], &[], &["u"], &["v"], &[], &[""]];
+    assert_eq!(writes, want.map(|w| w.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>()));
 }
