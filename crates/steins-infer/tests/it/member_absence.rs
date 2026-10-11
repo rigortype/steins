@@ -737,3 +737,41 @@ byref($e->other);
     assert_eq!(d.len(), 1, "{d:#?}");
     assert!(d[0].message.contains("$c->nope"), "{}", d[0].message);
 }
+
+#[test]
+fn a_computed_name_in_an_argument_does_not_take_the_id_off_the_project() {
+    // `strlen($c->$k)` reads; only a by-ref callee could create an unknown name (residual,
+    // S5). One such call must not silence every other finding in the project.
+    let src = "<?php
+class Cart { public int $a = 1; }
+function n(Cart $c): int { return $c->zz; }
+function m(Cart $c, string $k) { return strlen($c->$k); }
+";
+    assert_eq!(declared_props(src).len(), 1, "{:#?}", props(src));
+    // The write positions keep the project-wide bit.
+    let assign = "<?php
+class Cart { public int $a = 1; }
+function n(Cart $c): int { return $c->zz; }
+function m(Cart $c, string $k) { $c->$k = 1; }
+";
+    assert!(props(assign).is_empty(), "{:#?}", props(assign));
+}
+
+#[test]
+fn an_array_literal_argument_is_not_a_pattern_but_a_by_ref_element_is() {
+    let read = "<?php
+class C { public int $a = 1; }
+$c = new C();
+var_dump(in_array(1, [$c->zz]));
+$x = $c->zz;
+";
+    assert_eq!(exact_props(read).len(), 1, "{:#?}", props(read));
+    let by_ref = "<?php
+class C { public int $a = 1; }
+function f($xs) {}
+$c = new C();
+f([&$c->zz]);
+$x = $c->zz;
+";
+    assert!(props(by_ref).is_empty(), "{:#?}", props(by_ref));
+}
