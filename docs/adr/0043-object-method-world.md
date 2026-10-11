@@ -353,6 +353,28 @@ variadic one ends the positional walk, as before. The return seam judges the new
 `NativeType` rows but not the tops (#727 remains open for `: array` returning a
 scalar), and a typed property has no top.
 
+**Review rows (#1060).** Five shapes reported a `TypeError` on code PHP runs cleanly, and
+the rule for each is fixed where the base shares the defect:
+
+- A literal `is_callable('f')`, `is_callable('C::m')` or `is_callable(['C', 'm'])` vouches
+  the symbol on the side where it holds, as `function_exists` and `method_exists` do,
+  including the negated early return; `call.undefined-function` reads the same vouch. A
+  callable name is judged by the propagation pass, which holds the branch's vouches,
+  never by the env-free direct pass.
+- A type test the walk cannot decide over a value it holds exactly — `is_countable`,
+  `is_a`, `is_subclass_of`, `get_debug_type($x) === …`, `$x ?? d`, `$x?->p`, an offset
+  `isset`, any `is_*` the DR2 vocabulary leaves `Maybe` — forgets that value on both sides
+  of the branch (`branch::forget_unmodelled_tests`, whose doc comment carries the
+  predicate table). `isset($x)` itself is now decided on a proven value. This fixes the
+  scalar rows the base misjudged under the same guards as well.
+- A property write is not judged when it can miss the typed slot: another class's private
+  property (a dynamic property from a child), a protected or readonly one from an unrelated
+  scope, and any chain declaring `__set`, using a trait or reaching an unseen ancestor
+  (`unset()` routes the write to `__set`). This covers the scalar rows too.
+- A class name that only an unminted literal `class_alias` names (an alias of an engine
+  class, which the index does not mint) rejects no object. A name nothing aliases keeps
+  the class-identity amendment's proof; the alias resolution itself is a follow-up.
+
 **Measured.** The two coercion grids now agree with PHP on every cell (the `array` row
 and the class/`null` cell were their named divergences). On the ten public corpora the
 movement is one finding: PHPUnit's end-to-end TypeError fixture
