@@ -72,8 +72,11 @@ Two kinds of read are not recorded: a write target, and an offset or property
 under `isset`, `empty`, `??` or `??=`. Every family is silent on them (the run's
 decisions D1-D5 judge neither), so a consumer would skip them; a class constant
 under `isset`-like constructs is recorded, because PHP throws there. A call
-carries no lowered `CallExpr`: a consumer (S2) resolves the span to a call it
-lowers itself, which keeps the IR free of a second copy of every call.
+carries no lowered `CallExpr` in the position: slice S2 resolves the span to the call
+the lowering already holds (`SourceTree::call_at` for a function call,
+`Scope::method_call_at` for a method or static call or callable, `Stmt::read_calls` for a
+`new` and a function first-class callable), which keeps the IR free of a second copy of
+every call.
 
 ### 2.3 Why carriers are classified at lowering time
 
@@ -193,6 +196,21 @@ of peak RSS): PHPUnit 439 MB to 450 MB (+2.5%), Carbon 411 MB to 412 MB
 - Persistence: trace payloads are decoded past the analyzer gate, and the
   analyzer fingerprint refuses a generation written by another build, so the
   new field needs no `SCHEMA_VERSION` bump (`steins-db`'s wire notes).
+
+Slice S2 measured the call lookup: peak RSS on PHPUnit (release, strict `--no-php
+--vendor-diagnostics --no-cache`, median of 5) 454.8 MB to 461.3 MB, +1.4%. A first cut
+that kept a `CallExpr` per nested call cost +4% to +7%.
+
+### 2.7 Decisions and known gaps recorded by S2
+
+- **`@` plus a conditional is `Conditional`.** The weakest-claim order puts `Conditional`
+  before `Suppressed`, so a call under both is judged for existence. That is sound, since
+  an `Error` is not suppressible, and differs from D2 (silence under `@`), which holds for
+  a call under `@` alone.
+- **Known gap:** calls in an anonymous class's constructor arguments have positions but no
+  lowered call, so they are not judged.
+- **Known gap:** `call.inaccessible-method` is treated as value-dependent, so it declines
+  at a conditional position; a static `C::priv()` there is a false negative.
 
 ## 3. Consequences
 
