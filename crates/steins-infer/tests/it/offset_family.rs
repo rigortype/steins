@@ -183,8 +183,8 @@ fn silent_on_write_target() {
 
 #[test]
 fn silent_as_call_argument() {
-    // The call-argument read position is deferred (A7 by-ref / unresolved-callee
-    // autovivification risk) — safe silence in v1.
+    // An unresolved callee may take the argument by reference, which creates the key:
+    // the argument position declines unless the parameter is provably by value.
     assert!(offset_diags("<?php\n$a = [];\nfoo($a[0]);\n").is_empty());
 }
 

@@ -210,11 +210,18 @@ pub(crate) fn check_call_on_non_object(
 /// `warning-handler = "null"` the finding leaves the proof surface, like
 /// `offset.missing`.
 ///
-/// The receiver is only ever a bare variable — [`ArgValue::PropFetch`] is the only
-/// lowered shape of a property read (a chain, dynamic name, or `?->` all lower to
-/// `ArgValue::Other`). `$this` carries no fact lane, so `$this->p` is silent.
+/// Judged at every property read position the statement records (ADR-0104), at the
+/// read's own span, wherever the carrier table in `stmt_checks` judges a
+/// value-dependent family: a plain operand and a by-value function argument. A
+/// conditional, `@` or possibly-by-reference argument position declines, and so does
+/// a compound write (`$x->p .= 'v'` on null is the Error `Attempt to assign property`,
+/// not this warning).
 ///
-/// [`ArgValue::PropFetch`]: steins_syntax::ArgValue::PropFetch
+/// The receiver is only ever a bare variable — [`ReadKind::Prop`] records nothing
+/// else (a chain's outer levels, a dynamic name and a `?->` fetch are not positions).
+/// `$this` carries no fact lane, so `$this->p` is silent.
+///
+/// [`ReadKind::Prop`]: steins_syntax::ReadKind::Prop
 pub(crate) fn check_property_on_non_object(
     cx: &Cx,
     var: &str,
