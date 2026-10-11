@@ -3975,6 +3975,29 @@ pub struct OpaqueSite {
     pub span: Span,
 }
 
+/// How a `return` hands back its value, as PHP's compiler tells the forms apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
+pub enum ReturnForm {
+    /// `return;`
+    Bare,
+    /// `return <expr>;`, `return null;` included.
+    Valued,
+    /// The body expression of an arrow function (`fn(): T => <expr>`): a value, but
+    /// PHP compiles it with no `: never` check (witnessed 8.5.11: `fn(): never => 5`).
+    ArrowBody,
+}
+
+/// One `return` of a scope, where it stands (see [`Scope::returns`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
+pub struct ReturnSite {
+    pub form: ReturnForm,
+    /// The `return` statement's span (an arrow function's body expression for
+    /// [`ReturnForm::ArrowBody`]).
+    pub span: Span,
+}
+
 /// A return hint the value domain cannot represent but PHP **enforces** at the call
 /// boundary (ADR-0057 note, issue #603): the bare `array`, `object` and `iterable`
 /// keywords. Each names a top the [`NativeType`] union has no member for, yet a call
@@ -4075,6 +4098,12 @@ pub struct Scope {
     /// `scan_opaque` walk backing both). Read by `steins doctor`'s coverage posture (ADR-0054 §9.2).
     pub opaque: Vec<OpaqueSite>,
     pub stmts: Vec<Stmt>,
+    /// Every `return` of this scope's own body in source order, found on the syntax tree
+    /// rather than the trace: PHP's compile-time return rules (`return.compile-fatal`)
+    /// judge dead code and constructs the trace leaves opaque alike. Nested function-like
+    /// bodies are their own scopes and are not descended. Empty when the scope writes no
+    /// return hint, which is the only reader's premise.
+    pub returns: Vec<ReturnSite>,
     /// Every instance/static method call in this scope's body, comprehensively (including
     /// calls nested in sub-expressions the trace drops to [`ArgValue::Other`]), not
     /// descending into nested scopes — the sound caller-enumeration surface the

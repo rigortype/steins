@@ -13,8 +13,8 @@ use mago_syntax::cst::{
 };
 
 use crate::ast::{
-    BodyEnd, HookKind, NsCtx, Param, RetHint, RetHintKind, Runs, SUPERGLOBALS, Scope, ScopeOwner,
-    Stmt, StmtKind, UndefinedRead, UnusedCapture,
+    BodyEnd, HookKind, NsCtx, Param, RetHint, RetHintKind, ReturnForm, ReturnSite, Runs, SUPERGLOBALS,
+    Scope, ScopeOwner, Stmt, StmtKind, UndefinedRead, UnusedCapture,
 };
 use crate::lower_arg_shape::Captures;
 use crate::lower_decl::{DocIndex, lower_hint, lower_params};
@@ -286,9 +286,13 @@ fn build_scope_from(
     let mut stmts = Vec::new();
     let mut method_calls = Vec::new();
     let mut is_generator = false;
+    let mut returns = Vec::new();
     let mut guard_chain_no_default = Vec::new();
     for s in statements {
         lower_stmt(s, &mut stmts);
+        if ret_hint.is_some() {
+            scan_returns(&Node::Statement(s), &mut returns);
+        }
         scan_method_calls(&Node::Statement(s), &mut method_calls);
         scan_opaque(&Node::Statement(s), &mut opaque, false);
         scan_guard_chain_no_default(&Node::Statement(s), &mut guard_chain_no_default);
@@ -315,6 +319,7 @@ fn build_scope_from(
         poisoned,
         opaque,
         stmts,
+        returns,
         method_calls,
         params: Vec::new(),
         ret_ty: None,
@@ -529,6 +534,7 @@ fn build_hook_expr_scope(
         poisoned: !opaque.is_empty(),
         opaque,
         stmts: vec![stmt],
+        returns: Vec::new(),
         method_calls,
         // Filled by the caller, which is the only place the property's type is known.
         params: Vec::new(),
@@ -562,6 +568,26 @@ pub(crate) fn node_is_generator(node: &Node<'_, '_>) -> bool {
                 }
             }
             false
+        }
+    }
+}
+
+/// Every `return` statement of `node`'s subtree, in source order, into `out`. Nested
+/// function / method / closure / arrow bodies are their own scopes and are not descended.
+fn scan_returns(node: &Node<'_, '_>, out: &mut Vec<ReturnSite>) {
+    match node {
+        Node::Return(r) => {
+            let form = if r.value.is_some() { ReturnForm::Valued } else { ReturnForm::Bare };
+            out.push(ReturnSite { form, span: to_span(r.span()) });
+        }
+        Node::Function(_) | Node::Method(_) | Node::Closure(_) | Node::ArrowFunction(_) => {}
+        _ => {
+            if stack_guard::exhausted() {
+                return;
+            }
+            for child in children(node) {
+                scan_returns(&child, out);
+            }
         }
     }
 }
@@ -633,8 +659,12 @@ fn build_closure_scope_from_closure(
     );
     param_default_sites(&cl.parameter_list, &cx, &mut sites);
     let mut is_generator = false;
+    let mut returns = Vec::new();
     for s in cl.body.statements.iter() {
         lower_stmt(s, &mut stmts);
+        if cl.return_type_hint.is_some() {
+            scan_returns(&Node::Statement(s), &mut returns);
+        }
         scan_owner_sites(&Node::Statement(s), &cx, &mut sites);
         scan_method_calls(&Node::Statement(s), &mut method_calls);
         scan_opaque(&Node::Statement(s), &mut opaque, false);
@@ -660,6 +690,7 @@ fn build_closure_scope_from_closure(
         poisoned,
         opaque,
         stmts,
+        returns,
         method_calls,
         params: lower_params(&cl.parameter_list, rc),
         ret_ty: cl.return_type_hint.as_ref().and_then(|r| lower_hint(&r.hint, rc)),
@@ -1700,6 +1731,7 @@ fn build_closure_scope_from_arrow(
         poisoned,
         opaque,
         stmts: vec![ret],
+        returns: vec![ReturnSite { form: ReturnForm::ArrowBody, span }],
         method_calls,
         params: lower_params(&af.parameter_list, rc),
         ret_ty: af.return_type_hint.as_ref().and_then(|r| lower_hint(&r.hint, rc)),
