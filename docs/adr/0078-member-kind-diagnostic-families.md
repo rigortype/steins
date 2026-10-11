@@ -425,3 +425,53 @@ region therefore no longer runs the pass, which can withhold a
 of that was found (the `unset`-after-guard shapes are silent on the base
 too), the same gate already behaved so for the bare `if`/`?:` shield, and
 the public-corpus A/B shows no movement.
+
+## Amendment (2026-10-11): engine ancestors are read through `reflected_class`, and a tentative return is silence (issues #939, #1051)
+
+**Status: PENDING ratification.** The declaration fatals (#183, #184)
+enumerated the project's own class graph: an `extends` naming a class no
+project file declares ended the claim, and an `implements` naming one was
+dropped. `class Y implements Countable {}`, `class F extends FilterIterator {}`,
+`class E extends Exception { function getMessage() {} }` and
+`class C extends Closure {}` are load-time fatals on PHP 8.5.11 and were
+silent.
+
+The ancestry now continues into `Folder::reflected_class` for an engine
+parent and for engine interfaces named by a project class or interface. This
+lifts the 2026-08-09 "resolves, does not convict" ruling for these ids only:
+each verdict below is premised on a fatal PHP raised on the witness run, and
+the reflected declaration is the analysing PHP's own, not a bundled table. The
+gate is `absence_family_available` (a live engine inside the declared target
+range with no runtime-redefinition extension); without it the pass behaves
+exactly as before. A reflection must be of an internal class-like to count,
+a name a project file declares (even conditionally) is never asked of the
+engine, and the engine's answer is memoised per name by the folder.
+
+| engine ancestor | check | verdict |
+| --- | --- | --- |
+| parent, final class (`Closure`, `Generator`, `WeakMap`) | `class.extends-final`; every other check declines | judge |
+| parent, not a plain class | any | decline |
+| parent's abstract method not implemented (`FilterIterator::accept`) | `class.abstract-unimplemented`; a concrete reflected method discharges | judge |
+| interface method not implemented (`Countable`, `JsonSerializable`, `Stringable`, `IteratorAggregate`, a project interface extending one) | `class.abstract-unimplemented` | judge |
+| final method overridden | `override.final` | judge |
+| static / non-static flipped | `override.static-mismatch` | judge |
+| visibility narrowed | `override.visibility-weakened` | judge |
+| parameter count: required above the engine's, or fewer than the engine's with no variadic | `override.parameter-variance` | judge |
+| parameter type | none: reflection carries counts, not types | silence |
+| return type, tentative | none: a deprecation (D7) | silence |
+| return type, real | none: not parsed from the reflected string | silence |
+| `Throwable`, `Traversable`, `DateTimeInterface`, `UnitEnum`, `BackedEnum` named directly; `Iterator` with `IteratorAggregate` | each is its own fatal | decline |
+| class absent from the analysing PHP, or no engine | any | silence |
+
+A return type that differs from an engine *tentative* return type is a
+deprecation, not a fatal (`ArrayObject::count(): int` overridden as `: string`,
+an untyped `IteratorAggregate::getIterator()`): it loads, and the notice
+reaches `set_error_handler`, so it is neither clean nor a fatal. The pass says
+nothing about it and `override.return-variance` is never premised on a
+reflection; the tentative-return residue is a separate, unscheduled finding
+family. The declarer a message names is climbed from the reflected class while
+the parent reflects the same member shape (reflection carries no declaring
+class), so `RecursiveFilterIterator` reports `FilterIterator::accept`, as PHP
+does; the name is display only and never changes a verdict. The arity verdict
+reuses `override.parameter-variance` because a count incompatibility is the
+same `Declaration … must be compatible` fatal; the message states the counts.
