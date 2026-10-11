@@ -18,6 +18,7 @@ use steins_syntax::{
 use crate::by_value::value_stratum;
 use crate::fold::Folder;
 use crate::global_consts::global_const_literal;
+use crate::literal_memo;
 use crate::fold_args::{UNION_FOLD_COMBINATION_CAP, UNION_FOLD_MEMBER_CAP, concat_cast, is_fold_arg};
 use crate::{ID, RETURN_ID, RuntimePostures, Sym};
 use crate::arg_check::render_call;
@@ -925,18 +926,43 @@ impl<'a> Cx<'a> {
     /// (issue #127). Returns `(value, stratum)`: for a fold, stratum is `min` over
     /// the resolved fold arguments (including a nested project-call summary's
     /// stratum).
+    ///
+    /// Answered once per argument per outermost resolution (issue #1063): the fold,
+    /// the transfer rung and its fact reads each resolve a call's argument again,
+    /// so a call nested `n` deep cost `k^n` with `k` of 2 or 3. The
+    /// [`literal_memo`](crate::literal_memo) module states the recursion and when
+    /// a stored answer is reused.
     pub(crate) fn resolve_literal_under(
         &self,
         value: &ArgValue,
         env: &HashMap<String, Known>,
         poisoned: bool,
         folder: &mut dyn Folder,
-        mut descent: Option<&mut Descent<'_>>,
-        mut out: Option<&mut Vec<Diagnostic>>,
+        descent: Option<&mut Descent<'_>>,
+        out: Option<&mut Vec<Diagnostic>>,
     ) -> Option<(ArgValue, Stratum)> {
         if poisoned {
             return None;
         }
+        if !literal_memo::worth_memoising(value) {
+            return self.resolve_literal_once(value, env, folder, descent, out);
+        }
+        literal_memo::resolve(self, value, env, folder, descent, out, |folder, descent, out| {
+            self.resolve_literal_once(value, env, folder, descent, out)
+        })
+    }
+
+    /// One resolution of `value` in an unpoisoned scope, each argument answered
+    /// through [`Self::resolve_literal_under`] (and so through its memo).
+    fn resolve_literal_once(
+        &self,
+        value: &ArgValue,
+        env: &HashMap<String, Known>,
+        folder: &mut dyn Folder,
+        mut descent: Option<&mut Descent<'_>>,
+        mut out: Option<&mut Vec<Diagnostic>>,
+    ) -> Option<(ArgValue, Stratum)> {
+        let poisoned = false;
         match value {
             v if v.is_literal() => Some((v.clone(), Stratum::Verified)),
             ArgValue::Var(name) => {
