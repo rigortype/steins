@@ -229,18 +229,25 @@ the PHP behaviour per cell):
 | `Plain` | judge | judge | judge |
 | `Argument`, by-value parameter of a resolved function | judge | judge | judge |
 | `Argument`, by-reference, method, constructor, unresolved, `position: None` | decline | judge | judge |
-| `Conditional` | decline (D3) | judge | judge |
+| `Conditional` | decline (D3) | decline | judge (D3) |
 | `IssetLike` | not recorded | not recorded | judge |
 | `Suppressed` | decline (D2) | judge | judge |
 | `CompoundRead` | offsets: judge `offset.missing` and the strict leg, not `offset.on-unsupported`; properties: decline | decline | not a target |
 
-`property.inaccessible` judges a conditional, an `@` and a by-reference
-argument position because it reads the receiver's exact allocation, which no
-test changes, and PHP routes a by-reference fetch of an inaccessible property
-through the same `__get` lookup as a read. Witnessed on PHP 8.5:
-`byref($c->priv)` throws `Cannot access private property`, and with only
-`__get` declared it calls `__get`. A compound write takes `__set` on its
-write half, which the check does not model, so it declines.
+`property.inaccessible` judges an `@` and a by-reference argument position:
+the fatal is not suppressible, and PHP routes a by-reference fetch of an
+inaccessible property through the same `__get` lookup as a read. Witnessed on
+PHP 8.5: `byref($c->priv)` throws `Cannot access private property`, and with
+only `__get` declared it calls `__get`. It declines at `Conditional`. Its
+subject is the receiver, and a test on the receiver decides whether the arm
+runs: `isset($c->priv) ? $c->priv : 0` is silent in PHP, because `isset` on an
+inaccessible property without `__isset` is false, and so are
+`$c instanceof X ? $c->priv : 0` and `is_null($c) ? 0 : $c->priv` when the test
+is not decided. Every family whose subject is the receiver or its value
+declines at `Conditional`; only the class-constant families, whose subject is
+a named class that no test on a value decides, judge there (D3), and a decided
+guard still makes their arm dead. A compound write takes `__set` on its write
+half, which the check does not model, so it declines.
 
 **Two rules across the table.** First, a position inside an extent the guard
 sweep proves dead is not judged; the sweep now runs before the reads. Second,
@@ -262,8 +269,14 @@ file's calls are collected in source order, as the pre-order collector does.
 If that ever breaks, the lookup misses, and the argument declines as one
 whose parameter is unknowable: silence, never a false positive.
 
-**A base false positive removed.** A guard that proves present a key a sealed
-declared shape cannot carry (`@param array{type: string} $s`, then
+**`defined()` over a concatenated name.** A `defined()` argument that
+concatenates string literals and `X::class` fetches of a named class
+(`defined(K::class . '::NOPE')`) folds as the name it spells, so the guard
+decides its arm and its `if` body as a literal name does.
+
+**A base false positive removed.** A guard that proves present a key that a
+declared shape cannot carry (a sealed shape without the field, or an unsealed
+shape whose tail key class rejects the key; `@param array{type: string} $s`, then
 `isset($s['url'])`) left the shape unchanged. The guarded read was then
 reported as `offset.undeclared`, a read PHP makes without a warning. This
 false positive was on the base already; S3 would have raised it at more
@@ -272,4 +285,5 @@ the key, with no value and no order, count or cover claim (`shapes.rs`).
 
 Measured: on the ten public packages, under strict with vendor diagnostics,
 default, and strict without PHP, the only difference is one strict finding
-that moves to its read's column.
+that moves to its read's column. Peak RSS on PHPUnit (strict, no PHP) grows
+1.0%, 455.9 MB to 460.4 MB, by the review's measurement.
