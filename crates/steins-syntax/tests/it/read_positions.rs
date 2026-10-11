@@ -425,6 +425,20 @@ fn an_offset_names_its_place_and_literal_key() {
 }
 
 #[test]
+fn an_offset_names_a_variable_key() {
+    use steins_syntax::{Key, Place};
+    let src = "<?php\nfunction f($a, $k) { echo $a[$k]['x'], $a[$k . 'y']; }\n";
+    let tree = SourceTree::parse(src);
+    let f = tree.scopes().iter().find(|sc| sc.stmts.iter().any(|s| !s.read_positions().is_empty()));
+    let positions = f.expect("scope").stmts[0].read_positions();
+    let ReadKind::Offset(outer) = &positions[0].kind else { panic!("{positions:?}") };
+    let Place::Index(inner) = &outer.0 else { panic!("{outer:?}") };
+    assert_eq!(inner.1, Key::Var("k".to_owned()));
+    let ReadKind::Offset(computed) = &positions[2].kind else { panic!("{positions:?}") };
+    assert_eq!(computed.1, Key::Other);
+}
+
+#[test]
 fn an_empty_statement_costs_one_word() {
     let src = "<?php\nfunction f($a) { $b = 1; }\n";
     let tree = SourceTree::parse(src);
