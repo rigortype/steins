@@ -1444,6 +1444,7 @@ fn lower_cond_operand_other(other: &Expression<'_>) -> CondOperand {
             OperandWriters::Any => cond_writes(other),
             _ => Vec::new(),
         },
+        reads: cond_reads(other),
     }
 }
 
