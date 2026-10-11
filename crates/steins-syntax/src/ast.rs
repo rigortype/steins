@@ -3673,8 +3673,8 @@ pub struct Stmt {
     /// statement kinds [`Self::string_contexts`] reads, plus a `static` initializer, and for
     /// the entries that bypass `lower_stmt` (an arrow body, a `get` hook, a hoisted `match`
     /// arm). Boxed so the common empty case costs one word per statement; read it through
-    /// [`Self::read_positions`].
-    pub read_positions: Option<Box<Vec<ReadPosition>>>,
+    /// [`Self::read_positions`] and [`Self::read_calls`].
+    pub read_positions: Option<Box<ReadSet>>,
 }
 
 /// The functions the analyzer folds as **existence guards** (ADR-0049 §4 / N3, issues #198
@@ -3785,6 +3785,22 @@ pub enum RunArg {
 }
 
 impl StmtKind {
+    /// The statically-named calls this kind spells itself: a `Call`, an `Assign`'s,
+    /// `Return`'s, `Destructure`'s or `PropAssign`'s call, an `Echo`'s operand calls. A
+    /// call nested anywhere else is a [`Stmt::read_positions`] entry.
+    #[must_use]
+    pub fn own_calls(&self) -> Vec<&CallExpr> {
+        match self {
+            Self::Call(c) => vec![c],
+            Self::Return { call: Some(c), .. }
+            | Self::Assign { call: Some(c), .. }
+            | Self::Destructure { call: Some(c), .. }
+            | Self::PropAssign { value_call: Some(c), .. } => vec![c],
+            Self::Echo(cs) => cs.iter().collect(),
+            _ => Vec::new(),
+        }
+    }
+
     /// Every sub-trace this statement carries, in source order: an `if`'s branches,
     /// a `match`'s arms, a loop's `init` and body, a `try`'s block, catch bodies
     /// and `finally`. Empty for a leaf statement.
@@ -3849,7 +3865,16 @@ impl Stmt {
     /// The positions in [`Self::read_positions`], empty where there are none.
     #[must_use]
     pub fn read_positions(&self) -> &[ReadPosition] {
-        self.read_positions.as_deref().map_or(&[], Vec::as_slice)
+        self.read_positions.as_deref().map_or(&[], |r| r.positions.as_slice())
+    }
+
+    /// The lowered `new` and function first-class-callable calls of the call positions in
+    /// [`Self::read_positions`], each found by its [`CallExpr::span`] (the span of the
+    /// position); the other calls are found through the tree and the scope (see
+    /// [`ReadSet`]). Empty where there are none.
+    #[must_use]
+    pub fn read_calls(&self) -> &[CallExpr] {
+        self.read_positions.as_deref().map_or(&[], |r| r.calls.as_slice())
     }
 
     /// The names in [`Self::writes_through`], empty where there are none.
@@ -3897,6 +3922,24 @@ pub struct ReadPosition {
     pub span: Span,
     pub carrier: Carrier,
     pub kind: ReadKind,
+}
+
+/// What [`Stmt::read_positions`] holds: the positions and the calls no other list holds
+/// (ADR-0104 §2.5, amended by slice S2).
+///
+/// A [`ReadKind::Call`] position is its span alone; a consumer that judges the call needs
+/// the lowered [`CallExpr`], and the statement's own kind spells only the one call it is
+/// about. Every function call is in [`crate::SourceTree::calls`] and every method and
+/// static call, and method or static first-class callable, in [`Scope::method_calls`]
+/// (found by span: [`crate::SourceTree::call_at`], [`Scope::method_call_at`]), so `calls`
+/// holds only what neither does: a `new` with a statically named class and a function
+/// first-class callable. A call the lowering cannot resolve (a dynamic callee, an
+/// anonymous class) has a position and no entry anywhere.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
+pub struct ReadSet {
+    pub positions: Vec<ReadPosition>,
+    pub calls: Vec<CallExpr>,
 }
 
 /// What a [`ReadPosition`] reads.
@@ -4425,6 +4468,23 @@ pub struct Scope {
     /// [`Self::undefined_reads`] is.
     pub ref_arg_candidates: Vec<UndefinedRead>,
     // end undefined variables (ADR-0078, issue #194)
+}
+
+impl Scope {
+    /// The instance, static or first-class-callable method call of this scope's body at
+    /// exactly `span`, as [`Self::method_calls`] lists it. `None` for any other span.
+    #[must_use]
+    pub fn method_call_at(&self, span: Span) -> Option<&CallExpr> {
+        call_at_span(&self.method_calls, span)
+    }
+}
+
+/// The call at exactly `span` in a list the lowering built in source order (parents before
+/// the calls inside them): the list is non-decreasing in `span.start`, so the calls that
+/// start where `span` does are contiguous and found by bisection.
+pub(crate) fn call_at_span(calls: &[CallExpr], span: Span) -> Option<&CallExpr> {
+    let from = calls.partition_point(|c| c.span.start < span.start);
+    calls[from..].iter().take_while(|c| c.span.start == span.start).find(|c| c.span == span)
 }
 
 /// One by-value `use ($x)` capture a closure body never mentions — an entry of

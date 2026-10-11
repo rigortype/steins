@@ -164,7 +164,7 @@ pub(crate) fn lower_stmt(s: &Statement<'_>, out: &mut Vec<Stmt>) {
         span: stmt_span,
         string_contexts: string_context_sites(s),
         guards: guard_regions_of(s),
-        read_positions: read_positions_of(s).map(Box::new),
+        read_positions: read_positions_of(s, &stmt.kind),
         // The reachability foundation's central fill (ADR-0078, issue #199) — read
         // off the CST statement, never off the lowered `kind`. See `stmt_end`.
         end: stmt_end(s),
@@ -1334,7 +1334,7 @@ fn lower_expr_position(expr: &Expression<'_>) -> Vec<Stmt> {
         value_position: true,
         ..st
     };
-    let st = Stmt { read_positions: read_positions_of_expr(expr).map(Box::new), ..st };
+    let st = Stmt { read_positions: read_positions_of_expr(expr, &st.kind), ..st };
     out.push(with_heap_fill(st, &Node::Expression(expr), &[expr]));
     out
 }
@@ -2040,6 +2040,13 @@ pub(crate) fn lower_expr_stmt(expr: &Expression<'_>) -> Stmt {
         // `exit;` / `die;` — a trace terminator (ADR-0019 never-returns).
         Expression::Construct(Construct::Exit(_) | Construct::Die(_)) => {
             Stmt::lowered(StmtKind::Exit { span: to_span(expr.span()) }, Vec::new())
+        }
+        // `print e;` is `echo e;` that also yields 1, which the statement discards: the
+        // same operand call and the same invalidation, and the env survives it (as a
+        // `Barrier` it cleared every known value, whatever its operand did).
+        Expression::Construct(Construct::Print(p)) => {
+            let calls = named_call(p.value).into_iter().collect();
+            Stmt::lowered(StmtKind::Echo(calls), expr_invalidation(p.value))
         }
         // A pure expression writes nothing (`1;`, `$i;`, a literal match arm): the
         // empty `Echo` is the no-op entry, which keeps its `guards` and `runs` and

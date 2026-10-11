@@ -445,3 +445,93 @@ fn an_empty_statement_costs_one_word() {
     let f = tree.scopes().iter().find(|sc| !sc.stmts.is_empty()).expect("scope");
     assert!(f.stmts.iter().all(|s| s.read_positions.is_none()));
 }
+
+/// For each call or first-class-callable position of `body`, its text and where its lowered
+/// call is found: `stmt` (`Stmt::read_calls`: a `new`, a function callable), `tree`
+/// (`SourceTree::call_at`: a function call), `scope` (`Scope::method_call_at`: a method or
+/// static call or callable), or `none`.
+fn resolved(body: &str) -> Vec<String> {
+    let src = format!("<?php\nclass C {{ public function m() {{}} }}\nfunction f($a, $o, $x) {{\n{body}\n}}\n");
+    let tree = SourceTree::parse(&src);
+    let f = tree
+        .scopes()
+        .iter()
+        .find(|sc| matches!(&sc.owner, steins_syntax::ScopeOwner::Function { name: n, .. } if n == "f"))
+        .expect("the function's scope");
+    let mut all = Vec::new();
+    flatten(&f.stmts, &mut all);
+    let mut out = Vec::new();
+    for s in all {
+        for p in s.read_positions() {
+            if !matches!(p.kind, ReadKind::Call | ReadKind::CallRef) {
+                continue;
+            }
+            let found = if s.read_calls().iter().any(|c| c.span == p.span) {
+                "stmt"
+            } else if tree.call_at(p.span).is_some() {
+                "tree"
+            } else if f.method_call_at(p.span).is_some() {
+                "scope"
+            } else {
+                "none"
+            };
+            out.push(format!("{} -> {found}", &src[p.span.start as usize..p.span.end as usize]));
+        }
+    }
+    out
+}
+
+#[test]
+fn every_call_position_finds_its_lowered_call_in_exactly_one_list() {
+    assert_eq!(resolved("echo g(f($a));"), ["g(f($a)) -> tree", "f($a) -> tree"]);
+    assert_eq!(resolved("$r = g($o->m());"), ["g($o->m()) -> tree", "$o->m() -> scope"]);
+    assert_eq!(resolved("echo C::s(1);"), ["C::s(1) -> scope"]);
+    assert_eq!(resolved("throw new C(f($a));"), ["new C(f($a)) -> stmt", "f($a) -> tree"]);
+    assert_eq!(resolved("echo $o?->m();"), ["$o?->m() -> scope"]);
+}
+
+#[test]
+fn a_first_class_callable_is_found_by_its_kind() {
+    assert_eq!(resolved("$k = f(...);"), ["f(...) -> stmt"]);
+    assert_eq!(resolved("$k = $o->m(...);"), ["$o->m(...) -> scope"]);
+    assert_eq!(resolved("$k = C::m(...);"), ["C::m(...) -> scope"]);
+}
+
+#[test]
+fn a_computed_callee_and_a_dynamic_class_have_a_position_and_no_call() {
+    assert_eq!(resolved("echo $x();"), ["$x() -> tree"]);
+    assert_eq!(resolved("echo $o->$a();"), ["$o->$a() -> scope"]);
+    assert_eq!(resolved("$k = new $x();"), ["new $x() -> none"]);
+}
+
+#[test]
+fn the_tree_and_the_scope_list_their_calls_in_source_order() {
+    // `call_at` bisects on the start offset, which only holds if the lists are in source
+    // order with a call before the calls inside it.
+    let src = "<?php\nfunction f($o) { return g(h($o->a($o->b()), $o->c())) . $o->d()(1); }\nfunction k() { return f(1)(2); }\n";
+    let tree = SourceTree::parse(src);
+    let starts: Vec<u32> = tree.calls().iter().map(|c| c.span.start).collect();
+    assert!(starts.windows(2).all(|w| w[0] <= w[1]), "{starts:?}");
+    for sc in tree.scopes() {
+        let starts: Vec<u32> = sc.method_calls.iter().map(|c| c.span.start).collect();
+        assert!(starts.windows(2).all(|w| w[0] <= w[1]), "{starts:?}");
+        for c in &sc.method_calls {
+            assert_eq!(sc.method_call_at(c.span).map(|f| f.span), Some(c.span));
+        }
+    }
+    for c in tree.calls() {
+        assert_eq!(tree.call_at(c.span).map(|f| f.span), Some(c.span));
+    }
+}
+
+#[test]
+fn print_lowers_like_echo() {
+    let src = "<?php\nfunction f($a) { print g($a); }\n";
+    let tree = SourceTree::parse(src);
+    let f = tree
+        .scopes()
+        .iter()
+        .find(|sc| matches!(&sc.owner, steins_syntax::ScopeOwner::Function { name: n, .. } if n == "f"))
+        .expect("the function's scope");
+    assert!(matches!(&f.stmts[0].kind, steins_syntax::StmtKind::Echo(calls) if calls.len() == 1));
+}

@@ -72,13 +72,20 @@ use mago_syntax::cst::{
     PartialArgument, PartialArgumentList, Statement, StaticItem, UnaryPrefixOperator, Variable,
 };
 
-use crate::ast::{ArgValue, Carrier, Key, Place, ReadKind, ReadPosition, Span};
-use crate::lower_expr::{class_const_name, lower_arg_value, prop_fetch_of, trace_static_class};
+use crate::ast::{
+    ArgValue, CallExpr, Callee, Carrier, Key, Place, ReadKind, ReadPosition, ReadSet, Span,
+    StmtKind,
+};
+use crate::lower_expr::{
+    class_const_name, first_class_function_ref, lower_arg_value, lower_construct_call,
+    prop_fetch_of, trace_static_class,
+};
 use crate::{bytes_to_string, children, stack_guard, strip_dollar, to_span};
 
 /// The read positions of one statement's **own** expressions, `None` when there are none.
-pub(crate) fn read_positions_of(s: &Statement<'_>) -> Option<Vec<ReadPosition>> {
-    let mut scan = Scan::default();
+/// `kind` is the statement's lowered kind: the `new` it spells is not lowered a second time.
+pub(crate) fn read_positions_of(s: &Statement<'_>, kind: &StmtKind) -> Option<Box<ReadSet>> {
+    let mut scan = Scan::of(kind);
     match s {
         Statement::Expression(es) => scan.plain(es.expression),
         Statement::Return(r) => {
@@ -102,8 +109,11 @@ pub(crate) fn read_positions_of(s: &Statement<'_>) -> Option<Vec<ReadPosition>> 
 
 /// The read positions of one expression PHP evaluates in statement position (an arrow
 /// function's body, a `get` hook's, a `match` arm's), `None` when there are none.
-pub(crate) fn read_positions_of_expr(e: &Expression<'_>) -> Option<Vec<ReadPosition>> {
-    let mut scan = Scan::default();
+pub(crate) fn read_positions_of_expr(
+    e: &Expression<'_>,
+    kind: &StmtKind,
+) -> Option<Box<ReadSet>> {
+    let mut scan = Scan::of(kind);
     scan.plain(e);
     scan.finish()
 }
@@ -174,15 +184,35 @@ enum Operand<'a, 'arena> {
     Member(&'a Expression<'arena>, &'a mago_syntax::cst::ClassLikeMemberSelector<'arena>),
 }
 
-#[derive(Default)]
 struct Scan {
     out: Vec<ReadPosition>,
+    /// The lowered calls no other list holds (see [`ReadSet`]).
+    calls: Vec<CallExpr>,
+    /// The spans of the calls the statement's kind spells, which are not lowered again.
+    own: Vec<Span>,
 }
 
 impl Scan {
-    fn finish(mut self) -> Option<Vec<ReadPosition>> {
+    fn of(kind: &StmtKind) -> Self {
+        let own = kind.own_calls().iter().map(|c| c.span).collect();
+        Scan { out: Vec::new(), calls: Vec::new(), own }
+    }
+
+    fn finish(mut self) -> Option<Box<ReadSet>> {
         self.out.shrink_to_fit();
-        (!self.out.is_empty()).then_some(self.out)
+        self.calls.shrink_to_fit();
+        (!self.out.is_empty())
+            .then(|| Box::new(ReadSet { positions: self.out, calls: self.calls }))
+    }
+
+    /// Keep the lowered call behind a call position, unless no consumer can resolve it (a
+    /// dynamic callee).
+    fn keep_call(&mut self, call: Option<CallExpr>) {
+        if let Some(call) = call
+            && call.receiver != Callee::Dynamic
+        {
+            self.calls.push(call);
+        }
     }
 
     /// Record a position unless its carrier resolved to `None` (not judged by anyone).
@@ -354,6 +384,12 @@ impl Scan {
         // Recorded by span alone and before its operands, so an argument can name it by index.
         let index = u32::try_from(self.out.len()).ok();
         self.push(ReadKind::Call, to_span(span), resolve(*local, inner, false));
+        // Only a `new` is kept: the other calls are in the tree's and the scope's lists.
+        if let Node::Instantiation(inst) = node
+            && !self.own.contains(&to_span(span))
+        {
+            self.keep_call(lower_construct_call(inst));
+        }
         match operand {
             // A plain function or class name is no operand; a computed one is.
             Operand::Callee(Expression::Identifier(_)) => {}
@@ -438,6 +474,9 @@ impl Scan {
             self.descend(&Node::ClassLikeMemberSelector(selector), inner, &Local::Plain);
         }
         self.push(ReadKind::CallRef, to_span(span), resolve(Local::Plain, inner, false));
+        if let Node::FunctionPartialApplication(fpa) = node {
+            self.keep_call(Some(first_class_function_ref(fpa.function, to_span(fpa.span()))));
+        }
     }
 
     /// The binary, ternary and assignment operators: the ones that decide which of their
