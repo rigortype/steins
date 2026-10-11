@@ -13,6 +13,7 @@ use crate::{
 };
 use crate::absence::{check_undefined_class_const, check_undefined_property};
 use crate::arg_check::{is_type_error, object_world_guard_blind};
+use crate::value_tops::resolve_native_value;
 use crate::contract::accepts;
 use crate::env::{Descent, Known, Store, Stratum};
 use crate::inaccessible::{check_inaccessible_class_const, check_inaccessible_property};
@@ -152,7 +153,7 @@ pub(crate) fn check_return_value(
                 Some(&mut *out),
             )
             .or_else(|| {
-                cx.resolve_static_value(value, w.enclosing_class)
+                resolve_native_value(cx, value, w.enclosing_class)
                     .map(|v| (v, Stratum::Verified))
             });
         // The native return check is proof-layer (`type.return-mismatch`): a

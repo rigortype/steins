@@ -17,6 +17,7 @@ use crate::env::{Known, Store, Stratum, arg_of_val};
 use crate::generics::{check_named_phpdoc_params, check_phpdoc_param};
 use crate::heap::simple_class;
 use crate::project::Diagnostic;
+use crate::value_tops::check_top_argument;
 use crate::walk::WalkCx;
 
 use super::{project_call_summary, project_method_summary};
@@ -283,6 +284,15 @@ pub(crate) fn check_propagated_call(
                     out,
                 );
             }
+        }
+        // A variable bound to a proven value against an `array`/`object`/`iterable`/
+        // `callable` top (ADR-0043's 2026-10-11 amendment); a written value is the
+        // direct pass's.
+        if !native_fired && matches!(arg.value, ArgValue::Var(_)) {
+            native_fired = check_top_argument(
+                cx, folder, param, &decl.name, arg, Some(env), Some(store), poisoned, in_descent,
+                out,
+            );
         }
 
         // Only the propagation-carrier arg kinds (`$var`/`call()`/`$o->m()`) are the

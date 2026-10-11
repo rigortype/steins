@@ -27,6 +27,9 @@ use crate::{PHPDOC_MAYBE_ARGUMENT_MISMATCH_ID, TYPE_MAYBE_ARGUMENT_MISMATCH_ID, 
 use crate::builtin_returns::{builtin_call_return_fact, builtin_return_floor, store_holds_resource};
 use crate::coerce::{member_accepts_coercive, member_accepts_strict};
 use crate::offsets::{place_of, shape_read_at};
+use crate::value_tops::{
+    CLOSURE_FQN, builtin_null_rejected, closure_is_certain, resolve_native_value, top_arg_value,
+};
 
 // ---------------------------------------------------------------------------
 // Value / type helpers.
@@ -36,6 +39,27 @@ use crate::offsets::{place_of, shape_read_at};
 pub(crate) fn render_call(name: &str, args: &[ArgValue]) -> String {
     let inner: Vec<String> = args.iter().map(ArgValue::render).collect();
     format!("{name}({})", inner.join(", "))
+}
+
+/// Whether `p` is **implicitly nullable** and `arg` is the `null` its default
+/// admits — the argument-side half of a bit the callee side has read all along
+/// (issue #391).
+///
+/// `function f(string $s = null)` declares a non-nullable hint whose `= null`
+/// default makes PHP widen the parameter to `?string`: `f(null)` runs, emitting
+/// only the 8.4 "implicitly marking parameter as nullable" deprecation. Every
+/// argument-position native check therefore has to consult the default beside the
+/// hint, exactly as [`seed_fact`] does on the declaration side
+/// (`ty.nullable || p.has_null_default`). Without it a proven `null` — and, since
+/// issue #391, a fact whose `null` side-flag is set — convicted a parameter PHP
+/// accepts, a live proof-layer false positive on the pinned corpus.
+///
+/// A guard rather than a widened [`NativeType`] so the diagnostic keeps rendering
+/// the spelling the declaration actually carries.
+///
+/// [`seed_fact`]: crate::seed_fact
+pub(crate) fn implicit_null_accepted(p: &Param, arg: &ArgValue) -> bool {
+    p.has_null_default && matches!(arg, ArgValue::Null)
 }
 
 /// The generalized truth table: does passing (or returning) a **literal** `arg`
@@ -72,36 +96,71 @@ pub(crate) fn render_call(name: &str, args: &[ArgValue]) -> String {
 /// oracle on `cx`: a **proven object value** (`new` / enum case) errors iff every
 /// union member provenly rejects its exact class; a **scalar value** sees through
 /// any `Instance` union members (no coercion exists for those, exactly as the
-/// `member_accepts_*` tables' `Instance => false` arms encode). A `null` value
-/// against an object-bearing type stays silent (out of scope; sidesteps the
-/// `has_null_default` implicit-nullable interplay).
-/// Whether `p` is **implicitly nullable** and `arg` is the `null` its default
-/// admits — the argument-side half of a bit the callee side has read all along
-/// (issue #391).
+/// `member_accepts_*` tables' `Instance => false` arms encode).
 ///
-/// `function f(string $s = null)` declares a non-nullable hint whose `= null`
-/// default makes PHP widen the parameter to `?string`: `f(null)` runs, emitting
-/// only the 8.4 "implicitly marking parameter as nullable" deprecation. Every
-/// argument-position native check therefore has to consult the default beside the
-/// hint, exactly as [`seed_fact`] does on the declaration side
-/// (`ty.nullable || p.has_null_default`). Without it a proven `null` — and, since
-/// issue #391, a fact whose `null` side-flag is set — convicted a parameter PHP
-/// accepts, a live proof-layer false positive on the pinned corpus.
+/// # The rule table (ADR-0043's 2026-10-11 amendment, issues #951, #941, #952)
 ///
-/// A guard rather than a widened [`NativeType`] so the diagnostic keeps rendering
-/// the spelling the declaration actually carries.
+/// One row per value kind against each declared kind. **TypeError** is a definite
+/// verdict, **accept** is silence because PHP accepts, **decline** is silence because
+/// the row is not certain. Every cell was run on PHP 8.5.11 at the argument, the
+/// return and the typed-property seam, in both modes; the three seams agree on every
+/// one of them, and only the scalar-into-scalar cells differ between the modes. The
+/// rows are pinned in `tests/it/value_relation_openings.rs`; the scalar cells in
+/// `tests/it/coercion_witness_grid.rs`.
 ///
-/// [`seed_fact`]: crate::seed_fact
-pub(crate) fn implicit_null_accepted(p: &Param, arg: &ArgValue) -> bool {
-    p.has_null_default && matches!(arg, ArgValue::Null)
-}
-
+/// ```text
+/// value                    declared                              verdict
+/// ------------------------ ------------------------------------- ------------------------------
+/// int/float/string/bool    scalar and bool-literal members        the coercion table above
+/// int/float/string/bool    class, interface, A&B, (A&B)|C         TypeError: nothing coerces to
+///                                                                 an object, either mode
+/// null                     any native type without `null`         TypeError, either mode — scalar,
+///                          (scalar, class, A&B, (A&B)|C)          class and intersection alike
+/// null                     `?T`, `T|null`                         accept
+/// null                     `T $p = null` (any T)                  accept: the caller's
+///                                                                 [`implicit_null_accepted`]
+/// null                     a builtin's scalar position, coercive  accept (deprecation): the
+///                                                                 caller's internal-null carve-out
+/// array literal            any native type                        TypeError, either mode: no member
+///                                                                 accepts an array (a hint naming
+///                                                                 `array` lowers to no NativeType)
+/// closure                  `Closure`, or a union holding it       accept (is-a Yes)
+/// closure                  other class or interface, A&B, DNF     TypeError: `Closure` is final and
+///                                                                 implements nothing
+/// closure                  int/float/bool members                 TypeError: no object coerces
+/// closure                  a `string` member                      strict TypeError; coercive
+///                                                                 decline (the `__toString` rule
+///                                                                 is not specialised to `Closure`)
+/// `f(...)`, f unresolved   anything                               decline: an Error comes first
+/// `new C`, enum case       any native type                        [`Cx::object_is_type_error`]:
+///                                                                 every member rejects C, under a
+///                                                                 completely enumerated hierarchy
+/// any other value          —                                      decline: the caller resolves a
+///                                                                 variable, call or constant first
+/// ```
+///
+/// Declared kinds that never reach this function, because their hint lowers to no
+/// [`NativeType`]: `mixed` (accepts everything), `self`/`static`/`parent`, `void`/
+/// `never`, and every union holding `array`, `iterable`, `callable`, `object` or
+/// `mixed`. The bare and `null`-widened `array`/`object`/`iterable`/`callable` reach
+/// [`crate::value_tops::top_is_type_error`] instead, which carries its own table; a
+/// union of one of them with anything but `null` declines. A **by-reference**
+/// parameter is skipped by every caller and a **variadic** one ends the positional
+/// walk, so neither is judged. The caller-side gates stay as they were: the Verified
+/// premise (ADR-0052 §5), the internal-null carve-out, and guard blindness inside a
+/// binding descent ([`object_world_guard_blind`], which now counts a closure and an
+/// array as values a callee's unmodeled guard may have narrowed).
+///
+/// The possibly grade does not read the new `null` row: [`maybe_fact_verdict`] and the
+/// return seam's arm judgment keep the object-bearing `null` silence through
+/// [`possibly_null_rejected`], so this amendment moves no possibly-grade finding.
 pub(crate) fn is_type_error(cx: &Cx, ty: &NativeType, arg: &ArgValue) -> bool {
     let strict = cx.strict();
     match arg {
-        // `null` is accepted iff the type is nullable (`?T` / `null` member). An
-        // object-bearing type stays silent on `null`.
-        ArgValue::Null => !ty.nullable && !ty.has_instance(),
+        // `null` is accepted iff the type is nullable (`?T` / `null` member) — an
+        // object-bearing type included (the rule table above). The `= null` default
+        // that widens a parameter is the caller's `implicit_null_accepted`.
+        ArgValue::Null => !ty.nullable,
         // A concrete non-null literal: an error iff no member accepts it. `Instance`
         // members contribute nothing (they never accept a scalar) — ADR-0043 stage-3
         // scalar-vs-object opening (e.g. a raw string where an enum is required).
@@ -119,9 +178,14 @@ pub(crate) fn is_type_error(cx: &Cx, ty: &NativeType, arg: &ArgValue) -> bool {
             Some(class) => cx.object_is_type_error(ty, &class),
             None => false,
         },
-        // An array is never a native scalar/union finding (arrays only ever fail
-        // the phpdoc contract relation, checked separately).
-        ArgValue::Array(_) => false,
+        // No member of a native type accepts an array, in either mode: a hint that
+        // names `array` (or `iterable`) lowers to no `NativeType` at all.
+        ArgValue::Array(_) => true,
+        // A closure is an object of the final, interface-less class `Closure`, judged
+        // as one; a first-class callable of a name that does not resolve declines.
+        ArgValue::Closure(c) => {
+            closure_is_certain(cx, c) && cx.object_is_type_error(ty, CLOSURE_FQN)
+        }
         // Non-provable carriers: silent (a `Ternary` is resolved to a concrete arm
         // before this point; a `ClassConst` is resolved upstream to an enum case /
         // literal, so an unresolved one is genuinely unproven).
@@ -153,9 +217,6 @@ pub(crate) fn is_type_error(cx: &Cx, ty: &NativeType, arg: &ArgValue) -> bool {
         // the binding lane's fact, and a cast of a literal arrives here already
         // resolved to the value it folds to.
         | ArgValue::Cast { .. }
-        // A closure value against a scalar/union param is never a scalar finding
-        // (a `callable`/`Closure` param is not a native scalar type this checks).
-        | ArgValue::Closure(_)
         // A global-constant fetch (issue #168) is genuinely unproven here.
         | ArgValue::GlobalConst(..)
         | ArgValue::Other => false,
@@ -172,9 +233,31 @@ pub(crate) fn is_type_error(cx: &Cx, ty: &NativeType, arg: &ArgValue) -> bool {
 /// unsound, the same reason descent-bound property writes are unchecked (see
 /// `apply_prop_assign`). Only a judgment touching an object type is suppressed;
 /// scalar-vs-scalar descent checks are unaffected. Always `false` outside descent.
+///
+/// A closure is an object, and an array is the value an unmodeled `is_array()` or
+/// `is_iterable()` guard may have narrowed away (ADR-0043's 2026-10-11 amendment):
+/// both were silent everywhere before it, and inside a descent they stay so.
 pub(crate) fn object_world_guard_blind(in_descent: bool, ty: &NativeType, value: &ArgValue) -> bool {
     in_descent
-        && (ty.has_instance() || matches!(value, ArgValue::New(..) | ArgValue::EnumCase(..)))
+        && (ty.has_instance()
+            || matches!(
+                value,
+                ArgValue::New(..) | ArgValue::EnumCase(..) | ArgValue::Closure(_) | ArgValue::Array(_)
+            ))
+}
+
+/// Whether a `null` arm is rejected by `ty` **for the possibly grade** — the
+/// object-bearing silence [`is_type_error`] carried before ADR-0043's 2026-10-11
+/// amendment, kept here on purpose.
+///
+/// The possibly grade emits only a partial rejection, and #291's ruling keeps the
+/// all-arms verdict silent. Reading the new `null` row there would turn a
+/// `?string` fact against `K` from "its `string` arm is rejected" into "every arm
+/// is rejected", silencing a finding the base reports, and would open a new
+/// partial verdict for `int|null` against `int|K`. Neither belongs to the value
+/// relation's opening; the possibly grade's `null` reading is its own question.
+pub(crate) fn possibly_null_rejected(cx: &Cx, ty: &NativeType) -> bool {
+    !ty.has_instance() && is_type_error(cx, ty, &ArgValue::Null)
 }
 
 // ===========================================================================
@@ -320,7 +403,7 @@ pub(crate) fn maybe_fact_verdict(
     let rejected: Vec<AbstractArm> =
         arms.iter().filter(|arm| native_rejects_base(cx, ty, arm.0)).copied().collect();
     let null_rejected = nullable
-        && is_type_error(cx, ty, &ArgValue::Null)
+        && possibly_null_rejected(cx, ty)
         && !null_accepted
         && !null_tolerated;
     let total = arms.len() + usize::from(nullable);
@@ -779,6 +862,43 @@ fn lower_reflected_param_member(
     Some(())
 }
 
+/// `null` at a builtin position the native relation does not lower — `object`,
+/// `array`, `callable`, a class, `Traversable|array` — judged by
+/// [`builtin_null_rejected`]: the internal-null carve-out is scalar-only, so these
+/// reject `null` in both modes (ADR-0043's 2026-10-11 amendment). Only a proven
+/// `null` (written, or a variable's `Verified` singleton) is judged; the message
+/// spells the engine's own reflected type.
+#[allow(clippy::too_many_arguments)]
+fn check_builtin_null_position(
+    cx: &Cx,
+    rendered: &str,
+    callee: &str,
+    param_name: &str,
+    arg: &Arg,
+    env: &HashMap<String, Known>,
+    poisoned: bool,
+    in_descent: bool,
+    out: &mut Vec<Diagnostic>,
+) {
+    // A rebound variable may sit under a guard the walk does not model.
+    if in_descent && matches!(arg.value, ArgValue::Var(_)) {
+        return;
+    }
+    let Some((value, provenance, _)) = top_arg_value(cx, &arg.value, Some(env), poisoned) else {
+        return;
+    };
+    if matches!(value, ArgValue::Null) && builtin_null_rejected(rendered, cx.strict()) {
+        out.push(cx.diagnostic_spelled(
+            arg.span.start,
+            &value,
+            provenance.as_deref(),
+            callee,
+            param_name,
+            rendered,
+        ));
+    }
+}
+
 /// The synthetic [`Param`] one reflected position judges as. Carries the engine's
 /// own parameter name, so the message names `$string` the way PHP's own
 /// `TypeError` does.
@@ -792,6 +912,7 @@ fn builtin_param_as_param(bp: &BuiltinParam, ty: NativeType, span: Span) -> Para
     Param {
         name: bp.name.clone(),
         ty: Some(ty),
+        top: None,
         hint_span: None,
         variadic: false,
         by_ref: false,
@@ -881,6 +1002,11 @@ pub(crate) fn check_builtin_call_args(
                     in_descent, out,
                 );
             }
+            if let Some(rendered) = bp.ty.as_deref() {
+                check_builtin_null_position(
+                    cx, rendered, name, &bp.name, arg, env, poisoned, in_descent, out,
+                );
+            }
             continue;
         };
         let param = builtin_param_as_param(bp, ty, arg.span);
@@ -895,7 +1021,7 @@ pub(crate) fn check_builtin_call_args(
         .or_else(|| {
             // A literal in the source IS the value, so it enters `Verified` with no
             // provenance phrase — the direct pass's shape, reached from here.
-            cx.resolve_static_value(&arg.value, enclosing_class)
+            resolve_native_value(cx, &arg.value, enclosing_class)
                 .map(|v| (v, None, Stratum::Verified))
         });
         // Proof-layer consumption rule (ADR-0052 §5): an all-`Verified` premise, or

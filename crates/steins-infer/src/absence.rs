@@ -1172,6 +1172,82 @@ pub(crate) fn check_undefined_function(
     });
 }
 
+// ---------------------------------------------------------------------------
+// Callable names (ADR-0043's 2026-10-11 amendment, issue #941): the ladders above,
+// asked of the name a string or array spells where a native `callable` is
+// required, rather than of a call. The legs are the same legs, in the same order;
+// only what names the target differs. A string callable is resolved by PHP as a
+// fully-qualified name, so there is one candidate and no namespace fallback.
+// ---------------------------------------------------------------------------
+
+/// Whether the function a callable string names is provably absent — the
+/// `call.undefined-function` ladder for one fully-qualified candidate. `store` is
+/// the branch's when the caller has one, for the `function_exists` vouch.
+pub(crate) fn callable_function_absent(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    name: &str,
+    store: Option<&Store>,
+) -> bool {
+    let lname = name.trim_start_matches('\\').to_ascii_lowercase();
+    if steins_catalog::effect_labels(&lname).is_some()
+        || !matches!(cx.index.resolve_function(&lname), Res::Absent)
+        || is_sapi_provided_function(&lname)
+        || store.is_some_and(|s| s.vouches_function(&lname))
+    {
+        return false;
+    }
+    cx.dam.is_clear()
+        && folder.absence_family_available()
+        && folder.boot_surface_function(&lname) == Some(false)
+}
+
+/// Whether the class a callable's class half names is provably absent — the
+/// `class.undefined` ladder ([`check_undefined_class`]).
+pub(crate) fn callable_class_absent(cx: &Cx, folder: &mut dyn Folder, name: &str) -> bool {
+    let lname = name.trim_start_matches('\\').to_ascii_lowercase();
+    if !matches!(cx.index.resolve_class(&lname), Res::Absent)
+        || steins_catalog::builtin_class_supers(&lname).is_some()
+    {
+        return false;
+    }
+    cx.dam.is_clear()
+        && folder.absence_family_available()
+        && folder.boot_surface_class_like(&lname) == Some(false)
+}
+
+/// Whether `method` is provably absent from the exact project class `class_fqn` —
+/// the `call.undefined-method` ladder ([`check_undefined_method`]), walked for
+/// **both** call kinds. A callable reaches the method from whatever scope calls
+/// it, so `__call` and `__callStatic` are each an obstacle, whichever the
+/// spelling suggests. A builtin class anywhere on the chain is silence, as it is
+/// for the call: a reflected declaration never convicts (`Folder::reflected_class`).
+pub(crate) fn callable_method_absent(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    class_fqn: &str,
+    method: &str,
+) -> bool {
+    if !folder.absence_family_available() {
+        return false;
+    }
+    let mut chain: Vec<String> = Vec::new();
+    let mut conditional = false;
+    for kind in [UndefKind::Static, UndefKind::Instance] {
+        let ChainWalk::Absent { fqns, any_conditional, .. } =
+            enumerate_method_chain(cx, class_fqn, method, kind)
+        else {
+            return false;
+        };
+        conditional |= any_conditional;
+        chain = fqns;
+    }
+    if conditional && !cx.dam.is_clear() {
+        return false;
+    }
+    chain.iter().all(|fqn| folder.boot_surface_class_like(fqn) == Some(false))
+}
+
 /// The ADR-0049 §9 closure-evidence clause for the existence ids: the boot surface's
 /// self-description (`not defined in the project, not on PHP 8.5.8 (32 extensions)`),
 /// or a version-agnostic phrasing when the sidecar reports no label.

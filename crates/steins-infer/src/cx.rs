@@ -1523,16 +1523,31 @@ impl<'a> Cx<'a> {
         param_name: &str,
         ty: &NativeType,
     ) -> Diagnostic {
+        self.diagnostic_spelled(offset, value, provenance, callee, param_name, &ty.render())
+    }
+
+    /// [`Self::diagnostic`] for a declared type spelled by the caller — a
+    /// parameter top (`callable`, `?array`) or a builtin's reflected type, which
+    /// no [`NativeType`] renders (ADR-0043's 2026-10-11 amendment).
+    pub(crate) fn diagnostic_spelled(
+        &self,
+        offset: u32,
+        value: &ArgValue,
+        provenance: Option<&str>,
+        callee: &str,
+        param_name: &str,
+        ty: &str,
+    ) -> Diagnostic {
         let pos = self.tree().position(offset);
         let mode = if self.strict() { "strict" } else { "coercive" };
         let message = match provenance {
             Some(p) => format!(
                 "argument {} ({}) to {}() cannot become {} ${} — proven TypeError ({} mode)",
-                value.render(), p, callee, ty.render(), param_name, mode,
+                value.render(), p, callee, ty, param_name, mode,
             ),
             None => format!(
                 "argument {} to {}() cannot become {} ${} — proven TypeError ({} mode)",
-                value.render(), callee, ty.render(), param_name, mode,
+                value.render(), callee, ty, param_name, mode,
             ),
         };
         Diagnostic { id: ID, path: self.path().to_owned(), line: pos.line, column: pos.column, message, facet: None, fix: None }

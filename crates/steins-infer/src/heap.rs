@@ -17,6 +17,7 @@ use crate::{
     contract_touches_class, describe_fact,
 };
 use crate::arg_check::is_type_error;
+use crate::value_tops::resolve_native_value;
 use crate::coerce::coerce_fact_to_native;
 use crate::contract::{
     CArg, CVal, GenericCarry, TemplateShadow, accepts, class_key, neutralize_templates,
@@ -970,17 +971,29 @@ pub(crate) fn apply_prop_assign(
     // to the caller.
     let hooked = pdecl.is_some_and(|pd| pd.hooked) || cx.class_body_hooked(&class, prop);
 
-    // 1. Native `type.property-mismatch` — a proven literal against a native prop
-    // type. Skip promoted props (checked as constructor args; no double-report).
+    // 1. Native `type.property-mismatch` — a proven literal, or a value written in
+    // place that the relation judges whole (an array, a closure, a `new`, an enum
+    // case; ADR-0043's 2026-10-11 amendment), against a native prop type. Skip
+    // promoted props (checked as constructor args; no double-report).
+    let native_value: Option<ArgValue> = match proven_lit.as_ref() {
+        Some(lit) if lit.is_literal() || matches!(lit, ArgValue::Array(_)) => Some(lit.clone()),
+        Some(_) => None,
+        None => resolve_native_value(cx, value, w.enclosing_class).filter(|v| {
+            matches!(
+                v,
+                ArgValue::Array(_) | ArgValue::Closure(_) | ArgValue::New(..) | ArgValue::EnumCase(..)
+            )
+        }),
+    };
+    let native_strat = if proven_lit.is_some() { rvalue_strat } else { Stratum::Verified };
     let mut native_fired = false;
     if checks_enabled
         && !hooked
-        && rvalue_strat == Stratum::Verified
+        && native_strat == Stratum::Verified
         && let Some(pd) = pdecl
         && !pd.promoted
         && let Some(ty) = pd.ty.as_ref()
-        && let Some(lit) = proven_lit.as_ref()
-        && lit.is_literal()
+        && let Some(lit) = native_value.as_ref()
         && is_type_error(cx, ty, lit)
     {
         let pos = cx.tree().position(span_start);

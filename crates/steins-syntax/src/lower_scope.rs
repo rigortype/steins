@@ -447,6 +447,7 @@ fn hook_params(
     vec![Param {
         name: "value".to_owned(),
         ty: hint.and_then(|h| lower_hint(h, rc)),
+        top: hint.and_then(crate::lower_decl::param_top),
         hint_span: hint.map(|h| to_span(h.span())),
         variadic: false,
         by_ref: false,

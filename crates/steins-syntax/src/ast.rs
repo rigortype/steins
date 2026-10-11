@@ -237,6 +237,12 @@ pub struct Param {
     pub name: String,
     /// Native scalar/union type, or `None` when untyped / non-scalar / complex.
     pub ty: Option<NativeType>,
+    /// The non-scalar top the hint names when [`Self::ty`] could not lower it:
+    /// `array`, `object`, `iterable` or `callable`, optionally widened by `null`
+    /// (ADR-0043's 2026-10-11 amendment, issues #951 and #941). `None` for every
+    /// other hint, a union of a top with anything but `null` included. Never set
+    /// together with [`Self::ty`].
+    pub top: Option<ParamTop>,
     // untyped surface (ADR-0078, issue #200)
     /// **File byte span of the native type hint**, `None` if none declared —
     /// [`Self::ty`] also lowers unsupported-but-valid hints to `None`; slice with [`SourceTree::source_slice`] for spelling.
@@ -258,6 +264,52 @@ pub struct Param {
     /// (constant, `self::X`, expression) is `None` even if [`Self::has_default`].
     pub default: Option<ArgValue>,
     pub span: Span,
+}
+
+/// A parameter hint whose whole envelope is one non-scalar top PHP enforces at the
+/// call boundary (ADR-0043's 2026-10-11 amendment): `array`, `object`, `iterable`
+/// or `callable`, bare or widened by `null` (`?array`, `array|null`).
+///
+/// The parameter-side twin of [`EnforcedTop`], kept beside [`NativeType`] for the
+/// reason that one is: the union's members are what the value domain decides a
+/// value against, and these only bound it. Only the argument check reads it; a
+/// union of a top with a scalar or a class (`array|string`, `iterable|K`) lowers to
+/// no top at all, so it stays silent as it did before.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
+pub struct ParamTop {
+    pub kind: ParamTopKind,
+    /// `true` for `?T` or a `null` union member: `null` passes.
+    pub nullable: bool,
+}
+
+/// Which top a [`ParamTop`] names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
+pub enum ParamTopKind {
+    /// `array` — every array, and nothing else.
+    Array,
+    /// `object` — every object, closures and enum cases included.
+    Object,
+    /// `iterable` — exactly `array|Traversable`.
+    Iterable,
+    /// `callable` — a closure, an invokable object, or a string or array naming a
+    /// function or method PHP can call from the calling scope.
+    Callable,
+}
+
+impl ParamTop {
+    /// The PHP spelling, for a diagnostic: `array`, `?callable`.
+    #[must_use]
+    pub fn render(self) -> String {
+        let kw = match self.kind {
+            ParamTopKind::Array => "array",
+            ParamTopKind::Object => "object",
+            ParamTopKind::Iterable => "iterable",
+            ParamTopKind::Callable => "callable",
+        };
+        if self.nullable { format!("?{kw}") } else { kw.to_owned() }
+    }
 }
 
 /// [`EffectOrigin`] is a structural effect-origin candidate from a CST scan of

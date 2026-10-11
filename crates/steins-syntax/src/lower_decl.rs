@@ -18,7 +18,8 @@ use crate::ast::{
     AnonClassEdge, ArgValue, CatchClause, ClassAliasEdge, ClassConstDecl, ClassDecl, ClassRef,
     DynamismKind, DynamismSite, EffectEnvelope, EnforcedTop, EnumCaseDecl, FunctionDecl,
     GlobalConstDecl,
-    IncludePath, MethodDecl, NameRef, NativeType, Param, PropertyDecl, ReflectionKind,
+    IncludePath, MethodDecl, NameRef, NativeType, Param, ParamTop, ParamTopKind, PropertyDecl,
+    ReflectionKind,
     ReflectionSite, RetBoundKeyword, RetBoundKind, ScalarType, Span, StaticClass, TypeMember,
     TraitProp, Visibility, normalize_const_fqn,
 };
@@ -693,6 +694,7 @@ pub(crate) fn lower_params(list: &mago_syntax::cst::FunctionLikeParameterList<'_
         .map(|p| Param {
             name: strip_dollar(bytes_to_string(p.variable.name)),
             ty: p.hint.as_ref().and_then(|h| lower_hint(h, rc)),
+            top: p.hint.as_ref().and_then(param_top),
             // The syntactic answer, kept beside the modeling one (issue #200).
             hint_span: p.hint.as_ref().map(|h| to_span(h.span())),
             variadic: p.is_variadic(),
@@ -1773,6 +1775,39 @@ pub(crate) fn enforced_top(hint: &Hint<'_>) -> Option<EnforcedTop> {
         Hint::Object(_) => Some(EnforcedTop::Object),
         Hint::Iterable(_) => Some(EnforcedTop::Iterable),
         Hint::Parenthesized(p) => enforced_top(p.hint),
+        _ => None,
+    }
+}
+
+/// The [`ParamTop`] a parameter hint names (ADR-0043's 2026-10-11 amendment): a bare
+/// `array`/`object`/`iterable`/`callable`, or one widened by `null` through `?T`,
+/// `T|null` or `null|T`, through parentheses. `None` for every other hint — a union
+/// of a top with a scalar or a class included, which the value relation declines.
+pub(crate) fn param_top(hint: &Hint<'_>) -> Option<ParamTop> {
+    let mut nullable = false;
+    let kind = param_top_kind(hint, &mut nullable)?;
+    Some(ParamTop { kind, nullable })
+}
+
+/// The top leaf of [`param_top`], recording a `null` widening in `nullable`.
+fn param_top_kind(hint: &Hint<'_>, nullable: &mut bool) -> Option<ParamTopKind> {
+    match hint {
+        Hint::Array(_) => Some(ParamTopKind::Array),
+        Hint::Object(_) => Some(ParamTopKind::Object),
+        Hint::Iterable(_) => Some(ParamTopKind::Iterable),
+        Hint::Callable(_) => Some(ParamTopKind::Callable),
+        Hint::Parenthesized(p) => param_top_kind(p.hint, nullable),
+        Hint::Nullable(n) => {
+            *nullable = true;
+            param_top_kind(n.hint, nullable)
+        }
+        Hint::Union(u) => match (u.left, u.right) {
+            (Hint::Null(_), other) | (other, Hint::Null(_)) => {
+                *nullable = true;
+                param_top_kind(other, nullable)
+            }
+            _ => None,
+        },
         _ => None,
     }
 }
