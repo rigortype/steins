@@ -752,6 +752,14 @@ fn refuted_array_value(fact: &Fact, range: IntRange) -> Option<Fact> {
     }
 }
 
+/// Whether a shape's tail can supply an undeclared key `k`.
+fn tail_admits(tail: &steins_domain::Tail, k: &VKey) -> bool {
+    match tail {
+        steins_domain::Tail::Sealed => false,
+        steins_domain::Tail::Unsealed { key: class, .. } => class.admits_key(k),
+    }
+}
+
 /// **Fact-lane refinement**: apply the guard's domain operator to `var`'s
 /// `Fact::Shape`, if it has one. Every operator is a narrowing
 /// (`crates/steins-domain/src/shape.rs`), so the result admits everything the
@@ -775,6 +783,25 @@ fn refine_shape_fact(g: &ShapeGuard, env: &mut HashMap<String, Known>, witnessed
     let Some(Fact::Shape { shape, nullable }) = &known.fact else { return };
     let (shape, nullable) = (shape.as_ref(), *nullable);
     let next = match g {
+        // A guard that proves present a key the declaration says the array cannot
+        // carry (`@param array{type: string} $s`, then `isset($s['url'])`)
+        // contradicts the declaration on this branch, and [`ShapeFact::promote_present`]
+        // returns the shape unchanged. Keeping it would let the strict leg report the
+        // guarded read as outside the declared shape, a read PHP makes without a
+        // warning, so the shape widens to carry the key, with no value and no claim
+        // on order, count or covers.
+        ShapeGuard::Present { key, flavor, positive: true, .. }
+            if shape.field(key).is_none() && !tail_admits(&shape.tail, key) =>
+        {
+            let mut fields = shape.fields.clone();
+            fields.push((key.clone(), Presence::Required { witnessed }, None));
+            let tail = shape.tail.clone();
+            let widened = ShapeFact::normalize(fields, tail, Certainty::Maybe, true, Vec::new());
+            Some(Fact::Shape {
+                shape: Box::new(widened),
+                nullable: nullable && *flavor == PresenceFlavor::KeyExists,
+            })
+        }
         ShapeGuard::Present { key, flavor, positive: true, .. } => Some(Fact::Shape {
             shape: Box::new(shape.promote_present(
                 key,

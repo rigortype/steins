@@ -283,6 +283,23 @@ fn the_silence_contexts_stay_silent() {
 }
 
 #[test]
+fn a_guard_that_proves_an_undeclared_key_present_silences_its_read() {
+    // The guard contradicts the sealed declaration; PHP reads the key without a warning
+    // (the composer shape `!isset($source['url']) || ...` then `$source['url']`).
+    let sealed = "array{type: string}";
+    for body in [
+        "if (!isset($d['url'])) { throw new \\RuntimeException(); } $x = $d['url'];",
+        "if (isset($d['url'])) { echo $d['url']; }",
+        "if (array_key_exists('url', $d)) { echo strlen($d['url']); }",
+    ] {
+        let src = fixture(sealed, body);
+        assert!(ids(&src).is_empty(), "`{body}` must be silent: {:?}", strict(&src));
+    }
+    // Unguarded, the key is outside the declaration.
+    assert_eq!(ids(&fixture(sealed, "echo $d['url'];")), [OFFSET_UNDECLARED_ID]);
+}
+
+#[test]
 fn every_plain_read_position_is_judged() {
     // ADR-0104: the leg judges the read wherever it is written, at the read's own span.
     for body in [
