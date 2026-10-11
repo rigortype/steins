@@ -230,6 +230,28 @@ echo g() . $a['nope'];
 }
 
 #[test]
+fn a_userland_call_may_rebind_a_by_reference_parameter() {
+    // `$fn` captured the caller's `$arr` by reference: calling it writes through
+    // `&$a` before the read runs (silent in PHP).
+    let src = "<?php
+function g(array &$a, callable $fn, array $b) {
+    $a = [];
+    $b = [];
+    echo strlen('x') . $a['nope'];
+    echo $fn() . $a['nope'];
+    echo $fn() . $b['nope'];
+}
+";
+    let tree = SourceTree::parse(src);
+    let lines: Vec<u32> = check_with(&tree, &[], "test.php", &mut Boot)
+        .into_iter()
+        .filter(|d| d.id == OFFSET_MISSING_ID)
+        .map(|d| d.line)
+        .collect();
+    assert_eq!(lines, [5, 7], "a by-value local keeps its binding across the call");
+}
+
+#[test]
 fn a_key_variable_resolves_through_the_env() {
     fires("$k = 'nope'; echo $a[$k];", OFFSET_MISSING_ID);
     silent("$k = 'k'; echo $a[$k];");

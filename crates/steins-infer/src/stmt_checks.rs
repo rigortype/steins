@@ -53,7 +53,9 @@
 use std::collections::{HashMap, HashSet};
 
 use steins_domain::Certainty;
-use steins_syntax::{ArgValue, Carrier, Key, Place, ReadKind, ReadPosition, Stmt, StmtKind};
+use steins_syntax::{
+    ArgValue, Carrier, Key, Param, Place, ReadKind, ReadPosition, Stmt, StmtKind,
+};
 
 use crate::fold::Folder;
 use crate::{
@@ -235,45 +237,52 @@ fn key_arg(key: &Key) -> Option<ArgValue> {
     }
 }
 
-/// The names the statement may rebind before one of its reads runs.
-enum Rebindable<'s> {
-    /// Every name it hands to a call or writes in an embedded assignment, less the
-    /// ones every call provably takes by value ([`by_value_survivors`]).
-    Names(HashSet<&'s str>),
+/// The variables the statement may rebind before one of its reads runs.
+struct Rebindable<'s, 'p> {
     /// Every name: in the top-level frame, whose locals are the globals, a userland
     /// body the statement runs can rebind any of them (`global $a;`) before a later
     /// operand reads it ([`top_level_rebind_risk`]).
     ///
     /// [`top_level_rebind_risk`]: crate::rebind::top_level_rebind_risk
-    All,
+    all: bool,
+    /// Every name the statement hands to a call or writes in an embedded assignment,
+    /// less the ones every call provably takes by value ([`by_value_survivors`]).
+    handed: HashSet<&'s str>,
+    /// The scope's parameters when the statement may run a userland body: a
+    /// by-reference one aliases the caller's binding, which that body can reach
+    /// without being handed the name (a closure that captured the caller's variable
+    /// by reference).
+    params: &'p [Param],
 }
 
-impl Rebindable<'_> {
+impl Rebindable<'_, '_> {
     fn contains(&self, name: &str) -> bool {
-        match self {
-            Rebindable::Names(names) => names.contains(name),
-            Rebindable::All => true,
-        }
+        self.all
+            || self.handed.contains(name)
+            || self.params.iter().any(|p| p.by_ref && p.name == name)
     }
 }
 
-fn rebindable<'s>(
-    w: &WalkCx,
+fn rebindable<'s, 'p>(
+    w: &WalkCx<'p, '_>,
     folder: &mut dyn Folder,
     stmt: &'s Stmt,
     env: &HashMap<String, Known>,
     store: &Store,
-) -> Rebindable<'s> {
-    if crate::rebind::top_level_rebind_risk(w.cx, folder, &stmt.runs) {
-        return Rebindable::All;
+) -> Rebindable<'s, 'p> {
+    let userland = crate::rebind::may_run_userland(w.cx, folder, &stmt.runs);
+    let all = userland && crate::walk::frame_is_top_level();
+    let mut handed = HashSet::new();
+    if !all && !stmt.invalidated.is_empty() {
+        let (kept, _) =
+            by_value_survivors(w.cx, w.scope.poisoned, &stmt.invalidated, env, store);
+        let names = stmt.invalidated.iter().map(|v| v.name.as_str());
+        handed.extend(names.filter(|n| !kept.contains(n)));
     }
-    if stmt.invalidated.is_empty() {
-        return Rebindable::Names(HashSet::new());
-    }
-    let (kept, _) = by_value_survivors(w.cx, w.scope.poisoned, &stmt.invalidated, env, store);
-    let names = stmt.invalidated.iter().map(|v| v.name.as_str()).filter(|n| !kept.contains(n));
-    Rebindable::Names(names.collect())
+    let params = if userland { w.cx.scope_params(w.scope).unwrap_or(&[]) } else { &[] };
+    Rebindable { all, handed, params }
 }
+
 
 /// Step 1z's member and offset half: each offset, property and class-constant read
 /// position of `stmt`, judged by the module doc's table, at its own span.

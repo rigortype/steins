@@ -53,10 +53,17 @@ use crate::fold::Folder;
 ///
 /// [`Stmt::invalidated`]: steins_syntax::Stmt::invalidated
 pub(crate) fn top_level_rebind_risk(cx: &Cx, folder: &mut dyn Folder, runs: &Runs) -> bool {
-    crate::walk::frame_is_top_level()
-        && (runs.other
-            || runs.functions.iter().any(|call| call_may_run_userland(cx, folder, call))
-            || runs.constructs.iter().any(|class| !constructs_engine_class(cx, folder, class)))
+    crate::walk::frame_is_top_level() && may_run_userland(cx, folder, runs)
+}
+
+/// Whether an evaluation may run a userland body, in whatever frame: the frame-free
+/// half of [`top_level_rebind_risk`]. A by-reference parameter is the one local
+/// outside the top-level frame such a body can reach (through the caller's binding),
+/// which is what the read positions ask it for.
+pub(crate) fn may_run_userland(cx: &Cx, folder: &mut dyn Folder, runs: &Runs) -> bool {
+    runs.other
+        || runs.functions.iter().any(|call| call_may_run_userland(cx, folder, call))
+        || runs.constructs.iter().any(|class| !constructs_engine_class(cx, folder, class))
 }
 
 /// Whether `new` of the class `r` names builds an **engine class**, whose
