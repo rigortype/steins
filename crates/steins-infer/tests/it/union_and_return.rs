@@ -266,7 +266,9 @@ fn void_never_untyped_and_nonscalar_returns_skipped() {
 #[test]
 fn return_without_value_is_silent() {
     // A bare `return;` in a typed function proves nothing about the value
-    // (missing-return-path analysis is out of scope).
+    // (missing-return-path analysis is out of scope). PHP refuses the statement at
+    // compile time, which is `return.compile-fatal`'s finding, not a value proof.
     let src = "<?php\ndeclare(strict_types=1);\nfunction f($c): int { if ($c) { return; } return 1; }\n";
-    assert_eq!(n(src), 0, "bare return; is not a value proof");
+    let d = findings(src);
+    assert!(d.iter().all(|d| d.id == "return.compile-fatal"), "bare return; is not a value proof: {d:#?}");
 }
