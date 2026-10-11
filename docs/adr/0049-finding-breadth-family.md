@@ -1474,3 +1474,15 @@ name is case-sensitive.
   A scope that is not exactly known (a closure or arrow fn, which can be bound to any class, or a trait method, which runs in its user) is `Maybe` for a non-public constant; only an ancestor's `private`, which is never inherited, answers `No` from any scope.
 - `defined('X')` on a global constant is unchanged (`No` or `Maybe`). A
   `defined('C::K') || die;` statement is still not a guard region.
+
+## Amendment (2026-10-11): a first-class callable is an existence site (read-position run S2, #1050; PENDING ratification)
+
+Point 3(d) ("the call is a real call; first-class callable syntax is out of scope") and
+the method ladder's leg (l) no longer exclude a first-class callable. PHP resolves the
+callee when it builds the `Closure` and throws the same `Error` as for a call
+(`missing_fn(...)`, `$c->gone(...)`, `C::gone(...)`; witnessed on PHP 8.5.11), so the
+reference position `ReadKind::CallRef` (ADR-0104) is an existence site for
+`call.undefined-function` and `call.undefined-method`. Legs (l) and (d) are removed from
+`absence.rs`. Arity, types, descent, no-effect and dumps still never see a first-class
+callable, since it has no arguments and runs no call. A consequence: a named-only call
+`$o->m(x: 1)`, which leg (l) silenced by the same shape, is judged as the call it is.
