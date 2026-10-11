@@ -151,8 +151,8 @@ $ steins doctor --no-php .
   surface: layers [mechanics, proof], 49 checked id(s)
 ```
 
-Today that count runs 48 ids at `default`, 49 at `throws-direct`, 66 at
-`contracts`, 76 at `strict` and 67 at `pedantic`. The profiles, the baseline
+Today that count runs 49 ids at `default`, 50 at `throws-direct`, 67 at
+`contracts`, 77 at `strict` and 68 at `pedantic`. The profiles, the baseline
 ratchet that makes raising one survivable, and user-defined profiles all live in
 [chapter 5](05-profiles-and-baseline.md). The normative rules for layers,
 facets, and suppression are in
