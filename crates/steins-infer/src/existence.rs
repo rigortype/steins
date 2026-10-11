@@ -496,13 +496,56 @@ pub(crate) fn existence_vouch(cx: &Cx, store: &Store, call: &CallExpr) -> Vec<Vo
 /// `function_exists('f')` and `method_exists('C', 'm')` vouch, since a true answer
 /// proves exactly that the name is callable. The array form is a member guard
 /// ([`member_guard_shape`]). `None` when `call` is not this guard.
+///
+/// The arguments bind as PHP binds them, positionally or by name: `value`, then
+/// `syntax_only`, then the by-reference `callable_name`. Only a check that asks for
+/// real callability vouches — `syntax_only` absent or a literal `false`; a `true` or
+/// an unproven one asks about the spelling alone (the #1060 re-review). A spread or
+/// an unknown name declines.
 fn callable_name_vouch(cx: &Cx, call: &CallExpr) -> Option<Vec<Vouch>> {
     let callee = global_function_callee(cx, call)?;
-    if !callee.eq_ignore_ascii_case("is_callable") || !call.positional_only {
+    if !callee.eq_ignore_ascii_case("is_callable") || call.has_spread {
         return None;
     }
-    let [arg] = call.args.as_slice() else { return None };
-    let ArgValue::Str(name) = &arg.value else { return None };
+    let mut bound: [Option<&ArgValue>; 3] = [None; 3];
+    for (slot, arg) in bound.iter_mut().zip(&call.args) {
+        *slot = Some(&arg.value);
+    }
+    if call.args.len() > 3 {
+        return None;
+    }
+    for named in &call.named_args {
+        let i = ["value", "syntax_only", "callable_name"].iter().position(|n| *n == named.name)?;
+        if bound[i].replace(&named.value).is_some() {
+            return None;
+        }
+    }
+    if !matches!(bound[1], None | Some(ArgValue::Bool(false))) {
+        return Some(Vec::new());
+    }
+    let name = match bound[0]? {
+        ArgValue::Str(name) => name,
+        // `is_callable(['C', 'm'], false)`: the pair as a member guard reads it,
+        // for a literal class (the one-argument form is `member_guard_vouch`'s).
+        ArgValue::Array(items) => {
+            let [(k0, ArgValue::Str(class)), (k1, ArgValue::Str(method))] = items.as_slice() else {
+                return Some(Vec::new());
+            };
+            let positional =
+                |k: &ArrayKey, i: i64| matches!(k, ArrayKey::Auto) || *k == ArrayKey::Int(i);
+            let (Some(class), Some(method)) = (class.as_str(), method.as_str()) else {
+                return Some(Vec::new());
+            };
+            if !positional(k0, 0) || !positional(k1, 1) {
+                return Some(Vec::new());
+            }
+            return Some(vec![Vouch::Method {
+                class: class.trim_start_matches('\\').to_ascii_lowercase(),
+                method: method.to_ascii_lowercase(),
+            }]);
+        }
+        _ => return None,
+    };
     let Some(name) = name.as_str() else { return Some(Vec::new()) };
     let name = name.trim_start_matches('\\');
     Some(match name.split_once("::") {
