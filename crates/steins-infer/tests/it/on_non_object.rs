@@ -332,3 +332,32 @@ fn call_id_is_not_warning_gated() {
         .collect();
     assert_eq!(d.len(), 1, "a fatal is never demoted by the warning-handler posture");
 }
+
+// ---- A call at any position (ADR-0104, issue #935) ----
+
+#[test]
+fn call_on_a_scalar_receiver_in_an_argument_fires_at_its_own_span() {
+    let src = "<?php\nfunction f(): void { $x = 5; echo strlen($x->m()); }\n";
+    let d = on_non_object(src);
+    assert_eq!(d.len(), 1, "{d:?}");
+    assert_eq!((d[0].line, d[0].column), (2, 42), "{d:?}");
+}
+
+#[test]
+fn call_on_null_in_an_operand_fires() {
+    let src = "<?php\nfunction f(): int { $x = null; return 1 + $x->m(); }\n";
+    assert_eq!(on_null(src).len(), 1);
+}
+
+#[test]
+fn call_on_a_scalar_receiver_at_a_conditional_position_is_declined() {
+    let src = "<?php\nfunction f(bool $a): bool { $x = 5; return $a && $x->m(); }\n";
+    assert!(on_non_object(src).is_empty());
+}
+
+#[test]
+fn call_on_a_receiver_the_statement_rebinds_is_declined() {
+    // `$x = new K()` inside the argument rebinds the name the entry env holds as `5`.
+    let src = "<?php\nclass K { public function m(): int { return 1; } }\nfunction id($v) { return $v; }\nfunction f(): void { $x = 5; echo id($x = new K()) . $x->m(); }\n";
+    assert!(on_non_object(src).is_empty());
+}

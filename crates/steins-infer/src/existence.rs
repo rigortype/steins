@@ -618,6 +618,17 @@ fn member_guard_shape<'a>(cx: &Cx, call: &'a CallExpr) -> Option<MemberShape<'a>
     }
 }
 
+/// Whether `call` is a member-existence guard (`method_exists`, `property_exists`,
+/// `is_callable`) of the global builtin: a test whose truth vouches a member for the one
+/// binding it names, which a same-expression use sees only through a branch store.
+pub(crate) fn is_member_guard_call(cx: &Cx, call: &CallExpr) -> bool {
+    global_function_callee(cx, call).is_some_and(|callee| {
+        ["method_exists", "property_exists", "is_callable"]
+            .iter()
+            .any(|g| callee.eq_ignore_ascii_case(g))
+    })
+}
+
 /// The vouches of the member-existence guards, or `None` when `call` is not one. The
 /// method name is lowercased (PHP method names are case-insensitive), the property name
 /// kept as written.

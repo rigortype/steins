@@ -449,3 +449,42 @@ fn unbraced_namespace_function_too_few_positional_control() {
     assert_eq!(d.len(), 1, "{d:?}");
     assert!(too_few(&d[0]));
 }
+
+// A call nested in an argument or an operand is judged at its own span (ADR-0104, issue
+// #935); a first-class callable has no arguments and is never an arity site.
+
+#[test]
+fn nested_call_in_an_argument_is_judged_for_arity() {
+    let d = fires("<?php\nfunction format($a, $b) {}\nfunction id($x) {}\nid(format(1));\n");
+    assert_eq!(d.len(), 1, "{d:?}");
+    assert!(too_few(&d[0]));
+    assert_eq!((d[0].line, d[0].column), (4, 4), "the nested call's own column: {d:?}");
+}
+
+#[test]
+fn nested_call_in_an_operand_of_a_return_is_judged_for_arity() {
+    let d = fires("<?php\nfunction format($a, $b) {}\nfunction g() { return format(1) + 1; }\n");
+    assert_eq!(d.len(), 1, "{d:?}");
+}
+
+#[test]
+fn nested_constructor_in_a_throw_is_judged_for_arity() {
+    let d = fires(
+        "<?php\nclass E extends Exception { public function __construct(string $a, int $b) {} }\nthrow new E('a');\n",
+    );
+    assert_eq!(d.len(), 1, "{d:?}");
+}
+
+#[test]
+fn first_class_callable_is_never_an_arity_site() {
+    // `format(...)` names a function needing two arguments and passes none: it builds a
+    // Closure, so there is no call to be short of arguments.
+    for src in [
+        "<?php\nfunction format($a, $b) {}\n$f = format(...);\n",
+        "<?php\nfunction format($a, $b) {}\nfunction id($x) {}\nid(format(...));\n",
+        "<?php\nclass K { public function m($a, $b) {} public static function s($a, $b) {} }\n$k = new K();\n$f = $k->m(...);\n$g = K::s(...);\n",
+    ] {
+        let d = fires(src);
+        assert!(d.is_empty(), "{d:?}\n{src}");
+    }
+}
