@@ -70,6 +70,7 @@ mod heap;
 mod heap_alias;
 mod ids;
 mod inaccessible;
+mod literal_memo;
 mod mechanics;
 mod method_call;
 mod no_effect;
