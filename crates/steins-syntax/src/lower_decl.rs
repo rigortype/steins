@@ -898,6 +898,8 @@ pub(crate) struct BodyDestructor {
     /// A `__destruct` method, or a trait adaptation that names a method `__destruct`
     /// (`use T { bye as __destruct; }`, which makes `bye` the destructor).
     pub(crate) declares_destructor: bool,
+    /// A `__set` method, or a trait adaptation that names a method `__set`.
+    pub(crate) declares_magic_set: bool,
     /// The classes the non-static properties, promoted constructor parameters
     /// included, are hinted with, as written.
     pub(crate) held_classes: Vec<NameRef>,
@@ -936,6 +938,7 @@ pub(crate) fn scan_body<'a, 'arena: 'a>(
             ClassLikeMember::Method(m) => {
                 let name = bytes_to_string(m.name.value);
                 out.declares_destructor |= name.eq_ignore_ascii_case("__destruct");
+                out.declares_magic_set |= name.eq_ignore_ascii_case("__set");
                 if name.eq_ignore_ascii_case("__construct") {
                     for p in m.parameter_list.parameters.iter() {
                         if p.is_promoted_property() {
@@ -984,12 +987,16 @@ pub(crate) fn scan_body<'a, 'arena: 'a>(
             ClassLikeMember::TraitUse(tu) => {
                 out.used_traits.extend(tu.trait_names.iter().map(name_ref));
                 if let TraitUseSpecification::Concrete(spec) = &tu.specification {
-                    out.declares_destructor |= spec.adaptations.iter().any(|a| {
-                        matches!(a, TraitUseAdaptation::Alias(alias)
-                            if alias.alias.as_ref().is_some_and(|name| {
-                                bytes_to_string(name.value).eq_ignore_ascii_case("__destruct")
-                            }))
-                    });
+                    let aliases_as = |magic: &str| {
+                        spec.adaptations.iter().any(|a| {
+                            matches!(a, TraitUseAdaptation::Alias(alias)
+                                if alias.alias.as_ref().is_some_and(|name| {
+                                    bytes_to_string(name.value).eq_ignore_ascii_case(magic)
+                                }))
+                        })
+                    };
+                    out.declares_destructor |= aliases_as("__destruct");
+                    out.declares_magic_set |= aliases_as("__set");
                 }
             }
             _ => {}
@@ -1032,6 +1039,7 @@ fn lower_trait(t: &mago_syntax::cst::Trait<'_>, conditional: bool) -> ClassDecl 
         uses_traits: false,
         used_traits: body.used_traits,
         declares_destructor: body.declares_destructor,
+        declares_magic_set: body.declares_magic_set,
         held_classes: body.held_classes,
         holds_self: body.holds_self,
         holds_parent: body.holds_parent,
@@ -1119,6 +1127,7 @@ fn lower_class(c: &Class<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex, rc: 
         uses_traits,
         used_traits: body.used_traits,
         declares_destructor: body.declares_destructor,
+        declares_magic_set: body.declares_magic_set,
         held_classes: Vec::new(),
         holds_self: false,
         holds_parent: false,
@@ -1315,6 +1324,7 @@ fn lower_interface(i: &mago_syntax::cst::Interface<'_>, aliases: &SteinsAttrAlia
         uses_traits: false,
         used_traits: Vec::new(),
         declares_destructor,
+        declares_magic_set: false,
         held_classes: Vec::new(),
         holds_self: false,
         holds_parent: false,
@@ -1402,6 +1412,7 @@ fn lower_enum(e: &mago_syntax::cst::Enum<'_>, _aliases: &SteinsAttrAliases, docs
         // …nor a destructor: PHP refuses one on an enum, imported or declared.
         used_traits: Vec::new(),
         declares_destructor: false,
+        declares_magic_set: false,
         held_classes: Vec::new(),
         holds_self: false,
         holds_parent: false,

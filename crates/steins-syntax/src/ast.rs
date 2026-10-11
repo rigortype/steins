@@ -1728,6 +1728,11 @@ pub struct ClassDecl {
     /// `bye` at a drop). Read by name, so a trait's counts though its methods are
     /// not lowered.
     pub declares_destructor: bool,
+    /// Whether the body declares a `__set` method, or aliases an imported trait's
+    /// method `as __set` — read by name like [`Self::declares_destructor`], so a
+    /// trait's counts though its methods are not lowered. A typed property write on a
+    /// chain holding one may reach `__set` instead of the slot (the #1060 review).
+    pub declares_magic_set: bool,
     /// A **trait** only: the classes its non-static properties, and its constructor's
     /// promoted parameters, are hinted with, as written, by every member of a hint
     /// (`self` and `parent` excluded: they name the importing class and its parent,
