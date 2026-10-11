@@ -356,20 +356,27 @@ scalar), and a typed property has no top.
 **Review rows (#1060).** Five shapes reported a `TypeError` on code PHP runs cleanly, and
 the rule for each is fixed where the base shares the defect:
 
-- A literal `is_callable('f')`, `is_callable('C::m')` or `is_callable(['C', 'm'])` vouches
-  the symbol on the side where it holds, as `function_exists` and `method_exists` do,
+- A literal `is_callable('f')`, `is_callable('C::m')` or `is_callable(['C', 'm'])`, with
+  `syntax_only` absent or a literal `false` (by position or by name), vouches the symbol on
+  the side where it holds, as `function_exists` and `method_exists` do,
   including the negated early return; `call.undefined-function` reads the same vouch. A
   callable name is judged by the propagation pass, which holds the branch's vouches,
   never by the env-free direct pass.
-- A type test the walk cannot decide over a value it holds exactly — `is_countable`,
-  `is_a`, `is_subclass_of`, `get_debug_type($x) === …`, `$x ?? d`, `$x?->p`, an offset
-  `isset`, any `is_*` the DR2 vocabulary leaves `Maybe` — forgets that value on both sides
-  of the branch (`branch::forget_unmodelled_tests`, whose doc comment carries the
-  predicate table). `isset($x)` itself is now decided on a proven value. This fixes the
-  scalar rows the base misjudged under the same guards as well.
+- A type test over a value the walk holds exactly is decided where PHP's answer follows
+  from the value: `isset($x)`, the `is_*` family, `is_countable`, and `is_a` /
+  `is_subclass_of` over anything but a string that may name a class
+  (`cond::eval_literal_type_test`). One it still cannot decide (`ctype_*`,
+  `method_exists`, `get_debug_type($x) === …`, `$x ?? d`, `$x?->p`, an offset `isset`,
+  `is_callable` or `is_a` over a string) forgets the value **inside** the guarded sides
+  only, since either may be the side PHP never enters; a type test changes no value, so
+  the binding comes back at the join when every side falls through, and stays forgotten
+  after a join reached through one side alone (`if (!T) { return; }`). The table is on
+  `branch::unmodelled_tests`. This fixes the scalar rows the base misjudged under the same
+  guards, and loses none of master's findings after such a guard (the #1060 re-review).
 - A property write is not judged when it can miss the typed slot: another class's private
   property (a dynamic property from a child), a protected or readonly one from an unrelated
-  scope, and any chain declaring `__set`, using a trait or reaching an unseen ancestor
+  scope, and any chain declaring `__set` — itself, through a used trait (read by name, as
+  trait methods are not lowered), or possibly through an unresolvable ancestor or trait
   (`unset()` routes the write to `__set`). This covers the scalar rows too.
 - A class name that only an unminted literal `class_alias` names (an alias of an engine
   class, which the index does not mint) rejects no object. A name nothing aliases keeps
