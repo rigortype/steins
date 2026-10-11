@@ -3911,19 +3911,22 @@ pub enum ReadKind {
 pub enum Place {
     /// A bare local variable (name without the `$`).
     Var(String),
-    /// A literal-keyed offset of a place: the base of `$a['n']['k']` is `Index($a, 'n')`.
+    /// An offset of a place, its key a [`Key`]: the base of `$a['n']['k']` is `Index($a, 'n')`.
     Index(Box<(Place, Key)>),
     /// Anything else.
     Other,
 }
 
-/// The key of an offset read when it is a literal.
+/// The key of an offset read when it is a literal or a bare variable.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub enum Key {
     Int(i64),
     Str(PhpStr),
-    /// A key that is not an integer or string literal.
+    /// A bare local variable (name without the `$`): the consumer resolves it against the
+    /// env it judges the read in, as the offset family does for `$x = $a[$k]`.
+    Var(String),
+    /// Any other key.
     Other,
 }
 

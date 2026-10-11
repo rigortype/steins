@@ -550,7 +550,7 @@ fn has_nullsafe(e: &Expression<'_>) -> bool {
     }
 }
 
-/// The place an offset read's base names: a variable, or a literal-keyed offset of one.
+/// The place an offset read's base names: a variable, or an offset of one.
 fn place_of(base: &Expression<'_>) -> Place {
     match base.unparenthesized() {
         Expression::Variable(Variable::Direct(dv)) => {
@@ -563,9 +563,11 @@ fn place_of(base: &Expression<'_>) -> Place {
     }
 }
 
-/// The key of an offset read when it is an integer or string literal (a signed one included).
+/// The key of an offset read when it is an integer or string literal (a signed one included)
+/// or a bare variable.
 fn key_of(key: &Expression<'_>) -> Key {
     match key.unparenthesized() {
+        Expression::Variable(Variable::Direct(dv)) => Key::Var(strip_dollar(bytes_to_string(dv.name))),
         Expression::Literal(_) | Expression::UnaryPrefix(_) => match lower_arg_value(key) {
             ArgValue::Int(i) => Key::Int(i),
             ArgValue::Str(s) => Key::Str(s),
