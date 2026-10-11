@@ -18,15 +18,7 @@ use crate::walk::WalkCx;
 
 /// The statically-named calls a statement carries.
 pub(crate) fn checkable_calls(kind: &StmtKind) -> Vec<&CallExpr> {
-    match kind {
-        StmtKind::Call(c) => vec![c],
-        StmtKind::Return { call: Some(c), .. }
-        | StmtKind::Assign { call: Some(c), .. }
-        | StmtKind::Destructure { call: Some(c), .. }
-        | StmtKind::PropAssign { value_call: Some(c), .. } => vec![c],
-        StmtKind::Echo(cs) => cs.iter().collect(),
-        _ => Vec::new(),
-    }
+    kind.own_calls()
 }
 
 /// Escape + sweep the heap for a statement's calls (ADR-0036). Passing an object

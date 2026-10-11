@@ -171,9 +171,20 @@ fn silent_when_function_exists_vouches_on_this_branch() {
 }
 
 #[test]
-fn silent_on_first_class_callable() {
-    // `tyop(...)` builds a Closure — it does not invoke.
+fn fires_on_first_class_callable_at_creation() {
+    // `tyop(...)` builds a Closure and invokes nothing, but PHP resolves the function
+    // when it builds it: `Error: Call to undefined function tyop()` (ADR-0104, witnessed
+    // on PHP 8.5.11).
     let d = fires("<?php\n$f = tyop(...);\n");
+    assert_eq!(d.len(), 1, "{d:?}");
+    assert!(d[0].message.contains("call to undefined function tyop()"), "{}", d[0].message);
+    // Reported at the callable's own span.
+    assert_eq!((d[0].line, d[0].column), (2, 6), "{d:?}");
+}
+
+#[test]
+fn silent_on_first_class_callable_of_a_vouched_function() {
+    let d = fires("<?php\nif (function_exists('tyop')) {\n  $f = tyop(...);\n}\n");
     assert!(d.is_empty(), "{d:?}");
 }
 

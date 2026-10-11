@@ -11,7 +11,7 @@ use steins_syntax::{
 };
 
 use crate::cx::Cx;
-use crate::dump::{is_first_class_callable, resolved_fn_fqn};
+use crate::dump::resolved_fn_fqn;
 use crate::env::{Store, Stratum};
 use crate::heap::simple_class;
 use crate::project::{Diagnostic, MagicObstacle, Res};
@@ -56,21 +56,16 @@ impl UndefKind {
 /// The receiver a `call.undefined-method` claim can rest on, after legs (a)/(l).
 /// Carries the *exact* receiver class FQN and the call kind. `None` from the
 /// resolver means the receiver is out of scope for S2 (silence): `$this` (A1
-/// membership), an inexact/lower-bound variable, a nullsafe `?->`, a first-class
-/// callable, `self`/`static`/`parent`, or any dynamic form.
+/// membership), an inexact/lower-bound variable, a nullsafe `?->`,
+/// `self`/`static`/`parent`, or any dynamic form. A first-class callable `$v->m(...)` /
+/// `C::m(...)` is a site like a call (ADR-0104): PHP resolves the method when it builds the
+/// `Closure`, and throws the same `Error` when it is missing.
 fn undefined_method_receiver(
     cx: &Cx,
     call: &CallExpr,
     store: &Store,
     poisoned: bool,
 ) -> Option<(String, String, UndefKind)> {
-    // Leg (l): the first-class-callable form `$v->m(...)` / `C::m(...)` lowers to an
-    // arg-less non-positional call — it builds a Closure, it does not invoke — so it
-    // is never an undefined-method site. (A named/spread call keeps `args` non-empty
-    // and stays eligible: method existence is argument-shape-independent.)
-    if !call.positional_only && call.args.is_empty() {
-        return None;
-    }
     match &call.receiver {
         Callee::Method { receiver, method, nullsafe } => {
             if *nullsafe {
@@ -996,8 +991,9 @@ pub(crate) fn check_undefined_class_const(
 // functions/classes at runtime) — a standing dam site ANYWHERE in the universe
 // silences the whole slice (§10's falsifiable prediction). Shared ladder, any leg
 // failing ⇒ silence (zero-FP identity ADR-0013):
-//   - a real direct call / hard-error class position (first-class callables, `$fn()`,
-//     `::class`, instanceof, catch, type-decls are §5's verified NON-findings);
+//   - a direct function reference or hard-error class position (`$fn()`, `::class`,
+//     instanceof, catch, type-decls are §5's verified NON-findings; a first-class
+//     callable `f(...)` is a reference, ADR-0104);
 //   - `absence_family_available` (A9 monkey-patch void + no-sidecar sound subset);
 //   - not a reserved dump FQN (D3) and not a curated SAPI-provided name (A6);
 //   - every candidate FQN index-Absent (not Unique, not Ambiguous, not a catalog builtin);
@@ -1124,14 +1120,12 @@ pub(crate) fn check_undefined_function(
     store: &Store,
     out: &mut Vec<Diagnostic>,
 ) {
-    // Leg (d): a real direct call — `f(...)` (first-class callable) and `$fn()` are
-    // other `Callee` variants.
+    // Leg (d): a direct function reference — a call `f(...)` or a first-class callable
+    // `f(...)`, which PHP resolves when it builds the `Closure` (ADR-0104); `$fn()` is
+    // another `Callee` variant.
     let Callee::Function(_) = &call.receiver else {
         return;
     };
-    if is_first_class_callable(call) {
-        return;
-    }
     let Some(r) = call.callee_ref.as_ref() else {
         return;
     };

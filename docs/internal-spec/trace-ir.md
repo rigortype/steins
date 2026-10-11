@@ -60,8 +60,8 @@ variable of the chain, or `""` for a chain that starts at no variable.
 `read_positions` (ADR-0104, issue #1050) lists every call, offset read, property
 read and class-constant read the statement's own expressions write, each as a
 `ReadPosition { span, carrier, kind }` (40 bytes) at the read's own span, outermost
-first and in source order. The kind is `Call` (by span alone; no lowered call is
-copied), `Offset(place, key)` (a key is an integer or string literal, a bare
+first and in source order. The kind is `Call` (by span alone; the lowered call is found through the tree,
+the scope or `read_calls`), `Offset(place, key)` (a key is an integer or string literal, a bare
 variable `Key::Var` resolved against the env, or `Other`), `Prop(var, prop)` or `ClassConst(class, name)`; every
 level of an access chain and every call is a position, and `?->` and `Class::class`
 are not. A write target, and an offset or property under `isset`, `empty`, `??`
@@ -80,7 +80,13 @@ It is read for an expression statement, `return`, `echo` and `<?= ?>` and a
 `static` initializer, and for an arrow function's body, a hook's and a hoisted
 `match` arm's; a header is not read yet. The scan stops at a function-like, a
 class-like (an anonymous class keeps its constructor arguments) and a `match`.
-`None` when there is none. Nothing reads it yet.
+`None` when there is none. A call position's lowered `CallExpr` is found by its span (slice
+S2): a function call in `SourceTree::calls` (`SourceTree::call_at`), a method or static call
+and a method or static first-class callable in `Scope::method_calls`
+(`Scope::method_call_at`), and a `new` of a named class and a function first-class
+callable in `Stmt::read_calls`. A computed callee has no `CallExpr` to judge and a `new` of a
+dynamic class has none at all. The call consumer is `stmt_calls/nested.rs`; the offset,
+property and class-constant positions are not read yet.
 
 ## Statement kinds
 

@@ -1117,3 +1117,26 @@ fn an_84_or_later_or_open_target_judges_it_against_the_root() {
     let open = property_under(REDECLARED_PROTECTED_PROPERTY, (8, 1), None);
     assert!(open.is_empty(), "{open:#?}");
 }
+
+// ---- A call at any position (ADR-0104, issue #935) ----
+
+#[test]
+fn a_private_method_in_an_argument_is_judged_at_its_own_span() {
+    let src = "<?php
+class C { private function m(): int { return 1; } }
+function f(): void { $c = new C(); echo strlen($c->m()); }
+";
+    let d = method(src);
+    assert_eq!(d.len(), 1, "{d:?}");
+    assert_eq!((d[0].line, d[0].column), (3, 48), "{d:?}");
+}
+
+#[test]
+fn a_private_method_at_a_conditional_position_is_declined() {
+    // A value-dependent family: the test may have established what the receiver is.
+    let src = "<?php
+class C { private function m(): int { return 1; } }
+function f(bool $a): bool { $c = new C(); return $a && $c->m(); }
+";
+    assert!(method(src).is_empty());
+}

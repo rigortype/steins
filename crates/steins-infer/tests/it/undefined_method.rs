@@ -115,21 +115,18 @@ fn fires_with_a_positional_argument_present() {
 
 #[test]
 fn fires_with_mixed_positional_and_named_arguments() {
-    // A positional arg makes `args` non-empty, so the call is distinguishable from
-    // a first-class callable and stays eligible.
     let d = fires("<?php\nclass Order {}\n$o = new Order();\n$o->tyop(1, x: 2);\n");
     assert_eq!(d.len(), 1, "{d:?}");
 }
 
 #[test]
-fn silent_on_named_only_arguments_conflated_with_first_class_callable() {
-    // Lowering represents BOTH the first-class callable `m(...)` and a named-only
-    // call `m(x: 1)` as `args: [], positional_only: false`, indistinguishable in
-    // the current CallExpr shape; since the first-class form MUST stay silent
-    // (leg l), S2 conservatively silences both — a completeness loss, never an FP
-    // (zero-FP governs the tie-break).
+fn fires_on_named_only_arguments() {
+    // A named-only call `m(x: 1)` lowers to `args: [], positional_only: false`, the shape
+    // of a first-class callable `m(...)`. Leg (l) used to silence both; a first-class
+    // callable is an existence site now (ADR-0104), so the two agree and the method is
+    // undefined either way.
     let d = fires("<?php\nclass Order {}\n$o = new Order();\n$o->tyop(x: 1);\n");
-    assert!(d.is_empty(), "{d:?}");
+    assert_eq!(d.len(), 1, "{d:?}");
 }
 
 #[test]
@@ -301,9 +298,26 @@ fn silent_leg_l_nullsafe() {
 }
 
 #[test]
-fn silent_leg_l_first_class_callable() {
-    // `$o->tyop(...)` builds a Closure — it does not invoke.
+fn fires_on_first_class_callable_at_creation() {
+    // `$o->tyop(...)` builds a Closure and invokes nothing, but PHP resolves the method
+    // when it builds it: `Error: Call to undefined method Order::tyop()` (ADR-0104,
+    // witnessed on PHP 8.5.11).
     let d = fires("<?php\nclass Order {}\n$o = new Order();\n$f = $o->tyop(...);\n");
+    assert_eq!(d.len(), 1, "{d:?}");
+    assert_eq!((d[0].line, d[0].column), (4, 6), "{d:?}");
+}
+
+#[test]
+fn fires_on_static_first_class_callable_at_creation() {
+    let d = fires("<?php\nclass Registry {}\n$f = Registry::tyop(...);\n");
+    assert_eq!(d.len(), 1, "{d:?}");
+}
+
+#[test]
+fn silent_on_first_class_callable_of_an_existing_method() {
+    let d = fires(
+        "<?php\nclass Order { public function pay() {} }\n$o = new Order();\n$f = $o->pay(...);\n",
+    );
     assert!(d.is_empty(), "{d:?}");
 }
 

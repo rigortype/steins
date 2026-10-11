@@ -119,7 +119,6 @@ fn a_statement_that_runs_code_or_writes_stays_a_barrier() {
         "$i++;",
         "--$i;",
         "@$i;",
-        "print 1;",
         "clone $o;",
         "include 'x.php';",
         "eval('1;');",
@@ -172,6 +171,14 @@ fn a_statement_that_runs_code_or_writes_stays_a_barrier() {
     ] {
         assert_eq!(dump_after(stmt), "dumped type: unknown", "`{stmt}` stays a barrier");
     }
+}
+
+#[test]
+fn print_keeps_the_env_like_echo() {
+    // `print e;` is `echo e;` that yields 1, which the statement discards: it was a
+    // barrier before ADR-0104 and cleared every fact (issue #935).
+    assert_eq!(dump_after("print 1;"), dump_after("echo 1;"));
+    assert_ne!(dump_after("print 1;"), "dumped type: unknown");
 }
 
 #[test]

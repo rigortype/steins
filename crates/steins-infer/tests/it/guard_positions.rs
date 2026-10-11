@@ -42,7 +42,21 @@ impl Folder for Boot {
         Some(false)
     }
     fn boot_surface_function(&mut self, name: &str) -> Option<bool> {
-        Some(name == "dl")
+        // `dl` is the one resident function a fixture names; the guards are builtins too,
+        // and a guard call nested in an expression is itself a call position (ADR-0104).
+        Some(
+            name == "dl"
+                || [
+                    "defined",
+                    "class_exists",
+                    "extension_loaded",
+                    "function_exists",
+                    "method_exists",
+                    "is_callable",
+                    "property_exists",
+                ]
+                .contains(&name),
+        )
     }
     fn boot_surface_constant(&mut self, name: &str) -> Option<bool> {
         Some(name == "PHP_VERSION_ID")

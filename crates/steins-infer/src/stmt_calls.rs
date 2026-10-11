@@ -1,6 +1,52 @@
 //! Step 1 of the statement walk: check and descend every statically-named call a
 //! statement carries, and hand the phases after it what the descents learned
 //! ([`StmtCalls`]).
+//!
+//! # Calls at every position (ADR-0104, issue #935)
+//!
+//! The statement's kind spells one call, or a few for an `echo`: those are descended and
+//! judged by every family below. Every other call the statement writes is a
+//! [`ReadKind::Call`] (or [`ReadKind::CallRef`] for a first-class callable) position in
+//! [`Stmt::read_positions`], judged by [`nested`] in the plain per-scope pass only; its
+//! lowered call is found by span (the tree, the scope or [`Stmt::read_calls`]). A position
+//! is judged **once**: the kind's own calls are skipped by span, so `echo nope_fn()` reports
+//! once. Findings sit at the call's own span (D1).
+//!
+//! Families are split by what they read. **E** is environment-free: `call.undefined-function`,
+//! `call.undefined-method`, `call.too-few-arguments` and kin (arity), which read the project
+//! index and, for a variable receiver, the exact class an allocation proved. **V** is
+//! value-dependent: `call.on-null`, `call.on-non-object`, `call.inaccessible-method`,
+//! `phpdoc.undefined-method`, `call.printf-too-few-arguments`, `preg.invalid-pattern`, which
+//! read an env fact the statement's own tests may have changed.
+//!
+//! | Carrier | E, `Call` | V, `Call` | `CallRef` (existence only) |
+//! | --- | --- | --- | --- |
+//! | `Plain` | judge | judge | judge |
+//! | `Argument` | judge | judge | judge |
+//! | `Conditional` | judge, except `undefined-method` when the statement carries a `method_exists`, `property_exists` or `is_callable` test | decline | judge, same exception |
+//! | `Suppressed` (`@`) | decline (D2) | decline | decline |
+//! | `IssetLike`, `CompoundRead` | not a carrier of a call | | |
+//!
+//! Three rows hold at every carrier:
+//!
+//! * A position inside a dead extent a decided guard proved unevaluated is not judged
+//!   ([`sweep_guard_regions`] runs before this step for that reason).
+//! * A name the statement may have rebound before the position runs (an embedded assignment,
+//!   a name handed to a call that may take it by reference) is a stale env fact: a call on
+//!   such a receiver is not judged, and a `printf` format or `preg` pattern read off one is
+//!   not folded.
+//! * A first-class callable is judged for existence only. Arity (the shape has no arguments),
+//!   types, descent, no-effect and dumps never see a `CallRef`.
+//!
+//! The IR keeps the weakest claim a read sits under, so a call both conditional and under `@`
+//! is `Conditional`: its existence is judged, which is sound, since an `Error` is not
+//! suppressible. The module's tests have a case per row (`nested_call_positions.rs`).
+//!
+//! [`sweep_guard_regions`]: crate::guard_sweep::sweep_guard_regions
+//! [`ReadKind::Call`]: steins_syntax::ReadKind::Call
+//! [`ReadKind::CallRef`]: steins_syntax::ReadKind::CallRef
+
+mod nested;
 
 use std::collections::HashMap;
 
@@ -212,6 +258,11 @@ pub(crate) fn check_stmt_calls(
                 }
             }
         }
+    }
+    // The calls the kind does not spell (ADR-0104): arguments, operands, `new`, `throw`,
+    // first-class callables. A descent re-walks the statement, so only the plain pass judges.
+    if descent.is_none() {
+        nested::check_nested_calls(w, folder, stmt, env, store, out);
     }
     StmtCalls {
         summary: stmt_summary,

@@ -40,7 +40,18 @@ struct Boot {
 
 impl Boot {
     fn bare() -> Self {
-        Boot { present: &["RuntimeException", "stdClass"] }
+        // The guards are builtins too: a guard call nested in an expression is a call
+        // position of its own (ADR-0104), and a bare runtime still has them.
+        Boot {
+            present: &[
+                "RuntimeException",
+                "stdClass",
+                "function_exists",
+                "defined",
+                "class_exists",
+                "method_exists",
+            ],
+        }
     }
 }
 
@@ -312,4 +323,39 @@ class B extends Base {
 }
 ";
     fires_on(src, CALL_INACCESSIBLE_METHOD_ID, &[5]);
+}
+
+// ---- #935: a call nested at any position is judged (ADR-0104) ----
+//
+// Each of these is an `Error` or `ArgumentCountError` on PHP 8.5.11 (handler installed).
+
+#[test]
+fn a_nested_undefined_function_is_judged_at_every_position() {
+    let src = "<?php
+function id(mixed $x): mixed { return $x; }
+function a(): void { id(nope_fn()); }
+function b(): void { echo strlen(nope_fn()); }
+function c(): mixed { return [nope_fn()]; }
+function d(): mixed { return nope_fn() + 1; }
+function e(): void { throw nope_fn(); }
+function f(): void { print(nope_fn()); }
+function g(): void { static $s = nope_fn(); }
+function h(bool $x): mixed { return $x && nope_fn(); }
+";
+    fires_on(src, CALL_UNDEFINED_FUNCTION_ID, &[3, 4, 5, 6, 7, 8, 9, 10]);
+}
+
+#[test]
+fn a_first_class_callable_of_a_missing_function_is_an_existence_site() {
+    let src = "<?php\nfunction a(): mixed { return nope_fn(...); }\n";
+    fires_on(src, CALL_UNDEFINED_FUNCTION_ID, &[2]);
+}
+
+#[test]
+fn a_nested_call_in_a_dead_arm_is_not_judged() {
+    let src = "<?php
+function a(): mixed { return function_exists('nope_fn') ? nope_fn() : null; }
+function b(): mixed { return function_exists('nope_fn') && nope_fn(); }
+";
+    silent_on(src, &[CALL_UNDEFINED_FUNCTION_ID]);
 }

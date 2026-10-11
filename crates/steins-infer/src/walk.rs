@@ -629,6 +629,12 @@ fn walk_run(
         // What the calls will do to the names and resources they are handed, read
         // before step 1 runs any of them and applied in step 5.
         let pre_call = PreCall::read(w, folder, stmt, env, store);
+        // 0z. The ternaries and `&&`/`||` the statement evaluates, in any position: a
+        // decided guard proves the arm or operand it skips dead (issue #928). Before the
+        // calls are judged, because a call in a dead arm is not (ADR-0104).
+        if descent.is_none() {
+            sweep_guard_regions(w, folder, stmt);
+        }
         // 1. Check + descend every statically-named call this statement carries.
         let stmt_calls = check_stmt_calls(w, folder, stmt, env, store, descent, out);
 
@@ -636,10 +642,7 @@ fn walk_run(
         // pre-statement env (`check_read_positions`), once per site in the plain
         // per-scope pass.
         if descent.is_none() {
-            // The ternaries and `&&`/`||` the statement evaluates, in any position: a
-            // decided guard proves the arm or operand it skips dead (issue #928).
-            // Swept first, so a read position in a dead extent is not judged.
-            sweep_guard_regions(w, folder, stmt);
+            // The guard sweep ran at 0z, so a read position in a dead extent is not judged.
             check_read_positions(w, folder, stmt, env, store, out);
         }
 
