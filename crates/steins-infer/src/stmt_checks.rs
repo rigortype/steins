@@ -37,7 +37,9 @@
 //! before the read runs: a by-reference or unresolved call anywhere in the statement,
 //! or an embedded assignment (`f($a) . $a['k']` with `f(&$a)`, `($a['k'] = 1) +
 //! $a['k']`). Only a name every call provably takes by value keeps the entry env's
-//! binding ([`by_value_survivors`]).
+//! binding ([`by_value_survivors`]). In the top-level frame, whose locals are the
+//! globals, any call that may run userland can rebind every name (`global $a;`), so
+//! such a statement judges none of these reads.
 //!
 //! The right-most arm of a `??` keeps its own premise ladder
 //! ([`check_coalesce_final_arm`]), and a destructuring source its own key rule
@@ -233,20 +235,44 @@ fn key_arg(key: &Key) -> Option<ArgValue> {
     }
 }
 
-/// The names the statement may rebind before one of its reads runs: every name it
-/// hands to a call or writes in an embedded assignment, less the ones every call
-/// provably takes by value ([`by_value_survivors`]).
+/// The names the statement may rebind before one of its reads runs.
+enum Rebindable<'s> {
+    /// Every name it hands to a call or writes in an embedded assignment, less the
+    /// ones every call provably takes by value ([`by_value_survivors`]).
+    Names(HashSet<&'s str>),
+    /// Every name: in the top-level frame, whose locals are the globals, a userland
+    /// body the statement runs can rebind any of them (`global $a;`) before a later
+    /// operand reads it ([`top_level_rebind_risk`]).
+    ///
+    /// [`top_level_rebind_risk`]: crate::rebind::top_level_rebind_risk
+    All,
+}
+
+impl Rebindable<'_> {
+    fn contains(&self, name: &str) -> bool {
+        match self {
+            Rebindable::Names(names) => names.contains(name),
+            Rebindable::All => true,
+        }
+    }
+}
+
 fn rebindable<'s>(
     w: &WalkCx,
+    folder: &mut dyn Folder,
     stmt: &'s Stmt,
     env: &HashMap<String, Known>,
     store: &Store,
-) -> HashSet<&'s str> {
+) -> Rebindable<'s> {
+    if crate::rebind::top_level_rebind_risk(w.cx, folder, &stmt.runs) {
+        return Rebindable::All;
+    }
     if stmt.invalidated.is_empty() {
-        return HashSet::new();
+        return Rebindable::Names(HashSet::new());
     }
     let (kept, _) = by_value_survivors(w.cx, w.scope.poisoned, &stmt.invalidated, env, store);
-    stmt.invalidated.iter().map(|v| v.name.as_str()).filter(|n| !kept.contains(n)).collect()
+    let names = stmt.invalidated.iter().map(|v| v.name.as_str()).filter(|n| !kept.contains(n));
+    Rebindable::Names(names.collect())
 }
 
 /// Step 1z's member and offset half: each offset, property and class-constant read
@@ -265,7 +291,7 @@ fn check_member_reads(
     }
     let cx = w.cx;
     let poisoned = w.scope.poisoned;
-    let rebound = rebindable(w, stmt, env, store);
+    let rebound = rebindable(w, folder, stmt, env, store);
     let verdict = |carrier, family| carrier_verdict(cx, positions, carrier, family);
     let mut names = Vec::new();
     for pos in positions {
