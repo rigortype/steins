@@ -25,7 +25,8 @@ use crate::walk::{WalkCx, mark_dead_span};
 /// unevaluated. Plain per-scope walk only — the caller's `descent.is_none()` gate —
 /// because a dead region is a universal truth only there.
 ///
-/// Each region is evaluated against **no environment**: a statement's own bindings
+/// Each region is evaluated against **no environment** (and a store that holds only the
+/// guards variables hold): a statement's own bindings
 /// (an embedded assignment, a by-reference call earlier in the same expression) are not
 /// yet in the entry env this runs under, so a test that names a variable could be read
 /// stale. The lowering carries only the regions that can decide without one — a guard
@@ -37,12 +38,21 @@ use crate::walk::{WalkCx, mark_dead_span};
 /// is the whole of what such a region is for.
 ///
 /// [`mark_dead_operand`]: crate::walk::mark_dead_operand
-pub(crate) fn sweep_guard_regions(w: &WalkCx, folder: &mut dyn Folder, stmt: &Stmt) {
+pub(crate) fn sweep_guard_regions(w: &WalkCx, folder: &mut dyn Folder, stmt: &Stmt, held: &Store) {
     if stmt.guards.is_empty() {
         return;
     }
     let env = HashMap::new();
-    let store = Store::default();
+    // The one fact of the entry state a region may read: a variable holding an existence
+    // guard (`$has = function_exists('f')`, ADR-0104), unless the statement itself may
+    // rebind it or a variable the guard names.
+    let mut store = Store::default();
+    for (var, g) in &held.guard_vars {
+        let rebound = |n: &str| stmt.invalidated.iter().any(|e| e.name == n);
+        if !rebound(var) && !g.deps.iter().any(|d| rebound(d)) {
+            store.guard_vars.insert(var.clone(), g.clone());
+        }
+    }
     for region in &stmt.guards {
         let verdict = eval_cond(w, folder, &region.cond, &env, &store, w.scope.poisoned);
         let dead = match verdict {

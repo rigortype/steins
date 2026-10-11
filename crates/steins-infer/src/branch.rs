@@ -28,7 +28,7 @@ use crate::predicates::{apply_type_narrowing, pred_holds_on_fact, type_predicate
 use crate::project::Diagnostic;
 use crate::remembered;
 use crate::refine::{
-    Refine, apply_class_narrowing, apply_refinements, collect_guard_calls, collect_guard_calls_any,
+    Refine, apply_class_narrowing, apply_refinements, collect_guard_calls, collect_guard_vars, collect_guard_calls_any,
     collect_same_expr_call_guards, else_refinements, subtract_contract_lane, then_refinements,
 };
 use crate::shapes::{ShapeGuard, apply_shape_guard, apply_shape_narrowing, guard_key};
@@ -274,6 +274,21 @@ pub(crate) fn apply_cond_side(
         if returns_true {
             for v in existence_vouch(w.cx, store, call) {
                 store.vouch(v);
+            }
+        }
+    }
+    // A variable that holds an existence guard vouches it on the side where it is truthy
+    // (ADR-0104): `$has = function_exists('f'); if ($has) { f(); }`.
+    if !store.guard_vars.is_empty() {
+        let mut tested = Vec::new();
+        collect_guard_vars(cond, then, &mut tested);
+        for (var, truthy) in tested {
+            if truthy
+                && let Some(g) = store.guard_vars.get(var).cloned()
+            {
+                for v in existence_vouch(w.cx, store, &g.call) {
+                    store.vouch(v);
+                }
             }
         }
     }

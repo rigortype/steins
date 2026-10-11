@@ -284,3 +284,75 @@ row!(
     "return match ($n) { 1 => nope_fn(), default => 0 };",
     [UNDEF_FN]
 );
+
+// ---- A guard assigned before it is used as a connective's operand (review of #1066) ----
+
+row!(assigned_guard_on_the_left_of_and, "$k = function_exists('nope_fn') and nope_fn();", []);
+row!(assigned_negated_guard_on_the_left_of_or, "$k = !function_exists('nope_fn') or nope_fn();", []);
+row!(assigned_guard_into_an_append, "$r = []; $r[] = function_exists('nope_fn') and nope_fn();", []);
+row!(
+    assigned_guard_as_a_ternary_condition,
+    "return ($k = function_exists('nope_fn')) ? nope_fn() : 0;",
+    []
+);
+row!(
+    assigned_guard_as_a_conjunct_still_judges_the_other_arm,
+    "return ($k = function_exists('nope_fn')) ? 0 : nope_fn();",
+    [UNDEF_FN]
+);
+row!(assignment_of_a_non_guard_declines_nothing, "$k = $a and nope_fn();", [UNDEF_FN]);
+
+// ---- A guard stored in a variable and tested through it ----
+
+row!(
+    stored_guard_in_a_ternary,
+    "$has = function_exists('nope_fn'); return $has ? strlen(nope_fn()) : 0;",
+    []
+);
+row!(
+    stored_guard_in_an_if,
+    "$has = function_exists('nope_fn'); if ($has) { echo strlen(nope_fn()); }",
+    []
+);
+row!(
+    stored_guard_in_an_early_return,
+    "$has = function_exists('nope_fn'); if (!$has) { return 0; } return strlen(nope_fn());",
+    []
+);
+row!(
+    stored_guard_in_a_conjunction,
+    "$has = function_exists('nope_fn'); return $has && nope_fn();",
+    []
+);
+row!(
+    stored_guard_does_not_cover_a_call_outside_a_test,
+    "$has = function_exists('nope_fn'); return nope_fn();",
+    [UNDEF_FN]
+);
+row!(
+    stored_guard_covers_only_its_own_name,
+    "$has = function_exists('sprintf'); return $has ? nope_fn() : 0;",
+    [UNDEF_FN]
+);
+row!(
+    stored_guard_dies_on_reassignment,
+    "$has = function_exists('nope_fn'); $has = $a; return $has ? nope_fn() : 0;",
+    [UNDEF_FN]
+);
+row!(
+    stored_guard_dies_on_a_rebind_in_the_same_statement,
+    "$has = function_exists('nope_fn'); return ($has = $a) ? nope_fn() : 0;",
+    [UNDEF_FN]
+);
+row!(
+    stored_method_guard_dies_when_its_receiver_is_rebound,
+    "$has = method_exists($c, 'gone'); $c = new C(); return $has ? $c->gone() : 0;",
+    [UNDEF_M]
+);
+
+// ---- A literal that is not null decides `??` ----
+
+row!(non_null_literal_on_the_left_of_coalesce_kills_the_right, "return 1 ?? nope_fn();", []);
+row!(string_literal_on_the_left_of_coalesce_kills_the_right, "return 'x' ?? nope_fn();", []);
+row!(false_on_the_left_of_coalesce_kills_the_right, "return false ?? nope_fn();", []);
+row!(null_on_the_left_of_coalesce_keeps_the_right, "return null ?? nope_fn();", [UNDEF_FN]);

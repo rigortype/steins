@@ -197,9 +197,10 @@ of peak RSS): PHPUnit 439 MB to 450 MB (+2.5%), Carbon 411 MB to 412 MB
   analyzer fingerprint refuses a generation written by another build, so the
   new field needs no `SCHEMA_VERSION` bump (`steins-db`'s wire notes).
 
-Slice S2 measured the call lookup: peak RSS on PHPUnit (release, strict `--no-php
---vendor-diagnostics --no-cache`, median of 5) 454.8 MB to 461.3 MB, +1.4%. A first cut
-that kept a `CallExpr` per nested call cost +4% to +7%.
+Slice S2 measured the call lookup and the guard regions below: peak RSS on PHPUnit
+(release, strict `--no-php --vendor-diagnostics --no-cache`, median of 5) 455.4 MB to
+464.6 MB, +2.0% (the review measured +2.7%). A first cut that kept a `CallExpr` per nested
+call cost +4% to +7%.
 
 ### 2.7 Decisions and known gaps recorded by S2
 
@@ -211,6 +212,19 @@ that kept a `CallExpr` per nested call cost +4% to +7%.
   lowered call, so they are not judged.
 - **Known gap:** `call.inaccessible-method` is treated as value-dependent, so it declines
   at a conditional position; a static `C::priv()` there is a false negative.
+
+- **Guards reach a position through an assignment and through a variable.** `$v = G and R`
+  parses as `($v = G) and R`, and `$has = G; … $has ? R : …` tests a stored guard. The
+  guard-region lowering reads `($v = e)` as `e` (it decides dead extents and invalidates
+  nothing); a branch condition keeps the opaque write and conjoins the guard
+  (`And(Opaque, G)`), so the branch vouches what `G` vouches and is dead where `G` is
+  decided false. A variable assigned an existence call with literal or variable
+  arguments holds the guard in the store (`Store::guard_vars`) until it, or a variable the
+  guard names, is rebound; a bare truthy test of it is the guard for the sweep, the branch
+  walk and the vouch. A bare variable test is therefore a guard region now, which is the
+  trace growth in the figure above. A guard stored in a variable does not reach a
+  closure or arrow-function body in the guarded arm (a base false positive, unchanged).
+- **A literal that is not `null` on the left of `??` kills the right**, as `true || b` does.
 
 ## 3. Consequences
 

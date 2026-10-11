@@ -187,6 +187,21 @@ const POSITIONS: &[(&str, &str)] = &[
     ("switch-true-last-case", "switch (true) { case {G}: {R}; }"),
     ("switch-true-return", "switch (true) { case {G}: return {R}; default: return null; }"),
     ("switch-true-later-case", "switch (true) { case false: break; case {G}: {R}; break; }"),
+    // A guard on the left of a low-precedence connective is the right of an assignment:
+    // `$w = G and R` is `($w = G) and R` (ADR-0104).
+    ("assigned-and", "$w = {G} and {R};"),
+    ("assigned-negated-or", "$w = !{G} or {R};"),
+    ("assigned-ternary-condition", "return ($w = {G}) ? {R} : null;"),
+    ("assigned-if", "if ($w = {G}) { {R}; }"),
+    ("assigned-and-conjunct", "if (($w = {G}) && {R}) {}"),
+    // A guard kept in a variable is tested through it.
+    ("stored-ternary", "$w = {G}; return $w ? {R} : null;"),
+    ("stored-negated-ternary", "$w = {G}; return !$w ? null : {R};"),
+    ("stored-if", "$w = {G}; if ($w) { {R}; }"),
+    ("stored-early-return", "$w = {G}; if (!$w) { return null; } {R};"),
+    ("stored-and", "$w = {G}; $w && {R};"),
+    ("stored-or", "$w = {G}; !$w || {R};"),
+    ("stored-and-conjunct", "$w = {G}; if ($w && {R}) {}"),
 ];
 
 fn build(family: &Family, body: &str, index: usize) -> String {

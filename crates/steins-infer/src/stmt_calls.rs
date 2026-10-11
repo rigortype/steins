@@ -38,6 +38,21 @@
 //! * A first-class callable is judged for existence only. Arity (the shape has no arguments),
 //!   types, descent, no-effect and dumps never see a `CallRef`.
 //!
+//! How a guard reaches a position (all in `guard_positions.rs`, one row per spelling, for every
+//! guard family):
+//!
+//! | The test is | Read as |
+//! | --- | --- |
+//! | `G` (`function_exists('f')`, …) | the guard, as before |
+//! | `$v = G`, anywhere a condition goes (`and`/`or`, `&&`, ternary, `if`) | `G`: an assignment is truthy as its value is; the write stays on the leaf |
+//! | `!($v = G)` or `!G` | the negated guard |
+//! | `$v`, after `$v = G` | `G`, until `$v` (or a variable `G` names) is rebound, a barrier, or a join where a branch disagrees |
+//! | `$v`, with `$v` rebound in the same statement | nothing (the statement's own write is not modeled) |
+//! | `lit ?? b`, `lit` a literal that is not `null` | `b` is dead |
+//!
+//! A stored guard decides the ternary arm or operand it kills, vouches the symbol it names on
+//! the side where `$v` is truthy, and lets a conditional position be judged with its vouch.
+//!
 //! The IR keeps the weakest claim a read sits under, so a call both conditional and under `@`
 //! is `Conditional`: its existence is judged, which is sound, since an `Error` is not
 //! suppressible. The module's tests have a case per row (`nested_call_positions.rs`).

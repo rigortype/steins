@@ -16,7 +16,7 @@ use steins_domain::PhpStr;
 use crate::ast::{
     Arg, ArgValue, ArrayKey, CallExpr, Callee, CastTarget, ClosureRef, CmpOp, CondExpr, CondOperand,
     EffectRecv, IssetOperand, LogicalOp, NameRef, NamedArg, OperandSpan, Receiver, RefKind, Span,
-    StaticClass, Stmt, StmtKind, ValueOp,
+    StaticClass, Stmt, StmtKind, ValueOp, EXISTENCE_PREDICATES,
     flatten_spread_operand,
 };
 use crate::lower_effect::EffectScanCx;
@@ -1148,6 +1148,18 @@ pub(crate) fn lower_cond(expr: &Expression<'_>) -> CondExpr {
         Expression::UnaryPrefix(u) if matches!(u.operator, UnaryPrefixOperator::Not(_)) => {
             CondExpr::Not(Box::new(lower_cond(u.operand)))
         }
+        // `($v = G)` with `G` an existence guard is truthy exactly when `G` is
+        // (ADR-0104): the opaque write it always was, conjoined with the guard so the
+        // branch it opens vouches what `G` vouches and is dead where `G` is decided false.
+        Expression::Assignment(a) if a.operator.is_assign() => {
+            let opaque = CondExpr::Opaque { reads: cond_reads(expr), writes: cond_writes(expr) };
+            let inner = lower_cond(a.rhs);
+            if is_guard_call_cond(&inner) {
+                CondExpr::And(Box::new(opaque), Box::new(inner), OperandSpan::NONE)
+            } else {
+                opaque
+            }
+        }
         // `empty($x['k'])` — PHP's own definition, lowered rather than special-
         // cased: `empty(e)` is true iff `e` is not set OR `e` is falsy, i.e.
         // `!isset(e) || !e`. The narrowing then falls out of the compositional
@@ -1228,6 +1240,22 @@ pub(crate) fn lower_cond(expr: &Expression<'_>) -> CondExpr {
             }
             operand => CondExpr::Truthy(operand),
         },
+    }
+}
+
+/// Whether `cond` is an existence guard call, or the negation of one (the guards
+/// [`EXISTENCE_PREDICATES`] names and the member guards `property_exists` and `is_callable`).
+pub(crate) fn is_guard_call_cond(cond: &CondExpr) -> bool {
+    match cond {
+        CondExpr::Call { call, .. } => call.callee.as_deref().is_some_and(|n| {
+            let n = n.trim_start_matches('\\');
+            EXISTENCE_PREDICATES
+                .iter()
+                .chain(&["property_exists", "is_callable"])
+                .any(|p| n.eq_ignore_ascii_case(p))
+        }),
+        CondExpr::Not(c) => is_guard_call_cond(c),
+        _ => false,
     }
 }
 

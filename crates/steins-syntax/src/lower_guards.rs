@@ -11,10 +11,12 @@
 //! the same way in every position).
 
 use mago_span::HasSpan;
-use mago_syntax::cst::{BinaryOperator, Node, Statement, UnaryPrefixOperator};
+use mago_syntax::cst::{Binary, BinaryOperator, Expression, Node, Statement, UnaryPrefixOperator};
 
-use crate::ast::{CondExpr, CondOperand, EXISTENCE_PREDICATES, GuardRegion};
-use crate::lower_expr::{lower_binary_cond, lower_cond};
+use crate::ast::{
+    ArgValue, CmpOp, CondExpr, CondOperand, EXISTENCE_PREDICATES, GuardRegion, OperandSpan,
+};
+use crate::lower_expr::{lower_binary_cond, lower_cond, lower_cond_operand};
 use crate::{children, to_span};
 
 /// The [`GuardRegion`]s one statement's **own** expressions carry.
@@ -73,7 +75,7 @@ fn scan(node: &Node<'_, '_>, covered: bool, out: &mut Vec<GuardRegion>) {
         // `c` is falsy.
         // The test is one operand of the region, so a connective in it is covered by it.
         Node::Conditional(c) => {
-            let cond = lower_cond(c.condition);
+            let cond = lower_guard_cond(c.condition);
             if could_decide_without_env(&cond) {
                 out.push(GuardRegion {
                     cond,
@@ -94,12 +96,27 @@ fn scan(node: &Node<'_, '_>, covered: bool, out: &mut Vec<GuardRegion>) {
         // `xor` evaluates both.
         Node::Binary(b) if is_short_circuit(&b.operator) => {
             if !covered {
-                let cond = lower_binary_cond(b);
+                let cond = lower_guard_binary(b);
                 if could_decide_without_env(&cond) {
                     out.push(GuardRegion { cond, dead_if_true: None, dead_if_false: None });
                 }
             }
             operand_of_logical = true;
+        }
+        // `lit ?? b` never evaluates `b`: a non-null literal on the left decides it.
+        Node::Binary(b)
+            if matches!(b.operator, BinaryOperator::NullCoalesce(_))
+                && matches!(b.lhs.unparenthesized(), Expression::Literal(_)) =>
+        {
+            out.push(GuardRegion {
+                cond: CondExpr::Cmp {
+                    op: CmpOp::NotIdentical,
+                    lhs: lower_cond_operand(b.lhs),
+                    rhs: CondOperand::Literal(ArgValue::Null),
+                },
+                dead_if_true: Some(to_span(b.rhs.span())),
+                dead_if_false: None,
+            });
         }
         Node::Expression(_) | Node::Parenthesized(_) => operand_of_logical = covered,
         Node::UnaryPrefix(u) if matches!(u.operator, UnaryPrefixOperator::Not(_)) => {
@@ -109,6 +126,32 @@ fn scan(node: &Node<'_, '_>, covered: bool, out: &mut Vec<GuardRegion>) {
     }
     for child in children(node) {
         scan(&child, operand_of_logical, out);
+    }
+}
+
+/// [`lower_cond`] for a test that is only ever evaluated against no environment to find the
+/// extents it kills: `($v = e)` is read as `e`, since an assignment is truthy as its value is
+/// (`$v = G and R` parses as `($v = G) and R`, ADR-0104). The write is dropped, which is
+/// right here because a region decides dead extents and invalidates nothing.
+fn lower_guard_cond(expr: &Expression<'_>) -> CondExpr {
+    match expr.unparenthesized() {
+        Expression::Assignment(a) if a.operator.is_assign() => lower_guard_cond(a.rhs),
+        Expression::UnaryPrefix(u) if matches!(u.operator, UnaryPrefixOperator::Not(_)) => {
+            CondExpr::Not(Box::new(lower_guard_cond(u.operand)))
+        }
+        Expression::Binary(b) if is_short_circuit(&b.operator) => lower_guard_binary(b),
+        _ => lower_cond(expr),
+    }
+}
+
+/// [`lower_binary_cond`] over [`lower_guard_cond`] operands, for `&&`, `||`, `and` and `or`.
+fn lower_guard_binary(b: &Binary<'_>) -> CondExpr {
+    let span = OperandSpan(to_span(b.rhs.span()));
+    let (lhs, rhs) = (Box::new(lower_guard_cond(b.lhs)), Box::new(lower_guard_cond(b.rhs)));
+    match b.operator {
+        BinaryOperator::And(_) | BinaryOperator::LowAnd(_) => CondExpr::And(lhs, rhs, span),
+        BinaryOperator::Or(_) | BinaryOperator::LowOr(_) => CondExpr::Or(lhs, rhs, span),
+        _ => lower_binary_cond(b),
     }
 }
 
@@ -144,6 +187,9 @@ fn could_decide_without_env(cond: &CondExpr) -> bool {
     match cond {
         CondExpr::Call { call, .. } => call.callee.as_deref().is_some_and(is_guard_predicate),
         CondExpr::Cmp { lhs, rhs, .. } => free(lhs) && free(rhs),
+        // A variable may hold a stored existence guard (`$has = function_exists('f')`); the
+        // sweep reads that from the store (ADR-0104).
+        CondExpr::Truthy(CondOperand::Var(_)) => true,
         CondExpr::Truthy(op) | CondExpr::Instanceof { operand: op, .. } => free(op),
         CondExpr::Not(c) => could_decide_without_env(c),
         CondExpr::And(a, b, _) | CondExpr::Or(a, b, _) => {
