@@ -102,7 +102,7 @@ S3 own that table.
 | `IssetLike` | a class constant under `isset`, `empty`, `??` or `??=` (an offset or property there is not recorded) |
 | `Suppressed` | under `@` |
 | `CompoundRead` | the target of `++`, `--` or a compound assignment |
-| `FirstClassCallable` | `f(...)`, `$o->m(...)`, `C::m(...)` |
+| (kind `CallRef`) | `f(...)`, `$o->m(...)`, `C::m(...)`: its own kind, not a carrier, with the carrier folded like a call's (`$f && missing(...)` is `Conditional`) |
 
 A read can sit under several constructs at once. The lowering keeps the
 **weakest claim**, in the order write (not recorded), `IssetLike`, `Conditional`,
@@ -114,6 +114,28 @@ the default floor) is what makes that lossless, and a decision to judge under
 `@` has to re-derive the argument's by-reference evidence. Second, the base of
 a chain inherits the level above's carrier, except that the base of a
 `CompoundRead` is a `Write`, because the level above is fetched for write.
+
+The full rule table, one row per construct that writes, silences or
+short-circuits a read, is in the module doc of `lower_read.rs`, with a test per
+row. Beyond the order above:
+
+- **`?->` short-circuits the rest of the chain.** Once a receiver is null PHP
+  evaluates neither the member, nor its arguments and keys, nor any later link
+  (`$n?->m(missing(), A::NOPE, $a['k'])` evaluates nothing). Everything past a
+  `?->` is recorded `Conditional`; the receiver itself keeps the inherited
+  claim.
+- **An append writes its base.** `$a['k'][] = 1` creates `$a['k']`; no level of
+  its base is recorded.
+
+Two obligations fall on a consumer:
+
+- A by-reference argument also silences the base levels of its chain:
+  `f($a['x']['y'])` records both `$a['x']['y']` and `$a['x']` as `Argument`,
+  because a by-reference parameter creates the whole path. A consumer that
+  declines the argument declines the levels with it.
+- `position: None` (a named argument, or one at or after a spread) means the
+  by-reference parameter is unknowable. A value-dependent family must decline
+  there, not judge.
 
 ### 2.4 The boundary
 
@@ -130,7 +152,10 @@ contexts scan stops, and one construct further:
   statement evaluates, and none of its body;
 - a `match` is not descended. A structured one is hoisted and each arm is a
   statement carrying its own positions; an unstructured one is not a position
-  the walk can claim is reached. A `match` subject belongs to the headers.
+  the walk can claim is reached. A `match` subject, and every arm condition
+  of a `match` (`echo match ($a['subj']) { $a['arm'] => 1 }`), are never
+  recorded here: S4 gives the arm conditions the same header record as the
+  subject.
 
 Branch conditions, loop headers and `switch` subjects are not read here: they
 are evaluated in an env this pass does not hold, and S4 gives them a header
