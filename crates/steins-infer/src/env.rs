@@ -863,7 +863,20 @@ impl Store {
     /// seeing it); `var` just forgets which object it held (ADR-0036: a pass-to-call
     /// may rebind `$var`, so the var→id link must die exactly as `classes_env`
     /// entries did, while the id lives on for its other aliases).
+    ///
+    /// The object escapes first (issue #1048): a name forgotten because the walk
+    /// can no longer say what it holds may still hold that object, and a write
+    /// through it is then a write through an unresolved name. A name that is being
+    /// given a new value takes [`Self::release`] instead.
     pub(crate) fn unbind(&mut self, var: &str) {
+        self.escape_object(var);
+        self.release(var);
+    }
+
+    /// Drop `var`'s binding because `var` is being given a new value — an
+    /// assignment, a `catch` binding, a callee's out-parameter — so it no longer
+    /// holds the object, which therefore does not escape ([`Self::unbind`]).
+    pub(crate) fn release(&mut self, var: &str) {
         self.refs.remove(var);
         self.drop_places_of(var);
         // A call result remembered on this name is as stale as the name (ADR-0102 §2.4,
@@ -1040,12 +1053,20 @@ impl Store {
     /// mutable props are, and the same hand-off — a callee, a property, a
     /// closure capture, an unnamed nested call — is what loses it.
     pub(crate) fn mark_escaped(&mut self, var: &str) {
+        self.escape_object(var);
+        self.escape_resource(var);
+    }
+
+    /// Mark the heap object `var` refers to as escaped, and record it for a loop
+    /// whose body this is ([`EscapeRecorder`]). A no-op where `var` refers to none.
+    fn escape_object(&mut self, var: &str) {
         if let Some(id) = self.refs.get(var).copied()
             && let Some(o) = self.heap.get_mut(&id)
+            && !o.escaped
         {
             o.escaped = true;
+            note_escape(id);
         }
-        self.escape_resource(var);
     }
 
     /// Sweep the object `var` refers to: its non-readonly props and its value
@@ -1113,7 +1134,12 @@ impl Store {
         obj.props = snapshot.props.clone();
         obj.readonly = snapshot.readonly.clone();
         obj.ro_written = snapshot.ro_written.clone();
-        obj.escaped = snapshot.escaped;
+        // Monotone (issue #1048): a callee's snapshot cannot take back a hand-off
+        // the caller already made.
+        if snapshot.escaped && !obj.escaped {
+            obj.escaped = true;
+            note_escape(id);
+        }
     }
 
     /// Sweep every escaped object's non-readonly props (an unknown call ran that may
@@ -1504,6 +1530,76 @@ fn lane_claim(store: &Store, name: &str) -> Option<(Fact, Stratum)> {
     Some((fact, stratum))
 }
 
+thread_local! {
+    /// The ids escaped while each open [`EscapeRecorder`] was open, innermost last.
+    static ESCAPE_LOG: std::cell::RefCell<Vec<HashSet<AllocId>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Record that allocation `id` escaped, for the innermost open [`EscapeRecorder`].
+pub(crate) fn note_escape(id: AllocId) {
+    ESCAPE_LOG.with(|log| {
+        if let Some(top) = log.borrow_mut().last_mut() {
+            top.insert(id);
+        }
+    });
+}
+
+/// The ids escaped on any path of a loop body's walk (issue #1048). A loop's
+/// fall-through is built before its body is walked and keeps none of the body's
+/// stores, so an object the body hands to a closure or an array would otherwise be
+/// unescaped after the loop. Opened around the body walk; what it collected also
+/// counts for an enclosing recorder.
+pub(crate) struct EscapeRecorder(());
+
+impl EscapeRecorder {
+    pub(crate) fn start() -> Self {
+        ESCAPE_LOG.with(|log| log.borrow_mut().push(HashSet::new()));
+        EscapeRecorder(())
+    }
+
+    /// Close the recorder and hand back its ids.
+    pub(crate) fn finish(self) -> HashSet<AllocId> {
+        let ids = ESCAPE_LOG.with(|log| {
+            let mut log = log.borrow_mut();
+            let ids = log.pop().unwrap_or_default();
+            if let Some(parent) = log.last_mut() {
+                parent.extend(ids.iter().copied());
+            }
+            ids
+        });
+        std::mem::forget(self);
+        ids
+    }
+}
+
+impl Drop for EscapeRecorder {
+    /// A recorder abandoned by an unwind still closes, so the stack stays paired.
+    fn drop(&mut self) {
+        ESCAPE_LOG.with(|log| {
+            log.borrow_mut().pop();
+        });
+    }
+}
+
+/// A scope walk's own escape log: the caller's open recorders are set aside while a
+/// nested walk (a descent, a closure) runs, since its ids name another store's
+/// allocations.
+pub(crate) struct EscapeLogFrame(Vec<HashSet<AllocId>>);
+
+impl EscapeLogFrame {
+    pub(crate) fn enter() -> Self {
+        EscapeLogFrame(ESCAPE_LOG.with(|log| std::mem::take(&mut *log.borrow_mut())))
+    }
+}
+
+impl Drop for EscapeLogFrame {
+    fn drop(&mut self) {
+        let saved = std::mem::take(&mut self.0);
+        ESCAPE_LOG.with(|log| *log.borrow_mut() = saved);
+    }
+}
+
 /// The bindings a join keeps — a name every branch binds to the same id — and the
 /// ids a dropped binding named. A name the branches bind to different objects (or
 /// one leaves unbound) still holds one of them after the merge, as a name the store
@@ -1574,6 +1670,9 @@ pub(crate) fn join_stores(first: &Store, rest: &[&Store]) -> Store {
             .collect();
         joined.escaped =
             o0.escaped || others.iter().any(|o| o.escaped) || dropped.contains(&id);
+        if joined.escaped {
+            note_escape(id);
+        }
         // ro_written: written on EVERY joined path.
         joined.ro_written = o0
             .ro_written

@@ -465,5 +465,5 @@ fn seed_out_param(
     // The callee assigned the whole variable, so the guard-derived class facts and
     // the declared-arm lane the old value earned are void — the same reasoning any
     // rebinding applies.
-    store.unbind(var);
+    store.release(var);
 }

@@ -73,13 +73,13 @@ impl AssignLhs<'_> {
     /// the fact came from.
     fn bind_known(&self, env: &mut HashMap<String, Known>, store: &mut Store, known: Known) {
         env.insert(self.var.to_owned(), known);
-        store.unbind(self.var);
+        store.release(self.var);
     }
 
     /// Drop the binding from every lane: the arm binds no value.
     fn clear(&self, env: &mut HashMap<String, Known>, store: &mut Store) {
         env.remove(self.var);
-        store.unbind(self.var);
+        store.release(self.var);
     }
 
     /// Show `fact` on the line when it is one literal.
