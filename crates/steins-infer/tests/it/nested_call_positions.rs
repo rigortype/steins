@@ -38,6 +38,8 @@ impl Folder for Boot {
                 "property_exists",
                 "sprintf",
                 "preg_match",
+                "extract",
+                "mt_rand",
             ]
             .contains(&name),
         )
@@ -356,3 +358,160 @@ row!(non_null_literal_on_the_left_of_coalesce_kills_the_right, "return 1 ?? nope
 row!(string_literal_on_the_left_of_coalesce_kills_the_right, "return 'x' ?? nope_fn();", []);
 row!(false_on_the_left_of_coalesce_kills_the_right, "return false ?? nope_fn();", []);
 row!(null_on_the_left_of_coalesce_keeps_the_right, "return null ?? nope_fn();", [UNDEF_FN]);
+
+// ---- The stored-guard rule table (stmt_calls.rs): shapes x polarity x kills x joins x captures ----
+
+row!(
+    stored_negated_guard_runs_the_call_when_truthy,
+    "$h = !function_exists('nope_fn'); return $h ? nope_fn() : 0;",
+    [UNDEF_FN]
+);
+row!(
+    stored_negated_guard_kills_the_call_when_falsy,
+    "$h = !function_exists('nope_fn'); return $h ? 0 : nope_fn();",
+    []
+);
+row!(
+    stored_negated_guard_in_an_if_runs_the_body,
+    "$h = !function_exists('nope_fn'); if ($h) { echo strlen(nope_fn()); }",
+    [UNDEF_FN]
+);
+row!(
+    stored_negated_guard_in_a_negated_if_kills_the_body,
+    "$h = !function_exists('nope_fn'); if (!$h) { echo strlen(nope_fn()); }",
+    []
+);
+row!(
+    stored_negated_guard_vouches_the_else_side_of_an_if,
+    "$h = !function_exists('nope_fn'); if ($h) { return 0; } return strlen(nope_fn());",
+    []
+);
+row!(
+    stored_conjunction_vouches_its_guard,
+    "$h = function_exists('nope_fn') && $a; return $h ? nope_fn() : 0;",
+    []
+);
+row!(
+    stored_conjunction_with_a_call_vouches_its_guard,
+    "$h = function_exists('nope_fn') && mt_rand(0, 1) > 5; return $h ? nope_fn() : 0;",
+    []
+);
+row!(
+    stored_conjunction_says_nothing_when_falsy,
+    "$h = function_exists('sprintf') && $a; return $h ? 0 : nope_fn();",
+    [UNDEF_FN]
+);
+row!(
+    stored_disjunction_vouches_nothing,
+    "$h = function_exists('nope_fn') || $a; return $h ? nope_fn() : 0;",
+    [UNDEF_FN]
+);
+row!(
+    stored_comparison_is_not_a_guard,
+    "$h = function_exists('nope_fn') === true; return $h ? nope_fn() : 0;",
+    [UNDEF_FN]
+);
+row!(
+    stored_guard_naming_itself_is_not_stored,
+    "$h = function_exists($h); return $h ? nope_fn() : 0;",
+    [UNDEF_FN]
+);
+
+// Kills.
+row!(
+    reference_taken_to_a_stored_guard_kills_it,
+    "$h = function_exists('nope_fn'); $r = &$h; $r = true; return $h ? nope_fn() : 0;",
+    [UNDEF_FN]
+);
+row!(
+    extract_kills_a_stored_guard,
+    "$h = function_exists('nope_fn'); extract(['h' => true]); return $h ? nope_fn() : 0;",
+    [UNDEF_FN]
+);
+row!(
+    by_reference_capture_kills_a_stored_guard,
+    "$h = function_exists('nope_fn'); $f = function () use (&$h) { $h = true; }; $f(); return $h ? nope_fn() : 0;",
+    [UNDEF_FN]
+);
+row!(
+    variable_variable_write_kills_a_stored_guard,
+    "$h = function_exists('nope_fn'); $n = 'h'; $$n = true; return $h ? nope_fn() : 0;",
+    [UNDEF_FN]
+);
+row!(
+    list_destructure_kills_a_stored_guard,
+    "$h = function_exists('nope_fn'); [$h] = [true]; return $h ? nope_fn() : 0;",
+    [UNDEF_FN]
+);
+row!(
+    foreach_target_kills_a_stored_guard,
+    "$h = function_exists('nope_fn'); foreach ([true] as $h) {} return $h ? nope_fn() : 0;",
+    [UNDEF_FN]
+);
+row!(
+    increment_kills_a_stored_guard,
+    "$h = function_exists('nope_fn'); $h++; return $h ? nope_fn() : 0;",
+    [UNDEF_FN]
+);
+row!(
+    rebinding_a_variable_the_guard_names_kills_it,
+    "$n = 'nope_fn'; $h = function_exists($n); $n = 'other'; return $h ? nope_fn() : 0;",
+    [UNDEF_FN]
+);
+
+// Joins.
+row!(
+    both_branches_storing_the_same_guard_keep_it,
+    "if ($a) { $h = function_exists('nope_fn'); } else { $h = function_exists('nope_fn'); } return $h ? nope_fn() : 0;",
+    []
+);
+row!(
+    one_branch_rebinding_drops_the_guard_at_the_join,
+    "$h = function_exists('nope_fn'); if ($a) { $h = true; } return $h ? nope_fn() : 0;",
+    [UNDEF_FN]
+);
+row!(
+    branches_storing_different_guards_drop_it_at_the_join,
+    "if ($a) { $h = function_exists('nope_fn'); } else { $h = function_exists('other_fn'); } return $h ? nope_fn() : 0;",
+    [UNDEF_FN]
+);
+
+// Captures.
+row!(
+    by_value_capture_sees_the_guard_at_creation,
+    "$h = function_exists('nope_fn'); $f = function () use ($h) { return $h ? nope_fn() : 0; }; return $f();",
+    []
+);
+row!(
+    arrow_function_sees_the_parents_guard,
+    "$h = function_exists('nope_fn'); $f = fn () => $h ? nope_fn() : 0; return $f();",
+    []
+);
+row!(
+    by_reference_capture_scope_is_not_seeded,
+    "$h = function_exists('nope_fn'); $f = function () use (&$h) { return $h ? nope_fn() : 0; }; return $f();",
+    [UNDEF_FN]
+);
+row!(
+    closure_created_before_the_guard_is_not_seeded,
+    "$f = function () use ($a) { return $a ? nope_fn() : 0; }; $h = function_exists('nope_fn'); return $f();",
+    [UNDEF_FN]
+);
+
+// ---- A callee written in place: arity only (#1070), at a nested position ----
+
+row!(
+    in_place_closure_arity_at_a_nested_position,
+    "echo id((function ($x, $y) { return $x; })(1));",
+    ["call.too-few-arguments @ (function ($x"]
+);
+row!(
+    in_place_closure_arity_at_a_conditional_position,
+    "return $a && (function ($x, $y) { return $x; })(1);",
+    ["call.too-few-arguments @ (function ($x"]
+);
+row!(
+    in_place_closure_with_enough_arguments_is_silent,
+    "echo id((function ($x, $y) { return $x; })(1, 2));",
+    []
+);

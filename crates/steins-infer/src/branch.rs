@@ -283,11 +283,14 @@ pub(crate) fn apply_cond_side(
         let mut tested = Vec::new();
         collect_guard_vars(cond, then, &mut tested);
         for (var, truthy) in tested {
-            if truthy
-                && let Some(g) = store.guard_vars.get(var).cloned()
-            {
-                for v in existence_vouch(w.cx, store, &g.call) {
-                    store.vouch(v);
+            let Some(g) = store.guard_vars.get(var).cloned() else { continue };
+            let mut calls = Vec::new();
+            collect_guard_calls(&g.cond, truthy, &mut calls);
+            for (call, returns_true) in calls {
+                if returns_true {
+                    for v in existence_vouch(w.cx, store, call) {
+                        store.vouch(v);
+                    }
                 }
             }
         }

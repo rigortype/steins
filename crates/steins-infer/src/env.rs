@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use steins_contract::{ContractTy, normalize};
 use steins_domain::Certainty;
 use steins_syntax::{
-    ArgValue, ArrayKey, CallExpr, NameRef, NormKey, Scope, StaticClass, normalize_array,
+    ArgValue, ArrayKey, CondExpr, NameRef, NormKey, Scope, Span, StaticClass, normalize_array,
     normalize_array_refs,
 };
 
@@ -711,12 +711,51 @@ pub(crate) struct Store {
 }
 
 /// An existence guard a variable holds the result of (see [`Store::guard_vars`]).
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub(crate) struct GuardVar {
-    /// The guard call as written (`function_exists('f')`, `method_exists($o, 'm')`).
-    pub(crate) call: CallExpr,
-    /// The variables its arguments name; a rebind of one of them voids the guard.
+    /// The stored value as a condition: the guard call, its negation, or a conjunction with
+    /// the guard among its operands (a truthy `$v` implies every conjunct). Polarity lives
+    /// in the shape, so `collect_guard_calls` reads it for either side of a test.
+    pub(crate) cond: CondExpr,
+    /// The variables its guard calls' arguments name; a rebind of one of them voids it.
     pub(crate) deps: Vec<String>,
+}
+
+impl GuardVar {
+    /// Whether two guards stored on different paths are the same guard: the same shape over
+    /// the same calls, whichever statement spelled them (spans differ between branches).
+    pub(crate) fn same_as(&self, other: &Self) -> bool {
+        self.deps == other.deps && same_cond(&self.cond, &other.cond)
+    }
+}
+
+fn same_cond(a: &CondExpr, b: &CondExpr) -> bool {
+    match (a, b) {
+        (CondExpr::Call { call: x, .. }, CondExpr::Call { call: y, .. }) => {
+            x.callee == y.callee
+                && x.callee_ref == y.callee_ref
+                && x.receiver == y.receiver
+                && x.positional_only == y.positional_only
+                && x.has_spread == y.has_spread
+                && x.named_args.is_empty()
+                && y.named_args.is_empty()
+                && x.args.len() == y.args.len()
+                && x.args.iter().zip(&y.args).all(|(p, q)| p.value == q.value)
+        }
+        (CondExpr::Not(x), CondExpr::Not(y)) => same_cond(x, y),
+        (CondExpr::And(x1, x2, _), CondExpr::And(y1, y2, _)) => {
+            same_cond(x1, y1) && same_cond(x2, y2)
+        }
+        (CondExpr::Opaque { .. }, CondExpr::Opaque { .. }) => true,
+        _ => false,
+    }
+}
+
+/// A snapshot of the guards variables held at a statement, for the closures it creates
+/// (see [`crate::cx::Cx::guard_seeds`]).
+pub(crate) struct GuardSeed {
+    pub(crate) span: Span,
+    pub(crate) vars: HashMap<String, GuardVar>,
 }
 
 /// A symbol a positive existence guard vouches for (ADR-0049 §4 guard-respect leg).
@@ -1842,7 +1881,7 @@ fn join_guard_vars(first: &Store, rest: &[&Store]) -> HashMap<String, GuardVar> 
     first
         .guard_vars
         .iter()
-        .filter(|(k, g)| rest.iter().all(|s| s.guard_vars.get(*k) == Some(*g)))
+        .filter(|(k, g)| rest.iter().all(|s| s.guard_vars.get(*k).is_some_and(|o| o.same_as(g))))
         .map(|(k, g)| (k.clone(), g.clone()))
         .collect()
 }

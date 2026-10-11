@@ -5,16 +5,17 @@
 
 use std::collections::{HashMap, HashSet};
 
-use steins_syntax::{
-    ArgValue, CallExpr, Callee, Carrier, ReadKind, ReadPosition, Receiver, Span, Stmt,
-};
+use steins_domain::Certainty;
+use steins_syntax::{ArgValue, CallExpr, Callee, Carrier, ReadKind, Receiver, Span, Stmt};
 
 use crate::absence::{check_undefined_function, check_undefined_method};
 use crate::arity::{check_arity, check_printf_arity};
 use crate::by_value::by_value_survivors;
 use crate::descent::checkable_calls;
+use crate::descent::check_dynamic_callee_arity;
 use crate::declared_receiver::check_phpdoc_undefined_method;
-use crate::env::{Known, Store};
+use crate::cond::eval_cond;
+use crate::env::{GuardVar, Known, Store};
 use crate::existence::{is_member_guard_call, with_stored_guard_vouches};
 use crate::fold::Folder;
 use crate::inaccessible::check_inaccessible_method;
@@ -22,6 +23,8 @@ use crate::non_object::{check_call_on_non_object, check_call_on_null};
 use crate::out_params::check_preg_pattern;
 use crate::project::Diagnostic;
 use crate::walk::{WalkCx, in_dead};
+
+use super::call_at;
 
 /// How far a family reaches at a position, decided by its carrier alone.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -112,8 +115,13 @@ pub(super) fn check_nested_calls(
     // A position that may run under the test of a variable holding a stored guard
     // (`$has ? f() : 0`) is judged with those guards' vouches (ADR-0104).
     let rebound = |n: &str| stmt.invalidated.iter().any(|e| e.name == n);
-    let vouched = (!store.guard_vars.is_empty())
-        .then(|| with_stored_guard_vouches(w.cx, store, &rebound));
+    let vouched = (!store.guard_vars.is_empty()).then(|| {
+        let mut undecided = |g: &GuardVar| {
+            eval_cond(w, folder, &g.cond, &HashMap::new(), store, w.scope.poisoned)
+                == Certainty::Maybe
+        };
+        with_stored_guard_vouches(w.cx, store, &rebound, &mut undecided)
+    });
     let guarded = positions
         .iter()
         .filter_map(|p| call_at(w, stmt, p))
@@ -140,20 +148,6 @@ pub(super) fn check_nested_calls(
             _ => {}
         }
     }
-}
-
-/// The lowered call behind a call position: a `new` and a function first-class callable are
-/// in the statement, a function call in the tree, any method or static call (and a method
-/// first-class callable) in the scope; `None` when the lowering kept none (a dynamic callee).
-fn call_at<'a>(w: &'a WalkCx, stmt: &'a Stmt, pos: &ReadPosition) -> Option<&'a CallExpr> {
-    if !matches!(pos.kind, ReadKind::Call | ReadKind::CallRef) {
-        return None;
-    }
-    stmt.read_calls()
-        .iter()
-        .find(|c| c.span == pos.span)
-        .or_else(|| w.cx.tree().call_at(pos.span))
-        .or_else(|| w.scope.method_call_at(pos.span))
 }
 
 /// One call position and what judging it reads.
@@ -196,7 +190,11 @@ impl Site<'_, '_, '_> {
                 self.member_exists(out);
                 check_arity(cx, self.folder, call, store, poisoned, out);
             }
-            Callee::DynamicVar(_) | Callee::Dynamic => {}
+            // A callee written in place (`(function () {})(1)`, `'add'(1)`): arity only.
+            Callee::Dynamic => {
+                check_dynamic_callee_arity(cx, self.folder, call, store, poisoned, out);
+            }
+            Callee::DynamicVar(_) => {}
         }
     }
 

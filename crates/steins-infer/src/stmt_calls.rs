@@ -13,7 +13,7 @@
 //! once. Findings sit at the call's own span (D1).
 //!
 //! Families are split by what they read. **E** is environment-free: `call.undefined-function`,
-//! `call.undefined-method`, `call.too-few-arguments` and kin (arity), which read the project
+//! `call.undefined-method`, `call.too-few-arguments` and kin (arity, a callee written in place included), which read the project
 //! index and, for a variable receiver, the exact class an allocation proved. **V** is
 //! value-dependent: `call.on-null`, `call.on-non-object`, `call.inaccessible-method`,
 //! `phpdoc.undefined-method`, `call.printf-too-few-arguments`, `preg.invalid-pattern`, which
@@ -38,20 +38,47 @@
 //! * A first-class callable is judged for existence only. Arity (the shape has no arguments),
 //!   types, descent, no-effect and dumps never see a `CallRef`.
 //!
-//! How a guard reaches a position (all in `guard_positions.rs`, one row per spelling, for every
-//! guard family):
+//! How a guard reaches a position (`guard_positions.rs` has one row per spelling for every
+//! guard family; `nested_call_positions.rs` has a row for each line below):
 //!
 //! | The test is | Read as |
 //! | --- | --- |
-//! | `G` (`function_exists('f')`, …) | the guard, as before |
-//! | `$v = G`, anywhere a condition goes (`and`/`or`, `&&`, ternary, `if`) | `G`: an assignment is truthy as its value is; the write stays on the leaf |
-//! | `!($v = G)` or `!G` | the negated guard |
-//! | `$v`, after `$v = G` | `G`, until `$v` (or a variable `G` names) is rebound, a barrier, or a join where a branch disagrees |
-//! | `$v`, with `$v` rebound in the same statement | nothing (the statement's own write is not modeled) |
+//! | `G` (`function_exists('f')`, …) | the guard |
+//! | `$v = G` in a condition (`and`/`or`, `&&`, ternary, `if`) | `G`: an assignment is truthy as its value is |
 //! | `lit ?? b`, `lit` a literal that is not `null` | `b` is dead |
 //!
-//! A stored guard decides the ternary arm or operand it kills, vouches the symbol it names on
-//! the side where `$v` is truthy, and lets a conditional position be judged with its vouch.
+//! A variable can hold a guard (`Store::guard_vars`). What `$v = value` stores:
+//!
+//! | `value` | Stored | A test of `$v` is |
+//! | --- | --- | --- |
+//! | `G` | `G` | `G` |
+//! | `!G` | `!G` | `!G`: truthy kills the guarded arm, falsy vouches |
+//! | `G && x` | `G && ?` | truthy implies `G`: vouches it; falsy says nothing |
+//! | `G \|\| H`, `x && y` with no guard, anything else | nothing | undecided, vouches nothing |
+//! | a guard naming `$v` itself or a non-variable argument | nothing | undecided |
+//!
+//! Where the stored guard is read: the sweep decides the arm or operand a stored guard kills
+//! (`$h ? f() : 0`); the branch walk vouches on the side it is truthy for, with the polarity
+//! in the stored shape; and a conditional position is judged with the vouches of every
+//! stored guard that is still **undecided** (a decided one is a dead extent where it kills
+//! and a live call where it does not). Where it dies:
+//!
+//! | Event | Guard |
+//! | --- | --- |
+//! | `$v` rebound by assignment, compound assignment, `++`, `list`, `foreach`, `catch`, `unset`, a by-reference argument or out-parameter | dropped (the funnel every rebind passes) |
+//! | a variable the guard's arguments name is rebound | dropped |
+//! | a barrier | dropped |
+//! | a scope that is poisoned: a reference to `$v` (`$r = &$v`, `&$v` anywhere, `foreach … as &$v`), `use (&$v)`, `extract`, `$$n`, `global`, `static`, `include`, `eval` | never stored; a guard in a closure scope the poison reaches is never seeded |
+//! | a join of paths | kept only where every path holds the same guard, compared by shape and call (statements differ) |
+//! | the statement itself rebinds `$v` (`($v = e) ? f() : 0`) | not read by that statement |
+//!
+//! A closure or arrow function sees the guards its creating statement held, which is what a
+//! by-value capture snapshots (`use ($v)`, or an arrow function's parent scope). They are
+//! handed over through `Cx::guard_seeds` and seeded at the closure scope's entry, unless that
+//! scope is poisoned (a `use (&$v)` rewrites the variable after creation). The closure scope
+//! is seeded with every guard the statement held, not only the captured names: a free
+//! variable it does not capture is undefined there, which is falsy, so the extra vouch only
+//! silences a call that PHP never makes.
 //!
 //! The IR keeps the weakest claim a read sits under, so a call both conditional and under `@`
 //! is `Conditional`: its existence is judged, which is sound, since an `Error` is not
@@ -65,7 +92,7 @@ mod nested;
 
 use std::collections::HashMap;
 
-use steins_syntax::{Callee, Stmt, StmtKind};
+use steins_syntax::{CallExpr, Callee, ReadKind, ReadPosition, Stmt, StmtKind};
 
 use crate::fold::Folder;
 use crate::absence::{check_undefined_function, check_undefined_method};
@@ -85,6 +112,20 @@ use crate::out_params::check_preg_pattern;
 use crate::project::Diagnostic;
 use crate::return_arms::{bindable_args, fn_return_arms_at_call};
 use crate::walk::WalkCx;
+
+/// The lowered call behind a call position: a `new` and a function first-class callable are
+/// in the statement, a function call in the tree, any method or static call (and a method
+/// first-class callable) in the scope; `None` when the lowering kept none (a dynamic callee).
+pub(crate) fn call_at<'a>(w: &'a WalkCx, stmt: &'a Stmt, pos: &ReadPosition) -> Option<&'a CallExpr> {
+    if !matches!(pos.kind, ReadKind::Call | ReadKind::CallRef) {
+        return None;
+    }
+    stmt.read_calls()
+        .iter()
+        .find(|c| c.span == pos.span)
+        .or_else(|| w.cx.tree().call_at(pos.span))
+        .or_else(|| w.scope.method_call_at(pos.span))
+}
 
 /// What step 1 of [`walk_trace`] learned from a statement's calls, for the phases
 /// after it to read.

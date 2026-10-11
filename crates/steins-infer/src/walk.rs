@@ -35,7 +35,8 @@ use crate::dispatch::resolve_call_target;
 use crate::dump::{adopted_trace_docblock, emit_trace_annotations};
 use crate::entry_state::seed_entry_state;
 use crate::env::{
-    AllocId, Descent, EscapeLogFrame, ExitContribution, HeapRes, Known, Store, Stratum, SummaryCtx,
+    AllocId, Descent, EscapeLogFrame, ExitContribution, GuardSeed, GuardVar, HeapRes, Known, Store,
+    Stratum, SummaryCtx,
 };
 use crate::foreach_check::check_foreach_subject;
 use crate::guard_sweep::sweep_guard_regions;
@@ -100,6 +101,9 @@ pub(crate) fn analyze_scope(
         if descent.is_none() { cx.scope_return_phpdoc(scope) } else { None };
 
     seed_entry_state(cx, scope, descent.is_none(), this_exact.as_deref(), &mut env, &mut store);
+    if descent.is_none() {
+        seed_captured_guards(cx, scope, &mut store);
+    }
 
     // The allocation counter starts past any id already in the store (the seeded
     // `$this`), so a fresh `new`/`clone` never collides with it.
@@ -352,6 +356,53 @@ pub(crate) fn namespace_binding_is_settled(cx: &Cx, r: &NameRef, resolved_fqn: &
         return true;
     }
     resolved_fqn == format!("{}\\{name}", ctx.namespace.to_ascii_lowercase())
+}
+
+/// Hand the guards variables hold at `stmt` to the closures it creates (ADR-0104): a by-value
+/// capture snapshots the variable at creation, and an arrow function reads its parent's.
+/// A name the statement itself may rebind is not handed on.
+fn publish_guard_seed(w: &WalkCx, stmt: &Stmt, store: &Store) {
+    let Some(seeds) = w.cx.guard_seeds else { return };
+    if store.guard_vars.is_empty() || w.scope.poisoned {
+        return;
+    }
+    let rebound = |n: &str| stmt.invalidated.iter().any(|e| e.name == n);
+    let vars: HashMap<String, GuardVar> = store
+        .guard_vars
+        .iter()
+        .filter(|(k, g)| !rebound(k) && !g.deps.iter().any(|d| rebound(d)))
+        .map(|(k, g)| (k.clone(), g.clone()))
+        .collect();
+    if !vars.is_empty() {
+        seeds.borrow_mut().push(GuardSeed { span: stmt.span, vars });
+    }
+}
+
+/// Seed a closure or arrow function's store with the guards its creating statement held,
+/// unless the scope is poisoned (a by-reference capture rewrites the variable after creation).
+/// More than one snapshot of the same statement (a loop walks it twice) is merged, the first
+/// to name a variable winning: a seed only ever adds a vouch, and a wrong one only silences.
+fn seed_captured_guards(cx: &Cx, scope: &Scope, store: &mut Store) {
+    let (ScopeOwner::Closure { def_offset }, Some(seeds)) = (&scope.owner, cx.guard_seeds) else {
+        return;
+    };
+    if scope.poisoned {
+        return;
+    }
+    let seeds = seeds.borrow();
+    let Some(tightest) = seeds
+        .iter()
+        .filter(|s| s.span.start <= *def_offset && *def_offset < s.span.end)
+        .map(|s| s.span)
+        .min_by_key(|sp| sp.end - sp.start)
+    else {
+        return;
+    };
+    for s in seeds.iter().filter(|s| s.span == tightest) {
+        for (k, g) in &s.vars {
+            store.guard_vars.entry(k.clone()).or_insert_with(|| g.clone());
+        }
+    }
 }
 
 /// The immutable context shared across a scope's recursive branch walk (ADR-0031).
@@ -634,6 +685,7 @@ fn walk_run(
         // calls are judged, because a call in a dead arm is not (ADR-0104).
         if descent.is_none() {
             sweep_guard_regions(w, folder, stmt, store);
+            publish_guard_seed(w, stmt, store);
         }
         // 1. Check + descend every statically-named call this statement carries.
         let stmt_calls = check_stmt_calls(w, folder, stmt, env, store, descent, out);
@@ -855,9 +907,7 @@ fn walk_run(
                     stmt_calls.return_arms.as_deref(),
                     out,
                 );
-                if let Some(call) = call {
-                    crate::existence::remember_guard_var(w.cx, store, var, call);
-                }
+                crate::existence::remember_guard_var(w, stmt, store, var, value);
                 Flow::FellThrough
             }
             StmtKind::PropAssign { target_var, prop, value, span, .. } => {
