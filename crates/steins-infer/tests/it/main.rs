@@ -4,6 +4,7 @@
 
 mod arg_dispatch_transfers;
 mod arity;
+mod dynamic_callee_arity;
 mod array_duplicate_key;
 mod array_literal_seeding;
 mod array_read_position;

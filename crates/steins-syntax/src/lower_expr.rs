@@ -48,6 +48,10 @@ pub(crate) fn lower_call(c: &FunctionCall<'_>) -> CallExpr {
         (None, _) => Callee::Dynamic,
     };
 
+    let dynamic_callee = match receiver {
+        Callee::Dynamic => in_place_callee(c.function.unparenthesized()),
+        _ => None,
+    };
     let LoweredArgs { args, named_args, has_spread, positional_only, arg_conds } =
         lower_argument_list(&c.argument_list);
     CallExpr {
@@ -60,6 +64,26 @@ pub(crate) fn lower_call(c: &FunctionCall<'_>) -> CallExpr {
         positional_only,
         span: to_span(c.span()),
         arg_conds,
+        dynamic_callee,
+    }
+}
+
+/// The callee of a dynamic call when it is a closure, an arrow function, a
+/// first-class callable of a named function, or a string literal written in place
+/// (see [`CallExpr::dynamic_callee`]); `None` for any other expression.
+fn in_place_callee(callee: &Expression<'_>) -> Option<ArgValue> {
+    if !matches!(
+        callee,
+        Expression::Closure(_)
+            | Expression::ArrowFunction(_)
+            | Expression::PartialApplication(_)
+            | Expression::Literal(_)
+    ) {
+        return None;
+    }
+    match lower_arg_value(callee) {
+        v @ (ArgValue::Closure(_) | ArgValue::Str(_)) => Some(v),
+        _ => None,
     }
 }
 
@@ -406,7 +430,7 @@ pub(crate) fn lower_method_call(object: &Expression<'_>, selector: &ClassLikeMem
     let receiver = trace_method_callee(object, selector, nullsafe);
     let LoweredArgs { args, named_args, has_spread, positional_only, arg_conds } =
         lower_argument_list(list);
-    CallExpr { callee: None, callee_ref: None, receiver, args, named_args, has_spread, positional_only, span, arg_conds }
+    CallExpr { callee: None, callee_ref: None, receiver, args, named_args, has_spread, positional_only, span, arg_conds, dynamic_callee: None }
 }
 
 /// Lower a static method call into a [`CallExpr`].
@@ -414,7 +438,7 @@ pub(crate) fn lower_static_call(class: &Expression<'_>, selector: &ClassLikeMemb
     let receiver = trace_static_callee(class, selector);
     let LoweredArgs { args, named_args, has_spread, positional_only, arg_conds } =
         lower_argument_list(list);
-    CallExpr { callee: None, callee_ref: None, receiver, args, named_args, has_spread, positional_only, span, arg_conds }
+    CallExpr { callee: None, callee_ref: None, receiver, args, named_args, has_spread, positional_only, span, arg_conds, dynamic_callee: None }
 }
 
 /// Lower a method/static call written in **value** position to
@@ -459,6 +483,7 @@ pub(crate) fn first_class_method_ref(
         positional_only: false,
         span,
         arg_conds: Vec::new(),
+        dynamic_callee: None,
     }
 }
 
@@ -479,6 +504,7 @@ pub(crate) fn first_class_static_ref(
         positional_only: false,
         span,
         arg_conds: Vec::new(),
+        dynamic_callee: None,
     }
 }
 
@@ -508,6 +534,7 @@ pub(crate) fn lower_construct_call(inst: &Instantiation<'_>) -> Option<CallExpr>
         positional_only,
         span: to_span(inst.span()),
         arg_conds,
+        dynamic_callee: None,
     })
 }
 

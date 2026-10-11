@@ -19,9 +19,10 @@ use std::collections::HashMap;
 use steins_contract::ContractTy;
 use steins_domain::{Fact, PhpStr};
 use steins_syntax::{
-    ArgValue, CallExpr, Callee, NameRef, NamedArg, Param, RefKind, Scope, ScopeOwner,
+    ArgValue, CallExpr, Callee, ClosureRef, NameRef, NamedArg, Param, RefKind, Scope, ScopeOwner,
 };
 
+use crate::arity::{check_arity, check_closure_scope_arity, string_callee_ref};
 use crate::fold::Folder;
 use crate::MAX_BINDING_DEPTH;
 use crate::arg_check::{
@@ -368,6 +369,8 @@ pub(crate) fn handle_var_call(
         return empty;
     }
     let Some(known) = env.get(name) else { return empty };
+    // Arity (issue #1051) is judged once, in the plain per-scope pass.
+    let arity = descent.is_none().then_some(store);
 
     // 1. Proven closure value → check args + descend into the closure scope.
     if let Some(cv) = &known.closure {
@@ -379,6 +382,9 @@ pub(crate) fn handle_var_call(
                 // Declared return floor first — same rung free functions/methods keep
                 // when named/spread refuse binding descent (issue #128 review).
                 let return_arms = closure_return_arms(cx, callee_scope);
+                if arity.is_some() {
+                    check_closure_scope_arity(cx, call, &callee_scope.params, out);
+                }
                 // Argument type check at the `$fn(...)` site (mirrors the direct /
                 // propagated check for named calls, which never see a variable call).
                 check_callable_args(
@@ -420,6 +426,10 @@ pub(crate) fn handle_var_call(
                 VarCallOutcome { summary, return_arms }
             }
             ClosureTarget::Named(nameref) => {
+                if arity.is_some() {
+                    let synth = synth_function_call(call, nameref);
+                    check_arity(cx, folder, &synth, store, scope.poisoned, out);
+                }
                 dispatch_named_callable(
                     cx, folder, scope.poisoned, nameref, call, env, store, descent, out,
                 )
@@ -436,6 +446,11 @@ pub(crate) fn handle_var_call(
     if let Some(ArgValue::Str(s)) = known.singleton()
         && let Some(s) = s.as_str()
     {
+        // A proven (verified) literal only: an asserted string is not a premise.
+        if arity.is_some() && known.stratum == Stratum::Verified {
+            let synth = synth_function_call(call, &string_callee_ref(s, call.span.start));
+            check_arity(cx, folder, &synth, store, scope.poisoned, out);
+        }
         let nameref =
             NameRef { raw: s.to_owned(), kind: RefKind::Unqualified, offset: call.span.start };
         return dispatch_named_callable(
@@ -443,6 +458,40 @@ pub(crate) fn handle_var_call(
         );
     }
     empty
+}
+
+/// Arity of a call whose callee is written in place (`(function () {})(1)`,
+/// `add(...)(1)`, `'add'(1)`; [`CallExpr::dynamic_callee`]), judged once in the plain
+/// per-scope pass under the rules of [`crate::arity`]'s callee table.
+pub(crate) fn check_dynamic_callee_arity(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    call: &CallExpr,
+    store: &Store,
+    poisoned: bool,
+    out: &mut Vec<Diagnostic>,
+) {
+    if poisoned {
+        return;
+    }
+    match call.dynamic_callee.as_ref() {
+        Some(ArgValue::Closure(ClosureRef::Anonymous { def_offset, .. })) => {
+            if let Some(callee_scope) = cx.closure_scope(*def_offset) {
+                check_closure_scope_arity(cx, call, &callee_scope.params, out);
+            }
+        }
+        Some(ArgValue::Closure(ClosureRef::FunctionName(nameref))) => {
+            let synth = synth_function_call(call, nameref);
+            check_arity(cx, folder, &synth, store, poisoned, out);
+        }
+        Some(ArgValue::Str(s)) => {
+            if let Some(s) = s.as_str() {
+                let synth = synth_function_call(call, &string_callee_ref(s, call.span.start));
+                check_arity(cx, folder, &synth, store, poisoned, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Declared-return contract arms of a closure scope (issue #128): the native
@@ -507,6 +556,7 @@ fn synth_function_call(call: &CallExpr, nameref: &NameRef) -> CallExpr {
         positional_only: call.positional_only,
         span: call.span,
         arg_conds: call.arg_conds.clone(),
+        dynamic_callee: None,
     }
 }
 
