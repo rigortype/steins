@@ -2777,6 +2777,12 @@ pub struct CallExpr {
     /// way — populated purely syntactically. Empty in the common case
     /// (allocates nothing); index via [`Self::arg_cond`] (short vector = all-`None`).
     pub arg_conds: Vec<Option<CondExpr>>,
+    /// The callee of a [`Callee::Dynamic`] call when it is itself a closure value
+    /// or a string literal written in place — `(function () {})(1)`, `(fn () => 1)()`,
+    /// `add(...)(1)`, `'add'(1)`: an [`ArgValue::Closure`] or [`ArgValue::Str`]. `None`
+    /// for every other call and every other dynamic callee. The receiver stays
+    /// [`Callee::Dynamic`], so each reader that treats it as opaque still does.
+    pub dynamic_callee: Option<ArgValue>,
 }
 
 impl CallExpr {

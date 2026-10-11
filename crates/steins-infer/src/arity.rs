@@ -6,7 +6,8 @@ use std::collections::{HashMap, HashSet};
 
 use steins_domain::PhpStr;
 use steins_syntax::{
-    ArgValue, CallExpr, Callee, MethodDecl, Param, Receiver, StaticClass, Visibility,
+    ArgValue, CallExpr, Callee, MethodDecl, NameRef, Param, Receiver, RefKind, StaticClass,
+    Visibility,
 };
 
 use crate::cx::Cx;
@@ -390,6 +391,54 @@ pub(crate) fn check_arity(
         return;
     };
     emit_arity(cx, call, &target, out);
+}
+
+// ---------------------------------------------------------------------------
+// Arity through a closure value, a first-class callable and a string callee
+// (issue #1051 slice S4, from #938).
+//
+// The same ArgumentCountError as a direct call, reached through a value the
+// analysis proves is ONE callable. One row per callee shape (PHP 8.5 `php -r`-
+// checked; "decline" rows are silence, never a claim):
+//
+// | callee shape                                   | verdict  | why / PHP                          |
+// |------------------------------------------------|----------|------------------------------------|
+// | `$f = function ($a, $b) {}; $f(1)`             | too-few  | closure scope params               |
+// | `$f = fn ($a, $b) => 1; $f(1)`                 | too-few  | arrow scope params                 |
+// | `(function ($a, $b) {})(1)` / `(fn …)(1)`      | too-few  | the callee is the closure          |
+// | `$f = add(...); $f(1)`                         | too-few  | the resolved user function         |
+// | `add(...)(1)`                                  | too-few  | the same, no variable              |
+// | `$f = 'add'; $f(1)` (proven literal)           | too-few  | global `\add`, never the namespace |
+// | `'add'(1)`                                     | too-few  | the same, written in place         |
+// | `[$o, 'm'](1)` / `$o(1)` (`__invoke`)          | decline  | not a function value               |
+// | `$f` a OneOf of closures / unknown / reassigned | decline  | not one proven callable            |
+// | `$f` captured by reference and written          | decline  | the env drops the closure          |
+// | `Closure::fromCallable('add')`                 | decline  | not lowered as a closure value     |
+// | a builtin (`'strlen'`), method FCC, `'A::m'`   | decline  | the internal slice is S5           |
+// | `$f(1, 2, 3)` on `($a, $b)`                    | silent   | too many is never an error for a user callable |
+//
+// Variadics, defaults, named arguments, spread and the overwrite/unknown-name
+// precedence are [`emit_arity`]'s, unchanged. A re-bound closure (`Closure::bind`,
+// `->call`) keeps its parameters, and the rebound value is not a tracked closure
+// anyway. Judged in the plain per-scope pass only, like every other arity arm.
+// ---------------------------------------------------------------------------
+
+/// Arity of a call whose callee is a closure scope's parameter list.
+pub(crate) fn check_closure_scope_arity(
+    cx: &Cx,
+    call: &CallExpr,
+    params: &[Param],
+    out: &mut Vec<Diagnostic>,
+) {
+    emit_arity(cx, call, &ArityTarget { params, display: "closure".to_owned() }, out);
+}
+
+/// A string callee as a fully qualified function reference: PHP resolves a callable
+/// string against the global function table, never the calling namespace, and
+/// accepts one leading backslash.
+pub(crate) fn string_callee_ref(s: &str, offset: u32) -> NameRef {
+    let raw = s.strip_prefix('\\').unwrap_or(s).to_owned();
+    NameRef { raw, kind: RefKind::FullyQualified, offset }
 }
 
 // ---------------------------------------------------------------------------

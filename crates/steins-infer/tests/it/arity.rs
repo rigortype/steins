@@ -21,7 +21,7 @@ use steins_syntax::SourceTree;
 /// A boot-surface mock. `available` is the A9 family gate; `fn_homonyms` /
 /// `class_homonyms` are lowercased names the boot surface reports resident
 /// (the A2ii homonyms); `reflect_fails` simulates a mid-run sidecar failure.
-struct Boot {
+pub(crate) struct Boot {
     available: bool,
     fn_homonyms: Vec<String>,
     class_homonyms: Vec<String>,
@@ -31,7 +31,7 @@ struct Boot {
 impl Boot {
     /// The common case: family available, empty boot surface (project symbols are
     /// never homonyms), reflect answers cleanly.
-    fn ready() -> Self {
+    pub(crate) fn ready() -> Self {
         Boot { available: true, fn_homonyms: Vec::new(), class_homonyms: Vec::new(), reflect_fails: false }
     }
 }

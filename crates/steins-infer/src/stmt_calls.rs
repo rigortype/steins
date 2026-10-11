@@ -9,6 +9,7 @@ use steins_syntax::{Callee, Stmt, StmtKind};
 use crate::fold::Folder;
 use crate::absence::{check_undefined_function, check_undefined_method};
 use crate::arg_check::check_builtin_call_args;
+use crate::descent::check_dynamic_callee_arity;
 use crate::arity::{check_arity, check_printf_arity};
 use crate::declared_receiver::check_phpdoc_undefined_method;
 use crate::descent::{
@@ -203,7 +204,13 @@ pub(crate) fn check_stmt_calls(
                     stmt_return_arms = outcome.return_arms;
                 }
             }
-            Callee::Dynamic => {}
+            // `(function () {})(1)`, `add(...)(1)`, `'add'(1)`: arity only, in the
+            // plain per-scope pass (issue #1051).
+            Callee::Dynamic => {
+                if descent.is_none() {
+                    check_dynamic_callee_arity(cx, folder, call, store, scope.poisoned, out);
+                }
+            }
         }
     }
     StmtCalls {
