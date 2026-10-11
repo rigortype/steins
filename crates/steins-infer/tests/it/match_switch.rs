@@ -82,13 +82,13 @@ fn match_maybe_walks_all_and_join_agree_keeps_singleton() {
 }
 
 #[test]
-fn match_join_disagree_widens_to_oneof_silent() {
-    // Arms assign DIFFERENT bad values → the join is a `OneOf`, which is not a
-    // single proven value, so `width($w)` stays silent (the safe side).
+fn match_join_disagree_widens_to_oneof_and_every_member_is_refused() {
+    // Arms assign DIFFERENT bad values → the join is a `OneOf` whose every member
+    // `width` refuses, so every path throws (decision D6 of #1051).
     let src = format!(
         "{HDR}match ($x) {{ 1 => $w = \"abc\", 2 => $w = \"xyz\", default => $w = \"pqr\" }};\nwidth($w);\n"
     );
-    assert_eq!(n(&src), 0, "disagreeing arms → OneOf → not a proven value → silent");
+    assert_eq!(n(&src), 1, "disagreeing bad arms → OneOf, every member refused → flagged");
 }
 
 // match: arm refinement binds the subject var
@@ -105,14 +105,14 @@ match ($s) { \"abc\" => width($s), default => 0 };
 }
 
 #[test]
-fn match_arm_refinement_multi_literal_is_oneof_silent() {
-    // Two literal conditions → the subject is refined to a OneOf, not a Singleton,
-    // so it is not a single proven value → `width($s)` stays silent.
+fn match_arm_refinement_multi_literal_is_oneof_and_every_member_is_refused() {
+    // Two literal conditions → the subject is refined to a OneOf, and `width` refuses
+    // both members, so the arm throws whichever matched.
     let src = "<?php
 function width(int $w): int { return $w; }
 match ($s) { \"abc\", \"xyz\" => width($s), default => 0 };
 ";
-    assert_eq!(n(src), 0, "multi-literal arm → OneOf → no proven single value → silent");
+    assert_eq!(n(src), 1, "multi-literal arm → OneOf, every member refused → flagged");
 }
 
 // match without default: no-match throws → tail dead

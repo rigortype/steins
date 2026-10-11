@@ -6,7 +6,10 @@
 //! It reaches [`is_type_error`] through the same base-level lift
 //! ([`native_rejects_base`]) and the same witness set, takes the same
 //! minimum-stratum split into two ids (ADR-0052 §5), and declines the
-//! all-arms-rejected verdict for the same reason the argument side does. PHP
+//! all-arms-rejected verdict for the same reason the argument side does. (A finite
+//! `OneOf` is the exception: `finite_verdict` judges it member by member, and one
+//! whose every member is rejected is definite, since every path throws — decision D6
+//! of #1051.) PHP
 //! applies one coercion table to both boundaries — all 144 return-position cells of
 //! `harness/coercion-grid` answered exactly as their parameter twins at 8.5.9, and
 //! so did the object cells (a `__toString` object into `string` in coercive mode,
@@ -23,10 +26,10 @@
 //! would be a false positive no floor makes safe (ADR-0002).
 //!
 //! **Carrier: `ArgValue::Var`.** `return $x;` is where the declared-arm lane lives
-//! and where every shape the issue names sits. The nested-call carriers issue #418
-//! opened on the argument side (`return g();`, `return $o->m();`, `return $a['k'];`)
-//! are a wider slice with their own guard-decline surface (issue #421) and their own
-//! measurement; they are named, not shipped.
+//! and where every shape the issue names sits. A returned call (`return g();`,
+//! `return $o->m();`) reaches it through the virtual binding of `return_call`: it is
+//! judged as `$v = g(); return $v;` would be, so the two spellings cannot disagree.
+//! The offset carrier (`return $a['k'];`) is still named, not shipped (issue #421).
 //!
 //! [`is_type_error`]: crate::arg_check::is_type_error
 //! [`native_rejects_base`]: crate::arg_check::native_rejects_base
@@ -35,7 +38,7 @@ use std::collections::HashMap;
 use std::slice;
 
 use steins_contract::ContractTy;
-use steins_domain::Fact;
+use steins_domain::{Fact, Val};
 use steins_syntax::{ArgValue, NativeType};
 
 use crate::arg_check::{
@@ -44,6 +47,7 @@ use crate::arg_check::{
 };
 use crate::cx::Cx;
 use crate::dump::render_contract_arms;
+use crate::finite_verdict::check_oneof_return;
 use crate::env::{ContractArm, Known, Store, Stratum};
 use crate::project::Diagnostic;
 use crate::{PHPDOC_MAYBE_RETURN_MISMATCH_ID, TYPE_MAYBE_RETURN_MISMATCH_ID, describe_fact};
@@ -70,9 +74,9 @@ impl Premise {
 /// The abstract premise available for a returned value, in the argument side's own
 /// lane order: the value lane where it has a fact, else the declared-arm lane.
 ///
-/// A finite fact declines on either lane — `Singleton`/`OneOf` are the concrete
-/// lane's, and [`is_type_error`] has already judged them exactly, one rung above
-/// this one.
+/// A finite fact declines on either lane: a `Singleton` is the concrete lane's, which
+/// [`is_type_error`] has already judged exactly one rung above this one, and a `OneOf`
+/// is read by `oneof_premise` before this function is asked.
 fn return_premise(
     value: &ArgValue,
     env: &HashMap<String, Known>,
@@ -91,6 +95,23 @@ fn return_premise(
     let arms = store.contract_arms(name)?;
     let stratum = arms.iter().fold(Stratum::Verified, |acc, a| acc.min(a.stratum));
     Some(Premise::Arms(arms.to_vec(), stratum))
+}
+
+/// The members of a returned variable's `OneOf` value-lane fact, at its stratum.
+fn oneof_premise<'e>(
+    value: &ArgValue,
+    env: &'e HashMap<String, Known>,
+    poisoned: bool,
+) -> Option<(&'e [Val], Stratum)> {
+    if poisoned {
+        return None;
+    }
+    let ArgValue::Var(name) = value else { return None };
+    let k = env.get(name)?;
+    match k.fact.as_ref()? {
+        Fact::OneOf(members) => Some((members, k.stratum)),
+        _ => None,
+    }
 }
 
 /// The class an object-world declared arm denotes, or `None` for an arm with a
@@ -213,12 +234,19 @@ pub(crate) fn check_maybe_return_mismatch(
     ret: &NativeType,
     display: &str,
     value: &ArgValue,
+    shown: &ArgValue,
     env: &HashMap<String, Known>,
     store: &Store,
     poisoned: bool,
     span_start: u32,
     out: &mut Vec<Diagnostic>,
 ) {
+    // A `OneOf` is judged member by member, by `finite_verdict`'s table; it is the
+    // one finite fact that reaches here (a `Singleton` is the exact rung's).
+    if let Some((members, stratum)) = oneof_premise(value, env, poisoned) {
+        check_oneof_return(cx, ret, display, shown, members, stratum, span_start, out);
+        return;
+    }
     let Some(premise) = return_premise(value, env, store, poisoned) else { return };
     let Some((subject, named)) = verdict_spelling(cx, ret, &premise) else { return };
     let id = if premise.stratum() == Stratum::Verified {
@@ -226,7 +254,7 @@ pub(crate) fn check_maybe_return_mismatch(
     } else {
         PHPDOC_MAYBE_RETURN_MISMATCH_ID
     };
-    let subject_name = value.render();
+    let subject_name = shown.render();
     let arms = if named.len() == 1 {
         format!("its {} arm raises a TypeError", named[0])
     } else {

@@ -390,3 +390,59 @@ and the class/`null` cell were their named divergences). On the ten public corpo
 movement is one finding: PHPUnit's end-to-end TypeError fixture
 (`$this->dateTime = new DateTime` into a `DateTimeImmutable` property), a true positive
 pinned in the fp-gate ledger.
+
+## Amendment (2026-10-11): a returned call and a finite fact with several members — PENDING ratification
+
+**Status: PENDING ratification.** Slice S2 of the type/arity reproduction run (#1051), for
+issue #950 and decision D6. Designed under the owner's standing direction.
+
+**`return f(args)`.** The return check read a returned call through
+`resolve_literal_strat_ex` alone, which answers a nullary constant function and a
+builtin fold. A project call with arguments, a method and a static call reached neither
+the call's return summary nor its declared floor, so `return s(1)` into `: int` was
+silent while `$x = s(1); return $x;` reported. The returned call is now bound by the very
+function an assignment runs (`assign::apply_assign`, over a copy of the env and store,
+into a reserved slot, fed the statement's own call summary and declared arms) and the
+return seam judges that slot: the native proof, the `@return` contract and the possibly
+grade all read the binding, so the two spellings cannot disagree. The value as written is
+still tried first, so nothing the base reported is lost. The rule table is on
+`return_call`; the parity tests pin each row against its assignment spelling.
+
+**The builtin floor, narrowed by a literal.** Returning a call made the declared floor of a
+builtin reachable at the return seam, and with it a floor imprecision: `var_export($v,
+true)` and `print_r($v, true)` return a string, but their declared floors (`string|null`,
+`string|true`) are per name. A literal `true` as the second argument of `print_r`,
+`var_export`, `highlight_string` or `highlight_file` now narrows the floor to `string`
+(`builtin_returns::builtin_return_floor_for_call`), at the return, the assignment and the
+argument seam alike. Four corpus findings were this shape and are gone.
+
+**A `OneOf` is judged member by member** (`finite_verdict`, whose doc comment carries the
+table). The exact rung judges one literal and the possibly grade declined every finite
+fact "because the exact rung judged it", so `$b = $r ? null : 1; ti($b)` fell between
+them. Each member now goes through `is_type_error`, in the file's mode, so there is no
+second coercion table:
+
+| fact | members refused | verdict |
+| --- | --- | --- |
+| `Singleton` | 1 of 1 | the exact rung's definite finding, unchanged |
+| `OneOf` | all | the definite `type.argument-mismatch` / `type.return-mismatch`: every path throws (D6) |
+| `OneOf` | some | `type.maybe-argument-mismatch` / `type.maybe-return-mismatch` (`Floor::Strict`) |
+| `OneOf` | none | silent |
+| `Union`, `Refined`, `General` | any | unchanged (issue #291's ruling keeps all-refused silent) |
+
+A `null` member is admitted where the position admits it on its own: a `?T` type, an
+implicit-nullable default, and the internal-null coercive carve-out (§9.3). An `Asserted`
+premise never reaches the proof layer, so an every-refused `OneOf` at that stratum is
+silent and a some-refused one rides the `phpdoc.*` id (ADR-0052 §5); no source seeds such
+a fact on the value lane today. The carriers are a variable holding the fact and a call
+whose proven summary is one; a `OneOf` read from a declared arm list, a builtin envelope
+or a shape stays declined.
+
+Every cell was run on PHP 8.5.11 in both modes: `ti(null)`, `ti([])` and `ti("abc")` throw
+in both; `ti("5")` throws strictly and converts coercively; `tf(1)` runs and `tf("1")`
+throws strictly; `strlen(null)` is a deprecation coercively and a `TypeError` strictly.
+
+**Effect on the pinned tests.** Five fixtures pinned "a `OneOf` is silent" for two bad
+literals joined by an `if`, a ternary or a `match`; they now report, which is the point of
+D6. Two others (`$w = "abc"; if ($c) { $w = 5; } width($w)`, and the `$this instanceof`
+fixture) report the possibly grade for the path that throws, still no definite claim.

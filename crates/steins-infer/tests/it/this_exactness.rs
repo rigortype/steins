@@ -61,7 +61,13 @@ class Base2 {
 class Sub2 extends Base2 {}
 function takes_string(string $s): void {}
 (new Sub2())->m();";
-    assert_eq!(n(src), 0, "instanceof No on a lower bound → Maybe → then-branch live → silent");
+    // The branch is live, so `$v` is `1|"hello"` at the call: no definite claim, only
+    // the possibly grade about the `1` path (a `Base2` receiver throws).
+    assert_eq!(
+        ids(src),
+        vec!["type.maybe-argument-mismatch".to_owned()],
+        "instanceof No on a lower bound → Maybe → then-branch live → only the possibly grade"
+    );
 }
 
 #[test]

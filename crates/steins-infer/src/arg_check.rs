@@ -17,6 +17,7 @@ use crate::descent::{
     project_call_summary, project_method_summary, propagated_arg_value, summary_binds,
 };
 use crate::dump::render_contract_arms;
+use crate::finite_verdict::check_oneof_argument;
 use crate::env::{ContractArm, HandleState, Known, Store, Stratum};
 use crate::heap::simple_class;
 use crate::project::Diagnostic;
@@ -24,7 +25,9 @@ use crate::return_arms::{call_return_arms_by_name, method_return_arms_by_callee}
 use crate::walk::WalkCx;
 use crate::fold::Folder;
 use crate::{PHPDOC_MAYBE_ARGUMENT_MISMATCH_ID, TYPE_MAYBE_ARGUMENT_MISMATCH_ID, describe_fact};
-use crate::builtin_returns::{builtin_call_return_fact, builtin_return_floor, store_holds_resource};
+use crate::builtin_returns::{
+    builtin_call_return_fact, builtin_return_floor_for_call, store_holds_resource,
+};
 use crate::coerce::{member_accepts_coercive, member_accepts_strict};
 use crate::offsets::{place_of, shape_read_at};
 use crate::value_tops::{
@@ -588,8 +591,11 @@ fn arm_lane_premise(arms: Vec<ContractArm>) -> Option<(Fact, Stratum, Option<Vec
 /// code cannot ship even at the strict floor, so it is dropped rather than
 /// shipped unguarded (ADR-0002).
 ///
-/// A finite fact declines on every lane: `Singleton`/`OneOf` are the concrete
-/// lane's, and [`is_type_error`] has already judged them exactly.
+/// A `Singleton` declines on every lane: it is the concrete lane's, and
+/// [`is_type_error`] has already judged it exactly. A `OneOf` on the value lane (a
+/// variable's fact, or a call's proven summary) reaches
+/// [`crate::finite_verdict`], which judges it member by member; on the declared-arm,
+/// builtin-envelope and shape lanes it still declines.
 ///
 /// [`seed_refined_scalar_fact`]: crate::seed_refined_scalar_fact
 /// [`collect_shape_guards`]: crate::collect_shape_guards
@@ -621,7 +627,7 @@ fn maybe_arg_premise(
             if let Some(k) = env.get(name)
                 && let Some(f) = &k.fact
             {
-                return f.finite_members().is_none().then(|| (f.clone(), k.stratum, None));
+                return (!matches!(f, Fact::Singleton(_))).then(|| (f.clone(), k.stratum, None));
             }
             arm_lane_premise(store.contract_arms(name)?.to_vec())
         }
@@ -632,7 +638,7 @@ fn maybe_arg_premise(
                 )
                 .and_then(|s| s.value)
                 && summary_binds(&sv.fact)
-                && sv.fact.finite_members().is_none()
+                && !matches!(sv.fact, Fact::Singleton(_))
             {
                 return Some((sv.fact, sv.stratum, None));
             }
@@ -650,7 +656,7 @@ fn maybe_arg_premise(
             // ADR-0069 declared floor (`Asserted`, so it premises
             // `phpdoc.maybe-argument-mismatch` and never the `type.*` sibling).
             builtin_call_return_fact(cx, folder, name).map_or_else(
-                || arm_lane_premise(builtin_return_floor(cx, name)?),
+                || arm_lane_premise(builtin_return_floor_for_call(cx, name, args)?),
                 |f| f.finite_members().is_none().then_some((f, Stratum::Verified, None)),
             )
         }
@@ -662,7 +668,7 @@ fn maybe_arg_premise(
                 )
                 .and_then(|s| s.value)
                 && summary_binds(&sv.fact)
-                && sv.fact.finite_members().is_none()
+                && !matches!(sv.fact, Fact::Singleton(_))
             {
                 return Some((sv.fact, sv.stratum, None));
             }
@@ -694,6 +700,9 @@ fn maybe_arg_premise(
 ///
 /// `null_tolerated` is the internal-null coercive carve-out, `false` everywhere but
 /// the builtin arm in a coercive file — see [`internal_null_tolerated`].
+///
+/// Returns whether a **definite** finding was emitted: only a `OneOf` whose every
+/// member is rejected does, and the caller then treats the argument as judged.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn check_maybe_argument_mismatch(
     cx: &Cx,
@@ -710,23 +719,30 @@ pub(crate) fn check_maybe_argument_mismatch(
     in_descent: bool,
     null_tolerated: bool,
     out: &mut Vec<Diagnostic>,
-) {
-    let Some(ty) = param.ty.as_ref() else { return };
+) -> bool {
+    let Some(ty) = param.ty.as_ref() else { return false };
     // The same guard-blindness the object-world proof carries (ADR-0043 stage 3):
     // a rebound parameter's in-body `instanceof` guards are unmodeled in a descent.
     if in_descent && ty.has_instance() {
-        return;
+        return false;
     }
     let Some((fact, stratum, lane)) = maybe_arg_premise(
         cx, folder, value, env, store, poisoned, in_descent, this_exact, enclosing_class,
         arg_offset, out,
     ) else {
-        return;
+        return false;
     };
+    // A `OneOf` is judged member by member (`finite_verdict`): it may be a definite
+    // No, which the caller must know about.
+    if let Fact::OneOf(members) = &fact {
+        return check_oneof_argument(
+            cx, param, ty, callee, arg_offset, value, members, stratum, null_tolerated, out,
+        );
+    }
     let (verdict, rejected, null_rejected) =
         maybe_arg_verdict(cx, param, ty, &fact, null_tolerated);
     if verdict != MaybeVerdict::Partial {
-        return;
+        return false;
     }
     let id = if stratum == Stratum::Verified {
         TYPE_MAYBE_ARGUMENT_MISMATCH_ID
@@ -764,6 +780,7 @@ pub(crate) fn check_maybe_argument_mismatch(
         facet: None,
         fix: None,
     });
+    false
 }
 
 // ===========================================================================

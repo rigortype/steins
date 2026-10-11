@@ -247,6 +247,31 @@ pub(crate) fn builtin_return_floor(cx: &Cx, name: &str) -> Option<Vec<ContractAr
     refine_declared_arms(&[], arms, &catalog_class)
 }
 
+/// The builtins whose second parameter, `$return`, turns "print it and report success"
+/// into "return it as a string": the declared floor spells both outcomes (`string|true`,
+/// `string|null`, `string|bool`), and a literal `true` there leaves the string alone.
+const RETURN_FLAG_BUILTINS: [&str; 4] = ["print_r", "var_export", "highlight_string", "highlight_file"];
+
+/// [`builtin_return_floor`] for one call: the declared floor, narrowed to `string` where
+/// the call passes a literal `true` as `$return` (`var_export($v, true)`,
+/// `print_r($v, true)`). The declaration is per name, but those builtins never answer
+/// `null`, `true` or `false` in that mode, so the floor's other arms would convict a
+/// call PHP cannot make fail (#950: `return var_export($v, true)` from `: string`).
+pub(crate) fn builtin_return_floor_for_call(
+    cx: &Cx,
+    name: &str,
+    args: &[ArgValue],
+) -> Option<Vec<ContractArm>> {
+    let arms = builtin_return_floor(cx, name)?;
+    let returns_string = RETURN_FLAG_BUILTINS.iter().any(|b| b.eq_ignore_ascii_case(name))
+        && matches!(args.get(1), Some(ArgValue::Bool(true)));
+    if !returns_string {
+        return Some(arms);
+    }
+    let stratum = arms.iter().fold(Stratum::Verified, |acc, a| acc.min(a.stratum));
+    Some(vec![ContractArm { ty: ContractTy::Base(Base::String), stratum }])
+}
+
 /// The resolver a catalog row's class names take: the identity, less the leading
 /// `\` a row may spell, which lowering keeps for a namespace resolver to read
 /// (issue #699) and a resolved arm never carries.
@@ -534,7 +559,7 @@ fn builtin_ladder(
     {
         return Some(BuiltinRung::ResourceArms(arms, res));
     }
-    builtin_return_floor(cx, name).map(BuiltinRung::Floor)
+    builtin_return_floor_for_call(cx, name, args).map(BuiltinRung::Floor)
 }
 
 /// **The fact a builtin call in OPERAND position denotes** (issue #646) — the

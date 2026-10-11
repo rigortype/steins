@@ -56,6 +56,7 @@
 use std::collections::{HashMap, HashSet};
 
 use steins_domain::Certainty;
+use steins_phpdoc::Type as PType;
 use steins_syntax::{
     ArgValue, Carrier, Key, Param, Place, ReadKind, ReadPosition, Stmt, StmtKind,
 };
@@ -78,7 +79,9 @@ use crate::offsets::{
     check_coalesce_final_arm, check_destructure_source, check_offset_read, check_shape_read,
 };
 use crate::project::Diagnostic;
+use crate::return_call::bind_returned_call;
 use crate::return_maybe::check_maybe_return_mismatch;
+use crate::stmt_calls::StmtCalls;
 use crate::string_context::check_string_contexts;
 use crate::walk::{WalkCx, in_dead};
 
@@ -364,7 +367,13 @@ fn check_member_reads(
 /// Step 1b of [`walk_trace`]: a `return`'s value against the enclosing function's
 /// native return type and its `@return` contract. Nothing for any other statement.
 ///
+/// A returned call is judged exactly as `$v = f(args); return $v;` would be (the
+/// rule table in [`crate::return_call`]): where the value as written resolves to
+/// nothing, the copy of the env that binds it as an assignment binds it supplies the
+/// value, the contract's rendering and the possibly grade's premise.
+///
 /// [`walk_trace`]: crate::walk::walk_trace
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn check_return_value(
     w: &WalkCx,
     folder: &mut dyn Folder,
@@ -372,96 +381,124 @@ pub(crate) fn check_return_value(
     env: &HashMap<String, Known>,
     store: &Store,
     descent: &mut Option<Descent<'_>>,
+    calls: &StmtCalls,
     out: &mut Vec<Diagnostic>,
 ) {
     let cx = w.cx;
     let scope = w.scope;
-    if let StmtKind::Return { value, span, .. } = &stmt.kind {
-        let mut native_fired = false;
-        // A proven scalar (env/fold), or a proven object / class constant
-        // (ADR-0043 stage 3). Stratum rides with the resolution (issue #127): an
-        // Asserted fold must not launder to Verified via a syntactic re-read.
-        let ret_resolved: Option<(ArgValue, Stratum)> = cx
-            .resolve_literal_strat_ex(
-                value,
-                env,
-                scope.poisoned,
-                folder,
-                descent.as_mut(),
-                Some(&mut *out),
-            )
-            .or_else(|| {
-                resolve_native_value(cx, value, w.enclosing_class)
-                    .map(|v| (v, Stratum::Verified))
-            });
-        // The native return check is proof-layer (`type.return-mismatch`): a
-        // returned value proven only through an `Asserted` fact stays silent
-        // (ADR-0052 §5). The phpdoc contract check below accepts `Asserted`.
-        if let Some((ret, display)) = w.ret_info
-            && let Some((lit, strat)) = ret_resolved.as_ref()
-            && *strat == Stratum::Verified
-            && is_type_error(cx, ret, lit)
-            && !object_world_guard_blind(descent.is_some(), ret, lit)
-        {
-            out.push(cx.return_diagnostic(span.start, lit, ret, display));
-            native_fired = true;
-        }
-        if !native_fired
-            && let Some((pret, display)) = w.ret_phpdoc
-        {
-            // Proven-value path, then the abstract-fact path (Feature E) — same
-            // discipline as `@param`: only a definite `No`.
-            let rendered = match cx.resolve_cval(value, env, store, scope.poisoned, folder) {
-                // ADR-0043 stage 4: class-touching verdict is guard-blind inside a
-                // descent, mirroring `object_world_guard_blind`.
-                Some(cv) => (accepts(cx, cx.cur, span.start, pret, &cv) == Certainty::No
-                    && !phpdoc_object_guard_blind(descent.is_some(), pret, Some(&cv)))
-                .then(|| rendered_cval(&cv)),
-                None => arg_abstract_fact(value, env, scope.poisoned).and_then(|fact| {
-                    let cty = steins_contract::lower(pret);
-                    // The class valve opens for a pure known-class contract against
-                    // a definite scalar fact (see `check_phpdoc_param`).
-                    let open_class_valve = is_pure_class_contract(cx, cx.cur, span.start, pret)
-                        && !phpdoc_object_guard_blind(descent.is_some(), pret, None);
-                    ((!contract_touches_class(&cty) || open_class_valve)
-                        && steins_contract::admits_fact(&cty, fact) == Certainty::No)
-                        .then(|| describe_fact(fact))
-                }),
-            };
-            if let Some(rendered) = rendered {
-                let pos = cx.tree().position(span.start);
-                out.push(Diagnostic {
-                    id: RETURN_MISMATCH_ID,
-                    facet: None,
-                    fix: None,
-                    path: cx.path().to_owned(),
-                    line: pos.line,
-                    column: pos.column,
-                    message: format!(
-                        "return value {rendered} violates declared @return {pret} of {display}() — declared contract violation",
-                    ),
+    let StmtKind::Return { value, span, .. } = &stmt.kind else { return };
+    let virt = if descent.is_none() {
+        bind_returned_call(w, folder, stmt, calls, env, store)
+    } else {
+        None
+    };
+    // A proven scalar (env/fold), or a proven object / class constant
+    // (ADR-0043 stage 3). Stratum rides with the resolution (issue #127): an
+    // Asserted fold must not launder to Verified via a syntactic re-read.
+    let ret_resolved: Option<(ArgValue, Stratum)> = cx
+        .resolve_literal_strat_ex(
+            value,
+            env,
+            scope.poisoned,
+            folder,
+            descent.as_mut(),
+            Some(&mut *out),
+        )
+        .or_else(|| {
+            resolve_native_value(cx, value, w.enclosing_class).map(|v| (v, Stratum::Verified))
+        })
+        .or_else(|| {
+            let v = virt.as_ref()?;
+            cx.resolve_literal_strat_ex(&v.slot, &v.env, scope.poisoned, folder, None, None)
+        });
+    let mut native_fired = false;
+    // The native return check is proof-layer (`type.return-mismatch`): a returned
+    // value proven only through an `Asserted` fact stays silent (ADR-0052 §5). The
+    // phpdoc contract check below accepts `Asserted`.
+    if let Some((ret, display)) = w.ret_info
+        && let Some((lit, strat)) = ret_resolved.as_ref()
+        && *strat == Stratum::Verified
+        && is_type_error(cx, ret, lit)
+        && !object_world_guard_blind(descent.is_some(), ret, lit)
+    {
+        out.push(cx.return_diagnostic(span.start, lit, ret, display));
+        native_fired = true;
+    }
+    if !native_fired
+        && let Some((pret, display)) = w.ret_phpdoc
+    {
+        let in_descent = descent.is_some();
+        let rendered =
+            phpdoc_return_violation(w, folder, pret, value, env, store, in_descent, span.start)
+                .or_else(|| {
+                    let v = virt.as_ref()?;
+                    phpdoc_return_violation(
+                        w, folder, pret, &v.slot, &v.env, &v.store, in_descent, span.start,
+                    )
                 });
-            }
+        if let Some(rendered) = rendered {
+            let pos = cx.tree().position(span.start);
+            out.push(Diagnostic {
+                id: RETURN_MISMATCH_ID,
+                facet: None,
+                fix: None,
+                path: cx.path().to_owned(),
+                line: pos.line,
+                column: pos.column,
+                message: format!(
+                    "return value {rendered} violates declared @return {pret} of {display}() — declared contract violation",
+                ),
+            });
         }
-        // The possibly-grade sibling (ADR-0081 §8's 2026-08-27 amendment, issue
-        // #537), placed where its argument twin is: after the native proof had
-        // its chance, so a definite No is never shadowed by the weaker claim
-        // about the same `return`. It rides beside the phpdoc contract check
-        // rather than behind it, since the two judge different declarations.
-        if !native_fired
-            && let Some((ret, display)) = w.ret_info
-        {
-            check_maybe_return_mismatch(
-                cx,
-                ret,
-                display,
-                value,
-                env,
-                store,
-                scope.poisoned,
-                span.start,
-                out,
-            );
-        }
+    }
+    // The possibly-grade sibling (ADR-0081 §8's 2026-08-27 amendment, issue #537),
+    // placed where its argument twin is: after the native proof had its chance, so a
+    // definite No is never shadowed by the weaker claim about the same `return`. It
+    // rides beside the phpdoc contract check rather than behind it, since the two
+    // judge different declarations.
+    if !native_fired
+        && let Some((ret, display)) = w.ret_info
+    {
+        let (judged, env, store) = match &virt {
+            Some(v) => (&v.slot, &v.env, &v.store),
+            None => (value, env, store),
+        };
+        check_maybe_return_mismatch(
+            cx, ret, display, judged, value, env, store, scope.poisoned, span.start, out,
+        );
+    }
+}
+
+/// The `@return` contract's violation for one returned value, rendered for the
+/// message: a proven value first, then the abstract-fact path (Feature E) — the same
+/// discipline as `@param`, only a definite `No`.
+#[allow(clippy::too_many_arguments)]
+fn phpdoc_return_violation(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    pret: &PType,
+    value: &ArgValue,
+    env: &HashMap<String, Known>,
+    store: &Store,
+    in_descent: bool,
+    span_start: u32,
+) -> Option<String> {
+    let cx = w.cx;
+    match cx.resolve_cval(value, env, store, w.scope.poisoned, folder) {
+        // ADR-0043 stage 4: class-touching verdict is guard-blind inside a
+        // descent, mirroring `object_world_guard_blind`.
+        Some(cv) => (accepts(cx, cx.cur, span_start, pret, &cv) == Certainty::No
+            && !phpdoc_object_guard_blind(in_descent, pret, Some(&cv)))
+        .then(|| rendered_cval(&cv)),
+        None => arg_abstract_fact(value, env, w.scope.poisoned).and_then(|fact| {
+            let cty = steins_contract::lower(pret);
+            // The class valve opens for a pure known-class contract against a
+            // definite scalar fact (see `check_phpdoc_param`).
+            let open_class_valve = is_pure_class_contract(cx, cx.cur, span_start, pret)
+                && !phpdoc_object_guard_blind(in_descent, pret, None);
+            ((!contract_touches_class(&cty) || open_class_valve)
+                && steins_contract::admits_fact(&cty, fact) == Certainty::No)
+                .then(|| describe_fact(fact))
+        }),
     }
 }

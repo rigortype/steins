@@ -76,11 +76,11 @@ fn join_agree_keeps_fact() {
 }
 
 #[test]
-fn join_differ_becomes_oneof_and_is_silent() {
+fn join_differ_of_two_bad_values_is_definite() {
     let src = format!(
         "{HDR}if ($cond) {{ $w = \"abc\"; }} else {{ $w = \"xyz\"; }}\nwidth($w);"
     );
-    assert_eq!(n(&src), 0, "differing branches → OneOf → not one proven value → silent");
+    assert_eq!(n(&src), 1, "differing bad branches → OneOf, every member refused → flagged");
 }
 
 #[test]
@@ -238,9 +238,11 @@ fn ternary_decided_false_picks_else_arm() {
 }
 
 #[test]
-fn ternary_undecided_is_oneof_and_silent() {
+fn ternary_undecided_of_two_bad_literals_is_definite() {
+    // Two bad literals: every member of the `OneOf` is refused, so every path throws
+    // (ADR-0043's 2026-10-11 amendment on #950, decision D6).
     let src = format!("{HDR}$w = $c ? \"abc\" : \"xyz\";\nwidth($w);");
-    assert_eq!(n(&src), 0, "undecided ternary of two literals → OneOf → silent");
+    assert_eq!(n(&src), 1, "undecided ternary of two bad literals → every path throws");
 }
 
 #[test]

@@ -21,6 +21,7 @@
 mod absence;
 mod annotate;
 mod arg_check;
+mod finite_verdict;
 mod arity;
 mod array_out_state;
 mod assert_harness;
@@ -91,6 +92,7 @@ mod refine;
 mod remembered;
 mod resource;
 mod return_arms;
+mod return_call;
 mod return_maybe;
 mod return_missing;
 mod shape_projection;
