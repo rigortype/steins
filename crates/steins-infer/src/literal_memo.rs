@@ -17,22 +17,31 @@
 //!
 //! So `c(c(…c(x)…))` nested `n` deep costs `k^n` with `k` between 2 (a project
 //! function: the subject and the fact road) and 3 (a builtin: the fold as well).
-//! Every road is a pure function of the same inputs, so one answer per argument
-//! serves them all.
+//! An array literal between the calls (`count([count([…])])`) adds a road: the
+//! fact seam reads the literal element by element ([`array_literal_fact`]),
+//! each element through [`transfer_arg_known`] again. Every road is a pure
+//! function of the same inputs, so one answer per argument serves them all.
+//!
+//! # The extent
+//!
+//! The memo lives for one **outermost** read — the root, the first resolution or
+//! fact-seam read ([`within`]) made while no memo is open — and is dropped when
+//! the root returns (or unwinds). The fact seam opens the extent too, so the
+//! literal reads it makes per element share one memo instead of each opening
+//! its own.
 //!
 //! # When an answer is reused
 //!
-//! The memo lives for one **outermost** resolution — the root, the first call
-//! made while no memo is open — and is dropped when the root returns (or
-//! unwinds). Inside it, an answer is stored and reused only when every input
-//! that answer depends on is provably the root's:
+//! An answer is stored and reused only when every input it depends on is
+//! provably the root's:
 //!
 //! - **The value** is identified by address, and only for values inside the
 //!   root's own value tree ([`Memo::stable`]): the root is borrowed for the whole
 //!   extent, so its descendants live at addresses nothing else can occupy while
-//!   the memo is open. A temporary built along the way (a resolved argument
-//!   list, a lifted literal) is never stored, since a later temporary could reuse
-//!   its address.
+//!   the memo is open. A value joins the set when the read reaches it through
+//!   its parent. A temporary built along the way (a resolved argument list, a
+//!   lifted literal) never joins, since a later temporary could reuse its
+//!   address.
 //! - **The env, the folder and the context** are the root's. The env is
 //!   immutably borrowed for the extent, so equal addresses are equal contents; a
 //!   callee body walked by a descent binds a fresh env and does not match.
@@ -50,10 +59,25 @@
 //! computation always runs with a sink, which no resolution road treats
 //! differently from none: a sinkless fold writes to a scratch it discards.
 //!
+//! # What is kept
+//!
+//! Only calls, concatenations, comparisons and casts are stored — the variants
+//! whose resolution re-enters the roads above. An array literal resolves by
+//! resolving its elements, so it is never stored itself: its answer is a copy of
+//! its whole subtree, and storing one per level of a nested literal held
+//! `O(n·depth)` for no reuse. Its elements still join the stable set.
+//!
+//! A stored answer is read by the roads of its parent, which all run while the
+//! parent is being computed. So once a stored value's own computation returns,
+//! its children's entries are dropped: the memo holds the frontier of the read,
+//! not every level of it, and a nested call whose answers are arrays does not
+//! keep one copy per level.
+//!
 //! [`Cx::resolve_literal_under`]: crate::cx::Cx::resolve_literal_under
 //! [`Cx::try_fold_under`]: crate::cx::Cx::try_fold_under
 //! [`shape_builtin_return_fact`]: crate::builtin_returns::shape_builtin_return_fact
 //! [`transfer_arg_known`]: crate::transfers::transfer_arg_known
+//! [`array_literal_fact`]: crate::env::array_literal_fact
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -107,15 +131,15 @@ impl Inputs {
 /// One root's memo.
 struct Memo {
     root: Inputs,
-    /// Addresses of the values inside the root's value tree, grown as the
-    /// resolution reaches them (a stored value's children join on its way in).
+    /// Addresses of the values inside the root's value tree, grown as the read
+    /// reaches them (a value's children join when the value is read).
     stable: HashSet<usize>,
     /// The answer and the findings of each stored resolution, by value address.
     entries: HashMap<usize, (Resolved, Vec<Diagnostic>)>,
 }
 
 thread_local! {
-    /// The open memo, `None` outside any resolution. Per thread, since every walk
+    /// The open memo, `None` outside any read. Per thread, since every walk
     /// worker resolves on its own.
     static MEMO: RefCell<Option<Memo>> = const { RefCell::new(None) };
 }
@@ -130,46 +154,81 @@ impl Drop for RootGuard {
     }
 }
 
-/// Whether a value's resolution is worth the memo's bookkeeping: the variants
-/// [`Cx::resolve_literal_under`] recurses through. A literal, a variable and
-/// every variant the seam declines answer in constant time.
-///
-/// [`Cx::resolve_literal_under`]: crate::cx::Cx::resolve_literal_under
+/// Whether a value's resolution is stored: the variants whose resolution
+/// re-enters the roads above. A literal, a variable and every variant the seam
+/// declines answer in constant time; an array literal is read through its
+/// elements (see the module docs).
 pub(crate) fn worth_memoising(value: &ArgValue) -> bool {
     matches!(
         value,
-        ArgValue::Call(..)
-            | ArgValue::Concat(..)
-            | ArgValue::Binary { .. }
-            | ArgValue::Cast { .. }
-            | ArgValue::Array(_)
+        ArgValue::Call(..) | ArgValue::Concat(..) | ArgValue::Binary { .. } | ArgValue::Cast { .. }
     )
 }
 
-/// The values directly inside `value` that the literal seam or its callers
-/// resolve. A child left out is only never stored, never answered wrongly.
+/// The values directly inside `value` that the literal seam and the fact seam
+/// read: a call's arguments, an operator's operands, an array literal's
+/// elements. A child left out is only never stored, never answered wrongly.
 fn children(value: &ArgValue) -> Vec<&ArgValue> {
     match value {
         ArgValue::Call(_, args) => args.iter().collect(),
-        ArgValue::MethodCall { args, named, .. } | ArgValue::New(_, args, named) => {
-            args.iter().chain(named.iter().map(|n| &n.value)).collect()
-        }
         ArgValue::Array(items) => items.iter().map(|(_, v)| v).collect(),
-        ArgValue::Ternary { then_val, else_val, .. } => vec![then_val, else_val],
-        ArgValue::Coalesce(a, b, _)
-        | ArgValue::Concat(a, b)
-        | ArgValue::OffsetRead { base: a, key: b }
-        | ArgValue::Binary { lhs: a, rhs: b, .. }
-        | ArgValue::Logical { lhs: a, rhs: b, .. } => vec![a, b],
-        ArgValue::Not(a) | ArgValue::Cast { operand: a, .. } => vec![a],
+        ArgValue::Concat(a, b) | ArgValue::Binary { lhs: a, rhs: b, .. } => vec![a, b],
+        ArgValue::Cast { operand: a, .. } => vec![a],
         _ => Vec::new(),
     }
 }
 
+fn addr(value: &ArgValue) -> usize {
+    std::ptr::from_ref(value).addr()
+}
+
+/// Opens the root's memo at `value`, or `None` when one is already open.
+fn open_root(value: &ArgValue, inputs: Inputs) -> Option<RootGuard> {
+    MEMO.with_borrow_mut(|open| {
+        if open.is_some() {
+            return None;
+        }
+        *open = Some(Memo {
+            root: inputs,
+            stable: HashSet::from([addr(value)]),
+            entries: HashMap::new(),
+        });
+        Some(RootGuard)
+    })
+}
+
+/// Mark `value`'s children as inside the root's tree, when `value` is.
+pub(crate) fn note(value: &ArgValue) {
+    MEMO.with_borrow_mut(|open| {
+        if let Some(memo) = open
+            && memo.stable.contains(&addr(value))
+        {
+            // A literal or a variable leaf is never stored and has no children.
+            let inner = children(value)
+                .into_iter()
+                .filter(|c| !c.is_literal() && !matches!(c, ArgValue::Var(_)));
+            memo.stable.extend(inner.map(addr));
+        }
+    });
+}
+
+/// Run a **fact-seam** read of `value` inside the memo's extent: opening the
+/// root at `value` when no memo is open, so every literal read it makes per
+/// element shares one memo.
+pub(crate) fn within<R>(
+    cx: &Cx<'_>,
+    value: &ArgValue,
+    env: &HashMap<String, Known>,
+    folder: &mut dyn Folder,
+    body: impl FnOnce(&mut dyn Folder) -> R,
+) -> R {
+    let _guard = open_root(value, Inputs::of(cx, env, folder));
+    note(value);
+    body(folder)
+}
+
 /// What the open memo says about one resolution.
 enum Role {
-    /// No memo was open: this resolution opens it.
-    Root,
     /// A stored answer, to replay.
     Hit(Resolved, Vec<Diagnostic>),
     /// A storable resolution not yet stored.
@@ -194,61 +253,56 @@ pub(crate) fn resolve<'d>(
         Option<&mut Vec<Diagnostic>>,
     ) -> Resolved,
 ) -> Resolved {
-    let addr = std::ptr::from_ref(value).addr();
+    let key = addr(value);
     let inputs = Inputs::of(cx, env, folder);
-    let role = MEMO.with_borrow_mut(|open| match open {
-        None => {
-            *open = Some(Memo {
-                root: inputs,
-                stable: HashSet::from([addr]),
-                entries: HashMap::new(),
-            });
-            Role::Root
-        }
-        Some(memo) => {
-            if descent.is_some() || memo.root != inputs || !memo.stable.contains(&addr) {
-                Role::Bypass
-            } else if let Some((r, diags)) = memo.entries.get(&addr) {
-                Role::Hit(r.clone(), diags.clone())
-            } else {
-                Role::Miss
-            }
+    let _guard = open_root(value, inputs);
+    let role = MEMO.with_borrow_mut(|open| {
+        let Some(memo) = open else { return Role::Bypass };
+        if descent.is_some() || memo.root != inputs || !memo.stable.contains(&key) {
+            Role::Bypass
+        } else if let Some((r, diags)) = memo.entries.get(&key) {
+            Role::Hit(r.clone(), diags.clone())
+        } else {
+            Role::Miss
         }
     });
-    let store = match role {
+    note(value);
+    match role {
         Role::Hit(r, diags) => {
             if let Some(out) = out {
                 out.extend(diags);
             }
-            return r;
+            r
         }
-        Role::Bypass => return compute(folder, descent, out),
-        Role::Root => {
-            let _guard = RootGuard;
-            register_children(value);
-            return compute(folder, descent, out);
+        Role::Bypass => compute(folder, descent, out),
+        Role::Miss => {
+            let mut emitted = Vec::new();
+            let r = compute(folder, None, Some(&mut emitted));
+            if let Some(out) = out {
+                out.extend(emitted.iter().cloned());
+            }
+            store(value, key, r.clone(), emitted);
+            r
         }
-        Role::Miss => addr,
-    };
-    register_children(value);
-    let mut emitted = Vec::new();
-    let r = compute(folder, None, Some(&mut emitted));
-    if let Some(out) = out {
-        out.extend(emitted.iter().cloned());
     }
-    MEMO.with_borrow_mut(|open| {
-        if let Some(memo) = open {
-            memo.entries.insert(store, (r.clone(), emitted));
-        }
-    });
-    r
 }
 
-/// Mark `value`'s children as inside the root's tree; `value` is.
-fn register_children(value: &ArgValue) {
+/// Store `value`'s answer and drop the answers stored beneath it: their readers
+/// were the roads of `value`'s own computation, which has returned. Beneath it
+/// means down to the nearest stored value on each path, through the array
+/// literals between (whose own answers are never stored).
+fn store(value: &ArgValue, key: usize, r: Resolved, emitted: Vec<Diagnostic>) {
     MEMO.with_borrow_mut(|open| {
         if let Some(memo) = open {
-            memo.stable.extend(children(value).into_iter().map(|c| std::ptr::from_ref(c).addr()));
+            let mut below = children(value);
+            while let Some(child) = below.pop() {
+                if worth_memoising(child) {
+                    memo.entries.remove(&addr(child));
+                } else {
+                    below.extend(children(child));
+                }
+            }
+            memo.entries.insert(key, (r, emitted));
         }
     });
 }
