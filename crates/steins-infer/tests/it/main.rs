@@ -56,6 +56,7 @@ mod declared_parameter_seed;
 mod declared_property_lane;
 mod declared_receiver_intersections;
 mod declared_return_floor;
+mod destructure_call;
 mod destructure_scalar_source;
 mod destructure_source_read;
 mod docblock_hygiene;
