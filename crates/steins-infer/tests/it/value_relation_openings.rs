@@ -42,7 +42,10 @@ impl Boot {
         params.insert("iterator_to_array".to_owned(), vec![p("iterator", "Traversable|array")]);
         params.insert("array_keys".to_owned(), vec![p("array", "array")]);
         params.insert("usort".to_owned(), vec![p("array", "array"), p("callback", "callable")]);
-        params.insert("array_filter".to_owned(), vec![p("array", "array"), p("callback", "?callable")]);
+        params.insert(
+            "array_filter".to_owned(),
+            vec![p("array", "array"), p("callback", "?callable")],
+        );
         params.insert("str_replace".to_owned(), vec![p("search", "array|string")]);
         params.insert("strlen".to_owned(), vec![p("string", "string")]);
         params.insert("var_dump".to_owned(), vec![p("value", "mixed")]);
@@ -234,7 +237,8 @@ fn an_array_to_an_int_parameter_is_a_type_error() {
 
 #[test]
 fn an_array_to_every_representable_native_type_is_a_type_error() {
-    for ty in ["bool", "string", "int|string", "float", "false", "?int", "K", "I", "A&B", "(A&B)|K"] {
+    let types = ["bool", "string", "int|string", "float", "false", "?int", "K", "I", "A&B", "(A&B)|K"];
+    for ty in types {
         fires_both_modes(&format!("{K}function f({ty} $x): void {{}}\nf([1, 2]);\n"), ARG);
     }
 }
@@ -543,7 +547,15 @@ fn a_callable_string_through_self_or_parent_declines() {
 #[test]
 fn an_array_that_is_no_callable_pair_is_a_type_error() {
     let decl = format!("{FOO}class C {{ public static function s(): void {{}} }}\n");
-    for value in ["[]", "[1, 2]", "[\"C\"]", "[\"C\", \"s\", \"x\"]", "[\"a\" => \"C\", \"b\" => \"s\"]", "[\"C\", 1]"] {
+    let values = [
+        "[]",
+        "[1, 2]",
+        "[\"C\"]",
+        "[\"C\", \"s\", \"x\"]",
+        "[\"a\" => \"C\", \"b\" => \"s\"]",
+        "[\"C\", 1]",
+    ];
+    for value in values {
         fires_both_modes(&format!("{decl}foo({value});\n"), ARG);
     }
 }
@@ -648,7 +660,8 @@ fn the_builtin_null_message_spells_the_reflected_type() {
     let src = coercive("iterator_to_array(null);\n");
     let ds = findings_with(&src, &mut Boot::ready());
     assert_eq!(ds.len(), 1);
-    assert!(ds[0].message.contains("cannot become Traversable|array $iterator"), "{}", ds[0].message);
+    let msg = &ds[0].message;
+    assert!(msg.contains("cannot become Traversable|array $iterator"), "{msg}");
 }
 
 #[test]
@@ -656,5 +669,167 @@ fn the_top_message_spells_the_declared_top() {
     let src = strict(&format!("{FOO}foo(42);\n"));
     let ds = findings_with(&src, &mut Boot::ready());
     assert_eq!(ds.len(), 1);
-    assert!(ds[0].message.contains("argument 42 to foo() cannot become callable $c"), "{}", ds[0].message);
+    let msg = &ds[0].message;
+    assert!(msg.contains("argument 42 to foo() cannot become callable $c"), "{msg}");
+}
+
+// ---------------------------------------------------------------------------
+// The #1060 review's rows: guards that vouch a callable name, guards the walk
+// does not model over a proven value, writes that miss the declared slot, and a
+// `class_alias` of an engine class. Every row run on PHP 8.5.11.
+// ---------------------------------------------------------------------------
+
+/// Every id a fixture emits (not just `type.*`), `untyped.*` excluded.
+fn all_ids(src: &str) -> Vec<String> {
+    let tree = SourceTree::parse(src);
+    check_with(&tree, &[], "t.php", &mut Boot::ready())
+        .into_iter()
+        .filter(|d| !d.id.starts_with("untyped."))
+        .map(|d| d.id.to_owned())
+        .collect()
+}
+
+#[test]
+fn a_literal_is_callable_guard_vouches_the_name_it_tests() {
+    let decl = format!("{FOO}class K {{}}\nclass H {{ public function take(callable $c): void {{}} }}\n");
+    for body in [
+        "if (is_callable('zz')) { foo('zz'); }",
+        "if (is_callable(['K', 'zz'])) { foo(['K', 'zz']); }",
+        "if (is_callable('K::zz')) { foo('K::zz'); }",
+        "if (is_callable('Zz::m')) { foo('Zz::m'); }",
+        "if (is_callable('zz')) { (new H())->take('zz'); }",
+        "function g(): void { if (!is_callable('zz')) { return; } foo('zz'); }",
+        "function g(): void { if (!is_callable(['K', 'zz'])) { return; } foo(['K', 'zz']); }",
+        "if (class_exists('Zz')) { foo(['Zz', 'm']); }",
+        "if (method_exists('K', 'zz')) { foo(['K', 'zz']); }",
+    ] {
+        silent_both_modes(&format!("{decl}{body}\n"));
+    }
+    // The guard names one symbol: another name under it still fires.
+    fires_both_modes(&format!("{decl}if (is_callable('zz')) {{ foo('yy'); }}\n"), ARG);
+}
+
+#[test]
+fn a_literal_is_callable_guard_vouches_an_undefined_function_call_too() {
+    // The same vouch is `call.undefined-function`'s guard leg (a base misfire).
+    let src = strict("if (is_callable('zz')) { zz(); }\n");
+    assert!(all_ids(&src).is_empty(), "{:?}", all_ids(&src));
+    let src = strict("zz();\n");
+    assert_eq!(all_ids(&src), vec!["call.undefined-function".to_owned()]);
+}
+
+#[test]
+fn a_guard_the_walk_does_not_model_forgets_the_proven_value_it_tests() {
+    // Each guard is false for `null`, so PHP never runs the calls.
+    let decl = format!("{K}function obj(K $k): void {{}}\nfunction arr(array $a): void {{}}\n");
+    for guard in [
+        "is_countable($x)",
+        "is_a($x, 'K')",
+        "is_a($x, 'K', true)",
+        "is_subclass_of($x, 'K')",
+        "get_debug_type($x) === 'K'",
+        "($x ?? null) !== null",
+        "$x?->p !== null",
+        "isset($x['k'])",
+        "is_countable($x) && true",
+    ] {
+        silent_both_modes(&format!(
+            "{decl}function g(): void {{ $x = null; if ({guard}) {{ obj($x); arr($x); count($x); }} }}\n"
+        ));
+        silent_both_modes(&format!(
+            "{decl}function g(): void {{ $x = null; if (!({guard})) {{ return; }} obj($x); }}\n"
+        ));
+    }
+}
+
+#[test]
+fn a_guard_the_walk_models_prunes_the_branch_it_proves_dead() {
+    let decl = format!("{K}function obj(K $k): void {{}}\nfunction arr(array $a): void {{}}\n");
+    for guard in [
+        "isset($x)",
+        "!is_null($x)",
+        "is_array($x)",
+        "is_object($x)",
+        "is_iterable($x)",
+        "is_callable($x)",
+        "$x instanceof K",
+        "$x !== null",
+        "$x != null",
+        "!empty($x)",
+        "$x",
+        "gettype($x) === 'array'",
+    ] {
+        silent_both_modes(&format!(
+            "{decl}function g(): void {{ $x = null; if ({guard}) {{ obj($x); arr($x); }} }}\n"
+        ));
+    }
+}
+
+#[test]
+fn a_decided_isset_keeps_the_reports_on_the_path_php_takes() {
+    // `isset($x)` on a proven `null` is false: the negation's branch and the code
+    // after the `if` both run with `null`.
+    let decl = format!("{K}function obj(K $k): void {{}}\n");
+    fires_both_modes(&format!("{decl}function g(): void {{ $x = null; if (!isset($x)) {{ obj($x); }} }}\n"), ARG);
+    fires_both_modes(&format!("{decl}function g(): void {{ $x = null; if (isset($x)) {{}} obj($x); }}\n"), ARG);
+}
+
+#[test]
+fn an_undecided_guard_over_a_scalar_declines_the_scalar_rows_too() {
+    // The base misfired on these before the amendment.
+    let decl = format!("{K}function i(int $i): void {{}}\nfunction obj(K $k): void {{}}\n");
+    silent_both_modes(&format!("{decl}function g(): void {{ $x = null; if (isset($x)) {{ i($x); }} }}\n"));
+    silent_both_modes(&format!("{decl}function g(): void {{ $x = 'abc'; if (is_a($x, 'K')) {{ obj($x); }} }}\n"));
+    silent(&strict("function g(): void { $x = null; if (isset($x)) { strlen($x); } }\n"));
+}
+
+#[test]
+fn a_write_to_a_parents_private_property_declines() {
+    // From the child's scope the write creates a dynamic property (a deprecation).
+    let decl = format!("{K}class PA {{ private K $q; public K $p; }}\n");
+    silent_both_modes(&format!("{decl}class PB extends PA {{ public function f(): void {{ $this->q = null; }} }}\n"));
+    // The declaring class's own write, and a public property, are judged.
+    fires_both_modes(
+        &format!("{K}final class PA {{ private K $q; public function f(): void {{ $this->q = null; }} }}\n"),
+        PROP,
+    );
+    fires_both_modes(&format!("{decl}class PB extends PA {{ public function f(): void {{ $this->p = null; }} }}\n"), PROP);
+}
+
+#[test]
+fn a_write_to_a_protected_property_from_an_unrelated_scope_declines() {
+    // An Error, not a TypeError: the write never reaches the slot.
+    silent_both_modes(&format!(
+        "{K}class PA {{ protected K $q; }}\nfunction g(): void {{ $a = new PA(); $a->q = null; }}\n"
+    ));
+}
+
+#[test]
+fn a_write_that_may_reach_set_declines() {
+    // After `unset($this->p)` the write goes to `__set`.
+    let decl = format!(
+        "{K}class L {{ public K $p; public int $i = 0;\n    public function __construct() {{ unset($this->p, $this->i); }}\n    public function __set($n, $v) {{}} }}\n"
+    );
+    for value in ["null", "[]", "fn () => 1", "'x'"] {
+        silent_both_modes(&format!("{decl}function g(): void {{ $l = new L(); $l->p = {value}; }}\n"));
+    }
+    silent_both_modes(&format!("{decl}function g(): void {{ $l = new L(); $l->i = 'abc'; }}\n"));
+    // An inherited `__set` counts, and so does an ancestor the walk cannot see.
+    silent_both_modes(&format!(
+        "{K}class M {{ public function __set($n, $v) {{}} }}\nclass L extends M {{ public K $p; }}\nfunction g(): void {{ $l = new L(); $l->p = null; }}\n"
+    ));
+    silent_both_modes(&format!(
+        "{K}class L extends Missing {{ public K $p; }}\nfunction g(): void {{ $l = new L(); $l->p = null; }}\n"
+    ));
+}
+
+#[test]
+fn an_alias_of_an_engine_class_declines_and_an_unknown_name_keeps_its_proof() {
+    silent_both_modes(
+        "class_alias('Closure', 'MyClosure');\nfunction f(MyClosure $c): void {}\nf(function () {});\n",
+    );
+    silent_both_modes(
+        "class_alias('ArrayObject', 'AO');\nfunction f(AO $a): void {}\nf(new ArrayObject());\n",
+    );
+    fires(&strict("class Real {}\nfunction f(Minted $m): void {}\nf(new Real());\n"), ARG);
 }
