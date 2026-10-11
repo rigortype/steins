@@ -376,9 +376,11 @@ fn silent_enum_method() {
 }
 
 #[test]
-fn silent_closure_var_call() {
+fn closure_var_call_through_a_string_callee_fires() {
+    // Issue #1051 S4: a proven string callee is judged like the direct call (the
+    // table in `dynamic_callee_arity.rs`); before it, this shape was silent.
     let d = fires("<?php\nfunction f($a, $b) {}\n$fn = 'f';\n$fn(1);\n");
-    assert!(d.is_empty(), "{d:?}");
+    assert_eq!(d.len(), 1, "{d:?}");
 }
 
 #[test]
