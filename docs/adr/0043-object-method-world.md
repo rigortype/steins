@@ -281,3 +281,80 @@ Controls that stay findings: an unrelated class against a param typed with an al
 `Real`, an alias of `Real` against a param typed `Other`, a class without `__toString`
 against `Stringable`, a third class against an ambiguous alias, and, under a dynamic
 `class_alias`, a known class's mismatch (while a param typed with an unknown name declines).
+
+## Amendment (2026-10-11): the value relation's openings — null, arrays, closures and the parameter tops — PENDING ratification
+
+**Status: PENDING ratification.** Slice S1 of the type/arity reproduction run (#1051),
+for issues #951, #941 a/b and #952 l1. Designed under the owner's standing direction.
+
+§4's acceptance kept three deliberate silences: `null` against an object-bearing type
+(to sidestep the `T $p = null` idiom), every array argument (left to the phpdoc
+relation), and every closure. Each is a definite `No` in PHP with no coercion in either
+mode, and the `= null` idiom has had its own guard (`implicit_null_accepted`, #391)
+since. Every cell below was run on PHP 8.5.11 at the argument, the return and the
+typed-property seam in both modes; the three seams agree on every one, and only the
+scalar-into-scalar cells (unchanged here) differ between the modes.
+
+**The `NativeType` side** (`arg_check::is_type_error`, whose doc comment carries the
+whole table):
+
+- `null` is rejected by every type without a `null` member — a class, an interface, an
+  intersection and a DNF type as much as a scalar. The `= null` default still widens a
+  parameter, and the internal-null carve-out still covers a builtin's scalar position
+  in coercive mode.
+- An array literal is rejected by every `NativeType`: no member accepts an array, and a
+  hint that names `array` or `iterable` lowers to no `NativeType` at all. An array is an
+  array whatever its elements hold, so `[$x]` is judged too.
+- A closure is an object of the final, interface-less class `Closure`, and is judged as
+  one through §4's object arm: accepted by `Closure`, rejected by any other class,
+  interface or intersection and by `int`/`float`/`bool`; a `string` member rejects it in
+  strict mode only, since the `__toString` rule is not specialised to `Closure`. A
+  first-class callable `f(...)` is judged only when `f` resolves, since an unresolved
+  name throws an `Error` first.
+- At the typed-property seam a value written in place is judged whole: an array, a
+  closure, a `new` (#952 l1) and an enum case, besides the literals it judged already.
+  `new C` is rejected only under §3's completely enumerated hierarchy.
+
+**The parameter tops** (`value_tops::top_is_type_error`). A parameter hinted with a bare
+`array`, `object`, `iterable` or `callable`, or one of them widened by `null`, now
+carries a `ParamTop` beside its (absent) `NativeType`, the parameter-side twin of the
+return lane's `EnforcedTop` (#603). A union of a top with anything else still lowers to
+neither and stays silent. The table: every scalar and a non-nullable `null` is rejected
+by all four; an array is accepted by `array`/`iterable` and rejected by `object`; a
+closure is accepted by `object`/`callable` and rejected by `array`/`iterable`; `new C` is
+rejected by `array`, by `iterable` when C is-a `Traversable` is `No`, and by `callable`
+when C's chain is enumerated with no `__invoke` (nor `__call`).
+
+**`callable` names convict only through the absence family.** A string, a `C::m` string
+or an array pair is rejected only when the existence ladder ADR-0049 runs for a call
+would prove its target absent: the same legs in the same order (`call.undefined-function`'s
+for a function name, `class.undefined`'s for a class, `call.undefined-method`'s, walked
+for both call kinds, for a method), so a run without a live sidecar, with the dam
+standing or with a boot-surface homonym declines. An array that is not a pair at all
+(not exactly two elements at keys `0` and `1`, a non-string method, a scalar target) is
+rejected outright. A builtin class's members are never proven absent — a reflected
+declaration refutes and does not convict — so `["stdClass", "nope"]` and
+`new stdClass()` decline. The names are read off a **written** argument only: a name
+that reached the argument through a variable may sit under an `is_callable($name)` guard
+the walk does not model.
+
+**`null` at a builtin position the native relation does not lower** (`object`, `array`,
+`callable`, a class, `Traversable|array`) is a `TypeError` in both modes: the
+internal-null carve-out is scalar-only (`spl_object_id(null)`, `iterator_to_array(null)`).
+A position mixing a scalar with a non-scalar (`array|string`) follows the scalar rule.
+
+**What stays as it was.** The possibly grade keeps the object-bearing `null` silence
+(`possibly_null_rejected`): reading the new row there would turn a partial rejection
+into #291's unemitted all-arms verdict and drop findings the base reports. Inside a
+binding descent a closure and an array join `object_world_guard_blind`, and a top is not
+judged, because a rebound value may sit under an unmodeled `is_array()`,
+`is_callable()` or `instanceof` guard. A by-reference parameter is skipped and a
+variadic one ends the positional walk, as before. The return seam judges the new
+`NativeType` rows but not the tops (#727 remains open for `: array` returning a
+scalar), and a typed property has no top.
+
+**Measured.** The two coercion grids now agree with PHP on every cell (the `array` row
+and the class/`null` cell were their named divergences). On the ten public corpora the
+movement is one finding: PHPUnit's end-to-end TypeError fixture
+(`$this->dateTime = new DateTime` into a `DateTimeImmutable` property), a true positive
+pinned in the fp-gate ledger.
