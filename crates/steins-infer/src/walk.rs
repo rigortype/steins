@@ -644,7 +644,7 @@ fn walk_run(
         // whatever the sweeps left (ADR-0057's 2026-08-17 amendment, D4).
         // An object named in a value the lowering could not spell may have been
         // handed on by it (issue #1048) — before the sweep, which then covers it.
-        escape_unspelled_reads(&stmt.unspelled_reads, store);
+        escape_unspelled_reads(stmt.unspelled_reads(), store);
         apply_call_escape_and_sweep(w, &stmt.kind, env, store, &stmt_calls.this_backs);
 
         // 1b. Return-type check (native + phpdoc contract).

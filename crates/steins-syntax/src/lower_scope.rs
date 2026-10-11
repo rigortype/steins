@@ -483,7 +483,7 @@ fn build_hook_expr_scope(
             };
             Stmt {
                 span: to_span(expr.span()),
-                unspelled_reads: unspelled_reads(&kind, &node),
+                unspelled: unspelled_reads(&kind, &node).map(Box::new),
                 kind,
                 invalidated: call_invalidation(&node),
                 string_contexts,
@@ -506,7 +506,7 @@ fn build_hook_expr_scope(
                 guards,
                 end: expr_end(expr),
                 has_terminator: subtree_has_function_exit(&node),
-                unspelled_reads: unspelled_reads(&base.kind, &node),
+                unspelled: unspelled_reads(&base.kind, &node).map(Box::new),
                 ..base
             }
         }
@@ -1658,7 +1658,7 @@ fn build_closure_scope_from_arrow(
     let kind = StmtKind::Return { value, call, span };
     let ret = Stmt {
         span,
-        unspelled_reads: unspelled_reads(&kind, &Node::Expression(af.expression)),
+        unspelled: unspelled_reads(&kind, &Node::Expression(af.expression)).map(Box::new),
         kind,
         invalidated,
         string_contexts,

@@ -3561,13 +3561,14 @@ pub struct Stmt {
     /// nothing known, instead of calling the rest of the list dead.
     pub holds_label: bool,
     /// Every variable this statement's own expression mentions, when some value in
-    /// [`Self::kind`] lowered to [`ArgValue::Other`] (issue #1048); empty otherwise.
+    /// [`Self::kind`] lowered to [`ArgValue::Other`] (issue #1048); `None` otherwise.
     /// A value the lowering could not spell — a `match`, an `(object)` cast, an array
     /// with a computed key, a call chain — may still hand an object it names on to a
     /// name the walk cannot follow, and these are the names it may have handed on.
     /// Over-collected on purpose (nested function bodies included): a name listed
-    /// here only escapes its object.
-    pub unspelled_reads: Vec<String>,
+    /// here only escapes its object. Boxed so the common empty case costs one word
+    /// per statement; read it through [`Self::unspelled_reads`].
+    pub unspelled: Option<Box<Vec<String>>>,
 }
 
 /// The functions the analyzer folds as **existence guards** (ADR-0049 §4 / N3, issues #198
@@ -3732,8 +3733,14 @@ impl Stmt {
             runs: Runs::default(),
             guards: Vec::new(),
             holds_label: false,
-            unspelled_reads: Vec::new(),
+            unspelled: None,
         }
+    }
+
+    /// The names in [`Self::unspelled`], empty where every value was spelled.
+    #[must_use]
+    pub fn unspelled_reads(&self) -> &[String] {
+        self.unspelled.as_deref().map_or(&[], Vec::as_slice)
     }
 }
 
