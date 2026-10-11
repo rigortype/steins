@@ -1111,7 +1111,7 @@ Runtime
 Config + active surface
   steins.toml: not found (built-in defaults govern)
   active profile: `default` (from built-in default)
-  surface: layers [mechanics, proof], 48 checked id(s)
+  surface: layers [mechanics, proof], 49 checked id(s)
 
 Layout
   1 manifest(s) govern this tree:

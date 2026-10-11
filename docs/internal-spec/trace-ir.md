@@ -16,6 +16,7 @@ Scope {
   function_name: Option<String>          // free functions only: the owner's fqn
   poisoned:     bool
   stmts:        Vec<Stmt>                // the trace
+  returns:      Vec<ReturnSite>          // every `return`, bare or valued, see below
   method_calls: Vec<CallExpr>            // comprehensive, see below
   params:       Vec<Param>               // closure scopes
   ret_ty:       Option<NativeType>       // closure scopes
@@ -63,7 +64,7 @@ variable of the chain, or `""` for a chain that starts at no variable.
 | `Assign { var, value, call }` | `$var = <value>` to a bare local; `call` carries the full `CallExpr` when the rvalue *is* a named call, so argument spans survive |
 | `PropAssign { target_var, prop, value, value_call }` | `$o->p = <rvalue>` / `$this->p = …` with a static property name |
 | `Call(CallExpr)` | a statement-position call |
-| `Return { value, call, span }` | `return <value>` (`Other` for bare `return`) |
+| `Return { value, call, span }` | `return <value>` (`Other` for bare `return`; the bare and valued forms are told apart by `Scope::returns`, not by this value) |
 | `Echo(Vec<CallExpr>)` | `echo e1, e2` — carries named calls among the operands |
 | `If { cond, then_trace, elseifs, else_trace }` | structured branches, recursively lowered |
 | `Match { subject, arms, default, default_lands, loose }` | `match` (strict, first-match, throws on no match) and `switch` (loose, falls through). Each `MatchArmT` carries `lands`, and the `default` body `default_lands`: an `ArmLanding` (the case body's `writes`, `reads`, `clears` and `runs`) when a jump in it lands on the successor (ADR-0103), which adds a fall-through edge from the arm's entry with those sets forgotten |
@@ -138,6 +139,20 @@ scope **no variable value is ever considered known**.
 
 `Opaque { poisons: true }` is the local form of the same fact: the enclosing
 scope is independently poisoned too.
+
+## `returns`: the compile-time return surface
+
+`Scope::returns` lists every `return` of the scope's own body in source order as a
+`ReturnSite { form, span }`, where `form` is `Bare` (`return;`), `Valued`
+(`return <expr>;`, `return null;` included) or `ArrowBody` (an arrow function's
+body expression, which the lowering turns into the trace's one `Return`). It is
+read off the syntax tree, not the trace: the trace lowers a bare `return;` to
+`Return { value: Other }`, indistinguishable from a returned expression the
+lowering cannot spell, and drops what an `Opaque` construct swallows, while PHP's
+compile-time return rules (`return.compile-fatal`, ADR-0078's 2026-10-11
+amendment) hold in dead code and inside any construct. Nested function-like
+bodies are their own scopes and are not descended. The list is empty when the
+scope writes no return hint, the only reader's premise.
 
 ## `method_calls`: the sound enumeration surface
 
