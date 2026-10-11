@@ -126,6 +126,22 @@ struct LoweredArgs {
 /// cardinality, order and values, so the list stays a proven positional list.
 /// Every other spread keeps the flag raised. See [`flatten_spread_operand`].
 fn lower_argument_list(list: &mago_syntax::cst::ArgumentList<'_>) -> LoweredArgs {
+    lower_arguments(list, true)
+}
+
+/// [`lower_argument_list`] for a caller that keeps only the values: an
+/// [`ArgValue`] carries no guard reading, so none is lowered. Reading the guards
+/// there was a second lowering of every nested argument (issue #1063): a call's
+/// guard reading lowers the call again, so `$o->m($o->m(…))` nested `n` deep
+/// lowered `2^n` argument lists, the value and the guard road each re-entering
+/// both.
+fn lower_argument_values(list: &mago_syntax::cst::ArgumentList<'_>) -> LoweredArgs {
+    lower_arguments(list, false)
+}
+
+/// The one argument-list lowering; `guards` says whether each positional argument
+/// is also read as a guard ([`CallExpr::arg_conds`]).
+fn lower_arguments(list: &mago_syntax::cst::ArgumentList<'_>, guards: bool) -> LoweredArgs {
     let mut positional_only = true;
     let mut has_spread = false;
     let mut seen_non_positional = false;
@@ -144,7 +160,7 @@ fn lower_argument_list(list: &mago_syntax::cst::ArgumentList<'_>) -> LoweredArgs
                     has_spread = true;
                 }
                 args.push(Arg { value: lower_arg_value(p.value), span: to_span(p.value.span()) });
-                arg_conds.push(lower_guard_arg(p.value));
+                arg_conds.push(if guards { lower_guard_arg(p.value) } else { None });
             }
             Argument::Named(n) => {
                 positional_only = false;
@@ -305,7 +321,7 @@ fn trace_recv_of_object(object: &Expression<'_>) -> Option<Receiver> {
         Expression::Instantiation(inst) => instantiation_class(inst).map(|class| {
             let (args, named) = match &inst.argument_list {
                 Some(list) => {
-                    let LoweredArgs { args, named_args, .. } = lower_argument_list(list);
+                    let LoweredArgs { args, named_args, .. } = lower_argument_values(list);
                     (args.into_iter().map(|a| a.value).collect(), named_args)
                 }
                 None => (Vec::new(), Vec::new()),
@@ -452,7 +468,7 @@ fn method_call_arg_value(callee: Callee, list: &mago_syntax::cst::ArgumentList<'
     if matches!(callee, Callee::Dynamic) {
         return ArgValue::Other;
     }
-    let LoweredArgs { args, named_args, has_spread, .. } = lower_argument_list(list);
+    let LoweredArgs { args, named_args, has_spread, .. } = lower_argument_values(list);
     if has_spread {
         return ArgValue::Other;
     }
@@ -646,7 +662,7 @@ pub(crate) fn lower_arg_value(expr: &Expression<'_>) -> ArgValue {
         Expression::Instantiation(inst) => match instantiation_class(inst) {
             Some(class) => match inst.argument_list.as_ref() {
                 Some(list) => {
-                    let LoweredArgs { args, named_args, .. } = lower_argument_list(list);
+                    let LoweredArgs { args, named_args, .. } = lower_argument_values(list);
                     let args = args.into_iter().map(|a| a.value).collect();
                     ArgValue::New(class, args, named_args)
                 }
