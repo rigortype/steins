@@ -365,7 +365,10 @@ the rule for each is fixed where the base shares the defect:
 - A type test over a value the walk holds exactly is decided where PHP's answer follows
   from the value: `isset($x)`, the `is_*` family, `is_countable`, and `is_a` /
   `is_subclass_of` over anything but a string that may name a class
-  (`cond::eval_literal_type_test`). One it still cannot decide (`ctype_*`,
+  (`cond::eval_literal_type_test`) — and only where every PHP from the 7.4 floor up
+  answers alike, measured on 7.4.33, 8.0.28 and 8.5.11: `is_numeric` over a string with
+  trailing whitespace (false on 7.4, true from 8.0) stays undecided, every other cell
+  agrees. One it still cannot decide (`ctype_*`,
   `method_exists`, `get_debug_type($x) === …`, `$x ?? d`, `$x?->p`, an offset `isset`,
   `is_callable` or `is_a` over a string) forgets the value **inside** the guarded sides
   only, since either may be the side PHP never enters; a type test changes no value, so
