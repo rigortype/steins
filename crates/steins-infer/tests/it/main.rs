@@ -38,6 +38,7 @@ mod coalesce_value;
 mod coercion_boundaries;
 mod coercion_witness_grid;
 mod comparison_value;
+mod compile_fatal_returns;
 mod concat;
 mod concat_value_position;
 mod conditional_purity;

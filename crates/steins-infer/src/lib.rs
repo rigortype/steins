@@ -30,6 +30,7 @@ mod branch;
 mod builtin_returns;
 mod coerce;
 mod compare;
+mod compile_fatal_returns;
 mod cond;
 mod conjunct_writes;
 mod contract;

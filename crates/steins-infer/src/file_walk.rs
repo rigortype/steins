@@ -28,6 +28,7 @@ use crate::panic_guard;
 use crate::progress::Progress;
 use crate::project::{Diagnostic, FileUnit, Index, LazyTree};
 use crate::purity::PurityOracle;
+use crate::compile_fatal_returns::check_compile_fatal_returns;
 use crate::return_missing::check_return_missing;
 use crate::undefined_var::{check_phpdoc_maybe_undefined, check_undefined_variables};
 use crate::unknown_vocabulary::{VocabularyAllowlist, unknown_vocabulary};
@@ -355,6 +356,12 @@ fn file_passes(
     // dead-region filter: a body that runs off its end does so wherever it
     // sits, and the judgement is about the body's own shape.
     check_return_missing(cx, never_returning, out);
+
+    // --- `return.compile-fatal` (ADR-0078 amendment 2026-10-11 / issue #1051):
+    // PHP's compile-time return rules. Declaration plus the `return` statement's
+    // form, so no env, no folder and no dead-region filter: the compiler judges
+    // dead code too. ----------------------------------------------------------
+    check_compile_fatal_returns(cx, out);
 
     // --- `variable.undefined` (ADR-0078 / issue #194): every read of a name
     // its scope never binds. A per-scope textual/structural pass over the

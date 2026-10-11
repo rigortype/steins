@@ -61,7 +61,7 @@ use crate::{
     UNTYPED_PARAMETER_ID, UNTYPED_PROPERTY_ID, UNTYPED_RETURN_ID,
 };
 // return missing (ADR-0078, issue #199)
-use crate::{TYPE_RETURN_MAYBE_MISSING_ID, TYPE_RETURN_MISSING_ID};
+use crate::{RETURN_COMPILE_FATAL_ID, TYPE_RETURN_MAYBE_MISSING_ID, TYPE_RETURN_MISSING_ID};
 // overriding family (ADR-0078, issue #184)
 use crate::{
     OVERRIDE_FINAL_ID, OVERRIDE_PARAMETER_VARIANCE_ID, OVERRIDE_RETURN_VARIANCE_ID,
@@ -321,6 +321,9 @@ pub const DIAGNOSTIC_REGISTRY: &[(&str, Layer, Floor)] = &[
     // sibling, ADR-0078 §1.3). Floor set by corpus measurement (phpstan-src's own
     // `src/` carries two and passes its own missing-return rule).
     (TYPE_RETURN_MAYBE_MISSING_ID, Layer::Proof, Floor::Strict),
+    // compile-fatal returns (ADR-0078 amendment 2026-10-11, #1051): PHP refuses the
+    // file at compile time — never demotes.
+    (RETURN_COMPILE_FATAL_ID, Layer::Proof, Floor::Default),
     // invalid operands (ADR-0078, #191): operand kinds PHP's table refuses with a
     // `TypeError`. Fatal rows only — never demotes.
     (INVALID_OPERAND_ID, Layer::Proof, Floor::Default),

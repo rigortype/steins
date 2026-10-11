@@ -995,6 +995,28 @@ pub const TYPE_RETURN_MAYBE_MISSING_ID: &str = "type.return-maybe-missing";
 
 // end return missing (ADR-0078, issue #199)
 
+// compile-fatal returns (ADR-0078 amendment 2026-10-11, issues #952, #1051)
+
+/// `return.compile-fatal` (proof layer, `Default` floor): a `return` PHP refuses at
+/// **compile time**, so the file cannot be loaded at all. Three rows, each
+/// `php`-witnessed on 8.5.11 (the full table, with the declined shapes, is on
+/// `check_compile_fatal_returns`):
+///
+/// * a value returned from a `: void` function-like — "A void function must not return
+///   a value";
+/// * any `return` in a `: never` function-like — "A never-returning function must not
+///   return";
+/// * a bare `return;` in a function-like with any other written return type —
+///   "A function with return type must return a value".
+///
+/// Unlike `type.return-mismatch` this is a property of the declaration and the
+/// `return` statement alone: it holds in dead code, so neither the value walk nor the
+/// dead-region filter is consulted, and it never demotes. A `return null;` under
+/// `: int` compiles and stays `type.return-mismatch`'s.
+pub const RETURN_COMPILE_FATAL_ID: &str = "return.compile-fatal";
+
+// end compile-fatal returns (ADR-0078 amendment 2026-10-11, issues #952, #1051)
+
 // invalid operands (ADR-0078, issue #191)
 
 /// `type.invalid-operand` (ADR-0078, issue #191): an arithmetic, bitwise, shift
@@ -1252,6 +1274,8 @@ pub const ALL_EMITTABLE_IDS: &[&str] = &[
     TYPE_RETURN_MISSING_ID,
     TYPE_RETURN_MAYBE_MISSING_ID,
     // end return missing (ADR-0078, issue #199)
+    // compile-fatal returns (ADR-0078 amendment 2026-10-11, issues #952, #1051)
+    RETURN_COMPILE_FATAL_ID,
     // invalid operands (ADR-0078, issue #191)
     INVALID_OPERAND_ID,
     // end invalid operands (ADR-0078, issue #191)
