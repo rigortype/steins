@@ -66,6 +66,7 @@ mod generics;
 mod global_consts;
 mod guard_sweep;
 mod heap;
+mod heap_alias;
 mod ids;
 mod inaccessible;
 mod mechanics;

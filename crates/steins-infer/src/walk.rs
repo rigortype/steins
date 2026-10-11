@@ -38,6 +38,7 @@ use crate::env::{AllocId, Descent, ExitContribution, HeapRes, Known, Store, Stra
 use crate::foreach_check::check_foreach_subject;
 use crate::guard_sweep::sweep_guard_regions;
 use crate::heap::apply_prop_assign;
+use crate::heap_alias::{escape_stored_objects, escape_unspelled_reads};
 use crate::loops::walk_loop;
 use crate::operands::check_operand_sites;
 use crate::out_params::{
@@ -123,6 +124,7 @@ pub(crate) fn analyze_scope(
         dead: std::cell::RefCell::new(Vec::new()),
         uncovered_matches: std::cell::RefCell::new(Vec::new()),
         alloc: std::cell::Cell::new(alloc_start),
+        heap_sweeps: std::cell::Cell::new(0),
         summary,
         remember: RememberCache::default(),
     };
@@ -373,6 +375,14 @@ pub(crate) struct WalkCx<'a, 'w> {
     /// across branch clones (they clone the `Store`, not this cell), so a `new` in
     /// one branch never collides with one in another that later joins.
     pub(crate) alloc: std::cell::Cell<AllocId>,
+    /// How many times this walk has swept or cleared the heap's escaped objects
+    /// (issue #1048): an unknown call, a write through an unresolved name, an
+    /// unwalked construct, a barrier. Monotone and shared across branch clones like
+    /// [`Self::alloc`], so a loop reads it around its body walk and learns whether
+    /// any path of the body — one that `break`s included — did what its
+    /// fall-through, built from the write sets alone, cannot see
+    /// ([`crate::heap_alias`]).
+    pub(crate) heap_sweeps: std::cell::Cell<u64>,
     /// Return-fact summary collection (ADR-0057 T0): `Some` only while a callee
     /// body is walked for its summary. Each returning exit pushes its contribution
     /// here; the join happens in [`descend`].
@@ -391,6 +401,12 @@ impl WalkCx<'_, '_> {
         let id = self.alloc.get();
         self.alloc.set(id + 1);
         id
+    }
+
+    /// Record that this walk swept or cleared the escaped part of the heap — read
+    /// by a loop around its body walk ([`Self::heap_sweeps`]).
+    pub(crate) fn note_heap_sweep(&self) {
+        self.heap_sweeps.set(self.heap_sweeps.get() + 1);
     }
 }
 
@@ -473,12 +489,20 @@ pub(crate) fn forget_construct_sets(
     } else {
         for v in writes.iter().chain(reads) {
             // A handle the construct names may have been closed inside it, and
-            // the entry outlives the name for its aliases (ADR-0097 §2.4).
-            store.escape_resource(v);
+            // the entry outlives the name for its aliases (ADR-0097 §2.4). An
+            // object it names escapes the same way: the construct may have written
+            // it, and the name may still hold it, unresolved (issue #1048).
+            store.mark_escaped(v);
+            store.sweep_object(v);
             env.remove(v);
             store.unbind(v);
         }
+        // The construct is not walked, so a call or a write through an unresolved
+        // name inside it is not seen: its fall-through takes the sweep either would
+        // have made ([`crate::heap_alias`]).
+        store.sweep_escaped();
     }
+    w.note_heap_sweep();
     push_hidden_exit_floor(w, may_return);
 }
 
@@ -618,7 +642,10 @@ fn walk_run(
         // so an overridable call on it sweeps it, while a resolved private/final
         // call with no object args leaves it intact. Then the `$this` copy-backs, over
         // whatever the sweeps left (ADR-0057's 2026-08-17 amendment, D4).
-        apply_call_escape_and_sweep(w, &stmt.kind, store, &stmt_calls.this_backs);
+        // An object named in a value the lowering could not spell may have been
+        // handed on by it (issue #1048) — before the sweep, which then covers it.
+        escape_unspelled_reads(&stmt.unspelled_reads, store);
+        apply_call_escape_and_sweep(w, &stmt.kind, env, store, &stmt_calls.this_backs);
 
         // 1b. Return-type check (native + phpdoc contract).
         check_return_value(w, folder, stmt, env, store, descent, out);
@@ -644,6 +671,7 @@ fn walk_run(
         if rebinds && !matches!(stmt.kind, StmtKind::If { .. } | StmtKind::Try { .. }) {
             env.clear();
             store.clear();
+            w.note_heap_sweep();
         }
 
         // 2. Apply the statement's own effect on the environment + compute its flow.
@@ -652,6 +680,7 @@ fn walk_run(
             StmtKind::Barrier | StmtKind::Label { .. } => {
                 env.clear();
                 store.clear();
+                w.note_heap_sweep();
                 Flow::FellThrough
             }
             // A destructuring assignment (issue #288) is a barrier that also names
@@ -661,6 +690,7 @@ fn walk_run(
             StmtKind::Destructure { .. } => {
                 env.clear();
                 store.clear();
+                w.note_heap_sweep();
                 Flow::FellThrough
             }
             // The A-G8 invalidation table: barrier semantics, plus the base
@@ -768,6 +798,7 @@ fn walk_run(
                 if let ArgValue::Var(v) = value {
                     store.mark_escaped(v);
                 }
+                escape_stored_objects(value, store);
                 escape_mentioned_resources(value, store);
                 for v in &stmt.invalidated {
                     env.remove(&v.name);

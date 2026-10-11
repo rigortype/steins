@@ -25,6 +25,7 @@ use crate::contract::{
 use crate::cx::Cx;
 use crate::descent::{ThisSeed, descend};
 use crate::dispatch::resolve_exact;
+use crate::heap_alias::{escape_stored_objects, sweep_for_unresolved_write};
 use crate::env::{
     AllocId, ClosureTarget, ClosureVal, Descent, HandleState, HeapObj, HeapSummary, Known,
     PropFact, Store, Stratum, arg_of_val, singleton_fact,
@@ -916,17 +917,24 @@ pub(crate) fn apply_prop_assign(
     if w.scope.poisoned {
         return;
     }
-    // An object rvalue stored into a property escapes (now reachable via the prop).
+    // An object rvalue stored into a property escapes (now reachable via the prop),
+    // and so does one stored inside an array, a ternary arm or a nested call there
+    // (issue #1048).
     if let ArgValue::Var(src) = value
         && store.is_bound(src)
     {
         store.mark_escaped(src);
     }
-    // A binding may name a heap resource rather than an object (ADR-0097 §2.3);
-    // `$h->p = …` on a handle is a runtime error with no property to record.
+    escape_stored_objects(value, store);
+    // A receiver the store does not bind may hold any escaped object — the foreach
+    // value over an array the object was stored in, an element read back out of it
+    // (issue #1048) — so the write may land on any of them.
     let Some(id) = store.id_of(target_var) else {
+        sweep_for_unresolved_write(w, store);
         return;
     };
+    // A binding may name a heap resource rather than an object (ADR-0097 §2.3);
+    // `$h->p = …` on a handle is a runtime error with no property to record.
     let Some(class) = store.heap.get(&id).map(|o| o.class.clone()) else {
         return;
     };

@@ -4,12 +4,16 @@
 //! runs with the same `$this` sweeps `$this` as well, and a resolved descent's
 //! snapshot is copied back over the sweep ([`ThisWriteBack`]).
 
+use std::collections::HashMap;
+
 use steins_syntax::{ArgValue, CallExpr, Callee, NamedArg, Receiver, StaticClass, StmtKind};
 
+use crate::by_value::arg_is_by_value;
 use crate::contract::IsA;
 use crate::cx::Cx;
 use crate::dispatch::resolve_call_target;
-use crate::env::{HeapObj, Store};
+use crate::env::{HeapObj, Known, Store};
+use crate::heap_alias::{escape_stored_objects, may_carry_unnamed_object};
 use crate::walk::WalkCx;
 
 /// The statically-named calls a statement carries.
@@ -34,11 +38,12 @@ pub(crate) fn checkable_calls(kind: &StmtKind) -> Vec<&CallExpr> {
 pub(crate) fn apply_call_escape_and_sweep(
     w: &WalkCx,
     kind: &StmtKind,
+    env: &HashMap<String, Known>,
     store: &mut Store,
     this_backs: &[ThisWriteBack],
 ) {
     let calls = checkable_calls(kind);
-    escape_and_sweep_calls(w, &calls, store, this_backs);
+    escape_and_sweep_calls(w, &calls, env, store, this_backs);
 }
 
 /// One resolved call's `$this` snapshot, waiting to be copied back into the caller's
@@ -73,6 +78,7 @@ pub(crate) struct ThisWriteBack {
 pub(crate) fn escape_and_sweep_calls(
     w: &WalkCx,
     calls: &[&CallExpr],
+    env: &HashMap<String, Known>,
     store: &mut Store,
     this_backs: &[ThisWriteBack],
 ) {
@@ -125,12 +131,16 @@ pub(crate) fn escape_and_sweep_calls(
             // `f($b)` does, and used to escape nothing at all.
             escape_nested_calls(&arg.value, store, &mut object_passed);
         }
+        if call_reaches_unnamed_objects(w, call, env, store) {
+            object_passed = true;
+        }
         if !call_is_resolved(w, call, store) {
             unknown = true;
         }
     }
     if object_passed || unknown {
         store.sweep_escaped();
+        w.note_heap_sweep();
     }
     // A call that runs with the SAME `$this` — `$this->m(…)`, `parent::m(…)`,
     // `self::m(…)`, `static::m(…)`, `parent::__construct(…)` above all, and a
@@ -173,6 +183,70 @@ pub(crate) fn escape_and_sweep_calls(
                 store.copy_back(&wb.var, &wb.obj);
             }
         }
+    }
+}
+
+/// The argument half of the unresolved-alias rule ([`crate::heap_alias`], issue
+/// #1048) for one call: whether its arguments hand the callee a way to write an
+/// escaped object the statement's other checks do not see. Each argument
+///
+/// - escapes every object it stores as itself (`f([$o])`, `f($c ? $o : $p)`), as an
+///   assignment's rvalue would;
+/// - may carry an object the store cannot name (`mutate($q)` with `$q` a foreach
+///   value), which a resolved callee may write through;
+/// - may be a property passed **by reference** (`f($q->p)`), which the callee
+///   writes in place: a bound receiver loses that property here, and an unbound one
+///   may be any escaped object.
+///
+/// A general spread (`f(...$arr)`) hands on elements nothing here can see, so it
+/// counts as carrying one. Answers whether the escape set must be swept.
+fn call_reaches_unnamed_objects(
+    w: &WalkCx,
+    call: &CallExpr,
+    env: &HashMap<String, Known>,
+    store: &mut Store,
+) -> bool {
+    let mut sweep = call.has_spread;
+    let positional = call.args.iter().map(|a| &a.value).enumerate().map(|(i, v)| (Some(i), v));
+    let named = call.named_args.iter().map(|n| (None, &n.value));
+    let values: Vec<(Option<usize>, &ArgValue)> = positional.chain(named).collect();
+    for (position, value) in values {
+        sweep |= escape_stored_objects(value, store);
+        sweep |= may_carry_unnamed_object(value, env, store);
+        if let ArgValue::PropFetch { var, prop } = value
+            && !position.is_some_and(|i| arg_proven_by_value(w, call, i, store))
+        {
+            if store.is_object(var) {
+                store.forget_prop(var, prop);
+            } else {
+                sweep = true;
+            }
+        }
+    }
+    sweep
+}
+
+/// Whether the argument at `position` is provably passed **by value**: a function
+/// the catalog or its declaration answers for ([`arg_is_by_value`]), or a resolved
+/// method whose parameter there is neither by-reference nor variadic. PHP rejects an
+/// override that changes a parameter's by-reference-ness, so the resolved
+/// declaration answers for its overrides too. Every uncertainty answers `false`.
+fn arg_proven_by_value(w: &WalkCx, call: &CallExpr, position: usize, store: &Store) -> bool {
+    match &call.receiver {
+        Callee::Function(_) => {
+            let (Some(callee), Ok(position)) = (&call.callee_ref, u32::try_from(position)) else {
+                return false;
+            };
+            arg_is_by_value(w.cx, callee, position)
+        }
+        Callee::Method { .. } | Callee::Static { .. } | Callee::Construct { .. } => {
+            resolve_call_target(
+                w.cx, &call.receiver, store, w.this_exact, w.enclosing_class, w.scope.poisoned,
+            )
+            .and_then(|t| t.method.params.get(position))
+            .is_some_and(|p| !p.by_ref && !p.variadic)
+        }
+        Callee::DynamicVar(_) | Callee::Dynamic => false,
     }
 }
 

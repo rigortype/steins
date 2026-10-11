@@ -13,6 +13,7 @@ use steins_syntax::{ArgValue, CallExpr};
 use crate::fold::Folder;
 use crate::annotate::{FactKind, LineFact};
 use crate::builtin_returns::escape_mentioned_resources;
+use crate::heap_alias::escape_stored_objects;
 use crate::cond::{eval_ternary_fact_strat, total_op_fact};
 use crate::env::{
     ContractArm, HeapSummary, Known, ReturnSummary, Store, Stratum, render_val, singleton_fact,
@@ -129,6 +130,10 @@ pub(crate) fn apply_assign(
     // arguments are the statement's call effects, judged on the pre-call store.
     if !matches!(value, ArgValue::Var(_) | ArgValue::Call(..) | ArgValue::MethodCall { .. }) {
         escape_mentioned_resources(value, store);
+        // An object stored the same way reaches a name the store cannot follow —
+        // `$q = $arr[0]` or a foreach value later holds it (issue #1048), so it
+        // escapes too.
+        escape_stored_objects(value, store);
     }
 
     // A ternary rvalue `$x = $c ? A : B` (ADR-0031): the walk evaluates the guard
