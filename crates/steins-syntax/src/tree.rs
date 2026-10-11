@@ -6,7 +6,7 @@
 use mago_allocator::LocalArena;
 use mago_database::file::FileId;
 use mago_span::HasSpan;
-use mago_syntax::cst::{Access, Expression, Node, Statement};
+use mago_syntax::cst::{Access, ArrayElement, Expression, Node, Statement};
 
 use crate::ast::{
     AnonClassEdge, ArrayLiteralSite, CallExpr, ClassAliasEdge, ClassDecl, Comment, DynamismKind,
@@ -775,19 +775,53 @@ pub(crate) struct PropertyWrites {
 }
 
 impl PropertyWrites {
-    /// Record a property-write lvalue. A `$o->p`/`$this->p`/`$a->b->c` target contributes
-    /// its last name; a computed selector sets [`Self::dynamic`]; anything else contributes nothing.
+    /// Record a position that can create a property: the target of an assignment, `++`/`--`
+    /// or `foreach` binding, an argument, a `&` operand, or a destructure pattern (issue
+    /// #1050, S0b). The position kinds, each witnessed on PHP 8.5 against a class that
+    /// declares no `p` and allows dynamic properties:
+    ///
+    /// | position                                   | creates `p`?                       |
+    /// | ------------------------------------------ | ---------------------------------- |
+    /// | `$o->p = v`, `$o->p op= v`, `$o->p++`      | yes                                |
+    /// | `$o->p[k] = v`, `$o->p[] = v`              | yes (the base is written to)       |
+    /// | `foreach ($xs as $o->p)` and `$k => $o->p` | yes                                |
+    /// | `[$o->p] = v`, `['k' => $o->p] = v`, `list(..)`, nested | yes                   |
+    /// | `$a = &$o->p`, `[&$o->p]`, `foreach (.. as &$o->p)` | yes (the `&` binds it) |
+    /// | `f($o->p)`, `$m->f($o->p)`, `new C($o->p)`, `$f($o->p)` | yes when the callee takes it by reference; the callee is unknown here, so yes |
+    /// | `f($o->p[k])`                              | the same (the by-ref base is created) |
+    /// | `$o->p` read, `isset`/`empty`/`unset($o->p)`, `$o->p ?? v` | no                |
+    /// | `f($o->p + 1)`, `f(g($o->p))` (the fetch is an operand, not the argument) | no here; the inner call is its own argument position |
+    ///
+    /// A `$o->p`/`$this->p`/`$a->b->c` target contributes its last name; a computed selector
+    /// sets [`Self::dynamic`]; anything else contributes nothing.
     pub(crate) fn push_lvalue(&mut self, lvalue: &Expression<'_>) {
-        let Expression::Access(Access::Property(pa)) = lvalue.unparenthesized() else {
-            return;
-        };
-        match method_name_of(&pa.property) {
-            Some(name) => {
-                if !self.names.contains(&name) {
-                    self.names.push(name);
+        match lvalue.unparenthesized() {
+            Expression::Access(Access::Property(pa)) => match method_name_of(&pa.property) {
+                Some(name) => {
+                    if !self.names.contains(&name) {
+                        self.names.push(name);
+                    }
                 }
+                None => self.dynamic = true,
+            },
+            Expression::ArrayAccess(a) => self.push_lvalue(a.array),
+            Expression::ArrayAppend(a) => self.push_lvalue(a.array),
+            Expression::UnaryPrefix(u) if u.operator.is_reference() => self.push_lvalue(u.operand),
+            Expression::Array(a) => self.push_pattern(a.elements.iter()),
+            Expression::LegacyArray(a) => self.push_pattern(a.elements.iter()),
+            Expression::List(l) => self.push_pattern(l.elements.iter()),
+            _ => {}
+        }
+    }
+
+    /// The targets of a destructure pattern: each element's value, keyed or not, recursively.
+    fn push_pattern<'a>(&mut self, elements: impl Iterator<Item = &'a ArrayElement<'a>>) {
+        for e in elements {
+            match e {
+                ArrayElement::KeyValue(kv) => self.push_lvalue(kv.value),
+                ArrayElement::Value(v) => self.push_lvalue(v.value),
+                ArrayElement::Variadic(_) | ArrayElement::Missing(_) => {}
             }
-            None => self.dynamic = true,
         }
     }
 }
