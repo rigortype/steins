@@ -8,7 +8,7 @@ use steins_contract::ContractTy;
 use steins_domain::{Certainty, Fact, Val};
 use steins_phpdoc::{Type as PType, TagKind, scan_docblock};
 use steins_phpdoc::ast::TypeKind as PKind;
-use steins_syntax::{ArgValue, NamedArg, Param, PropertyDecl, TypeMember, Visibility};
+use steins_syntax::{ArgValue, ClassDecl, NamedArg, Param, PropertyDecl, TypeMember, Visibility};
 
 use crate::by_value::value_stratum;
 use crate::fold::Folder;
@@ -914,20 +914,25 @@ fn fact_is_nullish(f: &Fact) -> bool {
 ///                                                                 Error from outside: declined
 /// protected / readonly, declared by D a scope related to D        the slot (judged)
 /// protected / readonly, declared by D an unrelated scope          an Error: declined
-/// any                                 a chain with `__set`, a     `__set` once the slot has been
-///                                     trait or an unresolvable    `unset()`: declined
-///                                     ancestor
+/// any                                 a chain declaring `__set`,  `__set` once the slot has been
+///                                     itself or through a used    `unset()`: declined
+///                                     trait, or reaching an
+///                                     unresolvable ancestor or
+///                                     trait
+/// any                                 a chain whose traits hold   the slot (judged)
+///                                     no `__set`
 /// ```
 fn write_misses_declared_slot(cx: &Cx, class: &str, prop: &str, scope: Option<&str>) -> bool {
     let mut cur = class.to_owned();
     let mut seen: HashSet<String> = HashSet::new();
     let mut owner: Option<(String, &PropertyDecl)> = None;
+    let mut seen_traits: HashSet<String> = HashSet::new();
     loop {
         if !seen.insert(cur.to_ascii_lowercase()) {
             return true;
         }
         let Some((file, cd)) = cx.find_class(&cur) else { return true };
-        if cd.uses_traits || cd.methods.iter().any(|m| m.name.eq_ignore_ascii_case("__set")) {
+        if may_declare_magic_set(cx, file, cd, &mut seen_traits) {
             return true;
         }
         if owner.is_none()
@@ -949,6 +954,32 @@ fn write_misses_declared_slot(cx: &Cx, class: &str, prop: &str, scope: Option<&s
             same(s) || cx.is_a(s, &owner) == IsA::Yes || cx.is_a(&owner, s) == IsA::Yes
         }),
     }
+}
+
+/// Whether a class-like may hold a `__set`: it declares or aliases one itself, or a
+/// trait it uses does, through the trait's own `use`s. A trait the index cannot
+/// resolve uniquely may hold anything, so it answers `true`; a trait already
+/// visited answers nothing new.
+fn may_declare_magic_set(
+    cx: &Cx,
+    file: usize,
+    cd: &ClassDecl,
+    seen: &mut HashSet<String>,
+) -> bool {
+    if cd.declares_magic_set || cd.methods.iter().any(|m| m.name.eq_ignore_ascii_case("__set")) {
+        return true;
+    }
+    for used in &cd.used_traits {
+        let fqn = cx.units[file].tree.resolve_class_fqn(used).to_ascii_lowercase();
+        if !seen.insert(fqn.clone()) {
+            continue;
+        }
+        let Some((tfile, td)) = cx.find_class(&fqn) else { return true };
+        if !td.is_trait || may_declare_magic_set(cx, tfile, td, seen) {
+            return true;
+        }
+    }
+    false
 }
 
 #[allow(clippy::too_many_arguments)]
