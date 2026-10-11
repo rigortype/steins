@@ -237,6 +237,18 @@ pub(crate) fn eval_cond(
         // could decide it is a shape fact, which is `Asserted` — deciding here
         // would let a docblock claim silence the env-free pass on a live path.
         // Narrowing is the whole payoff; reachability stays proof-only.
+        // A bare `isset($x)` over a proven value is PHP's `$x !== null` (the #1060
+        // review): decided, so the branch PHP never enters is pruned. The binding's
+        // own stratum is the premise's, as the comparison folds take it.
+        CondExpr::IssetVar { var } if !poisoned => match env.get(var) {
+            Some(k) if k.stratum == Stratum::Verified => match k.singleton() {
+                Some(ArgValue::Null) => Certainty::No,
+                Some(_) => Certainty::Yes,
+                None if k.closure.is_some() => Certainty::Yes,
+                None => Certainty::Maybe,
+            },
+            _ => Certainty::Maybe,
+        },
         CondExpr::Isset { .. }
         | CondExpr::IssetVar { .. }
         | CondExpr::InstanceofDyn { .. }
