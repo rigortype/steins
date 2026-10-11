@@ -16,7 +16,7 @@ use steins_syntax::{ArgValue, SourceTree, Span};
 
 use crate::absence::{check_undefined_class, check_undefined_constant};
 use crate::arg_check::{implicit_null_accepted, is_type_error};
-use crate::value_tops::{check_top_argument, resolve_native_value};
+use crate::value_tops::{check_top_argument, resolve_native_value, top_needs_branch_store};
 use crate::cx::Cx;
 use crate::dam::DamFacts;
 use crate::docblock_hygiene::docblock_hygiene;
@@ -419,8 +419,12 @@ fn direct_pass(cx: &Cx, folder: &mut dyn Folder, dead_spans: &[Span], out: &mut 
                 native_fired = true;
             }
             // A written value against an `array`/`object`/`iterable`/`callable` top
-            // (ADR-0043's 2026-10-11 amendment); a variable is the propagation pass's.
-            if !native_fired && !matches!(arg.value, ArgValue::Var(_)) {
+            // (ADR-0043's 2026-10-11 amendment); a variable, and a `callable` name that
+            // needs the branch's vouches, are the propagation pass's.
+            if !native_fired
+                && !matches!(arg.value, ArgValue::Var(_))
+                && !top_needs_branch_store(param, &arg.value)
+            {
                 native_fired = check_top_argument(
                     cx, folder, param, &decl.name, arg, None, None, false, false, out,
                 );
