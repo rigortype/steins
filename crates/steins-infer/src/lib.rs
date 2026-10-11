@@ -92,6 +92,7 @@ mod refine;
 mod remembered;
 mod resource;
 mod return_arms;
+mod oneof_guard;
 mod return_call;
 mod return_maybe;
 mod return_missing;

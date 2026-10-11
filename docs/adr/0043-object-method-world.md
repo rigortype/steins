@@ -438,6 +438,19 @@ a fact on the value lane today. The carriers are a variable holding the fact and
 whose proven summary is one; a `OneOf` read from a declared arm list, a builtin envelope
 or a shape stays declined.
 
+**A guard over a `OneOf` is decided member by member** (`oneof_guard`, whose doc comment
+carries the table; the #1071 review). A definite verdict over a set is valid only when every
+member that reaches the point really reaches it, and a `Singleton`'s guard is folded while a
+`OneOf`'s used to evaluate `Maybe`, so `$x = $c ? 'a' : 'b'; if (ctype_alpha($x)) { return 1; }
+return $x;` into `: int` reported a definite `TypeError` on a dead fall-through. The condition
+is now evaluated once per member with that member bound as a `Singleton`: all members decided
+prunes the side none reaches and narrows a mixed set to the members of each side, one
+undecidable member forgets the variable inside both sides (restored at the join when every
+kept side falls through), and a condition reading two `OneOf` variables forgets both. A type
+predicate and a strict `in_array` over literals are decided the way their fact-level narrowers
+decide them. `highlight_file($f, true)` keeps its `false` arm (a missing file); only `print_r`,
+`var_export` and `highlight_string` narrow to `string`.
+
 Every cell was run on PHP 8.5.11 in both modes: `ti(null)`, `ti([])` and `ti("abc")` throw
 in both; `ti("5")` throws strictly and converts coercively; `tf(1)` runs and `tf("1")`
 throws strictly; `strlen(null)` is a deprecation coercively and a `TypeError` strictly.

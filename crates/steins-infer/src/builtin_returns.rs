@@ -248,28 +248,44 @@ pub(crate) fn builtin_return_floor(cx: &Cx, name: &str) -> Option<Vec<ContractAr
 }
 
 /// The builtins whose second parameter, `$return`, turns "print it and report success"
-/// into "return it as a string": the declared floor spells both outcomes (`string|true`,
-/// `string|null`, `string|bool`), and a literal `true` there leaves the string alone.
-const RETURN_FLAG_BUILTINS: [&str; 4] = ["print_r", "var_export", "highlight_string", "highlight_file"];
+/// into "return it as a string", and what a literal `true` there leaves of the declared
+/// floor. Run on PHP 8.5.11 against their failure modes:
+///
+/// ```text
+/// call                              declared floor   with a literal `true`
+/// --------------------------------- ---------------- -------------------------------
+/// print_r($v, true)                 string|true      string  (resources, objects too)
+/// var_export($v, true)              string|null      string  (NAN, resources: a string)
+/// highlight_string($s, true)        string|bool      string  (garbage input: a string)
+/// highlight_file($f, true)          string|bool      string|false (a missing file: false)
+/// ```
+const RETURN_STRING_BUILTINS: [&str; 3] = ["print_r", "var_export", "highlight_string"];
 
-/// [`builtin_return_floor`] for one call: the declared floor, narrowed to `string` where
-/// the call passes a literal `true` as `$return` (`var_export($v, true)`,
-/// `print_r($v, true)`). The declaration is per name, but those builtins never answer
-/// `null`, `true` or `false` in that mode, so the floor's other arms would convict a
-/// call PHP cannot make fail (#950: `return var_export($v, true)` from `: string`).
+/// [`builtin_return_floor`] for one call: the declared floor, narrowed where the call
+/// passes a literal `true` as `$return` (table above). The declaration is per name, but
+/// those builtins never answer `null` or `true` in that mode, so the floor's other arms
+/// would convict a call PHP cannot make fail (#950: `return var_export($v, true)` from
+/// `: string`). `highlight_file` keeps its `false` arm: it is the failure mode.
 pub(crate) fn builtin_return_floor_for_call(
     cx: &Cx,
     name: &str,
     args: &[ArgValue],
 ) -> Option<Vec<ContractArm>> {
     let arms = builtin_return_floor(cx, name)?;
-    let returns_string = RETURN_FLAG_BUILTINS.iter().any(|b| b.eq_ignore_ascii_case(name))
-        && matches!(args.get(1), Some(ArgValue::Bool(true)));
-    if !returns_string {
+    if !matches!(args.get(1), Some(ArgValue::Bool(true))) {
         return Some(arms);
     }
     let stratum = arms.iter().fold(Stratum::Verified, |acc, a| acc.min(a.stratum));
-    Some(vec![ContractArm { ty: ContractTy::Base(Base::String), stratum }])
+    if RETURN_STRING_BUILTINS.iter().any(|b| b.eq_ignore_ascii_case(name)) {
+        return Some(vec![ContractArm { ty: ContractTy::Base(Base::String), stratum }]);
+    }
+    if name.eq_ignore_ascii_case("highlight_file") {
+        return Some(vec![
+            ContractArm { ty: ContractTy::Base(Base::String), stratum },
+            ContractArm { ty: ContractTy::LitBool(false), stratum },
+        ]);
+    }
+    Some(arms)
 }
 
 /// The resolver a catalog row's class names take: the identity, less the leading
