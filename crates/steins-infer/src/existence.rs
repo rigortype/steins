@@ -17,6 +17,8 @@ use crate::fold::Folder;
 use crate::project::{FnResolution, Res};
 use crate::walk::WalkCx;
 
+mod class_const;
+
 // ---------------------------------------------------------------------------
 // Foldable existence-guard verdicts (ADR-0049 §4 / N3).
 //
@@ -150,6 +152,9 @@ pub(crate) fn eval_existence_call(
         let Some(name) = name.as_str() else {
             return Certainty::Maybe;
         };
+        if name.contains("::") {
+            return class_const::class_const_defined_verdict(w, folder, name);
+        }
         constant_defined_verdict(w.cx, folder, name)
     // end global constants (ADR-0078, issue #198)
     } else if pred == "extension_loaded" {
@@ -327,6 +332,8 @@ fn function_exists_verdict(cx: &Cx, folder: &mut dyn Folder, name: &str) -> Cert
 /// free: when nothing declares the name, the dam is clear, and PHP reports it not
 /// defined, the call provably returns `false` — so `if (defined('X')) { echo X; }`
 /// folds its body dead. Same mechanism `class.undefined` uses.
+///
+/// A `C::K` spelling is not a global constant: [`class_const`] answers it.
 ///
 /// `name` is case-sensitive on its final segment; [`steins_syntax::normalize_const_fqn`]
 /// decides which half folds case.

@@ -854,7 +854,7 @@ struct ConstReach {
 /// initializer is not a literal — the value list would not), and an enum's
 /// **cases**, which answer `Suit::Hearts` in exactly the same syntactic position.
 /// Names are matched case-sensitively, as PHP matches them.
-fn provides_class_const(cd: &ClassDecl, name: &str) -> bool {
+pub(crate) fn provides_class_const(cd: &ClassDecl, name: &str) -> bool {
     cd.const_visibility.iter().any(|(n, _)| n == name)
         || cd.enum_cases.iter().any(|c| c.name == name)
 }

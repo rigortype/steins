@@ -297,3 +297,75 @@ if (!function_exists('poly_f')) {
 ";
     assert_eq!(undef(src).len(), 1, "polyfill else-branch must not be pruned: {:?}", undef(src));
 }
+
+// `defined('C::K')` over class constants (read-position run S0c, ADR-0049 A25).
+
+fn class_const_findings(src: &str) -> Vec<Diagnostic> {
+    diags_with(src, &mut Boot::ready())
+        .into_iter()
+        .filter(|d| d.id == "class-const.undefined" || d.id == "class-const.inaccessible")
+        .collect()
+}
+
+const DEFINED_CLASSES: &str = "class A { private const P = 1; protected const Q = 2; const OK = 3; }
+class B extends A { const BK = 4; }
+";
+
+fn defined_case(body: &str) -> usize {
+    class_const_findings(&format!("<?php\n{DEFINED_CLASSES}function f() {{\n{body}\n}}\n")).len()
+}
+
+#[test]
+fn defined_private_class_const_guard_discharges_inaccessible() {
+    assert_eq!(defined_case("if (defined('A::P')) { return A::P; } return 0;"), 0);
+    assert_eq!(defined_case("if (defined('\\\\A::P')) { return A::P; } return 0;"), 0);
+    assert_eq!(defined_case("if (defined('a::P')) { return A::P; } return 0;"), 0);
+}
+
+#[test]
+fn defined_undefined_class_const_guard_discharges_undefined() {
+    assert_eq!(defined_case("if (defined('A::NOPE')) { $x = A::NOPE; } return 0;"), 0);
+    assert_eq!(defined_case("if (!defined('A::NOPE')) { return 0; } $x = A::NOPE; return $x;"), 0);
+    assert_eq!(defined_case("if (defined('B::NOPE')) { $x = B::NOPE; } return 0;"), 0);
+}
+
+#[test]
+fn defined_protected_class_const_from_global_scope_discharges() {
+    assert_eq!(defined_case("if (defined('A::Q')) { return A::Q; } return 0;"), 0);
+}
+
+#[test]
+fn defined_class_const_controls_still_report() {
+    // Unguarded, a guard on another constant, a case-mismatched constant name.
+    assert_eq!(defined_case("return A::NOPE;"), 1);
+    assert_eq!(defined_case("if (defined('A::OTHER')) { return 0; } return A::NOPE;"), 1);
+    // The constant name is case-sensitive: `A::nope` is not defined, so the branch is dead.
+    assert_eq!(defined_case("if (defined('A::nope')) { return A::NOPE; } return 0;"), 0);
+    assert_eq!(defined_case("if (defined('A::P')) { return 1; } return A::P;"), 1);
+    // A defined, public constant makes the guard true: the code after the return is dead.
+    assert_eq!(defined_case("if (defined('A::OK')) { return A::OK; } return A::NOPE;"), 0);
+    assert_eq!(defined_case("if (defined('A::OK')) { echo 1; } return A::NOPE;"), 1);
+}
+
+#[test]
+fn defined_guard_with_exit_discharges_the_rest() {
+    assert_eq!(defined_case("if (!defined('A::NOPE')) { exit; } return A::NOPE;"), 0);
+    assert_eq!(defined_case("if (!defined('A::OTHER')) { return 0; } return A::NOPE;"), 0);
+}
+
+/// `defined(...) || die; A::NOPE` is not modelled: the connective folds its right operand
+/// only, and the path ending inside it is not a branch, so the fold changes nothing after
+/// the statement (a recorded gap, S4).
+#[test]
+fn defined_or_die_statement_is_not_a_guard_region() {
+    assert_eq!(defined_case("defined('A::NOPE') || die; return A::NOPE;"), 1);
+}
+
+#[test]
+fn defined_private_const_is_visible_inside_its_class() {
+    let src = "<?php
+class A { private const P = 1; function m() { if (defined('A::P')) { return A::P; } return A::NOPE; } function n() { return A::NOPE; } }
+";
+    // Visible here, so the guard is true and its else leg is dead; only `n` reports.
+    assert_eq!(class_const_findings(src).len(), 1, "{:?}", class_const_findings(src));
+}
