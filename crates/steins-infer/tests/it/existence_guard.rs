@@ -369,3 +369,30 @@ class A { private const P = 1; function m() { if (defined('A::P')) { return A::P
     // Visible here, so the guard is true and its else leg is dead; only `n` reports.
     assert_eq!(class_const_findings(src).len(), 1, "{:?}", class_const_findings(src));
 }
+
+/// A closure, bound closure or arrow fn can run in any class's scope, so a non-public
+/// constant is `Maybe` there: both branches stay live (PHP answers true in these).
+#[test]
+fn defined_non_public_const_in_a_rebindable_scope_is_undecided() {
+    let in_closure = "<?php
+class SC { private const SP = 1; protected const PP = 2; function m() { return function() {
+    if (defined('SC::SP')) { return SC::NOPE; } return 0; }; } }
+";
+    assert_eq!(class_const_findings(in_closure).len(), 1, "{:?}", class_const_findings(in_closure));
+    let plain = "<?php
+class SC { private const SP = 1; }
+$f = function() { if (defined('SC::SP')) { return SC::NOPE; } return 0; };
+";
+    assert_eq!(class_const_findings(plain).len(), 1, "{:?}", class_const_findings(plain));
+    let bound = "<?php
+class SC { private const SP = 1; }
+$g = Closure::bind(function() { if (defined('SC::SP')) { return SC::NOPE; } return 0; }, null, SC::class);
+";
+    assert_eq!(class_const_findings(bound).len(), 1, "{:?}", class_const_findings(bound));
+    // An arrow fn: a `Maybe` ternary guard is silent on both arms (the guard-respect leg),
+    // while a wrong `No` would leave the else arm live and report.
+    let arrow = "<?php
+class SC { private const SP = 1; function a() { return fn() => defined('SC::SP') ? 0 : SC::NOPE; } }
+";
+    assert_eq!(class_const_findings(arrow).len(), 0, "{:?}", class_const_findings(arrow));
+}

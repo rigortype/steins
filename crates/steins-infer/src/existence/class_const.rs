@@ -15,7 +15,7 @@
 //!                                       once, public/case       -                 Yes
 //!                                       once, private/protected visible           Yes
 //!                                       once, private/protected invisible         No
-//!                                       once, scope unprovable  -                 Maybe
+//!                                       once, scope not exact   -                 Maybe
 //!                                       twice, or any obstacle  -                 Maybe
 //! 'self::K' 'static::K' 'parent::K'     -                       -                 Maybe
 //! anything else ('C::class', 'C::', …)  -                       -                 Maybe
@@ -146,29 +146,23 @@ pub(super) fn class_const_defined_verdict(
     let [p] = found.as_slice() else {
         return Certainty::Maybe;
     };
+    // `No` and `Yes` for a non-public constant need the scope's class known exactly:
+    // a closure (or arrow fn) can be bound to any class, and a trait method runs in
+    // its user's scope. Top level and free functions have no class scope at all.
     let scope = w.enclosing_class;
+    let scope_exact = class_scope_known(w.scope)
+        && scope.is_none_or(|s| cx.find_class(s).is_some_and(|(_, cd)| !cd.is_trait));
     match p.visibility {
         None | Some(Visibility::Public) => Certainty::Yes,
+        Some(Visibility::Private) if !p.at_start => {
+            // Not inherited: invisible whatever the scope (witnessed, scope P included).
+            Certainty::No
+        }
+        Some(_) if !scope_exact => Certainty::Maybe,
         Some(Visibility::Private) => {
-            if !p.at_start {
-                // Not inherited: invisible whatever the scope (witnessed).
-                Certainty::No
-            } else if private_invisible(&p.fqn, scope) {
-                if scope.is_none() || class_scope_known(w.scope) {
-                    Certainty::No
-                } else {
-                    Certainty::Maybe
-                }
-            } else if class_scope_known(w.scope) {
-                Certainty::Yes
-            } else {
-                Certainty::Maybe
-            }
+            if private_invisible(&p.fqn, scope) { Certainty::No } else { Certainty::Yes }
         }
         Some(Visibility::Protected) => {
-            if !class_scope_known(w.scope) {
-                return Certainty::Maybe;
-            }
             let Some(scope) = scope else { return Certainty::No };
             match protected_visible(cx, &p.fqn, scope) {
                 IsA::Yes => Certainty::Yes,
