@@ -34,7 +34,7 @@ use crate::lower_site::{
 use crate::lower_stmt::{
     block_end, call_invalidation, expr_end, lower_expr_stmt, lower_stmt, named_call, node_poisons,
     push_byref_captures, scan_guard_chain_no_default, scan_opaque, scan_string_contexts,
-    subtree_has_function_exit,
+    subtree_has_function_exit, unspelled_reads,
 };
 use crate::names::{RefResolver, ctx_of};
 use crate::stack_guard;
@@ -475,33 +475,41 @@ fn build_hook_expr_scope(
     let mut guards = Vec::new();
     scan_guard_regions(&node, &mut guards);
     let stmt = match kind {
-        HookKind::Get => Stmt {
-            span: to_span(expr.span()),
-            kind: StmtKind::Return {
+        HookKind::Get => {
+            let kind = StmtKind::Return {
                 value: lower_arg_value(expr),
                 call: named_call(expr),
                 span: to_span(expr.span()),
-            },
-            invalidated: call_invalidation(&node),
-            string_contexts,
-            guards,
-            // The body IS the return, so the trace always terminates — which is why
-            // an arrow-bodied `get` can never be a `type.return-missing` site.
-            end: BodyEnd::Terminates,
-            has_terminator: true,
-            value_position: false,
-            // A hook body is never the top-level frame (issue #762).
-            runs: Runs::default(),
-            holds_label: false,
-        },
-        HookKind::Set => Stmt {
-            span: to_span(expr.span()),
-            string_contexts,
-            guards,
-            end: expr_end(expr),
-            has_terminator: subtree_has_function_exit(&node),
-            ..lower_expr_stmt(expr)
-        },
+            };
+            Stmt {
+                span: to_span(expr.span()),
+                unspelled_reads: unspelled_reads(&kind, &node),
+                kind,
+                invalidated: call_invalidation(&node),
+                string_contexts,
+                guards,
+                // The body IS the return, so the trace always terminates — which is
+                // why an arrow-bodied `get` can never be a `type.return-missing` site.
+                end: BodyEnd::Terminates,
+                has_terminator: true,
+                value_position: false,
+                // A hook body is never the top-level frame (issue #762).
+                runs: Runs::default(),
+                holds_label: false,
+            }
+        }
+        HookKind::Set => {
+            let base = lower_expr_stmt(expr);
+            Stmt {
+                span: to_span(expr.span()),
+                string_contexts,
+                guards,
+                end: expr_end(expr),
+                has_terminator: subtree_has_function_exit(&node),
+                unspelled_reads: unspelled_reads(&base.kind, &node),
+                ..base
+            }
+        }
     };
     Scope {
         function_name: None,
@@ -1647,9 +1655,11 @@ fn build_closure_scope_from_arrow(
     scan_string_contexts(&Node::Expression(af.expression), &mut string_contexts);
     let mut guards = Vec::new();
     scan_guard_regions(&Node::Expression(af.expression), &mut guards);
+    let kind = StmtKind::Return { value, call, span };
     let ret = Stmt {
         span,
-        kind: StmtKind::Return { value, call, span },
+        unspelled_reads: unspelled_reads(&kind, &Node::Expression(af.expression)),
+        kind,
         invalidated,
         string_contexts,
         guards,

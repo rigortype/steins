@@ -286,3 +286,35 @@ fn a_goto_ends_its_list_and_a_label_marks_where_a_walk_resumes() {
         ]
     );
 }
+
+// ---- issue #1048: what a value the lowering cannot spell may hand on -----------
+
+#[test]
+fn an_unspelled_rvalue_names_what_it_mentions() {
+    // A `match` and an `(object)` cast lower to `Other`; the names inside them
+    // are kept, so the walk can escape the objects they may store.
+    let got = stmts("", "$q = match ($k) { 0 => $o, default => $p }; $w = (object) ['o' => $r];");
+    let reads: Vec<Vec<String>> = got
+        .iter()
+        .filter(|s| matches!(s.kind, StmtKind::Assign { .. }))
+        .map(|s| {
+            let mut r = s.unspelled_reads.clone();
+            r.sort();
+            r
+        })
+        .collect();
+    assert_eq!(reads, [vec!["k", "o", "p", "q"], vec!["r", "w"]], "{got:?}");
+}
+
+#[test]
+fn a_spelled_rvalue_names_nothing() {
+    let got = stmts("", "$q = [$o, $k ? $p : 1];");
+    assert!(got.iter().all(|s| s.unspelled_reads.is_empty()), "{got:?}");
+}
+
+#[test]
+fn a_statement_that_yields_is_a_barrier() {
+    // The generator's consumer runs before the expression resumes.
+    let got = stmts("", "$r = yield $o;");
+    assert!(matches!(&got[..], [Stmt { kind: StmtKind::Barrier, .. }]), "{got:?}");
+}
