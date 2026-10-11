@@ -61,6 +61,13 @@ function mutate($x): void { $x->p = 'changed'; }
 function spreadw(O ...$xs): void { foreach ($xs as $q) { $q->p = 'changed'; } }
 ";
 
+/// `PRELUDE` plus `function {sig} { $o = new O(); $o->p = 1; {body} dump($o->p); }`,
+/// the dump on line 8.
+fn case(sig: &str, body: &str) -> String {
+    let dump = "\\PHPStan\\dumpType($o->p);";
+    format!("{PRELUDE}function {sig} {{ $o = new O(); $o->p = 1; {body} {dump} }}\n")
+}
+
 /// The reach rows of the rule table: how `$o` comes to `$q`. `WRITE` is replaced by
 /// one write row. In every row PHP prints `'changed'` (or nothing, for `unset`).
 const REACH: &[(&str, &str)] = &[
@@ -78,7 +85,10 @@ const REACH: &[(&str, &str)] = &[
     ("array_shift", "$arr = [$o]; $q = array_shift($arr); WRITE"),
     ("dynamic key", "$arr = [$o]; $k = rand(0, 0); $q = $arr[$k]; WRITE"),
     ("constant key", "$arr = [$o]; $q = $arr[0]; WRITE"),
-    ("iterator_to_array", "$arr = [$o]; foreach (iterator_to_array(new ArrayIterator($arr)) as $q) { WRITE }"),
+    (
+        "iterator_to_array",
+        "$arr = [$o]; foreach (iterator_to_array(new ArrayIterator($arr)) as $q) { WRITE }",
+    ),
     ("generator", "foreach (gen($o) as $q) { WRITE }"),
     ("array_values", "$arr = [$o]; $q = array_values($arr)[0]; WRITE"),
     ("array_filter", "$arr = [$o]; foreach (array_filter($arr) as $q) { WRITE }"),
@@ -107,11 +117,7 @@ fn no_reach_and_write_pair_leaves_the_original_fact_stale() {
     let mut stale = Vec::new();
     for (reach, body) in REACH {
         for (write, w) in WRITES {
-            let src = format!(
-                "{PRELUDE}function t(): void {{ $o = new O(); $o->p = 1; {} \\PHPStan\\dumpType($o->p); }}\n",
-                body.replace("WRITE", w),
-            );
-            let got = dumps(&src);
+            let got = dumps(&case("t(): void", &body.replace("WRITE", w)));
             if got.len() != 1 || got[0].ends_with(": 1") {
                 stale.push(format!("{reach} x {write}: {got:?}"));
             }
@@ -122,26 +128,20 @@ fn no_reach_and_write_pair_leaves_the_original_fact_stale() {
 
 #[test]
 fn a_spread_into_a_resolved_callee_reaches_the_element() {
-    let src = format!(
-        "{PRELUDE}function t(): void {{ $o = new O(); $o->p = 1; $arr = [$o]; spreadw(...$arr); \\PHPStan\\dumpType($o->p); }}\n"
-    );
+    let src = case("t(): void", "$arr = [$o]; spreadw(...$arr);");
     assert_eq!(dumps(&src), vec!["8: unknown"]);
 }
 
 #[test]
 fn a_by_ref_pass_of_a_bound_property_forgets_it() {
     // No alias at all: the callee writes `$o->p` in place.
-    let src = format!(
-        "{PRELUDE}function t(): void {{ $o = new O(); $o->p = 1; byref($o->p); \\PHPStan\\dumpType($o->p); }}\n"
-    );
+    let src = case("t(): void", "byref($o->p);");
     assert_eq!(dumps(&src), vec!["8: unknown"]);
 }
 
 #[test]
 fn a_yield_suspends_the_generator_and_its_consumer_may_write_the_handle() {
-    let src = format!(
-        "{PRELUDE}function t(): \\Generator {{ $o = new O(); $o->p = 1; $r = yield $o; \\PHPStan\\dumpType($o->p); }}\n"
-    );
+    let src = case("t(): \\Generator", "$r = yield $o;");
     assert_eq!(dumps(&src), vec!["8: unknown"]);
 }
 
@@ -228,27 +228,21 @@ function b5(): void {{
 #[test]
 fn a_write_through_an_alias_of_another_object_keeps_the_fact() {
     // PHP: 1 — the array holds a different object.
-    let src = format!(
-        "{PRELUDE}function t(): void {{ $o = new O(); $o->p = 1; $arr = [new O()]; foreach ($arr as $q) {{ $q->p = 'changed'; }} \\PHPStan\\dumpType($o->p); }}\n"
-    );
+    let src = case("t(): void", "$arr = [new O()]; foreach ($arr as $q) { $q->p = 'changed'; }");
     assert_eq!(dumps(&src), vec!["8: 1"]);
 }
 
 #[test]
 fn a_write_through_a_parameter_keeps_a_local_objects_fact() {
     // PHP: 1 — `$x` cannot be `$o`, which no route handed out.
-    let src = format!(
-        "{PRELUDE}function t(O $x): void {{ $o = new O(); $o->p = 1; $x->p = 'changed'; \\PHPStan\\dumpType($o->p); }}\n"
-    );
+    let src = case("t(O $x): void", "$x->p = 'changed';");
     assert_eq!(dumps(&src), vec!["8: 1"]);
 }
 
 #[test]
 fn storing_an_object_without_a_later_write_keeps_the_fact() {
     // Escaping is not forgetting: no write and no call follows.
-    let src = format!(
-        "{PRELUDE}function t(): void {{ $o = new O(); $o->p = 1; $arr = [$o]; foreach ($arr as $q) {{ }} \\PHPStan\\dumpType($o->p); }}\n"
-    );
+    let src = case("t(): void", "$arr = [$o]; foreach ($arr as $q) { }");
     assert_eq!(dumps(&src), vec!["8: 1"]);
 }
 

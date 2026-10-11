@@ -72,7 +72,7 @@ use std::collections::HashMap;
 
 use steins_contract::ContractTy;
 use steins_domain::Fact;
-use steins_syntax::{ArgValue, Callee, ClosureRef, Receiver};
+use steins_syntax::{ArgValue, Callee, ClosureRef, NamedArg, Receiver};
 
 use crate::env::{Known, Store, Stratum};
 use crate::walk::WalkCx;
@@ -99,7 +99,7 @@ pub(crate) fn escape_stored_objects(value: &ArgValue, store: &mut Store) -> bool
 }
 
 /// Mark escaped every bound object a statement names inside a value its lowering
-/// could not spell ([`steins_syntax::Stmt::unspelled_reads`]): a `match`, an
+/// could not spell ([`steins_syntax::Stmt::unspelled`]): a `match`, an
 /// `(object)` cast or an array with a computed key may store the handle as surely
 /// as an array literal does.
 pub(crate) fn escape_unspelled_reads(names: &[String], store: &mut Store) {
@@ -143,18 +143,21 @@ fn flowing_vars<'a>(value: &'a ArgValue, out: &mut Vec<&'a str>) {
                 out.push(v);
             }
             if let Callee::Method { receiver: Receiver::New { args, named, .. }, .. } = callee {
-                args.iter().chain(named.iter().map(|n| &n.value)).for_each(|a| flowing_vars(a, out));
+                all_args(args, named).for_each(|a| flowing_vars(a, out));
             }
-            args.iter().chain(named.iter().map(|n| &n.value)).for_each(|a| flowing_vars(a, out));
+            all_args(args, named).for_each(|a| flowing_vars(a, out));
         }
-        ArgValue::New(_, args, named) => {
-            args.iter().chain(named.iter().map(|n| &n.value)).for_each(|a| flowing_vars(a, out));
-        }
+        ArgValue::New(_, args, named) => all_args(args, named).for_each(|a| flowing_vars(a, out)),
         ArgValue::Closure(ClosureRef::Anonymous { captures, .. }) => {
             out.extend(captures.iter().map(String::as_str));
         }
         _ => {}
     }
+}
+
+/// A call's positional and named argument values, in that order.
+fn all_args<'a>(args: &'a [ArgValue], named: &'a [NamedArg]) -> impl Iterator<Item = &'a ArgValue> {
+    args.iter().chain(named.iter().map(|n| &n.value))
 }
 
 /// The handles the calls nested in a scalar-valued operand are handed: the
@@ -183,7 +186,9 @@ pub(crate) fn may_carry_unnamed_object(
 ) -> bool {
     match value {
         ArgValue::Var(v) => !store.is_bound(v) && !holds_no_object(v, env, store),
-        ArgValue::Array(items) => items.iter().any(|(_, v)| may_carry_unnamed_object(v, env, store)),
+        ArgValue::Array(items) => {
+            items.iter().any(|(_, v)| may_carry_unnamed_object(v, env, store))
+        }
         ArgValue::Ternary { then_val, else_val, .. } => {
             may_carry_unnamed_object(then_val, env, store)
                 || may_carry_unnamed_object(else_val, env, store)
@@ -192,10 +197,9 @@ pub(crate) fn may_carry_unnamed_object(
             may_carry_unnamed_object(a, env, store) || may_carry_unnamed_object(b, env, store)
         }
         ArgValue::Cast { operand, .. } => may_carry_unnamed_object(operand, env, store),
-        ArgValue::New(_, args, named) => args
-            .iter()
-            .chain(named.iter().map(|n| &n.value))
-            .any(|a| may_carry_unnamed_object(a, env, store)),
+        ArgValue::New(_, args, named) => {
+            all_args(args, named).any(|a| may_carry_unnamed_object(a, env, store))
+        }
         // A property's value: known and object-free only through a recorded fact.
         ArgValue::PropFetch { var, prop } => {
             !store.prop_fact(var, prop).is_some_and(|f| !matches!(f, Fact::Shape { .. }))

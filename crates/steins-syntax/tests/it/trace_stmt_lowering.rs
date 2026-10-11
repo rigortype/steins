@@ -298,7 +298,7 @@ fn an_unspelled_rvalue_names_what_it_mentions() {
         .iter()
         .filter(|s| matches!(s.kind, StmtKind::Assign { .. }))
         .map(|s| {
-            let mut r = s.unspelled_reads.clone();
+            let mut r = s.unspelled_reads().to_vec();
             r.sort();
             r
         })
@@ -309,7 +309,7 @@ fn an_unspelled_rvalue_names_what_it_mentions() {
 #[test]
 fn a_spelled_rvalue_names_nothing() {
     let got = stmts("", "$q = [$o, $k ? $p : 1];");
-    assert!(got.iter().all(|s| s.unspelled_reads.is_empty()), "{got:?}");
+    assert!(got.iter().all(|s| s.unspelled_reads().is_empty()), "{got:?}");
 }
 
 #[test]
