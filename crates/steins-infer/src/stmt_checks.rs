@@ -13,9 +13,12 @@
 //!   `property.maybe-undefined`, `property.on-non-object`) read the env or the
 //!   receiver's binding: value-dependent;
 //! * **property access** (`property.inaccessible`) reads the receiver's exact
-//!   allocation, which no test can change, and PHP routes a by-reference fetch through
-//!   the same `__get` lookup as a read (witnessed PHP 8.5: `byref($c->priv)` throws
-//!   `Cannot access private property`, and with only `__get` declared it calls it);
+//!   allocation, and PHP routes a by-reference fetch through the same `__get` lookup
+//!   as a read (witnessed PHP 8.5: `byref($c->priv)` throws `Cannot access private
+//!   property`, and with only `__get` declared it calls it). Its subject is still the
+//!   receiver: a test on it (`isset($c->priv) ? $c->priv : 0`, where `isset` on an
+//!   inaccessible property is false, or `$c instanceof X ? ...`) decides whether a
+//!   conditional arm runs, so it declines there like the value families;
 //! * **class constant** (`class-const.undefined`, `class-const.inaccessible`) reads no
 //!   env at all: env-independent.
 //!
@@ -25,7 +28,7 @@
 //! | `Argument`, by-value parameter of a resolved function | judge: warns | judge: warns | judge: Error | judge: Error |
 //! | `Argument`, by-reference parameter | decline: the key is created, silent | decline: the property is created, silent | judge: Error, fetched through `__get` like a read | judge: Error |
 //! | `Argument` of a method, constructor or unresolved callee, or `position: None` | decline: the parameter is unknowable (D5) | decline (D5) | judge | judge |
-//! | `Conditional` (ternary arm, right of `&&` `\|\|` `??`, past `?->`) | decline: the test may establish the key (D3) | decline (D3) | judge (D3) | judge (D3) |
+//! | `Conditional` (ternary arm, right of `&&` `\|\|` `??`, past `?->`) | decline: the test may establish the key (D3) | decline (D3) | decline: a test on the receiver decides whether the arm runs | judge (D3): no test on a value decides a class's constants, and a decided `defined()` guard makes the arm dead |
 //! | `IssetLike` | not recorded: silent | not recorded: silent | not recorded: silent | judge: Error (`A::K ?? 1` throws) |
 //! | `Suppressed` (`@`) | decline: warns, silent at the default floor (D2) | decline (D2) | judge: an Error is not suppressible | judge: Error |
 //! | `CompoundRead` (`++`, `--`, `.=`) | judge `offset.missing` and the strict leg: warns; not `offset.on-unsupported`, since a null base is created and a scalar one throws | decline: on null it is the Error `Attempt to assign property`, and a written name is a write obstacle anyway | decline: the write half's `__set` route is not modelled | not a target |
@@ -169,7 +172,10 @@ fn carrier_verdict(
         (_, Carrier::Argument { call, position }) => {
             argument_by_value(cx, positions, call, position)
         }
-        (Family::PropertyAccess, Carrier::Conditional | Carrier::Suppressed) => true,
+        // Not `Conditional`: a test on the receiver (`isset($c->p)`, `$c instanceof X`)
+        // decides whether the arm runs, and PHP's `isset` on an inaccessible property
+        // is false, so the guarded arm is never reached.
+        (Family::PropertyAccess, Carrier::Suppressed) => true,
         _ => false,
     };
     judged.then_some(false)
@@ -282,7 +288,6 @@ fn rebindable<'s, 'p>(
     let params = if userland { w.cx.scope_params(w.scope).unwrap_or(&[]) } else { &[] };
     Rebindable { all, handed, params }
 }
-
 
 /// Step 1z's member and offset half: each offset, property and class-constant read
 /// position of `stmt`, judged by the module doc's table, at its own span.

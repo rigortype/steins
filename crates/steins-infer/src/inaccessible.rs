@@ -498,11 +498,12 @@ fn declared_in_chain<'a, T>(
 /// access entirely.
 ///
 /// The read side is judged at every property read position the statement records
-/// (ADR-0104), at the read's own span: the receiver's exact allocation is a fact no
-/// test changes, so a conditional and an `@` operand judge too (the fatal is not
+/// (ADR-0104), at the read's own span: an `@` operand judges (the fatal is not
 /// suppressible), and so does a by-reference argument, which PHP fetches through the
-/// same `__get` route as a read (witnessed PHP 8.5). A compound write
-/// (`$x->p .= 'v'`), whose write half takes `__set`, declines.
+/// same `__get` route as a read (witnessed PHP 8.5). A conditional operand declines: a
+/// test on the receiver decides whether the arm runs, and `isset($c->priv) ? $c->priv
+/// : 0` never reaches the arm, since `isset` on an inaccessible property is false. A
+/// compound write (`$x->p .= 'v'`), whose write half takes `__set`, declines.
 pub(crate) fn check_inaccessible_property(
     w: &WalkCx,
     var: &str,
