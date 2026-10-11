@@ -14,6 +14,7 @@ use crate::arg_check::{
 use crate::builtin_returns::store_holds_resource;
 use crate::contract::{AliasTable, TemplateShadow, template_names_of, type_aliases_of};
 use crate::cx::Cx;
+use crate::value_tops::{check_top_argument, resolve_native_value};
 use crate::descent::{ThisSeed, ThisWriteBack, descend, project_method_summary, runs_with_same_this};
 use crate::dispatch::resolve_call_target;
 use crate::env::{
@@ -428,8 +429,7 @@ fn check_method_args(
                 // A proven object (`new` / enum case) or resolved class constant
                 // (ADR-0043 stage 3). Env-free; `self`/`parent` at the call site are
                 // not available here, so only a written class name resolves.
-                _ => cx
-                    .resolve_static_value(&arg.value, None)
+                _ => resolve_native_value(cx, &arg.value, None)
                     .map(|v| (v, None, Stratum::Verified)),
             };
             // Proof-layer consumption rule (ADR-0052 §5): silent on an `Asserted`
@@ -508,6 +508,15 @@ fn check_method_args(
                     out,
                 );
             }
+        }
+        // An `array`/`object`/`iterable`/`callable` top (ADR-0043's 2026-10-11
+        // amendment): the one reporter at a method or constructor call, so written
+        // values and bound variables both.
+        if !native_fired {
+            native_fired = check_top_argument(
+                cx, folder, param, callee_name, arg, Some(env), Some(store), poisoned, in_descent,
+                out,
+            );
         }
 
         if !native_fired

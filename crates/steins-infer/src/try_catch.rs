@@ -292,6 +292,7 @@ fn bind_caught(
     let param = Param {
         name: var.to_owned(),
         ty: Some(NativeType { members, nullable: false }),
+        top: None,
         hint_span: None,
         variadic: false,
         by_ref: false,

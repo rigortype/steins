@@ -28,6 +28,7 @@ use crate::arg_check::{
     implicit_null_accepted, is_type_error, object_world_guard_blind, render_call,
 };
 use crate::coerce::coerce_into_param;
+use crate::value_tops::{check_top_argument, resolve_native_value};
 use crate::cx::Cx;
 use crate::dispatch::resolve_call_target;
 use crate::env::{
@@ -535,7 +536,14 @@ fn check_callable_args(
         if param.by_ref {
             continue;
         }
-        let Some(ty) = param.ty.as_ref() else { continue };
+        let Some(ty) = param.ty.as_ref() else {
+            // An `array`/`object`/`iterable`/`callable` top (ADR-0043's 2026-10-11
+            // amendment), judged as at a function call.
+            check_top_argument(
+                cx, folder, param, display, arg, Some(env), None, poisoned, in_descent, out,
+            );
+            continue;
+        };
         // Resolve the argument to a proven value (literal directly; `$var`/fold via
         // the env). Provenance names the variable/fold source where applicable.
         // Stratum rides with the resolution (issue #127 review) — never a syntactic
@@ -555,8 +563,7 @@ fn check_callable_args(
                 .map(|(lit, prov, strat)| (lit, Some(prov), strat)),
             // A proven object (`new` / enum case) or resolved class constant
             // (ADR-0043 stage 3); env-free, `self`/`parent` unavailable here.
-            _ => cx
-                .resolve_static_value(&arg.value, None)
+            _ => resolve_native_value(cx, &arg.value, None)
                 .map(|v| (v, None, Stratum::Verified)),
         };
         // Proof-layer consumption rule (ADR-0052 §5): silent on an `Asserted`

@@ -39,7 +39,8 @@ use steins_domain::Fact;
 use steins_syntax::{ArgValue, NativeType};
 
 use crate::arg_check::{
-    MaybeVerdict, arm_base_set, is_type_error, maybe_fact_verdict, native_rejects_base, spell_arm,
+    MaybeVerdict, arm_base_set, maybe_fact_verdict, native_rejects_base, possibly_null_rejected,
+    spell_arm,
 };
 use crate::cx::Cx;
 use crate::dump::render_contract_arms;
@@ -142,7 +143,7 @@ fn judge_arm(cx: &Cx, ret: &NativeType, ty: &ContractTy) -> ArmVerdict {
     match arm_base_set(ty) {
         Some((bases, nullable)) if !bases.is_empty() || nullable => {
             let rejected = bases.iter().all(|b| native_rejects_base(cx, ret, *b))
-                && (!nullable || is_type_error(cx, ret, &ArgValue::Null));
+                && (!nullable || possibly_null_rejected(cx, ret));
             if rejected { ArmVerdict::Rejected } else { ArmVerdict::Accepted }
         }
         _ => ArmVerdict::Undecided,
