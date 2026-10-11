@@ -311,7 +311,9 @@ function f(bool $flag): void { $c = new C(); needString($c->m($flag)); }\n",
     );
     let d = proof(&src);
     assert_eq!(d.len(), 1, "{d:?}");
-    assert!(d[0].message.contains("$c->m() is string|false"), "{}", d[0].message);
+    // The call's proven summary (`"value"|false`) is sharper than its declared floor
+    // (`string|false`), and the argument is judged as `$v = $c->m(); f($v)` is.
+    assert!(d[0].message.contains("$c->m() is one of false, \"value\""), "{}", d[0].message);
 }
 
 #[test]

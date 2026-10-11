@@ -176,9 +176,12 @@ fn reassignment_uses_last_literal() {
 
 #[test]
 fn construct_writing_var_forgets_it() {
-    // An `if` that writes `$w` makes it unknown at the later use → silent.
+    // An `if` that writes `$w` joins `"abc"` with `5`: not one proven value, so no
+    // definite claim; the possibly grade names the `"abc"` path only.
     let src = format!("{COERCIVE_INT}$w = \"abc\";\nif ($cond) {{ $w = 5; }}\nwidth($w);");
-    assert_eq!(n(&src), 0, "if writes $w → forgotten → silent");
+    let got = findings(&src);
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert_eq!(got[0].id, "type.maybe-argument-mismatch");
 }
 
 #[test]

@@ -491,7 +491,7 @@ fn check_method_args(
             // The possibly-grade sibling, method-call twin (issue #391; the
             // non-`Var` carriers of issue #418).
             if !native_fired {
-                check_maybe_argument_mismatch(
+                native_fired = check_maybe_argument_mismatch(
                     cx,
                     folder,
                     param,

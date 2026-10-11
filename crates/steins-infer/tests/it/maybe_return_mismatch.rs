@@ -252,15 +252,20 @@ fn void_and_never_returns_are_silent() {
 }
 
 #[test]
-fn a_non_var_carrier_is_not_read_yet() {
-    // The slice's stated bound: `return $x;` is the carrier. A nested call's
-    // return (`return g();`) is issue #418's seam on the argument side and needs
-    // that seam's guard-decline surface (issue #421) before it can ship here.
-    let src = strict(
+fn a_returned_call_is_judged_as_its_assignment_is() {
+    // `return g();` reaches the seam through the virtual binding of `return_call`
+    // (#950): the same finding `$v = g($flag); return $v;` reports.
+    let call = strict(
         "function g(bool $ok): string|false { if ($ok) { return \"v\"; } return false; }
 function f(bool $flag): string { return g($flag); }\n",
     );
-    assert!(family(&src).is_empty(), "{:?}", family(&src));
+    let assigned = strict(
+        "function g(bool $ok): string|false { if ($ok) { return \"v\"; } return false; }
+function f(bool $flag): string { $v = g($flag); return $v; }\n",
+    );
+    assert_eq!(family(&call).len(), 1, "{:?}", family(&call));
+    let ids = |s: &str| family(s).into_iter().map(|d| d.id).collect::<Vec<_>>();
+    assert_eq!(ids(&call), ids(&assigned));
 }
 
 

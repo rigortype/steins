@@ -713,7 +713,7 @@ fn walk_run(
         apply_hidden_heap_effects(w, stmt, env, store);
 
         // 1b. Return-type check (native + phpdoc contract).
-        check_return_value(w, folder, stmt, env, store, descent, out);
+        check_return_value(w, folder, stmt, env, store, descent, &stmt_calls, out);
 
         // 1c. Return summary (ADR-0057 T0 value component, T1 heap component): when a
         // descent is building this callee's summary, snapshot each returning exit.

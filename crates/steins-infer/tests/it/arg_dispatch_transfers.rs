@@ -672,7 +672,10 @@ fn without_the_reflected_declaration_every_transfer_is_withheld() {
         ("explode(',', $s)", "list<string>"),
         ("range(1, 3)", "array"),
         ("preg_replace('/a/', 'b', $s)", "string|null|array"),
-        ("var_export($s, true)", "string|null"),
+        ("var_export($s)", "string|null"),
+        // A literal `true` as `$return` narrows the floor to the string it returns
+        // (#950), still the declaration's reading and still `asserted`.
+        ("var_export($s, true)", "string"),
         // The arithmetic family (issue #40). `abs` has an ADR-0069 floor row to
         // fall to; `pow` has none, so a silent engine leaves it `unknown` — the
         // sound subset, and what every `pow` call said before this wave.

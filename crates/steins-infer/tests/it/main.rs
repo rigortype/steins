@@ -173,6 +173,7 @@ mod resource_folds;
 mod resource_params;
 mod resource_producers;
 mod resource_values;
+mod return_call_oneof;
 mod return_missing;
 mod return_summary;
 mod returned_allocation;

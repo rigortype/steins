@@ -267,7 +267,7 @@ pub(crate) fn check_propagated_call(
             // check runs: after every native proof had its chance, so a definite No
             // is never shadowed by the weaker claim about the same argument.
             if !native_fired {
-                check_maybe_argument_mismatch(
+                native_fired = check_maybe_argument_mismatch(
                     cx,
                     folder,
                     param,
