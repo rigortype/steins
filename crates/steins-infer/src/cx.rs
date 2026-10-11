@@ -104,6 +104,11 @@ pub(crate) struct Cx<'a> {
     /// declared range lies at or above one builtin's change boundary. `None` is an
     /// undeclared target, which the floor admits.
     pub(crate) php_target: Option<&'a steins_db::PhpTarget>,
+    /// The guards variables held at the statements of the scopes walked so far in this file,
+    /// for the closures those statements create: a by-value capture snapshots the variable at
+    /// creation, so the guard it held then is the one the closure body tests (ADR-0104).
+    /// `None` outside the file walk.
+    pub(crate) guard_seeds: Option<&'a std::cell::RefCell<Vec<crate::env::GuardSeed>>>,
 }
 
 /// The one allowlisted name whose folded array can keep its input's next append
@@ -123,6 +128,7 @@ impl<'a> Cx<'a> {
             version_id: None,
             purity: None,
             php_target: None,
+            guard_seeds: None,
         }
     }
 
@@ -151,6 +157,7 @@ impl<'a> Cx<'a> {
             version_id,
             purity,
             php_target,
+            guard_seeds: None,
         }
     }
 
@@ -168,6 +175,7 @@ impl<'a> Cx<'a> {
             version_id: self.version_id,
             purity: self.purity,
             php_target: self.php_target,
+            guard_seeds: self.guard_seeds,
         }
     }
 

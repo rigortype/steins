@@ -6,7 +6,8 @@ use std::collections::HashSet;
 
 use steins_domain::Certainty;
 use steins_syntax::{
-    ArgValue, ArrayKey, CallExpr, ClassDecl, EXISTENCE_PREDICATES, NameRef, RefKind, StaticClass,
+    ArgValue, ArrayKey, CallExpr, ClassDecl, CondExpr, EXISTENCE_PREDICATES, LogicalOp, NameRef,
+    OperandSpan, ReadKind, RefKind, StaticClass, Stmt,
 };
 
 use crate::cx::Cx;
@@ -618,24 +619,84 @@ fn member_guard_shape<'a>(cx: &Cx, call: &'a CallExpr) -> Option<MemberShape<'a>
     }
 }
 
-/// Bind `var` to the existence guard `call` is, when the assignment `$var = call` stores
-/// one ([`Store::guard_vars`]): an existence predicate or a member guard whose arguments are
-/// literals or bare variables other than `var` itself. Called after the assignment's own
-/// rebind of `var`, which dropped any earlier guard.
-pub(crate) fn remember_guard_var(cx: &Cx, store: &mut Store, var: &str, call: &CallExpr) {
-    if existence_predicate(cx, call).is_none() && member_guard_shape(cx, call).is_none() {
+/// Bind `var` to the existence guard the assignment `$var = value` stores, when it stores
+/// one ([`Store::guard_vars`]): the guard call, its negation, or a conjunction with a guard
+/// among its operands (`!G`, `G && x`). A disjunction, a comparison or any other shape stores
+/// nothing: `$v = G || H` truthy says neither. The guard's arguments are literals or bare
+/// variables other than `var`. Called after the assignment's own rebind of `var`, which
+/// dropped any earlier guard, and never in a poisoned scope, where a reference, `extract`,
+/// `global` or by-reference capture may rewrite `var` unseen.
+pub(crate) fn remember_guard_var(
+    w: &WalkCx,
+    stmt: &Stmt,
+    store: &mut Store,
+    var: &str,
+    value: &ArgValue,
+) {
+    if w.scope.poisoned {
         return;
     }
     let mut deps = Vec::new();
-    for arg in call.args.iter().map(|a| &a.value) {
-        if !guard_arg_deps(arg, &mut deps) {
-            return;
-        }
-    }
-    if deps.iter().any(|d| d == var) || !call.positional_only {
+    let mut guards = 0usize;
+    let Some(cond) = guard_cond_of(w, stmt, value, &mut deps, &mut guards) else { return };
+    if guards == 0 || deps.iter().any(|d| d == var) {
         return;
     }
-    store.guard_vars.insert(var.to_owned(), GuardVar { call: call.clone(), deps });
+    store.guard_vars.insert(var.to_owned(), GuardVar { cond, deps });
+}
+
+/// The condition `value` stores, or `None` for a shape that is neither a guard nor built from
+/// one. A conjunct that is not a guard is kept as an opaque operand: it can only make the
+/// whole false, which a vouch never reads.
+fn guard_cond_of(
+    w: &WalkCx,
+    stmt: &Stmt,
+    value: &ArgValue,
+    deps: &mut Vec<String>,
+    guards: &mut usize,
+) -> Option<CondExpr> {
+    match value {
+        ArgValue::Call(name, args) => {
+            let call = call_with_arguments(w, stmt, name, args)?;
+            if existence_predicate(w.cx, call).is_none() && member_guard_shape(w.cx, call).is_none()
+                || !call.positional_only
+                || !call.args.iter().all(|a| guard_arg_deps(&a.value, deps))
+            {
+                return None;
+            }
+            *guards += 1;
+            Some(CondExpr::Call { call: Box::new(call.clone()), reads: Vec::new(), writes: Vec::new() })
+        }
+        ArgValue::Not(inner) => {
+            guard_cond_of(w, stmt, inner, deps, guards).map(|c| CondExpr::Not(Box::new(c)))
+        }
+        ArgValue::Logical { op: LogicalOp::And, lhs, rhs, .. } => {
+            let opaque = || CondExpr::Opaque { reads: Vec::new(), writes: Vec::new() };
+            let l = guard_cond_of(w, stmt, lhs, deps, guards).unwrap_or_else(opaque);
+            let r = guard_cond_of(w, stmt, rhs, deps, guards).unwrap_or_else(opaque);
+            Some(CondExpr::And(Box::new(l), Box::new(r), OperandSpan::NONE))
+        }
+        _ => None,
+    }
+}
+
+/// The lowered call of `stmt` named `name` whose arguments are `args`, among the call
+/// positions the statement writes (the value lowering keeps no span for it).
+fn call_with_arguments<'a>(
+    w: &'a WalkCx,
+    stmt: &'a Stmt,
+    name: &str,
+    args: &[ArgValue],
+) -> Option<&'a CallExpr> {
+    stmt.read_positions()
+        .iter()
+        .filter(|p| matches!(p.kind, ReadKind::Call))
+        .filter_map(|p| crate::stmt_calls::call_at(w, stmt, p))
+        .find(|c| {
+            c.callee.as_deref() == Some(name)
+                && c.args.len() == args.len()
+                && c.args.iter().zip(args).all(|(a, b)| a.value == *b)
+        })
 }
 
 /// The variables a guard argument names, or `false` for an argument that is not a literal, a
@@ -653,23 +714,34 @@ fn guard_arg_deps(arg: &ArgValue, deps: &mut Vec<String>) -> bool {
     }
 }
 
-/// `store` with the vouches every guard stored in a variable would give if it held: the view
-/// a position that may run under any of those variables' tests is judged in (ADR-0104). The
-/// statement's own tests are not modeled in an expression, so which variable it tests is not
-/// asked; vouching more only silences.
+/// `store` with the vouches every **undecided** guard stored in a variable would give if it
+/// held, on either side of a test of it: the view a position that may run under any of those
+/// variables' tests is judged in (ADR-0104). The statement's own tests are not modeled in an
+/// expression, so which variable it tests, and at which polarity, is not asked; vouching more
+/// only silences. A decided guard vouches nothing: the arm it kills is a dead extent already,
+/// and the arm it keeps really runs (`$h = !function_exists('f'); $h ? f() : 0`).
 pub(crate) fn with_stored_guard_vouches(
     cx: &Cx,
     store: &Store,
     rebound: &dyn Fn(&str) -> bool,
+    undecided: &mut dyn FnMut(&GuardVar) -> bool,
 ) -> Store {
     let mut out = store.clone();
     for (var, g) in &store.guard_vars {
         // A guard the statement itself may rebind is not the one its tests read.
-        if rebound(var) || g.deps.iter().any(|d| rebound(d)) {
+        if rebound(var) || g.deps.iter().any(|d| rebound(d)) || !undecided(g) {
             continue;
         }
-        for v in existence_vouch(cx, &out, &g.call) {
-            out.vouch(v);
+        for truthy in [true, false] {
+            let mut calls = Vec::new();
+            crate::refine::collect_guard_calls(&g.cond, truthy, &mut calls);
+            for (call, returns_true) in calls {
+                if returns_true {
+                    for v in existence_vouch(cx, &out, call) {
+                        out.vouch(v);
+                    }
+                }
+            }
         }
     }
     out

@@ -194,7 +194,7 @@ pub(crate) fn eval_cond(
             if let CondOperand::Var(v) = op
                 && let Some(g) = store.guard_vars.get(v)
             {
-                let verdict = eval_existence_call(w, folder, store, &g.call);
+                let verdict = eval_cond(w, folder, &g.cond, &HashMap::new(), store, poisoned);
                 if verdict != Certainty::Maybe {
                     return verdict;
                 }

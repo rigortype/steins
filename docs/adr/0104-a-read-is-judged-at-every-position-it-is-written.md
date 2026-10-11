@@ -197,10 +197,11 @@ of peak RSS): PHPUnit 439 MB to 450 MB (+2.5%), Carbon 411 MB to 412 MB
   analyzer fingerprint refuses a generation written by another build, so the
   new field needs no `SCHEMA_VERSION` bump (`steins-db`'s wire notes).
 
-Slice S2 measured the call lookup and the guard regions below: peak RSS on PHPUnit
-(release, strict `--no-php --vendor-diagnostics --no-cache`, median of 5) 455.4 MB to
-464.6 MB, +2.0% (the review measured +2.7%). A first cut that kept a `CallExpr` per nested
-call cost +4% to +7%.
+Slice S2 measured the call lookup, the guard regions and the stored guards on top of S3:
+peak RSS on PHPUnit (release, strict `--no-php --vendor-diagnostics --no-cache`, median of
+5) 488.9 MB to 497.3 MB, +1.7% (the reviews measured +2.7% and +3.0% on other runs of the
+same binaries; the figure moves by about a point between runs). A first cut that kept a
+`CallExpr` per nested call cost +4% to +7%.
 
 ### 2.7 Decisions and known gaps recorded by S2
 
@@ -218,12 +219,19 @@ call cost +4% to +7%.
   guard-region lowering reads `($v = e)` as `e` (it decides dead extents and invalidates
   nothing); a branch condition keeps the opaque write and conjoins the guard
   (`And(Opaque, G)`), so the branch vouches what `G` vouches and is dead where `G` is
-  decided false. A variable assigned an existence call with literal or variable
-  arguments holds the guard in the store (`Store::guard_vars`) until it, or a variable the
-  guard names, is rebound; a bare truthy test of it is the guard for the sweep, the branch
-  walk and the vouch. A bare variable test is therefore a guard region now, which is the
-  trace growth in the figure above. A guard stored in a variable does not reach a
-  closure or arrow-function body in the guarded arm (a base false positive, unchanged).
+  decided false. A variable assigned `G`, `!G` or a conjunction with `G` among its operands
+  (arguments literal or bare variables) holds the guard in the store (`Store::guard_vars`),
+  with its polarity in the stored shape: a truthy test of `$h = !G` is `!G`, so it kills
+  the arm `G` would keep and vouches the other. A disjunction stores nothing. The guard
+  dies when it, or a variable it names, is rebound, at a barrier, and at a join unless every
+  path holds the same guard (compared by shape and call, since the statements differ); it is
+  never stored in a poisoned scope, which is how a reference, `extract`, `global` and a
+  by-reference capture kill it. A bare truthy test of it is the guard for the sweep, the
+  branch walk and the vouch. A bare variable test is therefore a guard region now, which is
+  the trace growth in the figure above. A closure or arrow function is seeded with the
+  guards its creating statement held (a by-value capture snapshots them), through
+  `Cx::guard_seeds`, unless its scope is poisoned. A conditional position is judged with the
+  vouches of the stored guards still undecided; a decided one needs none.
 - **A literal that is not `null` on the left of `??` kills the right**, as `true || b` does.
 
 ## 3. Consequences
