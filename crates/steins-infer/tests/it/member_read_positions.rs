@@ -149,7 +149,16 @@ fn a_conditional_operand_declines_value_families_and_judges_the_others() {
     silent("echo $u ?: $a['nope'];");
     silent("echo $u ? $z->p : 1;");
     silent("echo $u ? $c->nope : 1;");
-    fires("echo $u ? $c->priv : 1;", PROPERTY_INACCESSIBLE_ID);
+    // A test on the receiver decides whether the arm runs (review B1): `isset` on an
+    // inaccessible property is false, so these arms never run in PHP.
+    silent("echo $u ? $c->priv : 1;");
+    silent("echo isset($c->priv) ? $c->priv : 0;");
+    silent("echo isset($c->priv) && $c->priv;");
+    silent("echo !isset($c->priv) || $c->priv;");
+    silent("echo empty($c->priv) ? 0 : $c->priv;");
+    silent("echo $c instanceof A ? $c->priv : 0;");
+    silent("echo is_null($c) ? 0 : $c->priv;");
+    silent("echo isset($c->priv) ? byref($c->priv) : 0;");
     fires("echo $u ? A::NOPE : 1;", CLASS_CONST_UNDEFINED_ID);
     fires("echo $u?->m(A::NOPE);", CLASS_CONST_UNDEFINED_ID);
 }
@@ -185,6 +194,14 @@ fn a_compound_read_judges_the_missing_key_only() {
     // On null the property is an Error of its own, and a private one takes `__set`.
     silent("$z->p .= 'x';");
     silent("$c->priv++;");
+}
+
+#[test]
+fn a_concatenated_defined_guard_folds() {
+    // Review S1: `K::class . '::NOPE'` is the name `defined()` reads.
+    silent("echo defined(A::class . '::NOPE') ? A::NOPE : 0;");
+    silent("if (defined(A::class . '::NOPE')) { echo A::NOPE; }");
+    fires("echo defined(A::class . '::K') ? A::NOPE : 0;", CLASS_CONST_UNDEFINED_ID);
 }
 
 #[test]
