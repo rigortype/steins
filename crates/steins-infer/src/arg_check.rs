@@ -109,34 +109,34 @@ pub(crate) fn implicit_null_accepted(p: &Param, arg: &ArgValue) -> bool {
 /// `tests/it/coercion_witness_grid.rs`.
 ///
 /// ```text
-/// value                    declared                              verdict
-/// ------------------------ ------------------------------------- ------------------------------
-/// int/float/string/bool    scalar and bool-literal members        the coercion table above
-/// int/float/string/bool    class, interface, A&B, (A&B)|C         TypeError: nothing coerces to
-///                                                                 an object, either mode
-/// null                     any native type without `null`         TypeError, either mode — scalar,
-///                          (scalar, class, A&B, (A&B)|C)          class and intersection alike
-/// null                     `?T`, `T|null`                         accept
-/// null                     `T $p = null` (any T)                  accept: the caller's
-///                                                                 [`implicit_null_accepted`]
-/// null                     a builtin's scalar position, coercive  accept (deprecation): the
-///                                                                 caller's internal-null carve-out
-/// array literal            any native type                        TypeError, either mode: no member
-///                                                                 accepts an array (a hint naming
-///                                                                 `array` lowers to no NativeType)
-/// closure                  `Closure`, or a union holding it       accept (is-a Yes)
-/// closure                  other class or interface, A&B, DNF     TypeError: `Closure` is final and
-///                                                                 implements nothing
-/// closure                  int/float/bool members                 TypeError: no object coerces
-/// closure                  a `string` member                      strict TypeError; coercive
-///                                                                 decline (the `__toString` rule
-///                                                                 is not specialised to `Closure`)
-/// `f(...)`, f unresolved   anything                               decline: an Error comes first
-/// `new C`, enum case       any native type                        [`Cx::object_is_type_error`]:
-///                                                                 every member rejects C, under a
-///                                                                 completely enumerated hierarchy
-/// any other value          —                                      decline: the caller resolves a
-///                                                                 variable, call or constant first
+/// value                 declared                              verdict
+/// --------------------- ------------------------------------- ------------------------------
+/// int/float/string/bool scalar and bool-literal members        the coercion table above
+/// int/float/string/bool class, interface, A&B, (A&B)|C         TypeError: nothing coerces to
+///                                                              an object, either mode
+/// null                  any native type without `null`         TypeError, either mode — scalar,
+///                       (scalar, class, A&B, (A&B)|C)          class and intersection alike
+/// null                  `?T`, `T|null`                         accept
+/// null                  `T $p = null` (any T)                  accept: the caller's
+///                                                              [`implicit_null_accepted`]
+/// null                  a builtin's scalar position, coercive  accept (deprecation): the
+///                                                              caller's internal-null carve-out
+/// array literal         any native type                        TypeError, either mode: no member
+///                                                              accepts an array (a hint naming
+///                                                              `array` lowers to no NativeType)
+/// closure               `Closure`, or a union holding it       accept (is-a Yes)
+/// closure               other class or interface, A&B, DNF     TypeError: `Closure` is final and
+///                                                              implements nothing
+/// closure               int/float/bool members                 TypeError: no object coerces
+/// closure               a `string` member                      strict TypeError; coercive
+///                                                              decline (the `__toString` rule
+///                                                              is not specialised to `Closure`)
+/// `f(...)`, f unresolvedanything                               decline: an Error comes first
+/// `new C`, enum case    any native type                        [`Cx::object_is_type_error`]:
+///                                                              every member rejects C, under a
+///                                                              completely enumerated hierarchy
+/// any other value       —                                      decline: the caller resolves a
+///                                                              variable, call or constant first
 /// ```
 ///
 /// Declared kinds that never reach this function, because their hint lowers to no
@@ -242,7 +242,10 @@ pub(crate) fn object_world_guard_blind(in_descent: bool, ty: &NativeType, value:
         && (ty.has_instance()
             || matches!(
                 value,
-                ArgValue::New(..) | ArgValue::EnumCase(..) | ArgValue::Closure(_) | ArgValue::Array(_)
+                ArgValue::New(..)
+                    | ArgValue::EnumCase(..)
+                    | ArgValue::Closure(_)
+                    | ArgValue::Array(_)
             ))
 }
 

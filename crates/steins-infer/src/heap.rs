@@ -8,7 +8,7 @@ use steins_contract::ContractTy;
 use steins_domain::{Certainty, Fact, Val};
 use steins_phpdoc::{Type as PType, TagKind, scan_docblock};
 use steins_phpdoc::ast::TypeKind as PKind;
-use steins_syntax::{ArgValue, NamedArg, Param, PropertyDecl, TypeMember};
+use steins_syntax::{ArgValue, NamedArg, Param, PropertyDecl, TypeMember, Visibility};
 
 use crate::by_value::value_stratum;
 use crate::fold::Folder;
@@ -20,7 +20,7 @@ use crate::arg_check::is_type_error;
 use crate::value_tops::resolve_native_value;
 use crate::coerce::coerce_fact_to_native;
 use crate::contract::{
-    CArg, CVal, GenericCarry, TemplateShadow, accepts, class_key, neutralize_templates,
+    CArg, CVal, GenericCarry, IsA, TemplateShadow, accepts, class_key, neutralize_templates,
     parse_tag_type, template_names_of,
 };
 use crate::cx::Cx;
@@ -899,6 +899,58 @@ fn fact_is_nullish(f: &Fact) -> bool {
 /// `phpdoc.property-mismatch`, `readonly.reassigned`), then record the prop's new
 /// fact in the heap. An unknown receiver (no tracked object) records nothing (but
 /// an object rvalue still escapes — it is now reachable via the property).
+/// Whether a write to `$obj->prop`, on an object whose class is `class`, from code in
+/// `scope` (the enclosing class, `None` at function or file scope), can land anywhere
+/// but the typed slot `class` declares — so neither property-mismatch id may judge it
+/// (the #1060 review; every row run on PHP 8.5.11):
+///
+/// ```text
+/// declaration found in the chain      written from                lands in
+/// ----------------------------------- --------------------------- -------------------------------
+/// public                              anywhere                    the slot (judged)
+/// private, declared by D              D's own scope               the slot (judged)
+/// private, declared by D              any other scope             a dynamic property of the
+///                                                                 object (deprecated), or an
+///                                                                 Error from outside: declined
+/// protected / readonly, declared by D a scope related to D        the slot (judged)
+/// protected / readonly, declared by D an unrelated scope          an Error: declined
+/// any                                 a chain with `__set`, a     `__set` once the slot has been
+///                                     trait or an unresolvable    `unset()`: declined
+///                                     ancestor
+/// ```
+fn write_misses_declared_slot(cx: &Cx, class: &str, prop: &str, scope: Option<&str>) -> bool {
+    let mut cur = class.to_owned();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut owner: Option<(String, &PropertyDecl)> = None;
+    loop {
+        if !seen.insert(cur.to_ascii_lowercase()) {
+            return true;
+        }
+        let Some((file, cd)) = cx.find_class(&cur) else { return true };
+        if cd.uses_traits || cd.methods.iter().any(|m| m.name.eq_ignore_ascii_case("__set")) {
+            return true;
+        }
+        if owner.is_none()
+            && let Some(pd) = cd.properties.iter().find(|p| p.name == prop && !p.is_static)
+        {
+            owner = Some((cd.fqn.clone(), pd));
+        }
+        match &cd.parent {
+            Some(pref) => cur = cx.units[file].tree.resolve_class_fqn(pref),
+            None => break,
+        }
+    }
+    let Some((owner, pd)) = owner else { return false };
+    let same = |s: &str| s.eq_ignore_ascii_case(&owner);
+    match (pd.visibility, pd.readonly) {
+        (Visibility::Public, false) => false,
+        (Visibility::Private, _) => !scope.is_some_and(same),
+        _ => !scope.is_some_and(|s| {
+            same(s) || cx.is_a(s, &owner) == IsA::Yes || cx.is_a(&owner, s) == IsA::Yes
+        }),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 #[expect(clippy::too_many_lines, reason = "predates the #778 ratchet; split when next reworked")]
 pub(crate) fn apply_prop_assign(
@@ -969,7 +1021,10 @@ pub(crate) fn apply_prop_assign(
     // asked for separately — which matters now that a constructor's writes leave the
     // walk (ADR-0057's constructor-summary amendment) and could carry an FP-16 fact
     // to the caller.
-    let hooked = pdecl.is_some_and(|pd| pd.hooked) || cx.class_body_hooked(&class, prop);
+    let hooked = pdecl.is_some_and(|pd| pd.hooked) || cx.class_body_hooked(&class, prop)
+        // A write that does not reach the declared slot proves nothing about its type
+        // (the #1060 review): see `write_misses_declared_slot`.
+        || write_misses_declared_slot(cx, &class, prop, w.enclosing_class);
 
     // 1. Native `type.property-mismatch` — a proven literal, or a value written in
     // place that the relation judges whole (an array, a closure, a `new`, an enum
@@ -981,7 +1036,10 @@ pub(crate) fn apply_prop_assign(
         None => resolve_native_value(cx, value, w.enclosing_class).filter(|v| {
             matches!(
                 v,
-                ArgValue::Array(_) | ArgValue::Closure(_) | ArgValue::New(..) | ArgValue::EnumCase(..)
+                ArgValue::Array(_)
+                    | ArgValue::Closure(_)
+                    | ArgValue::New(..)
+                    | ArgValue::EnumCase(..)
             )
         }),
     };
