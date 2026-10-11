@@ -1504,6 +1504,27 @@ fn lane_claim(store: &Store, name: &str) -> Option<(Fact, Stratum)> {
     Some((fact, stratum))
 }
 
+/// The bindings a join keeps — a name every branch binds to the same id — and the
+/// ids a dropped binding named. A name the branches bind to different objects (or
+/// one leaves unbound) still holds one of them after the merge, as a name the store
+/// no longer resolves, so each object a dropped name held escapes (issue #1048,
+/// [`crate::heap_alias`]).
+fn join_refs(first: &Store, rest: &[&Store]) -> (HashMap<String, AllocId>, HashSet<AllocId>) {
+    let mut refs: HashMap<String, AllocId> = HashMap::new();
+    for (var, id) in &first.refs {
+        if rest.iter().all(|s| s.refs.get(var) == Some(id)) {
+            refs.insert(var.clone(), *id);
+        }
+    }
+    let dropped = std::iter::once(first)
+        .chain(rest.iter().copied())
+        .flat_map(|s| s.refs.iter())
+        .filter(|(var, id)| refs.get(*var) != Some(*id))
+        .map(|(_, id)| *id)
+        .collect();
+    (refs, dropped)
+}
+
 /// Join the heap stores of several fall-through branches (ADR-0036). A variable's
 /// ObjRef survives only when every branch binds it to the SAME allocation id (a
 /// pre-branch object keeps its id across the clones; a per-branch `new`/`clone`
@@ -1512,21 +1533,7 @@ fn lane_claim(store: &Store, name: &str) -> Option<(Fact, Stratum)> {
 /// unions `escaped` (escaped anywhere → escaped), and intersects `ro_written` (a
 /// readonly write counts only when proven on every joined path).
 pub(crate) fn join_stores(first: &Store, rest: &[&Store]) -> Store {
-    let mut refs: HashMap<String, AllocId> = HashMap::new();
-    for (var, id) in &first.refs {
-        if rest.iter().all(|s| s.refs.get(var) == Some(id)) {
-            refs.insert(var.clone(), *id);
-        }
-    }
-    // A name the branches bind to different objects (or one leaves unbound) still
-    // holds one of them after the merge, as a name the store no longer resolves —
-    // so each object a dropped name held escapes (issue #1048, [`crate::heap_alias`]).
-    let dropped: HashSet<AllocId> = std::iter::once(first)
-        .chain(rest.iter().copied())
-        .flat_map(|s| s.refs.iter())
-        .filter(|(var, id)| refs.get(*var) != Some(*id))
-        .map(|(_, id)| *id)
-        .collect();
+    let (refs, dropped) = join_refs(first, rest);
     let mut heap: HashMap<AllocId, HeapObj> = HashMap::new();
     // Join every id that survives via a ref (and any id present in all branches).
     let live_ids: HashSet<AllocId> = refs.values().copied().collect();
