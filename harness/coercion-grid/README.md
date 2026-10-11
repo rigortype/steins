@@ -71,19 +71,14 @@ php gen_grid.php strict > /tmp/grid-strict.php
 steins check --profile strict /tmp/grid-strict.php
 ```
 
-## The two divergences, both silences
+## No divergences
 
-63 of the 72 cells agree per mode. The nine that do not are all Steins staying
-silent where PHP raises, never the other direction, and both classes are
-deliberate:
-
-1. **The whole `array` row** (7 cells per mode, every non-`array` parameter).
-   `is_type_error` answers `false` for an `ArgValue::Array` by construction:
-   an array argument's mismatch is the phpdoc contract relation's to report, not
-   the native check's. Recorded in the divergence registry.
-2. **`null` into a class-typed parameter** (1 cell per mode). The native check
-   stays silent on `null` against an object-bearing type, which is what keeps
-   the implicitly-nullable `f(\DateTime $d = null)` idiom from convicting.
-
-The test encodes both as a named exception list rather than as a weaker
-assertion, so a *new* divergence — in either direction — fails it.
+All 72 cells agree per mode, and all 27 internal cells. Until ADR-0043's
+2026-10-11 amendment (issues #951, #1051) nine userland cells per mode and three
+internal ones were Steins staying silent where PHP raises: the whole `array` row
+(`is_type_error` answered `false` for an array argument) and `null` into a
+class-typed parameter (the native check was silent on `null` against an
+object-bearing type). The amendment judges both — an array is rejected by every
+type the native relation represents, and `null` by every non-nullable one, with
+the `= null` default still accepted through `implicit_null_accepted` — so both
+tests now assert that no cell diverges, in either direction.

@@ -467,13 +467,6 @@ fn steins_errors(mode: &str, function: &str, literal: &str) -> bool {
     ds.iter().any(|d| d.id == ID)
 }
 
-/// The cells PHP rejects and Steins deliberately does not — the same `array` row
-/// the userland grid carries (`is_type_error` answers `false` for an array by
-/// construction; the phpdoc contract relation owns that mismatch).
-fn is_known_divergence(class: &str) -> bool {
-    class == "array"
-}
-
 fn agrees(mode: &str) {
     let mut divergent = Vec::new();
     for c in internal_grid(mode) {
@@ -487,10 +480,10 @@ fn agrees(mode: &str) {
              never an admissible divergence",
             c.function, c.literal
         );
-        assert!(is_known_divergence(&c.class), "new divergence in {mode} mode: {}/{}", c.function, c.class);
         divergent.push(format!("{}/{}", c.function, c.class));
     }
-    assert_eq!(divergent.len(), 3, "the known silence is one array cell per function: {divergent:?}");
+    // The `array` row closed with ADR-0043's 2026-10-11 amendment: every cell agrees.
+    assert!(divergent.is_empty(), "{mode}: Steins is silent where PHP raises: {divergent:?}");
 }
 
 #[test]

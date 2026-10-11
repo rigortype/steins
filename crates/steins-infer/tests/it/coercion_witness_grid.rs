@@ -12,8 +12,9 @@
 //! PHP's coercion behaviour (see the harness README for why `bool` and `string`
 //! each need two).
 //!
-//! The two known divergences are named exceptions rather than a weakened
-//! assertion, so a new one in either direction fails this test.
+//! Every cell agrees. The two divergences this file used to name — the `array` row
+//! and `null` into a class-typed parameter — closed with ADR-0043's 2026-10-11
+//! amendment, so any divergence now, in either direction, fails this test.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -31,18 +32,6 @@ struct Cell {
     literal: String,
     /// PHP's answer: `true` when the call raised a `TypeError`.
     php_errors: bool,
-}
-
-/// The cells PHP rejects and Steins deliberately does not, as
-/// `(param, value-class)` pairs. Both are silence-direction and documented in
-/// `harness/coercion-grid/README.md`:
-///
-/// * every `array` cell — `is_type_error` answers `false` for an array argument
-///   by construction (the phpdoc contract relation owns that mismatch);
-/// * `null` into a class-typed parameter — the native check stays silent there,
-///   which is what keeps `f(\DateTime $d = null)` from convicting.
-fn is_known_divergence(param: &str, class: &str) -> bool {
-    class == "array" || (param == "DateTime" && class == "null")
 }
 
 fn grid(mode: &str) -> Vec<Cell> {
@@ -110,22 +99,14 @@ fn agrees(mode: &str) -> (usize, HashSet<String>) {
 fn the_strict_grid_agrees_with_php_cell_for_cell() {
     let (n, divergent) = agrees("strict");
     assert_eq!(n, 72);
-    for d in &divergent {
-        let (param, class) = d.split_once('/').expect("formatted above");
-        assert!(is_known_divergence(param, class), "new divergence in strict mode: {d}");
-    }
-    assert_eq!(divergent.len(), 9, "the known silences are 7 array cells + 1 class/null: {divergent:?}");
+    assert!(divergent.is_empty(), "strict: Steins is silent where PHP raises: {divergent:?}");
 }
 
 #[test]
 fn the_coercive_grid_agrees_with_php_cell_for_cell() {
     let (n, divergent) = agrees("coercive");
     assert_eq!(n, 72);
-    for d in &divergent {
-        let (param, class) = d.split_once('/').expect("formatted above");
-        assert!(is_known_divergence(param, class), "new divergence in coercive mode: {d}");
-    }
-    assert_eq!(divergent.len(), 9, "the known silences are 7 array cells + 1 class/null: {divergent:?}");
+    assert!(divergent.is_empty(), "coercive: Steins is silent where PHP raises: {divergent:?}");
 }
 
 #[test]

@@ -254,13 +254,19 @@ f(new B());";
 }
 
 #[test]
-fn null_vs_object_type_silent() {
-    // Out of scope this stage; sidesteps has_null_default implicit-nullable interplay.
+fn null_vs_object_type_fires_unless_the_default_is_null() {
+    // ADR-0043's 2026-10-11 amendment: `null` into a non-nullable class type is a
+    // TypeError in both modes; the `= null` default still widens the parameter.
     let src = "<?php declare(strict_types=1);
 final class A {}
 function f(A $v): void {}
 f(null);";
-    assert_eq!(n(src), 0, "null-vs-object stays silent");
+    assert_eq!(ids(src), vec!["type.argument-mismatch"], "null-vs-object fires");
+    let src = "<?php declare(strict_types=1);
+final class A {}
+function f(A $v = null): void {}
+f(null);";
+    assert_eq!(n(src), 0, "an implicitly nullable class parameter accepts null");
 }
 
 // 7. Return path.
