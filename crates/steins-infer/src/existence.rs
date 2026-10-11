@@ -146,16 +146,13 @@ pub(crate) fn eval_existence_call(
         if !call.positional_only || call.args.len() != 1 {
             return Certainty::Maybe;
         }
-        let ArgValue::Str(name) = &call.args[0].value else {
-            return Certainty::Maybe;
-        };
-        let Some(name) = name.as_str() else {
+        let Some(name) = defined_name(w.cx, &call.args[0].value) else {
             return Certainty::Maybe;
         };
         if name.contains("::") {
-            return class_const::class_const_defined_verdict(w, folder, name);
+            return class_const::class_const_defined_verdict(w, folder, &name);
         }
-        constant_defined_verdict(w.cx, folder, name)
+        constant_defined_verdict(w.cx, folder, &name)
     // end global constants (ADR-0078, issue #198)
     } else if pred == "extension_loaded" {
         if !call.positional_only || call.args.len() != 1 {
@@ -337,6 +334,23 @@ fn function_exists_verdict(cx: &Cx, folder: &mut dyn Folder, name: &str) -> Cert
 ///
 /// `name` is case-sensitive on its final segment; [`steins_syntax::normalize_const_fqn`]
 /// decides which half folds case.
+/// The name a `defined()` argument spells: a string literal, or a concatenation of
+/// string literals and `X::class` fetches of a named class (`defined(K::class .
+/// '::NOPE')`). `X::class` is the class's fully qualified name without the leading
+/// `\`, which is how `defined()` reads a name. `None` for anything else.
+fn defined_name(cx: &Cx, arg: &ArgValue) -> Option<String> {
+    match arg {
+        ArgValue::Str(s) => s.as_str().map(str::to_owned),
+        ArgValue::ClassConst(steins_syntax::StaticClass::Named(r), name)
+            if name.eq_ignore_ascii_case("class") =>
+        {
+            Some(cx.class_fqn(r).trim_start_matches('\\').to_owned())
+        }
+        ArgValue::Concat(l, r) => Some(defined_name(cx, l)? + &defined_name(cx, r)?),
+        _ => None,
+    }
+}
+
 fn constant_defined_verdict(cx: &Cx, folder: &mut dyn Folder, name: &str) -> Certainty {
     let key = steins_syntax::normalize_const_fqn(name);
     if cx.index.declares_constant(&key) {
