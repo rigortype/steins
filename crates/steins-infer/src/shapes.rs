@@ -960,6 +960,8 @@ fn write_is_frame_private(w: &WalkCx, base: &str) -> bool {
 ///
 /// [`closed_handle_verdict`]: crate::arg_check
 fn open_offset_barrier(w: &WalkCx, base: &str, env: &mut HashMap<String, Known>, store: &mut Store) {
+    // Both legs clear the heap; a loop around this write reads that (issue #1048).
+    w.note_heap_sweep();
     if !write_is_frame_private(w, base) || offset_write_may_run_userland(base, env) {
         env.clear();
         store.clear();

@@ -106,7 +106,7 @@ pub(crate) fn walk_if(
     // its lane survival stays with the guard machinery below.
     let guard_resources =
         resource_call_effects(w.cx, folder, poisoned, &guard_calls, None, store);
-    escape_and_sweep_calls(w, &guard_calls, store, &[]);
+    escape_and_sweep_calls(w, &guard_calls, env, store, &[]);
     // The pattern-refusal check at guard position (ADR-0078 / issue #189):
     // `if (preg_match('/…/', $s))` is the idiom the id is about, and a guard
     // condition is not a `checkable_calls` position. An `elseif` chain recurses
@@ -155,6 +155,7 @@ pub(crate) fn walk_if(
         env.clear();
         store.clear();
         restore.clear();
+        w.note_heap_sweep();
     }
 
     // 3. Walk the live branches on cloned envs, collecting those that fall through.

@@ -1067,6 +1067,17 @@ impl Store {
         self.escape_resource(var);
     }
 
+    /// Forget one property fact of the object `var` refers to — a write this walk
+    /// cannot evaluate landed on that slot (a by-reference argument, issue #1048).
+    /// A no-op where `var` refers to no object.
+    pub(crate) fn forget_prop(&mut self, var: &str, prop: &str) {
+        if let Some(id) = self.refs.get(var).copied()
+            && let Some(o) = self.heap.get_mut(&id)
+        {
+            o.props.remove(prop);
+        }
+    }
+
     /// Sweep the `$this` object's non-readonly props and value carries (ADR-0057 C5) —
     /// what a call running with the same `$this` may have written behind this walk's
     /// back. A no-op where `$this` is unbound.
@@ -1507,6 +1518,15 @@ pub(crate) fn join_stores(first: &Store, rest: &[&Store]) -> Store {
             refs.insert(var.clone(), *id);
         }
     }
+    // A name the branches bind to different objects (or one leaves unbound) still
+    // holds one of them after the merge, as a name the store no longer resolves —
+    // so each object a dropped name held escapes (issue #1048, [`crate::heap_alias`]).
+    let dropped: HashSet<AllocId> = std::iter::once(first)
+        .chain(rest.iter().copied())
+        .flat_map(|s| s.refs.iter())
+        .filter(|(var, id)| refs.get(*var) != Some(*id))
+        .map(|(_, id)| *id)
+        .collect();
     let mut heap: HashMap<AllocId, HeapObj> = HashMap::new();
     // Join every id that survives via a ref (and any id present in all branches).
     let live_ids: HashSet<AllocId> = refs.values().copied().collect();
@@ -1545,7 +1565,8 @@ pub(crate) fn join_stores(first: &Store, rest: &[&Store]) -> Store {
             .filter(|c| others.iter().all(|o| o.targs.contains(c)))
             .cloned()
             .collect();
-        joined.escaped = o0.escaped || others.iter().any(|o| o.escaped);
+        joined.escaped =
+            o0.escaped || others.iter().any(|o| o.escaped) || dropped.contains(&id);
         // ro_written: written on EVERY joined path.
         joined.ro_written = o0
             .ro_written

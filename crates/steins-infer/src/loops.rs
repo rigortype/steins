@@ -49,7 +49,9 @@ pub(crate) fn walk_loop(
             loop_entry_forget(writes, reads, &[], *poisons, &mut benv, &mut bstore);
             loop_fallthrough_forget(w, writes, reads, *poisons, *may_return, env, store);
             apply_loop_exit_negation(w, folder, cond, *break_free, env, store);
+            let swept = w.heap_sweeps.get();
             let verdict = walk_while_body(w, folder, cond, body, benv, bstore, descent, facts, out);
+            sweep_after_body(w, swept, store);
             loop_flow(*break_free, verdict)
         }
         // A structured `for` (issue #650). The `while` arm above plus its two
@@ -72,12 +74,15 @@ pub(crate) fn walk_loop(
         } => {
             let mut benv = env.clone();
             let mut bstore = store.clone();
+            // Read before `init`: it runs on every path, into the body's env only.
+            let swept = w.heap_sweeps.get();
             let _ =
                 walk_trace(w, folder, init, &mut benv, &mut bstore, descent, facts, guarded, out);
             loop_entry_forget(writes, reads, carried, *poisons, &mut benv, &mut bstore);
             loop_fallthrough_forget(w, writes, reads, *poisons, *may_return, env, store);
             apply_loop_exit_negation(w, folder, cond, *break_free, env, store);
             let verdict = walk_while_body(w, folder, cond, body, benv, bstore, descent, facts, out);
+            sweep_after_body(w, swept, store);
             loop_flow(*break_free, verdict)
         }
         // A structured `foreach` (issues #650 and #652): the same entry env, with
@@ -98,6 +103,14 @@ pub(crate) fn walk_loop(
             poisons,
             may_return,
         } => {
+            // An object iterated over may hand itself to the value variable (an
+            // iterator yielding `$this`), a name the store does not bind (issue
+            // #1048).
+            if let Some(subject) = subject.as_deref()
+                && store.is_object(subject)
+            {
+                store.mark_escaped(subject);
+            }
             let mut benv = env.clone();
             let mut bstore = store.clone();
             loop_entry_forget(writes, reads, &[], *poisons, &mut benv, &mut bstore);
@@ -112,7 +125,9 @@ pub(crate) fn walk_loop(
                 &mut bstore,
             );
             loop_fallthrough_forget(w, writes, reads, *poisons, *may_return, env, store);
+            let swept = w.heap_sweeps.get();
             let _ = walk_loop_body(w, folder, body, benv, bstore, descent, facts, out);
+            sweep_after_body(w, swept, store);
             Flow::FellThrough
         }
         // A structured `do`-`while` (issues #650 and #651): the condition
@@ -139,7 +154,9 @@ pub(crate) fn walk_loop(
             loop_entry_forget(writes, reads, &[], *poisons, &mut benv, &mut bstore);
             loop_fallthrough_forget(w, writes, reads, *poisons, *may_return, env, store);
             apply_loop_exit_negation(w, folder, cond, *break_free, env, store);
+            let swept = w.heap_sweeps.get();
             let body_flow = walk_loop_body(w, folder, body, benv, bstore, descent, facts, out);
+            sweep_after_body(w, swept, store);
             do_while_flow(*break_free && *continue_free, body_flow)
         }
         _ => unreachable!("walk_trace hands walk_loop the four loop kinds only"),
@@ -184,6 +201,25 @@ fn do_while_flow(jumps_stay_inside: bool, body_flow: Flow) -> Flow {
     }
 }
 
+/// What a loop body's walk did to the escaped heap, applied to the fall-through
+/// (issue #1048). The fall-through is built from the write sets before the body is
+/// walked and nothing the body computes reaches it, so a sweep the body made — an
+/// unknown call, a write through an unresolved name, a barrier, on any path
+/// including one that `break`s — would otherwise leave the escaped objects' facts
+/// standing after the loop. `swept` is [`WalkCx::heap_sweeps`] read before the body
+/// walk; a change means some statement of the body swept, and the fall-through
+/// takes the same sweep, `$this` included where it is the unescaped one the call
+/// sweep also clears.
+fn sweep_after_body(w: &WalkCx, swept: u64, store: &mut Store) {
+    if w.heap_sweeps.get() == swept {
+        return;
+    }
+    store.sweep_escaped();
+    if store.obj_of("this").is_some_and(|o| !o.escaped) {
+        store.sweep_this();
+    }
+}
+
 /// The env a **structured loop's fall-through** starts in (issue #651) — the same
 /// two-set question `forget_construct_sets` answers for an `Opaque`, with the
 /// `reads` half decided the other way.
@@ -225,7 +261,9 @@ fn loop_fallthrough_forget(
             // The handle a written name held may have been closed by the body
             // through THAT name, and its entry outlives the name for every alias
             // (ADR-0097 §2.4) — the resource half of the read names' sweep below.
-            store.escape_resource(v);
+            // An object it held escapes the same way: the name still holds it on
+            // a zero-trip or last-write-elsewhere path, unresolved (issue #1048).
+            store.mark_escaped(v);
             env.remove(v);
             store.unbind(v);
         }
@@ -285,8 +323,10 @@ pub(crate) fn loop_entry_forget(
             continue;
         }
         // Iteration 2 may see a handle iteration 1 closed through this name, and
-        // an alias outside `writes` still refers to the entry (ADR-0097 §2.4).
-        store.escape_resource(v);
+        // an alias outside `writes` still refers to the entry (ADR-0097 §2.4). An
+        // object it held escapes: iteration 1 reaches the body still holding it
+        // through a name the entry no longer resolves (issue #1048).
+        store.mark_escaped(v);
         env.remove(v);
         store.unbind(v);
     }
