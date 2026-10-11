@@ -211,6 +211,25 @@ fn a_read_whose_base_the_statement_may_rebind_declines() {
 }
 
 #[test]
+fn a_top_level_userland_call_may_rebind_every_global() {
+    // The top-level frame's locals are the globals: `g()` runs before the read and
+    // creates the key (silent in PHP).
+    let src = "<?php
+function g() { global $a; $a['nope'] = 1; return ''; }
+$a = ['k' => 1];
+echo strlen('x') . $a['nope'];
+echo g() . $a['nope'];
+";
+    let tree = SourceTree::parse(src);
+    let lines: Vec<u32> = check_with(&tree, &[], "test.php", &mut Boot)
+        .into_iter()
+        .filter(|d| d.id == OFFSET_MISSING_ID)
+        .map(|d| d.line)
+        .collect();
+    assert_eq!(lines, [4], "only the engine builtin keeps the binding");
+}
+
+#[test]
 fn a_key_variable_resolves_through_the_env() {
     fires("$k = 'nope'; echo $a[$k];", OFFSET_MISSING_ID);
     silent("$k = 'k'; echo $a[$k];");
