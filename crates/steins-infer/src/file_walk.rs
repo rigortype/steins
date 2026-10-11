@@ -326,7 +326,7 @@ fn file_passes(
     // of a symbol) and dam-free (the immunity asymmetry — no runtime construct
     // adds a method to a declared class), so it runs beside the pass above
     // without borrowing its ladder. -------------------------------------------
-    check_declaration_fatals(cx, dead_spans, out);
+    check_declaration_fatals(cx, folder, dead_spans, out);
 
     // --- Docblock hygiene (ADR-0078 / issue #186): the mechanics-layer
     // anti-rot family. Textual premises only — no env, no folder, no dead-region
