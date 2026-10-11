@@ -775,35 +775,27 @@ pub(crate) struct PropertyWrites {
 }
 
 impl PropertyWrites {
-    /// Record a position that can create a property: the target of an assignment, `++`/`--`
-    /// or `foreach` binding, an argument, a `&` operand, or a destructure pattern (issue
-    /// #1050, S0b). The position kinds, each witnessed on PHP 8.5 against a class that
-    /// declares no `p` and allows dynamic properties:
+    /// Record a position that writes a property: the target of an assignment, `++`/`--` or
+    /// `foreach` binding, a `&` operand, or a destructure pattern (issue #1050, S0b). Each
+    /// position was witnessed on PHP 8.5 against a class that declares no `p` and allows
+    /// dynamic properties. "Names" is a named write (`$o->p`); "dynamic" is the project-wide
+    /// [`Self::dynamic`] bit that a computed selector (`$o->$k`) sets.
     ///
-    /// | position                                   | creates `p`?                       |
-    /// | ------------------------------------------ | ---------------------------------- |
-    /// | `$o->p = v`, `$o->p op= v`, `$o->p++`      | yes                                |
-    /// | `$o->p[k] = v`, `$o->p[] = v`              | yes (the base is written to)       |
-    /// | `foreach ($xs as $o->p)` and `$k => $o->p` | yes                                |
-    /// | `[$o->p] = v`, `['k' => $o->p] = v`, `list(..)`, nested | yes                   |
-    /// | `$a = &$o->p`, `[&$o->p]`, `foreach (.. as &$o->p)` | yes (the `&` binds it) |
-    /// | `f($o->p)`, `$m->f($o->p)`, `new C($o->p)`, `$f($o->p)` | yes when the callee takes it by reference; the callee is unknown here, so yes |
-    /// | `f($o->p[k])`                              | the same (the by-ref base is created) |
-    /// | `$o->p` read, `isset`/`empty`/`unset($o->p)`, `$o->p ?? v` | no                |
-    /// | `f($o->p + 1)`, `f(g($o->p))` (the fetch is an operand, not the argument) | no here; the inner call is its own argument position |
+    /// | position                                    | creates `p` | names | computed selector |
+    /// | ------------------------------------------- | ----------- | ----- | ----------------- |
+    /// | `$o->p = v`, `op=`, `++`/`--`               | yes         | yes   | dynamic           |
+    /// | `$o->p[k] = v`, `$o->p[] = v`               | yes         | yes   | dynamic           |
+    /// | `foreach (.. as $o->p)`, `$k => $o->p`      | yes         | yes   | dynamic           |
+    /// | `[$o->p] = v`, keyed, nested, `list(..)`    | yes         | yes   | dynamic           |
+    /// | `&$o->p` anywhere (`$a = &..`, `[&..]`, `foreach (.. as &..)`) | yes | yes | dynamic  |
+    /// | `$o->p` read, `isset`/`empty`/`unset`, `??` | no          | no    | no                |
+    /// | an array literal `[$o->p]` outside a pattern | no         | no    | no                |
     ///
-    /// A `$o->p`/`$this->p`/`$a->b->c` target contributes its last name; a computed selector
-    /// sets [`Self::dynamic`]; anything else contributes nothing.
+    /// Argument positions are [`Self::push_argument`]. A `$o->p`/`$this->p`/`$a->b->c`
+    /// target contributes its last name; anything else contributes nothing.
     pub(crate) fn push_lvalue(&mut self, lvalue: &Expression<'_>) {
         match lvalue.unparenthesized() {
-            Expression::Access(Access::Property(pa)) => match method_name_of(&pa.property) {
-                Some(name) => {
-                    if !self.names.contains(&name) {
-                        self.names.push(name);
-                    }
-                }
-                None => self.dynamic = true,
-            },
+            Expression::Access(Access::Property(pa)) => self.push_property(pa, true),
             Expression::ArrayAccess(a) => self.push_lvalue(a.array),
             Expression::ArrayAppend(a) => self.push_lvalue(a.array),
             Expression::UnaryPrefix(u) if u.operator.is_reference() => self.push_lvalue(u.operand),
@@ -811,6 +803,34 @@ impl PropertyWrites {
             Expression::LegacyArray(a) => self.push_pattern(a.elements.iter()),
             Expression::List(l) => self.push_pattern(l.elements.iter()),
             _ => {}
+        }
+    }
+
+    /// Record a call argument. The callee's by-reference parameters are unknown here, so a
+    /// property fetch that IS the argument (`f($o->p)`, `f($o->p[k])`) is a possible write
+    /// of the NAMED property (witnessed: `byref`, `settype`, `preg_match` create it). It
+    /// never sets [`Self::dynamic`]: `strlen($o->$k)` is overwhelmingly a read, and one such
+    /// call would otherwise take `property.undefined` off the whole project. Residual,
+    /// left for S5's by-reference oracle: a by-ref callee given a computed name creates an
+    /// unknown name. An array literal argument is not a pattern (`f([$o->p])` creates
+    /// nothing); only its `&` elements write, and the walk reaches those on their own.
+    pub(crate) fn push_argument(&mut self, arg: &Expression<'_>) {
+        match arg.unparenthesized() {
+            Expression::Access(Access::Property(pa)) => self.push_property(pa, false),
+            Expression::ArrayAccess(a) => self.push_argument(a.array),
+            Expression::ArrayAppend(a) => self.push_argument(a.array),
+            _ => {}
+        }
+    }
+
+    fn push_property(&mut self, pa: &mago_syntax::cst::PropertyAccess<'_>, computed_is_dynamic: bool) {
+        match method_name_of(&pa.property) {
+            Some(name) => {
+                if !self.names.contains(&name) {
+                    self.names.push(name);
+                }
+            }
+            None => self.dynamic |= computed_is_dynamic,
         }
     }
 
