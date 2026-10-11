@@ -3,8 +3,9 @@
 //! A call's argument was resolved once by each road that reads it — the fold,
 //! the transfer rung and its fact reads — and each of those resolved the
 //! argument's own argument the same way, so `strlen(strlen(…))` cost `3^n` and
-//! a project call `2^n`. In value position, a method call or `new` also lowered
-//! its argument list twice per level. At depth 200 either is out of reach, so
+//! a project call `2^n`; an array literal between the calls added the fact
+//! seam's element reads. In value position, a method call or `new` also lowered
+//! its argument list twice per level. At depth 200 any of these is out of reach, so
 //! each test runs the check on its own thread and fails on a deadline instead of
 //! hanging the suite.
 
@@ -69,6 +70,23 @@ fn a_method_call_nested_200_deep_walks_in_polynomial_time() {
         nest("$o->m(", "1", ")")
     );
     assert_eq!(dumps_within_deadline(src), vec!["4: 1"]);
+}
+
+#[test]
+fn a_builtin_call_nested_200_deep_through_array_arguments_walks_in_polynomial_time() {
+    // The fact seam reads each array literal element by element; every element
+    // read resolved the call inside it again.
+    let src = format!(
+        "<?php\n$x = 'a';\n\\PHPStan\\dumpType({});\n",
+        nest("implode(',', [", "$x", "])")
+    );
+    assert_eq!(dumps_within_deadline(src), vec!["3: string (asserted)"]);
+}
+
+#[test]
+fn a_count_of_an_array_holding_a_count_nested_200_deep_walks_in_polynomial_time() {
+    let src = format!("<?php\n\\PHPStan\\dumpType(count({}));\n", nest("[count(", "[1]", ")]"));
+    assert_eq!(dumps_within_deadline(src), vec!["2: int<0, max> (asserted)"]);
 }
 
 #[test]
