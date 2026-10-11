@@ -509,6 +509,16 @@ fn a_conditionally_declared_function_name_declines() {
 fn a_function_name_reaching_the_argument_through_a_variable_declines() {
     // Pinned decline: an `is_callable($s)` guard the walk does not model may stand.
     silent_both_modes(&format!("{FOO}function g(): void {{ $s = \"trime\"; foo($s); }}\n"));
+    // The same for a class constant that resolves to the name.
+    silent_both_modes(&format!("{FOO}final class C {{ const CB = 'trime'; }}\nfoo(C::CB);\n"));
+}
+
+#[test]
+fn a_top_is_not_judged_inside_a_binding_descent() {
+    // Pinned decline: a rebound value may sit under a guard the walk does not
+    // model (`is_callable`, `is_array`, `instanceof`), so only the plain pass judges.
+    silent_both_modes(&format!("{FOO}function g($c): void {{ foo($c); }}\ng(42);\n"));
+    silent_both_modes(&format!("{K}function tk(K $k): void {{}}\nfunction g($c): void {{ tk($c); }}\ng(fn () => 1);\n"));
 }
 
 #[test]
