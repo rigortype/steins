@@ -2922,6 +2922,10 @@ pub enum CondOperand {
         /// refinement stale, and `invalidates` alone cannot say which of its names a
         /// write reached and which were only read.
         writes: Vec<String>,
+        /// Every bare variable the operand reads (`get_debug_type($x)`, `$x ?? 1`,
+        /// `$x?->p`) — what a test of it is a test of, so a branch the walk cannot
+        /// decide over a proven `$x` forgets `$x` (ADR-0043's 2026-10-11 amendment).
+        reads: Vec<String>,
     },
 }
 
