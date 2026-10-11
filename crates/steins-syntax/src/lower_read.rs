@@ -31,17 +31,12 @@
 use mago_span::HasSpan;
 use mago_syntax::cst::{
     Access, ArgumentList, ArrayElement, AssignmentOperator, BinaryOperator, Expression, Node,
-    PartialArgument, PartialArgumentList, Statement, StaticItem, UnaryPrefixOperator,
+    PartialArgument, PartialArgumentList, Statement, StaticItem, UnaryPrefixOperator, Variable,
 };
 
-use crate::ast::{CallExpr, Callee, Carrier, NameRef, ReadKind, ReadPosition, Span};
-use crate::lower_expr::{
-    class_const_name, first_class_method_ref, first_class_static_ref, lower_arg_value,
-    lower_call, lower_construct_call, lower_method_call, lower_static_call, prop_fetch_of,
-    trace_static_class,
-};
-use crate::names::name_ref;
-use crate::{children, stack_guard, to_span};
+use crate::ast::{ArgValue, Carrier, Key, Place, ReadKind, ReadPosition, Span};
+use crate::lower_expr::{class_const_name, lower_arg_value, prop_fetch_of, trace_static_class};
+use crate::{bytes_to_string, children, stack_guard, strip_dollar, to_span};
 
 /// The read positions of one statement's **own** expressions, `None` when there are none.
 pub(crate) fn read_positions_of(s: &Statement<'_>) -> Option<Vec<ReadPosition>> {
@@ -96,10 +91,10 @@ impl Ctx {
 
 /// What the **innermost** construct makes of the node being scanned; [`resolve`] folds the
 /// inherited [`Ctx`] in.
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 enum Local {
     Plain,
-    Argument { callee: Option<NameRef>, position: Option<u32> },
+    Argument { call: Option<u32>, position: Option<u32> },
     IssetLike,
     Write,
     CompoundRead,
@@ -109,27 +104,28 @@ impl Local {
     /// What the base of a chain makes of itself when the level above it is `self`: the level
     /// above is fetched for write, so a compound target's base is written, and every other
     /// carrier passes through unchanged.
-    fn for_base(&self) -> Local {
+    fn for_base(self) -> Local {
         match self {
             Local::CompoundRead => Local::Write,
-            other => other.clone(),
+            other => other,
         }
     }
 }
 
-/// The [`Carrier`] of a read under `local` and `ctx`: the weakest claim wins (see [`Carrier`]).
-fn resolve(local: &Local, ctx: Ctx) -> Carrier {
-    match local {
-        Local::Write => Carrier::Write,
+/// The [`Carrier`] of a read under `local` and `ctx`: the weakest claim wins (see
+/// [`Carrier`]). `None` for a read no consumer judges and so is not recorded: a write, and
+/// an `isset`-like read unless `isset_recorded` (a class constant, which throws there).
+fn resolve(local: Local, ctx: Ctx, isset_recorded: bool) -> Option<Carrier> {
+    Some(match local {
+        Local::Write => return None,
+        Local::IssetLike if !isset_recorded => return None,
         Local::IssetLike => Carrier::IssetLike,
         _ if ctx.conditional => Carrier::Conditional,
         _ if ctx.suppressed => Carrier::Suppressed,
         Local::CompoundRead => Carrier::CompoundRead,
-        Local::Argument { callee, position } => {
-            Carrier::Argument { callee: callee.clone(), position: *position }
-        }
+        Local::Argument { call, position } => Carrier::Argument { call, position },
         Local::Plain => Carrier::Plain,
-    }
+    })
 }
 
 /// What a call is made on, as far as its operands go.
@@ -146,12 +142,16 @@ struct Scan {
 }
 
 impl Scan {
-    fn finish(self) -> Option<Vec<ReadPosition>> {
+    fn finish(mut self) -> Option<Vec<ReadPosition>> {
+        self.out.shrink_to_fit();
         (!self.out.is_empty()).then_some(self.out)
     }
 
-    fn push(&mut self, kind: ReadKind, span: Span, carrier: Carrier) {
-        self.out.push(ReadPosition { kind, span, carrier });
+    /// Record a position unless its carrier resolved to `None` (not judged by anyone).
+    fn push(&mut self, kind: ReadKind, span: Span, carrier: Option<Carrier>) {
+        if let Some(carrier) = carrier {
+            self.out.push(ReadPosition { span, carrier, kind });
+        }
     }
 
     fn plain(&mut self, e: &Expression<'_>) {
@@ -165,7 +165,7 @@ impl Scan {
     /// A call is never a target, never silent: only an argument position changes it.
     fn call_local(local: &Local) -> Local {
         match local {
-            Local::Argument { .. } => local.clone(),
+            Local::Argument { .. } => *local,
             _ => Local::Plain,
         }
     }
@@ -236,24 +236,26 @@ impl Scan {
             Expression::ArrayAccess(_)
                 | Expression::Access(Access::Property(_) | Access::NullSafeProperty(_))
         );
-        self.expr(e, ctx, &if chain { local.for_base() } else { Local::Plain });
+        self.expr(e, ctx, &if chain { (*local).for_base() } else { Local::Plain });
     }
 
     fn access(&mut self, node: &Node<'_, '_>, ctx: Ctx, local: &Local) {
         match node {
             Node::ArrayAccess(aa) => {
-                let kind = ReadKind::Offset {
-                    base: Box::new(lower_arg_value(aa.array)),
-                    key: Box::new(lower_arg_value(aa.index)),
-                };
-                self.push(kind, to_span(aa.span()), resolve(local, ctx));
+                // Not recorded when no consumer judges it, so the place is not built either.
+                if let Some(carrier) = resolve(*local, ctx, false) {
+                    let kind = ReadKind::Offset(Box::new((place_of(aa.array), key_of(aa.index))));
+                    self.push(kind, to_span(aa.span()), Some(carrier));
+                }
                 self.base(aa.array, ctx, local);
                 self.expr(aa.index, ctx, &Local::Plain);
             }
             Node::PropertyAccess(pa) => {
-                if let Some((var, prop)) = prop_fetch_of(pa.object, &pa.property) {
+                if let Some(carrier) = resolve(*local, ctx, false)
+                    && let Some(names) = prop_fetch_of(pa.object, &pa.property)
+                {
                     let span = to_span(pa.span());
-                    self.push(ReadKind::Prop { var, prop }, span, resolve(local, ctx));
+                    self.push(ReadKind::Prop(Box::new(names)), span, Some(carrier));
                 }
                 self.base(pa.object, ctx, local);
                 self.descend(&Node::ClassLikeMemberSelector(&pa.property), ctx, &Local::Plain);
@@ -268,7 +270,8 @@ impl Scan {
                     && !name.eq_ignore_ascii_case("class")
                 {
                     let span = to_span(cc.span());
-                    self.push(ReadKind::ClassConst(class, name), span, resolve(local, ctx));
+                    let kind = ReadKind::ClassConst(Box::new((class, name)));
+                    self.push(kind, span, resolve(*local, ctx, true));
                 }
                 self.expr(cc.class, ctx, &Local::Plain);
             }
@@ -277,37 +280,27 @@ impl Scan {
     }
 
     fn call(&mut self, node: &Node<'_, '_>, ctx: Ctx, local: &Local) {
-        let (call, operand, args) = match node {
+        let (span, operand, args) = match node {
             Node::FunctionCall(fc) => {
-                (Some(lower_call(fc)), Operand::Callee(fc.function), Some(&fc.argument_list))
+                (fc.span(), Operand::Callee(fc.function), Some(&fc.argument_list))
             }
             Node::MethodCall(mc) => {
-                let span = to_span(mc.span());
-                let call = lower_method_call(mc.object, &mc.method, &mc.argument_list, span, false);
-                (Some(call), Operand::Member(mc.object, &mc.method), Some(&mc.argument_list))
+                (mc.span(), Operand::Member(mc.object, &mc.method), Some(&mc.argument_list))
             }
             Node::NullSafeMethodCall(mc) => {
-                let span = to_span(mc.span());
-                let call = lower_method_call(mc.object, &mc.method, &mc.argument_list, span, true);
-                (Some(call), Operand::Member(mc.object, &mc.method), Some(&mc.argument_list))
+                (mc.span(), Operand::Member(mc.object, &mc.method), Some(&mc.argument_list))
             }
             Node::StaticMethodCall(sc) => {
-                let span = to_span(sc.span());
-                let call = lower_static_call(sc.class, &sc.method, &sc.argument_list, span);
-                (Some(call), Operand::Member(sc.class, &sc.method), Some(&sc.argument_list))
+                (sc.span(), Operand::Member(sc.class, &sc.method), Some(&sc.argument_list))
             }
-            Node::Instantiation(inst) => (
-                lower_construct_call(inst),
-                Operand::Callee(inst.class),
-                inst.argument_list.as_ref(),
-            ),
+            Node::Instantiation(inst) => {
+                (inst.span(), Operand::Callee(inst.class), inst.argument_list.as_ref())
+            }
             _ => return,
         };
-        let callee = call.as_ref().and_then(|c| c.callee_ref.clone());
-        if let Some(call) = call.filter(|c| c.receiver != Callee::Dynamic) {
-            let span = call.span;
-            self.push(ReadKind::Call(call), span, resolve(local, ctx));
-        }
+        // Recorded by span alone and before its operands, so an argument can name it by index.
+        let index = u32::try_from(self.out.len()).ok();
+        self.push(ReadKind::Call, to_span(span), resolve(*local, ctx, false));
         match operand {
             // A plain function or class name is no operand; a computed one is.
             Operand::Callee(Expression::Identifier(_)) => {}
@@ -318,13 +311,13 @@ impl Scan {
             }
         }
         if let Some(list) = args {
-            self.args(list, callee, ctx);
+            self.args(list, index, ctx);
         }
     }
 
     /// Each argument of a call, as an operand of it: the position among the written
     /// arguments while no named argument or spread has come before.
-    fn args(&mut self, list: &ArgumentList<'_>, callee: Option<NameRef>, ctx: Ctx) {
+    fn args(&mut self, list: &ArgumentList<'_>, call: Option<u32>, ctx: Ctx) {
         let mut bound = true;
         for (i, arg) in list.arguments.iter().enumerate() {
             let spread = arg.is_unpacked();
@@ -334,14 +327,14 @@ impl Scan {
             let local = if spread {
                 Local::Plain
             } else {
-                Local::Argument { callee: callee.clone(), position }
+                Local::Argument { call, position }
             };
             self.expr(arg.value(), ctx, &local);
         }
     }
 
     /// The same for the constructor arguments of an anonymous class.
-    fn partial_args(&mut self, list: &PartialArgumentList<'_>, callee: Option<NameRef>, ctx: Ctx) {
+    fn partial_args(&mut self, list: &PartialArgumentList<'_>, call: Option<u32>, ctx: Ctx) {
         let mut bound = true;
         for (i, arg) in list.arguments.iter().enumerate() {
             let (value, spread, named) = match arg {
@@ -354,7 +347,7 @@ impl Scan {
             let local = if spread {
                 Local::Plain
             } else {
-                Local::Argument { callee: callee.clone(), position }
+                Local::Argument { call, position }
             };
             self.expr(value, ctx, &local);
         }
@@ -363,19 +356,17 @@ impl Scan {
     /// `f(...)`, `$o->m(...)`, `C::m(...)`: a reference to the callee, whose existence PHP
     /// checks at creation. A partial application with placeholders is not one.
     fn first_class_callable(&mut self, node: &Node<'_, '_>, ctx: Ctx) {
-        let (call, object, selector) = match node {
+        let (span, object, selector) = match node {
             Node::FunctionPartialApplication(fpa) if fpa.argument_list.is_first_class_callable() => {
-                (named_function_ref(fpa), None, None)
+                (fpa.span(), None, None)
             }
             Node::MethodPartialApplication(mpa) if mpa.argument_list.is_first_class_callable() => {
-                let call = first_class_method_ref(mpa.object, &mpa.method, to_span(mpa.span()));
-                (Some(call), Some(mpa.object), Some(&mpa.method))
+                (mpa.span(), Some(mpa.object), Some(&mpa.method))
             }
             Node::StaticMethodPartialApplication(spa)
                 if spa.argument_list.is_first_class_callable() =>
             {
-                let call = first_class_static_ref(spa.class, &spa.method, to_span(spa.span()));
-                (Some(call), Some(spa.class), Some(&spa.method))
+                (spa.span(), Some(spa.class), Some(&spa.method))
             }
             _ => {
                 self.descend(node, ctx, &Local::Plain);
@@ -388,10 +379,7 @@ impl Scan {
         if let Some(selector) = selector {
             self.descend(&Node::ClassLikeMemberSelector(selector), ctx, &Local::Plain);
         }
-        if let Some(call) = call.filter(|c| c.receiver != Callee::Dynamic) {
-            let span = call.span;
-            self.push(ReadKind::Call(call), span, Carrier::FirstClassCallable);
-        }
+        self.push(ReadKind::Call, to_span(span), Some(Carrier::FirstClassCallable));
     }
 
     /// The binary, ternary and assignment operators: the ones that decide which of their
@@ -480,19 +468,28 @@ impl Scan {
     }
 }
 
-/// The reference a first-class callable of a statically named function makes.
-fn named_function_ref(fpa: &mago_syntax::cst::FunctionPartialApplication<'_>) -> Option<CallExpr> {
-    let Expression::Identifier(id) = fpa.function else { return None };
-    let name = crate::bytes_to_string(id.last_segment());
-    Some(CallExpr {
-        callee: Some(name.clone()),
-        callee_ref: Some(name_ref(id)),
-        receiver: Callee::Function(name),
-        args: Vec::new(),
-        named_args: Vec::new(),
-        has_spread: false,
-        positional_only: false,
-        span: to_span(fpa.span()),
-        arg_conds: Vec::new(),
-    })
+/// The place an offset read's base names: a variable, or a literal-keyed offset of one.
+fn place_of(base: &Expression<'_>) -> Place {
+    match base.unparenthesized() {
+        Expression::Variable(Variable::Direct(dv)) => {
+            Place::Var(strip_dollar(bytes_to_string(dv.name)))
+        }
+        Expression::ArrayAccess(aa) => {
+            Place::Index(Box::new((place_of(aa.array), key_of(aa.index))))
+        }
+        _ => Place::Other,
+    }
 }
+
+/// The key of an offset read when it is an integer or string literal (a signed one included).
+fn key_of(key: &Expression<'_>) -> Key {
+    match key.unparenthesized() {
+        Expression::Literal(_) | Expression::UnaryPrefix(_) => match lower_arg_value(key) {
+            ArgValue::Int(i) => Key::Int(i),
+            ArgValue::Str(s) => Key::Str(s),
+            _ => Key::Other,
+        },
+        _ => Key::Other,
+    }
+}
+

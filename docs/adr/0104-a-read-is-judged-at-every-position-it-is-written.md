@@ -55,15 +55,25 @@ to the read".
 Each statement carries `read_positions: Option<Box<Vec<ReadPosition>>>` (the
 accessor `Stmt::read_positions()` returns a slice). A `ReadPosition` is
 
-- a **kind**: `Call(CallExpr)`, `Offset { base, key }`, `Prop { var, prop }`
-  or `ClassConst(class, name)`, each lowered as its `ArgValue` twin is, so
-  the unresolvable shapes (a dynamic receiver, a `?->` fetch, `Class::class`,
-  a chain's outer levels over a non-variable) are not positions;
+- a **kind**: `Call` (identified by its span alone), `Offset(place, key)`,
+  `Prop(var, prop)` or `ClassConst(class, name)`. A `Place` is a variable or a
+  literal-keyed offset of one, a `Key` an integer or string literal; neither
+  holds a lowered `ArgValue`. A `?->` fetch, `Class::class` and a property
+  chain's outer levels are not positions;
 - its **span**, the read's own;
-- its **carrier**.
+- its **carrier**, a `Copy` enum.
 
 Every level of an access chain is a position of its own (`$a['n']['zz']` is
-two), and so is every call nested in an argument.
+two), and so is every call, nested or not, in source order with the outer
+read first. A `Carrier::Argument` names the call it is an argument of by that
+call's index in the same list.
+
+Two kinds of read are not recorded: a write target, and an offset or property
+under `isset`, `empty`, `??` or `??=`. Every family is silent on them (the run's
+decisions D1-D5 judge neither), so a consumer would skip them; a class constant
+under `isset`-like constructs is recorded, because PHP throws there. A call
+carries no lowered `CallExpr`: a consumer (S2) resolves the span to a call it
+lowers itself, which keeps the IR free of a second copy of every call.
 
 ### 2.3 Why carriers are classified at lowering time
 
@@ -87,16 +97,15 @@ S3 own that table.
 | Carrier | The construct |
 | --- | --- |
 | `Plain` | an operand PHP evaluates unconditionally and reads |
-| `Argument { callee, position }` | an argument; `callee` names a plain function, `position` is `None` for a named argument or one at or after a spread |
+| `Argument { call, position }` | an argument; `call` is the index of its call position, `position` is `None` for a named argument or one at or after a spread |
 | `Conditional` | an arm of a ternary, the right of `&&` `\|\|` `and` `or` `??` `??=` |
-| `IssetLike` | the operand of `isset` or `empty`, the left of `??` and `??=` |
+| `IssetLike` | a class constant under `isset`, `empty`, `??` or `??=` (an offset or property there is not recorded) |
 | `Suppressed` | under `@` |
-| `Write` | an assignment, `&` or destructuring target |
 | `CompoundRead` | the target of `++`, `--` or a compound assignment |
 | `FirstClassCallable` | `f(...)`, `$o->m(...)`, `C::m(...)` |
 
 A read can sit under several constructs at once. The lowering keeps the
-**weakest claim**, in the order `Write`, `IssetLike`, `Conditional`,
+**weakest claim**, in the order write (not recorded), `IssetLike`, `Conditional`,
 `Suppressed`, `CompoundRead`, `Argument`, `Plain`: each carrier before `Plain`
 is a reason for a value-dependent family to decline, so the order is the one a
 consumer that declines on doubt wants. Two couplings are recorded here for the
@@ -132,15 +141,18 @@ property or constant initializer) and attribute arguments are out of this run.
 
 The field costs one word per statement when empty, which is almost every
 statement: `Option<Box<Vec<_>>>`, as `unspelled` and `writes_through` are
-(#1048). A non-empty statement pays the position records. A `ReadPosition`
-owns its `CallExpr` (a clone of the lowering the call would get anyway) or two
-lowered `ArgValue`s, so a deeply nested call is lowered once per enclosing
-level, quadratic in the nesting depth, which is bounded by the stack guard
-every lowering shares. Measured at S1 on the public corpus (release build,
-`--no-cache`): peak RSS grows by 25% to 31% (PHPUnit 437 MB to 574 MB, Carbon
-414 MB to 514 MB), wall time is within noise. That is the price of cloning
-every call and lowering both operands of every offset read; a consumer slice
-that needs it back can store a call's span and index instead of its clone.
+(#1048). A non-empty statement pays the position records, shrunk to fit.
+The first cut stored a clone of each `CallExpr` and two lowered `ArgValue`s per
+offset read, in an enum as wide as its largest variant: peak RSS grew 25% to
+31% (PHPUnit 437 MB to 574 MB), which issue #890 cannot take. The record is
+now 40 bytes (`size_of::<ReadPosition>()`: a span, a 16-byte `Copy` carrier
+and a 16-byte kind whose heap parts are boxed), a call is its span, an offset
+is a place and a literal key, and writes and `isset`-silent reads are not
+recorded. Nothing is lowered twice: the scan builds no `CallExpr`, so a nested
+call costs no more at depth than at the top. Measured (release build,
+`--profile strict --no-php --vendor-diagnostics --no-cache`, median of 3 runs
+of peak RSS): PHPUnit 439 MB to 450 MB (+2.5%), Carbon 411 MB to 412 MB
+(+0.1%), PHP-Parser 137 MB to 141 MB (+2.6%); wall time is within noise.
 
 ### 2.6 What this ADR does not decide
 

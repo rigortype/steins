@@ -3797,73 +3797,102 @@ pub struct StringContextSite {
 }
 
 /// One place a statement reads a call result, an offset, a property or a class constant
-/// (ADR-0104, issue #1050): what is read, where it is written, and what carries it.
+/// (ADR-0104, issue #1050): where it is written, what it reads and what carries it.
 ///
 /// The syntax layer only records the position and classifies its carrier; whether a
 /// finding about it is due is the inference layer's judgement, per family and carrier.
+/// The record is kept small on purpose (ADR-0104 §2.5): a position that no consumer judges
+/// (a write target, an offset or property under `isset`) is not recorded at all, and a
+/// call is recorded by its span alone.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub struct ReadPosition {
-    pub kind: ReadKind,
     /// The span of the read itself, not of the statement or the enclosing expression: the
     /// text a finding points at (the owner's decision D1).
     pub span: Span,
     pub carrier: Carrier,
+    pub kind: ReadKind,
 }
 
 /// What a [`ReadPosition`] reads.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub enum ReadKind {
-    /// A call, a method call, a static call or a `new` with a statically named class, or a
-    /// first-class callable (an argument-less reference, see [`Carrier::FirstClassCallable`]).
-    /// A call whose receiver the lowering cannot represent is not a position.
-    Call(CallExpr),
-    /// `$base[$key]`, every level of a chain a position of its own. Both operands are
-    /// lowered like a call argument.
-    Offset { base: Box<ArgValue>, key: Box<ArgValue> },
+    /// A call, a method call, a static call, a `new`, or a first-class callable, identified
+    /// by [`ReadPosition::span`] alone: the position carries no copy of the lowered call, and
+    /// a consumer resolves the span to a call it lowers itself. Every call is recorded, so a
+    /// [`Carrier::Argument`] can name its call by index.
+    Call,
+    /// `$base[$key]`, every level of a chain a position of its own.
+    Offset(Box<(Place, Key)>),
     /// `$var->prop` with a bare-variable receiver and a statically named property; a deeper
     /// chain `$a->b->c` is the position `$a->b` and nothing for the outer access. A
     /// `?->` fetch is not a position.
-    Prop { var: String, prop: String },
+    Prop(Box<(String, String)>),
     /// `Class::NAME` with a statically named class and constant. `Class::class` is not one.
-    ClassConst(StaticClass, String),
+    ClassConst(Box<(StaticClass, String)>),
+}
+
+/// The base of an offset read, as far as a place can be named without a lowered value.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
+pub enum Place {
+    /// A bare local variable (name without the `$`).
+    Var(String),
+    /// A literal-keyed offset of a place: the base of `$a['n']['k']` is `Index($a, 'n')`.
+    Index(Box<(Place, Key)>),
+    /// Anything else.
+    Other,
+}
+
+/// The key of an offset read when it is a literal.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
+pub enum Key {
+    Int(i64),
+    Str(PhpStr),
+    /// A key that is not an integer or string literal.
+    Other,
 }
 
 /// The construct that carries a [`ReadPosition`]: what PHP does with the read, which decides
 /// whether a missing key, property or function is a diagnostic there (ADR-0104).
 ///
 /// A read can sit under several constructs at once (`@f($a['k'] && $b['j'])`). The lowering
-/// keeps the **weakest claim** any of them makes, in this order: [`Self::Write`],
-/// [`Self::IssetLike`], [`Self::Conditional`], [`Self::Suppressed`], [`Self::CompoundRead`],
-/// [`Self::Argument`], then [`Self::Plain`]. It is the order a consumer that declines on doubt
-/// wants: each variant before [`Self::Plain`] is a reason for a value-dependent family to
-/// decline or fall silent. An environment-free family (an undefined function, an undeclared
-/// constant) judges in all of them except where a decided guard makes the extent dead, which
-/// the guard regions and their spans say.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// keeps the **weakest claim** any of them makes, in this order: write (not recorded, see
+/// below), [`Self::IssetLike`], [`Self::Conditional`], [`Self::Suppressed`],
+/// [`Self::CompoundRead`], [`Self::Argument`], then [`Self::Plain`]. It is the order a
+/// consumer that declines on doubt wants: each variant before [`Self::Plain`] is a reason
+/// for a value-dependent family to decline or fall silent. An environment-free family (an
+/// undefined function, an undeclared constant) judges in all of them except where a decided
+/// guard makes the extent dead, which the guard regions and their spans say.
+///
+/// Two kinds of read are **not recorded**, because every family is silent on them: a read
+/// in a write position (an assignment, `&` or destructuring target, whose key operands are
+/// ordinary reads and are recorded), and an offset or property read under `isset`, `empty`,
+/// `??` or `??=`. A class constant under those is recorded as [`Self::IssetLike`]: PHP
+/// throws there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub enum Carrier {
     /// An operand PHP evaluates unconditionally and reads: an operand of an operator, a cast,
     /// an interpolation, `echo`, `return`, the right-hand side of `=`, an array element, the
     /// test of a ternary, the left of `&&`.
     Plain,
-    /// An argument of a call. `callee` is the function reference when the call names a plain
-    /// function, `None` for a method, a static call, a constructor or a dynamic callee.
-    /// `position` is the zero-based position among the written arguments, `None` for a named
-    /// argument and for any argument at or after a spread, whose position the callee binds.
-    /// A by-reference parameter creates the key or property instead of reading it.
-    Argument { callee: Option<NameRef>, position: Option<u32> },
+    /// An argument of a call. `call` is the index, in the same statement's
+    /// [`Stmt::read_positions`], of the call position it is an argument of; `None` when that
+    /// call is not a position (an anonymous class's constructor). `position` is the
+    /// zero-based position among the written arguments, `None` for a named argument and for
+    /// any argument at or after a spread, whose position the callee binds. A by-reference
+    /// parameter creates the key or property instead of reading it.
+    Argument { call: Option<u32>, position: Option<u32> },
     /// Evaluated only when something else holds: an arm of a ternary, the right operand of
     /// `&&`, `||`, `and`, `or`, `??` and `??=`. A `?:` left operand is [`Self::Plain`].
     Conditional,
-    /// The operand of `isset` or `empty`, the left of `??` and `??=`: the read is silent for
-    /// an offset and a property (but not for a class constant, which throws).
+    /// The operand of `isset` or `empty`, or the left of `??` and `??=`, for a class constant.
     IssetLike,
     /// Under `@`.
     Suppressed,
-    /// An assignment target, a `&` operand, a destructuring target: written, not read.
-    Write,
     /// The target of `++`, `--` and a compound assignment (`.=`, `+=`, ...): read, then
     /// written.
     CompoundRead,
