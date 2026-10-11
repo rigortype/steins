@@ -23,6 +23,7 @@ use crate::contract::ProjectIsa;
 use crate::descent::escape_and_sweep_calls;
 use crate::env::{ContractArm, Descent, Known, Store, Stratum, join_envs, val_of};
 use crate::existence::existence_vouch;
+use crate::oneof_guard::{narrow_side, oneof_guards};
 use crate::out_params::{check_preg_pattern, seed_out_params, seed_produced_places};
 use crate::predicates::{apply_type_narrowing, pred_holds_on_fact, type_predicate};
 use crate::project::Diagnostic;
@@ -77,6 +78,14 @@ pub(crate) fn walk_if(
     // 1. Evaluate the guard in the pre-branch env (short-circuit env refinement is
     // stage 2 — each condition sees the same entry env).
     let verdict = eval_cond(w, folder, cond, env, store, poisoned);
+    // A `OneOf` the guard reads is judged member by member (`oneof_guard`): a side no
+    // member reaches is pruned like a `Singleton`'s, a set is narrowed to the members
+    // that reach a side, and a guard some member leaves undecided forgets the variable.
+    let guards = oneof_guards(w, folder, cond, env, store);
+    let verdict = guards
+        .iter()
+        .filter(|g| g.sides.is_some())
+        .fold(verdict, |v, g| if v == Certainty::Maybe { g.verdict } else { v });
 
     // A decided guard proves the skipped side dead — record it so the env-free
     // direct pass never reports inside it (live-path discipline, ADR-0002/0031).
@@ -150,7 +159,8 @@ pub(crate) fn walk_if(
     apply_resource_effects(&guard_resources, store);
     // A tested, undecided, proven binding is forgotten inside each guarded side and
     // handed back at its exit, with the presence guard's keys (`unmodelled_tests`).
-    let untested = unmodelled_tests(w, folder, cond, env, store);
+    let mut untested = unmodelled_tests(w, folder, cond, env, store);
+    untested.retain(|v| !guards.iter().any(|g| g.sides.is_some() && &g.var == v));
     let untested_lanes: Vec<BranchScopedLanes> = untested
         .iter()
         .map(|v| (v.clone(), env.get(v).cloned(), store.contract.get(v).cloned()))
@@ -176,6 +186,7 @@ pub(crate) fn walk_if(
         let mut benv = env.clone();
         let mut bclasses = store.clone();
         forget_in_branch(&untested, &mut benv, &mut bclasses);
+        narrow_side(&guards, true, &mut benv);
         apply_cond_side(w, folder, cond, true, &mut benv, &mut bclasses);
         if walk_trace(w, folder, then_trace, &mut benv, &mut bclasses, descent, facts, true, out)
             == Flow::FellThrough
@@ -189,6 +200,7 @@ pub(crate) fn walk_if(
         let mut benv = env.clone();
         let mut bclasses = store.clone();
         forget_in_branch(&untested, &mut benv, &mut bclasses);
+        narrow_side(&guards, false, &mut benv);
         apply_cond_side(w, folder, cond, false, &mut benv, &mut bclasses);
         if walk_else(w, folder, elseifs, else_trace, chain, &mut benv, &mut bclasses, descent, facts, out)
             == Flow::FellThrough
@@ -378,6 +390,9 @@ pub(crate) fn unmodelled_tests(
     let masked = mask_stale_conjuncts(w.cx, cond);
     let mut out = Vec::new();
     collect_unmodelled_tests(w, folder, masked.as_ref(), env, store, &mut out);
+    // A `OneOf` is never "proven" above; a guard over one forgets it unless the caller
+    // narrows it member by member (`walk_if` does, a loop header does not).
+    out.extend(oneof_guards(w, folder, cond, env, store).into_iter().map(|g| g.var));
     out.sort();
     out.dedup();
     out
@@ -433,7 +448,7 @@ fn collect_unmodelled_tests(
 /// (`is_string($x)`) is decided by the DR2 vocabulary on the variable's fact, which
 /// is what narrows its branches, not by [`eval_cond`], which answers `Maybe` for
 /// every call it does not fold.
-fn atom_verdict(
+pub(crate) fn atom_verdict(
     w: &WalkCx,
     folder: &mut dyn Folder,
     atom: &CondExpr,

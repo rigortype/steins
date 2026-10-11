@@ -321,7 +321,9 @@ fn in_array_drops_a_fact_no_haystack_member_can_satisfy() {
     let src = "<?php\nfunction f(bool $c): void {\n\
                if ($c) { $s = 'a'; } else { $s = 'b'; }\n\
                if (in_array($s, ['z'], true)) { \\PHPStan\\dumpType($s); }\n}\n";
-    assert_eq!(dumps(src), vec!["unknown"]);
+    // Neither `'a'` nor `'b'` is in the haystack, so the guard is decided member by
+    // member (`oneof_guard`) and the then side is dead: nothing is dumped there.
+    assert_eq!(dumps(src), Vec::<String>::new());
 }
 
 // ---- `in_array` (census #3) -------------------------------------------------

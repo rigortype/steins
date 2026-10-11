@@ -368,3 +368,125 @@ fn union_refined_and_general_facts_are_unchanged() {
     // General, all rejected: silent by #291's ruling (unchanged).
     silent(&strict("function h(string $x): int { return $x; }"));
 }
+
+// ---------------------------------------------------------------------------
+// Table 3: a guard over a OneOf is decided member by member (the #1071 review).
+// The table is on `oneof_guard`. PHP 8.5.11 raises no TypeError on any path of the
+// "silent" shapes below: every member passes the guard, so the `return $x` is dead.
+// ---------------------------------------------------------------------------
+
+const BODY: &str = "$x = $c ? 'a' : 'b';";
+
+fn guarded(guard: &str, rest: &str) -> String {
+    strict(&format!("function r(bool $c): int {{ {BODY} if ({guard}) {{ return 1; }} {rest} }}\n"))
+}
+
+#[test]
+fn a_guard_no_member_decides_forgets_the_set_on_both_sides() {
+    // Undecidable for every member, every polarity, every shape the review swept.
+    for guard in [
+        "ctype_alpha($x)",
+        "!ctype_alpha($x)",
+        "strlen($x) === 1",
+        "!(strlen($x) === 1)",
+        "gettype($x) === 'string'",
+        "(int) $x === 0",
+        "intval($x) === 0",
+        "trim($x) === $x",
+        "!ctype_digit($x)",
+        "strtoupper($x) !== $x",
+        "in_array($x, ['a', 'b'], true)",
+        "preg_match('/^[ab]$/', $x)",
+        "str_contains('ab', $x)",
+        "is_string($x)",
+    ] {
+        silent(&guarded(guard, "return $x;"));
+    }
+}
+
+#[test]
+fn a_guard_no_member_decides_forgets_the_set_before_an_argument_too() {
+    let src = strict(
+        "function ti(int $i): int { return $i; }\nfunction a(bool $c): int { $x = $c ? 'a' : 'b'; if (!ctype_alpha($x)) { return ti($x); } return 1; }\n",
+    );
+    silent(&src);
+    let src = strict(
+        "function ti(int $i): int { return $i; }\nfunction a(bool $c): int { $x = $c ? 'a' : 5; if (intval($x) !== 0) { return ti($x); } return 1; }\n",
+    );
+    silent(&src);
+}
+
+#[test]
+fn an_undecidable_guard_with_a_rejected_member_stays_silent() {
+    // `'a'|5` into `: int`: the `'a'` arm is rejected, but whether it reaches the
+    // fall-through is the guard's to say, and it cannot be decided.
+    let src = strict("function r(bool $c): int { $x = $c ? 'a' : 5; if (ctype_alpha($x)) { return 1; } return $x; }\n");
+    silent(&src);
+    let src = strict("function r(bool $c): int { $x = $c ? 'a' : 5; if (gettype($x) === 'string') { return 1; } return $x; }\n");
+    silent(&src);
+}
+
+#[test]
+fn an_undecidable_guard_that_every_side_survives_restores_the_set() {
+    // Both sides fall through, so the code after the join runs whichever side PHP took
+    // and every member reaches it: the definite verdict is valid there.
+    let src = strict("function r(bool $c): int { $x = $c ? 'a' : 'b'; if (ctype_alpha($x)) { echo 1; } return $x; }\n");
+    fires(&src, RET);
+}
+
+#[test]
+fn a_guard_every_member_passes_prunes_the_side_no_member_reaches() {
+    // `'a'` and `'b'` are both non-empty: the else side is dead.
+    silent(&guarded("$x !== ''", "return $x;"));
+    silent(&guarded("$x === 'a' || $x === 'b'", "return $x;"));
+    // Every member fails: the then side is dead, and the code after reads the set.
+    let src = strict("function r(bool $c): int { $x = $c ? 'a' : 'b'; if ($x === '') { return $x; } return 1; }\n");
+    silent(&src);
+}
+
+#[test]
+fn a_guard_that_splits_the_members_narrows_each_side_to_its_own() {
+    // `$x === 'a'`: the then side holds `'a'`, the else side `'b'`; each is a
+    // `Singleton` and reports as one.
+    let then = strict("function r(bool $c): int { $x = $c ? 'a' : 'b'; if ($x === 'a') { return $x; } return 1; }\n");
+    let d = findings(&then);
+    assert_eq!(d.len(), 1, "{d:?}");
+    assert_eq!(d[0].id, RET);
+    assert!(d[0].message.contains("\"a\""), "{}", d[0].message);
+    let other = strict("function r(bool $c): int { $x = $c ? 'a' : 'b'; if ($x === 'a') { return 1; } return $x; }\n");
+    let d = findings(&other);
+    assert_eq!(d.len(), 1, "{d:?}");
+    assert!(d[0].message.contains("\"b\""), "{}", d[0].message);
+}
+
+#[test]
+fn a_guard_reading_two_oneof_variables_forgets_both() {
+    let src = strict(
+        "function r(bool $c): int { $x = $c ? 'a' : 'b'; $y = $c ? 'a' : 'b'; if ($x === $y) { return 1; } return $x; }\n",
+    );
+    silent(&src);
+}
+
+#[test]
+fn a_loop_header_over_a_oneof_forgets_it_in_the_body() {
+    let src = strict(
+        "function r(bool $c): int { $x = $c ? 'a' : 'b'; while (ctype_alpha($x)) { return $x; } return 1; }\n",
+    );
+    silent(&src);
+}
+
+// ---------------------------------------------------------------------------
+// The `$return` flag narrows a builtin's floor only by what PHP never answers.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn highlight_file_keeps_its_false_arm_when_asked_for_a_string() {
+    // PHP 8.5.11: `highlight_file('/nonexistent', true)` is `false`.
+    let src = strict("function f(string $p): string { return highlight_file($p, true); }\n");
+    fires(&src, PHPDOC_MAYBE_RET);
+    let src = strict("function f(string $p): string { $x = highlight_file($p, true); return $x; }\n");
+    fires(&src, PHPDOC_MAYBE_RET);
+    // `highlight_string` answers a string even for garbage input.
+    let src = strict("function f(string $p): string { return highlight_string($p, true); }\n");
+    silent(&src);
+}

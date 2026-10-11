@@ -260,7 +260,8 @@
 # 3276 → 3298  2026-10-03 (issue #882, S6c): +22 throw.maybe-undeclared ((b) -5, (c) +27: a parameter hinted with, or a `new` of a class whose chain reaches, a Composer or PSR name this checkout lacks); the triage is above the composer row.
 # 3298 → 3307  2026-10-07 (issue #868, S5): +9 throw.maybe-undeclared net (+18 sites, -9: 17 in a vendored copy of `symfony/filesystem` under the test fixtures, the callers of `JsonFile::encode()` and `Composer::getVersion()` lost); the triage is above the composer row.
 # 3307 → 3309  2026-10-11 (issue #943, #1033 S1): +2 phpdoc.maybe-argument-mismatch inside try bodies the walker now reaches, both TRUE: `PharArchiver.php:65` (`realpath` can return false) and `CurlDownloader.php:425` (`stream_get_contents` can return false).
-"composer/composer" = 3309
+# 3309 → 3316  2026-10-11 (issue #950, #1071): +7 maybe-return-mismatch at a `return` of a call, which is now judged as the assignment of the call is; all TRUE, each shape run on PHP 8.5.11 under `strict_types`: `abs()` of a map value can be a float (`Decisions.php:91`), `key()` of a queue can be a string (`Decisions.php:178`), `array_search` returns false or an int (`DownloadManager.php:183`), `realpath` returns false (`TestCase.php:108`), and a callee declared `?int` or `?string` returns null into a non-null return (`ProcessExecutor.php:213`, `Svn.php:103`, `Svn.php:120`).
+"composer/composer" = 3316
 
 # 1 — `Application.php:409`, class 4 (`exitWithErrorMessage`).
 # 1 → 2, 2026-09-01 with issue #589 (the cross-lane guard join; see
@@ -486,6 +487,7 @@
 # 173 → 175  2026-10-03 (issue #1003, S6d): +2 throw.maybe-undeclared, a constructor's write after `parent::__construct()` over a property hinted with a class this checkout lacks (`MandrillHandler`, `PHPConsoleHandler`); the triage is above the composer row.
 # 175 → 172  2026-10-07 (issue #868, S5): -3 throw.maybe-undeclared net (`Logger` and `Utils` concatenations over a `match` of literals or a class constant); the triage is above the composer row.
 "Seldaek/monolog" = 172
-"thephpleague/flysystem" = 38
+# 38 → 39  2026-10-11 (issue #950, #1071): +1 phpdoc.maybe-return-mismatch, `FtpAdapter.php:499`: `octdec()` of an overlong string returns a float, which `: int` refuses under `strict_types`; TRUE, run on PHP 8.5.11.
+"thephpleague/flysystem" = 39
 "cakephp/chronos" = 50
 
