@@ -373,6 +373,23 @@ fn nothing_after_a_nullsafe_is_unconditional() {
 }
 
 #[test]
+fn a_nullsafe_in_a_static_call_class_operand_short_circuits_it() {
+    assert_eq!(
+        reads("$o?->s::m($a['k6']);"),
+        ["$o?->s::m($a['k6']) [cond]", "$a['k6'] [cond]"]
+    );
+    assert_eq!(
+        reads("($o?->p)::m($a['k5']);"),
+        ["($o?->p)::m($a['k5']) [cond]", "$a['k5'] [cond]"]
+    );
+    // Without a `?->` the same shape is unconditional.
+    assert_eq!(
+        reads("$o->s::m($a['k']);"),
+        ["$o->s::m($a['k']) [plain]", "$o->s [plain]", "$a['k'] [arg($o->s::m,0)]"]
+    );
+}
+
+#[test]
 fn unset_is_not_a_scanned_statement() {
     assert_eq!(reads("unset($a['k'][$x['i']]);"), Vec::<String>::new());
 }

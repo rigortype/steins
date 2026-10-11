@@ -69,7 +69,7 @@ or `??=`, are not recorded. The carrier names the construct around the read:
 in the list; `position` is `None` for a named argument or one at or after a
 spread), `Conditional`, `IssetLike` (class constants only), `Suppressed`,
 and `CompoundRead` (a first-class callable is the kind `CallRef`, its carrier folded
-like a call's); everything past a `?->` is `Conditional`, and the base of an append
+like a call's; the S2 row "FCC existence" consumes `kind == CallRef`); everything past a `?->` is `Conditional`, and the base of an append
 is a write. A by-reference argument also silences the base levels of its chain
 (`f($a['x']['y'])` gives both levels `Argument`), and `position: None` means the
 by-reference parameter is unknowable, so a value-dependent family declines. The
