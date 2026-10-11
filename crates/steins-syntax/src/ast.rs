@@ -2195,7 +2195,13 @@ impl NormKey {
 /// instead of appending, so the literal builds no array to resolve.
 #[must_use]
 fn normalize_entries(items: &[(ArrayKey, ArgValue)]) -> Option<Vec<(NormKey, ArgValue)>> {
-    let mut out: Vec<(NormKey, ArgValue)> = Vec::with_capacity(items.len());
+    let entries = normalize_entry_refs(items)?;
+    Some(entries.into_iter().map(|(k, v)| (k, v.clone())).collect())
+}
+
+/// [`normalize_entries`] borrowing each surviving value from `items`.
+fn normalize_entry_refs(items: &[(ArrayKey, ArgValue)]) -> Option<Vec<(NormKey, &ArgValue)>> {
+    let mut out: Vec<(NormKey, &ArgValue)> = Vec::with_capacity(items.len());
     // A literal's next key (ADR-0049 A22): one past the largest integer key seen
     // so far, explicit or auto (verified: `[5=>'a',5=>'b','c']` → 5, 6).
     let mut next_int = NextInt::new();
@@ -2215,9 +2221,9 @@ fn normalize_entries(items: &[(ArrayKey, ArgValue)]) -> Option<Vec<(NormKey, Arg
         };
         // Last-wins: update in place if the key already occupies a slot.
         if let Some(slot) = out.iter_mut().find(|(ek, _)| *ek == key) {
-            slot.1 = v.clone();
+            slot.1 = v;
         } else {
-            out.push((key, v.clone()));
+            out.push((key, v));
         }
     }
     Some(out)
@@ -2236,6 +2242,18 @@ pub fn normalize_array(items: &[(ArrayKey, ArgValue)]) -> Option<Vec<(NormKey, A
         return None;
     }
     normalize_entries(items)
+}
+
+/// [`normalize_array`] borrowing each surviving value from `items` rather than
+/// copying it: the same keys, in the same order, the last-wins value of each.
+/// A reader that walks a nested literal level by level copies no subtree, and
+/// each value it reads is the one written in the tree.
+#[must_use]
+pub fn normalize_array_refs(items: &[(ArrayKey, ArgValue)]) -> Option<Vec<(NormKey, &ArgValue)>> {
+    if items.iter().any(|(k, _)| matches!(k, ArrayKey::Expr(_))) {
+        return None;
+    }
+    normalize_entry_refs(items)
 }
 
 /// The positional arguments a **spread operand** contributes, or `None` when the
