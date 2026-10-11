@@ -443,7 +443,11 @@ each verdict below is premised on a fatal PHP raised on the witness run, and
 the reflected declaration is the analysing PHP's own, not a bundled table. The
 gate is `absence_family_available` (a live engine inside the declared target
 range with no runtime-redefinition extension); without it the pass behaves
-exactly as before. A reflection must be of an internal class-like to count,
+exactly as before. The gate is shut on any project whose `config.platform.php`
+pins a version the analysing PHP is outside of (issue #28's version-skew
+gate; `steins doctor` says so), which is common on libraries: composer pins
+7.2.5 and phpunit 8.4.1, so neither sees these checks under an 8.5 engine.
+That is by design, not a gap of this amendment. A reflection must be of an internal class-like to count,
 a name a project file declares (even conditionally) is never asked of the
 engine, and the engine's answer is memoised per name by the folder.
 
