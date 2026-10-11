@@ -10,8 +10,8 @@ use steins_domain::{
     php_is_numeric,
 };
 use steins_syntax::{
-    ArgValue, CastTarget, CmpOp, CondExpr, CondOperand, IssetOperand, LogicalOp, NameRef, RefKind,
-    Span, ValueOp,
+    ArgValue, CallExpr, CastTarget, CmpOp, CondExpr, CondOperand, IssetOperand, LogicalOp, NameRef,
+    RefKind, Span, ValueOp,
 };
 
 use crate::by_value::value_stratum;
@@ -23,7 +23,9 @@ use crate::compare::{php_identical, php_loose_eq, php_truthy};
 use crate::contract::IsA;
 use crate::cx::Cx;
 use crate::env::{Known, Member, Store, Stratum, arg_of_val, singleton_fact};
-use crate::existence::eval_existence_call;
+use crate::absence::callable_class_absent;
+use crate::predicates::{pred_holds_on_fact, type_predicate};
+use crate::existence::{eval_existence_call, global_function_callee};
 use crate::offsets::{ShapeRead, offset_key_of, offset_operand_fact, shape_read_at};
 use crate::predicates::apply_type_narrowing;
 use crate::refine::{apply_refinements, collect_refine};
@@ -232,7 +234,10 @@ pub(crate) fn eval_cond(
         // A foldable existence predicate in guard position folds to a Yes/No/Maybe
         // verdict against the closed world (ADR-0049 §4 / N3); an opaque condition or
         // any other guard call stays undecided.
-        CondExpr::Call { call, .. } => eval_existence_call(w, folder, store, call),
+        CondExpr::Call { call, .. } => match eval_existence_call(w, folder, store, call) {
+            Certainty::Maybe => eval_literal_type_test(w, folder, call, env, store, poisoned),
+            decided => decided,
+        },
         // `isset($x[k])` decides NOTHING (ADR-0062 S4). The only evidence that
         // could decide it is a shape fact, which is `Asserted` — deciding here
         // would let a docblock claim silence the env-free pass on a live path.
@@ -1656,5 +1661,77 @@ fn fact_is_non_object(f: &Fact) -> bool {
 fn val_is_non_object(v: &Val) -> bool {
     match v {
         Val::Int(_) | Val::Float(_) | Val::Str(_) | Val::Bool(_) | Val::Null | Val::Array(_) => true,
+    }
+}
+
+/// The type predicates, `is_countable`, `is_a` and `is_subclass_of` over a proven
+/// value (the #1060 re-review), which PHP answers from the value alone, so the walk
+/// prunes the branch PHP never enters instead of forgetting the value in both:
+///
+/// ```text
+/// call                                   value                         verdict
+/// -------------------------------------- ----------------------------- -------------
+/// is_int, is_string, … (`type_predicate`) any                          the DR2 kinds
+/// is_countable($v)                       array / null, bool, int,      Yes / No
+///                                        float, string
+/// is_a($v, C), is_a($v, C, false)        any but an object             No
+/// is_subclass_of($v, C, false)           any but an object             No
+/// is_a($v, C, true), is_subclass_of($v,  null, bool, int, float, array No
+/// C) (allow_string defaults to true)     a string naming a class the   No
+///                                        absence ladder proves absent
+///                                        any other string              Maybe
+/// ```
+///
+/// The value is a literal argument or a variable's `Verified` singleton; an object is
+/// never a singleton, so it stays `Maybe`. Anything else is `Maybe`.
+fn eval_literal_type_test(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    call: &CallExpr,
+    env: &HashMap<String, Known>,
+    store: &Store,
+    poisoned: bool,
+) -> Certainty {
+    let Some(callee) = global_function_callee(w.cx, call) else { return Certainty::Maybe };
+    let callee = callee.to_ascii_lowercase();
+    if !call.positional_only || call.args.is_empty() {
+        return Certainty::Maybe;
+    }
+    let value = match &call.args[0].value {
+        ArgValue::Var(v) if !poisoned => match env.get(v) {
+            Some(k) if k.stratum == Stratum::Verified => k.singleton(),
+            _ => None,
+        },
+        v if v.is_literal() || matches!(v, ArgValue::Array(_)) => Some(v.clone()),
+        _ => None,
+    };
+    let Some(value) = value else { return Certainty::Maybe };
+    // The `is_*` family the DR2 vocabulary narrows on: decided here too, on a proven
+    // value only, so a disjunct like `is_countable($x) || is_iterable($x)` prunes as
+    // a whole instead of leaving a live side the narrowing cannot empty.
+    if let Some(pred) = type_predicate(w.cx, call)
+        && let Some(fact) = singleton_fact(&value)
+    {
+        return pred_holds_on_fact(pred, &fact);
+    }
+    match callee.as_str() {
+        "is_countable" if call.args.len() == 1 => {
+            if matches!(value, ArgValue::Array(_)) { Certainty::Yes } else { Certainty::No }
+        }
+        "is_a" | "is_subclass_of" if (2..=3).contains(&call.args.len()) => {
+            let allow_string = match call.args.get(2).map(|a| &a.value) {
+                None => callee == "is_subclass_of",
+                Some(ArgValue::Bool(b)) => *b,
+                Some(_) => return Certainty::Maybe,
+            };
+            match &value {
+                ArgValue::Str(s) if allow_string => match s.as_str() {
+                    Some(name) if callable_class_absent(w.cx, folder, name, store) => Certainty::No,
+                    _ => Certainty::Maybe,
+                },
+                _ => Certainty::No,
+            }
+        }
+        _ => Certainty::Maybe,
     }
 }
