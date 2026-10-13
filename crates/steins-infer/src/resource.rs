@@ -19,7 +19,7 @@ mod folds;
 mod producers;
 
 pub(crate) use closers::{
-    ResourceEffects, apply_resource_effects, escape_mentioned_resources, resource_call_effects,
+    ResourceEffects, mentioned_vars, apply_resource_effects, escape_mentioned_resources, resource_call_effects,
 };
 pub(crate) use folds::resource_fold_return_fact;
 pub(crate) use producers::{

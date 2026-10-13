@@ -1495,7 +1495,9 @@ pub(crate) fn join_envs(
                 .is_some_and(|cv| closure_target_eq(&cv0.target, &cv.target))
         });
         if all_same {
-            env.insert(name.clone(), Known::closure(cv0.clone(), k0.line));
+            let mut known = Known::closure(cv0.clone(), k0.line);
+            known.thinned = k0.thinned || rest.iter().any(|(be, _)| be.get(name).is_some_and(|k| k.thinned));
+            env.insert(name.clone(), known);
         }
     }
 

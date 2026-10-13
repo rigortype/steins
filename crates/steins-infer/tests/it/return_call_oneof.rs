@@ -564,3 +564,86 @@ fn a_ternary_whose_arm_is_a_set_its_condition_reads_is_unknown() {
         MAYBE_RET,
     );
 }
+
+// ---------------------------------------------------------------------------
+// Table 4, round 4: the flag travels with the value (the #1071 round-3 review). A shape,
+// a closure, a concatenation or a fold built from the set inherits the thinning of what
+// it was built from, so the derived value is not a proof either. PHP 8.5.11 raises no
+// TypeError on any path of these shapes.
+// ---------------------------------------------------------------------------
+
+fn no_definite(src: &str) {
+    let got = ids(src);
+    assert!(
+        !got.iter().any(|i| i == RET || i == ARG),
+        "expected no definite finding, got {got:?} for:\n{src}"
+    );
+}
+
+#[test]
+fn a_value_derived_from_the_set_before_the_exit_inherits_the_thinning() {
+    // c4: a shape element read after the exit.
+    no_definite(&one_fn(
+        "$a = ['k' => $x]; $ok = ctype_alpha($x); if ($ok) { return 1; } $y = $a['k']; return $y;",
+    ));
+    // c7: a closure returning the set, called after the exit.
+    no_definite(&one_fn(
+        "$f = fn() => $x; $ok = ctype_alpha($x); if ($ok) { return 1; } $y = $f(); return $y;",
+    ));
+}
+
+#[test]
+fn a_value_derived_from_the_set_after_the_exit_inherits_the_thinning() {
+    // c9: a concatenation; c12: a builtin fold; c1: a copy; c3: a call's result.
+    no_definite(&one_fn(
+        "$ok = ctype_alpha($x); if ($ok) { return 1; } $y = $x . ''; return $y;",
+    ));
+    no_definite(&one_fn(
+        "$ok = ctype_alpha($x); if ($ok) { return 1; } $y = strtolower($x); return $y;",
+    ));
+    no_definite(&one_fn("$ok = ctype_alpha($x); if ($ok) { return 1; } $y = $x; return $y;"));
+    no_definite(&one_fn(
+        "$ok = ctype_alpha($x); if ($ok) { return 1; } $y = id($x); return $y;",
+    ).replace("function ti", "function id($v) { return $v; }\nfunction ti"));
+    // The same shapes without the exit keep the definite verdict.
+    fires(&one_fn("$a = ['k' => $x]; $y = $a['k']; return $y;"), RET);
+    fires(&one_fn("$y = $x . ''; return $y;"), RET);
+}
+
+#[test]
+fn a_value_built_from_nothing_thinned_after_the_exit_is_fresh() {
+    fires(
+        &one_fn("$ok = ctype_alpha($x); if ($ok) { return 1; } $z = $c ? 'c' : 'd'; return $z;"),
+        RET,
+    );
+}
+
+fn all_ids(src: &str) -> Vec<String> {
+    let tree = SourceTree::parse(src);
+    check_with(&tree, &[], "t.php", &mut Boot::new())
+        .into_iter()
+        .map(|d| d.id.to_owned())
+        .filter(|i| !i.starts_with("untyped."))
+        .collect()
+}
+
+#[test]
+fn a_ternary_decided_per_member_binds_the_members_that_reach_each_arm() {
+    // tern01 q1: `$x === 'a'` is decided per member, `$r` is `"a"|"z"`: a string, so
+    // the call on it is still a proven `call.on-non-object`.
+    let src = one_fn("$r = $x === 'a' ? $x : 'z'; return $r->foo();");
+    assert!(all_ids(&src).contains(&"call.on-non-object".to_owned()), "{:?}", all_ids(&src));
+    // The dead side contributes nothing: `$x !== ''` holds for both, so `'z'` is out.
+    fires(&one_fn("$r = $x !== '' ? $x : 'z'; return $r;"), RET);
+}
+
+#[test]
+fn a_ternary_no_member_decides_keeps_the_base_when_the_arms_agree() {
+    // `'z'` and the set are strings: the result is a string, whichever arm is taken.
+    let src = one_fn("$r = ctype_alpha($x) ? 'z' : $x; return $r->foo();");
+    assert!(all_ids(&src).contains(&"call.on-non-object".to_owned()), "{:?}", all_ids(&src));
+    // A string into `: int` is the all-refused case of the general fact: silent.
+    silent(&one_fn("$r = ctype_alpha($x) ? 'z' : $x; return $r;"));
+    // Mixed bases bind nothing (og01 t4).
+    silent(&one_fn("$r = ctype_alpha($x) ? 1 : $x; return $r;"));
+}
