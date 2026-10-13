@@ -404,7 +404,8 @@
 # 462 → 461  2026-10-03 (issues #860, #991): -1 throw.maybe-undeclared (`in_array` with a literal `true`); the triage is above the composer row.
 # 461 → 461  2026-10-03 (issue #882, S6c): no net change ((b) -4, a class whose traits are all read and clean; (d) +4, a `CarbonInterface` bound of a class that holds one); the triage is above the composer row.
 # 461 → 465  2026-10-03 (issue #1003, S6d): +4 throw.maybe-undeclared, the writes of `CarbonPeriod::$carbonCurrent` (`?CarbonInterface`); the triage is above the composer row.
-"briannesbitt/Carbon" = 465
+# 465 → 470  2026-10-14 (issue #950, #1075), measured with the PHP sidecar (the no-php posture CI runs does not see them): +5 type.maybe-return-mismatch on `return preg_replace(...)` into a `: string` (`CarbonPeriod.php:2383`, `tests/AbstractTestCase.php:495`, two `SerializationTest.php:43` copies, `ToArrayTest.php:272`), a `return` of a call is now judged as its assignment is; all TRUE: `preg_replace` returns null on a PCRE error (backtrack limit), which a `: string` refuses under `strict_types`, run on PHP 8.5.11.
+"briannesbitt/Carbon" = 470
 
 # 0 → 1, 2026-08-16 with issue #391 — and a sixth class, the first that is not
 # a binding claim at all: `type.maybe-argument-mismatch` on
