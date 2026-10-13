@@ -317,7 +317,8 @@
 # 3277 → 3206  2026-10-03 (issue #882, S6c): -71 throw.maybe-undeclared ((a) -84, (b) -4, (c) +11, (d) +6); the local fp-gate measures 3255 → 3184 here, the 22 of slack the row already carried is kept; the triage is above the composer row.
 # 3206 → 3227  2026-10-03 (issue #1003, S6d): +21 throw.maybe-undeclared (16 callers of `CodeCoverage::instance()`'s lazy-singleton write, 5 writes of a property hinted with a rule or exception class a class that reaches a destructor extends), 9 more with the kind in their list; the local fp-gate measures 3184 → 3205 here, the 22 of slack the row already carried is kept; the triage is above the composer row.
 # 3227 → 3214  2026-10-07 (issue #868, S5): -13 throw.maybe-undeclared net (+4 sites and 5 callees' kind lists, -17 `TextUI` commands and configuration over constants and a `match`); the triage is above the composer row.
-"sebastianbergmann/phpunit" = 3214
+# 3214 → 3215  2026-10-14 (issue #950, #1075): +1 phpdoc.maybe-return-mismatch, `return array_sum(...)` into a declared `int` (`TestResult.php:331`); array_sum returns float for a float element, a true possibly-grade finding.
+"sebastianbergmann/phpunit" = 3215
 
 # 10 — six class 1/2/3 in `Application.php`, `CompletionInput.php` and
 # `SymfonyStyle.php`; four class 5 in `Tests/`.
