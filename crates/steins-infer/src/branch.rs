@@ -23,7 +23,7 @@ use crate::contract::ProjectIsa;
 use crate::descent::escape_and_sweep_calls;
 use crate::env::{ContractArm, Descent, Known, Store, Stratum, join_envs, val_of};
 use crate::existence::existence_vouch;
-use crate::oneof_guard::{narrow_side, oneof_guards};
+use crate::oneof_guard::{mark_thinned, narrow_side, oneof_guards};
 use crate::out_params::{check_preg_pattern, seed_out_params, seed_produced_places};
 use crate::predicates::{apply_type_narrowing, pred_holds_on_fact, type_predicate};
 use crate::project::Diagnostic;
@@ -223,7 +223,16 @@ pub(crate) fn walk_if(
             restore_branch_scoped(&untested_lanes, benv, bstore);
         }
     }
-    let (jenv, jclasses) = join_envs(fell);
+    // A live side that does not fall through is an exit the walk could not rule out:
+    // every `OneOf` binding but the ones this guard decided member by member is
+    // thinned (`oneof_guard`'s path rule).
+    let exited = fell.len() < live;
+    let (mut jenv, jclasses) = join_envs(fell);
+    if exited {
+        let decided: Vec<String> =
+            guards.iter().filter(|g| g.sides.is_some()).map(|g| g.var.clone()).collect();
+        mark_thinned(&mut jenv, &decided);
+    }
     *env = jenv;
     *store = jclasses;
     Flow::FellThrough
@@ -868,7 +877,14 @@ pub(crate) fn walk_match(
     if fell.is_empty() {
         return Flow::Terminated;
     }
-    let (jenv, jclasses) = join_envs(fell);
+    let (mut jenv, jclasses) = join_envs(fell);
+    // The subject is narrowed by the arms exactly; any other `OneOf` may have lost
+    // members to an arm that did not fall through.
+    let subject_var: Vec<String> = match subject {
+        CondOperand::Var(v) => vec![v.clone()],
+        _ => Vec::new(),
+    };
+    mark_thinned(&mut jenv, &subject_var);
     *env = jenv;
     *store = jclasses;
     Flow::FellThrough

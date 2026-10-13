@@ -490,3 +490,77 @@ fn highlight_file_keeps_its_false_arm_when_asked_for_a_string() {
     let src = strict("function f(string $p): string { return highlight_string($p, true); }\n");
     silent(&src);
 }
+
+// ---------------------------------------------------------------------------
+// Table 4: the path rule (the #1071 re-review). A guard on a copy, a derived boolean or
+// an array holding the set cannot be decided per member, so "every member refused" is
+// not a proof after the branch with an exit: the set is thinned and the verdict drops to
+// the possibly grade. PHP 8.5.11 raises no TypeError on any path of these shapes.
+// ---------------------------------------------------------------------------
+
+fn demoted(src: &str, maybe: &str) {
+    let got = ids(src);
+    assert_eq!(got, vec![maybe.to_owned()], "expected only {maybe} for:\n{src}");
+}
+
+fn one_fn(body: &str) -> String {
+    strict(&format!(
+        "function ti(int $i): int {{ return $i; }}\nfunction r(bool $c): int {{ $x = $c ? 'a' : 'b'; {body} }}\n"
+    ))
+}
+
+#[test]
+fn a_guard_on_a_copy_of_the_set_demotes_the_definite_verdict() {
+    // d1, d2, d7: `$y = $x` binds nothing the walk can decide a guard on.
+    demoted(&one_fn("$y = $x; if (ctype_alpha($y)) { return 1; } return $x;"), MAYBE_RET);
+    demoted(&one_fn("$y = $x; if (strlen($y) === 1) { return 1; } return $x;"), MAYBE_RET);
+    demoted(&one_fn("$y = $x; if ($y === 'a' || $y === 'b') { return 1; } return $x;"), MAYBE_RET);
+}
+
+#[test]
+fn a_guard_on_a_derived_value_demotes_the_definite_verdict() {
+    // d3, d9: a boolean computed from the set; d8: an array holding it.
+    demoted(&one_fn("$ok = ctype_alpha($x); if ($ok) { return 1; } return $x;"), MAYBE_RET);
+    demoted(&one_fn("$ok = $x === 'a' || $x === 'b'; if ($ok) { return 1; } return $x;"), MAYBE_RET);
+    demoted(&one_fn("$arr = [$x]; if (ctype_alpha($arr[0])) { return 1; } return $x;"), MAYBE_RET);
+}
+
+#[test]
+fn the_argument_side_demotes_the_same_way() {
+    // d6.
+    demoted(&one_fn("$y = $x; if (ctype_alpha($y)) { return 1; } return ti($x);"), MAYBE_ARG);
+}
+
+#[test]
+fn an_unrelated_branch_with_an_exit_thins_the_set_too() {
+    // The walk cannot say the exit is uncorrelated with the set.
+    demoted(&one_fn("if (rand() === 1) { return 2; } return $x;"), MAYBE_RET);
+    demoted(&one_fn("foreach ([1] as $_) { if (rand() === 1) { break; } } return $x;"), MAYBE_RET);
+    demoted(&one_fn("try { echo 1; } catch (Exception $e) { return 2; } return $x;"), MAYBE_RET);
+}
+
+#[test]
+fn a_branch_that_exits_through_a_decided_guard_keeps_the_definite_verdict() {
+    // Three members, `$x === 'a'` decided per member: the fall-through holds `'b'|'c'`,
+    // exactly, and both are refused.
+    let src = strict(
+        "function r(bool $c, bool $d): int { if ($c) { $x = 'a'; } elseif ($d) { $x = 'b'; } else { $x = 'c'; } if ($x === 'a') { return 1; } return $x; }\n",
+    );
+    fires(&src, RET);
+    // A branch with no exit does not thin.
+    fires(&one_fn("if (rand() === 1) { echo 2; } return $x;"), RET);
+    // A rebinding after the exit starts a new epoch.
+    fires(&one_fn("if (rand() === 1) { return 2; } $x = $c ? 'c' : 'd'; return $x;"), RET);
+}
+
+#[test]
+fn a_ternary_whose_arm_is_a_set_its_condition_reads_is_unknown() {
+    // og01 t4: `$r` would hold `1|'a'|'b'`, with `'a'` and `'b'` unreachable.
+    silent(&one_fn("$r = ctype_alpha($x) ? 1 : $x; return $r;"));
+    silent(&one_fn("$r = !ctype_alpha($x) ? $x : 1; return $r;"));
+    // A ternary that does not read the set in its condition keeps the arm's members.
+    demoted(
+        &one_fn("$r = rand() === 1 ? 1 : $x; return $r;"),
+        MAYBE_RET,
+    );
+}

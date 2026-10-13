@@ -24,6 +24,35 @@
 //! two or more OneOf variables read       forgotten (all)    forgotten (all)    as above
 //! ```
 //!
+//! The per-member decision is the precise half. It cannot see a guard on a *copy*
+//! (`$y = $x; if (ctype_alpha($y)) { return 1; }`), on a value *derived* from the set
+//! (`$ok = ctype_alpha($x)`) or on an array holding it: the walk binds nothing it can
+//! decide those on, and teaching it each shape is the patching the #1071 re-review
+//! stopped. The backstop is a **path rule**, tracked on the binding (`Known::thinned`):
+//!
+//! ```text
+//! walk event after the OneOf is bound                         the binding
+//! ----------------------------------------------------------- ------------------------
+//! an `if` with a live side that does not fall through         thinned, unless this guard
+//! (return, throw, break, continue, exit, goto)                 decided that variable
+//! a loop, a `try`, or a `match` (any other subject)           thinned
+//! an `if` whose live sides all fall through                   unchanged
+//! a rebinding of the variable                                 a new, unthinned binding
+//! a join of bindings                                          thinned if either was
+//!
+//! verdict at the judged site                  not thinned          thinned
+//! ------------------------------------------- -------------------- -------------------
+//! every member refused                        definite (D6)        possibly grade
+//! some members refused                        possibly grade       possibly grade
+//! no member refused                           silent               silent
+//! ```
+//!
+//! A ternary `$r = <cond> ? a : b` whose arm is a `OneOf` variable the condition reads
+//! binds nothing: the condition keeps members out of that arm and the walk does not say
+//! which, so the result is unknown (a ternary elsewhere in a `return`, a `match (true)`
+//! and a `switch` are already silent). A ternary that does not read the set keeps the
+//! arm's members and hands the arm's flag on.
+//!
 //! "Forgotten" is the `unmodelled_tests` treatment a type test over a `Singleton`
 //! already gets: no verdict is premised on a binding inside a side that may be dead.
 //! A narrowed set is exact, so a verdict over it holds for every member that reaches
@@ -214,6 +243,17 @@ pub(crate) fn narrow_side(guards: &[OneOfGuard], then: bool, benv: &mut HashMap<
         let set = if then { then_set } else { else_set };
         if let (Some(fact), Some(k)) = (narrowed_fact(set), benv.get_mut(&g.var)) {
             k.fact = Some(fact);
+        }
+    }
+}
+
+/// Mark every `OneOf` binding of `env` but `except` as thinned: the walk has passed an
+/// undecided branch with an exit, so a member may not reach the current point (the
+/// path rule in the module doc).
+pub(crate) fn mark_thinned(env: &mut HashMap<String, Known>, except: &[String]) {
+    for (name, k) in env.iter_mut() {
+        if matches!(k.fact, Some(Fact::OneOf(_))) && !except.contains(name) {
+            k.thinned = true;
         }
     }
 }
