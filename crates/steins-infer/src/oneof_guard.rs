@@ -47,11 +47,26 @@
 //! no member refused                           silent               silent
 //! ```
 //!
-//! A ternary `$r = <cond> ? a : b` whose arm is a `OneOf` variable the condition reads
-//! binds nothing: the condition keeps members out of that arm and the walk does not say
-//! which, so the result is unknown (a ternary elsewhere in a `return`, a `match (true)`
-//! and a `switch` are already silent). A ternary that does not read the set keeps the
-//! arm's members and hands the arm's flag on.
+//! The flag travels with the value. Every binding is marked at the event above, not
+//! only a `OneOf`, and an assignment inherits the flag of every variable its right-hand
+//! side mentions (`inherits_thinned`): a copy, a shape element read back, a closure
+//! called, a concatenation, a fold, a call's arguments. A binding built from nothing
+//! thinned is fresh. So a set stored in a shape or captured by a closure *before* the
+//! exit is thinned when it comes back out *after* it, with no per-site plumbing.
+//!
+//! ```text
+//! a ternary `$r = <cond> ? a : b` whose arm is a OneOf variable the condition reads
+//! ------------------------------------------------------------------------------------
+//! condition decided per member   the members that reach each arm, plus the other arm's
+//!                                literal if some member reaches its side
+//! undecided, every arm one base  that base, `General` (still a proven string, so
+//!                                `$r->foo()` stays `call.on-non-object`)
+//! undecided, mixed bases         nothing bound (a type-mismatch needs a value that
+//!                                reaches the site)
+//! a ternary that reads no set    the evaluator's fact; the result inherits the flag
+//! ```
+//!
+//! (A ternary in a `return`, a `match (true)` and a `switch` are already silent.)
 //!
 //! "Forgotten" is the `unmodelled_tests` treatment a type test over a `Singleton`
 //! already gets: no verdict is premised on a binding inside a side that may be dead.
@@ -61,13 +76,14 @@
 use std::collections::HashMap;
 
 use steins_domain::{Certainty, Fact, Val};
-use steins_syntax::{ArgValue, CondExpr, CondOperand};
+use steins_syntax::{ArgValue, CallExpr, Callee, CondExpr, CondOperand, Receiver};
 
 use crate::branch::atom_verdict;
 use crate::cond::eval_cond;
 use crate::predicates::in_array_literals;
 use crate::env::{Known, Store};
 use crate::fold::Folder;
+use crate::resource::mentioned_vars;
 use crate::walk::WalkCx;
 
 /// What a condition says about one `OneOf` variable it reads.
@@ -247,13 +263,45 @@ pub(crate) fn narrow_side(guards: &[OneOfGuard], then: bool, benv: &mut HashMap<
     }
 }
 
-/// Mark every `OneOf` binding of `env` but `except` as thinned: the walk has passed an
-/// undecided branch with an exit, so a member may not reach the current point (the
-/// path rule in the module doc).
+/// Mark every binding of `env` but `except` as thinned: the walk has passed an
+/// undecided branch with an exit, so a member of any set a binding holds, or a value
+/// derived from one, may not reach the current point (the path rule in the module doc).
+/// Every binding, not only a `OneOf`: a shape, a closure or a heap value built from a
+/// set before the exit hands the flag on to what is derived from it ([`inherits_thinned`]).
 pub(crate) fn mark_thinned(env: &mut HashMap<String, Known>, except: &[String]) {
     for (name, k) in env.iter_mut() {
-        if matches!(k.fact, Some(Fact::OneOf(_))) && !except.contains(name) {
+        if !except.contains(name) {
             k.thinned = true;
         }
     }
+}
+
+/// Whether a value being bound mentions a thinned binding: an assignment inherits the
+/// flag of every variable its right-hand side reads (a copy, a shape element, a
+/// concatenation, a fold, a call's arguments, a closure's captures and the closure
+/// called). A binding derived from nothing thinned is a fresh one.
+pub(crate) fn inherits_thinned(
+    value: &ArgValue,
+    call: Option<&CallExpr>,
+    env: &HashMap<String, Known>,
+) -> bool {
+    let mut names: Vec<&str> = Vec::new();
+    mentioned_vars(value, &mut names);
+    // `$f()` lowers to no value at all; the statement's call carries the closure
+    // variable called and the arguments passed.
+    if let Some(c) = call {
+        match &c.receiver {
+            Callee::DynamicVar(v) | Callee::Method { receiver: Receiver::Var(v), .. } => names.push(v),
+            _ => {}
+        }
+        for a in &c.args {
+            mentioned_vars(&a.value, &mut names);
+        }
+    }
+    match value {
+        ArgValue::MethodCall { callee: Callee::DynamicVar(v), .. } => names.push(v),
+        ArgValue::PropFetch { var, .. } => names.push(var),
+        _ => {}
+    }
+    names.iter().any(|n| env.get(*n).is_some_and(|k| k.thinned))
 }

@@ -20,7 +20,8 @@ use crate::env::{
 };
 use crate::heap::{build_closure_val, build_new_object};
 use crate::offsets::shape_read_at;
-use crate::oneof_guard::oneof_guards;
+use crate::env::val_of;
+use crate::oneof_guard::{inherits_thinned, narrowed_fact, oneof_guards};
 use crate::project::Diagnostic;
 use crate::walk::WalkCx;
 
@@ -97,12 +98,14 @@ impl AssignLhs<'_> {
     }
 }
 
-/// Bind `$var = <cond> ? a : b`: the evaluator's fact, or unknown.
+/// Bind `$var = <cond> ? a : b`: the evaluator's fact, or what is left of it when an arm
+/// is a `OneOf` variable the condition reads.
 ///
-/// An arm that is a `OneOf` variable the condition reads is not the whole set the
-/// variable holds: the condition keeps some members out of that arm, and the walk does
-/// not say which, so the result is unknown (`oneof_guard`'s table, the ternary row). An
-/// arm that is a thinned `OneOf` hands its flag on.
+/// Such an arm is not the whole set the variable holds: the condition keeps some members
+/// out of it. When `oneof_guard` decided the condition member by member, each arm holds
+/// exactly the members that reach it. When it could not, the result keeps the one thing
+/// every member shares, its base (`General`), if all the arms agree on one; mixed bases
+/// bind nothing (`oneof_guard`'s ternary rows).
 #[allow(clippy::too_many_arguments)]
 fn bind_ternary(
     w: &WalkCx,
@@ -115,29 +118,82 @@ fn bind_ternary(
     store: &mut Store,
 ) {
     let (then_val, else_val) = arms;
-    let arm_names: Vec<&str> = [then_val, else_val]
-        .into_iter()
-        .filter_map(|a| if let ArgValue::Var(v) = a { Some(v.as_str()) } else { None })
-        .collect();
-    if !arm_names.is_empty() {
+    let is_arm_var = |a: &ArgValue| matches!(a, ArgValue::Var(_));
+    if is_arm_var(then_val) || is_arm_var(else_val) {
         let guards = oneof_guards(w, folder, cond, env, store);
-        if guards.iter().any(|g| arm_names.contains(&g.var.as_str())) {
-            lhs.clear(env, store);
+        let reads_set = |a: &ArgValue| {
+            matches!(a, ArgValue::Var(v) if guards.iter().any(|g| &g.var == v))
+        };
+        if reads_set(then_val) || reads_set(else_val) {
+            let bound = oneof_ternary_fact(&guards, cond_is_decided(&guards), then_val, else_val, env);
+            match bound {
+                Some((fact, strat)) => lhs.bind(env, store, fact, strat),
+                None => lhs.clear(env, store),
+            }
             return;
         }
     }
-    let thinned_arm = arm_names
-        .iter()
-        .any(|n| env.get(*n).is_some_and(|k| k.thinned && matches!(k.fact, Some(Fact::OneOf(_)))));
     match eval_ternary_fact_strat(w, folder, cond, then_val, else_val, spans, env, store) {
-        Some((fact, strat)) => {
-            lhs.bind(env, store, fact, strat);
-            if thinned_arm && let Some(k) = env.get_mut(lhs.var) {
-                k.thinned = true;
-            }
-        }
+        Some((fact, strat)) => lhs.bind(env, store, fact, strat),
         None => lhs.clear(env, store),
     }
+}
+
+fn cond_is_decided(guards: &[crate::oneof_guard::OneOfGuard]) -> bool {
+    guards.iter().all(|g| g.sides.is_some())
+}
+
+/// The fact of a ternary one of whose arms is a guarded `OneOf` variable.
+fn oneof_ternary_fact(
+    guards: &[crate::oneof_guard::OneOfGuard],
+    decided: bool,
+    then_val: &ArgValue,
+    else_val: &ArgValue,
+    env: &HashMap<String, Known>,
+) -> Option<(Fact, Stratum)> {
+    let mut members: Vec<steins_domain::Val> = Vec::new();
+    let mut strat = Stratum::Verified;
+    for (arm, then_side) in [(then_val, true), (else_val, false)] {
+        let vals: Vec<steins_domain::Val> = match arm {
+            ArgValue::Var(v) => {
+                let g = guards.iter().find(|g| &g.var == v)?;
+                let k = env.get(v)?;
+                let Some(Fact::OneOf(all)) = k.fact.as_ref() else { return None };
+                strat = strat.min(k.stratum);
+                match (&g.sides, decided) {
+                    (Some((t, e)), true) => (if then_side { t } else { e }).clone(),
+                    _ => all.clone(),
+                }
+            }
+            other => {
+                // A literal arm is reached only if some member reaches its side.
+                if decided
+                    && let Some((t, e)) = guards.first().and_then(|g| g.sides.as_ref())
+                    && (if then_side { t } else { e }).is_empty()
+                {
+                    continue;
+                }
+                vec![val_of(other)?]
+            }
+        };
+        members.extend(vals);
+    }
+    if decided {
+        let mut unique: Vec<steins_domain::Val> = Vec::new();
+        for m in members {
+            if !unique.contains(&m) {
+                unique.push(m);
+            }
+        }
+        return narrowed_fact(&unique).map(|f| (f, strat));
+    }
+    // Undecided: every member shares a base or nothing is bound.
+    let mut bases = members.iter().map(steins_domain::Val::base);
+    let first = bases.next()??;
+    bases.all(|b| b == Some(first)).then_some((
+        Fact::General { base: first, nullable: false },
+        strat,
+    ))
 }
 
 /// Apply a plain `$var = <value>;` assignment to the env (extracted from the walk).
@@ -145,6 +201,33 @@ fn bind_ternary(
 /// this assignment may unbind its own target (self-assign `$o = $o->m(1)`).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_assign(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    var: &str,
+    value: &ArgValue,
+    call: Option<&CallExpr>,
+    span_start: u32,
+    env: &mut HashMap<String, Known>,
+    store: &mut Store,
+    facts: &mut Option<&mut Vec<LineFact>>,
+    summary: Option<&ReturnSummary>,
+    ctor_heap: Option<&HeapSummary>,
+    return_arms: Option<&[ContractArm]>,
+    out: &mut Vec<Diagnostic>,
+) {
+    // Read before the binding unbinds its own target (`$x = $x . ''`).
+    let thinned = inherits_thinned(value, call, env);
+    bind_value(
+        w, folder, var, value, call, span_start, env, store, facts, summary, ctor_heap,
+        return_arms, out,
+    );
+    if thinned && let Some(k) = env.get_mut(var) {
+        k.thinned = true;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn bind_value(
     w: &WalkCx,
     folder: &mut dyn Folder,
     var: &str,

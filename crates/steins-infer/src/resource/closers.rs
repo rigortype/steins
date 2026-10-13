@@ -259,7 +259,7 @@ pub(crate) fn apply_resource_effects(effects: &ResourceEffects, store: &mut Stor
 /// concatenation and a binary operator, an offset read's base and key. A
 /// property fetch, an `isset` and the literal/constant leaves mention no
 /// binding a handle could ride.
-fn mentioned_vars<'a>(value: &'a ArgValue, out: &mut Vec<&'a str>) {
+pub(crate) fn mentioned_vars<'a>(value: &'a ArgValue, out: &mut Vec<&'a str>) {
     match value {
         ArgValue::Var(v) | ArgValue::Clone(v) => out.push(v),
         ArgValue::Call(_, args) => args.iter().for_each(|a| mentioned_vars(a, out)),

@@ -457,9 +457,13 @@ array holding the set, and the third round on one predicate is the signal to sto
 guard shapes. "Every member refused" is a proof only when every member reaches the site, so a
 `OneOf` binding is *thinned* (`Known::thinned`) once the walk passes an undecided `if` with a
 live side that does not fall through, or a loop, a `try` or a `match`; a binding the guard
-decided member by member keeps its flag, and a rebinding starts a new one. A thinned set
+decided member by member keeps its flag, and a rebinding starts a new one. The flag lives on every binding and an assignment inherits it from every variable its
+right-hand side mentions, so a set stored in a shape or captured by a closure before the exit
+is thinned when it comes back out after it. A thinned set
 drops the every-refused row to the possibly grade and leaves the other rows alone. A
-ternary whose arm is a `OneOf` variable its own condition reads binds nothing. The same
+ternary whose arm is a `OneOf` variable its own condition reads binds the members that reach
+each arm when the condition is decided per member, the common base when it is not and the
+arms agree on one, and nothing when the bases differ. The same
 backstop would apply to the `Singleton` guards of #1073, and would also silence every
 `Singleton` verdict after an unrelated early exit; that choice is left to #1073.
 
