@@ -60,6 +60,7 @@ use crate::refine::{
 use crate::return_arms::return_envelope_arms;
 use crate::shapes::{apply_offset_append, apply_offset_write, apply_shape_narrowing};
 use crate::stmt_calls::{StmtCalls, check_stmt_calls};
+use crate::oneof_guard;
 use crate::stmt_checks::{check_read_positions, check_return_value};
 use crate::try_catch::walk_try;
 
@@ -793,14 +794,21 @@ fn walk_run(
             }
             // A structured `try` (the ADR-0027 `try` amendment, issue #943).
             StmtKind::Try { .. } => {
-                walk_try(w, folder, stmt, rebinds, env, store, descent, facts, guarded, out)
+                let flow =
+                    walk_try(w, folder, stmt, rebinds, env, store, descent, facts, guarded, out);
+                oneof_guard::mark_thinned(env, &[]);
+                flow
             }
             // The structured loops (ADR-0027 amendment): `walk_loop` holds each one's rule.
             StmtKind::While { .. }
             | StmtKind::For { .. }
             | StmtKind::Foreach { .. }
             | StmtKind::DoWhile { .. } => {
-                walk_loop(w, folder, stmt, env, store, descent, facts, guarded, out)
+                let flow = walk_loop(w, folder, stmt, env, store, descent, facts, guarded, out);
+                // A body may leave by `return`, `throw` or `break` on a path the header
+                // does not decide.
+                oneof_guard::mark_thinned(env, &[]);
+                flow
             }
             // A statement-position call to a resolved `: never` callee is a
             // terminator (issue #599), and the arm below is the `Throw`/`Exit` arm

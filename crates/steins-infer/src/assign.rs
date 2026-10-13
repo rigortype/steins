@@ -20,6 +20,7 @@ use crate::env::{
 };
 use crate::heap::{build_closure_val, build_new_object};
 use crate::offsets::shape_read_at;
+use crate::oneof_guard::oneof_guards;
 use crate::project::Diagnostic;
 use crate::walk::WalkCx;
 
@@ -96,6 +97,49 @@ impl AssignLhs<'_> {
     }
 }
 
+/// Bind `$var = <cond> ? a : b`: the evaluator's fact, or unknown.
+///
+/// An arm that is a `OneOf` variable the condition reads is not the whole set the
+/// variable holds: the condition keeps some members out of that arm, and the walk does
+/// not say which, so the result is unknown (`oneof_guard`'s table, the ternary row). An
+/// arm that is a thinned `OneOf` hands its flag on.
+#[allow(clippy::too_many_arguments)]
+fn bind_ternary(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    lhs: &mut AssignLhs,
+    cond: &steins_syntax::CondExpr,
+    arms: (&ArgValue, &ArgValue),
+    spans: (steins_syntax::Span, steins_syntax::Span),
+    env: &mut HashMap<String, Known>,
+    store: &mut Store,
+) {
+    let (then_val, else_val) = arms;
+    let arm_names: Vec<&str> = [then_val, else_val]
+        .into_iter()
+        .filter_map(|a| if let ArgValue::Var(v) = a { Some(v.as_str()) } else { None })
+        .collect();
+    if !arm_names.is_empty() {
+        let guards = oneof_guards(w, folder, cond, env, store);
+        if guards.iter().any(|g| arm_names.contains(&g.var.as_str())) {
+            lhs.clear(env, store);
+            return;
+        }
+    }
+    let thinned_arm = arm_names
+        .iter()
+        .any(|n| env.get(*n).is_some_and(|k| k.thinned && matches!(k.fact, Some(Fact::OneOf(_)))));
+    match eval_ternary_fact_strat(w, folder, cond, then_val, else_val, spans, env, store) {
+        Some((fact, strat)) => {
+            lhs.bind(env, store, fact, strat);
+            if thinned_arm && let Some(k) = env.get_mut(lhs.var) {
+                k.thinned = true;
+            }
+        }
+        None => lhs.clear(env, store),
+    }
+}
+
 /// Apply a plain `$var = <value>;` assignment to the env (extracted from the walk).
 /// `return_arms` is the declared return floor resolved at the call site **before**
 /// this assignment may unbind its own target (self-assign `$o = $o->m(1)`).
@@ -140,19 +184,9 @@ pub(crate) fn apply_assign(
     // and resolves to the chosen arm, or (undecided) a `OneOf` of both when
     // literal, else unknown.
     if let ArgValue::Ternary { cond, then_val, then_span, else_val, else_span } = value {
-        match eval_ternary_fact_strat(
-            w,
-            folder,
-            cond,
-            then_val,
-            else_val,
-            (*then_span, *else_span),
-            env,
-            store,
-        ) {
-            Some((fact, strat)) => lhs.bind(env, store, fact, strat),
-            None => lhs.clear(env, store),
-        }
+        bind_ternary(
+            w, folder, &mut lhs, cond, (then_val, else_val), (*then_span, *else_span), env, store,
+        );
         return;
     }
 

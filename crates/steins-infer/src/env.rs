@@ -1268,24 +1268,31 @@ pub(crate) struct Known {
     /// The trust stratum of `fact` (ADR-0052 §5). `Verified` by default; an
     /// assert-derived or assert-laundered fact carries `Asserted`.
     pub(crate) stratum: Stratum,
+    /// A `OneOf` binding that an undecided branch with an exit (a `return`, `throw`,
+    /// `break`, `continue`, `exit`, or a loop, `try` or `match` the walk does not
+    /// decide) has been walked past since it was bound: some members may never reach
+    /// the walk's current point, so "every member is rejected" is not a proof here
+    /// (see `oneof_guard`'s path rule). Set at the join, cleared by a rebinding, and
+    /// kept by a narrowing the walk decided.
+    pub(crate) thinned: bool,
 }
 
 impl Known {
     /// A plain value binding at the `Verified` stratum (native seeds, literal
     /// assignments, native-condition refinements — the common case).
     pub(crate) fn value(fact: Fact, line: u32, bound: Option<String>) -> Self {
-        Known { fact: Some(fact), line, bound, closure: None, stratum: Stratum::Verified }
+        Known { fact: Some(fact), line, bound, closure: None, stratum: Stratum::Verified, thinned: false }
     }
 
     /// A plain value binding at an explicit stratum (derivation sites propagating
     /// `min(inputs)`, and the assert family binding `Asserted`).
     pub(crate) fn value_strat(fact: Fact, line: u32, bound: Option<String>, stratum: Stratum) -> Self {
-        Known { fact: Some(fact), line, bound, closure: None, stratum }
+        Known { fact: Some(fact), line, bound, closure: None, stratum, thinned: false }
     }
 
     /// A closure binding (no scalar fact; a closure is never assert-derived).
     pub(crate) fn closure(cv: ClosureVal, line: u32) -> Self {
-        Known { fact: None, line, bound: None, closure: Some(cv), stratum: Stratum::Verified }
+        Known { fact: None, line, bound: None, closure: Some(cv), stratum: Stratum::Verified, thinned: false }
     }
 
     /// The single proven value, when the fact is a `Singleton` (converted back to
@@ -1523,11 +1530,13 @@ pub(crate) fn join_envs(
         // element. Provenance (line/bound) comes from the first branch holding an
         // env fact — the names set guarantees one exists.
         let mut stratum = Stratum::Verified;
+        let mut thinned = false;
         let mut provenance: Option<(u32, Option<String>)> = None;
         let mut ok = true;
         for (be, bs) in &all {
             let (f, s) = match be.get(name).filter(|k| k.fact.is_some()) {
                 Some(k) => {
+                    thinned |= k.thinned;
                     if provenance.is_none() {
                         provenance = Some((k.line, k.bound.clone()));
                     }
@@ -1561,7 +1570,9 @@ pub(crate) fn join_envs(
             && let Some(fact) = fact
             && let Some((line, bound)) = provenance
         {
-            env.insert(name.clone(), Known::value_strat(fact, line, bound, stratum));
+            let mut known = Known::value_strat(fact, line, bound, stratum);
+            known.thinned = thinned;
+            env.insert(name.clone(), known);
         }
     }
 

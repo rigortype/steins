@@ -451,6 +451,18 @@ predicate and a strict `in_array` over literals are decided the way their fact-l
 decide them. `highlight_file($f, true)` keeps its `false` arm (a missing file); only `print_r`,
 `var_export` and `highlight_string` narrow to `string`.
 
+**The path rule (the #1071 re-review).** The per-member decision cannot see a guard on a copy
+(`$y = $x; if (ctype_alpha($y)) { return 1; } return $x;`), on a derived boolean or on an
+array holding the set, and the third round on one predicate is the signal to stop adding
+guard shapes. "Every member refused" is a proof only when every member reaches the site, so a
+`OneOf` binding is *thinned* (`Known::thinned`) once the walk passes an undecided `if` with a
+live side that does not fall through, or a loop, a `try` or a `match`; a binding the guard
+decided member by member keeps its flag, and a rebinding starts a new one. A thinned set
+drops the every-refused row to the possibly grade and leaves the other rows alone. A
+ternary whose arm is a `OneOf` variable its own condition reads binds nothing. The same
+backstop would apply to the `Singleton` guards of #1073, and would also silence every
+`Singleton` verdict after an unrelated early exit; that choice is left to #1073.
+
 Every cell was run on PHP 8.5.11 in both modes: `ti(null)`, `ti([])` and `ti("abc")` throw
 in both; `ti("5")` throws strictly and converts coercively; `tf(1)` runs and `tf("1")`
 throws strictly; `strlen(null)` is a deprecation coercively and a `TypeError` strictly.

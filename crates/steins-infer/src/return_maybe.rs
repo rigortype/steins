@@ -102,14 +102,14 @@ fn oneof_premise<'e>(
     value: &ArgValue,
     env: &'e HashMap<String, Known>,
     poisoned: bool,
-) -> Option<(&'e [Val], Stratum)> {
+) -> Option<(&'e [Val], Stratum, bool)> {
     if poisoned {
         return None;
     }
     let ArgValue::Var(name) = value else { return None };
     let k = env.get(name)?;
     match k.fact.as_ref()? {
-        Fact::OneOf(members) => Some((members, k.stratum)),
+        Fact::OneOf(members) => Some((members, k.stratum, k.thinned)),
         _ => None,
     }
 }
@@ -243,8 +243,8 @@ pub(crate) fn check_maybe_return_mismatch(
 ) {
     // A `OneOf` is judged member by member, by `finite_verdict`'s table; it is the
     // one finite fact that reaches here (a `Singleton` is the exact rung's).
-    if let Some((members, stratum)) = oneof_premise(value, env, poisoned) {
-        check_oneof_return(cx, ret, display, shown, members, stratum, span_start, out);
+    if let Some((members, stratum, thinned)) = oneof_premise(value, env, poisoned) {
+        check_oneof_return(cx, ret, display, shown, members, stratum, thinned, span_start, out);
         return;
     }
     let Some(premise) = return_premise(value, env, store, poisoned) else { return };

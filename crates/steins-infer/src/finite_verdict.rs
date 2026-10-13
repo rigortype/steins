@@ -35,6 +35,15 @@
 //! Union / Refined / General  some               any            the possibly grade, unchanged
 //! ```
 //!
+//! **The path rule (the #1071 re-review).** "Every member refused" is a proof only when
+//! every member reaches the site. A `OneOf` the walk has passed an undecided branch with
+//! an exit since it was bound is *thinned* (`Known::thinned`, set at the join by
+//! `oneof_guard::mark_thinned`): a guard on a copy (`$y = $x; if (ctype_alpha($y))
+//! return 1;`), on a derived boolean or on an array holding it can end the paths of
+//! some members without the walk seeing which. A thinned set demotes the every-refused
+//! row to the possibly grade; the some-refused row is unchanged, and a narrowing the
+//! walk decided (`oneof_guard`) keeps the flag it had.
+//!
 //! Which carriers reach this judgment: a variable whose value lane holds the
 //! `OneOf`, and a call whose proven return summary is one (an argument `g($x)`, or
 //! a returned `f($x)` through the same virtual binding `$v = f($x); return $v;`
@@ -73,6 +82,7 @@ pub(crate) fn finite_verdict(
     ty: &NativeType,
     members: &[Val],
     null_ok: bool,
+    thinned: bool,
 ) -> FiniteVerdict {
     let rejected: Vec<String> = members
         .iter()
@@ -85,7 +95,9 @@ pub(crate) fn finite_verdict(
     if rejected.is_empty() {
         FiniteVerdict::Nothing
     } else if rejected.len() == members.len() {
-        FiniteVerdict::Every
+        // Every member is refused, but a thinned set may not be reached by all of them
+        // (the path rule): the claim drops to "a path may throw".
+        if thinned { FiniteVerdict::Some(rejected) } else { FiniteVerdict::Every }
     } else {
         FiniteVerdict::Some(rejected)
     }
@@ -122,10 +134,11 @@ pub(crate) fn check_oneof_argument(
     members: &[Val],
     stratum: Stratum,
     null_tolerated: bool,
+    thinned: bool,
     out: &mut Vec<Diagnostic>,
 ) -> bool {
     let null_ok = null_tolerated || implicit_null_accepted(param, &ArgValue::Null);
-    match finite_verdict(cx, ty, members, null_ok) {
+    match finite_verdict(cx, ty, members, null_ok, thinned) {
         FiniteVerdict::Nothing => false,
         FiniteVerdict::Every if stratum == Stratum::Verified => {
             let provenance = subject_of(members);
@@ -172,10 +185,11 @@ pub(crate) fn check_oneof_return(
     shown: &ArgValue,
     members: &[Val],
     stratum: Stratum,
+    thinned: bool,
     span_start: u32,
     out: &mut Vec<Diagnostic>,
 ) {
-    let (id, message) = match finite_verdict(cx, ret, members, false) {
+    let (id, message) = match finite_verdict(cx, ret, members, false, thinned) {
         FiniteVerdict::Nothing => return,
         FiniteVerdict::Every if stratum == Stratum::Verified => (
             RETURN_ID,

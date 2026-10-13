@@ -735,8 +735,10 @@ pub(crate) fn check_maybe_argument_mismatch(
     // A `OneOf` is judged member by member (`finite_verdict`): it may be a definite
     // No, which the caller must know about.
     if let Fact::OneOf(members) = &fact {
+        let thinned = matches!(value, ArgValue::Var(n) if env.get(n).is_some_and(|k| k.thinned));
         return check_oneof_argument(
-            cx, param, ty, callee, arg_offset, value, members, stratum, null_tolerated, out,
+            cx, param, ty, callee, arg_offset, value, members, stratum, null_tolerated, thinned,
+            out,
         );
     }
     let (verdict, rejected, null_rejected) =
