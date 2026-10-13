@@ -197,11 +197,15 @@ of peak RSS): PHPUnit 439 MB to 450 MB (+2.5%), Carbon 411 MB to 412 MB
   analyzer fingerprint refuses a generation written by another build, so the
   new field needs no `SCHEMA_VERSION` bump (`steins-db`'s wire notes).
 
-Slice S2 measured the call lookup, the guard regions and the stored guards on top of S3:
-peak RSS on PHPUnit (release, strict `--no-php --vendor-diagnostics --no-cache`, median of
-5) 488.9 MB to 497.3 MB, +1.7% (the reviews measured +2.7% and +3.0% on other runs of the
-same binaries; the figure moves by about a point between runs). A first cut that kept a
-`CallExpr` per nested call cost +4% to +7%.
+Slice S2 measured the call lookup, the guard regions and the stored guards on top of S3 and
+the nested-call memo: peak RSS on PHPUnit (release, strict `--no-php --vendor-diagnostics
+--no-cache`, median of 5) 486.6 MB to 496.8 MB, +2.1% (the reviews measured +2.7% and
++3.0% on other runs of the same code; the figure moves by about a point between runs). A
+first cut that kept a `CallExpr` per nested call cost +4% to +7%. The scan lowers a `new`
+call's arguments once more per nesting level, so a pathological chain pays for it: 100
+nested `new` and 200 nested calls in two functions measured 0.98 s and 992 MB, then 1.07 s
+and 1136 MB (+14% RSS); the baseline there is already 1 GB. Nested `new` chains land on the same cubic curve as nested calls (#1065), because their
+arguments are re-lowered per level.
 
 ### 2.7 Decisions and known gaps recorded by S2
 
