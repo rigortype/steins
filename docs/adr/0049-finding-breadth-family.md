@@ -1535,3 +1535,45 @@ lane that read `conditional && !dam.is_clear()` now asks it.
   parent not yet declared when a non-hoisted class runs, a class constant
   naming an absent class). Uses below it name a line PHP never reaches, as
   for any earlier fatal.
+
+
+## Amendment (2026-10-14): arity of internal functions, engine methods and callbacks (type/arity run S5, #937; PENDING ratification)
+
+Section 6's arity ladder stopped at project targets, and `call.too-many-arguments`
+waited, registered and silent, for "the reflect slice". The reflect slice has shipped
+(`Folder::builtin_param_types`, `Folder::reflected_class`), so the internal arms follow
+the same rule table as the userland ones, with the engine's own reflection as the
+signature. Every row was run on PHP 8.5.11; `arity/internal.rs` and `arity/callbacks.rs`
+carry the tables, one test per row, mock and live.
+
+- **Internal function, too few.** `strlen()`, `intdiv(1)`, `max()`, `compact()`,
+  `mktime()`, `var_dump()` are an `ArgumentCountError`; the required count is the
+  reflected one (one past the last non-optional parameter, variadics excluded from the
+  count by their `isOptional()`). `call.too-few-arguments`.
+- **Internal function, too many.** `strlen("a", "b")`, `session_id(1, 2)` are an
+  `ArgumentCountError` for a non-variadic function: the asymmetry with userland (extras
+  run clean) is the reason this id exists only for internal targets. `call.too-many-arguments`
+  leaves `REGISTERED_NOT_YET_EMITTED`, which is now empty. Judged only when every
+  argument is positional.
+- **Unknown named argument.** `strlen(str: "a")` is an `Error`, and the existing
+  `call.unknown-named-argument` states it. A **variadic** internal function declines:
+  `sprintf(format: "x", foo: 1)` is an `ArgumentCountError`, but `call_user_func` and its
+  kin forward named extras, and the reflected list cannot tell the two apart. A named
+  argument over a positional declines (the overwrite `Error`), as in the userland arm.
+- **Engine methods and constructors** (`$d->format()`, `new DateTimeZone()`): too few
+  only, under a receiver the project does not declare and the walk proves exact. Too many
+  would need a `variadic` flag on `ReflectedMethod`; adding one changes the sidecar
+  reply, so it is left to a slice that wants it (`rand(1)`-style reflection gaps apply to
+  methods too).
+- **Callbacks.** A closure, first-class callable or proven string naming a function
+  (project or internal) is judged against the arguments an invoking builtin passes,
+  where the callback provably runs: `call_user_func` always; `array_map`, `array_filter`,
+  `array_walk`, `array_reduce` over a proven non-empty array; `usort`/`uasort`/`uksort`
+  over a proven array of two or more. `preg_replace_callback` declines (a match is the
+  project's own PCRE's to decide).
+- **Known false negatives, kept.** `rand(1)` (reflection says zero required), an internal
+  callback that receives too many arguments, `[$o, 'm']` and `'A::m'` callbacks.
+
+Every arm is gated on `Folder::absence_family_available` through the reflection
+accessors, so a skewed or absent engine, or a loaded runtime-redefinition extension,
+silences all of it: the arity is read from the analysing PHP, not from a table.

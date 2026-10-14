@@ -996,8 +996,7 @@ pub(crate) fn check_builtin_call_args(
     let null_tolerated = internal_null_tolerated(cx);
     for (i, arg) in call.args.iter().enumerate() {
         // Past the declared list: an extra argument is an arity question, not a
-        // type one, and `call.too-many-arguments` for internal targets is its own
-        // slice (ADR-0049 §6, still REGISTERED_NOT_YET_EMITTED).
+        // type one, judged by `call.too-many-arguments` (`arity/internal.rs`).
         let Some(bp) = params.get(i) else { break };
         // A variadic binds every argument from here on, so there is no position
         // left to index by — `break`, exactly as the project arm does.

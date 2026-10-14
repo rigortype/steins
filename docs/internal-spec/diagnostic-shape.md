@@ -56,9 +56,9 @@ red on sight), `Contract` (declared-contract acceptance, increase tripwires),
 profile but baseline- and suppression-exempt and excluded from every gate
 counter; a dump is not a finding).
 
-`REGISTERED_NOT_YET_EMITTED` today holds exactly one id:
-`call.too-many-arguments` (fires for internal targets only, so it waits on the
-sidecar `reflect` slice's signature layer). The existence ids
+`REGISTERED_NOT_YET_EMITTED` is empty today: its last id,
+`call.too-many-arguments`, emits for non-variadic internal targets since the
+internal-arity slice (ADR-0049, 2026-10-14 amendment). The existence ids
 `call.undefined-function` and `class.undefined` lit up at ADR-0049 S4 and are
 now emittable (their emitters run under the full dam-gated ladder). The whole
 dump surface — `debug.type` / `debug.phpdoc-type` (D3), `debug.var-dump` (D4),
