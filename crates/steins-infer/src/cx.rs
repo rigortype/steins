@@ -1795,7 +1795,8 @@ impl<'a> Cx<'a> {
             // A property hook likewise carries its own (issue #544) — including the
             // implicit `$value` of a short-form `set`, which no declaration spells.
             // The owner triple is unique within a file, so it addresses the scope.
-            ScopeOwner::PropertyHook { .. } => {
+            // An anonymous class's method carries its own the same way (ADR-0105).
+            ScopeOwner::PropertyHook { .. } | ScopeOwner::AnonMethod { .. } => {
                 let s = self.tree().scopes().iter().find(|s| s.owner == scope.owner)?;
                 Some(&s.params)
             }
@@ -1818,7 +1819,10 @@ impl<'a> Cx<'a> {
         scope: &Scope,
     ) -> Option<(Option<&'a str>, &'a [Param], &'a [steins_syntax::SiteOrigin])> {
         match &scope.owner {
-            ScopeOwner::TopLevel | ScopeOwner::PropertyHook { .. } => None,
+            // An anonymous class's method carries no sites, as a hook carries none.
+            ScopeOwner::TopLevel | ScopeOwner::PropertyHook { .. } | ScopeOwner::AnonMethod { .. } => {
+                None
+            }
             ScopeOwner::Function { fqn, .. } => {
                 let f = self.scope_function(fqn)?;
                 Some((None, &f.params, &f.sites))
@@ -1854,9 +1858,11 @@ impl<'a> Cx<'a> {
             // (issue #128 lit up `@return` only, via `scope_return_phpdoc`) —
             // `@param`/`@throws` on closures stays dark. A property hook adopts no
             // docblock at all yet (issue #544), so it is dark for the same reason.
+            // An anonymous class's method adopts no docblock yet (ADR-0105).
             ScopeOwner::TopLevel
             | ScopeOwner::Closure { .. }
-            | ScopeOwner::PropertyHook { .. } => None,
+            | ScopeOwner::PropertyHook { .. }
+            | ScopeOwner::AnonMethod { .. } => None,
             ScopeOwner::Function { fqn, .. } => {
                 let f = self.scope_function(fqn)?;
                 self.envelopes_of(f.docblock.as_deref(), self.cur, f.span.start)
@@ -1881,7 +1887,9 @@ impl<'a> Cx<'a> {
     /// [`Cx::scope_envelopes`] applies. Empty for top-level and closure scopes.
     pub(crate) fn scope_template_shadow(&self, scope: &Scope) -> TemplateShadow {
         match &scope.owner {
-            ScopeOwner::TopLevel | ScopeOwner::Closure { .. } => TemplateShadow::default(),
+            ScopeOwner::TopLevel | ScopeOwner::Closure { .. } | ScopeOwner::AnonMethod { .. } => {
+                TemplateShadow::default()
+            }
             // A hook body sits inside the class declaration exactly as a method body
             // does, so the class-level `@template` names shadow there too (issue #5);
             // the hook itself adopts no docblock, so there is no second stage.
@@ -1948,6 +1956,10 @@ impl<'a> Cx<'a> {
                 .ret_ty
                 .as_ref()
                 .map(|r| (r, format!("{class}::${property}::{}", hook.as_str()))),
+            // …and so does an anonymous class's method (ADR-0105).
+            ScopeOwner::AnonMethod { method, .. } => {
+                scope.ret_ty.as_ref().map(|r| (r, format!("class@anonymous::{method}")))
+            }
         }
     }
 
@@ -2017,7 +2029,7 @@ impl<'a> Cx<'a> {
             // A hooked property's docblock is the *property's*, and `@var` is what it
             // spells — not `@return`. Adopting it as a `get` hook's return envelope is
             // a separate question (issue #544 leaves it dark).
-            ScopeOwner::PropertyHook { .. } => None,
+            ScopeOwner::PropertyHook { .. } | ScopeOwner::AnonMethod { .. } => None,
         }
     }
 }

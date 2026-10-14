@@ -1317,6 +1317,45 @@ fn trait_enters_the_class_like_index_as_a_name() {
     assert!(!t.conditional, "a top-level namespaced trait is unconditional");
 }
 
+// ADR-0105: trait, enum and anonymous-class members and scopes
+
+#[test]
+fn trait_enum_and_anonymous_method_bodies_get_scopes() {
+    let src = "<?php\nnamespace App;\ntrait T { public function t(): self { return $this; } abstract function a(); }\n\
+               enum E { case A; public function e(): int { return 1; } }\n\
+               $o = new class { public function n(int $x): int { return $x; } };\n";
+    let tree = SourceTree::parse(src);
+    let owners: Vec<&ScopeOwner> = tree.scopes().iter().map(|s| &s.owner).collect();
+    assert!(owners.iter().any(|o| matches!(o, ScopeOwner::TraitMethod { class, method }
+        if class == "App\\T" && method == "t")), "{owners:?}");
+    assert!(owners.iter().any(|o| matches!(o, ScopeOwner::Method { class, method }
+        if class == "App\\E" && method == "e")), "{owners:?}");
+    let anon = tree
+        .scopes()
+        .iter()
+        .find(|s| matches!(&s.owner, ScopeOwner::AnonMethod { method, .. } if method == "n"))
+        .expect("an anonymous class's method gets a scope");
+    assert_eq!(anon.params.len(), 1, "its parameters ride on the scope");
+    assert!(anon.ret_ty.is_some(), "and its native return type");
+    // The abstract trait method has no body, and so no scope; it is a lowered member.
+    let t = class(&tree, "T");
+    let names: Vec<&str> = t.methods.iter().map(|m| m.name.as_str()).collect();
+    assert_eq!(names, ["t", "a"]);
+    // `self` in a trait names the importer: no bound is stamped.
+    assert!(t.methods[0].ret.is_none(), "{:?}", t.methods[0].ret);
+    let e = class(&tree, "E");
+    assert_eq!(e.methods.len(), 1, "an enum's methods are lowered");
+}
+
+#[test]
+fn a_trait_use_with_an_adaptation_is_marked() {
+    let src = "<?php\ntrait T { function m() {} }\nclass A { use T; }\nclass B { use T {} }\nclass C { use T { m as n; } }\n";
+    let tree = SourceTree::parse(src);
+    assert!(!class(&tree, "A").trait_adapted);
+    assert!(!class(&tree, "B").trait_adapted, "an empty block adapts nothing");
+    assert!(class(&tree, "C").trait_adapted);
+}
+
 // ADR-0049 A2i: the conditional flag
 
 #[test]

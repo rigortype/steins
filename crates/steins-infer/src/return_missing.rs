@@ -122,6 +122,12 @@ fn return_missing_subject(cx: &Cx, scope: &Scope) -> (String, String) {
             let qualified = format!("{class}::{method}");
             (format!("trait method {qualified}"), qualified)
         }
+        // PHP names an anonymous class `class@anonymous` followed by its file and
+        // position, which no source text spells: the readable prefix stands in.
+        ScopeOwner::AnonMethod { method, .. } => {
+            let qualified = format!("class@anonymous::{method}");
+            (format!("method {qualified}"), qualified)
+        }
         ScopeOwner::Closure { def_offset } => {
             let line = cx.tree().position(*def_offset).line;
             (format!("the closure on line {line}"), "{closure}".to_owned())
