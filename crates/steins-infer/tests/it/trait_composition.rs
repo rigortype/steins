@@ -254,6 +254,14 @@ fn a_trait_typed_property_is_judged_on_write() {
     assert_eq!(of(src, PROP_MISMATCH_ID).len(), 1);
 }
 
+/// C1 under a declining composition: the class's own typed property is still its own
+/// (PHP: "Cannot assign string to property Q::$p of type int").
+#[test]
+fn an_own_property_survives_a_declining_composition() {
+    let src = "<?php\ndeclare(strict_types=1);\ntrait T { function t() {} }\nclass Q { use T { t as u; } public int $p = 0; }\nfunction f(): void { $q = new Q(); $q->p = \"x\"; }\n";
+    assert_eq!(of(src, PROP_MISMATCH_ID).len(), 1);
+}
+
 /// #940 c: an empty `use` no longer hides the class's own constructor (PHP: "Too
 /// few arguments to function C::__construct(), 0 passed"); a constructor a trait
 /// gives the class is the class's (C2).
