@@ -36,6 +36,7 @@
 //! [`Index::destructor_ancestors`]: crate::project::Index::destructor_ancestors
 
 mod property;
+pub(crate) use property::declarers;
 
 use std::collections::HashSet;
 

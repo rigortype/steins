@@ -369,7 +369,7 @@ impl Ask<'_, '_> {
 
 /// The universe's property declarers (ADR-0100 §7, issue #1003): every class-like that declares
 /// a property or imports a trait, and every anonymous class's properties, own and imported.
-fn declarers(cx: &Cx<'_>) -> PropertyDeclarers {
+pub(crate) fn declarers(cx: &Cx<'_>) -> PropertyDeclarers {
     let mut out = PropertyDeclarers::default();
     let mut named: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
     for (file, unit) in cx.units.iter().enumerate() {

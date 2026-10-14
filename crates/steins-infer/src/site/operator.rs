@@ -26,6 +26,7 @@
 mod chain;
 mod coerce;
 mod drops;
+pub(crate) use drops::declarers;
 mod family;
 
 pub(super) use coerce::{

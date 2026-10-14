@@ -1927,6 +1927,16 @@ impl<'a> Cx<'a> {
         }
     }
 
+    /// How a message names a method scope's method: `Class::m`, or for a trait's method
+    /// the importer PHP would name (ADR-0105 §2.5, [`Cx::trait_method_display`]).
+    fn member_display(&self, scope: &Scope, cd: &ClassDecl, method: &str) -> String {
+        if matches!(scope.owner, ScopeOwner::TraitMethod { .. }) {
+            self.trait_method_display(&cd.fqn, method)
+        } else {
+            format!("{}::{}", cd.name, method)
+        }
+    }
+
     /// The native return type and display name of a scope's owning function,
     /// method, or closure (the same file this `Cx` points at), or `None` for the
     /// top-level script scope or an owner with no native scalar/union return type.
@@ -1950,7 +1960,8 @@ impl<'a> Cx<'a> {
                 let cd =
                     self.tree().classes().iter().find(|c| c.fqn.eq_ignore_ascii_case(class))?;
                 let m = cd.methods.iter().find(|m| m.name.eq_ignore_ascii_case(method))?;
-                m.ret.as_ref().map(|r| (r, format!("{}::{}", cd.name, m.name)))
+                let name = self.member_display(scope, cd, &m.name);
+                m.ret.as_ref().map(|r| (r, name))
             }
             // Issue #128: closures carry their native `: R` on the scope itself
             // (`Scope::ret_ty`) — same check surface as free functions.
@@ -2022,7 +2033,7 @@ impl<'a> Cx<'a> {
                     &type_aliases_of(cd.docblock.as_deref(), self.cur, cd.span.start),
                 );
                 let ret = env.ret?;
-                Some((ret, format!("{}::{}", cd.name, m.name)))
+                Some((ret, self.member_display(scope, cd, &m.name)))
             }
             // Issue #128: closures carry their adopted docblock on the scope itself
             // (`Scope::docblock`) — same `parse_envelopes` grammar as free
