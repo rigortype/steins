@@ -10,6 +10,8 @@ use steins_syntax::{
 
 use crate::contract::IsA;
 use crate::cx::Cx;
+use crate::early_binding::{Binding, class_use, redammed};
+use crate::fold::NoFold;
 use crate::dispatch::{Resolution, ResolvedMethod, private_blocked, resolve_in_chain};
 use crate::env::Store;
 use crate::project::Diagnostic;
@@ -435,8 +437,11 @@ pub(crate) fn check_inaccessible_method(
         return;
     }
     // A2i: a conditional declaration anywhere leaves which body binds to load order —
-    // fire only when the whole-universe dam is clear.
-    if chain.any_conditional && !cx.dam.is_clear() {
+    // fire only when the whole-universe dam is clear — and a use above a class PHP
+    // does not bind early declines. This lane holds no folder, so an engine parent
+    // never proves early binding here: the use declines, the safe side.
+    let binding = class_use(cx, &mut NoFold, &class_fqn, chain.any_conditional, call.span.start);
+    if binding == Binding::Decline {
         return;
     }
     let pos = cx.tree().position(call.span.start);
@@ -460,8 +465,9 @@ pub(crate) fn check_inaccessible_method(
         column: pos.column,
         message: format!(
             "call to {vis} {kind_word}{call_render} — hierarchy fully enumerated ({}), \
-             {magic_render} — proven Error ({sentence})",
+             {magic_render} — proven Error ({sentence}){}",
             chain.render(),
+            binding.suffix(),
         ),
     });
 }
@@ -568,7 +574,7 @@ pub(crate) fn check_inaccessible_property(
     let Some(vis) = member_inaccessible(cx, decl.visibility, &judged.fqn, w.enclosing_class) else {
         return;
     };
-    if chain.any_conditional && !cx.dam.is_clear() {
+    if redammed(cx, chain.any_conditional) {
         return;
     }
     let pos = cx.tree().position(span.start);
@@ -638,7 +644,10 @@ pub(crate) fn check_inaccessible_class_const(
     let Some(vis) = member_inaccessible(cx, visibility, &declaring.fqn, w.enclosing_class) else {
         return;
     };
-    if chain.any_conditional && !cx.dam.is_clear() {
+    // A2i, and a fetch above a class PHP does not bind early (no folder: an engine
+    // parent declines, as for the method lane).
+    let binding = class_use(cx, &mut NoFold, &class_fqn, chain.any_conditional, span.start);
+    if binding == Binding::Decline {
         return;
     }
     // PHP names the class as *written* at the site in this message
@@ -656,10 +665,11 @@ pub(crate) fn check_inaccessible_class_const(
         message: format!(
             "fetch of {vis} class constant {written}::{name} from {} — declared by {}, \
              hierarchy fully enumerated ({}), constants have no magic fallback — \
-             proven Error (Cannot access {vis} constant {written}::{name})",
+             proven Error (Cannot access {vis} constant {written}::{name}){}",
             scope_render(cx, w.enclosing_class),
             declaring.name,
             chain.render(),
+            binding.suffix(),
         ),
     });
 }

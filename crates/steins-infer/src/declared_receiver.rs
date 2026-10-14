@@ -7,6 +7,7 @@ use steins_syntax::{CallExpr, Callee, ClassDecl, Receiver};
 
 use crate::contract::{IsA, ProjectIsa};
 use crate::cx::Cx;
+use crate::early_binding::redammed;
 use crate::env::{ContractArm, Store, Stratum};
 use crate::project::{Diagnostic, Res};
 use crate::fold::Folder;
@@ -203,7 +204,7 @@ fn arm_provably_lacks_method(
         return None;
     };
     // A2i: a conditional declaration in the chain re-dams the claim.
-    if any_conditional && !cx.dam.is_clear() {
+    if redammed(cx, any_conditional) {
         return None;
     }
     // A2ii homonym: every chain FQN must be answered NOT-present by the boot surface.

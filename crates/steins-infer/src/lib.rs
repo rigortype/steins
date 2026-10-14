@@ -43,6 +43,7 @@ mod descent;
 mod dispatch;
 mod docblock_hygiene;
 mod dump;
+mod early_binding;
 pub mod effects;
 mod env;
 pub mod escapes;
