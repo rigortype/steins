@@ -493,6 +493,28 @@ impl<'a> Cx<'a> {
         })
     }
 
+    /// How a message names `method` of the trait `trait_fqn` (ADR-0105 §2.5): PHP names
+    /// the importer (`C::f()`), so a trait one class imports, directly and alone, is
+    /// named by that class; a trait several import, or none, keeps its own name, since
+    /// the one walk of its body speaks for every importer.
+    pub(crate) fn trait_method_display(&self, trait_fqn: &str, method: &str) -> String {
+        let table = self.index.property_declarers(|| crate::site::declarers(self));
+        let id = self.class_identity(trait_fqn);
+        let importers: Vec<&String> = table
+            .importers
+            .get(&id)
+            .map(|v| v.iter().collect())
+            .unwrap_or_default();
+        let owner = match importers.as_slice() {
+            [only] if self.find_class(only).is_some_and(|(_, cd)| !cd.is_trait) => *only,
+            _ => trait_fqn,
+        };
+        // The simple name, as a class method's message spells its class.
+        let display = self.class_display_fqn(owner);
+        let simple = display.rsplit('\\').next().unwrap_or(&display);
+        format!("{simple}::{method}")
+    }
+
     /// The trait declarations `cd`'s composition reaches, as `(file, decl)` pairs.
     pub(crate) fn reached_traits(&self, file: usize, cd: &ClassDecl) -> Vec<(usize, &'a ClassDecl)> {
         let Some(comp) = self.composition_of(file, cd) else { return Vec::new() };

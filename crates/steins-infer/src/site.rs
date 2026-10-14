@@ -24,6 +24,7 @@ mod contract;
 pub(crate) mod engine;
 pub(crate) mod method;
 mod operator;
+pub(crate) use operator::declarers;
 mod printf;
 pub(crate) mod reach;
 mod resolve;

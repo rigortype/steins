@@ -246,6 +246,19 @@ fn a_trait_method_body_judges_no_receiver_dependent_claim() {
     }
 }
 
+/// §2.5: a finding in a trait body names the importer PHP names (`C::f(): Return value
+/// must be of type int, string returned`) when one class imports the trait, and the
+/// trait when several do.
+#[test]
+fn a_trait_body_finding_names_its_importer() {
+    let one = "<?php\ndeclare(strict_types=1);\ntrait T { public function f(): int { return \"x\"; } }\nclass C { use T; }\n";
+    let d = findings(one);
+    assert!(d.iter().any(|d| d.message.contains("C::f()")), "{d:#?}");
+    let two = "<?php\ndeclare(strict_types=1);\ntrait T { public function f(): int { return \"x\"; } }\nclass C { use T; }\nclass D { use T; }\n";
+    let d = findings(two);
+    assert!(d.iter().any(|d| d.message.contains("T::f()")), "{d:#?}");
+}
+
 /// #952 l3: a typed property declared in a trait (PHP: "Cannot assign string to
 /// property Q::$t of type int").
 #[test]
