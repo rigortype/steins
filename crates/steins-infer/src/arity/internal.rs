@@ -46,6 +46,7 @@ use crate::env::Store;
 use crate::existence::global_function_callee;
 use crate::fold::Folder;
 use crate::project::Diagnostic;
+use crate::version_region::in_version_dependent_region;
 use crate::{
     CALL_TOO_FEW_ARGUMENTS_ID, CALL_TOO_MANY_ARGUMENTS_ID, CALL_UNKNOWN_NAMED_ARGUMENT_ID,
 };
@@ -111,6 +112,11 @@ fn countable(call: &CallExpr) -> bool {
 }
 
 fn emit(cx: &Cx, call: &CallExpr, display: &str, verdict: Verdict, out: &mut Vec<Diagnostic>) {
+    // The signature is the analysing PHP's; a branch that runs on another PHP is
+    // judged by a signature it never sees.
+    if in_version_dependent_region(cx, call.span.start) {
+        return;
+    }
     let (id, message) = match verdict {
         Verdict::UnknownNamed(name) => (
             CALL_UNKNOWN_NAMED_ARGUMENT_ID,
