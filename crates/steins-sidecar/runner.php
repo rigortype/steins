@@ -269,6 +269,7 @@ function steins_reflect(array $params)
     $params_total = null;
     $params_required = null;
     $parameters = null;
+    $extension = null;
     if ($function) {
         try {
             $rf = new ReflectionFunction($name);
@@ -283,6 +284,8 @@ function steins_reflect(array $params)
             if ($rt !== null) {
                 $return_type = (string) $rt;
             }
+            $ext = $rf->getExtensionName();
+            $extension = $ext === false ? null : $ext;
             $params_total = $rf->getNumberOfParameters();
             $params_required = $rf->getNumberOfRequiredParameters();
             $parameters = [];
@@ -302,6 +305,7 @@ function steins_reflect(array $params)
             $params_total = null;
             $params_required = null;
             $parameters = null;
+            $extension = null;
         }
     }
 
@@ -316,6 +320,7 @@ function steins_reflect(array $params)
         'params_total' => $params_total,
         'params_required' => $params_required,
         'params' => $parameters,
+        'extension' => $extension,
     ];
 }
 

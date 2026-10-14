@@ -105,6 +105,12 @@ pub struct Reflection {
     /// before the field, a reflection failure, a name that is not a function. A
     /// zero-parameter function reports `Some(vec![])` — an empty list is an answer.
     pub params: Option<Vec<BuiltinParam>>,
+    /// `getExtensionName()` of a resident function (`"standard"`, `"gnupg"`), or `None`
+    /// for a user function, a name that is not a function, an older runner and a replay
+    /// table recorded before the field. Arity judgments admit only extensions bundled
+    /// with php-src, whose arginfo is the engine's contract (PECL arginfo varies with
+    /// the extension's version and can be wrong).
+    pub extension: Option<String>,
 }
 
 /// One parameter of a resident function as the running engine reports it
@@ -418,6 +424,10 @@ pub fn parse_reflection_result(result: &serde_json::Value, target: &str) -> Opti
         // every position after the gap. Absent / `null` / unreadable all collapse
         // to `None`, which withholds the judgment.
         params: result.get("params").and_then(parse_builtin_params),
+        extension: result
+            .get("extension")
+            .and_then(serde_json::Value::as_str)
+            .map(ToOwned::to_owned),
     })
 }
 

@@ -37,7 +37,7 @@ use steins_syntax::{
     ArgValue, CallExpr, Callee, ClosureRef, NameRef, Param, normalize_array,
 };
 
-use super::internal::{builtin_signature, required_of};
+use super::internal::{builtin_signature, function_is_bundled, required_of};
 use super::{required_param_count, resolve_arity_function, string_callee_ref};
 use crate::cx::Cx;
 use crate::env::{ClosureTarget, Known, Stratum};
@@ -50,6 +50,8 @@ use crate::CALL_TOO_FEW_ARGUMENTS_ID;
 /// A resolved callback signature: how many arguments it needs, and its name.
 struct Sig {
     required: usize,
+    /// The internal function the callback names, to check its extension at report time.
+    internal: Option<String>,
     display: String,
 }
 
@@ -152,15 +154,17 @@ fn function_call(call: &CallExpr, r: &NameRef) -> CallExpr {
 fn function_sig(cx: &Cx, folder: &mut dyn Folder, call: &CallExpr, r: &NameRef) -> Option<Sig> {
     let synth = function_call(call, r);
     if let Some(target) = resolve_arity_function(cx, folder, &synth) {
-        return Some(Sig { required: required_param_count(target.params), display: target.display });
+        let required = required_param_count(target.params);
+        return Some(Sig { required, display: target.display, internal: None });
     }
     let (name, params) = builtin_signature(cx, folder, &synth)?;
-    Some(Sig { required: required_of(&params), display: name })
+    Some(Sig { required: required_of(&params), display: name.clone(), internal: Some(name) })
 }
 
 fn closure_sig(cx: &Cx, def_offset: u32) -> Option<Sig> {
     let params: &[Param] = &cx.closure_scope(def_offset)?.params;
-    Some(Sig { required: required_param_count(params), display: "closure".to_owned() })
+    let required = required_param_count(params);
+    Some(Sig { required, display: "closure".to_owned(), internal: None })
 }
 
 /// A string callee: a function name, never `Class::method`.
@@ -225,6 +229,12 @@ pub(crate) fn check_callback_arity(
     let Some(arg) = call.args.get(inv.callback) else { return };
     let Some(sig) = callback_sig(cx, folder, call, &arg.value, env) else { return };
     if sig.required <= inv.invoked {
+        return;
+    }
+    // A PECL callee's arginfo is not trusted (see `internal.rs`).
+    if let Some(name) = &sig.internal
+        && !function_is_bundled(folder, name)
+    {
         return;
     }
     if in_version_dependent_region(cx, call.span.start) {

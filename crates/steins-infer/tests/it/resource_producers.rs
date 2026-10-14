@@ -154,6 +154,7 @@ impl FoldEngine for Engine {
             params_total: None,
             params_required: None,
             params: known.then(|| self.params[&key].clone()),
+            extension: None,
         })
     }
     fn reflect_class(&mut self, _target: &str) -> Option<ClassReflection> {
