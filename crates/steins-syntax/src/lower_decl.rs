@@ -840,7 +840,7 @@ fn lower_classes_into(
         Node::Class(c) => out.push(lower_class(c, aliases, docs, rc, conditional)),
         Node::Interface(i) => out.push(lower_interface(i, aliases, docs, rc, conditional)),
         Node::Enum(e) => out.push(lower_enum(e, aliases, docs, rc, conditional)),
-        Node::Trait(t) => out.push(lower_trait(t, conditional)),
+        Node::Trait(t) => out.push(lower_trait(t, aliases, docs, rc, conditional)),
         _ => {}
     }
     // A declaration reached only through a plain namespace/program node is
@@ -889,12 +889,15 @@ fn is_decl_transparent(node: &Node<'_, '_>) -> bool {
 }
 
 /// What a class-like body's members say, by name, about the destructor an instance
-/// runs when it is dropped and the traits it imports (ADR-0100 §7, issue #882). A
-/// trait's methods are not lowered, so this reads the member list itself.
+/// runs when it is dropped and the traits it imports (ADR-0100 §7, issue #882). An
+/// anonymous class's members are not lowered, so this reads the member list itself.
 #[derive(Default)]
 pub(crate) struct BodyDestructor {
     /// Every trait the body's `use` statements name, as written.
     pub(crate) used_traits: Vec<NameRef>,
+    /// Whether a `use` statement carries an adaptation (`insteadof` or `as`), which the
+    /// trait composition declines on (ADR-0105).
+    pub(crate) trait_adapted: bool,
     /// A `__destruct` method, or a trait adaptation that names a method `__destruct`
     /// (`use T { bye as __destruct; }`, which makes `bye` the destructor).
     pub(crate) declares_destructor: bool,
@@ -987,6 +990,7 @@ pub(crate) fn scan_body<'a, 'arena: 'a>(
             ClassLikeMember::TraitUse(tu) => {
                 out.used_traits.extend(tu.trait_names.iter().map(name_ref));
                 if let TraitUseSpecification::Concrete(spec) = &tu.specification {
+                    out.trait_adapted |= !spec.adaptations.is_empty();
                     let aliases_as = |magic: &str| {
                         spec.adaptations.iter().any(|a| {
                             matches!(a, TraitUseAdaptation::Alias(alias)
@@ -1008,11 +1012,78 @@ pub(crate) fn scan_body<'a, 'arena: 'a>(
     out
 }
 
-/// Lower a `trait` declaration to a name-only [`ClassDecl`] (ADR-0049 §5, C8/A2i):
-/// it joins the class-like index but has no members/flattening, only its FQN.
-fn lower_trait(t: &mago_syntax::cst::Trait<'_>, conditional: bool) -> ClassDecl {
-    // The members are read by name only: nothing of a trait's body is lowered into a unit.
+/// The members of a class or trait body, lowered alike (ADR-0105): a trait's members are
+/// the own members of every class that imports them.
+#[derive(Default)]
+struct BodyMembers {
+    methods: Vec<MethodDecl>,
+    properties: Vec<PropertyDecl>,
+    consts: Vec<(String, ArgValue)>,
+    const_visibility: Vec<(String, Visibility)>,
+    const_decls: Vec<ClassConstDecl>,
+    hooked_properties: Vec<String>,
+    uses_traits: bool,
+}
+
+/// Lower the methods, properties and constants of a class, trait or enum body.
+fn lower_body_members<'a, 'arena: 'a>(
+    members: impl Iterator<Item = &'a ClassLikeMember<'arena>>,
+    aliases: &SteinsAttrAliases,
+    docs: &DocIndex,
+    rc: &RefResolver,
+) -> BodyMembers {
+    let mut out = BodyMembers::default();
+    for member in members {
+        match member {
+            ClassLikeMember::Method(m) => {
+                // A constructor's promoted params are properties too (ADR-0036).
+                if bytes_to_string(m.name.value).eq_ignore_ascii_case("__construct") {
+                    lower_promoted_params(m, rc, &mut out.properties);
+                }
+                out.methods.push(lower_method(m, aliases, docs, rc));
+            }
+            ClassLikeMember::Property(Property::Plain(p)) => {
+                lower_plain_property(p, docs, rc, &mut out.properties);
+            }
+            // Hooked properties are virtual/computed, not heap-tracked/checked as stored
+            // values — only their NAME is kept, so member-existence checks aren't fooled
+            // (ADR-0078, issue #185).
+            ClassLikeMember::Property(Property::Hooked(h)) => {
+                out.hooked_properties.push(strip_dollar(bytes_to_string(match &h.item {
+                    PropertyItem::Abstract(a) => a.variable.name,
+                    PropertyItem::Concrete(c) => c.variable.name,
+                })));
+            }
+            ClassLikeMember::Constant(k) => {
+                lower_class_consts(
+                    k,
+                    docs,
+                    &mut out.consts,
+                    &mut out.const_visibility,
+                    &mut out.const_decls,
+                );
+            }
+            ClassLikeMember::TraitUse(_) => out.uses_traits = true,
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Lower a `trait` declaration (ADR-0105): its methods, properties and constants are
+/// lowered as a class's are, and a class that imports the trait holds them through the
+/// per-universe composition `steins_infer` computes, never by copy. The trait also joins
+/// the class-like index by name (ADR-0049 §5): sharing an FQN with a class makes both
+/// `Ambiguous`.
+fn lower_trait(
+    t: &mago_syntax::cst::Trait<'_>,
+    aliases: &SteinsAttrAliases,
+    docs: &DocIndex,
+    rc: &RefResolver,
+    conditional: bool,
+) -> ClassDecl {
     let body = scan_body(t.members.iter());
+    let members = lower_body_members(t.members.iter(), aliases, docs, rc);
     ClassDecl {
         name: bytes_to_string(t.name.value),
         fqn: String::new(), // filled in `parse` from the enclosing namespace ctx
@@ -1028,25 +1099,28 @@ fn lower_trait(t: &mago_syntax::cst::Trait<'_>, conditional: bool) -> ClassDecl 
         enum_cases: Vec::new(),
         parent: None,
         implements: Vec::new(),
-        methods: Vec::new(),
-        properties: Vec::new(),
-        consts: Vec::new(),
-        const_visibility: Vec::new(),
-        const_decls: Vec::new(),
-        hooked_properties: Vec::new(),
-        // A trait is inert here — `uses_traits` on the using class already obstructs.
+        methods: members.methods,
+        properties: members.properties,
+        consts: members.consts,
+        const_visibility: members.const_visibility,
+        const_decls: members.const_decls,
+        hooked_properties: members.hooked_properties,
         allows_dynamic_properties: false,
+        // The obstacle bit stays off for a trait: what it imports is the composition's
+        // to read, through `used_traits`.
         uses_traits: false,
         used_traits: body.used_traits,
+        trait_adapted: body.trait_adapted,
         declares_destructor: body.declares_destructor,
         declares_magic_set: body.declares_magic_set,
         held_classes: body.held_classes,
         holds_self: body.holds_self,
         holds_parent: body.holds_parent,
         trait_props: body.props,
-        // No member docblock can observe a trait-level `@template`.
-        docblock: None,
-        docblock_span: None,
+        // A trait's `@template`, `@method` and `@property` tags read as a class's do: its
+        // members are lowered, and a magic tag on it obstructs every class importing it.
+        docblock: docs.preceding(to_span(t.span()).start),
+        docblock_span: docs.preceding_span(to_span(t.span()).start),
         span: to_span(t.name.span()),
     }
 }
@@ -1063,42 +1137,8 @@ fn lower_class(c: &Class<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex, rc: 
         .map(|i| i.types.iter().map(name_ref).collect())
         .unwrap_or_default();
 
-    let mut methods = Vec::new();
-    let mut properties = Vec::new();
-    let mut consts = Vec::new();
-    let mut const_visibility = Vec::new();
-    let mut const_decls = Vec::new();
-    let mut hooked_properties = Vec::new();
-    let mut uses_traits = false;
     let body = scan_body(c.members.iter());
-    for member in c.members.iter() {
-        match member {
-            ClassLikeMember::Method(m) => {
-                // A constructor's promoted params are properties too (ADR-0036).
-                if bytes_to_string(m.name.value).eq_ignore_ascii_case("__construct") {
-                    lower_promoted_params(m, rc, &mut properties);
-                }
-                methods.push(lower_method(m, aliases, docs, rc));
-            }
-            ClassLikeMember::Property(Property::Plain(p)) => {
-                lower_plain_property(p, docs, rc, &mut properties);
-            }
-            // Hooked properties are virtual/computed, not heap-tracked/checked as stored
-            // values — only their NAME is kept, so member-existence checks aren't fooled
-            // (ADR-0078, issue #185).
-            ClassLikeMember::Property(Property::Hooked(h)) => {
-                hooked_properties.push(strip_dollar(bytes_to_string(match &h.item {
-                    PropertyItem::Abstract(a) => a.variable.name,
-                    PropertyItem::Concrete(c) => c.variable.name,
-                })));
-            }
-            ClassLikeMember::Constant(k) => {
-                lower_class_consts(k, docs, &mut consts, &mut const_visibility, &mut const_decls);
-            }
-            ClassLikeMember::TraitUse(_) => uses_traits = true,
-            _ => {}
-        }
-    }
+    let members = lower_body_members(c.members.iter(), aliases, docs, rc);
 
     ClassDecl {
         name: bytes_to_string(c.name.value),
@@ -1115,17 +1155,18 @@ fn lower_class(c: &Class<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex, rc: 
         enum_cases: Vec::new(),
         parent,
         implements,
-        methods,
-        properties,
-        consts,
-        const_visibility,
-        const_decls,
-        hooked_properties,
+        methods: members.methods,
+        properties: members.properties,
+        consts: members.consts,
+        const_visibility: members.const_visibility,
+        const_decls: members.const_decls,
+        hooked_properties: members.hooked_properties,
         // member absence (ADR-0078, issue #197)
         allows_dynamic_properties: attrs_allow_dynamic_properties(&c.attribute_lists),
         // end member absence (ADR-0078, issue #197)
-        uses_traits,
+        uses_traits: members.uses_traits,
         used_traits: body.used_traits,
+        trait_adapted: body.trait_adapted,
         declares_destructor: body.declares_destructor,
         declares_magic_set: body.declares_magic_set,
         held_classes: Vec::new(),
@@ -1323,6 +1364,7 @@ fn lower_interface(i: &mago_syntax::cst::Interface<'_>, aliases: &SteinsAttrAlia
         allows_dynamic_properties: false,
         uses_traits: false,
         used_traits: Vec::new(),
+        trait_adapted: false,
         declares_destructor,
         declares_magic_set: false,
         held_classes: Vec::new(),
@@ -1340,8 +1382,9 @@ fn lower_interface(i: &mago_syntax::cst::Interface<'_>, aliases: &SteinsAttrAlia
 /// Lower an `enum` declaration to a [`ClassDecl`] with `is_enum = true` (ADR-0043).
 /// Implicitly `final`, cannot extend; joins the class index for subtyping. `implements`
 /// feeds the is-a oracle (plus implicit `UnitEnum`/`BackedEnum`); cases + backing scalar
-/// are recorded for value reasoning. Method bodies are not analyzed: `methods` stays empty.
-fn lower_enum(e: &mago_syntax::cst::Enum<'_>, _aliases: &SteinsAttrAliases, docs: &DocIndex, rc: &RefResolver, conditional: bool) -> ClassDecl {
+/// are recorded for value reasoning. Its methods and constants lower as a class's do
+/// (ADR-0105), and so do the traits it imports.
+fn lower_enum(e: &mago_syntax::cst::Enum<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex, rc: &RefResolver, conditional: bool) -> ClassDecl {
     let implements: Vec<NameRef> = e
         .implements
         .as_ref()
@@ -1356,34 +1399,24 @@ fn lower_enum(e: &mago_syntax::cst::Enum<'_>, _aliases: &SteinsAttrAliases, docs
     });
 
     let mut enum_cases = Vec::new();
-    let mut consts = Vec::new();
-    let mut const_visibility = Vec::new();
-    let mut const_decls = Vec::new();
     for member in e.members.iter() {
-        match member {
-            ClassLikeMember::EnumCase(case) => {
-                let (name_id, value) = match &case.item {
-                    mago_syntax::cst::EnumCaseItem::Unit(u) => (&u.name, None),
-                    mago_syntax::cst::EnumCaseItem::Backed(b) => {
-                        let v = lower_arg_value(b.value);
-                        (&b.name, (!matches!(v, ArgValue::Other)).then_some(v))
-                    }
-                };
-                enum_cases.push(EnumCaseDecl {
-                    name: bytes_to_string(name_id.value),
-                    value,
-                    span: to_span(case.span()),
-                });
-            }
-            ClassLikeMember::Constant(k) => {
-                lower_class_consts(k, docs, &mut consts, &mut const_visibility, &mut const_decls);
-            }
-            _ => {}
+        if let ClassLikeMember::EnumCase(case) = member {
+            let (name_id, value) = match &case.item {
+                mago_syntax::cst::EnumCaseItem::Unit(u) => (&u.name, None),
+                mago_syntax::cst::EnumCaseItem::Backed(b) => {
+                    let v = lower_arg_value(b.value);
+                    (&b.name, (!matches!(v, ArgValue::Other)).then_some(v))
+                }
+            };
+            enum_cases.push(EnumCaseDecl {
+                name: bytes_to_string(name_id.value),
+                value,
+                span: to_span(case.span()),
+            });
         }
     }
-
-    // Keep the class-like lowerer signature uniform; enum members need no name resolution.
-    let _ = rc;
+    let body = scan_body(e.members.iter());
+    let members = lower_body_members(e.members.iter(), aliases, docs, rc);
 
     ClassDecl {
         name: bytes_to_string(e.name.value),
@@ -1400,26 +1433,26 @@ fn lower_enum(e: &mago_syntax::cst::Enum<'_>, _aliases: &SteinsAttrAliases, docs
         enum_cases,
         parent: None,
         implements,
-        methods: Vec::new(),
-        properties: Vec::new(),
-        consts,
-        const_visibility,
-        const_decls,
-        hooked_properties: Vec::new(),
+        methods: members.methods,
         // An enum cannot declare a property, dynamic or otherwise.
+        properties: Vec::new(),
+        consts: members.consts,
+        const_visibility: members.const_visibility,
+        const_decls: members.const_decls,
+        hooked_properties: Vec::new(),
         allows_dynamic_properties: false,
-        uses_traits: false,
+        uses_traits: members.uses_traits,
+        used_traits: body.used_traits,
+        trait_adapted: body.trait_adapted,
         // …nor a destructor: PHP refuses one on an enum, imported or declared.
-        used_traits: Vec::new(),
         declares_destructor: false,
         declares_magic_set: false,
         held_classes: Vec::new(),
         holds_self: false,
         holds_parent: false,
         trait_props: Vec::new(),
-        // No analyzed member can observe an enum-level `@template`.
-        docblock: None,
-        docblock_span: None,
+        docblock: docs.preceding(to_span(e.span()).start),
+        docblock_span: docs.preceding_span(to_span(e.span()).start),
         span: to_span(e.name.span()),
     }
 }

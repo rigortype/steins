@@ -79,10 +79,12 @@ use crate::absence::magic_obstacles_in_reach;
 ///
 /// A plain `function` nested inside a method genuinely has no class scope, and a
 /// top-level statement is the global scope; both keep `None` and both answerable.
+/// A trait method runs in the scope of whichever class imports it (ADR-0105), so its
+/// `None` is unknown too.
 ///
 /// [`scope_class`]: crate::scope_class
 pub(crate) fn class_scope_known(scope: &Scope) -> bool {
-    !matches!(scope.owner, ScopeOwner::Closure { .. })
+    !matches!(scope.owner, ScopeOwner::Closure { .. } | ScopeOwner::TraitMethod { .. })
 }
 
 /// The `private` leg of member visibility: a `private` member declared by

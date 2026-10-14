@@ -116,6 +116,12 @@ fn return_missing_subject(cx: &Cx, scope: &Scope) -> (String, String) {
             let qualified = format!("{class}::{method}");
             (format!("method {qualified}"), qualified)
         }
+        // PHP names the importing class (`C::m(): Return value …`), which the trait's
+        // one walk does not know (ADR-0105): the trait is the name the source spells.
+        ScopeOwner::TraitMethod { class, method } => {
+            let qualified = format!("{class}::{method}");
+            (format!("trait method {qualified}"), qualified)
+        }
         ScopeOwner::Closure { def_offset } => {
             let line = cx.tree().position(*def_offset).line;
             (format!("the closure on line {line}"), "{closure}".to_owned())
