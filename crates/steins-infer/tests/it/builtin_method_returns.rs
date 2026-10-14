@@ -470,16 +470,15 @@ function f(Reader $r): void {
     assert_eq!(one_type(src), "unknown");
 }
 
-/// A class that `use`s a trait and does not declare the name refuses, for
-/// ADR-0049 A18's reason: trait method bodies and return types are not lowered, so
-/// "not found on the class" cannot be read as "inherited from the parent" while a
-/// trait could be declaring it.
+/// A class whose trait composition declines refuses, for ADR-0049 A18's reason:
+/// "not held by the class" cannot be read as "inherited from the parent" while a
+/// trait could be giving it the name (ADR-0105 C5).
 #[test]
 fn a_trait_using_child_refuses_the_inherited_row() {
     let src = r#"<?php
-trait T {}
+trait T { public function x(): void {} }
 class Reader extends \SplFileObject {
-    use T;
+    use T { x as y; }
 }
 function f(Reader $r): void {
     \PHPStan\dumpType($r->getPath());

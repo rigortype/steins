@@ -105,6 +105,7 @@ mod site;
 mod string_context;
 pub mod suppress;
 mod throws;
+mod trait_composition;
 mod transfers;
 mod undefined_var;
 mod unknown_vocabulary;

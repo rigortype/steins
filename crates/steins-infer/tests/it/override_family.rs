@@ -473,9 +473,10 @@ fn silent_on_an_unresolvable_parent() {
 
 #[test]
 fn silent_on_a_trait_using_class() {
-    // Real fatal (php -r witnessed); trait members aren't flattened (ADR-0049 leg (e)).
+    // Real fatal (php -r witnessed); a composition that declines (ADR-0105 C5) is
+    // the trait obstacle (ADR-0049 leg (e)).
     silent(
-        "<?php\nclass P { public function m(int|string $x) {} }\ntrait T {}\nclass C extends P { use T; public function m(int $x) {} }\n",
+        "<?php\nclass P { public function m(int|string $x) {} }\ntrait T { function t() {} }\nclass C extends P { use T { t as u; } public function m(int $x) {} }\n",
     );
 }
 
@@ -483,7 +484,7 @@ fn silent_on_a_trait_using_class() {
 fn silent_when_an_ancestor_uses_a_trait() {
     // The obstacle is per-node over the WHOLE chain, not just the subject.
     silent(
-        "<?php\ntrait T {}\nclass A { public function m(int|string $x) {} }\nclass B extends A { use T; }\nclass C extends B { public function m(int $x) {} }\n",
+        "<?php\ntrait T { function t() {} }\nclass A { public function m(int|string $x) {} }\nclass B extends A { use T { t as u; } }\nclass C extends B { public function m(int $x) {} }\n",
     );
 }
 

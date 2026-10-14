@@ -332,17 +332,17 @@ function f(): void { $c = new C(); $c->m(); }
 
 #[test]
 fn trait_use_anywhere_in_the_chain_is_silent() {
-    // A trait's members aren't flattened in, so the walk can't see a public `m()` or `__call`.
+    // A composition that declines (ADR-0105 C5) could hide a public `m()` or `__call`.
     let using = "<?php
 trait T { public function t(): void {} }
-class C { use T; private function m(): void {} }
+class C { use T { t as u; } private function m(): void {} }
 function f(): void { $c = new C(); $c->m(); }
 ";
     assert!(method(using).is_empty(), "a trait-using receiver is unresolvable");
 
     let ancestor = "<?php
 trait T { public function t(): void {} }
-class P { use T; }
+class P { use T { t as u; } }
 class C extends P { private function m(): void {} }
 function f(): void { $c = new C(); $c->m(); }
 ";
@@ -554,7 +554,7 @@ function f(): int { $c = new C(); $v = $c->p; return $v; }
 fn property_on_a_trait_using_receiver_is_silent() {
     let src = "<?php
 trait T { public function t(): void {} }
-class C { use T; private int $p = 1; }
+class C { use T { t as u; } private int $p = 1; }
 function f(): int { $c = new C(); $v = $c->p; return $v; }
 ";
     assert!(property(src).is_empty());
@@ -706,7 +706,7 @@ function f(): string { $v = C::class; return $v; }
 fn class_constant_on_a_trait_using_or_unresolvable_chain_is_silent() {
     let using = "<?php
 trait T { public function t(): void {} }
-class C { use T; private const K = 1; }
+class C { use T { t as u; } private const K = 1; }
 function f(): int { $v = C::K; return $v; }
 ";
     assert!(class_const(using).is_empty());

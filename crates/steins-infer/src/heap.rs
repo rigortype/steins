@@ -298,21 +298,11 @@ fn ctor_touched_props(cx: &Cx, class: &str, props: &[&PropertyDecl]) -> Option<H
 
 /// The class whose declaration owns the constructor [`Cx::find_ctor`] resolved for
 /// `class` — an inherited constructor's scope is keyed by the declaring class, not by
-/// the subclass being allocated.
+/// the subclass being allocated. A constructor a trait gives the class is keyed by
+/// the trait (ADR-0105), whose method scope a class lookup never finds: every slot
+/// then counts as touched.
 fn ctor_owner_fqn(cx: &Cx, class: &str) -> String {
-    let mut cur = class.to_owned();
-    let mut seen: HashSet<String> = HashSet::new();
-    loop {
-        if !seen.insert(cur.to_ascii_lowercase()) {
-            return cur;
-        }
-        let Some((file, cd)) = cx.find_class(&cur) else { return cur };
-        if cd.methods.iter().any(|m| m.is_constructor) {
-            return cd.fqn.clone();
-        }
-        let Some(parent) = cd.parent.as_ref() else { return cur };
-        cur = cx.units[file].tree.resolve_class_fqn(parent);
-    }
+    cx.find_ctor_held(class).map_or_else(|| class.to_owned(), |m| m.owner.fqn.clone())
 }
 
 /// What a constructor body's text reveals about the slots it can reach — the answer
@@ -935,10 +925,13 @@ fn write_misses_declared_slot(cx: &Cx, class: &str, prop: &str, scope: Option<&s
         if may_declare_magic_set(cx, file, cd, &mut seen_traits) {
             return true;
         }
-        if owner.is_none()
-            && let Some(pd) = cd.properties.iter().find(|p| p.name == prop && !p.is_static)
-        {
-            owner = Some((cd.fqn.clone(), pd));
+        // A property a trait gives the class is the class's own (ADR-0105 C11): a
+        // private one is private to the importer.
+        if owner.is_none() {
+            let Ok(held) = cx.held_property(file, cd, prop) else { return true };
+            if let Some(pd) = held.map(|h| h.decl).filter(|p| !p.is_static) {
+                owner = Some((cd.fqn.clone(), pd));
+            }
         }
         match &cd.parent {
             Some(pref) => cur = cx.units[file].tree.resolve_class_fqn(pref),

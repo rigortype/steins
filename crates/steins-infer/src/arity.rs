@@ -166,9 +166,9 @@ fn arity_method_receiver(
 /// [`MethodDecl`] under S2's closure discipline. Returns the method, its declaring
 /// class's simple name, the ordered traversed FQNs (for the A2ii homonym leg), and
 /// whether any traversed class was declared conditionally (A2i). `None` on any
-/// obstacle: an unresolvable/`Ambiguous`/absent class, an enum (A3 — methods not
-/// lowered), a trait name or a `uses_traits` class (a trait could shadow the method
-/// with a different signature), a cycle, an **abstract** or **non-public** resolved
+/// obstacle: an unresolvable/`Ambiguous`/absent class, an enum (A3), a trait name or a
+/// class whose trait composition declines its methods (ADR-0105; a class holds what
+/// its traits give it before what it inherits), a cycle, an **abstract** or **non-public** resolved
 /// method (a protected/private method may route to `__call` or raise a distinct
 /// visibility `Error` — not an `ArgumentCountError`), or the method being absent
 /// from the whole chain (that is S2's job, not arity's).
@@ -186,18 +186,21 @@ fn walk_arity_chain<'a>(
             return None; // cycle — closure cannot terminate soundly.
         }
         let (cfile, cd) = cx.find_class(&cur)?; // unique project class, or bust.
-        if cd.is_enum || cd.is_trait || cd.uses_traits {
+        if cd.is_enum || cd.is_trait {
             return None;
         }
         traversed.push(cur.clone());
         if cd.conditional {
             any_conditional = true;
         }
-        if let Some(m) = cd.methods.iter().find(|m| m.name.eq_ignore_ascii_case(method)) {
-            if m.is_abstract || m.visibility != Visibility::Public {
+        // What the class holds, its own methods before its traits' (ADR-0105 C1, C2);
+        // a composition that declines is the trait obstacle it always was.
+        if let Some(m) = cx.held_method(cfile, cd, method).ok()? {
+            if m.decl.is_abstract || m.decl.visibility != Visibility::Public {
                 return None;
             }
-            return Some((m, cd.name.clone(), traversed, any_conditional));
+            // PHP names an imported method by its importer (`C::__construct()`).
+            return Some((m.decl, cd.name.clone(), traversed, any_conditional));
         }
         // A `None` parent ends the chain: the method is absent from the whole chain
         // — that is S2's `call.undefined-method`, never arity's id.

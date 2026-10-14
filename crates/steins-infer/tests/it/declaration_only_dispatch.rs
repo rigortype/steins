@@ -174,17 +174,34 @@ function f(Base $b): void {
     assert_eq!(one_type(src), "string|null");
 }
 
-/// A method the class obtains from a **trait** stays refused: trait bodies and
-/// return types are not lowered, so "not found on the class" must not be read as
-/// "absent" while that is so.
+/// A method the class obtains from a **trait** answers its declaration (ADR-0105
+/// C2): the trait's method is the class's, and return covariance bounds any
+/// subclass's override as it does an inherited one.
 #[test]
-fn a_trait_provided_method_stays_refused() {
+fn a_trait_provided_method_answers_its_declaration() {
     let src = r#"<?php
 trait Naming {
     public function getName(): string { return 'x'; }
 }
 class Foo {
     use Naming;
+}
+function f(Foo $foo): void {
+    \PHPStan\dumpType($foo->getName());
+}
+"#;
+    assert_eq!(one_type(src), "string");
+}
+
+/// …and stays refused where the composition declines (ADR-0105 C5).
+#[test]
+fn a_trait_provided_method_under_an_adaptation_stays_refused() {
+    let src = r#"<?php
+trait Naming {
+    public function getName(): string { return 'x'; }
+}
+class Foo {
+    use Naming { getName as protected; }
 }
 function f(Foo $foo): void {
     \PHPStan\dumpType($foo->getName());

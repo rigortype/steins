@@ -294,15 +294,34 @@ $x = $c->nope;
 
 #[test]
 fn a_trait_anywhere_in_the_chain_is_silence() {
-    // Trait members aren't flattened into the using class (S1 / leg (e)), and a trait
-    // CAN declare a property — witnessed: `(new UT)->tp` is 4.
+    // A trait CAN declare a property — witnessed: `(new UT)->tp` is 4 — so a
+    // composition that declines (ADR-0105 C5) hides one.
     let src = "<?php
+trait TP { public int $tp = 4; public function t(): void {} }
+class UT { use TP { t as u; } }
+$u = new UT();
+$x = $u->nope;
+";
+    assert!(props(src).is_empty(), "{:#?}", props(src));
+}
+
+#[test]
+fn a_property_a_trait_gives_the_class_is_declared() {
+    // ADR-0105 C11: `tp` is the class's; `nope` is declared nowhere.
+    let declared = "<?php
+trait TP { public int $tp = 4; }
+class UT { use TP; }
+$u = new UT();
+$x = $u->tp;
+";
+    assert!(props(declared).is_empty(), "{:#?}", props(declared));
+    let absent = "<?php
 trait TP { public int $tp = 4; }
 class UT { use TP; }
 $u = new UT();
 $x = $u->nope;
 ";
-    assert!(props(src).is_empty(), "{:#?}", props(src));
+    assert_eq!(props(absent).len(), 1, "{:#?}", props(absent));
 }
 
 #[test]
@@ -577,13 +596,30 @@ $x = Suit::Nope;
 #[test]
 fn a_trait_using_class_is_silence_for_constants() {
     // Trait constants (8.2+) answer through the using class (witnessed: `CT::TK` is
-    // "tk"), so a trait-using node is an obstacle, not a node to skip.
+    // "tk"), so a composition that declines (ADR-0105 C5) is an obstacle.
     let src = "<?php
+trait T1 { const TK = 'tk'; public function t(): void {} }
+class CT { use T1 { t as u; } }
+$x = CT::NOPE;
+";
+    assert!(consts(src).is_empty(), "{:#?}", consts(src));
+}
+
+#[test]
+fn a_constant_a_trait_gives_the_class_is_declared() {
+    // ADR-0105 C12: `TK` is the class's; `NOPE` is declared nowhere.
+    let declared = "<?php
+trait T1 { const TK = 'tk'; }
+class CT { use T1; }
+$x = CT::TK;
+";
+    assert!(consts(declared).is_empty(), "{:#?}", consts(declared));
+    let absent = "<?php
 trait T1 { const TK = 'tk'; }
 class CT { use T1; }
 $x = CT::NOPE;
 ";
-    assert!(consts(src).is_empty(), "{:#?}", consts(src));
+    assert_eq!(consts(absent).len(), 1, "{:#?}", consts(absent));
 }
 
 #[test]

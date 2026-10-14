@@ -35,6 +35,7 @@ use crate::env::{Descent, Known, Store, Stratum, arg_of_val, singleton_fact, val
 use crate::project::{Diagnostic, FileUnit, FnResolution, Index, Res, Site};
 use crate::purity::PurityOracle;
 use crate::return_arms::class_template_names;
+use crate::trait_composition::HeldMethod;
 
 // ---------------------------------------------------------------------------
 // The project-aware analysis context.
@@ -354,8 +355,11 @@ impl<'a> Cx<'a> {
     /// The non-static properties of `class_fqn` including inherited ones (ADR-0036),
     /// walking the parent chain; a derived-class declaration shadows an ancestor's
     /// property of the same name (first-seen wins, own class first). Static
-    /// properties are excluded (never heap-tracked). Stops at an unknown/absent
-    /// parent or a trait-using class (give up → the props gathered so far).
+    /// properties are excluded (never heap-tracked). A class's properties include
+    /// what its traits give it (ADR-0105 C11). Stops at an unknown/absent parent or
+    /// at a class whose trait composition declines its properties (give up → the
+    /// props gathered so far: a farther declaration could be shadowed by one the
+    /// composition does not name).
     pub(crate) fn class_props(&self, class_fqn: &str) -> Vec<&'a PropertyDecl> {
         let mut out: Vec<&'a PropertyDecl> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
@@ -366,7 +370,8 @@ impl<'a> Cx<'a> {
                 break;
             }
             let Some((file, cd)) = self.find_class(&cur) else { break };
-            for p in &cd.properties {
+            let Ok(held) = self.held_properties(file, cd) else { break };
+            for p in held.into_iter().map(|p| p.decl) {
                 if p.is_static {
                     continue;
                 }
@@ -397,7 +402,13 @@ impl<'a> Cx<'a> {
                 return false;
             }
             let Some((file, cd)) = self.find_class(&cur) else { return false };
-            if cd.hooked_properties.iter().any(|h| h == prop) {
+            // A trait's hooked property is the importer's (ADR-0105 C11a).
+            if cd.hooked_properties.iter().any(|h| h == prop)
+                || self
+                    .reached_traits(file, cd)
+                    .iter()
+                    .any(|(_, td)| td.hooked_properties.iter().any(|h| h == prop))
+            {
                 return true;
             }
             match &cd.parent {
@@ -416,6 +427,13 @@ impl<'a> Cx<'a> {
     /// namespace and `use` scope, and a class reference in it names a different
     /// class — or no class — read anywhere else.
     pub(crate) fn find_ctor(&self, class_fqn: &str) -> Option<(usize, &'a MethodDecl)> {
+        self.find_ctor_held(class_fqn).map(|m| (m.file, m.decl))
+    }
+
+    /// [`Self::find_ctor`], saying whether the constructor is one a trait gives the
+    /// class (ADR-0105 C2: it outranks an inherited one). `None` where the chain or a
+    /// trait composition on it declines.
+    pub(crate) fn find_ctor_held(&self, class_fqn: &str) -> Option<HeldMethod<'a>> {
         let mut cur = class_fqn.to_owned();
         let mut seen: HashSet<String> = HashSet::new();
         loop {
@@ -423,8 +441,8 @@ impl<'a> Cx<'a> {
                 return None;
             }
             let (file, cd) = self.find_class(&cur)?;
-            if let Some(m) = cd.methods.iter().find(|m| m.is_constructor) {
-                return Some((file, m));
+            if let Some(m) = self.held_method(file, cd, "__construct").ok()? {
+                return Some(m);
             }
             cur = self.units[file].tree.resolve_class_fqn(cd.parent.as_ref()?);
         }
@@ -467,7 +485,12 @@ impl<'a> Cx<'a> {
         if templates.is_empty() {
             return empty; // not a generic class — no carry.
         }
-        let Some((cfile, ctor)) = self.find_ctor(class_fqn) else { return empty };
+        // A trait's constructor reads its `@param` in the trait's own docblock scope,
+        // which no class-level template of the importer reaches (ADR-0105): no carry.
+        let Some(held) = self.find_ctor_held(class_fqn).filter(|m| !m.imported()) else {
+            return empty;
+        };
+        let (cfile, ctor) = (held.file, held.decl);
         // The constructor's own `@param` envelopes, WITHOUT the class-level template
         // shadow applied: a bare `@param T` must stay readable as the template name
         // `T` here (the shadow that neutralizes it to opaque is a check-site concern).

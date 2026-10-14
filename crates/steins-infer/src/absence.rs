@@ -167,6 +167,10 @@ pub(crate) fn magic_obstacles_in_reach(cx: &Cx, start_fqn: &str) -> Vec<MagicObs
         for r in cd.parent.iter().chain(cd.implements.iter()) {
             stack.push(tree.resolve_class_fqn(r));
         }
+        // A tag on a trait obstructs every class that imports it (ADR-0105).
+        for (_, td) in cx.reached_traits(file, cd) {
+            stack.push(td.fqn.clone());
+        }
     }
     out
 }
@@ -223,24 +227,20 @@ pub(crate) fn enumerate_method_chain(cx: &Cx, start_fqn: &str, method: &str, kin
         if cd.is_enum {
             return ChainWalk::Silent;
         }
-        // A trait name in the class-like index carries no lowered members (S1): it
-        // would falsely read as "method absent". Never a method holder here.
+        // A trait name is never a chain node: `extends` naming one is its own fatal.
         if cd.is_trait {
             return ChainWalk::Silent;
         }
         // Leg (e): a trait use adds methods the is-a oracle rightly ignores for
-        // ancestry — Unknown until trait flattening (per-node, like resolve_in_chain).
-        if cd.uses_traits {
-            return ChainWalk::Silent;
-        }
+        // ancestry. The class holds them through its composition (ADR-0105); one that
+        // declines leaves the chain unenumerable, as every trait use did before it.
         // Leg (d): a magic fallback anywhere swallows the name — no error at runtime.
-        if cd.methods.iter().any(|m| m.name.eq_ignore_ascii_case(magic)) {
-            return ChainWalk::Silent;
-        }
         // The method is present (case-insensitively) — including an abstract
         // declaration: it is defined, so the call is not undefined.
-        if cd.methods.iter().any(|m| m.name.eq_ignore_ascii_case(method)) {
-            return ChainWalk::Silent;
+        for name in [magic, method] {
+            if !matches!(cx.held_method(cfile, cd, name), Ok(None)) {
+                return ChainWalk::Silent;
+            }
         }
         simple_chain.push(cd.name.clone());
         fqns.push(cur.clone());
@@ -421,28 +421,33 @@ struct PropertyChain {
 /// `Accessing static property S1::$sp as non static` then `Undefined property:
 /// S1::$sp`) — treating the name as present costs one true positive, never a
 /// false one.
-fn declares_property(cd: &ClassDecl, prop: &str) -> bool {
-    cd.properties.iter().any(|p| p.name == prop) || cd.hooked_properties.iter().any(|h| h == prop)
+///
+/// A property a trait gives the class counts as the class's own (ADR-0105 C11); a
+/// composition that declines is [`property_walk_obstacle`]'s, asked first.
+fn declares_property(cx: &Cx, file: usize, cd: &ClassDecl, prop: &str) -> bool {
+    cd.hooked_properties.iter().any(|h| h == prop)
+        || !matches!(cx.held_property(file, cd, prop), Ok(None))
 }
 
 /// Whether this node hides members from the property walk however the walk asks
 /// (ADR-0078, issue #197) — the obstacle set shared by the chain walk and the
-/// descendant scan: a **trait** name or trait-using node (members not
-/// flattened, S1/leg (e) — a trait can declare properties, witnessed `UT::$tp`
-/// reads `4` through `use TP`); an **enum** (`name`/`value` are engine-provided,
+/// descendant scan: a **trait** name, or a node whose trait composition declines its
+/// properties or methods (ADR-0105 — a trait can declare properties, witnessed
+/// `UT::$tp` reads `4` through `use TP`, and a `__get` it gives the class is the
+/// class's); an **enum** (`name`/`value` are engine-provided,
 /// not declared); an **interface** (declares no properties at all, so its own
 /// emptiness proves nothing about the object behind it); `__get`/`__set`/
 /// `__isset` (see [`PROPERTY_MAGIC`] — the fallback is inherited, witnessed a
 /// parent's `__get` rescues a read on the child, which is why this is asked at
 /// every node); `#[AllowDynamicProperties]` (re-licenses the write PHP 8.2
 /// deprecated, leaving the property set open for good).
-fn property_walk_obstacle(cd: &ClassDecl) -> bool {
+fn property_walk_obstacle(cx: &Cx, file: usize, cd: &ClassDecl) -> bool {
     cd.is_trait
-        || cd.uses_traits
         || cd.is_enum
         || cd.is_interface
         || cd.allows_dynamic_properties
-        || cd.methods.iter().any(|m| PROPERTY_MAGIC.iter().any(|g| m.name.eq_ignore_ascii_case(g)))
+        || cx.properties_open(file, cd)
+        || PROPERTY_MAGIC.iter().any(|g| !matches!(cx.held_method(file, cd, g), Ok(None)))
 }
 
 /// Walk `start_fqn`'s parent chain proving `prop`'s absence under complete
@@ -512,10 +517,10 @@ fn enumerate_property_chain_outcome(
         };
         // ADR-0079 §2.5: a node declared in an unparsable file is member-incomplete —
         // recovery kept the class but may have dropped members out of its body.
-        if cx.member_incomplete(cfile) || property_walk_obstacle(cd) {
+        if cx.member_incomplete(cfile) || property_walk_obstacle(cx, cfile, cd) {
             return PropertyChainOutcome::Unknown;
         }
-        if declares_property(cd, prop) {
+        if declares_property(cx, cfile, cd, prop) {
             // Declared — plain, promoted, static, readonly or hooked. This is the
             // one exit that proves the read CLEAN rather than merely unprovable.
             return PropertyChainOutcome::Declared;
@@ -588,9 +593,9 @@ fn undefined_property_receiver(cx: &Cx, store: &Store, var: &str) -> Option<Prop
 /// leg for leg.
 ///
 /// [`descendant_introduces_method`]: crate::declared_receiver::descendant_introduces_method
-fn descendant_introduces_property(cx: &Cx, cd: &ClassDecl, prop: &str) -> bool {
-    property_walk_obstacle(cd)
-        || declares_property(cd, prop)
+fn descendant_introduces_property(cx: &Cx, file: usize, cd: &ClassDecl, prop: &str) -> bool {
+    property_walk_obstacle(cx, file, cd)
+        || declares_property(cx, file, cd, prop)
         || !magic_obstacles_in_reach(cx, &cd.fqn).is_empty()
 }
 
@@ -640,11 +645,11 @@ fn arm_property_presence(
                 // `eval` could mint a subclass declaring the property.
                 return ArmPropertyPresence::Unknown;
             }
-            for (_, dcd) in &descendants {
+            for (dfile, dcd) in &descendants {
                 // A descendant that declares the property is NOT the `Declared`
                 // answer: the receiver may or may not be that descendant, which is
                 // precisely an unknown rather than a clean path.
-                if descendant_introduces_property(cx, dcd, prop) {
+                if descendant_introduces_property(cx, *dfile, dcd, prop) {
                     return ArmPropertyPresence::Unknown;
                 }
                 if folder.boot_surface_class_like(&dcd.fqn) != Some(false) {
@@ -904,11 +909,17 @@ fn enumerate_const_reach(cx: &Cx, start_fqn: &str, name: &str) -> Option<ConstRe
         if cx.member_incomplete(cfile) {
             return None; // ADR-0079 §2.5: members may have been dropped by recovery.
         }
-        if cd.is_trait || cd.uses_traits {
-            return None; // trait constants are not flattened into the using class.
+        // A trait constant answers through the class that imports it (ADR-0105 C12):
+        // a trait name, or a composition that declines its constants, is an obstacle.
+        if cd.is_trait {
+            return None;
+        }
+        match cx.held_const(cfile, cd, name) {
+            Err(_) | Ok(Some(_)) => return None,
+            Ok(None) => {}
         }
         if provides_class_const(cd, name) {
-            return None; // declared constant, or an enum case — not undefined.
+            return None; // an enum case — not undefined.
         }
         reach.any_conditional |= cd.conditional;
         reach.fqns.push(fqn.clone());

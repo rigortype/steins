@@ -173,7 +173,8 @@ fn a_chain_leaving_the_project_at_an_unknown_class_is_non_exhaustive() {
 
 #[test]
 fn a_trait_using_class_may_get_its_constructor_from_the_trait() {
-    let src = "<?php\ntrait T {}\nclass C { use T; }\nfunction make(): C { return new C(); }\n";
+    // A composition that declines (ADR-0105 C5) may be hiding a constructor.
+    let src = "<?php\ntrait T { public function x(): void {} }\nclass C { use T { x as y; } }\nfunction make(): C { return new C(); }\n";
     assert!(!summary(src, "make").exhaustive);
 }
 
