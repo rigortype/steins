@@ -149,8 +149,14 @@ impl ReadSet {
     /// weaker: the header these positions belong to is evaluated in an env the walk does
     /// not hold (see the module doc).
     pub(crate) fn conditional(&mut self) {
+        self.conditional_from(0);
+    }
+
+    /// [`Self::conditional`] for the positions that start at or after `offset`: the
+    /// alternatives after the first of a list PHP stops evaluating at the first that holds.
+    pub(crate) fn conditional_from(&mut self, offset: u32) {
         for p in &mut self.positions {
-            if p.carrier != Carrier::IssetLike {
+            if p.span.start >= offset && p.carrier != Carrier::IssetLike {
                 p.carrier = Carrier::Conditional;
             }
         }

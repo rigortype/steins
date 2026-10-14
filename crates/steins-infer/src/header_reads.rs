@@ -22,6 +22,8 @@
 //! | structured `match` or `switch` arm conditions | when no earlier arm matched | the env the construct is entered with; dead after an arm decided taken | as written |
 //! | a hoisted value-position `match (true)` arm | ahead of the operands to its left | the hoisted entry's env | `Conditional` |
 //! | a `match` subject | as an operand | the enclosing statement's read positions | as the operand |
+//! | a `match` arm's second and later conditions, a `switch` arm's second and later stacked labels | only when every earlier one failed | as the arm; dead once an earlier one is decided true | `Conditional` |
+//! | a `for` header's second and later comma conditions | always | as the header | as written |
 //!
 //! `Conditional` (recorded by the lowering) keeps the environment-free families and
 //! declines the value-dependent ones: the env the walker holds there is not one PHP

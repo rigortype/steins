@@ -381,6 +381,15 @@ them and the value-dependent ones decline (D3). The architect's table had the
 because the walk holds the env that reaches the `elseif`, which is the point of
 judging a header where it is evaluated.
 
+**Alternatives.** A header that lists alternatives PHP tries in order and stops
+at the first that holds (a `match` arm's `a, b =>`, a `switch` arm's stacked
+`case a: case b:`) records every position after the first alternative's
+`Conditional`, as the right of `||` is, and the `||` the walk folds them into
+carries each alternative's extent, so a decided earlier one marks the later ones
+dead (`match (true) { !isset($a['k']), $a['k'] > 5 => … }` reads nothing). A
+`for` header's comma-separated conditions are not alternatives: PHP evaluates
+each, and each is judged.
+
 **Dedupe.** The `preg_*` pattern check that `walk_if` ran on a condition's guard
 calls keeps running (it judges a `Conditional` guard call too); a finding it
 raises at a place the header already reported is not raised twice.
