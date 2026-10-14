@@ -1594,3 +1594,25 @@ Bundled entries that parse by hand stay a per-name list (`DatePeriod::__construc
 Version-dependent regions also cover expressions (a ternary, the right operand of `&&`/`||`/`and`/`or`, `?:`, `match`/`switch` arms after a version label), read lexically from the source between a version read and the call; the table is on `version_region::in_version_dependent_region`.
 
 **Target gate (supersedes the region rules above).** Review found eight version-skew shapes no region model sees (a stored flag, a helper, a class constant, a loop condition, an early exit, the file-top polyfill return, a file loaded only behind a version check). The families therefore judge only where every targeted PHP is the analysing engine: `Folder::arity_target_exact`, true when the declared target is exactly the runtime minor (`config.platform.php` 8.5.x, or a `php` constraint resolving to `~8.5.0` / `8.5.*`) with the absence family available. A range target leaves them dark until a per-minor arity table exists (mining follow-up). Under an exact target, a file that reads the PHP version at all (`version_region.rs`) is also not judged, the backstop for the indirection the walk cannot fold; an indirection through ANOTHER file stays a known gap. The bundled list gained `dba`, `FFI`, `Zend OPcache`, `uri` and `lexbor`.
+
+## Amendment (2026-10-14): a trait user holds what its traits give it (type/arity run S8, #940; PENDING ratification)
+
+Status: PENDING ratification (post-hoc-ratification mode, ADR-0077
+precedent). Source: #940 and #952 l3, under decision D1 of #1051; the design is
+ADR-0105.
+
+### A27. Leg (e) is the trait composition, not the trait bit
+
+§4 leg (e) refused every class that `use`s a trait, §5 entered trait names into
+the class-like index "as names, not yet flattened members", and A18 kept a
+method a class obtains from a trait refused while trait bodies were not lowered.
+All three are reopened by ADR-0105: trait members are lowered, and every chain
+walk reads what a class *holds*, its own members first and then the ones its
+trait composition gives it (`Cx::held_method` and its siblings), before the
+parent's. Leg (e) is now the composition **declining** (two traits colliding, an
+`insteadof`/`as` adaptation, an unresolvable, ambiguous or conditional trait, a
+`use` cycle, or a reached file that did not parse), not the presence of a `use`.
+A2i is unchanged for the importer; a conditional trait declines the composition
+(ADR-0105 C7) rather than re-damming it. A trait name stays a name in §5's
+sense: `extends` naming one, `new` on one and a chain node that is one still
+answer as before.

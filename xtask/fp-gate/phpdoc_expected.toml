@@ -348,7 +348,11 @@
 # 7 → 6  2026-10-02 (issues #915, #922): the 1 `phpdoc.maybe-argument-mismatch` /
 # `phpdoc.maybe-return-mismatch` rows are strict-floor ids, and the gate now counts every
 # strict-floor id in POSSIBLY_EXPECTED, by the registry's floor. Same findings, other table.
-"Seldaek/monolog" = 6
+# 6 → 8  2026-10-14 (issue #940, type/arity run S8, ADR-0105): +2 phpdoc.param-mismatch, `new GroupHandler([$h, 'foo'])`
+# (GroupHandlerTest.php:26, WhatFailureGroupHandlerTest.php:26) against `@param
+# HandlerInterface[] $handlers`. `GroupHandler` uses a trait, which no longer hides its own
+# constructor (ADR-0105 C1); TRUE, a docblock contract the tests break on purpose.
+"Seldaek/monolog" = 8
 
 # 1 → 2 (+1) with ADR-0043 stage 4 (phpdoc-side class contracts). The new
 # finding is a class-value contract: `new MountManager(['valid' => 'something
@@ -465,3 +469,16 @@
 # 9 → 0  2026-10-02 (issues #915, #922): the 9 `phpdoc.maybe-argument-mismatch` /
 # `phpdoc.maybe-return-mismatch` rows are strict-floor ids, and the gate now counts every
 # strict-floor id in POSSIBLY_EXPECTED, by the registry's floor. Same findings, other table.
+# 0 → 10  2026-10-14 (issue #940, type/arity run S8, ADR-0105): +10 phpdoc.param-mismatch, `CarbonInterval::create("PT0S")` and nine
+# more ISO-8601 strings (CarbonInterval/ConstructTest.php:40–60, 400, 412) against
+# `@param int $years`. `CarbonInterval` uses traits, which no longer hide its own static
+# method (ADR-0105 C1); TRUE, the docblock says `int` and the tests pass a string.
+"briannesbitt/Carbon" = 10
+
+# 0 → 3  2026-10-14 (issue #940, type/arity run S8, ADR-0105): +3 phpdoc.param-mismatch, `new CurlFactory(…, false)` against the
+# `$shareHandle` union (CurlFactoryTest.php:674) and `['unknown' => true]` against the sealed
+# option shapes of `CurlHandler::__construct()` and `StreamHandler::__construct()`
+# (CurlHandlerTest.php:188, StreamHandlerTest.php:80). Each class uses a trait, which no
+# longer hides its own constructor (ADR-0105 C1); TRUE, tests that break the documented
+# contract on purpose.
+"guzzle/guzzle" = 3

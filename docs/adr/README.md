@@ -142,3 +142,4 @@ list in one place.
 | ADR-0102 | [A call's result is remembered on its key until a site invalidates it: the value-lane half of "remembering and forgetting"](0102-remembered-call-results.md) |
 | ADR-0103 | [Jumps are credited by level](0103-jumps-are-credited-by-level.md) |
 | ADR-0104 | [A read is judged at every position it is written, through its carrier](0104-a-read-is-judged-at-every-position-it-is-written.md) |
+| ADR-0105 | [Trait members are composed at query time, and trait bodies are walked with an open receiver](0105-trait-members-are-composed-at-query-time.md) |

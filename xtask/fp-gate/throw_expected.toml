@@ -60,12 +60,26 @@
 # table: the rows below are the definite `throw.undeclared` + `throw.liskov-widened`
 # counts and are the ones the slice left unchanged (the gate prints them as measured).
 
-"composer/composer" = 94
-"sebastianbergmann/phpunit" = 32
-"guzzle/guzzle" = 2
+# 2026-10-14 (issue #940, type/arity run S8, ADR-0105): a class that uses a trait no longer hides its own methods
+# (ADR-0105 C1), so a `$this->m()` on one resolves and the throws of `m` reach the caller's
+# `@throws`. Every row below is a definite `throw.undeclared`, a checked exception a resolved
+# own method throws and the caller does not declare; all TRUE as the lane reads them.
+#   composer/composer 94 → 100: `BumpCommand::doBump()`/`execute()` (BumpCommand.php:245,
+#     259; Factory.php:231; Silencer.php:74), `RuntimeException`/`Exception` under
+#     `@throws ParsingException`.
+#   sebastianbergmann/phpunit 32 → 48: `MockObject\Generator\Generator` and `DoubledMethod`,
+#     whose private `ensure*()` checks throw `UnknownTypeException`, `DuplicateMethodException`
+#     and the rest under narrower `@throws` lists (Generator.php:304–767, DoubledMethod.php:400).
+#   guzzle/guzzle 2 → 3: `Utils::chooseHandler()` (CurlShareHandleState.php:144, `Throwable`).
+#   briannesbitt/Carbon 0 → 1: `CarbonInterval::set()` (CarbonInterval.php:3537,
+#     `RuntimeException` under `@throws UnknownSetterException`).
+"composer/composer" = 100
+"sebastianbergmann/phpunit" = 48
+"guzzle/guzzle" = 3
 "Seldaek/monolog" = 7
 "symfony/console" = 13
 "nikic/PHP-Parser" = 1
+"briannesbitt/Carbon" = 1
 
 # Registered 2026-07-24 (v0.1.0 run, oracle idea A): PHPStan's own `src/` as a
 # local project. First run 0 proof-layer / 0 phpdoc.* / 20 throw.undeclared,
