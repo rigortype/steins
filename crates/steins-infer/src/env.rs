@@ -708,6 +708,12 @@ pub(crate) struct Store {
     /// ([`Self::release`]) and by a rebind of any variable the guard's arguments name,
     /// emptied by a Barrier, and intersected at a join like `vouched`.
     pub(crate) guard_vars: HashMap<String, GuardVar>,
+    /// Whether this path passed a call whose `@phpstan-assert` a proven value
+    /// contradicts (ADR-0105 §2.6): the helper throws there, or its docblock lies, so a
+    /// binding descent judges nothing further on the path. Only the descent reads it;
+    /// the path is not dead for anything else. A join keeps it only where every joined
+    /// path carries it.
+    pub(crate) withheld: bool,
 }
 
 /// An existence guard a variable holds the result of (see [`Store::guard_vars`]).
@@ -1886,6 +1892,7 @@ pub(crate) fn join_stores(first: &Store, rest: &[&Store]) -> Store {
         remembered,
         may_hold_places,
         guard_vars,
+        withheld: first.withheld && rest.iter().all(|s| s.withheld),
     }
 }
 

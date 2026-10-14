@@ -310,3 +310,25 @@ fn a_call_condition_the_fold_decides_is_decided_in_a_descent() {
         assert_eq!(bound_findings(&row(body)), n, "{body}");
     }
 }
+
+/// A call whose `@phpstan-assert` a bound value contradicts ends what a binding descent
+/// proves on that path (ADR-0105 §2.6): `null` into an asserted `string` throws in the
+/// helper (PHP 8.5.11: `InvalidArgumentException`), or the docblock lies; either way the
+/// `V::mk(null)` after it is not a proven TypeError. Reached by a plain call, a static
+/// call, a method call on a resolved receiver, and an assert nested in an argument; an
+/// assert the value satisfies (`string|null`) withholds nothing.
+#[test]
+fn a_contradicted_assert_withholds_the_rest_of_the_descent_path() {
+    let prelude = "<?php\n\
+        final class A { /** @phpstan-assert string $s */ public static function str($s) { if (!is_string($s)) { throw new InvalidArgumentException('x'); } return $s; }\n\
+          /** @phpstan-assert string $s */ public function inst($s) { if (!is_string($s)) { throw new InvalidArgumentException('x'); } return $s; }\n\
+          /** @phpstan-assert string|null $s */ public static function maybe($s) { return $s; } }\n\
+        /** @phpstan-assert string $s */ function str_of($s) { if (!is_string($s)) { throw new InvalidArgumentException('x'); } return $s; }\n\
+        final class V { public static function mk(string $f): void {} }\n";
+    let row = |body: &str| format!("{prelude}final class D {{ public static function c($x): void {{ {body} V::mk($x); }} }}\nD::c(null);\n");
+    for body in ["A::str($x);", "str_of($x);", "$a = new A(); $a->inst($x);", "strlen(A::str($x));"] {
+        let src = row(body);
+        assert_eq!(bound_findings(&src), 0, "{body}");
+    }
+    assert_eq!(bound_findings(&row("A::maybe($x);")), 1, "a satisfied assert withholds nothing");
+}

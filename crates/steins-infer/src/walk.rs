@@ -636,11 +636,17 @@ fn walk_run(
     descent: &mut Option<Descent<'_>>,
     facts: &mut Option<&mut Vec<LineFact>>,
     guarded: bool,
-    out: &mut Vec<Diagnostic>,
+    out_all: &mut Vec<Diagnostic>,
 ) -> Flow {
     let cx = w.cx;
     let scope = w.scope;
     for (stmt_idx, stmt) in stmts.iter().enumerate() {
+        // A binding descent proves nothing past a call whose `@phpstan-assert` a proven
+        // value contradicted (ADR-0105 §2.6): the path goes on for its env, and what it
+        // would report is withheld.
+        let mut withheld: Vec<Diagnostic> = Vec::new();
+        let out: &mut Vec<Diagnostic> =
+            if descent.is_some() && store.withheld { &mut withheld } else { &mut *out_all };
         // 0. Statement-level inline `@var` casts (ADR-0073), applied before the
         // statement's own checks read the env. A tag above an `Assign` to the same
         // variable is erased by step 2's own rebind — the assignment-form `@var`
