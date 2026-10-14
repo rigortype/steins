@@ -1590,3 +1590,5 @@ older runner or replay table means no verdict). PECL arginfo varies with the ext
 version and can be wrong (`gnupg` understates its arity, `gnupg_*()` and the class alike).
 Bundled entries that parse by hand stay a per-name list (`DatePeriod::__construct`,
 `Phar::setStub`, `PharData::setStub`).
+
+Version-dependent regions also cover expressions (a ternary, the right operand of `&&`/`||`/`and`/`or`, `?:`, `match`/`switch` arms after a version label), read lexically from the source between a version read and the call; the table is on `version_region::in_version_dependent_region`.

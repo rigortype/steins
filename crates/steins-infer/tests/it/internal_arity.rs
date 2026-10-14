@@ -524,3 +524,45 @@ fn a_call_outside_the_version_branch_is_still_judged() {
     too_few("if (PHP_VERSION_ID < 80000) {\n    time();\n}\nmktime();", "mktime()");
     too_few("if (PHP_VERSION_ID < 80000) {\n    time();\n}\nif (rand()) {\n    mktime();\n}", "mktime()");
 }
+
+// ---------------------------------------------------------------------------
+// Expression-level version regions: one row per construct of the table on
+// `version_region::in_version_dependent_region`
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_ternary_on_the_php_version_is_not_judged_in_either_arm() {
+    silent("$t = PHP_VERSION_ID < 80000 ? mktime() : time();");
+    silent("$t = PHP_VERSION_ID >= 80000 ? time() : mktime();");
+    silent("$t = version_compare(PHP_VERSION, '8.0.0', '<') ?: mktime();");
+}
+
+#[test]
+fn a_short_circuit_on_the_php_version_is_not_judged_in_its_right_operand() {
+    silent("PHP_VERSION_ID < 80000 && openssl_seal($d, $s, $e, [$k]);");
+    silent("PHP_VERSION_ID >= 80000 || mktime();");
+    silent("PHP_VERSION_ID < 80000 and mktime();");
+    silent("PHP_VERSION_ID >= 80000 or mktime();");
+    silent("if (PHP_VERSION_ID < 80000 && mktime()) {\n    time();\n}");
+}
+
+#[test]
+fn a_match_or_switch_on_true_is_not_judged_in_the_arms_after_a_version_label() {
+    silent("$t = match (true) { PHP_VERSION_ID < 80000 => mktime(), default => time() };");
+    silent("$t = match (true) { PHP_VERSION_ID >= 80000 => time(), default => mktime() };");
+    silent("switch (true) {\n    case PHP_VERSION_ID < 80000:\n        mktime();\n        break;\n}");
+}
+
+#[test]
+fn a_closure_written_in_a_version_expression_is_in_the_region() {
+    silent("$f = PHP_VERSION_ID < 80000 ? function () { return mktime(); } : null;");
+}
+
+#[test]
+fn a_call_outside_the_version_expression_is_still_judged() {
+    // Before the operator: the condition runs on every target.
+    too_few("$t = mktime() ?: (PHP_VERSION_ID < 80000 ? 1 : 2);", "mktime()");
+    too_few("$t = (mktime() && PHP_VERSION_ID < 80000) ? 1 : 2;", "mktime()");
+    // In the next statement.
+    too_few("$t = PHP_VERSION_ID < 80000 ? 1 : 2;\nmktime();", "mktime()");
+}
