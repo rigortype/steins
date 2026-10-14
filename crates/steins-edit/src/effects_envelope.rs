@@ -208,7 +208,9 @@ pub fn plan_effects_envelope(
             );
         }
 
-        for class in tree.classes() {
+        // A trait's methods are its importers' (ADR-0105), whose class-keyed reasoning
+        // this transform does not carry to them: they stay out of its candidates.
+        for class in tree.classes().iter().filter(|c| !c.is_trait) {
             // Class-level claim decided first: ADR-0082 §7 writes it *instead
             // of* per-method tags where it holds.
             if class_is_provenly_pure(class, &sweep) {
@@ -434,7 +436,7 @@ fn decide_class(em: &mut Emission, class: &ClassDecl, tree: &SourceTree, sweep: 
             REASON_USES_TRAIT,
             format!(
                 "{} uses a trait, and the class-wide tag covers the trait's methods as the \
-                 class's own; trait bodies are not analyzed, so the purity claim is not proven",
+                 class's own, whose purity this transform does not prove",
                 class.name
             ),
         );

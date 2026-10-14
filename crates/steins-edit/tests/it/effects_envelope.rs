@@ -388,7 +388,7 @@ fn an_interface_is_never_a_class_tag_candidate() {
 }
 
 /// The tag covers a trait's methods as the class's own (PHPStan reports
-/// `impure.echo` in `loud()` under it), and trait bodies are never analyzed, so
+/// `impure.echo` in `loud()` under it), which the transform does not prove, so
 /// the claim is refused whatever the trait holds — impure, pure, or not in the
 /// project at all.
 #[test]

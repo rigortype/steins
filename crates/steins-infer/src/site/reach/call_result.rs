@@ -325,7 +325,8 @@ fn property_read_is_direct(cx: &Cx, frame: &Frame, (start, exact): (&str, bool))
     let mut seen: HashSet<String> = HashSet::new();
     while seen.insert(cur.to_ascii_lowercase()) {
         let Some((file, cd)) = cx.find_class(&cur) else { break };
-        if cd.methods.iter().any(|m| m.name.eq_ignore_ascii_case("__get")) {
+        // A `__get` a trait gives the class is the class's (ADR-0105).
+        if !matches!(cx.held_method(file, cd, "__get"), Ok(None)) {
             return false;
         }
         match &cd.parent {

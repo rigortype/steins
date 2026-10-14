@@ -195,10 +195,17 @@ fn a_trait_in_the_chain_is_silent() {
 }
 
 #[test]
-fn a_trait_without_tostring_is_still_silent() {
-    // The obstacle is the trait itself, not what it declares.
+fn a_trait_without_tostring_gives_none() {
+    // ADR-0105: what a trait gives the class is read; this one gives no
+    // `__toString` (PHP 8.5.11: "Object of class A could not be converted to string").
     let src = "<?php\ntrait T { public function x(): int { return 1; } }\nclass A { use T; }\n$a = new A();\necho $a;\n";
-    assert!(findings(src).is_empty(), "the trait obstacle does not depend on its members");
+    assert_eq!(findings(src).len(), 1, "{:#?}", findings(src));
+}
+
+#[test]
+fn a_trait_use_whose_composition_declines_is_silent() {
+    let src = "<?php\ntrait T { public function x(): int { return 1; } }\nclass A { use T { x as y; } }\n$a = new A();\necho $a;\n";
+    assert!(findings(src).is_empty(), "a declined composition is the trait obstacle");
 }
 
 #[test]

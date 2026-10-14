@@ -312,7 +312,8 @@ fn throw_own_rows(
                 ulist.push(Unit {
                     sym: Sym::Method(c.fqn.clone(), m.name.clone()),
                     file: fi,
-                    class_fqn: Some(c.fqn.clone()),
+                    // A trait method runs in its importer, an open receiver (ADR-0105).
+                    class_fqn: (!c.is_trait).then(|| c.fqn.clone()),
                     sites: &m.sites,
                     params: &m.params,
                 });
@@ -607,7 +608,7 @@ pub(crate) fn throw_diagnostics(
                         &mut out, &cx, index, units, &sym, &display, &declared, throws,
                         &m.sites, uncovered,
                     );
-                    let frame = Frame::new(Some(&c.fqn), &m.params, &m.sites);
+                    let frame = Frame::new((!c.is_trait).then_some(&c.fqn), &m.params, &m.sites);
                     let judged = (throws, &enveloped);
                     floor::report_unit(&mut out, &cx, &frame, &display, &declared, judged);
                 }
@@ -788,7 +789,10 @@ fn nearest_parent_throws(cx: &Cx, class: &ClassDecl, method: &str) -> Option<(St
         if cd.is_interface {
             return None;
         }
-        if let Some(pm) = cd.methods.iter().find(|pm| pm.name.eq_ignore_ascii_case(method)) {
+        // The nearest method the ancestor holds, its own or through a trait (ADR-0105);
+        // a composition that declines leaves the nearest one unknown.
+        if let Some(held) = cx.held_method(file, cd, method).ok()? {
+            let (file, pm) = (held.file, held.decl);
             let pcx = Cx::new(cx.units, cx.index, file);
             let declared = declared_throws(&pcx, pm.span.start, pm.docblock.as_deref());
             if !declared.is_empty() {

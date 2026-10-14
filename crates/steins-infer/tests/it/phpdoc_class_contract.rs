@@ -295,11 +295,26 @@ fn class_without_to_string_rejects_stringable() {
 
 #[test]
 fn trait_using_class_vs_stringable_is_unknown() {
-    // A trait may supply `__toString`; merged methods unmodeled, verdict is Unknown, not No.
-    let src = "<?php trait T {} class TU { use T; }\n\
+    // A trait may supply `__toString`; a composition that declines (ADR-0105 C5)
+    // leaves the verdict Unknown, not No.
+    let src = "<?php trait T { function t() {} } final class TU { use T { t as u; } }\n\
         /** @param \\Stringable $x */ function f($x): void {}\n\
         f(new TU());";
-    assert_eq!(param_count(src), 0, "trait-using class vs Stringable → Unknown → silent");
+    assert_eq!(param_count(src), 0, "declined composition vs Stringable → Unknown → silent");
+}
+
+#[test]
+fn trait_using_class_vs_stringable_reads_the_composition() {
+    // ADR-0105: a trait's `__toString` makes the importer Stringable (witnessed
+    // 8.5.11), and a trait without one gives it none.
+    let with = "<?php trait T { function __toString(): string { return ''; } } final class TU { use T; }\n\
+        /** @param \\Stringable $x */ function f($x): void {}\n\
+        f(new TU());";
+    assert_eq!(param_count(with), 0, "imported __toString ⇒ implicit Stringable");
+    let without = "<?php trait T {} final class TU { use T; }\n\
+        /** @param \\Stringable $x */ function f($x): void {}\n\
+        f(new TU());";
+    assert_eq!(param_count(without), 1, "no __toString held ⇒ is-a-No Stringable");
 }
 
 #[test]

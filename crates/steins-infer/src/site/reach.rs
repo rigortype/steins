@@ -459,8 +459,9 @@ fn method_start(cx: &Cx, class_fqn: Option<&str>, callee: &Callee) -> Option<Str
 
 /// The parameters of the project method `class::method`.
 fn method_params<'a>(cx: &Cx<'a>, class: &str, method: &str) -> Option<&'a [Param]> {
-    let (_, decl) = cx.find_class(class)?;
-    decl.methods.iter().find(|m| m.name.eq_ignore_ascii_case(method)).map(|m| m.params.as_slice())
+    let (file, decl) = cx.find_class(class)?;
+    // Its own method, or one a trait gives it (ADR-0105).
+    cx.held_method(file, decl, method).ok()?.map(|m| m.decl.params.as_slice())
 }
 
 /// Whether a call no project declaration answers runs an engine constructor or

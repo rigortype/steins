@@ -251,7 +251,8 @@ fn effect_own_rows(
                 ulist.push(Unit {
                     sym: Sym::Method(c.fqn.clone(), m.name.clone()),
                     file: fi,
-                    class_fqn: Some(c.fqn.clone()),
+                    // A trait method runs in its importer, an open receiver (ADR-0105).
+                    class_fqn: (!c.is_trait).then(|| c.fqn.clone()),
                     sites: &m.sites,
                     params: &m.params,
                 });
@@ -879,7 +880,7 @@ fn region_purity_in(
     }
     for c in tree.classes() {
         for m in &c.methods {
-            take(Some(&c.fqn), &m.params, &m.sites);
+            take((!c.is_trait).then_some(&c.fqn), &m.params, &m.sites);
         }
     }
     for scope in tree.scopes() {
@@ -1255,8 +1256,9 @@ fn nearest_parent_effect(cx: &Cx, class: &ClassDecl, method: &str) -> Option<(St
         if cd.is_interface {
             return None;
         }
-        if let Some(pm) = cd.methods.iter().find(|pm| pm.name.eq_ignore_ascii_case(method))
-            && let Some(env) = &pm.effect_envelope
+        // The nearest method the ancestor holds, its own or through a trait (ADR-0105).
+        if let Some(held) = cx.held_method(file, cd, method).ok()?
+            && let Some(env) = &held.decl.effect_envelope
         {
             return Some((cd.name.clone(), env.labels.clone()));
         }

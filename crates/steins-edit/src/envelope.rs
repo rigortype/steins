@@ -145,7 +145,9 @@ pub fn plan_throws_envelope(
                 &mut staged, &mut refusals, &mut oracle,
             );
         }
-        for class in tree.classes() {
+        // A trait's methods are its importers' (ADR-0105), whose class-keyed reasoning
+        // this transform does not carry to them: they stay out of its candidates.
+        for class in tree.classes().iter().filter(|c| !c.is_trait) {
             for method in &class.methods {
                 let key = (class.fqn.to_ascii_lowercase(), method.name.to_ascii_lowercase());
                 let Some(esc) = sweep.methods.get(&key) else { continue };
