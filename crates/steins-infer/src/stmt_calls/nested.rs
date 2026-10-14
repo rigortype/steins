@@ -9,7 +9,7 @@ use steins_domain::Certainty;
 use steins_syntax::{ArgValue, CallExpr, Callee, Carrier, ReadKind, Receiver, Span, Stmt};
 
 use crate::absence::{check_undefined_function, check_undefined_method};
-use crate::arity::{check_arity, check_printf_arity};
+use crate::arity::{check_arity, check_callback_arity, check_printf_arity};
 use crate::by_value::by_value_survivors;
 use crate::descent::checkable_calls;
 use crate::descent::check_dynamic_callee_arity;
@@ -174,6 +174,7 @@ impl Site<'_, '_, '_> {
                 check_arity(cx, self.folder, call, store, poisoned, out);
                 if self.reach == Reach::Value && !self.blocked.args_fold(call) {
                     check_printf_arity(cx, self.folder, call, self.env, poisoned, out);
+                    check_callback_arity(cx, self.folder, call, self.env, poisoned, out);
                     check_preg_pattern(self.w, self.folder, call, self.env, out);
                 }
             }

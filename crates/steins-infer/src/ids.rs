@@ -1305,6 +1305,9 @@ pub const ALL_EMITTABLE_IDS: &[&str] = &[
     PHPDOC_UNKNOWN_VOCABULARY_ID,
     // the discarded-call family (ADR-0096, issue #320).
     STATEMENT_NO_EFFECT_ID,
+    // internal-target arity (ADR-0049 amendment, issue #1051 slice S5): the
+    // too-many-arguments arm, reflected from the analysing PHP.
+    CALL_TOO_MANY_ARGUMENTS_ID,
 ];
 
 /// Ids **registered ahead of emission**: they exist in [`DIAGNOSTIC_REGISTRY`]
@@ -1317,8 +1320,4 @@ pub const ALL_EMITTABLE_IDS: &[&str] = &[
 /// missing from `ALL_EMITTABLE_IDS` still fails forward totality.
 ///
 /// [`DIAGNOSTIC_REGISTRY`]: suppress::DIAGNOSTIC_REGISTRY
-pub const REGISTERED_NOT_YET_EMITTED: &[&str] = &[
-    // The too-many-arguments arm fires for INTERNAL targets only (userland
-    // too-many runs clean), so it waits for the reflect slice (M2).
-    CALL_TOO_MANY_ARGUMENTS_ID,
-];
+pub const REGISTERED_NOT_YET_EMITTED: &[&str] = &[];
