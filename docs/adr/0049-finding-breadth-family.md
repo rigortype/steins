@@ -1577,3 +1577,16 @@ carry the tables, one test per row, mock and live.
 Every arm is gated on `Folder::absence_family_available` through the reflection
 accessors, so a skewed or absent engine, or a loaded runtime-redefinition extension,
 silences all of it: the arity is read from the analysing PHP, not from a table.
+
+Two guards on the amendment above, added after review. **Version-dependent regions:** every
+internal, engine and callback verdict declines inside an `if`/`elseif`/`else` chain whose
+condition reads `PHP_VERSION_ID`, `PHP_MAJOR_VERSION`, `PHP_MINOR_VERSION`,
+`PHP_RELEASE_VERSION`, `PHP_VERSION` or `version_compare`, unless the declared target range
+decides it (`version_region.rs`; then only the arm no target runs is a region): the branch
+runs on a PHP whose signatures the analysing PHP does not have. **Bundled extensions only:**
+functions, classes and methods are judged only when reflection reports a php-src bundled
+extension (`getExtensionName()`, now on the `reflect` reply as `extension`; absent from an
+older runner or replay table means no verdict). PECL arginfo varies with the extension's
+version and can be wrong (`gnupg` understates its arity, `gnupg_*()` and the class alike).
+Bundled entries that parse by hand stay a per-name list (`DatePeriod::__construct`,
+`Phar::setStub`, `PharData::setStub`).
