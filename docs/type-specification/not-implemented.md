@@ -311,7 +311,6 @@ the ADR-0044/0045 packs.
 
 | Surface | ADR | Note |
 | --- | --- | --- |
-| `call.too-many-arguments` | 0049 §6 | Internal targets only — userland too-many runs clean and is never a finding. Waits on the sidecar reflect slice. The only registered id with no emitter. |
 | Scoped policy — `[paths.sets]`, `[[policy]]` | 0023 | Designed in full, including semantic `where` matchers. The pipeline stage exists as a no-op with a seam. |
 | [`doctor` (full report)](#doctor) | 0054 | The minimal report, `--format json` and part of the C4 audit have **landed**; two counts are deferred. |
 | [`check --fix` fix-its](#fix-its) | 0010 | Fix payloads and `check --fix` have **landed** with one family; every further fix family is deferred. |

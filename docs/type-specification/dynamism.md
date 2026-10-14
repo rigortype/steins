@@ -106,7 +106,7 @@ present, no absence claim holds.
 | `call.undefined-method` (declared-receiver half) | proof | the same ladder with **every arm `Verified`** — a native declaration PHP enforces at the call boundary (ADR-0049 A13) | **emits** |
 | `call.undefined-function` | proof | the dam clear, no candidate FQN, sidecar not-found | **emitting** (ADR-0049 S4, landed) |
 | `class.undefined` | proof | the same, at a position that breaks (`new`, static call, class-const fetch, `extends`/`implements`/`use <Trait>`, `catch`, a native type declaration) | **emitting** (S4 + ADR-0049 A15, landed) |
-| `call.too-many-arguments` | proof | an **internal** non-variadic target | registered, **not emitted** (needs the reflect slice) |
+| `call.too-many-arguments` | proof | an **internal** non-variadic target | **emitting** (ADR-0049 2026-10-14 amendment, from the analysing PHP's reflection) |
 
 The arity table is **asymmetric on purpose**, and every row was `php -r`-verified
 on PHP 8.5: too few arguments to a userland target is always a fatal

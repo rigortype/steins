@@ -1018,7 +1018,8 @@ format the other tables will follow once a consumer wants them.
   mixed-pin second leg — a rule whose name declares a bare `mixed` countersigns
   itself against the live signature — and **no checker consumes it yet**:
   `call.too-many-arguments` for internal targets is a separate slice that can now
-  read this surface instead of a parameter table. Absent counts (an older runner,
+  read this surface instead of a parameter table (it did, in the internal-arity
+  slice, through `Folder::builtin_param_types`). Absent counts (an older runner,
   a canned replay table recorded before the field, a reflection failure) stay
   `None`, which withholds rather than guesses.
 

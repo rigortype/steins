@@ -446,11 +446,15 @@ src/Arity.php:7:1: error[call.too-few-arguments]: too few arguments to schedule(
 src/Arity.php:8:1: error[call.unknown-named-argument]: unknown named argument $timeout to schedule() — no parameter $timeout, provable Error
 ```
 
-**`call.too-many-arguments`** is registered and not yet emitted. Extra
-arguments to a userland function are silently ignored by PHP, so they are
-never a finding; only an *internal* non-variadic target fatals, and that arm
-waits on the reflection slice. The id is nameable today in `@steins-ignore`
-and in profiles, and it produces nothing.
+**`call.too-many-arguments`** fires for an *internal* non-variadic function
+only (`strlen("a", "b")`, `session_id(1, 2)`): extra arguments to a userland
+function are silently ignored by PHP, so they are never a finding. The
+signature is read from the PHP that runs the analysis, so the id is silent
+under `--no-php`, with a skewed PHP, or beside a runtime-redefinition
+extension. The same reflection gives `call.too-few-arguments` for internal
+functions (`strlen()`), for the methods and constructors of an engine class
+(`new DateTimeZone()`), and for a callback an invoking builtin provably runs
+with too few arguments (`array_map(fn($a, $b) => 1, [1])`).
 
 ### `class.*` — a class name that resolves to nothing
 

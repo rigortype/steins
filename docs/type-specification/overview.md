@@ -129,13 +129,12 @@ Emitting ids, by layer (the registry is the source of truth —
   `debug.trace` (warn-level, exit-neutral, profile-inert — the
   `/** @psalm-trace $x */` docblock trigger) — ADR-0074.
 
-Registered but **not yet emitted** — the registry reserves the id and its layer
-so `@steins-ignore` can name it and a profile can select it, but no emitter
-produces it (`REGISTERED_NOT_YET_EMITTED`):
-
-| Id | Waiting on |
-| --- | --- |
-| `call.too-many-arguments` | the sidecar `reflect` slice — the arm fires for *internal* targets only, since userland too-many runs clean and is never a finding |
+Registered but **not yet emitted** — the registry can reserve an id and its layer
+so `@steins-ignore` can name it and a profile can select it before any emitter
+produces it (`REGISTERED_NOT_YET_EMITTED`). The list is empty: the last one,
+`call.too-many-arguments`, emits since the internal-arity slice (ADR-0049, 2026-10-14
+amendment) — for a non-variadic *internal* target only, since userland too-many runs
+clean and is never a finding.
 
 CLI surface: `check`, `annotate`, `transform`, a minimal `doctor`
 (ADR-0054 C3 scope — the index-bound posture report, running no emitter), and
