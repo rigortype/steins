@@ -51,18 +51,39 @@ use crate::{
     CALL_TOO_FEW_ARGUMENTS_ID, CALL_TOO_MANY_ARGUMENTS_ID, CALL_UNKNOWN_NAMED_ARGUMENT_ID,
 };
 
-/// Function-name prefixes whose reflected arity is not the arity they enforce: the
-/// PECL `gnupg` procedural wrappers share an arginfo that omits the leading handle, so
-/// the maximum is understated. Found by calling every function of the analysing PHP
-/// with one argument more than reflected (and one fewer than required) and keeping
-/// those that did not raise `ArgumentCountError`; core and bundled extensions had
-/// none.
-const MISREFLECTED_FUNCTIONS: [&str; 1] = ["gnupg_"];
+/// The extensions php-src ships (`getExtensionName()`, lowercased), whose arginfo is
+/// the engine's contract. A PECL extension's arginfo varies with its version and can be
+/// wrong (`gnupg`'s understates its arity, functions and methods alike), so a function,
+/// class or method from any other extension is never judged.
+const BUNDLED_EXTENSIONS: &[&str] = &[
+    "core", "standard", "date", "spl", "pcre", "json", "ctype", "mbstring", "hash", "random",
+    "reflection", "tokenizer", "filter", "iconv", "session", "posix", "pcntl", "sockets",
+    "curl", "openssl", "zlib", "bcmath", "bz2", "calendar", "dom", "simplexml", "xml",
+    "xmlreader", "xmlwriter", "libxml", "pdo", "pdo_mysql", "pdo_pgsql", "pdo_sqlite",
+    "pdo_odbc", "pdo_dblib", "phar", "readline", "sodium", "sqlite3", "intl", "gd", "gettext",
+    "gmp", "exif", "fileinfo", "ftp", "ldap", "mysqli", "mysqlnd", "odbc", "pgsql", "shmop",
+    "snmp", "soap", "sysvmsg", "sysvsem", "sysvshm", "tidy", "xsl", "zip",
+];
 
-/// Engine constructors that parse their arguments by hand: `DatePeriod`'s overloaded
-/// signature throws a `TypeError` (not `ArgumentCountError`) for a short list, so the
-/// finding would name the wrong consequence.
-const HAND_PARSED_CONSTRUCTORS: [&str; 1] = ["dateperiod"];
+/// Whether an extension name is one php-src bundles. The list is the common set; a
+/// bundled extension missing from it is silence, never a finding.
+fn bundled(extension: Option<&str>) -> bool {
+    extension.is_some_and(|e| BUNDLED_EXTENSIONS.iter().any(|b| e.eq_ignore_ascii_case(b)))
+}
+
+/// Bundled methods that parse their arguments by hand and throw something other than
+/// `ArgumentCountError` for a short list, so the finding would name the wrong
+/// consequence: `DatePeriod`'s overloaded constructor throws `TypeError`, and
+/// `Phar::setStub()` / `PharData::setStub()` throw `UnexpectedValueException` on a
+/// plain archive. (class, method), lowercased.
+const HAND_PARSED_METHODS: [(&str, &str); 3] =
+    [("dateperiod", "__construct"), ("phar", "setstub"), ("phardata", "setstub")];
+
+fn hand_parsed(class: &str, method: &str) -> bool {
+    HAND_PARSED_METHODS
+        .iter()
+        .any(|(c, m)| class.eq_ignore_ascii_case(c) && method.eq_ignore_ascii_case(m))
+}
 
 /// What the call's argument list proves about an internal signature.
 #[derive(Debug, PartialEq, Eq)]
@@ -70,7 +91,7 @@ pub(super) enum Verdict {
     /// A named argument binding no parameter of a non-variadic function.
     UnknownNamed(String),
     /// A required parameter covered by nothing.
-    TooFew { passed: usize, required: usize },
+    TooFew { passed: usize, required: usize, missing: Option<(usize, String)> },
     /// More positional arguments than a non-variadic function declares.
     TooMany { passed: usize, accepted: usize },
 }
@@ -98,7 +119,12 @@ pub(super) fn judge(params: &[BuiltinParam], pos: usize, named: &[NamedArg]) -> 
     let uncovered =
         (0..required).any(|i| i >= pos && !named.iter().any(|n| n.name == params[i].name));
     if uncovered {
-        return Some(Verdict::TooFew { passed: pos + named.len(), required });
+        // As PHP names it: the first required parameter nothing covers.
+        let missing = (0..required)
+            .find(|&i| i >= pos && !named.iter().any(|n| n.name == params[i].name))
+            .filter(|_| !named.is_empty())
+            .map(|i| (i + 1, params[i].name.clone()));
+        return Some(Verdict::TooFew { passed: pos + named.len(), required, missing });
     }
     (named.is_empty() && !variadic && pos > params.len())
         .then_some(Verdict::TooMany { passed: pos, accepted: params.len() })
@@ -124,12 +150,19 @@ fn emit(cx: &Cx, call: &CallExpr, display: &str, verdict: Verdict, out: &mut Vec
                 "unknown named argument ${name} to {display}() — no parameter ${name}, provable Error",
             ),
         ),
-        Verdict::TooFew { passed, required } => (
-            CALL_TOO_FEW_ARGUMENTS_ID,
-            format!(
-                "too few arguments to {display}(): {passed} passed, {required} required — provable ArgumentCountError",
-            ),
-        ),
+        Verdict::TooFew { passed, required, missing } => {
+            // With named arguments the count alone misleads (`implode(array: [1])` is
+            // 1 passed of 1 required): name the parameter PHP reports as not passed.
+            let named = missing
+                .map(|(n, name)| format!("; argument #{n} (${name}) not passed"))
+                .unwrap_or_default();
+            (
+                CALL_TOO_FEW_ARGUMENTS_ID,
+                format!(
+                    "too few arguments to {display}(): {passed} passed, {required} required{named} — provable ArgumentCountError",
+                ),
+            )
+        }
         Verdict::TooMany { passed, accepted } => (
             CALL_TOO_MANY_ARGUMENTS_ID,
             format!(
@@ -157,10 +190,6 @@ pub(super) fn builtin_signature(
     call: &CallExpr,
 ) -> Option<(String, Vec<BuiltinParam>)> {
     let name = global_function_callee(cx, call)?;
-    let lower = name.to_ascii_lowercase();
-    if MISREFLECTED_FUNCTIONS.iter().any(|p| lower.starts_with(p)) {
-        return None;
-    }
     // A project function of this simple name shadows the builtin or makes the name
     // ambiguous: what runs is not what the engine reflected.
     if cx.index.has_simple_function(name) {
@@ -181,9 +210,17 @@ pub(super) fn check_function(
         return;
     }
     let Some((name, params)) = builtin_signature(cx, folder, call) else { return };
-    if let Some(verdict) = judge(&params, call.args.len(), &call.named_args) {
+    if let Some(verdict) = judge(&params, call.args.len(), &call.named_args)
+        && function_is_bundled(folder, &name)
+    {
         emit(cx, call, &name, verdict, out);
     }
+}
+
+/// Whether the builtin belongs to an extension php-src bundles. Asked only once a
+/// verdict is in hand.
+pub(super) fn function_is_bundled(folder: &mut dyn Folder, name: &str) -> bool {
+    bundled(folder.builtin_function_extension(name).as_deref())
 }
 
 /// The engine class a receiver names, when no project file declares it and the
@@ -193,7 +230,11 @@ fn engine_class(cx: &Cx, folder: &mut dyn Folder, fqn: &str) -> Option<Reflected
         return None;
     }
     let decl = folder.reflected_class(fqn.trim_start_matches('\\'))?.declaration?;
-    (decl.internal && decl.kind == ReflectedClassKind::Class && !decl.is_abstract).then_some(decl)
+    (decl.internal
+        && bundled(decl.extension.as_deref())
+        && decl.kind == ReflectedClassKind::Class
+        && !decl.is_abstract)
+        .then_some(decl)
 }
 
 /// The engine-method arm: too few arguments to a method or constructor of an
@@ -219,9 +260,7 @@ pub(super) fn check_engine_method(
         return;
     }
     let Some(decl) = engine_class(cx, folder, &class) else { return };
-    if method.eq_ignore_ascii_case("__construct")
-        && HAND_PARSED_CONSTRUCTORS.iter().any(|c| decl.name.eq_ignore_ascii_case(c))
-    {
+    if hand_parsed(&decl.name, &method) {
         return;
     }
     let Some(m) = decl.methods.iter().find(|m| m.name.eq_ignore_ascii_case(&method)) else {
@@ -233,6 +272,6 @@ pub(super) fn check_engine_method(
     let (passed, required) = (call.args.len(), m.params_required as usize);
     if passed < required {
         let display = format!("{}::{}", decl.name, m.name);
-        emit(cx, call, &display, Verdict::TooFew { passed, required }, out);
+        emit(cx, call, &display, Verdict::TooFew { passed, required, missing: None }, out);
     }
 }

@@ -248,6 +248,7 @@ impl FoldEngine for Engine {
                 .as_ref()
                 .map(|ps| ps.iter().filter(|p| !p.optional).count() as u32),
             params,
+            extension: None,
         })
     }
     fn reflect_class(&mut self, _target: &str) -> Option<ClassReflection> {

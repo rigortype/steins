@@ -333,6 +333,7 @@ impl FakeEngine {
                 params_total: None,
                 params_required: None,
                 params: None,
+                extension: None,
             },
         );
         self

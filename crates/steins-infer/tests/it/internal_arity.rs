@@ -69,6 +69,7 @@ fn functions() -> Vec<(&'static str, Vec<BuiltinParam>)> {
         ("preg_replace_callback", "r:pattern r:callback r:subject o:limit o:count o:flags"),
         ("strtoupper", "r:string"),
         ("gnupg_getprotocol", ""),
+        ("implode", "r:separator o:array"),
         ("openssl_seal", "r:data r:sealed_data r:encrypted_keys r:public_key o:cipher_algo o:iv"),
     ]
     .into_iter()
@@ -111,6 +112,14 @@ fn class(
     }
 }
 
+/// A class of the named extension.
+fn ext_class(name: &str, extension: &str, methods: Vec<ReflectedMethod>) -> ReflectedClass {
+    ReflectedClass {
+        extension: Some(extension.to_owned()),
+        ..class(name, ReflectedClassKind::Class, false, methods)
+    }
+}
+
 fn classes() -> Vec<ReflectedClass> {
     use ReflectedClassKind::{Class, Interface};
     let mut private_ctor = method("__construct", 0, 0, false);
@@ -127,6 +136,8 @@ fn classes() -> Vec<ReflectedClass> {
             ],
         ),
         class("DateTimeZone", Class, false, vec![method("__construct", 1, 1, false)]),
+        ext_class("gnupg", "gnupg", vec![method("addsignkey", 2, 2, false)]),
+        ext_class("PharData", "Phar", vec![method("setStub", 3, 1, false)]),
         class("DatePeriod", Class, false, vec![method("__construct", 4, 1, false)]),
         class("Exception", Class, false, vec![method("__construct", 3, 0, false)]),
         class("Sealed", Class, false, vec![private_ctor]),
@@ -159,6 +170,12 @@ impl Folder for Mock {
             return None;
         }
         functions().into_iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).map(|(_, p)| p)
+    }
+    fn builtin_function_extension(&mut self, name: &str) -> Option<String> {
+        self.available.then(|| {
+            // The PECL wrapper is the one function of the table outside php-src.
+            if name.starts_with("gnupg_") { "gnupg" } else { "standard" }.to_owned()
+        })
     }
     fn reflected_class(&mut self, fqn: &str) -> Option<ClassReflection> {
         let declaration = classes().into_iter().find(|c| c.name.eq_ignore_ascii_case(fqn));
@@ -230,6 +247,14 @@ fn too_few_to_internal_functions() {
 fn a_named_argument_covers_a_required_parameter() {
     silent("intdiv(num1: 1, num2: 2);");
     too_few("intdiv(num1: 1);", "intdiv(): 1 passed, 2 required");
+}
+
+#[test]
+fn a_missing_parameter_is_named_as_php_names_it() {
+    too_few(
+        "implode(array: [1]);",
+        "implode(): 1 passed, 1 required; argument #1 ($separator) not passed",
+    );
 }
 
 #[test]
@@ -348,6 +373,10 @@ fn engine_method_declines() {
     // bound that a subclass may widen.
     silent("class P extends DateTime {}\n$p = new P();\n$p->format();");
     silent("function f(DateTime $d) { $d->format(); }");
+    // A PECL class's arginfo is not trusted: `gnupg::addsignkey()` takes one argument.
+    silent("$g = new gnupg();\n$g->addsignkey('x');");
+    // `PharData::setStub()` throws `UnexpectedValueException` on a plain archive.
+    silent("$p = new PharData('x');\n$p->setStub();");
     // `DatePeriod` parses its overloaded constructor by hand: a `TypeError`, not the count.
     silent("new DatePeriod();");
     // A class the analysing PHP does not have.

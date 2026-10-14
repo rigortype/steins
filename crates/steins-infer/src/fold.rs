@@ -284,6 +284,19 @@ pub trait Folder {
         None
     }
 
+    /// The extension a resident builtin `name` belongs to (`"standard"`, `"gnupg"`)
+    /// under the same gates as [`Self::builtin_param_types`]. `None` without a live
+    /// engine, for a name the engine does not know, and for a runner or replay table
+    /// that predates the field.
+    ///
+    /// The arity families use it to admit only extensions bundled with php-src: PECL
+    /// arginfo varies with the extension's version and can be wrong. Not memoized;
+    /// asked only about a call a verdict is about to be reported on.
+    fn builtin_function_extension(&mut self, name: &str) -> Option<String> {
+        let _ = name;
+        None
+    }
+
     /// What the builtin `name` demands of a **resource** argument at its 0-based
     /// position `index` (ADR-0097 §2.5) — the parameter twin of
     /// [`Self::builtin_resource_return`], gated the same way.
@@ -1109,6 +1122,17 @@ impl<E: FoldEngine> Folder for EngineFolder<E> {
         let answer = self.compute_builtin_param_types(&key);
         self.param_types_memo.insert(key, answer.clone());
         answer
+    }
+
+    fn builtin_function_extension(&mut self, name: &str) -> Option<String> {
+        if !self.absence_family_available() {
+            return None;
+        }
+        let refl = self.engine.reflect(&name.to_ascii_lowercase())?;
+        if !refl.function_exists {
+            return None;
+        }
+        refl.extension
     }
 
     fn builtin_resource_param(&mut self, name: &str, index: usize) -> Option<ResourceParam> {
