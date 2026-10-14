@@ -370,7 +370,12 @@ impl<'a> Cx<'a> {
                 break;
             }
             let Some((file, cd)) = self.find_class(&cur) else { break };
-            let Ok(held) = self.held_properties(file, cd) else { break };
+            // A composition that declines still leaves the class's own properties its
+            // own (C1); only what lies past them is unknown.
+            let (held, open) = match self.held_properties(file, cd) {
+                Ok(held) => (held, false),
+                Err(_) => (cd.properties.iter().collect(), true),
+            };
             for p in held {
                 if p.is_static {
                     continue;
@@ -378,6 +383,9 @@ impl<'a> Cx<'a> {
                 if seen.insert(p.name.to_ascii_lowercase()) {
                     out.push(p);
                 }
+            }
+            if open {
+                break;
             }
             match &cd.parent {
                 Some(pref) => cur = self.units[file].tree.resolve_class_fqn(pref),
