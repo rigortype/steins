@@ -1486,3 +1486,52 @@ reference position `ReadKind::CallRef` (ADR-0104) is an existence site for
 `absence.rs`. Arity, types, descent, no-effect and dumps still never see a first-class
 callable, since it has no arguments and runs no call. A consequence: a named-only call
 `$o->m(x: 1)`, which leg (l) silenced by the same shape, is judged as the call it is.
+
+## Amendment (2026-10-14): a use rests on its declaration having run (type/arity run S7, #1035; PENDING ratification)
+
+Status: PENDING ratification (post-hoc-ratification mode, ADR-0077
+precedent). Source: #1035, the conditional half, under decision D3 of #1051.
+A2i read the dam and nothing else: with the dam clear, a conditional
+declaration was judged as if it always ran, and nothing modelled PHP's early
+binding, so a use above a declaration PHP binds only when execution reaches
+it was judged against a signature PHP never consults. In both cases PHP
+raises "Call to undefined function" or "Class not found", and the lane named
+another error.
+
+### A26. Whether the declaration has run is asked once, per use site
+
+`crates/steins-infer/src/early_binding.rs` holds the rule table, every row
+witnessed on PHP 8.5.11, and is the only place the A2i leg is written. Every
+lane that read `conditional && !dam.is_clear()` now asks it.
+
+- **Hoisting.** PHP binds at compile time a top-level unconditional
+  function; a top-level class with no `implements`, no `use`, that is not an
+  `enum`, and whose parent is absent, an engine class, or a project class
+  declared earlier in the same file and itself bound early; an interface or
+  trait with no parents and no `use`. Everything else binds when execution
+  reaches it, and a declaration under a condition only if the condition held.
+- **A use that names the class or function** (arity, `call.undefined-method`,
+  `class-const.undefined`, `call.inaccessible-method`,
+  `class-const.inaccessible`) **declines** in the file's top-level code above
+  a declaration in the same file that is not bound early, whether conditional
+  or not: PHP raises the not-found error there. Below it, inside a function,
+  method, closure, arrow function or property hook (a body runs when called,
+  after the top-level code above it), or from another file, the use is judged.
+- **A conditional declaration with the dam clear keeps the lane's id and
+  appends the disjunction** to the message (`or Error "Class not found" if a
+  conditional declaration in its hierarchy has not run`): both worlds fail,
+  so the finding stands, and its message now names both errors. With the
+  dam standing it declines, as A2i always did.
+- **Value lanes and existence verdicts ask only the dam leg.** A property
+  read on an object, a declared receiver and an object in string context run
+  after the class bound; a declaration fatal is raised when the declaration
+  runs; `method_exists`, `function_exists`, the `defined('C::K')` fold and a
+  callable's absence keep their A2i answers (the function-polyfill trade-off
+  stays #978).
+- **Not modelled:** a body called from top-level code above the declaration
+  it uses (judged, as before); a class whose method signature names a class
+  not yet loaded, which binds late without opcache and early with it (judged,
+  as before); a load-time fatal of the declaration itself (a trait or
+  parent not yet declared when a non-hoisted class runs, a class constant
+  naming an absent class). Uses below it name a line PHP never reaches, as
+  for any earlier fatal.
