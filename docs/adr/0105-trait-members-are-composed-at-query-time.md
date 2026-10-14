@@ -152,23 +152,44 @@ Kept, with the reason:
 
 PHP names an imported method by its importer (`C::__construct()`, `U::p`,
 `Child::foo()`), and so do the arity, abstract-unimplemented and overriding
-messages. An overriding finding for an imported method is reported at the
+messages. A finding inside a trait's body (`type.return-mismatch`,
+`type.return-missing`) names the one class that imports the trait directly, when
+there is exactly one, and the trait otherwise: the one walk speaks for every
+importer. An overriding finding for an imported method is reported at the
 importer's `use` name it came through, the line in the importer's file the fix
 starts from.
 
-### 2.6 A binding descent and a condition its binding decides
+### 2.6 A call condition the fold decides is decided
 
 Resolving a trait user's own methods (C1) let the binding descent (ADR-0001,
 ADR-0057) reach `CarbonInterval::createFromFormat("H:i:s", null)` and report a
-proven `TypeError` at an `explode($m[1], $interval)` that sits under
-`if (preg_match('/s([,.])([uv])$/', $format, $m))`: the walk does not fold that
-condition, PHP decides it false for this call, and the program runs clean. The
-shape predates this ADR (the same descent into a class with no trait reports
-it). The rule: in a binding descent, an undecided condition that reads a
-binding the call seeded is one PHP decides under that call's arguments, so its
-sides are walked for their envs and what they report is held back. A condition
-reading no binding (`rand()`) is open for the call too, and its sides are still
-judged.
+proven `TypeError` at an `explode($m[1], $interval)` under
+`if (preg_match('/s([,.])([uv])$/', $format, $m))`. PHP decides that condition
+false for this call and the program runs clean; the walk left it undecided,
+because a call in truthiness position (`if (f(…))`) was never folded, though the
+same call in a comparison (`if (f(…) === 1)`) was. The shape predates this ADR:
+the plain walk and a descent into a class with no trait report it alike.
+
+The rule is the comparison's, applied to truthiness: a call condition the fold
+resolves over the walk's proven arguments is decided by the value's truthiness,
+in the plain walk and in a descent alike. A trailing `$matches` of `preg_match`
+or `preg_match_all` is written and never read, and the count the call returns
+does not depend on it, so the call folds without it. Nothing else changes: an
+undecided condition leaves both sides judged ("when the line runs"), and a
+decided one prunes its dead side as every decided condition does. The rows, each
+on PHP 8.5.11 for `outer("abc", "abc")`, are pinned in `tests/it/binding.rs`:
+
+| row | condition | sides holding `width($s)` | PHP | here |
+| --- | --- | --- | --- | --- |
+| b01 | `preg_match('/x/', $f)` (false) | then, else | TypeError | reported, on the live else side |
+| b02 | `preg_match('/a/', $f)` (true) | then | TypeError | reported |
+| b03 | `preg_match('/q/', $f) \|\| rand() >= 0` | then | TypeError | reported (`rand()` leaves it open) |
+| b06 | `preg_match('/a/', $f)`, then `rand() >= 0` inside | inner then | TypeError | reported |
+| b07 | `$g = $f . ""; preg_match('/q/', $g)` | then | clean | silent (`$g` is proven `"abc"`) |
+| b09 | `preg_match('/q/', $f, $m)` (false) | then | clean | silent |
+
+Without a live sidecar nothing folds, and the condition stays undecided, as
+before.
 
 ## 3. Persisted formats
 
