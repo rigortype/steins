@@ -1878,8 +1878,6 @@ pub(crate) fn join_stores(first: &Store, rest: &[&Store]) -> Store {
     // disagreed on, so a branch that bound one is enough to keep sweeping.
     let may_hold_places = first.may_hold_places || rest.iter().any(|s| s.may_hold_places);
 
-    let guard_vars = join_guard_vars(first, rest);
-
     Store {
         refs,
         heap,
@@ -1891,7 +1889,7 @@ pub(crate) fn join_stores(first: &Store, rest: &[&Store]) -> Store {
         guarded_calls,
         remembered,
         may_hold_places,
-        guard_vars,
+        guard_vars: join_guard_vars(first, rest),
         withheld: first.withheld && rest.iter().all(|s| s.withheld),
     }
 }
