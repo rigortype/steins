@@ -44,6 +44,7 @@ use crate::env::{ClosureTarget, Known, Stratum};
 use crate::existence::global_function_callee;
 use crate::fold::Folder;
 use crate::project::Diagnostic;
+use crate::version_region::in_version_dependent_region;
 use crate::CALL_TOO_FEW_ARGUMENTS_ID;
 
 /// A resolved callback signature: how many arguments it needs, and its name.
@@ -224,6 +225,9 @@ pub(crate) fn check_callback_arity(
     let Some(arg) = call.args.get(inv.callback) else { return };
     let Some(sig) = callback_sig(cx, folder, call, &arg.value, env) else { return };
     if sig.required <= inv.invoked {
+        return;
+    }
+    if in_version_dependent_region(cx, call.span.start) {
         return;
     }
     let at = cx.tree().position(arg.span.start);

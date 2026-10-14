@@ -69,6 +69,7 @@ fn functions() -> Vec<(&'static str, Vec<BuiltinParam>)> {
         ("preg_replace_callback", "r:pattern r:callback r:subject o:limit o:count o:flags"),
         ("strtoupper", "r:string"),
         ("gnupg_getprotocol", ""),
+        ("openssl_seal", "r:data r:sealed_data r:encrypted_keys r:public_key o:cipher_algo o:iv"),
     ]
     .into_iter()
     .map(|(n, s)| (n, sig(s)))
@@ -466,4 +467,31 @@ fn callables_the_family_cannot_prove_decline() {
 #[test]
 fn a_project_twin_of_the_invoker_is_not_the_engines_function() {
     silent("function array_map($cb, $xs) {}\narray_map(fn($a, $b) => 1, [1]);");
+}
+
+// ---------------------------------------------------------------------------
+// Version-dependent regions: a branch that runs on another PHP is not judged by 8.5
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_branch_guarded_by_the_php_version_is_not_judged_by_the_analysing_php() {
+    silent("if (PHP_VERSION_ID < 80000) {\n    mktime();\n}");
+    silent("if (\\PHP_VERSION_ID < 80000) {\n    mktime();\n} else {\n    time();\n}");
+    silent("if (version_compare(PHP_VERSION, '8.0.0', '<')) {\n    mktime();\n}");
+    silent("if (PHP_MAJOR_VERSION < 8) {\n    mktime();\n}");
+    silent("if (PHP_VERSION_ID >= 80000) {\n    time();\n} else {\n    mktime();\n}");
+    // The openssl_seal() shape: the old arity in the old branch.
+    silent(
+        "function seal($d, $k) {\n    if (\\PHP_VERSION_ID < 80000) {\n        openssl_seal($d, $s, $e, [$k]);\n    } else {\n        openssl_seal($d, $s, $e, [$k], 'aes-256-cbc', $iv);\n    }\n}",
+    );
+    // A closure written inside the region is in it.
+    silent("if (PHP_VERSION_ID < 80000) {\n    $f = function () { return mktime(); };\n}");
+    // A callback judged inside the region too.
+    silent("if (PHP_VERSION_ID < 80000) {\n    call_user_func(fn($a, $b) => 1, 1);\n}");
+}
+
+#[test]
+fn a_call_outside_the_version_branch_is_still_judged() {
+    too_few("if (PHP_VERSION_ID < 80000) {\n    time();\n}\nmktime();", "mktime()");
+    too_few("if (PHP_VERSION_ID < 80000) {\n    time();\n}\nif (rand()) {\n    mktime();\n}", "mktime()");
 }

@@ -23,6 +23,7 @@ mod annotate;
 mod arg_check;
 mod finite_verdict;
 mod arity;
+mod version_region;
 mod array_out_state;
 mod assert_harness;
 mod asserts;
