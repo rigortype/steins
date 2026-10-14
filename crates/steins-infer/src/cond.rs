@@ -246,7 +246,10 @@ pub(crate) fn eval_cond(
         // verdict against the closed world (ADR-0049 §4 / N3); an opaque condition or
         // any other guard call stays undecided.
         CondExpr::Call { call, .. } => match eval_existence_call(w, folder, store, call) {
-            Certainty::Maybe => eval_literal_type_test(w, folder, call, env, store, poisoned),
+            Certainty::Maybe => match eval_literal_type_test(w, folder, call, env, store, poisoned) {
+                Certainty::Maybe => eval_folded_call(w, folder, call, env, poisoned),
+                decided => decided,
+            },
             decided => decided,
         },
         // `isset($x[k])` decides NOTHING (ADR-0062 S4). The only evidence that
@@ -1718,6 +1721,36 @@ fn val_is_non_object(v: &Val) -> bool {
 ///
 /// Leading whitespace (`' 1'`) is numeric on all three, and `8.0` to `8.5` agree on
 /// every cell, so one check covers the floor range.
+/// The truthiness of a call condition the fold resolves (ADR-0105 §2.6): the same
+/// fold a comparison operand already gets (`strlen($s) === 3`), so `if (f(…))` over
+/// proven arguments is decided as `if (f(…) == true)` would be. A trailing
+/// `$matches` of `preg_match`/`preg_match_all` is written, never read, and the count
+/// the call returns does not depend on it, so the call folds without it.
+fn eval_folded_call(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    call: &CallExpr,
+    env: &HashMap<String, Known>,
+    poisoned: bool,
+) -> Certainty {
+    if !call.positional_only || call.has_spread {
+        return Certainty::Maybe;
+    }
+    let Some(name) = call.callee.clone() else { return Certainty::Maybe };
+    let mut args: Vec<ArgValue> = call.args.iter().map(|a| a.value.clone()).collect();
+    let bare = name.trim_start_matches('\\').to_ascii_lowercase();
+    if matches!(bare.as_str(), "preg_match" | "preg_match_all")
+        && args.len() == 3
+        && matches!(args[2], ArgValue::Var(_))
+    {
+        args.pop();
+    }
+    match w.cx.cmp_candidates_under(&ArgValue::Call(name, args), env, poisoned, folder, None, None) {
+        Some(vs) if !vs.is_empty() => all_agree(vs.iter().map(php_truthy)),
+        _ => Certainty::Maybe,
+    }
+}
+
 fn eval_literal_type_test(
     w: &WalkCx,
     folder: &mut dyn Folder,
