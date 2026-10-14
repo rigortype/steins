@@ -224,11 +224,12 @@ fn finding_breadth_ids_light_up_stage_by_stage() {
     assert!(emittable.contains(CALL_UNDEFINED_METHOD_ID), "the promoted half's id must be emittable");
     assert_ne!(PHPDOC_UNDEFINED_METHOD_ID, CALL_UNDEFINED_METHOD_ID);
 
-    // Only the internal-target too-many arm remains pending; userland too-many
-    // measured clean, and internal targets require reflection (M2).
+    // The internal-target too-many arm emits since issue #1051 slice S5 (userland
+    // too-many measured clean and is never a finding; internal targets read the
+    // analysing PHP's reflection).
     let too_many = CALL_TOO_MANY_ARGUMENTS_ID;
-    assert!(pending.contains(too_many), "`{too_many}` should be registered-not-yet-emitted");
-    assert!(!emittable.contains(too_many), "`{too_many}` must not be emittable before its stage");
+    assert!(!pending.contains(too_many), "`{too_many}` must have left REGISTERED_NOT_YET_EMITTED");
+    assert!(emittable.contains(too_many), "`{too_many}` must be emittable");
     assert!(layer(too_many).is_some(), "`{too_many}` must be registered with a layer");
 
     // member absence (ADR-0078, issue #197)
@@ -252,7 +253,7 @@ fn finding_breadth_ids_light_up_stage_by_stage() {
     assert_eq!(layer(PROPERTY_MAYBE_UNDEFINED_ID), Some(Layer::Proof));
     assert_eq!(surface_floor(PROPERTY_MAYBE_UNDEFINED_ID), Some(Floor::Strict));
 
-    assert_eq!(REGISTERED_NOT_YET_EMITTED.len(), 1);
+    assert!(REGISTERED_NOT_YET_EMITTED.is_empty());
 }
 
 // undefined variables (ADR-0078, issue #194)
@@ -394,14 +395,15 @@ fn the_unknown_vocabulary_id_sits_on_the_measured_family_floor() {
     assert_ne!(layer(PHPDOC_UNKNOWN_VOCABULARY_ID), Some(Layer::Mechanics));
 }
 
-/// The registered-ahead-of-emission list holds exactly the one id argued above and
-/// nothing else — the cardinality guard that makes a forgotten emitter visible.
+/// The registered-ahead-of-emission list is empty since the last one, the
+/// internal-target too-many arm, landed (issue #1051 slice S5): a new entry needs an
+/// argued reason, and this test is where it is argued.
 #[test]
-fn exactly_one_id_is_registered_ahead_of_emission() {
+fn no_id_is_registered_ahead_of_emission() {
     let pending: HashSet<&str> = REGISTERED_NOT_YET_EMITTED.iter().copied().collect();
     assert_eq!(
         pending,
-        HashSet::from([CALL_TOO_MANY_ARGUMENTS_ID]),
+        HashSet::new(),
         "REGISTERED_NOT_YET_EMITTED drifted — every entry needs an argued reason"
     );
 }

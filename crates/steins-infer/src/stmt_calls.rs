@@ -98,7 +98,7 @@ use crate::fold::Folder;
 use crate::absence::{check_undefined_function, check_undefined_method};
 use crate::arg_check::check_builtin_call_args;
 use crate::descent::check_dynamic_callee_arity;
-use crate::arity::{check_arity, check_printf_arity};
+use crate::arity::{check_arity, check_callback_arity, check_printf_arity};
 use crate::declared_receiver::check_phpdoc_undefined_method;
 use crate::descent::{
     ThisWriteBack, check_propagated_call, checkable_calls, handle_var_call, try_descend_function,
@@ -208,6 +208,9 @@ pub(crate) fn check_stmt_calls(
                     // Printf-family arity (ADR-0078, issue #188): a folded literal
                     // format string demanding more placeholders than proven.
                     check_printf_arity(cx, folder, call, env, scope.poisoned, out);
+                    // A callback handed to an invoking builtin that provably runs it
+                    // with fewer arguments than it requires (issue #1051, S5).
+                    check_callback_arity(cx, folder, call, env, scope.poisoned, out);
                     // Existence flagship (ADR-0049 §3 / S4): a call to a
                     // provably-undefined function behind a clear dam. The branch
                     // store carries the FP-15 `function_exists` vouch.

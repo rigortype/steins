@@ -27,8 +27,8 @@ use crate::{
 // The verified PHP 8.5 table is ASYMMETRIC (every row `php -r`-checked): too few
 // positional/named arguments to a userland target is always a fatal
 // `ArgumentCountError`; too MANY to a non-variadic runs clean (extras ignored),
-// never a finding (ADR-0002; `call.too-many-arguments` stays
-// REGISTERED_NOT_YET_EMITTED for the internal slice, M2); an unknown named
+// never a finding (ADR-0002; `call.too-many-arguments` is the internal-target
+// arm, in `arity/internal.rs`); an unknown named
 // argument to a non-variadic is a fatal `Error`, while a variadic silently
 // collects it (`fv(x: 1)` → `{"x":1}`). A named argument overwriting a positional
 // (`f(1, a: 5)`) is also a fatal `Error` — a DEFERRED id, a silence leg here.
@@ -58,6 +58,11 @@ use crate::{
 // proven Singleton arrays is deferred); `f(...)` is not a call; named binding
 // resolves case-SENSITIVELY, exactly as PHP binds parameter names.
 // ---------------------------------------------------------------------------
+
+mod callbacks;
+mod internal;
+
+pub(crate) use callbacks::check_callback_arity;
 
 /// A resolved arity target: the callee's parameter list (the ground-truth
 /// signature) and its PHP display name for the message (`format`, `Order::pay`,
@@ -396,6 +401,15 @@ pub(crate) fn check_arity(
         Callee::DynamicVar(_) | Callee::Dynamic => None,
     };
     let Some(target) = target else {
+        // No project target: an internal function or an engine class's method
+        // (issue #1051 slice S5), judged from the analysing PHP's reflection.
+        match &call.receiver {
+            Callee::Function(_) => internal::check_function(cx, folder, call, out),
+            Callee::Method { .. } | Callee::Static { .. } | Callee::Construct { .. } => {
+                internal::check_engine_method(cx, folder, call, store, poisoned, out);
+            }
+            Callee::DynamicVar(_) | Callee::Dynamic => {}
+        }
         return;
     };
     let before = out.len();
