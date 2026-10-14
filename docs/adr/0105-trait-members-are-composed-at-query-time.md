@@ -191,6 +191,20 @@ on PHP 8.5.11 for `outer("abc", "abc")`, are pinned in `tests/it/binding.rs`:
 Without a live sidecar nothing folds, and the condition stays undecided, as
 before.
 
+**A contradicted assertion declines the rest of a descent's path.** The same
+exposure reached a descent past an assertion helper: `null` bound into a
+parameter a callee asserts `string` (`@phpstan-assert`, or an
+`-if-true`/`-if-false` assert taken as a guard). The helper throws there, or its
+docblock lies and it returns; neither is safe to prove on, so the descent
+declines: once a call's assert is contradicted by every value the walk proves for
+the argument, the binding descent reports nothing further on that path
+(`Store::withheld`, kept through a join only where every joined path carries it).
+The path is not marked dead: its env flows on, and every other analysis reads it
+as before. This only removes findings, so no proof rests on the docblock claim.
+It holds for every way the descent reaches the call (a plain call, a static call,
+a method call on a resolved receiver, an assert nested in an argument), pinned in
+`tests/it/binding.rs`.
+
 ## 3. Persisted formats
 
 No layout read before the analyzer gate changes, so `SCHEMA_VERSION` does not

@@ -165,6 +165,9 @@ fn apply_call_asserts(
             continue;
         }
         let Some(arg) = call.args.get(pos) else { continue };
+        if assert_contradicted(&arg.value, env, spec) {
+            store.withheld = true;
+        }
         let ArgValue::Var(v) = &arg.value else { continue };
         if apply_assert_to_var(cx, decl_at, env, store, v, spec) {
             asserted.insert(v.clone());
@@ -181,6 +184,38 @@ fn apply_call_asserts(
 /// `@phpstan-assert Guest $v` declared in `App\Auth` means `App\Auth\Guest`
 /// wherever called from. Reading it there is a query answer, not cross-scope
 /// walk state (ADR-0048 §2 replayability).
+/// Whether a proven argument value contradicts what `spec` asserts of it (ADR-0105
+/// §2.6): every value the argument can hold is provably outside the asserted type (or,
+/// for a negated spec, provably inside it). `null` handed to `@phpstan-assert string`
+/// is the shape: the helper throws there, or its docblock lies, and a binding descent
+/// proves nothing past it.
+fn assert_contradicted(value: &ArgValue, env: &HashMap<String, Known>, spec: &AssertSpec) -> bool {
+    use steins_domain::Certainty;
+    let members: Vec<ArgValue> = match value {
+        ArgValue::Var(v) => {
+            let Some(k) = env.get(v).filter(|k| k.stratum == Stratum::Verified) else {
+                return false;
+            };
+            match k.fact.as_ref().and_then(Fact::finite_members) {
+                Some(vs) => vs.iter().map(crate::env::arg_of_val).collect(),
+                None => return false,
+            }
+        }
+        v if v.is_literal() => vec![v.clone()],
+        _ => return false,
+    };
+    let cty = steins_contract::lower(&spec.ty);
+    let refused = Certainty::No;
+    let admitted = Certainty::Yes;
+    !members.is_empty()
+        && members.iter().all(|m| {
+            crate::contract::literal_contract(m).is_some_and(|lit| {
+                let verdict = normalize::subsumes(&cty, &lit);
+                if spec.negated { verdict == admitted } else { verdict == refused }
+            })
+        })
+}
+
 struct AssertCallee<'a> {
     params: &'a [Param],
     docblock: Option<&'a str>,
