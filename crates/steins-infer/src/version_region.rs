@@ -17,7 +17,8 @@
 //! Every arm of an `if`/`elseif`/`else` chain with one such condition is a region,
 //! since each arm's liveness depends on every earlier condition.
 //!
-//! Ternaries and the right operand of `&&`/`||` are not regions yet.
+//! Expression-level constructs are regions too; the table is on
+//! [`in_version_dependent_region`].
 
 use steins_domain::Certainty;
 use steins_syntax::{ArgValue, CallExpr, CondExpr, CondOperand, Span, Stmt, StmtKind};
@@ -112,13 +113,111 @@ fn collect(cx: &Cx, stmts: &[Stmt], regions: &mut Vec<Span>) {
     }
 }
 
-/// Whether the byte `offset` of the current file lies in a branch whose liveness
-/// depends on the PHP version the target range does not fix. Computed on demand: the
-/// callers ask only when about to report.
+/// Words that make what follows conditional on what precedes them.
+const WORD_OPERATORS: [&str; 4] = ["and", "or", "xor", "case"];
+
+/// Whether `word` occurs in `text` as a whole word.
+fn has_word(text: &str, word: &str) -> bool {
+    let is_ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    text.match_indices(word).any(|(i, _)| {
+        !text[..i].chars().next_back().is_some_and(is_ident)
+            && !text[i + word.len()..].chars().next().is_some_and(is_ident)
+    })
+}
+
+/// Whether `text` holds a conditional operator: `?` (ternary, `?:`), `&&`, `||`, `=>`
+/// (a `match` arm), a single `:` (a ternary else, a `switch` label), or `and`/`or`/
+/// `xor`/`case`.
+fn has_conditional_operator(text: &str) -> bool {
+    let b = text.as_bytes();
+    let lone_colon = b.iter().enumerate().any(|(i, &c)| {
+        c == b':' && b.get(i + 1) != Some(&b':') && (i == 0 || b[i - 1] != b':')
+    });
+    text.contains('?')
+        || text.contains("&&")
+        || text.contains("||")
+        || text.contains("=>")
+        || lone_colon
+        || WORD_OPERATORS.iter().any(|w| has_word(text, w))
+}
+
+/// Whether `text` reads the version and, after its LAST read, passes a conditional
+/// operator: what follows runs only on some versions.
+fn text_is_version_conditional(text: &str) -> bool {
+    let last_read = ["PHP_VERSION", "PHP_MAJOR_VERSION", "PHP_MINOR_VERSION", "PHP_RELEASE_VERSION"]
+        .iter()
+        .filter_map(|t| text.rfind(t))
+        .chain(text.rfind("version_compare"))
+        .max();
+    last_read.is_some_and(|i| has_conditional_operator(&text[i..]))
+}
+
+/// The expression-level rule, read from the source: a call after a version read and a
+/// conditional operator in the same statement (or the same gap between a container's
+/// branches). The tree keeps no expression spans, so the text between the read and the
+/// call is scanned; the cost is over-silence in an exotic statement, never a finding.
+fn lexical_region(cx: &Cx, stmts: &[Stmt], offset: u32) -> bool {
+    for stmt in stmts {
+        if !(stmt.span.start <= offset && offset < stmt.span.end) {
+            continue;
+        }
+        let subs = stmt.kind.sub_traces();
+        let spans: Vec<Span> = subs.iter().filter_map(|t| trace_span(t)).collect();
+        let inside = spans.iter().any(|r| r.start <= offset && offset < r.end);
+        let from = match &stmt.kind {
+            // A leaf statement: its whole text up to the call.
+            _ if spans.is_empty() => Some(stmt.span.start),
+            // A `match`/`switch`: every earlier arm label decides a later arm.
+            StmtKind::Match { .. } => Some(stmt.span.start),
+            // An `if`: the branches are the structural rule's; its conditions are the
+            // gaps between them.
+            StmtKind::If { .. } if !inside => {
+                spans.iter().map(|r| r.end).filter(|&e| e <= offset).max().or(Some(stmt.span.start))
+            }
+            _ => None,
+        };
+        if let Some(from) = from
+            && cx
+                .tree()
+                .source_slice(Span { start: from.min(offset), end: offset })
+                .is_some_and(text_is_version_conditional)
+        {
+            return true;
+        }
+        if subs.iter().any(|t| lexical_region(cx, t, offset)) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether the byte `offset` of the current file lies in a part of the code whose
+/// liveness depends on the PHP version the target range does not fix.
+///
+/// | construct                                  | version-dependent part               | rule        |
+/// |--------------------------------------------|--------------------------------------|-------------|
+/// | `if (V) A elseif (V2) B else C`            | every arm (the dead arm only, when   | structural  |
+/// |                                            | the range decides a `PHP_VERSION_ID`)|             |
+/// | `V ? A : B`, `V ?: B`                      | A and B                              | lexical     |
+/// | `V && X`, `V and X`, `V \|\| X`, `V or X` | X                                    | lexical     |
+/// | `match (true) { V => A, default => B }`    | A, and every later arm               | lexical     |
+/// | `switch (true) { case V: A }`              | the statements after the label       | lexical     |
+/// | a closure written in any of the above      | its whole body                       | both        |
+/// | the condition `V` itself, a call before the operator | none (runs on every target) | -           |
+///
+/// `V` reads `PHP_VERSION_ID`, `PHP_MAJOR_VERSION`, `PHP_MINOR_VERSION`,
+/// `PHP_RELEASE_VERSION`, `PHP_VERSION` or `version_compare`. The structural rule
+/// consults the target range; the lexical rule does not (a decided ternary stays silent
+/// too), because the tree records no expression spans to fold against.
+///
+/// Computed on demand: the callers ask only when about to report.
 pub(crate) fn in_version_dependent_region(cx: &Cx, offset: u32) -> bool {
     let mut regions = Vec::new();
     for scope in cx.tree().scopes() {
         collect(cx, &scope.stmts, &mut regions);
+        if lexical_region(cx, &scope.stmts, offset) {
+            return true;
+        }
     }
     regions.iter().any(|r| r.start <= offset && offset < r.end)
 }

@@ -181,7 +181,7 @@ is the only channel available to hand the runner its own source.
 | --- | --- | --- |
 | `env` | `{php_version, extensions, sapi}` — coverage-posture material and the PHP-minor check for catalog version skew | implemented |
 | `fold` | a call's value, tagged with its PHP type | implemented |
-| `reflect` | whether a name is a resident function and/or class-like on this PHP, autoload **disabled**; for a resident function also its **reflected return type** (`return_type`, with `return_type_tentative` when the engine carries only a tentative type) — the envelope the ADR-0056 return-fact seeder reads — its **parameter counts** (`params_total`, `params_required`) and its **parameter list** (`params`) | implemented |
+| `reflect` | whether a name is a resident function and/or class-like on this PHP, autoload **disabled**; for a resident function also its **reflected return type** (`return_type`, with `return_type_tentative` when the engine carries only a tentative type) — the envelope the ADR-0056 return-fact seeder reads — its **parameter counts** (`params_total`, `params_required`) its **parameter list** (`params`) and its **extension** (`extension`) | implemented |
 | `plugin` | — | **stub**: returns `{kind: "widen", reason: "unimplemented"}` |
 
 `reflect`'s reply is always structured: a name that exists nowhere is a
@@ -219,6 +219,18 @@ unreadable list all read as "unanswerable" and withhold the judgment; a
 zero-parameter function reports `[]`, which is an answer. Like the counts, the
 field is additive — an older reply, and a replay table recorded before it, keep
 parsing and simply judge nothing.
+
+The **extension** (`extension`, issue #937) is `getExtensionName()` of a resident
+function (`null` for a name that is not a function). The arity families judge a
+function, engine class or method only from a php-src bundled extension, since PECL
+arginfo varies with the extension's version and can be wrong. It is additive like
+the fields above: the replay table stores the raw reply keyed by the request, so a
+table recorded before the field keeps parsing with `extension` absent, which reads
+as "no verdict" for arity (silence until the table is re-recorded). Nothing in the
+`symbols` shard, the `summaries` rows or `.steins/gen` holds a reflect reply, so
+`SCHEMA_VERSION` does not move. `Folder::builtin_function_extension` asks the engine
+and is not memoized: it is called only about a call a verdict is about to be
+reported on.
 
 `fold` returns one of three outcomes, and the middle one is the interesting one:
 
