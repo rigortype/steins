@@ -234,6 +234,11 @@ impl SourceTree {
             // Source-cased, namespace-qualified FQN for diagnostic/dump rendering (no
             // leading `\`, matching PHPStan) — same construction the self/static bound uses below.
             c.display = self_display.clone();
+            // In a trait, `self` and `static` name the class that imports it and `parent`
+            // that class's parent (ADR-0105): no bound is known here, so none is stamped.
+            if c.is_trait {
+                continue;
+            }
             let self_fqn = c.fqn.clone();
             let parent_bound = c.parent.as_ref().map(|p| {
                 let display = resolve_class_ref(ctx_of(&contexts, &regions, p.offset), p);

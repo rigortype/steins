@@ -122,62 +122,21 @@ fn collect_scopes(
             scope.yields_by_ref = scope.is_generator && f.ampersand.is_some();
             out.push(scope);
         }
+        // A trait's and an enum's methods get scopes as a class's do (ADR-0105). The
+        // owner names the declaring class-like; for a trait, which class `$this`,
+        // `self` and `static` name is the importing one, and the walk reads that
+        // receiver as open (`steins_infer`'s scope receiver).
         Node::Class(c) => {
-            let simple = bytes_to_string(c.name.value);
-            let ctx = ctx_of(contexts, regions, to_span(c.name.span()).start);
-            // Case-preserved FQN: cross-file lookups fold case, but keeping the
-            // written case makes the owner readable and stable for same-file code.
-            let class_fqn = if ctx.namespace.is_empty() {
-                simple.clone()
-            } else {
-                format!("{}\\{}", ctx.namespace, simple)
-            };
-            for member in c.members.iter() {
-                match member {
-                    ClassLikeMember::Method(m) => {
-                        if let MethodBody::Concrete(block) = &m.body {
-                            let method = bytes_to_string(m.name.value);
-                            let owner =
-                                ScopeOwner::Method { class: class_fqn.clone(), method };
-                            let mut scope = build_scope(
-                                owner,
-                                block.statements.as_slice(),
-                                ret_hint_of(m.return_type_hint.as_ref()),
-                                Some(&m.parameter_list),
-                            );
-                            scope.yields_by_ref = scope.is_generator && m.ampersand.is_some();
-                            out.push(scope);
-                        }
-                        // A promoted parameter's hooks are the constructor's syntax but
-                        // the property's semantics (issue #544) — same scopes as the
-                        // class-body form below, and reached only from here because the
-                        // hook list hangs off the parameter.
-                        for p in m.parameter_list.parameters.iter() {
-                            if let Some(hooks) = &p.hooks {
-                                collect_hook_scopes(
-                                    &class_fqn,
-                                    &strip_dollar(bytes_to_string(p.variable.name)),
-                                    p.hint.as_ref(),
-                                    hooks,
-                                    rc,
-                                    out,
-                                );
-                            }
-                        }
-                    }
-                    ClassLikeMember::Property(Property::Hooked(h)) => {
-                        collect_hook_scopes(
-                            &class_fqn,
-                            &strip_dollar(bytes_to_string(h.item.variable().name)),
-                            h.hint.as_ref(),
-                            &h.hook_list,
-                            rc,
-                            out,
-                        );
-                    }
-                    _ => {}
-                }
-            }
+            let class_fqn = member_owner_fqn(contexts, regions, &c.name);
+            collect_member_scopes(&class_fqn, c.members.iter(), false, rc, out);
+        }
+        Node::Trait(t) => {
+            let class_fqn = member_owner_fqn(contexts, regions, &t.name);
+            collect_member_scopes(&class_fqn, t.members.iter(), true, rc, out);
+        }
+        Node::Enum(e) => {
+            let class_fqn = member_owner_fqn(contexts, regions, &e.name);
+            collect_member_scopes(&class_fqn, e.members.iter(), false, rc, out);
         }
         // Closures / arrow fns get their own scope (ADR-0033), addressed by the
         // definition-site byte offset. Params/effects/throws ride on the scope.
@@ -202,6 +161,83 @@ fn collect_scopes(
     // `Node::Class`), so this recursion never double-creates one.
     for child in children(node) {
         collect_scopes(&child, contexts, regions, rc, docs, stmt_doc, out);
+    }
+}
+
+/// The case-preserved FQN of a named class-like, as a method scope's owner spells it:
+/// cross-file lookups fold case, but keeping the written case makes the owner readable
+/// and stable for same-file code.
+fn member_owner_fqn(
+    contexts: &[NsCtx],
+    regions: &[(u32, u32, usize)],
+    name: &mago_syntax::cst::LocalIdentifier<'_>,
+) -> String {
+    let simple = bytes_to_string(name.value);
+    let ctx = ctx_of(contexts, regions, to_span(name.span()).start);
+    if ctx.namespace.is_empty() { simple } else { format!("{}\\{}", ctx.namespace, simple) }
+}
+
+/// One scope per concrete method of a class-like body, and one per property hook.
+///
+/// A trait's methods are [`ScopeOwner::TraitMethod`]s, and its property hooks get no
+/// scope: a hook body runs with `$this` bound to the importing class, which a
+/// [`ScopeOwner::PropertyHook`] would name as the trait.
+fn collect_member_scopes<'a, 'arena: 'a>(
+    class_fqn: &str,
+    members: impl Iterator<Item = &'a ClassLikeMember<'arena>>,
+    in_trait: bool,
+    rc: &RefResolver,
+    out: &mut Vec<Scope>,
+) {
+    for member in members {
+        match member {
+            ClassLikeMember::Method(m) => {
+                if let MethodBody::Concrete(block) = &m.body {
+                    let method = bytes_to_string(m.name.value);
+                    let class = class_fqn.to_owned();
+                    let owner = if in_trait {
+                        ScopeOwner::TraitMethod { class, method }
+                    } else {
+                        ScopeOwner::Method { class, method }
+                    };
+                    let mut scope = build_scope(
+                        owner,
+                        block.statements.as_slice(),
+                        ret_hint_of(m.return_type_hint.as_ref()),
+                        Some(&m.parameter_list),
+                    );
+                    scope.yields_by_ref = scope.is_generator && m.ampersand.is_some();
+                    out.push(scope);
+                }
+                // A promoted parameter's hooks are the constructor's syntax but the
+                // property's semantics (issue #544) — same scopes as the class-body form
+                // below, and reached only from here because the hook list hangs off the
+                // parameter.
+                for p in m.parameter_list.parameters.iter().filter(|_| !in_trait) {
+                    if let Some(hooks) = &p.hooks {
+                        collect_hook_scopes(
+                            class_fqn,
+                            &strip_dollar(bytes_to_string(p.variable.name)),
+                            p.hint.as_ref(),
+                            hooks,
+                            rc,
+                            out,
+                        );
+                    }
+                }
+            }
+            ClassLikeMember::Property(Property::Hooked(h)) if !in_trait => {
+                collect_hook_scopes(
+                    class_fqn,
+                    &strip_dollar(bytes_to_string(h.item.variable().name)),
+                    h.hint.as_ref(),
+                    &h.hook_list,
+                    rc,
+                    out,
+                );
+            }
+            _ => {}
+        }
     }
 }
 
@@ -307,6 +343,7 @@ fn build_scope_from(
         ScopeOwner::Function { fqn, .. } => Some(fqn.clone()),
         ScopeOwner::TopLevel
         | ScopeOwner::Method { .. }
+        | ScopeOwner::TraitMethod { .. }
         | ScopeOwner::Closure { .. }
         | ScopeOwner::PropertyHook { .. } => None,
     };

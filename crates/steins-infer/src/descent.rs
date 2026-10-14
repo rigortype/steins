@@ -59,7 +59,12 @@ pub(crate) fn scope_class(scope: &Scope) -> Option<&str> {
         ScopeOwner::Method { class, .. } | ScopeOwner::PropertyHook { class, .. } => Some(class),
         // A closure lexically inside a method captures `$this`, but the analyzer
         // does not thread the enclosing class into the closure scope (documented).
-        ScopeOwner::TopLevel | ScopeOwner::Function { .. } | ScopeOwner::Closure { .. } => None,
+        // A trait method runs in the class that imports it, which its one walk does
+        // not know (ADR-0105): the receiver is open, as a closure's is.
+        ScopeOwner::TopLevel
+        | ScopeOwner::Function { .. }
+        | ScopeOwner::Closure { .. }
+        | ScopeOwner::TraitMethod { .. } => None,
     }
 }
 

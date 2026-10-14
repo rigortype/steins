@@ -896,7 +896,6 @@ fn class_likes_are_all_lowered_as_names() {
     assert_eq!(e.enum_cases[0].name, "A");
     let t = tree.classes().iter().find(|d| d.name == "T").unwrap();
     assert!(t.is_trait, "trait T is marked is_trait (ADR-0049 §5)");
-    assert!(t.methods.is_empty(), "a trait is lowered name-only in S1");
 }
 
 #[test]
@@ -1313,7 +1312,8 @@ fn trait_enters_the_class_like_index_as_a_name() {
     assert!(t.is_trait, "trait carries is_trait");
     assert!(!t.is_interface && !t.is_enum);
     assert_eq!(t.fqn, "app\\greet", "trait FQN is indexed lowercase");
-    assert!(t.methods.is_empty(), "trait members are not lowered in S1");
+    let names: Vec<&str> = t.methods.iter().map(|m| m.name.as_str()).collect();
+    assert_eq!(names, ["hi"], "trait members are lowered (ADR-0105)");
     assert!(!t.conditional, "a top-level namespaced trait is unconditional");
 }
 

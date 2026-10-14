@@ -1756,7 +1756,7 @@ impl<'a> Cx<'a> {
         match &scope.owner {
             ScopeOwner::TopLevel => None,
             ScopeOwner::Function { fqn, .. } => Some(&self.scope_function(fqn)?.params),
-            ScopeOwner::Method { class, method } => {
+            ScopeOwner::Method { class, method } | ScopeOwner::TraitMethod { class, method } => {
                 let cd = self.tree().classes().iter().find(|c| c.fqn.eq_ignore_ascii_case(class))?;
                 let m = cd.methods.iter().find(|m| m.name.eq_ignore_ascii_case(method))?;
                 Some(&m.params)
@@ -1805,6 +1805,12 @@ impl<'a> Cx<'a> {
                 let m = cd.methods.iter().find(|m| m.name.eq_ignore_ascii_case(method))?;
                 Some((Some(cd.fqn.as_str()), &m.params, &m.sites))
             }
+            // A trait method's receiver is the importing class, open here (ADR-0105).
+            ScopeOwner::TraitMethod { class, method } => {
+                let cd = self.tree().classes().iter().find(|c| c.fqn.eq_ignore_ascii_case(class))?;
+                let m = cd.methods.iter().find(|m| m.name.eq_ignore_ascii_case(method))?;
+                Some((None, &m.params, &m.sites))
+            }
             ScopeOwner::Closure { def_offset } => {
                 let s = self.tree().scopes().iter().find(|s| {
                     matches!(&s.owner, ScopeOwner::Closure { def_offset: d } if d == def_offset)
@@ -1832,7 +1838,7 @@ impl<'a> Cx<'a> {
                 let f = self.scope_function(fqn)?;
                 self.envelopes_of(f.docblock.as_deref(), self.cur, f.span.start)
             }
-            ScopeOwner::Method { class, method } => {
+            ScopeOwner::Method { class, method } | ScopeOwner::TraitMethod { class, method } => {
                 let cd = self.tree().classes().iter().find(|c| c.fqn.eq_ignore_ascii_case(class))?;
                 let m = cd.methods.iter().find(|m| m.name.eq_ignore_ascii_case(method))?;
                 let mut env = self.envelopes_of(m.docblock.as_deref(), self.cur, m.span.start)?;
@@ -1867,7 +1873,7 @@ impl<'a> Cx<'a> {
             ScopeOwner::Function { fqn, .. } => self
                 .scope_function(fqn)
                 .map_or_else(TemplateShadow::default, |f| template_names_of(f.docblock.as_deref())),
-            ScopeOwner::Method { class, method } => {
+            ScopeOwner::Method { class, method } | ScopeOwner::TraitMethod { class, method } => {
                 let Some(cd) =
                     self.tree().classes().iter().find(|c| c.fqn.eq_ignore_ascii_case(class))
                 else {
@@ -1899,7 +1905,7 @@ impl<'a> Cx<'a> {
                 let f = self.scope_function(fqn)?;
                 f.ret.as_ref().map(|r| (r, f.name.clone()))
             }
-            ScopeOwner::Method { class, method } => {
+            ScopeOwner::Method { class, method } | ScopeOwner::TraitMethod { class, method } => {
                 // `owner.class` is the case-preserved FQN; `ClassDecl.fqn` is
                 // lowercase-normalized — compare case-insensitively.
                 let cd =
@@ -1959,7 +1965,7 @@ impl<'a> Cx<'a> {
                 let ret = self.envelopes_of(f.docblock.as_deref(), self.cur, f.span.start)?.ret?;
                 Some((ret, f.name.clone()))
             }
-            ScopeOwner::Method { class, method } => {
+            ScopeOwner::Method { class, method } | ScopeOwner::TraitMethod { class, method } => {
                 let cd =
                     self.tree().classes().iter().find(|c| c.fqn.eq_ignore_ascii_case(class))?;
                 let m = cd.methods.iter().find(|m| m.name.eq_ignore_ascii_case(method))?;

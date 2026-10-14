@@ -1715,14 +1715,18 @@ pub struct ClassDecl {
     /// `property.undefined` treats it as an obstacle anywhere in the chain, like `__get`.
     pub allows_dynamic_properties: bool,
     // end member absence (ADR-0078, issue #197)
-    /// `true` if the class `use`s any trait — trait bodies live elsewhere, so a
-    /// trait-using class is treated as unresolvable (give up → silent).
+    /// `true` if a class or enum `use`s any trait. What the traits bring in is read
+    /// through the trait composition (ADR-0105), which a consumer asks in place of
+    /// treating the class as unresolvable; `false` for a trait.
     pub uses_traits: bool,
-    /// The traits the body imports, as written, from every `use` statement: a class's
-    /// and a trait's own (ADR-0100 §7, issue #882). [`Self::uses_traits`] stays the
-    /// obstacle bit the other analyses read and is `false` for a trait, whose body
-    /// is not lowered; this is what the destructor gate resolves instead.
+    /// The traits the body imports, as written, from every `use` statement: a class's,
+    /// an enum's and a trait's own (ADR-0100 §7, issue #882; ADR-0105). This is what
+    /// the trait composition and the destructor gate resolve.
     pub used_traits: Vec<NameRef>,
+    /// Whether a `use` statement of the body carries an adaptation block with an
+    /// `insteadof` or `as` rule. The trait composition declines such a class-like
+    /// (ADR-0105, v1).
+    pub trait_adapted: bool,
     /// Whether the body declares a `__destruct` method, or aliases an imported
     /// trait's method `as __destruct` (`use T { bye as __destruct; }`, which runs
     /// `bye` at a drop). Read by name, so a trait's counts though its methods are
@@ -4176,6 +4180,12 @@ pub enum ScopeOwner {
     /// carries its signature, so, exactly as for a closure, the hook's parameters and
     /// its native return type ride on the [`Scope`] itself.
     PropertyHook { class: String, property: String, hook: HookKind },
+    /// A trait's concrete method (ADR-0105). `class` is the trait's case-preserved FQN,
+    /// which addresses the [`MethodDecl`] as a [`ScopeOwner::Method`]'s does; but the
+    /// body runs in whichever class imports the trait, so `$this`, `self`, `static`
+    /// and `parent` name no class this scope knows. The walk judges the body once with
+    /// that receiver open, as it does a closure's.
+    TraitMethod { class: String, method: String },
 }
 
 /// Which of a hooked property's two hooks a [`ScopeOwner::PropertyHook`] scope is.
