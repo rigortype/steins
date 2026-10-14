@@ -929,7 +929,7 @@ fn write_misses_declared_slot(cx: &Cx, class: &str, prop: &str, scope: Option<&s
         // private one is private to the importer.
         if owner.is_none() {
             let Ok(held) = cx.held_property(file, cd, prop) else { return true };
-            if let Some(pd) = held.map(|h| h.decl).filter(|p| !p.is_static) {
+            if let Some(pd) = held.filter(|p| !p.is_static) {
                 owner = Some((cd.fqn.clone(), pd));
             }
         }

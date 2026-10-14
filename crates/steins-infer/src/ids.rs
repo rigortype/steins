@@ -672,8 +672,9 @@ pub const FOREACH_NON_ITERABLE_ID: &str = "foreach.non-iterable";
 /// The receiver's class must be **exactly** known and its `__toString` provably
 /// absent under complete enumeration — the same ladder `call.undefined-method`
 /// walks. Silence cases: a `Stringable` implementor, a `__toString` inherited
-/// from an unresolvable parent, a trait anywhere in the chain (traits are not
-/// flattened), or an A14 magic-tag obstacle in the class-like's resolved reach.
+/// from an unresolvable parent, a trait composition that declines anywhere in the
+/// chain (a `__toString` a trait gives the class is the class's, ADR-0105), or an
+/// A14 magic-tag obstacle in the class-like's resolved reach.
 ///
 /// The magic-tag leg is deliberate over-silence: measured on 8.5.9, `__call` does
 /// **not** rescue a string conversion (`WithCall` still raises the `Error`), so no
@@ -850,7 +851,8 @@ pub const CLASS_CONST_INACCESSIBLE_ID: &str = "class-const.inaccessible";
 ///   plain-class dynamic write is deprecated, not an error). A computed-name
 ///   write (`$o->$n = …`) anywhere takes the id off the surface.
 /// * Everything the method ladder already had: the A14 magic-tag obstacle, a
-///   trait name/using node, an enum node, an unresolvable/`Ambiguous`/builtin
+///   trait name or a trait composition that declines (ADR-0105; a property a
+///   trait gives the class is declared), an enum node, an unresolvable/`Ambiguous`/builtin
 ///   ancestor, a member-incomplete file (ADR-0079 §2.5), a cycle, the A2i
 ///   conditional-declaration re-dam, and the A2ii boot-surface homonym leg.
 ///
@@ -896,7 +898,7 @@ pub const PROPERTY_MAYBE_UNDEFINED_ID: &str = "property.maybe-undefined";
 /// parent chain, **any interface in the reach** (`class C implements I`
 /// answers `C::IK`; `interface IB extends IA` carries `IA`'s constants through
 /// to `CB::AK` — both witnessed), a **trait** the class uses (`CT::TK`,
-/// witnessed 8.2+, so `uses_traits` is an obstacle), or an enum's **cases**
+/// witnessed 8.2+, read through the trait composition, ADR-0105), or an enum's **cases**
 /// (`Suit::Hearts`).
 ///
 /// `X::class` is excluded at the site: it is a plain string since PHP 8.0 and

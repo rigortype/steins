@@ -26,8 +26,9 @@
 //!
 //! The methods PHPStan reads as the class's own: those its body declares, and
 //! those a trait inserts (reflection names the using class their declaring
-//! class). Trait bodies are lowered name-only (ADR-0049), so a trait-using
-//! class refuses `uses-trait`. An **inherited** method is not covered: PHPStan
+//! class). This transform proves no trait method pure for its importer (it keeps
+//! trait methods out of its candidates, ADR-0105), so a trait-using class refuses
+//! `uses-trait`. An **inherited** method is not covered: PHPStan
 //! reads the class tag off the method's declaring class, so under a child's
 //! tag a parent's impure method stays `possiblyImpure` (checked against
 //! phpstan-src 2026-09-26) and needs no check here.
@@ -92,9 +93,9 @@ pub const REASON_EXISTING_TAG_UNREADABLE: &str = "existing-tag-unreadable";
 /// registry does not know, or a `failure.*` label — so the tag would read back as
 /// prose (⊤) rather than the bound it meant.
 pub const REASON_BOUND_LABEL_UNKNOWN: &str = "bound-label-unknown";
-/// The class uses a trait: the class tag covers the trait's methods too, and
-/// their bodies are never analyzed (ADR-0049 lowers a trait by name only), so
-/// the class-wide claim is not proven.
+/// The class uses a trait: the class tag covers the trait's methods too, which
+/// this transform does not prove pure for the importer (ADR-0105), so the
+/// class-wide claim is not proven.
 pub const REASON_USES_TRAIT: &str = "uses-trait";
 /// No lossless insertion point, or the written tag did not survive the
 /// re-parse round-trip. Shared with the `@throws` sister (same reason name).

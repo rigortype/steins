@@ -1673,8 +1673,9 @@ pub struct ClassDecl {
     /// `true` for an `enum` (ADR-0043, implicitly `final`); cases/backing in
     /// [`Self::enum_cases`]/[`Self::enum_backing`]; implicitly implements `UnitEnum`/`BackedEnum`.
     pub is_enum: bool,
-    /// `true` for a `trait` (ADR-0049 §5, C8/A2i): enters the class-*like* index
-    /// as a **name** only, inert — sharing an FQN with a class makes both `Ambiguous`.
+    /// `true` for a `trait` (ADR-0049 §5): enters the class-*like* index — sharing an
+    /// FQN with a class makes both `Ambiguous` — and its members are lowered, which a
+    /// class that imports it holds through the trait composition (ADR-0105).
     pub is_trait: bool,
     /// `true` when nested under anything but namespace/program (ADR-0049 A2i);
     /// runtime load order decides which binds, so a chain with one **re-dams**.
@@ -1729,21 +1730,20 @@ pub struct ClassDecl {
     pub trait_adapted: bool,
     /// Whether the body declares a `__destruct` method, or aliases an imported
     /// trait's method `as __destruct` (`use T { bye as __destruct; }`, which runs
-    /// `bye` at a drop). Read by name, so a trait's counts though its methods are
-    /// not lowered.
+    /// `bye` at a drop). Read by name off the member list, the reading the drop
+    /// gate's shard tables are built from.
     pub declares_destructor: bool,
     /// Whether the body declares a `__set` method, or aliases an imported trait's
-    /// method `as __set` — read by name like [`Self::declares_destructor`], so a
-    /// trait's counts though its methods are not lowered. A typed property write on a
-    /// chain holding one may reach `__set` instead of the slot (the #1060 review).
+    /// method `as __set` — read by name like [`Self::declares_destructor`]. A typed
+    /// property write on a chain holding one may reach `__set` instead of the slot (the
+    /// #1060 review).
     pub declares_magic_set: bool,
     /// A **trait** only: the classes its non-static properties, and its constructor's
     /// promoted parameters, are hinted with, as written, by every member of a hint
     /// (`self` and `parent` excluded: they name the importing class and its parent,
-    /// which are asked anyway). A trait's properties are not lowered, so the
-    /// typed-property hop reads the importing class's traits through this list
-    /// (ADR-0100 §7). Empty for every other class-like, whose properties are
-    /// [`Self::properties`].
+    /// which are asked anyway). The typed-property hop reads the importing class's
+    /// traits through this list (ADR-0100 §7), which predates the lowered trait
+    /// members of ADR-0105. Empty for every other class-like.
     pub held_classes: Vec<NameRef>,
     /// A **trait** only: whether a non-static property or promoted parameter of it is
     /// hinted `self`, which names the class that imports the trait.
@@ -1751,12 +1751,13 @@ pub struct ClassDecl {
     /// A **trait** only: the same for `parent`, the importing class's parent.
     pub holds_parent: bool,
     /// A **trait** only: each property, and each promoted constructor parameter, by name and
-    /// declared hint. A trait's properties are not lowered, so the property drops (ADR-0100 §7)
-    /// read the one a class imports from here. Empty for every other class-like, whose
-    /// properties are [`Self::properties`].
+    /// declared hint, which the property drops (ADR-0100 §7) read the one a class imports
+    /// from; a trait's [`Self::properties`] carry the lowered declarations (ADR-0105). Empty
+    /// for every other class-like.
     pub trait_props: Vec<TraitProp>,
     /// Raw `/** … */` docblock preceding the class-like, if any — read for
-    /// class-level `@template` names shadowing same-named classes (issue #5). `None` for a trait.
+    /// class-level `@template` names shadowing same-named classes (issue #5), and for the
+    /// magic-member tags of ADR-0049 A14, a trait's and an enum's included.
     pub docblock: Option<String>,
     /// **File byte span** of that docblock — class-world analogue of
     /// [`FunctionDecl::docblock_span`], used by the transform engine's interop envelope write.
@@ -1765,8 +1766,8 @@ pub struct ClassDecl {
     pub span: Span,
 }
 
-/// One property a trait declares, read off its member list by name and native hint (a
-/// trait's body is not lowered). See [`ClassDecl::trait_props`].
+/// One property a trait declares, read off its member list by name and native hint. See
+/// [`ClassDecl::trait_props`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub struct TraitProp {

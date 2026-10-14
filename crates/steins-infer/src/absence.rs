@@ -180,10 +180,10 @@ pub(crate) fn magic_obstacles_in_reach(cx: &Cx, start_fqn: &str) -> Vec<MagicObs
 /// a PHP interface never carries a method body, so it can never *define* the
 /// method — only the `extends` (class-parent) chain can, exactly as
 /// [`resolve_in_chain`] does. Any of these taints closure ⇒ `Silent`:
-/// unresolvable/`Ambiguous`/builtin ancestor (leg b/f/i), a trait name or a
-/// `uses_traits` node (leg e), an `is_enum` node (leg j / A3), the magic fallback
-/// (`__call`/`__callStatic`, leg d), a cycle (leg b), or the method being present
-/// (not undefined).
+/// unresolvable/`Ambiguous`/builtin ancestor (leg b/f/i), a trait name or a node
+/// whose trait composition declines (leg e, ADR-0105), an `is_enum` node (leg j /
+/// A3), the magic fallback (`__call`/`__callStatic`, leg d, its own or a trait's),
+/// a cycle (leg b), or the method being held (not undefined), its own or a trait's.
 ///
 /// [`resolve_in_chain`]: crate::resolve_in_chain
 pub(crate) fn enumerate_method_chain(cx: &Cx, start_fqn: &str, method: &str, kind: UndefKind) -> ChainWalk {
@@ -222,8 +222,9 @@ pub(crate) fn enumerate_method_chain(cx: &Cx, start_fqn: &str, method: &str, kin
         if cx.member_incomplete(cfile) {
             return ChainWalk::Silent;
         }
-        // Leg (j)/A3: enum methods are not lowered, so an enum chain would look
-        // method-empty — Unknown until enum method lowering lands.
+        // Leg (j)/A3: an enum's methods are lowered now (ADR-0105), but its cases
+        // and the engine's `UnitEnum` methods are not methods of the declaration;
+        // the enum chain stays Unknown.
         if cd.is_enum {
             return ChainWalk::Silent;
         }
@@ -884,9 +885,8 @@ pub(crate) fn provides_class_const(cd: &ClassDecl, name: &str) -> bool {
 /// answers through the using class (`CT::TK`) — so a trait-using node is an
 /// obstacle here rather than a node to skip.
 ///
-/// An enum node is **not** an obstacle: unlike enum methods (leg (j)/A3,
-/// unlowered) both an enum's constants and cases are lowered, so an enum reach
-/// is enumerable for this member kind.
+/// An enum node is **not** an obstacle: both an enum's constants and cases are
+/// lowered, so an enum reach is enumerable for this member kind.
 fn enumerate_const_reach(cx: &Cx, start_fqn: &str, name: &str) -> Option<ConstReach> {
     // A14 (issue #195), one door earlier. Constants have no magic channel at all —
     // a `@property`/`@method` tag cannot make `C::K` resolve — so this leg is pure

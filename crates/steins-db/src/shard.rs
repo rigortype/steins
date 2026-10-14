@@ -721,8 +721,8 @@ pub fn fallback_package_key(path: &str) -> String {
 /// Whether a class-like declares a method the engine runs on a property access
 /// (`__get`, `__set`, `__isset`, `__unset`) or hooks a property: the classes
 /// whose subclasses an operator site cannot rule out (ADR-0099 §4.4). A class
-/// using a trait counts: the trait's body is not lowered, so what it imports
-/// (`__get` among it) is unknown.
+/// using a trait counts: the merge does not compose traits (ADR-0105's composition
+/// is the analyzer's), so what it imports (`__get` among it) is unknown here.
 fn declares_property_magic(cd: &ClassDecl) -> bool {
     const MAGIC: [&str; 4] = ["__get", "__set", "__isset", "__unset"];
     cd.uses_traits
