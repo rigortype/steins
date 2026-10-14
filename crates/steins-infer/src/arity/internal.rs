@@ -30,6 +30,7 @@
 //! abstract/interface/enum class, non-public or       decline
 //!   abstract method, Class::nonStatic()
 //! a project class, even one extending an engine one  decline: the project arm owns it
+//! new DatePeriod(), gnupg_*()                        decline: hand-parsed / misreflected
 //! ```
 //!
 //! The required count is one past the last non-optional parameter, which is
@@ -48,6 +49,19 @@ use crate::project::Diagnostic;
 use crate::{
     CALL_TOO_FEW_ARGUMENTS_ID, CALL_TOO_MANY_ARGUMENTS_ID, CALL_UNKNOWN_NAMED_ARGUMENT_ID,
 };
+
+/// Function-name prefixes whose reflected arity is not the arity they enforce: the
+/// PECL `gnupg` procedural wrappers share an arginfo that omits the leading handle, so
+/// the maximum is understated. Found by calling every function of the analysing PHP
+/// with one argument more than reflected (and one fewer than required) and keeping
+/// those that did not raise `ArgumentCountError`; core and bundled extensions had
+/// none.
+const MISREFLECTED_FUNCTIONS: [&str; 1] = ["gnupg_"];
+
+/// Engine constructors that parse their arguments by hand: `DatePeriod`'s overloaded
+/// signature throws a `TypeError` (not `ArgumentCountError`) for a short list, so the
+/// finding would name the wrong consequence.
+const HAND_PARSED_CONSTRUCTORS: [&str; 1] = ["dateperiod"];
 
 /// What the call's argument list proves about an internal signature.
 #[derive(Debug, PartialEq, Eq)]
@@ -137,6 +151,10 @@ pub(super) fn builtin_signature(
     call: &CallExpr,
 ) -> Option<(String, Vec<BuiltinParam>)> {
     let name = global_function_callee(cx, call)?;
+    let lower = name.to_ascii_lowercase();
+    if MISREFLECTED_FUNCTIONS.iter().any(|p| lower.starts_with(p)) {
+        return None;
+    }
     // A project function of this simple name shadows the builtin or makes the name
     // ambiguous: what runs is not what the engine reflected.
     if cx.index.has_simple_function(name) {
@@ -195,6 +213,11 @@ pub(super) fn check_engine_method(
         return;
     }
     let Some(decl) = engine_class(cx, folder, &class) else { return };
+    if method.eq_ignore_ascii_case("__construct")
+        && HAND_PARSED_CONSTRUCTORS.iter().any(|c| decl.name.eq_ignore_ascii_case(c))
+    {
+        return;
+    }
     let Some(m) = decl.methods.iter().find(|m| m.name.eq_ignore_ascii_case(&method)) else {
         return;
     };

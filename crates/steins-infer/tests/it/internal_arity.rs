@@ -68,6 +68,7 @@ fn functions() -> Vec<(&'static str, Vec<BuiltinParam>)> {
         ("str_pad", "r:string r:length o:pad_string o:pad_type"),
         ("preg_replace_callback", "r:pattern r:callback r:subject o:limit o:count o:flags"),
         ("strtoupper", "r:string"),
+        ("gnupg_getprotocol", ""),
     ]
     .into_iter()
     .map(|(n, s)| (n, sig(s)))
@@ -125,6 +126,7 @@ fn classes() -> Vec<ReflectedClass> {
             ],
         ),
         class("DateTimeZone", Class, false, vec![method("__construct", 1, 1, false)]),
+        class("DatePeriod", Class, false, vec![method("__construct", 4, 1, false)]),
         class("Exception", Class, false, vec![method("__construct", 3, 0, false)]),
         class("Sealed", Class, false, vec![private_ctor]),
         class("AbstractThing", Class, true, vec![method("__construct", 1, 1, false)]),
@@ -264,6 +266,12 @@ fn a_userland_function_keeps_the_userland_rule() {
 }
 
 #[test]
+fn a_function_whose_reflected_arity_is_not_the_enforced_one_declines() {
+    // The `gnupg` procedural wrappers reflect a maximum below what they take.
+    silent("gnupg_getprotocol(1, 2);");
+}
+
+#[test]
 fn rand_with_one_argument_is_a_known_false_negative() {
     // PHP throws; reflection says 0 required of 2, so the engine cannot say so.
     silent("rand(1);");
@@ -339,6 +347,8 @@ fn engine_method_declines() {
     // bound that a subclass may widen.
     silent("class P extends DateTime {}\n$p = new P();\n$p->format();");
     silent("function f(DateTime $d) { $d->format(); }");
+    // `DatePeriod` parses its overloaded constructor by hand: a `TypeError`, not the count.
+    silent("new DatePeriod();");
     // A class the analysing PHP does not have.
     silent("new NoSuchEngineClass();");
 }
