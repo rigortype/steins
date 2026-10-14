@@ -116,6 +116,16 @@ base could have stopped holding it.
 _Avoid_: "lvalue" (a place is what the heap keys by, not what may be assigned
 to — `$a[$i]` is an lvalue and is no place), "path" (reserved for the file kind)
 
+**Trait composition** (ADR-0105):
+What a class or enum holds through its `use` statements: the methods, properties
+and constants its traits give it, flattened at query time through one memo per
+universe, its own members first and its parent's after. A composition PHP would
+reject, or one `insteadof`/`as` reshapes, **declines**: the class reads as
+unenumerable, as every trait user did before. A trait's method body is walked once,
+with its receiver **open** (`$this`, `self`, `static` name the importer).
+_Avoid_: "trait flattening" for the walk (it is a query, not a copy), "mixin"
+(a docblock tag of its own, ADR-0049 A14)
+
 **Surface floor** (ADR-0062 A-G10):
 The single registry attribute that places a diagnostic id on the profile
 ladder (`default ⊂ contracts ⊂ strict`): the lowest surface at which the id
