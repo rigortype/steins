@@ -44,7 +44,7 @@ use crate::env::{ClosureTarget, Known, Stratum};
 use crate::existence::global_function_callee;
 use crate::fold::Folder;
 use crate::project::Diagnostic;
-use crate::version_region::in_version_dependent_region;
+use crate::version_region::file_reads_php_version;
 use crate::CALL_TOO_FEW_ARGUMENTS_ID;
 
 /// A resolved callback signature: how many arguments it needs, and its name.
@@ -237,7 +237,7 @@ pub(crate) fn check_callback_arity(
     {
         return;
     }
-    if in_version_dependent_region(cx, call.span.start) {
+    if file_reads_php_version(cx) {
         return;
     }
     let at = cx.tree().position(arg.span.start);

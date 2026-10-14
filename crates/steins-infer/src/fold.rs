@@ -297,6 +297,20 @@ pub trait Folder {
         None
     }
 
+    /// Whether the project's declared PHP target is exactly the analysing engine's
+    /// minor (`config.platform.php` 8.5.x, a `php` constraint of `~8.5.0` / `8.5.*`,
+    /// on an 8.5 runtime), with the absence family available.
+    ///
+    /// The arity families read signatures from the analysing PHP, and no table says
+    /// which signatures differ between minors (`mktime()` needs an argument from 8.0,
+    /// `openssl_seal()` one more from 8.0, `each()` is gone). Until such a table
+    /// exists they judge only where every targeted version is the engine's own minor.
+    /// A range target, no target and a target that excludes the runtime all answer
+    /// `false`, as does the sound subset (default).
+    fn arity_target_exact(&mut self) -> bool {
+        false
+    }
+
     /// What the builtin `name` demands of a **resource** argument at its 0-based
     /// position `index` (ADR-0097 §2.5) — the parameter twin of
     /// [`Self::builtin_resource_return`], gated the same way.
@@ -1122,6 +1136,16 @@ impl<E: FoldEngine> Folder for EngineFolder<E> {
         let answer = self.compute_builtin_param_types(&key);
         self.param_types_memo.insert(key, answer.clone());
         answer
+    }
+
+    fn arity_target_exact(&mut self) -> bool {
+        if !self.absence_family_available() {
+            return false;
+        }
+        match (self.php_minor(), &self.php_target) {
+            (Some(minor), Some(target)) => target.is_exactly(minor),
+            _ => false,
+        }
     }
 
     fn builtin_function_extension(&mut self, name: &str) -> Option<String> {

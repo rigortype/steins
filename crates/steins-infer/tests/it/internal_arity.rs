@@ -14,6 +14,7 @@ use steins_infer::{
     CALL_UNKNOWN_NAMED_ARGUMENT_ID as UNKNOWN_NAMED, Diagnostic, Folder, NoFold, SidecarFolder,
     check_with,
 };
+use steins_db::{PhpTarget, PhpTargetSource};
 use steins_sidecar::{
     BuiltinParam, ClassReflection, ReflectedClass, ReflectedClassKind, ReflectedMethod,
     Visibility,
@@ -150,6 +151,8 @@ fn classes() -> Vec<ReflectedClass> {
 /// sound default. `available` is the absence-family gate: off, no reflection answers.
 struct Mock {
     available: bool,
+    /// The declared target is exactly the runtime's minor (`arity_target_exact`).
+    exact: bool,
 }
 
 impl Folder for Mock {
@@ -158,6 +161,9 @@ impl Folder for Mock {
     }
     fn absence_family_available(&mut self) -> bool {
         self.available
+    }
+    fn arity_target_exact(&mut self) -> bool {
+        self.available && self.exact
     }
     fn boot_surface_class_like(&mut self, _fqn: &str) -> Option<bool> {
         Some(false)
@@ -187,6 +193,39 @@ impl Folder for Mock {
 // Harness
 // ---------------------------------------------------------------------------
 
+/// A target of the given range, as `composer.json` would resolve it.
+fn target(raw: &str, floor: (u16, u16), ceiling: Option<(u16, u16)>) -> PhpTarget {
+    PhpTarget { floor, ceiling, source: PhpTargetSource::Require, raw: raw.to_owned() }
+}
+
+/// A live sidecar, when a `php` answers, declared to target exactly its own minor.
+fn live_exact() -> Option<SidecarFolder> {
+    let mut live = SidecarFolder::enabled();
+    let minor = live.php_minor()?;
+    live.set_php_target(Some(target("exact", minor, Some(minor))));
+    (live.builtin_param_types("strlen").is_some() && live.arity_target_exact()).then_some(live)
+}
+
+/// Live sidecars declared to target a RANGE (or another minor): `^7.4 || ^8.0`,
+/// `>=8.1`, and the minor below the runtime's. None may judge a thing.
+fn live_ranges() -> Vec<(&'static str, SidecarFolder)> {
+    let mut out = Vec::new();
+    let Some(minor) = SidecarFolder::enabled().php_minor() else { return out };
+    let below = (minor.0, minor.1.saturating_sub(1));
+    let ranges: [(&'static str, PhpTarget); 4] = [
+        ("^7.4 || ^8.0", target("^7.4 || ^8.0", (7, 4), Some((8, u16::MAX)))),
+        (">=7.4", target(">=7.4", (7, 4), None)),
+        (">=8.1", target(">=8.1", (8, 1), None)),
+        ("the minor below", target("below", below, Some(below))),
+    ];
+    for (name, t) in ranges {
+        let mut live = SidecarFolder::enabled();
+        live.set_php_target(Some(t));
+        out.push((name, live));
+    }
+    out
+}
+
 fn run_with(src: &str, folder: &mut dyn Folder) -> Vec<Diagnostic> {
     check_with(&SourceTree::parse(src), &[], "t.php", folder)
         .into_iter()
@@ -196,9 +235,8 @@ fn run_with(src: &str, folder: &mut dyn Folder) -> Vec<Diagnostic> {
 
 /// The mock run, plus the live run when a `php` answers; both must agree.
 fn engines(src: &str) -> Vec<(&'static str, Vec<Diagnostic>)> {
-    let mut out = vec![("mock", run_with(src, &mut Mock { available: true }))];
-    let mut live = SidecarFolder::enabled();
-    if live.builtin_param_types("strlen").is_some() && live.absence_family_available() {
+    let mut out = vec![("mock", run_with(src, &mut Mock { available: true, exact: true }))];
+    if let Some(mut live) = live_exact() {
         out.push(("live", run_with(src, &mut live)));
     }
     out
@@ -209,7 +247,17 @@ fn engines(src: &str) -> Vec<(&'static str, Vec<Diagnostic>)> {
 fn fires(src: &str, id: &str, needle: &str) {
     let src = format!("<?php\n{src}\n");
     assert!(run_with(&src, &mut NoFold).is_empty(), "silent without an engine:\n{src}");
-    assert!(run_with(&src, &mut Mock { available: false }).is_empty(), "gate closed:\n{src}");
+    assert!(
+        run_with(&src, &mut Mock { available: false, exact: true }).is_empty(),
+        "gate closed:\n{src}"
+    );
+    assert!(
+        run_with(&src, &mut Mock { available: true, exact: false }).is_empty(),
+        "a range target:\n{src}"
+    );
+    for (which, mut live) in live_ranges() {
+        assert!(run_with(&src, &mut live).is_empty(), "live, {which}:\n{src}");
+    }
     for (which, ds) in engines(&src) {
         assert_eq!(ds.len(), 1, "{which}: expected one finding for:\n{src}\ngot {ds:?}");
         assert_eq!(ds[0].id, id, "{which}: {ds:?}");
@@ -519,12 +567,6 @@ fn a_branch_guarded_by_the_php_version_is_not_judged_by_the_analysing_php() {
     silent("if (PHP_VERSION_ID < 80000) {\n    call_user_func(fn($a, $b) => 1, 1);\n}");
 }
 
-#[test]
-fn a_call_outside_the_version_branch_is_still_judged() {
-    too_few("if (PHP_VERSION_ID < 80000) {\n    time();\n}\nmktime();", "mktime()");
-    too_few("if (PHP_VERSION_ID < 80000) {\n    time();\n}\nif (rand()) {\n    mktime();\n}", "mktime()");
-}
-
 // ---------------------------------------------------------------------------
 // Expression-level version regions: one row per construct of the table on
 // `version_region::in_version_dependent_region`
@@ -559,10 +601,89 @@ fn a_closure_written_in_a_version_expression_is_in_the_region() {
 }
 
 #[test]
-fn a_call_outside_the_version_expression_is_still_judged() {
-    // Before the operator: the condition runs on every target.
-    too_few("$t = mktime() ?: (PHP_VERSION_ID < 80000 ? 1 : 2);", "mktime()");
-    too_few("$t = (mktime() && PHP_VERSION_ID < 80000) ? 1 : 2;", "mktime()");
-    // In the next statement.
-    too_few("$t = PHP_VERSION_ID < 80000 ? 1 : 2;\nmktime();", "mktime()");
+fn a_file_that_reads_the_version_is_not_judged_even_outside_the_branch() {
+    silent("if (PHP_VERSION_ID < 80000) {\n    time();\n}\nmktime();");
+    silent("$t = PHP_VERSION_ID < 80000 ? 1 : 2;\nmktime();");
+    silent("mktime();\n$v = phpversion();");
+    // A file that never reads it is judged (the other tests of this file).
+    too_few("mktime();\n$t = 'PHP_VER' . 'SION_ID';", "mktime()");
+}
+
+// ---------------------------------------------------------------------------
+// The target gate: arity is judged only where the declared target is exactly the
+// runtime's minor. The shapes below run clean on PHP 8.5 and 7.4 and were once
+// reported through indirection no region model sees.
+// ---------------------------------------------------------------------------
+
+const INDIRECT_SHAPES: [&str; 9] = [
+    "function f(): int {\n    if (PHP_VERSION_ID >= 80000) {\n        return time();\n    }\n    return mktime();\n}",
+    "function f(): int {\n    if (PHP_VERSION_ID >= 80000) {\n        throw new LogicException('x');\n    }\n    return mktime();\n}",
+    "function f(): int {\n    $old = PHP_VERSION_ID < 80000;\n    if ($old) {\n        return mktime();\n    }\n    return 0;\n}",
+    "function isLegacy(): bool { return PHP_VERSION_ID < 80000; }\nfunction f(): int {\n    if (isLegacy()) {\n        return mktime();\n    }\n    return 0;\n}",
+    "final class Compat { const LEGACY = PHP_VERSION_ID < 80000; }\nfunction f(): int {\n    if (Compat::LEGACY) {\n        return mktime();\n    }\n    return 0;\n}",
+    "function f(): int {\n    while (PHP_VERSION_ID < 80000) {\n        return mktime();\n    }\n    return 0;\n}",
+    "if (\\PHP_VERSION_ID >= 80000) {\n    return;\n}\nfunction legacy_now(): int { return mktime(); }",
+    "function f(): int {\n    $old = PHP_VERSION_ID < 80000;\n    $old && mktime();\n    return 0;\n}",
+    "function f(): int {\n    $x = ((PHP_VERSION_ID) < (80000)) ? (mktime()) : (time());\n    return $x;\n}",
+];
+
+fn live_findings(src: &str, folder: &mut SidecarFolder, t: PhpTarget) -> Vec<Diagnostic> {
+    use steins_db::{GoverningRoot, Project, ProjectLayout, SourceFile, SteinsDatabase};
+    folder.set_php_target(Some(t.clone()));
+    let root = GoverningRoot::new(
+        std::path::PathBuf::from("/proj/composer.json"),
+        std::path::PathBuf::from("/proj"),
+        vec![std::path::PathBuf::from("/proj/vendor")],
+        vec![],
+    )
+    .with_php_target(Some(t));
+    let layout = ProjectLayout::new(std::path::PathBuf::from("/proj"), vec![root]);
+    let db = SteinsDatabase::default();
+    let file = SourceFile::new(&db, "/proj/t.php".to_owned(), format!("<?php\n{src}\n"));
+    let project = Project::new(&db, vec![file], layout, steins_db::PluginFacts::none());
+    steins_infer::check_project_with_runtime(&db, project, folder, true)
+        .into_iter()
+        .filter(|d| [TOO_FEW, TOO_MANY, UNKNOWN_NAMED].contains(&d.id))
+        .collect()
+}
+
+#[test]
+fn version_indirection_is_silent_under_a_range_target_and_an_exact_one() {
+    let Some(minor) = SidecarFolder::enabled().php_minor() else { return };
+    let below = (minor.0, minor.1.saturating_sub(1));
+    let targets = [
+        target("^7.4 || ^8.0", (7, 4), Some((8, u16::MAX))),
+        target(">=7.4", (7, 4), None),
+        target(">=8.1", (8, 1), None),
+        target("below", below, Some(below)),
+        // The only target that judges: the runtime's own minor. The branches below are
+        // dead on it, so a finding there would claim a throw PHP never reaches.
+        target("exact", minor, Some(minor)),
+    ];
+    for src in INDIRECT_SHAPES {
+        for t in &targets {
+            let mut live = SidecarFolder::enabled();
+            let ds = live_findings(src, &mut live, t.clone());
+            assert!(ds.is_empty(), "target {}: {ds:?}\n{src}", t.raw);
+        }
+    }
+}
+
+#[test]
+fn a_file_loaded_only_behind_a_version_check_is_silent_without_an_exact_target() {
+    // `if (PHP_VERSION_ID < 80000) require 'legacy.php';` loads this file on 7.x only.
+    let legacy = "echo mktime(), \"\\n\";";
+    let Some(minor) = SidecarFolder::enabled().php_minor() else { return };
+    for t in [
+        target("^7.4 || ^8.0", (7, 4), Some((8, u16::MAX))),
+        target(">=8.1", (8, 1), None),
+    ] {
+        let mut live = SidecarFolder::enabled();
+        let ds = live_findings(legacy, &mut live, t.clone());
+        assert!(ds.is_empty(), "target {}: {ds:?}", t.raw);
+    }
+    // And the engine's own exact minor does judge a plain call (the gate is open).
+    let mut live = SidecarFolder::enabled();
+    let ds = live_findings(legacy, &mut live, target("exact", minor, Some(minor)));
+    assert_eq!(ds.len(), 1, "{ds:?}");
 }

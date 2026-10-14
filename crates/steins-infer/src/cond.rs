@@ -66,7 +66,7 @@ fn is_engine_version_id(cx: &Cx, r: &NameRef) -> bool {
 /// `Maybe` verdict for an interval the literal splits (a target range that
 /// straddles the comparison keeps both arms live). `None` hands the comparison
 /// to the ordinary evaluation.
-pub(crate) fn eval_version_id_cmp(
+fn eval_version_id_cmp(
     cx: &Cx,
     op: CmpOp,
     lhs: &CondOperand,
