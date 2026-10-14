@@ -78,15 +78,30 @@ rule table is in `lower_read.rs`. Under several constructs the weakest
 claim wins, in the order on `Carrier`.
 It is read for an expression statement, `return`, `echo` and `<?= ?>` and a
 `static` initializer, and for an arrow function's body, a hook's and a hoisted
-`match` arm's; a header is not read yet. The scan stops at a function-like, a
-class-like (an anonymous class keeps its constructor arguments) and a `match`.
+`match` arm's. The scan stops at a function-like, a class-like (an anonymous
+class keeps its constructor arguments) and a `match`'s arms; a `match` subject is
+read as an operand.
 `None` when there is none. A call position's lowered `CallExpr` is found by its span (slice
 S2): a function call in `SourceTree::calls` (`SourceTree::call_at`), a method or static call
 and a method or static first-class callable in `Scope::method_calls`
 (`Scope::method_call_at`), and a `new` of a named class and a function first-class
 callable in `Stmt::read_calls`. A computed callee has no `CallExpr` to judge and a `new` of a
-dynamic class has none at all. The call consumer is `stmt_calls/nested.rs`; the offset,
-property and class-constant positions are not read yet.
+dynamic class has none at all. The call consumer is `stmt_calls/nested.rs`, and the offset,
+property and class-constant consumer is `stmt_checks.rs`.
+
+A branch condition, a loop header, a `switch` subject or label and a structured
+`match`'s arm conditions carry a `Header { span, eval }` of their own (slice S4):
+`StmtKind::If::heads` (one per condition of the chain, a `switch (true)` label set
+or a `match (true)` arm included), `While::head`, `For::head` (every condition) and
+`For::step`, `DoWhile::head`, `Foreach::head`, `Match::head` (a `switch` subject; a
+`match` subject is the enclosing statement's operand) and `MatchArmT::head`. `eval`
+is the header lowered as an expression statement with the no-op kind `Echo([])`,
+carrying its read positions, guard regions, `invalidated` and `runs`, so the same
+consumers read it; `None` when it records no position. `span` always covers the
+header, so a condition after one decided true is marked dead by it. A `for` step, a
+`do`-`while` condition and the arm conditions of a hoisted value-position `match`
+record every position `Conditional`, since the walk does not hold the env they are
+evaluated in. `crates/steins-infer/src/header_reads.rs` holds where each is judged.
 
 ## Statement kinds
 

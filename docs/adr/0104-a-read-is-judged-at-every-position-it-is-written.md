@@ -331,3 +331,66 @@ Measured: on the ten public packages, under strict with vendor diagnostics,
 default, and strict without PHP, the only difference is one strict finding
 that moves to its read's column. Peak RSS on PHPUnit (strict, no PHP) grows
 1.0%, 455.9 MB to 460.4 MB, by the review's measurement.
+
+## Amendment (2026-10-14): the S4 headers — PENDING ratification
+
+Slice S4 (issue #1050, the header rows of #935, #936 and #949) gives branch
+conditions, loop headers and `switch` subjects the read positions §2.4 left out,
+and judges each where PHP evaluates it.
+
+**The IR.** A header is a `Header { span, eval }`: `If::heads` (one per
+condition of the chain, a `switch (true)` label set and a `match (true)` arm
+included), `While::head`, `For::head` (every condition) and `For::step`,
+`DoWhile::head`, `Foreach::head`, `Match::head` (a `switch` subject) and
+`MatchArmT::head`. `eval` is the header lowered as the expression statement it
+would be, with a no-op kind, so it carries the read positions, guard regions,
+rebound names and calls a statement carries, and the S2 and S3 consumers read it
+unchanged. It is `None` when the header records no position, which costs one
+word. `span` is always set, because a header after a condition decided true is
+marked dead by it.
+
+**Two changes to §2.4.** A `match` subject is now read by the scan as an operand
+of the expression around it, with that expression's carrier: it is evaluated
+there, in that statement's env, whether or not the `match` is structured. A
+structured `match`'s arm conditions are headers (`MatchArmT::head`); an
+unstructured one's stay unread, since the walk cannot claim which arm is reached.
+
+**Where each header is judged** (`header_reads.rs` holds the table, with a test
+per row in `tests/it/header_read_positions.rs`):
+
+| Header | Judged under |
+| --- | --- |
+| `if` condition | the env the `if` is entered with, before the condition's own effects |
+| `elseif`, `switch (true)` label, `match (true)` arm | the env the earlier conditions' false sides leave |
+| any of these after a condition decided true | not judged; its span is marked dead |
+| `while` condition, `for` conditions | the loop-head env (after `init` for a `for`), whatever the verdict |
+| `for` step, `do`-`while` condition | the loop-head env, recorded `Conditional`, and only when an iteration can complete (or `continue`) |
+| `foreach` subject, `switch` subject | the env the construct is entered with |
+| structured `match`/`switch` arm conditions | the construct's entry env; dead after an arm decided taken; an arm whose earlier condition decided it is not judged |
+| arm conditions of a hoisted value-position `match` | recorded `Conditional` |
+
+The loop-head env is the entry env with every name the loop writes forgotten,
+so a finding read off it holds at the header's first evaluation, which is where
+PHP warns or throws. A `for` step and a `do`-`while` condition are evaluated only
+after the body, in an env the walk does not hold (a userland call in the body of
+a top-level loop can rebind a name the write sets do not list), and a hoisted
+`match` is walked before the operands to its left run: the lowering records
+their positions `Conditional`, so the environment-independent families judge
+them and the value-dependent ones decline (D3). The architect's table had the
+`elseif` condition decline the value-dependent families; S4 judges them,
+because the walk holds the env that reaches the `elseif`, which is the point of
+judging a header where it is evaluated.
+
+**Dedupe.** The `preg_*` pattern check that `walk_if` ran on a condition's guard
+calls keeps running (it judges a `Conditional` guard call too); a finding it
+raises at a place the header already reported is not raised twice.
+
+**Fixed with it.** A condition after one decided true was walked as if
+evaluated: `if (true) {…} elseif (NOPE) {…}` reported `constant.undefined`, and
+`elseif (new Nope())` `class.undefined`. Its span is now dead, so the file-wide
+passes skip it.
+
+Measured: on the ten public packages, under strict with vendor diagnostics, with
+and without PHP, the output is identical. Peak RSS on PHPUnit (release, strict
+`--no-php --vendor-diagnostics --no-cache`, median of 3) 492.4 MB to 497.3 MB,
++1.0%; the three head runs spread over 13 MB.
