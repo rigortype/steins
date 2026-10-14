@@ -259,6 +259,33 @@ fn a_trait_body_finding_names_its_importer() {
     assert!(d.iter().any(|d| d.message.contains("T::f()")), "{d:#?}");
 }
 
+/// The effect lane reads a trait-using class's own method as it reads a plain class's
+/// (C1): a wrapper over `DateTimeImmutable::createFromFormat` reaches the engine row
+/// (ADR-0101 §3.17, the zone and the clock as the upper bound a concrete call keeps) the
+/// same way whether or not its class uses a trait, so both grade definite, as the
+/// plain-class twin did before this ADR. A string conversion of a `mixed` operand
+/// names no receiver and stays the possibly-grade gap in both.
+#[test]
+fn a_trait_using_wrapper_reaches_the_effect_its_plain_twin_does() {
+    let src = "<?php\n\
+        class W extends DateTimeImmutable { public static function cff(string $f, string $t): static|false { return parent::createFromFormat($f, $t); } }\n\
+        trait Fmt { public function label(): string { return 'w'; } }\n\
+        class WT extends DateTimeImmutable { use Fmt; public static function cff(string $f, string $t): static|false { return parent::createFromFormat($f, $t); } }\n\
+        class Stamp { use Fmt; public function __toString(): string { return date('Y'); } }\n\
+        /** @phpstan-all-methods-pure */\n\
+        final class R {\n\
+          public static function plain(string $s) { return W::cff('Y-m-d', $s); }\n\
+          public static function traited(string $s) { return WT::cff('Y-m-d', $s); }\n\
+          public static function text(mixed $s) { return \"{$s}\"; }\n\
+        }\n";
+    let d = findings(src);
+    let line = |id: &str, n: u32| d.iter().filter(|f| f.id == id && f.line == n).count();
+    assert_eq!(line(steins_infer::EFFECT_ID, 8), 2, "{d:#?}");
+    assert_eq!(line(steins_infer::EFFECT_ID, 9), 2, "{d:#?}");
+    assert_eq!(line(steins_infer::EFFECT_ID, 10), 0, "{d:#?}");
+    assert_eq!(line(steins_infer::EFFECT_MAYBE_ENVELOPE_EXCEEDED_ID, 10), 1, "{d:#?}");
+}
+
 /// #952 l3: a typed property declared in a trait (PHP: "Cannot assign string to
 /// property Q::$t of type int").
 #[test]
