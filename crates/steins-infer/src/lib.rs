@@ -68,6 +68,7 @@ mod foreach_check;
 mod generics;
 mod global_consts;
 mod guard_sweep;
+mod header_reads;
 mod heap;
 mod heap_alias;
 mod ids;

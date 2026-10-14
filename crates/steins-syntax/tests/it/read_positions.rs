@@ -395,12 +395,89 @@ fn unset_is_not_a_scanned_statement() {
 }
 
 #[test]
-fn a_match_subject_and_arm_conditions_are_not_read_here() {
-    // S4's scope: the arm conditions join the subject there.
+fn a_match_subject_is_an_operand_and_its_arm_conditions_are_not_read_here() {
+    // S4: the subject is evaluated as an operand of the statement; the arm conditions are
+    // the structured construct's headers.
     assert_eq!(
         reads("echo match ($a['subj']) { $a['arm'] => 1, default => 2 };"),
-        Vec::<String>::new()
+        ["$a['subj'] [plain]"]
     );
+    assert_eq!(reads("$r = $x ? match (C::B) { default => 2 } : 0;"), ["C::B [cond]"]);
+}
+
+/// The positions of every header of `body`'s statements and their sub-traces, in the
+/// order the constructs list them.
+fn header_reads(body: &str) -> Vec<String> {
+    use steins_syntax::{Header, StmtKind};
+    let src = format!("<?php\nclass C {{ const B = 1; }}\nfunction f($a, $o, $x) {{\n{body}\n}}\n");
+    let tree = SourceTree::parse(&src);
+    let f = tree
+        .scopes()
+        .iter()
+        .find(|sc| matches!(&sc.owner, steins_syntax::ScopeOwner::Function { name: n, .. } if n == "f"))
+        .expect("the function's scope");
+    let mut all = Vec::new();
+    flatten(&f.stmts, &mut all);
+    let mut heads: Vec<&Header> = Vec::new();
+    for s in all {
+        match &s.kind {
+            StmtKind::If { heads: h, .. } => heads.extend(h),
+            StmtKind::While { head, .. }
+            | StmtKind::Foreach { head, .. }
+            | StmtKind::DoWhile { head, .. } => heads.push(head),
+            StmtKind::For { head, step, .. } => heads.extend([head, step]),
+            StmtKind::Match { head, arms, .. } => {
+                heads.push(head);
+                heads.extend(arms.iter().map(|a| &a.head));
+            }
+            _ => {}
+        }
+    }
+    heads
+        .iter()
+        .filter_map(|h| h.eval.as_deref())
+        .flat_map(|st| render(&src, st.read_positions()))
+        .collect()
+}
+
+#[test]
+fn every_condition_of_an_if_chain_is_a_header() {
+    assert_eq!(
+        header_reads("if (f1()) {} elseif ($a['k'] && f2()) {} else {}"),
+        ["f1() [plain]", "$a['k'] [plain]", "f2() [cond]"]
+    );
+    // The statement itself records none of them.
+    assert_eq!(reads("if (f1()) {} elseif ($a['k']) {}"), Vec::<String>::new());
+}
+
+#[test]
+fn loop_headers_are_headers() {
+    assert_eq!(header_reads("while ($a['k']) {}"), ["$a['k'] [plain]"]);
+    assert_eq!(header_reads("foreach (f1() as $v) {}"), ["f1() [plain]"]);
+    // A `for` step and a `do`-`while` condition run after an iteration completes.
+    assert_eq!(
+        header_reads("for ($i = f0(); f1(), $a['k']; f2($a['s'])) {}"),
+        ["f1() [plain]", "$a['k'] [plain]", "f2($a['s']) [cond]", "$a['s'] [cond]"]
+    );
+    assert_eq!(header_reads("do {} while (f1() ?? $a['k']);"), ["f1() [cond]", "$a['k'] [cond]"]);
+}
+
+#[test]
+fn switch_and_match_headers() {
+    assert_eq!(
+        header_reads("switch ($a['k']) { case C::B: break; }"),
+        ["$a['k'] [plain]", "C::B [plain]"]
+    );
+    assert_eq!(
+        header_reads("switch (true) { case f1(): case f2(): break; }"),
+        ["f1() [plain]", "f2() [plain]"]
+    );
+    // A statement-position `match`: the subject is the statement's, an arm condition a
+    // header.
+    assert_eq!(header_reads("match ($x) { C::B => 1, default => 2 };"), ["C::B [plain]"]);
+    assert_eq!(header_reads("match (true) { f1() => 1, default => 2 };"), ["f1() [plain]"]);
+    // A hoisted one is walked ahead of its statement: `Conditional`.
+    assert_eq!(header_reads("return match (true) { f1() => 1, default => 2 };"), ["f1() [cond]"]);
 }
 
 #[test]
