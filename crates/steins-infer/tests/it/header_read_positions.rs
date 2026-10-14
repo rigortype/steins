@@ -30,7 +30,7 @@ impl Folder for Boot {
         Some(false)
     }
     fn boot_surface_function(&mut self, name: &str) -> Option<bool> {
-        Some(["function_exists", "strlen"].contains(&name))
+        Some(["function_exists", "class_exists", "defined", "strlen"].contains(&name))
     }
     fn boot_surface_constant(&mut self, _: &str) -> Option<bool> {
         Some(false)
@@ -270,3 +270,68 @@ row!(
 
 row!(echo_call_once, "echo nope_fn();", [UNDEF_FN]);
 row!(if_condition_once, "if (nope_fn() && nope_fn()) { return 1; }", [UNDEF_FN, UNDEF_FN]);
+
+// ---- Alternatives: PHP stops at the first condition of an arm list or a label stack ----
+// Witnessed on PHP 8.5: each silent row runs without a warning or an error.
+
+row!(
+    match_arm_list_after_a_decided_guard,
+    "match (true) { !defined('A::NOPE'), A::NOPE > 1 => 1, default => 2 };",
+    []
+);
+row!(
+    hoisted_match_arm_list_after_a_decided_guard,
+    "return match (true) { !defined('A::NOPE'), A::NOPE > 1 => 1, default => 2 };",
+    []
+);
+row!(
+    assigned_match_arm_list_after_a_decided_guard,
+    "$y = match (true) { !defined('A::NOPE'), A::NOPE > 1 => 1, default => 2 }; return $y;",
+    []
+);
+row!(
+    match_arm_list_after_a_decided_class_guard,
+    "match (true) { !class_exists('Nope'), (new Nope())->x() => 1, default => 2 };",
+    []
+);
+row!(
+    match_arm_list_after_an_isset,
+    "$b = []; match (true) { !isset($b['k']), $b['k'] > 5 => 1, default => 2 };",
+    []
+);
+row!(
+    switch_label_stack_after_an_empty,
+    "$b = []; switch (true) { case empty($b): case $b[0] > 5: return 1; }",
+    []
+);
+row!(
+    match_arm_list_later_condition_judges_existence,
+    "match (true) { $x > 1, nope_fn() => 1, default => 2 };",
+    [UNDEF_FN]
+);
+row!(
+    switch_label_stack_later_label_judges_existence,
+    "switch (true) { case $x > 1: case nope_fn(): return 1; }",
+    [UNDEF_FN]
+);
+// A `for` header's comma conditions all run: PHP throws on `A::NOPE`.
+row!(for_comma_conditions_all_run, "for (; $x, A::NOPE; ) { break; }", [UNDEF_CC]);
+
+/// `body` in a function whose `$s` is declared `array{k?: int}`, at the strict leg.
+fn found_shape(body: &str) -> Vec<String> {
+    let src = format!("{PRELUDE}/** @param array{{k?: int}} $s */\nfunction t(array $s) {{ {body} }}\n");
+    let tree = SourceTree::parse(&src);
+    let out: Vec<Diagnostic> = check_with(&tree, &[], "test.php", &mut Boot);
+    out.iter().filter(|d| d.id.starts_with("offset.")).map(|d| d.id.to_owned()).collect()
+}
+
+#[test]
+fn an_optional_key_after_an_isset_alternative_is_not_read() {
+    for body in [
+        "echo match (true) { !isset($s['k']), $s['k'] > 5 => 'a', default => 'b' };",
+        "switch (true) { case !isset($s['k']): case $s['k'] > 5: echo 'a'; }",
+        "match (true) { !isset($s['k']), $s['k'] > 5 => print('a'), default => print('b') };",
+    ] {
+        assert_eq!(found_shape(body), Vec::<String>::new(), "{body}");
+    }
+}

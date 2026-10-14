@@ -470,8 +470,14 @@ fn switch_and_match_headers() {
     );
     assert_eq!(
         header_reads("switch (true) { case f1(): case f2(): break; }"),
-        ["f1() [plain]", "f2() [plain]"]
+        ["f1() [plain]", "f2() [cond]"]
     );
+    // PHP stops at the first alternative that holds; a `for`'s comma conditions all run.
+    assert_eq!(
+        header_reads("match (true) { f1(), f2() => 1, default => 2 };"),
+        ["f1() [plain]", "f2() [cond]"]
+    );
+    assert_eq!(header_reads("for (; f1(), f2(); ) {}"), ["f1() [plain]", "f2() [plain]"]);
     // A statement-position `match`: the subject is the statement's, an arm condition a
     // header.
     assert_eq!(header_reads("match ($x) { C::B => 1, default => 2 };"), ["C::B [plain]"]);

@@ -1115,6 +1115,21 @@ pub(crate) fn conditional_header_of(exprs: &[&Expression<'_>]) -> Header {
     head
 }
 
+/// [`header_of`] for alternatives PHP tries in order and stops at the first that holds:
+/// a `match` arm's conditions (`a, b => …`) and a `switch` arm's stacked labels
+/// (`case a: case b:`). Every position after the first expression's is `Conditional`, as
+/// the right of `||` is. A `for` header's comma-separated conditions are not this: PHP
+/// evaluates each of them.
+pub(crate) fn alternatives_header_of(exprs: &[&Expression<'_>]) -> Header {
+    let mut head = header_of(exprs);
+    if let (Some(second), Some(set)) =
+        (exprs.get(1), head.eval.as_mut().and_then(|st| st.read_positions.as_mut()))
+    {
+        set.conditional_from(second.span().start.offset);
+    }
+    head
+}
+
 /// Lower a structured `if`/`elseif`/`else` statement (ADR-0031) to
 /// [`StmtKind::If`]. Each branch body is lowered by the same statement rules as
 /// the enclosing scope (so nested ifs recurse and unstructured constructs inside
@@ -1556,7 +1571,7 @@ fn lower_match_by_value(m: &mago_syntax::cst::Match<'_>) -> Option<Stmt> {
                     conditions.push(usable_operand(c)?);
                 }
                 let exprs: Vec<&Expression<'_>> = a.conditions.iter().copied().collect();
-                let head = header_of(&exprs);
+                let head = alternatives_header_of(&exprs);
                 let trace = lower_expr_position(a.expression);
                 arms.push(MatchArmT { conditions, head, trace, lands: None });
             }
@@ -1611,11 +1626,16 @@ fn lower_match_guard_chain(m: &mago_syntax::cst::Match<'_>) -> Option<Stmt> {
                     let one = guard_arm_cond(c, sense)?;
                     cond = Some(match cond {
                         None => one,
-                        Some(acc) => CondExpr::Or(Box::new(acc), Box::new(one), OperandSpan::NONE),
+                        // The operand's own extent, so a decided earlier condition
+                        // marks it dead.
+                        Some(acc) => {
+                            let span = OperandSpan(to_span(c.span()));
+                            CondExpr::Or(Box::new(acc), Box::new(one), span)
+                        }
                     });
                 }
                 let exprs: Vec<&Expression<'_>> = a.conditions.iter().copied().collect();
-                heads.push(header_of(&exprs));
+                heads.push(alternatives_header_of(&exprs));
                 links.push((cond?, lower_expr_position(a.expression)));
             }
             mago_syntax::cst::MatchArm::Default(a) => {
@@ -1767,7 +1787,7 @@ fn lower_switch(sw: &mago_syntax::cst::Switch<'_>) -> Option<Stmt> {
         .into_iter()
         .map(|SwitchArm { labels, trace, lands }| {
             let exprs: Vec<&Expression<'_>> = labels.iter().map(|(_, e)| *e).collect();
-            let head = header_of(&exprs);
+            let head = alternatives_header_of(&exprs);
             let conditions = labels.into_iter().map(|(c, _)| c).collect();
             MatchArmT { conditions, head, trace, lands }
         })
@@ -1942,7 +1962,7 @@ fn lower_switch_true(sw: &mago_syntax::cst::Switch<'_>) -> Option<Stmt> {
     let mut heads = Vec::new();
     let mut links = arms.into_iter().map(|SwitchArm { labels, trace, .. }| {
         let exprs: Vec<&Expression<'_>> = labels.iter().map(|(_, _, e)| *e).collect();
-        heads.push(header_of(&exprs));
+        heads.push(alternatives_header_of(&exprs));
         let cond = labels
             .into_iter()
             .map(|(cond, span, _)| (cond, span))
