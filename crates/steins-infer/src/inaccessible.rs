@@ -207,6 +207,7 @@ fn member_root<'a>(
 fn enumerate_member_chain<'a>(
     cx: &Cx<'a>,
     start_fqn: &str,
+    member: &str,
     magic: &[&str],
 ) -> Option<MemberChain<'a>> {
     // A14 (issue #195): a `@method` / `@property*` / `@mixin` tag anywhere in the
@@ -228,15 +229,16 @@ fn enumerate_member_chain<'a>(
         // `Ambiguous` FQN alike, and either could be where a nearer declaration or a
         // `__call` lives.
         let (cfile, cd) = cx.find_class(&cur)?;
-        // A trait's members are not flattened into the using class (S1/leg (e)), so a
-        // trait name and a trait-using node both hide declarations from this walk —
-        // including, possibly, a public override of the member in hand.
-        if cd.is_trait || cd.uses_traits {
+        // A trait name is never a chain node. A class's trait composition (ADR-0105)
+        // hides a declaration from this walk where it declines, or where it imports a
+        // member of the asked name — possibly a public override of the member in hand,
+        // whose root and scope the walk reads off the node's own lists.
+        if cd.is_trait || cx.trait_hides(cfile, cd, member) {
             return None;
         }
-        // The magic fallback: present anywhere in the chain, PHP routes the
-        // inaccessible access through it and raises nothing at all.
-        if cd.methods.iter().any(|m| magic.iter().any(|g| m.name.eq_ignore_ascii_case(g))) {
+        // The magic fallback: present anywhere in the chain, its own or imported, PHP
+        // routes the inaccessible access through it and raises nothing at all.
+        if magic.iter().any(|g| !matches!(cx.held_method(cfile, cd, g), Ok(None))) {
             return None;
         }
         any_conditional |= cd.conditional;
@@ -411,7 +413,7 @@ pub(crate) fn check_inaccessible_method(
     if r.method.visibility == Visibility::Public {
         return;
     }
-    let Some(chain) = enumerate_member_chain(cx, &class_fqn, kind.magic()) else {
+    let Some(chain) = enumerate_member_chain(cx, &class_fqn, &method, kind.magic()) else {
         return;
     };
     // The `private` leg IS the resolver's predicate, called here for the finding
@@ -534,7 +536,7 @@ pub(crate) fn check_inaccessible_property(
         return;
     }
     let magic: &[&str] = if write { &["__set"] } else { &["__get"] };
-    let Some(chain) = enumerate_member_chain(cx, &obj.class, magic) else {
+    let Some(chain) = enumerate_member_chain(cx, &obj.class, prop, magic) else {
         return;
     };
     // A property hook makes the member virtual, and a hooked declaration OVERRIDES an
@@ -629,7 +631,7 @@ pub(crate) fn check_inaccessible_class_const(
     }
     let StaticClass::Named(r) = sc else { return };
     let class_fqn = cx.class_fqn(r);
-    let Some(chain) = enumerate_member_chain(cx, &class_fqn, &[]) else {
+    let Some(chain) = enumerate_member_chain(cx, &class_fqn, name, &[]) else {
         return;
     };
     // Constant names are case-sensitive in PHP, so the match is exact. An enum case

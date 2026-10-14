@@ -351,6 +351,9 @@ pub(crate) struct Index {
     /// that needs a `Cx` (or unit order) looks the index up here rather than
     /// embedding one.
     files: HashMap<String, usize>,
+    /// The trait compositions asked so far (ADR-0105): computed per class-like on
+    /// first ask, so a warm run decodes only the trees its queries reach.
+    trait_memo: crate::trait_composition::TraitMemo,
 }
 
 /// Partition the units by [`fallback_package_key`], build one [`PackageShard`]
@@ -410,6 +413,7 @@ impl Index {
             anonymous_classes: m.anonymous_classes.into_iter().collect(),
             constants: m.constants,
             files: m.files,
+            trait_memo: crate::trait_composition::TraitMemo::default(),
         }
     }
 
@@ -545,6 +549,11 @@ impl Index {
         build: impl FnOnce() -> PropertyDeclarers,
     ) -> &PropertyDeclarers {
         self.property_declarers.0.get_or_init(build)
+    }
+
+    /// The per-universe trait-composition memo (ADR-0105).
+    pub(crate) fn trait_memo(&self) -> &crate::trait_composition::TraitMemo {
+        &self.trait_memo
     }
 
     /// The anonymous classes that have a parent or interfaces (ADR-0100 §7).

@@ -251,18 +251,23 @@ fn method_exists_verdict(
         let Some((cfile, cd)) = cx.find_class(&cur) else {
             return Certainty::Maybe; // ancestor leaves the project / ambiguous.
         };
-        // Enum methods are not lowered; a trait/`uses_traits` node could carry the
-        // method invisibly to this walk — either way, closure is unproven.
-        if cd.is_enum || cd.is_trait || cd.uses_traits {
+        // An enum node stays unproven (A3); a trait name, or a class whose trait
+        // composition declines its methods (ADR-0105), could carry the method
+        // invisibly to this walk — either way, closure is unproven.
+        if cd.is_enum || cd.is_trait {
             return Certainty::Maybe;
         }
         fqns.push(cur.clone());
         if cd.conditional {
             any_conditional = true;
         }
-        if cd.methods.iter().any(|m| m.name.eq_ignore_ascii_case(method)) {
-            present = true;
-            break;
+        match cx.held_method(cfile, cd, method) {
+            Err(_) => return Certainty::Maybe,
+            Ok(Some(_)) => {
+                present = true;
+                break;
+            }
+            Ok(None) => {}
         }
         match &cd.parent {
             None => {

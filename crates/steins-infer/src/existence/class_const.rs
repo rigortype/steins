@@ -33,7 +33,6 @@ use std::collections::HashSet;
 use steins_domain::Certainty;
 use steins_syntax::Visibility;
 
-use crate::absence::provides_class_const;
 use crate::contract::IsA;
 use crate::cx::Cx;
 use crate::early_binding::redammed;
@@ -89,12 +88,18 @@ fn providers(
             continue;
         }
         let (cfile, cd) = cx.find_class(&fqn)?;
-        if cx.member_incomplete(cfile) || cd.is_trait || cd.uses_traits {
+        if cx.member_incomplete(cfile) || cd.is_trait {
             return None;
         }
-        if provides_class_const(cd, name) {
-            let visibility =
-                cd.const_visibility.iter().find(|(n, _)| n == name).map(|(_, v)| *v);
+        // An enum case is always public; a constant is held by the class-like itself
+        // or through its traits (ADR-0105 C12), and a declining composition is the
+        // trait obstacle it always was.
+        let held = if cd.enum_cases.iter().any(|c| c.name == name) {
+            Some(None)
+        } else {
+            cx.held_const(cfile, cd, name).ok()?.map(|c| Some(c.visibility))
+        };
+        if let Some(visibility) = held {
             found.push(Provider { fqn: fqn.clone(), visibility, at_start: seen.len() == 1 });
         }
         any_conditional |= cd.conditional;

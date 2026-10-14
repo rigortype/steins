@@ -175,15 +175,14 @@ pub(crate) fn descendant_closure<'a>(cx: &Cx<'a>, arm_fqn: &str) -> DescendantCl
 
 /// Whether a descendant declaration could **introduce** `method` (or hide an
 /// obstacle to it) below a member whose own chain already lacks it (ADR-0049
-/// §8): declares the method, uses a trait, is an enum (A3, methods
-/// unlowered), carries `__call`, or is in reach of a magic-member docblock
-/// tag (A14). Any such descendant fails the absence claim (silence).
-fn descendant_introduces_method(cx: &Cx, cd: &ClassDecl, method: &str) -> bool {
+/// §8): holds the method, its own or through a trait (ADR-0105), or carries
+/// `__call` either way; uses traits whose composition declines; is an enum (A3) or a
+/// trait; or is in reach of a magic-member docblock tag (A14). Any such descendant
+/// fails the absence claim (silence).
+fn descendant_introduces_method(cx: &Cx, file: usize, cd: &ClassDecl, method: &str) -> bool {
     cd.is_enum
         || cd.is_trait
-        || cd.uses_traits
-        || cd.methods.iter().any(|m| m.name.eq_ignore_ascii_case("__call"))
-        || cd.methods.iter().any(|m| m.name.eq_ignore_ascii_case(method))
+        || ["__call", method].iter().any(|m| !matches!(cx.held_method(file, cd, m), Ok(None)))
         || !magic_obstacles_in_reach(cx, &cd.fqn).is_empty()
 }
 
@@ -226,8 +225,8 @@ fn arm_provably_lacks_method(
             // ADR-0079 §2.5 needs no leg here: a member-incomplete descendant
             // implies an unparsable non-vendor file, itself a dam site already
             // caught above (revisit if §3 ever allows unparsable-without-dam).
-            for (_, dcd) in &descendants {
-                if descendant_introduces_method(cx, dcd, method) {
+            for (dfile, dcd) in &descendants {
+                if descendant_introduces_method(cx, *dfile, dcd, method) {
                     return None;
                 }
                 // A homonym descendant may be dead code shadowed by a loaded class.

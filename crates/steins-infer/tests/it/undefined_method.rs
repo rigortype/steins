@@ -231,14 +231,32 @@ fn silent_leg_d_callstatic_for_static_call() {
 
 #[test]
 fn silent_leg_e_trait_use() {
-    let d = fires("<?php\ntrait T {}\nclass Order { use T; }\n(new Order())->tyop();\n");
+    // Leg (e) is a composition that declines (ADR-0105 C5).
+    let d = fires(
+        "<?php\ntrait T { function t() {} }\nclass Order { use T { t as u; } }\n(new Order())->tyop();\n",
+    );
     assert!(d.is_empty(), "{d:?}");
 }
 
 #[test]
 fn silent_leg_e_trait_use_in_ancestor() {
     let d = fires(
-        "<?php\ntrait T {}\nclass Base { use T; }\nclass Order extends Base {}\n(new Order())->tyop();\n",
+        "<?php\ntrait T { function t() {} }\nclass Base { use T { t as u; } }\nclass Order extends Base {}\n(new Order())->tyop();\n",
+    );
+    assert!(d.is_empty(), "{d:?}");
+}
+
+#[test]
+fn fires_through_a_trait_use_that_composes() {
+    // ADR-0105: an empty or unrelated trait composes; `tyop` is held nowhere.
+    let d = fires("<?php\ntrait T {}\nclass Order { use T; }\n(new Order())->tyop();\n");
+    assert_eq!(d.len(), 1, "{d:?}");
+}
+
+#[test]
+fn silent_on_a_method_a_trait_gives_the_class() {
+    let d = fires(
+        "<?php\ntrait T { function tyop() {} }\nclass Base { use T; }\nclass Order extends Base {}\n(new Order())->tyop();\n",
     );
     assert!(d.is_empty(), "{d:?}");
 }

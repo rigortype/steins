@@ -184,7 +184,8 @@ fn an_undeclared_class_marks_the_caller_non_exhaustive_and_reports_nothing() {
 
 #[test]
 fn a_trait_using_class_may_get_its_constructor_from_the_trait() {
-    let src = "<?php\ntrait T {}\nclass C { use T; }\nfunction make(): C { return new C(); }\n";
+    // A composition that declines (ADR-0105 C5) may be hiding a constructor.
+    let src = "<?php\ntrait T { public function x(): void {} }\nclass C { use T { x as y; } }\nfunction make(): C { return new C(); }\n";
     assert_eq!(throws(src, "make"), (vec![], false));
 }
 

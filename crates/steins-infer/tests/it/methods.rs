@@ -182,10 +182,17 @@ fn private_method_from_outside_is_skipped() {
 // Trait-using class / chain leaving the file → give up
 
 #[test]
-fn trait_using_class_is_silent() {
-    // A `use`d trait merges methods from elsewhere → resolution gives up.
+fn trait_using_class_is_silent_where_its_composition_declines() {
+    // An adapted `use` (ADR-0105 C5) could give the class another constructor.
+    let src = "<?php\ntrait T { public function t(): void {} }\nclass P { public function __construct(int $w) {} }\nclass Foo extends P { use T { t as u; } }\nnew Foo(\"abc\");\n";
+    assert_eq!(n(src), 0, "declined composition → silent");
+}
+
+#[test]
+fn trait_using_class_judges_its_own_constructor() {
+    // ADR-0105 C1: the class's own constructor outranks anything a trait gives it.
     let src = "<?php\ntrait T {}\nclass Foo { use T; public function __construct(int $w) {} }\nnew Foo(\"abc\");\n";
-    assert_eq!(n(src), 0, "trait-using class → silent");
+    assert_eq!(n(src), 1);
 }
 
 #[test]

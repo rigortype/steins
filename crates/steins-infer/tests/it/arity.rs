@@ -266,13 +266,38 @@ fn silent_unpacking_mixed() {
 }
 
 #[test]
-fn silent_trait_bearing_chain() {
-    // Leg (e): a `use`-trait class may gain the method from the trait with a
-    // different signature ⇒ Unknown ⇒ silence.
+fn fires_on_a_trait_using_class_for_its_own_method() {
+    // ADR-0105 C1: the class's own `m2` outranks anything a trait gives it, so the
+    // trait use no longer hides it (PHP 8.5.11: ArgumentCountError).
     let d = fires(
         "<?php\ntrait T { public function m($a) {} }\nclass C { use T; public function m2($a, $b) {} }\n(new C())->m2(1);\n",
     );
+    assert_eq!(d.len(), 1, "{d:?}");
+}
+
+#[test]
+fn fires_on_a_method_a_trait_gives_the_class() {
+    // ADR-0105 C2: the imported method is the class's, named by the importer.
+    let d = fires(
+        "<?php\ntrait T { public function m($a, $b) {} }\nclass C { use T; }\n(new C())->m(1);\n",
+    );
+    assert_eq!(d.len(), 1, "{d:?}");
+    assert!(d[0].message.contains("C::m()"), "{d:?}");
+}
+
+#[test]
+fn silent_trait_bearing_chain_with_an_adaptation() {
+    // ADR-0105 C5: an `as` or `insteadof` adaptation declines the composition (v1),
+    // so a method the class does not declare itself is not resolved through it.
+    let d = fires(
+        "<?php\ntrait T { public function m($a, $b) {} }\nclass C { use T { m as n; } }\n(new C())->m(1);\n",
+    );
     assert!(d.is_empty(), "{d:?}");
+    // …while the class's own method still outranks anything an adaptation names (C1).
+    let own = fires(
+        "<?php\ntrait T { public function m($a) {} }\nclass C { use T { m as m2; } public function m2($a, $b) {} }\n(new C())->m2(1);\n",
+    );
+    assert_eq!(own.len(), 1, "{own:?}");
 }
 
 #[test]

@@ -68,19 +68,28 @@ pub(crate) fn resolve_in_chain_mode<'a>(
         let Some((cfile, cd)) = cx.find_class(&cur) else {
             return Resolution::Unknown; // chain leaves the project
         };
-        // A18: under `Declaration` a trait user is walked rather than refused on
-        // sight, so a name the class or a parent *declares* still answers. A name
-        // only a trait provides is still refused — it is nowhere on the walk, so
-        // the chain runs out and the caller gets nothing either way.
-        if cd.uses_traits && mode == ChainMode::Dispatch {
-            return Resolution::Unknown;
-        }
-        if let Some(m) = cd.methods.iter().find(|m| m.name.eq_ignore_ascii_case(method)) {
-            return if m.is_abstract && mode == ChainMode::Dispatch {
-                Resolution::Unknown
-            } else {
-                Resolution::Found(ResolvedMethod { method: m, declaring_class: cd, class_file: cfile })
-            };
+        // What the class holds, its own methods before its traits' (ADR-0105 C1, C2).
+        // A composition that declines refuses `Dispatch`; under `Declaration` (A18)
+        // the walk goes on to the parent, whose envelope bounds a trait-imported
+        // override by return covariance, so a name the class or a parent declares
+        // still answers.
+        match cx.held_method(cfile, cd, method) {
+            Err(_) if mode == ChainMode::Dispatch => return Resolution::Unknown,
+            Err(_) | Ok(None) => {}
+            Ok(Some(m)) => {
+                // `Dispatch` descends into the body that runs. A trait method's body
+                // is walked once with its receiver open, never per importer (v1),
+                // and an abstract declaration has no body.
+                return if mode == ChainMode::Dispatch && (m.decl.is_abstract || m.imported()) {
+                    Resolution::Unknown
+                } else {
+                    Resolution::Found(ResolvedMethod {
+                        method: m.decl,
+                        declaring_class: m.owner,
+                        class_file: m.file,
+                    })
+                };
+            }
         }
         match &cd.parent {
             None => return Resolution::NotFoundChainComplete,
@@ -380,14 +389,21 @@ pub(crate) fn resolve_declaration_target<'a>(
     // method is not virtual, so the declared chain's answer would be the wrong
     // declaration. The is-a question must be proven; an undecided hierarchy
     // answers nothing rather than either declaration.
+    // A private method the enclosing class imports from a trait is its own private
+    // method (ADR-0105), and a composition that declines leaves the rule undecided.
     let shadow = enclosing_class.and_then(|enc| {
         let (efile, ecd) = cx.find_class(enc)?;
-        let pm = ecd
-            .methods
-            .iter()
-            .find(|m| m.name.eq_ignore_ascii_case(&method) && m.visibility == Visibility::Private)?;
+        let held = match cx.held_method(efile, ecd, &method) {
+            Ok(held) => held?,
+            Err(_) => return Some(None),
+        };
+        if held.decl.visibility != Visibility::Private {
+            return None;
+        }
         Some(match cx.is_a(&class, enc) {
-            IsA::Yes => Some(ResolvedMethod { method: pm, declaring_class: ecd, class_file: efile }),
+            IsA::Yes if !held.imported() => {
+                Some(ResolvedMethod { method: held.decl, declaring_class: ecd, class_file: efile })
+            }
             IsA::No => None,
             _ => return Some(None),
         })
@@ -545,10 +561,10 @@ pub(crate) fn resolve_builtin_callee(
 ///
 /// Only `extends` is followed, as [`resolve_in_chain_mode`] follows only `extends`:
 /// a method reached through a builtin *interface* the project class implements is
-/// not on this walk. A `use`-ing class that does not declare the name refuses, for
-/// ADR-0049 A18's reason — trait method bodies and return types are not lowered, so
-/// "not found on the class" cannot be read as "inherited from the parent" while a
-/// trait could be declaring it.
+/// not on this walk. A class that holds the name, its own or through a trait
+/// (ADR-0105), refuses, and so does one whose trait composition declines: "not held
+/// by the class" can be read as "inherited from the parent" only where the
+/// composition answers.
 fn builtin_root(cx: &Cx, class: &str, method: &str) -> Option<String> {
     let mut cur = class.to_owned();
     let mut seen: HashSet<String> = HashSet::new();
@@ -559,10 +575,7 @@ fn builtin_root(cx: &Cx, class: &str, method: &str) -> Option<String> {
         let Some((cfile, cd)) = cx.find_class(&cur) else {
             return Some(cur); // the chain left the project: a builtin name
         };
-        if cd.methods.iter().any(|m| m.name.eq_ignore_ascii_case(method)) {
-            return None;
-        }
-        if cd.uses_traits {
+        if !matches!(cx.held_method(cfile, cd, method), Ok(None)) {
             return None;
         }
         cur = cx.units[cfile].tree.resolve_class_fqn(cd.parent.as_ref()?);

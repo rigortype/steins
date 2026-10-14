@@ -16,6 +16,7 @@ use steins_syntax::{ClassDecl, MethodDecl, NameRef, NativeType, Param, Span, Vis
 use crate::fold::Folder;
 use crate::generics::native_to_contract;
 use crate::cx::Cx;
+use crate::trait_composition::HeldMethod;
 use crate::early_binding::redammed;
 use crate::project::{Diagnostic, Res};
 use crate::return_arms::native_arms;
@@ -152,12 +153,26 @@ struct EngineAncestry {
     interfaces: Vec<ReflectedClass>,
 }
 
+/// One class of the `extends` chain and the methods it holds: its own, then what its
+/// traits give it (ADR-0105).
+struct ChainNode<'a> {
+    cd: &'a ClassDecl,
+    held: Vec<HeldMethod<'a>>,
+}
+
+impl<'a> ChainNode<'a> {
+    /// The method `name` this node holds, its own before an imported one (C1).
+    fn held(&self, name: &str) -> Option<&HeldMethod<'a>> {
+        self.held.iter().find(|m| m.decl.name.eq_ignore_ascii_case(name))
+    }
+}
+
 /// A subject class's enumerated ancestry (ADR-0078 / issue #183).
 struct Ancestry<'a> {
     /// The `extends` chain, SUBJECT FIRST. The only member source that can define a
     /// method body, so this is what answers "is the requirement discharged?" — and
     /// why it must be enumerable end to end.
-    chain: Vec<&'a ClassDecl>,
+    chain: Vec<ChainNode<'a>>,
     /// The transitively collected interfaces (`implements` on every chain node, plus
     /// each interface's own `extends` list). Requirement sources only; unresolvable
     /// ones are dropped, per the asymmetry above.
@@ -189,7 +204,7 @@ fn enumerate_ancestry<'a>(
     subject: &'a ClassDecl,
 ) -> Option<Ancestry<'a>> {
     let engine_ok = folder.absence_family_available();
-    let mut chain: Vec<&'a ClassDecl> = Vec::new();
+    let mut chain: Vec<ChainNode<'a>> = Vec::new();
     let mut iface_refs: Vec<String> = Vec::new();
     let mut any_conditional = false;
     let mut engine = EngineAncestry::default();
@@ -205,14 +220,13 @@ fn enumerate_ancestry<'a>(
         if cd.is_interface || cd.is_enum || cd.is_trait {
             return None;
         }
-        // Trait obstacle (leg (e), header above) — witnessed silent: `trait T {
-        // public function m() {} } class C implements I { use T; }` runs clean.
-        if cd.uses_traits {
-            return None;
-        }
+        // What the class holds through its traits counts as its own (ADR-0105) —
+        // witnessed: `trait T { public function m() {} } class C implements I { use
+        // T; }` runs clean. A composition that declines is the trait obstacle.
+        let held = cx.held_methods(file, cd).ok()?;
         any_conditional |= cd.conditional;
         iface_refs.extend(cd.implements.iter().map(|r| cx.units[file].tree.resolve_class_fqn(r)));
-        chain.push(cd);
+        chain.push(ChainNode { cd, held });
         cur = match &cd.parent {
             None => None,
             Some(pref) => {
@@ -304,12 +318,20 @@ enum Satisfaction {
 /// — the same first-wins rule [`resolve_in_chain`] applies to dispatch.
 ///
 /// [`resolve_in_chain`]: crate::resolve_in_chain
+///
+/// An abstract method a trait gives a node is a requirement, never a declaration that
+/// shadows an inherited one (ADR-0105 C8a: an inherited concrete method implements
+/// it), so the walk passes it by.
 fn method_satisfaction(anc: &Ancestry, name: &str) -> Satisfaction {
     let mut saw_abstract = false;
     for node in &anc.chain {
-        let Some(m) = node.methods.iter().find(|m| m.name.eq_ignore_ascii_case(name)) else {
+        let Some(held) = node.held(name) else {
             continue;
         };
+        let m = held.decl;
+        if m.is_abstract && held.imported() {
+            continue;
+        }
         if !m.is_abstract {
             return if saw_abstract { Satisfaction::Refused } else { Satisfaction::Concrete };
         }
@@ -380,6 +402,12 @@ fn decl_display(cd: &ClassDecl) -> String {
     if cd.display.is_empty() { cd.name.clone() } else { cd.display.clone() }
 }
 
+/// Whether a chain node above `at`, or the engine parent, holds a method `name`.
+fn inherited_holds(anc: &Ancestry, at: usize, name: &str) -> bool {
+    anc.chain[at + 1..].iter().any(|node| node.held(name).is_some())
+        || anc.engine.parent.as_ref().is_some_and(|p| engine_method(p, name).is_some())
+}
+
 /// Run the ADR-0078 ladder for one class-like declaration and emit
 /// `class.abstract-unimplemented` iff every leg holds.
 fn check_abstract_unimplemented(
@@ -406,7 +434,23 @@ fn check_abstract_unimplemented(
     // by name, nearest declarer first, exactly as the runtime message lists them.
     let mut required: Vec<AbstractRequirement> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
-    for node in anc.chain.iter().chain(anc.interfaces.iter()) {
+    for (at, node) in anc.chain.iter().enumerate() {
+        for held in node.held.iter().filter(|m| m.decl.is_abstract) {
+            // An abstract trait method binds to an inherited method of its name, and
+            // PHP names that one (witnessed: `(P::m)`); else it is the importer's own
+            // requirement, named `Importer::m` (ADR-0105 C8).
+            if held.imported() && inherited_holds(&anc, at, &held.decl.name) {
+                continue;
+            }
+            if seen.insert(held.decl.name.to_ascii_lowercase()) {
+                required.push(AbstractRequirement {
+                    name: held.decl.name.clone(),
+                    declarer: decl_display(node.cd),
+                });
+            }
+        }
+    }
+    for node in &anc.interfaces {
         for m in node.methods.iter().filter(|m| m.is_abstract) {
             if seen.insert(m.name.to_ascii_lowercase()) {
                 required
@@ -665,11 +709,18 @@ fn override_parents<'s>(anc: &'s Ancestry, name: &str) -> Option<Vec<OverridePar
     let mut parents: Vec<OverrideParent<'s>> = Vec::new();
     let mut found = false;
     for node in anc.chain.iter().skip(1) {
-        if let Some(m) = node.methods.iter().find(|m| m.name.eq_ignore_ascii_case(name)) {
+        if let Some(held) = node.held(name) {
+            // An abstract trait method binds to an inherited one rather than
+            // overriding it (ADR-0105 C9a), so the nearer declaration is farther up.
+            if held.imported() && held.decl.is_abstract {
+                continue;
+            }
+            let m = held.decl;
             if m.visibility == Visibility::Private {
                 return None;
             }
-            parents.push(OverrideParent { sig: ParentSig::Source(m), declarer: decl_display(node) });
+            // A method a trait gives an ancestor is that ancestor's (`P::m`, C9).
+            parents.push(OverrideParent { sig: ParentSig::Source(m), declarer: decl_display(node.cd) });
             found = true;
             break; // nearest declaration binds; farther ones are already compatible.
         }
@@ -771,17 +822,17 @@ fn emit_override_violation(
     cx: &Cx,
     folder: &mut dyn Folder,
     subject: &ClassDecl,
-    cm: &MethodDecl,
+    (cm, at): (&MethodDecl, u32),
     parent: &OverrideParent,
     out: &mut Vec<Diagnostic>,
 ) -> bool {
     let pm = match &parent.sig {
         ParentSig::Source(pm) => *pm,
         ParentSig::Engine(pm, class) => {
-            return emit_engine_violation(cx, folder, subject, cm, (pm, class), out);
+            return emit_engine_violation(cx, folder, subject, (cm, at), (pm, class), out);
         }
     };
-    let pos = cx.tree().position(cm.span.start);
+    let pos = cx.tree().position(at);
     let child_name = format!("{}::{}", decl_display(subject), cm.name);
     let parent_name = format!("{}::{}", parent.declarer, pm.name);
     let mut emit = |id: &'static str, message: String| {
@@ -913,11 +964,11 @@ fn emit_engine_violation(
     cx: &Cx,
     folder: &mut dyn Folder,
     subject: &ClassDecl,
-    cm: &MethodDecl,
+    (cm, at): (&MethodDecl, u32),
     (pm, class): (&ReflectedMethod, &ReflectedClass),
     out: &mut Vec<Diagnostic>,
 ) -> bool {
-    let pos = cx.tree().position(cm.span.start);
+    let pos = cx.tree().position(at);
     let child_name = format!("{}::{}", decl_display(subject), cm.name);
     let parent_name = format!("{}::{}", engine_declarer(folder, class, &pm.name), pm.name);
     let mut emit = |id: &'static str, message: String| {
@@ -988,10 +1039,11 @@ fn check_override_family(
     cd: &ClassDecl,
     out: &mut Vec<Diagnostic>,
 ) {
-    // Only a CLASS declaration is the subject in v1. An enum's and a trait's members
-    // are not lowered (ADR-0043); `interface I extends J` re-declaring a method is
-    // the same fatal, but the ancestry walk `enumerate_ancestry` performs is
-    // class-shaped (it refuses an interface node outright) — a recorded silence.
+    // Only a CLASS declaration is the subject in v1. An enum cannot extend, and a
+    // trait's methods are judged in each class that imports them; `interface I
+    // extends J` re-declaring a method is the same fatal, but the ancestry walk
+    // `enumerate_ancestry` performs is class-shaped (it refuses an interface node
+    // outright) — a recorded silence.
     if cd.is_interface || cd.is_enum || cd.is_trait {
         return;
     }
@@ -1006,10 +1058,16 @@ fn check_override_family(
     if redammed(cx, anc.any_conditional) {
         return;
     }
-    for cm in &cd.methods {
-        let Some(parents) = override_parents(&anc, &cm.name) else { continue };
+    // The subject's own methods, and the concrete ones its traits give it: PHP checks
+    // an imported method against the parent's as the importer's own (`C::m`,
+    // ADR-0105 C9), reported at the `use` it came through. An abstract imported
+    // method binds to the inherited one instead (C9a) and is never judged here.
+    let Some(subject) = anc.chain.first() else { return };
+    for held in subject.held.iter().filter(|m| !(m.imported() && m.decl.is_abstract)) {
+        let Some(parents) = override_parents(&anc, &held.decl.name) else { continue };
+        let at = held.via.map_or(held.decl.span.start, |r| r.offset);
         for parent in &parents {
-            if emit_override_violation(cx, folder, cd, cm, parent, out) {
+            if emit_override_violation(cx, folder, cd, (held.decl, at), parent, out) {
                 break; // one runtime fatal, one finding.
             }
         }
