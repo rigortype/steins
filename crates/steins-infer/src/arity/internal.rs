@@ -33,6 +33,15 @@
 //! new DatePeriod(), gnupg_*()                        decline: hand-parsed / misreflected
 //! ```
 //!
+//! **The target gate.** Every row above is judged only when the declared PHP target is
+//! exactly the analysing engine's minor (`Folder::arity_target_exact`: `config.platform.php`
+//! 8.5.x, or a `php` constraint resolving to `~8.5.0` / `8.5.*`, on an 8.5 runtime). The
+//! signatures are the analysing PHP's, and no table says which differ between minors
+//! (`mktime()` and `openssl_seal()` changed in 8.0, `each()` is gone); a range target such
+//! as `^7.4 || ^8.0` or `>=8.1` therefore leaves the whole family dark. A file that reads
+//! the PHP version is dark too (`version_region.rs`), and only extensions php-src bundles
+//! are judged. A per-minor arity table would lift the first limit.
+//!
 //! The required count is one past the last non-optional parameter, which is
 //! `getNumberOfRequiredParameters()` for an internal function (its `isOptional()`
 //! is `position >= required`).
@@ -46,7 +55,7 @@ use crate::env::Store;
 use crate::existence::global_function_callee;
 use crate::fold::Folder;
 use crate::project::Diagnostic;
-use crate::version_region::in_version_dependent_region;
+use crate::version_region::file_reads_php_version;
 use crate::{
     CALL_TOO_FEW_ARGUMENTS_ID, CALL_TOO_MANY_ARGUMENTS_ID, CALL_UNKNOWN_NAMED_ARGUMENT_ID,
 };
@@ -63,6 +72,7 @@ const BUNDLED_EXTENSIONS: &[&str] = &[
     "pdo_odbc", "pdo_dblib", "phar", "readline", "sodium", "sqlite3", "intl", "gd", "gettext",
     "gmp", "exif", "fileinfo", "ftp", "ldap", "mysqli", "mysqlnd", "odbc", "pgsql", "shmop",
     "snmp", "soap", "sysvmsg", "sysvsem", "sysvshm", "tidy", "xsl", "zip",
+    "dba", "ffi", "zend opcache", "uri", "lexbor",
 ];
 
 /// Whether an extension name is one php-src bundles. The list is the common set; a
@@ -138,9 +148,9 @@ fn countable(call: &CallExpr) -> bool {
 }
 
 fn emit(cx: &Cx, call: &CallExpr, display: &str, verdict: Verdict, out: &mut Vec<Diagnostic>) {
-    // The signature is the analysing PHP's; a branch that runs on another PHP is
-    // judged by a signature it never sees.
-    if in_version_dependent_region(cx, call.span.start) {
+    // The signature is the analysing PHP's; code that runs on another PHP is judged
+    // by a signature it never sees (see `version_region.rs`).
+    if file_reads_php_version(cx) {
         return;
     }
     let (id, message) = match verdict {
@@ -189,6 +199,9 @@ pub(super) fn builtin_signature(
     folder: &mut dyn Folder,
     call: &CallExpr,
 ) -> Option<(String, Vec<BuiltinParam>)> {
+    if !folder.arity_target_exact() {
+        return None;
+    }
     let name = global_function_callee(cx, call)?;
     // A project function of this simple name shadows the builtin or makes the name
     // ambiguous: what runs is not what the engine reflected.
@@ -226,7 +239,7 @@ pub(super) fn function_is_bundled(folder: &mut dyn Folder, name: &str) -> bool {
 /// The engine class a receiver names, when no project file declares it and the
 /// analysing PHP has it as an internal, instantiable-kind class.
 fn engine_class(cx: &Cx, folder: &mut dyn Folder, fqn: &str) -> Option<ReflectedClass> {
-    if !cx.class_absent(fqn) || !folder.absence_family_available() {
+    if !cx.class_absent(fqn) || !folder.arity_target_exact() {
         return None;
     }
     let decl = folder.reflected_class(fqn.trim_start_matches('\\'))?.declaration?;
