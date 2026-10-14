@@ -230,7 +230,8 @@ fn existence_class_literal(cx: &Cx, v: &ArgValue) -> Option<String> {
 /// class chain under the S2 closure discipline (ADR-0049 §4). Unlike the absence
 /// flagship this ignores `__call`/`__callStatic` — `method_exists` reports only
 /// declared methods. Abstract or any-visibility declarations count as present
-/// (visibility-blind). Any obstacle to closure (trait-bearing/enum node,
+/// (visibility-blind), a class's own or one a trait gives it (ADR-0105). Any obstacle
+/// to closure (an enum node, a trait composition that declines,
 /// unresolvable ancestor, cycle, conditional node with the dam standing, or an
 /// unanswerable/positive boot-surface homonym) collapses to `Maybe`.
 fn method_exists_verdict(

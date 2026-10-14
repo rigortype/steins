@@ -116,6 +116,9 @@ pub(crate) struct Composition {
     reached: Vec<(usize, usize)>,
 }
 
+/// Which of a [`Composition`]'s three tables a query reads.
+type TablePick = fn(&Composition) -> &Result<Vec<Imported>, Open>;
+
 /// The per-universe memo (ADR-0105). Carries no fact of its own, so two indexes
 /// compare equal whatever either has computed.
 #[derive(Default)]
@@ -446,23 +449,6 @@ impl HeldMethod<'_> {
     }
 }
 
-/// A property a class-like holds, and the file of the class-like declaring it.
-#[derive(Clone, Copy)]
-pub(crate) struct HeldProperty<'a> {
-    pub(crate) decl: &'a PropertyDecl,
-    pub(crate) file: usize,
-}
-
-/// A class constant a class-like holds: its declared visibility, its literal value
-/// when it has one, and the declaring class-like and file.
-#[derive(Clone, Copy)]
-pub(crate) struct HeldConst<'a> {
-    pub(crate) visibility: Visibility,
-    pub(crate) value: Option<&'a steins_syntax::ArgValue>,
-    pub(crate) owner: &'a ClassDecl,
-    pub(crate) file: usize,
-}
-
 impl<'a> Cx<'a> {
     /// The composition of `cd` (declared in `file`), or `None` when it imports no
     /// trait. A trait's own `use`s are read through its importers, never here.
@@ -477,7 +463,7 @@ impl<'a> Cx<'a> {
     fn table<'c>(
         &self,
         comp: &'c Composition,
-        pick: fn(&Composition) -> &Result<Vec<Imported>, Open>,
+        pick: TablePick,
     ) -> Result<&'c [Imported], Open> {
         if comp.reached.iter().any(|&(file, _)| self.member_incomplete(file)) {
             return Err(Open::Incomplete);
@@ -485,23 +471,10 @@ impl<'a> Cx<'a> {
         pick(comp).as_deref().map_err(|open| *open)
     }
 
-    /// Whether `cd`'s composition declines its method table: the trait obstacle the
-    /// chain walks read in place of [`ClassDecl::uses_traits`].
-    pub(crate) fn methods_open(&self, file: usize, cd: &ClassDecl) -> bool {
-        self.composition_of(file, cd)
-            .is_some_and(|c| self.table(&c, |c| &c.methods).is_err())
-    }
-
     /// Whether `cd`'s composition declines its property table.
     pub(crate) fn properties_open(&self, file: usize, cd: &ClassDecl) -> bool {
         self.composition_of(file, cd)
             .is_some_and(|c| self.table(&c, |c| &c.properties).is_err())
-    }
-
-    /// Whether `cd`'s composition declines its constant table.
-    pub(crate) fn consts_open(&self, file: usize, cd: &ClassDecl) -> bool {
-        self.composition_of(file, cd)
-            .is_some_and(|c| self.table(&c, |c| &c.consts).is_err())
     }
 
     /// Whether a walk that reads `cd`'s own member lists must refuse `cd` for a member
@@ -512,7 +485,7 @@ impl<'a> Cx<'a> {
     pub(crate) fn trait_hides(&self, file: usize, cd: &ClassDecl, name: &str) -> bool {
         let Some(comp) = self.composition_of(file, cd) else { return false };
         let lname = name.to_ascii_lowercase();
-        let tables: [(fn(&Composition) -> &Result<Vec<Imported>, Open>, &str); 3] =
+        let tables: [(TablePick, &str); 3] =
             [(|c| &c.methods, lname.as_str()), (|c| &c.properties, name), (|c| &c.consts, name)];
         tables.iter().any(|(pick, key)| match self.table(&comp, *pick) {
             Err(_) => true,
@@ -581,14 +554,13 @@ impl<'a> Cx<'a> {
         &self,
         file: usize,
         cd: &'a ClassDecl,
-    ) -> Result<Vec<HeldProperty<'a>>, Open> {
-        let mut out: Vec<HeldProperty<'a>> =
-            cd.properties.iter().map(|p| HeldProperty { decl: p, file }).collect();
+    ) -> Result<Vec<&'a PropertyDecl>, Open> {
+        let mut out: Vec<&'a PropertyDecl> = cd.properties.iter().collect();
         if let Some(comp) = self.composition_of(file, cd) {
             let imported = self.table(&comp, |c| &c.properties)?;
             out.extend(imported.iter().map(|i| {
                 let owner = &self.units[i.member.file as usize].tree.classes()[i.member.decl as usize];
-                HeldProperty { decl: &owner.properties[i.member.index as usize], file: i.member.file as usize }
+                &owner.properties[i.member.index as usize]
             }));
         }
         Ok(out)
@@ -600,34 +572,30 @@ impl<'a> Cx<'a> {
         file: usize,
         cd: &'a ClassDecl,
         name: &str,
-    ) -> Result<Option<HeldProperty<'a>>, Open> {
+    ) -> Result<Option<&'a PropertyDecl>, Open> {
         if let Some(p) = cd.properties.iter().find(|p| p.name == name) {
-            return Ok(Some(HeldProperty { decl: p, file }));
+            return Ok(Some(p));
         }
-        Ok(self.held_properties(file, cd)?.into_iter().find(|p| p.decl.name == name))
+        Ok(self.held_properties(file, cd)?.into_iter().find(|p| p.name == name))
     }
 
-    /// The class constant `name` that `cd` holds (C1, C12).
+    /// The declared visibility of the class constant `name` that `cd` holds (C1, C12).
     pub(crate) fn held_const(
         &self,
         file: usize,
-        cd: &'a ClassDecl,
+        cd: &ClassDecl,
         name: &str,
-    ) -> Result<Option<HeldConst<'a>>, Open> {
-        let read = |owner: &'a ClassDecl, file: usize, at: usize| {
-            let (cname, visibility) = &owner.const_visibility[at];
-            let value = owner.consts.iter().find(|(n, _)| n == cname).map(|(_, v)| v);
-            HeldConst { visibility: *visibility, value, owner, file }
-        };
+    ) -> Result<Option<Visibility>, Open> {
+        let read = |owner: &ClassDecl, at: usize| owner.const_visibility[at].1;
         if let Some(at) = cd.const_visibility.iter().position(|(n, _)| n == name) {
-            return Ok(Some(read(cd, file, at)));
+            return Ok(Some(read(cd, at)));
         }
         let Some(comp) = self.composition_of(file, cd) else { return Ok(None) };
         let imported = self.table(&comp, |c| &c.consts)?;
         Ok(imported.binary_search_by(|i| (*i.name).cmp(name)).ok().map(|at| {
             let i = &imported[at];
             let owner = &self.units[i.member.file as usize].tree.classes()[i.member.decl as usize];
-            read(owner, i.member.file as usize, i.member.index as usize)
+            read(owner, i.member.index as usize)
         }))
     }
 }

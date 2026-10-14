@@ -371,7 +371,7 @@ impl<'a> Cx<'a> {
             }
             let Some((file, cd)) = self.find_class(&cur) else { break };
             let Ok(held) = self.held_properties(file, cd) else { break };
-            for p in held.into_iter().map(|p| p.decl) {
+            for p in held {
                 if p.is_static {
                     continue;
                 }

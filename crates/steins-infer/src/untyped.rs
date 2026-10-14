@@ -34,9 +34,9 @@ use crate::throws::resolve_class_name;
 //
 // What the lowering leaves invisible:
 //
-// * **Traits** lower to a NAME only (ADR-0049 §5) — no members reach here.
-// * **Enum methods** are not lowered (`ClassDecl::methods` is empty for an
-//   enum), so method signatures are not measured; enum CONSTANTS are.
+// * **Trait and enum members** are lowered as a class's are (ADR-0105) and are
+//   measured as declarations: a trait's method is the trait's to type, whichever
+//   class imports it.
 // * **Class-body hooked properties** are dropped at lowering (only names
 //   survive), so they never reach the property arm. A PROMOTED hooked property
 //   does reach it, and is skipped there like every other promoted property,

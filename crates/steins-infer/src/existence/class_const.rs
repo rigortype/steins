@@ -97,7 +97,7 @@ fn providers(
         let held = if cd.enum_cases.iter().any(|c| c.name == name) {
             Some(None)
         } else {
-            cx.held_const(cfile, cd, name).ok()?.map(|c| Some(c.visibility))
+            cx.held_const(cfile, cd, name).ok()?.map(Some)
         };
         if let Some(visibility) = held {
             found.push(Provider { fqn: fqn.clone(), visibility, at_start: seen.len() == 1 });

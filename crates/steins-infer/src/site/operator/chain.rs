@@ -4,7 +4,9 @@
 //!
 //! A chain is **closed** when every ancestor class and trait is something this
 //! analysis can read: a project class-like (one unambiguous declaration, using
-//! no trait, since a trait's body is not lowered against its user) or a class
+//! no trait, since this chain reads a member's hint and visibility in its
+//! declaring class-like's scope, which for a trait member is the importer's; it
+//! keeps the trait obstacle ADR-0105 lifted elsewhere) or a class
 //! the engine's catalog knows and the project does not declare. An *interface*
 //! the project cannot read does not open a chain: it has no body to run. The
 //! engine's own classes contribute no *project* code to a property fetch, a
@@ -242,7 +244,7 @@ pub(super) fn hooks_property(cx: &Cx, class: &str, exact: bool) -> bool {
 /// engine class (`Throwable`, `Exception`), so `has` is false for a bound that is
 /// one. A class that hooks a property counts unless the walk shows it is not `class`
 /// (an `Unknown` verdict counts: the hook is user code whatever its unreadable
-/// parent is). A class that imports a trait (whose body is not lowered) counts only
+/// parent is). A class that imports a trait (which this chain does not compose) counts only
 /// when the walk shows it **is** `class`, and so does an anonymous class for the
 /// parents the index lists: counting an `Unknown` there would charge every site for
 /// every trait user whose parent a vendor-less checkout lacks (§7.2's open question).
@@ -273,8 +275,8 @@ fn subclass_hooks_property(cx: &Cx, class: &str) -> bool {
 ///
 /// * a class declaring a magic method, or hooking `member`, whose chain reaches
 ///   `class`;
-/// * a class importing a trait, whose body is not lowered, so what it brings
-///   (`__get` among it) is unknown;
+/// * a class importing a trait, which the shard's tables do not compose, so what it
+///   brings (`__get` among it) is unknown;
 /// * an anonymous class, which no index lists: any one extending or implementing
 ///   `class` or something under it counts, whatever its body declares, as
 ///   `declared_receiver`'s descendant closure reads it (ADR-0049 A4).

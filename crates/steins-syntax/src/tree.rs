@@ -358,8 +358,8 @@ impl SourceTree {
         &self.functions
     }
 
-    /// The user-defined class declarations found in the file (interfaces,
-    /// traits, and enums are not lowered here).
+    /// The user-defined class-like declarations found in the file: classes,
+    /// interfaces, traits and enums.
     #[must_use]
     pub fn classes(&self) -> &[ClassDecl] {
         &self.classes

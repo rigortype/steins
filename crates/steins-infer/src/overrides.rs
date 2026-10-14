@@ -56,8 +56,9 @@ use crate::{
 // ancestors; an ENGINE ancestor (issue #939) is read off the analysing PHP's own
 // reflection under the rule table below.
 //
-// Silence legs: a `use`d trait ANYWHERE in the chain (members not flattened, leg
-// (e) — could implement the method invisibly); an unresolvable/ambiguous PARENT
+// Silence legs: a trait composition that declines ANYWHERE in the chain (ADR-0105,
+// leg (e) — it could implement the method invisibly; a composition that answers is
+// read, a trait method being the importer's own); an unresolvable/ambiguous PARENT
 // (the implementation could live there); a misshapen edge (`extends` naming an
 // interface/enum/trait, `implements` naming a non-interface — its own load-time
 // fatal); the "Cannot make non abstract method A::m() abstract in class B" shape
@@ -418,8 +419,8 @@ fn check_abstract_unimplemented(
 ) {
     // Declaration-site gate: only a CONCRETE class must implement everything. An
     // abstract class and an interface may carry abstract methods (witnessed silent);
-    // a trait's and an enum's members are not lowered at all (an enum cannot be
-    // abstract, and its own `Enum E must implement …` fatal is a different message).
+    // a trait's requirements are its importers' (ADR-0105 C8), and an enum's own
+    // `Enum E must implement …` fatal is a different message.
     if cd.is_abstract || cd.is_interface || cd.is_enum || cd.is_trait {
         return;
     }
@@ -655,7 +656,8 @@ pub(crate) fn check_declaration_fatals(
 // exclusion.
 //
 // Further tested silences: an interface SUBJECT (class-shaped ancestry walk); an
-// enum/anonymous-class subject (members not lowered, ADR-0043/ADR-0049 A4); a
+// enum/anonymous-class subject (an enum cannot extend; an anonymous class lowers
+// edge-only, ADR-0049 A4); a
 // child method declared `abstract` over a concrete parent (`Satisfaction::Refused`);
 // a `self`/`static`/`parent` return keyword (bound is the *declaring* class, would
 // misname the comparison); a variadic or by-reference position on either side.

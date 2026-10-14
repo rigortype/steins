@@ -34,15 +34,16 @@ pub(crate) enum Resolution<'a> {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ChainMode {
     /// **Dispatch**: the declaration whose body the runtime will run. An abstract
-    /// declaration has no body, and a trait-using class resolves names through
-    /// machinery this analyzer does not lower — both are `Unknown`.
+    /// declaration has no body, a method a trait gives the class is walked once with
+    /// its receiver open rather than per call (ADR-0105), and a trait composition
+    /// that declines may hold any name — all three are `Unknown`.
     Dispatch,
     /// **Declaration only** (ADR-0049 A16): the declaration whose *return envelope*
     /// binds the runtime one. PHP enforces return covariance at class-declaration
     /// time, so an abstract declaration's envelope is a sound upper bound under
     /// every implementation, and so is a parent's under a trait-imported override.
-    /// A name that resolves nowhere on the class or its parents while a trait is in
-    /// play stays `Unknown`: the trait could be declaring it (A18).
+    /// A method a trait gives the class answers its own declaration (ADR-0105 C2);
+    /// where the composition declines, the walk goes on to the parent as before (A18).
     Declaration,
 }
 
