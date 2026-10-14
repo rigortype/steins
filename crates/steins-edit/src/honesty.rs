@@ -136,7 +136,9 @@ pub fn plan_phpdoc_honesty(
             );
         }
         let method_scopes = scopes_by_method(tree);
-        for class in tree.classes() {
+        // A trait's methods are its importers' (ADR-0105), whose class-keyed reasoning
+        // this transform does not carry to them: they stay out of its candidates.
+        for class in tree.classes().iter().filter(|c| !c.is_trait) {
             for method in &class.methods {
                 let tags = method.docblock.as_deref().map(scan_docblock).unwrap_or_default();
                 plan_method_params(

@@ -453,6 +453,13 @@ fn method_eligibility(cx: &Cx, class: &ClassDecl, m: &MethodDecl) -> MethodEligi
                 .to_owned(),
         );
     }
+    // A trait's method is the method of every class that imports it (ADR-0105), each
+    // with its own subclasses and callers.
+    if class.is_trait {
+        return MethodEligibility::Inheritance(
+            "a trait method is copied into every class that uses it".to_owned(),
+        );
+    }
     let promotable = m.is_final || m.visibility == Visibility::Private || class.is_final;
     if !promotable {
         return MethodEligibility::Inheritance(

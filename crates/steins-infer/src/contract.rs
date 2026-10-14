@@ -1612,13 +1612,17 @@ impl<'a> Cx<'a> {
                 continue;
             }
             if let Some((file, cd)) = self.find_class(&cur) {
+                // A `__toString` the class holds, its own or through a trait, makes it
+                // `Stringable` (witnessed 8.5.11 for a trait's); a composition that
+                // declines may hold one (ADR-0105).
                 if stringable_target {
-                    if cd.methods.iter().any(|m| m.name.eq_ignore_ascii_case("__toString")) {
-                        walk.verdict = IsA::Yes;
-                        return walk;
-                    }
-                    if cd.uses_traits {
-                        maybe_stringable = true;
+                    match self.held_method(file, cd, "__toString") {
+                        Ok(Some(_)) => {
+                            walk.verdict = IsA::Yes;
+                            return walk;
+                        }
+                        Err(_) => maybe_stringable = true,
+                        Ok(None) => {}
                     }
                 }
                 let edges = project_supers(self.units[file].tree, cd);

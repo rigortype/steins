@@ -189,8 +189,8 @@ pub(crate) fn parent_constructor_hooks(cx: &Cx, enclosing: Option<&str>) -> bool
 }
 
 /// The engine class `start`'s chain leaves the project at, when no project
-/// class on the way can hold `method`: none declares it, and none uses a trait
-/// that could supply it. The exit class must be absent from the project and
+/// class on the way can hold `method`: none holds it, its own or through a trait,
+/// and none has a trait composition that declines (ADR-0105). The exit class must be absent from the project and
 /// declared by the mined engine hierarchy under that FQN
 /// ([`engine::declares_engine_class`]), the gates [`engine_method`] holds a
 /// catalogued method to, for its reasons. `start` itself is the exit when no
@@ -203,7 +203,9 @@ pub(crate) fn engine_exit(cx: &Cx, start: &str, method: &str) -> Option<String> 
             return None;
         }
         let Some((file, cd)) = cx.find_class(&cur) else { break };
-        if cd.uses_traits || cd.methods.iter().any(|m| m.name.eq_ignore_ascii_case(method)) {
+        // Held by the class, its own or through a trait (ADR-0105), or behind a trait
+        // composition that declines: no engine method answers.
+        if !matches!(cx.held_method(file, cd, method), Ok(None)) {
             return None;
         }
         cur = cx.units[file].tree.resolve_class_fqn(cd.parent.as_ref()?);

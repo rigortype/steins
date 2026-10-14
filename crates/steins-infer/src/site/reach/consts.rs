@@ -109,8 +109,9 @@ impl Frame<'_> {
             if let Some(decl) = cd.const_decls.iter().find(|d| d.name == name) {
                 return self.init_free(&cx.at(file), &cd.fqn, &decl.init, depth + 1);
             }
-            // A trait may supply the constant (PHP 8.2), and its body is not lowered.
-            if cd.uses_traits {
+            // A trait may supply the constant (PHP 8.2), whose initializer reads `self`
+            // as the importer: declined, as is a composition that declines (ADR-0105).
+            if !matches!(cx.held_const(file, cd, name), Ok(None)) {
                 return false;
             }
             let tree = cx.units[file].tree;

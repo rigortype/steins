@@ -481,7 +481,8 @@ fn own_rows_of(
         for m in &c.methods {
             classify(
                 Sym::Method(c.fqn.clone(), m.name.clone()),
-                Some(&c.fqn),
+                // A trait method runs in its importer, an open receiver (ADR-0105).
+                (!c.is_trait).then_some(&c.fqn),
                 &m.params,
                 &m.sites,
                 &mut syms,

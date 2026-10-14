@@ -748,10 +748,9 @@ fn identifiers(text: &str) -> impl Iterator<Item = &str> {
 }
 
 /// Every class FQN a file's class-likes inherit from, in the widest reading
-/// the lowering supports: `extends`, `implements`, `@mixin` targets, the
-/// **anonymous** classes' edges, and — for a class that uses traits, whose
-/// trait names the lowering keeps only as a bit — every class-like this file
-/// names at all.
+/// the lowering supports: `extends`, `implements`, `@mixin` targets, the traits
+/// every class-like (a trait included) imports, whose members a class holds
+/// through its trait composition (ADR-0105), and the **anonymous** classes' edges.
 ///
 /// Anonymous classes matter and are easy to miss: they enter no index and
 /// declare no name, so nothing can ever have a *call* edge to the file holding
@@ -761,7 +760,6 @@ fn identifiers(text: &str) -> impl Iterator<Item = &str> {
 /// declares nothing else would, without this leg, leave every reasoner about
 /// `Report`'s descendants replaying a stale answer.
 fn inheritance_refs(tree: &SourceTree, add: &mut dyn FnMut(&str)) {
-    let mut any_trait_user = false;
     for c in tree.classes() {
         if let Some(parent) = &c.parent {
             add(&tree.resolve_class_fqn(parent).to_ascii_lowercase());
@@ -780,21 +778,15 @@ fn inheritance_refs(tree: &SourceTree, add: &mut dyn FnMut(&str)) {
                 }
             }
         }
-        any_trait_user |= c.uses_traits;
+        for r in &c.used_traits {
+            add(&tree.resolve_class_fqn(r).to_ascii_lowercase());
+        }
     }
     for edge in tree.anonymous_class_edges() {
         if let Some(parent) = &edge.parent {
             add(&tree.resolve_class_fqn(parent).to_ascii_lowercase());
         }
-        for r in &edge.implements {
-            add(&tree.resolve_class_fqn(r).to_ascii_lowercase());
-        }
-    }
-    if any_trait_user {
-        // `ClassDecl` records only *that* traits are used, so the trait names
-        // are approximated by every class-like reference the file makes —
-        // `hard_class_refs` includes `use <Trait>` positions.
-        for r in tree.hard_class_refs() {
+        for r in edge.implements.iter().chain(&edge.used_traits) {
             add(&tree.resolve_class_fqn(r).to_ascii_lowercase());
         }
     }
@@ -965,16 +957,18 @@ mod tests {
         assert!(from_leaf.contains(&0), "a changed subclass reaches its base");
     }
 
-    /// A trait-using class widens to every class-like the file names, since the
-    /// lowering keeps only the bit — the over-approximation the module docs
-    /// declare, pinned so a later narrowing is a deliberate change.
+    /// A trait-using class inherits from the traits it imports, read off the
+    /// lowered trait names (ADR-0105), and so does a trait that imports a trait.
     #[test]
-    fn a_trait_user_widens_to_every_class_it_names() {
+    fn a_trait_user_inherits_from_its_traits() {
         let t = trees(&[
-            "<?php trait T { public function t(): int { return 1; } }\n",
+            "<?php trait U { public function u(): int { return 1; } }\n",
+            "<?php trait T { use U; }\n",
             "<?php class C { use T; }\n",
+            "<?php class Other {}\n",
         ]);
-        assert_eq!(affected(&t, &[0], &[]), vec![0, 1]);
+        assert_eq!(affected(&t, &[0], &[]), vec![0, 1, 2]);
+        assert_eq!(affected(&t, &[3], &[]), vec![3]);
     }
 
     /// Nothing changed and nothing in the delta: nothing is affected, which is

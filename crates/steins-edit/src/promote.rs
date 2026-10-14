@@ -141,7 +141,9 @@ pub fn plan_phpdoc_to_native(
                 &mut refusals, &mut oracle,
             );
         }
-        for class in tree.classes() {
+        // A trait's methods are its importers' (ADR-0105), whose class-keyed reasoning
+        // this transform does not carry to them: they stay out of its candidates.
+        for class in tree.classes().iter().filter(|c| !c.is_trait) {
             for method in &class.methods {
                 plan_method(
                     class, method, path, source, tree, &msweep, blocking.as_ref(), &mut plan,
