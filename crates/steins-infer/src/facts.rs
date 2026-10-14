@@ -372,7 +372,9 @@ pub(crate) fn never_returning_of(tree: &SourceTree) -> Vec<String> {
         }
         let key = match &scope.owner {
             ScopeOwner::Function { fqn, .. } => fqn,
-            ScopeOwner::Method { method, .. } | ScopeOwner::TraitMethod { method, .. } => method,
+            ScopeOwner::Method { method, .. }
+            | ScopeOwner::TraitMethod { method, .. }
+            | ScopeOwner::AnonMethod { method, .. } => method,
             // A hook writes no return type of its own (`get(): int` is a parse
             // error), so no hook scope can ever carry a `: never` hint.
             ScopeOwner::TopLevel

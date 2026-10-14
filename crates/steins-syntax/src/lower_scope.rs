@@ -138,6 +138,7 @@ fn collect_scopes(
             let class_fqn = member_owner_fqn(contexts, regions, &e.name);
             collect_member_scopes(&class_fqn, e.members.iter(), false, rc, out);
         }
+        Node::AnonymousClass(ac) => collect_anon_method_scopes(ac, rc, out),
         // Closures / arrow fns get their own scope (ADR-0033), addressed by the
         // definition-site byte offset. Params/effects/throws ride on the scope.
         Node::Closure(cl) => out.push(build_closure_scope_from_closure(cl, rc, docs, stmt_doc)),
@@ -238,6 +239,32 @@ fn collect_member_scopes<'a, 'arena: 'a>(
             }
             _ => {}
         }
+    }
+}
+
+/// One [`ScopeOwner::AnonMethod`] scope per concrete method of an anonymous class
+/// (ADR-0105), its parameters and native return type on the scope. Property hooks of
+/// an anonymous class get no scope: a hook scope names its class.
+fn collect_anon_method_scopes(
+    ac: &mago_syntax::cst::AnonymousClass<'_>,
+    rc: &RefResolver,
+    out: &mut Vec<Scope>,
+) {
+    let def_offset = to_span(ac.span()).start;
+    for member in ac.members.iter() {
+        let ClassLikeMember::Method(m) = member else { continue };
+        let MethodBody::Concrete(block) = &m.body else { continue };
+        let owner = ScopeOwner::AnonMethod { def_offset, method: bytes_to_string(m.name.value) };
+        let mut scope = build_scope(
+            owner,
+            block.statements.as_slice(),
+            ret_hint_of(m.return_type_hint.as_ref()),
+            Some(&m.parameter_list),
+        );
+        scope.yields_by_ref = scope.is_generator && m.ampersand.is_some();
+        scope.params = lower_params(&m.parameter_list, rc);
+        scope.ret_ty = m.return_type_hint.as_ref().and_then(|r| lower_hint(&r.hint, rc));
+        out.push(scope);
     }
 }
 
@@ -344,6 +371,7 @@ fn build_scope_from(
         ScopeOwner::TopLevel
         | ScopeOwner::Method { .. }
         | ScopeOwner::TraitMethod { .. }
+        | ScopeOwner::AnonMethod { .. }
         | ScopeOwner::Closure { .. }
         | ScopeOwner::PropertyHook { .. } => None,
     };

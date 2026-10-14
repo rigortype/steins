@@ -4186,6 +4186,12 @@ pub enum ScopeOwner {
     /// and `parent` name no class this scope knows. The walk judges the body once with
     /// that receiver open, as it does a closure's.
     TraitMethod { class: String, method: String },
+    /// A concrete method of an anonymous class (ADR-0105), addressed by the `new class`
+    /// construct's byte offset and the method name, which together are unique within a
+    /// file. No [`ClassDecl`] carries an anonymous class's members, so, as for a
+    /// property hook, the parameters and the native return type ride on the [`Scope`]
+    /// itself; and no class name binds `$this` or `self`, so the receiver is open.
+    AnonMethod { def_offset: u32, method: String },
 }
 
 /// Which of a hooked property's two hooks a [`ScopeOwner::PropertyHook`] scope is.

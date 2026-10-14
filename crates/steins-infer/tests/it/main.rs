@@ -215,6 +215,7 @@ mod throws;
 mod tolerated_effects;
 mod top_level_rebind;
 mod trace_annotation;
+mod trait_composition;
 mod transfer_value_composition;
 mod truth_table;
 mod try_bodies;

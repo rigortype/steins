@@ -54,7 +54,9 @@ pub(crate) fn check_compile_fatal_returns(cx: &Cx, out: &mut Vec<Diagnostic>) {
         // body is not a function-like PHP gives these rules to (declined).
         let noun = match &scope.owner {
             ScopeOwner::Function { .. } | ScopeOwner::Closure { .. } => "function",
-            ScopeOwner::Method { .. } | ScopeOwner::TraitMethod { .. } => "method",
+            ScopeOwner::Method { .. }
+            | ScopeOwner::TraitMethod { .. }
+            | ScopeOwner::AnonMethod { .. } => "method",
             ScopeOwner::PropertyHook { .. } | ScopeOwner::TopLevel => continue,
         };
         if declares_void_inside_a_type(cx, hint) {
@@ -113,6 +115,7 @@ fn finding(
         ScopeOwner::Method { class, method } | ScopeOwner::TraitMethod { class, method } => {
             format!("method {class}::{method}")
         }
+        ScopeOwner::AnonMethod { method, .. } => format!("method class@anonymous::{method}"),
         _ => format!("the closure on line {}", closure_line(cx, scope)),
     };
     let pos = cx.tree().position(site.span.start);

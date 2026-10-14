@@ -61,10 +61,12 @@ pub(crate) fn scope_class(scope: &Scope) -> Option<&str> {
         // does not thread the enclosing class into the closure scope (documented).
         // A trait method runs in the class that imports it, which its one walk does
         // not know (ADR-0105): the receiver is open, as a closure's is.
+        // An anonymous class's method has no class name to bind (ADR-0105).
         ScopeOwner::TopLevel
         | ScopeOwner::Function { .. }
         | ScopeOwner::Closure { .. }
-        | ScopeOwner::TraitMethod { .. } => None,
+        | ScopeOwner::TraitMethod { .. }
+        | ScopeOwner::AnonMethod { .. } => None,
     }
 }
 
