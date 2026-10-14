@@ -248,3 +248,65 @@ fn return_call_direct_var_flow_flagged() {
     assert_eq!(d.line, 3);
     assert!(d.message.contains("from $w, assigned at line 3"), "{}", d.message);
 }
+
+/// A stand-in for the sidecar's `preg_match` fold: a `/x/` pattern over a literal
+/// subject answers whether the subject contains `x`, as PHP does.
+struct PregFold;
+
+impl steins_infer::Folder for PregFold {
+    fn fold(
+        &mut self,
+        name: &str,
+        args: &[steins_syntax::ArgValue],
+        _strict: bool,
+    ) -> Option<steins_syntax::ArgValue> {
+        use steins_syntax::ArgValue;
+        let [ArgValue::Str(p), ArgValue::Str(s)] = args else { return None };
+        if !name.eq_ignore_ascii_case("preg_match") {
+            return None;
+        }
+        let text = |v: &steins_domain::PhpStr| String::from_utf8_lossy(v.as_bytes()).into_owned();
+        let needle = text(p).trim_matches('/').to_owned();
+        Some(ArgValue::Int(i64::from(text(s).contains(&needle))))
+    }
+}
+
+fn bound_findings(src: &str) -> usize {
+    let tree = SourceTree::parse(src);
+    steins_infer::check_with(&tree, &[], "test.php", &mut PregFold)
+        .iter()
+        .filter(|d| d.message.contains("bound at"))
+        .count()
+}
+
+/// A call condition the fold decides is decided, in a binding descent as anywhere
+/// (ADR-0105 §2.6). Each row is PHP 8.5.11's verdict on `outer("abc", "abc")`:
+///
+/// ```text
+/// row  condition                                  sides with width($s)   PHP        here
+/// b01  preg_match('/x/', $f)  (false)             then, else             TypeError  1 (else)
+/// b02  preg_match('/a/', $f)  (true)              then                   TypeError  1
+/// b03  preg_match('/q/', $f) || rand() >= 0       then                   TypeError  1 (undecided)
+/// b06  preg_match('/a/', $f), then rand() >= 0    inner then             TypeError  1
+/// b07  $g = $f . ""; preg_match('/q/', $g)        then                   clean      0
+/// b09  preg_match('/q/', $f, $m)  (false)         then                   clean      0
+/// ```
+#[test]
+fn a_call_condition_the_fold_decides_is_decided_in_a_descent() {
+    let row = |body: &str| {
+        format!(
+            "<?php\n{WIDTH}function outer(string $f, string $s): void {{ {body} }}\nouter(\"abc\", \"abc\");\n"
+        )
+    };
+    let cases = [
+        ("if (preg_match('/x/', $f)) { width($s); } else { width($s); }", 1),
+        ("if (preg_match('/a/', $f)) { width($s); }", 1),
+        ("if (preg_match('/q/', $f) || rand(0, 1) >= 0) { width($s); }", 1),
+        ("if (preg_match('/a/', $f)) { if (rand(0, 1) >= 0) { width($s); } }", 1),
+        ("$g = $f . \"\"; if (preg_match('/q/', $g)) { width($s); }", 0),
+        ("if (preg_match('/q/', $f, $m)) { width($s); }", 0),
+    ];
+    for (body, n) in cases {
+        assert_eq!(bound_findings(&row(body)), n, "{body}");
+    }
+}
