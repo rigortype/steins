@@ -533,3 +533,26 @@ fn silent_when_the_project_defines_the_name_the_engine_removed() {
     );
     assert!(d.is_empty(), "{d:#?}");
 }
+
+// A condition after one decided true is never evaluated (ADR-0104's S4 amendment,
+// issue #1050). Witnessed PHP 8.5: each function returns without an error.
+
+#[test]
+fn an_elseif_condition_after_a_decided_true_one_is_dead() {
+    let src = "<?php\nfunction f() { if (true) { return 1; } elseif (NOPE_CONST) { return 2; } return 0; }\n";
+    let d = fires(src);
+    assert!(d.is_empty(), "{d:?}");
+}
+
+#[test]
+fn a_match_true_arm_after_a_decided_true_one_is_dead() {
+    let d = fires("<?php\nfunction f() { match (true) { true => 1, NOPE_CONST => 2 }; }\n");
+    assert!(d.is_empty(), "{d:?}");
+}
+
+#[test]
+fn an_elseif_condition_after_an_undecided_one_is_judged() {
+    let src = "<?php\nfunction f($x) { if ($x) { return 1; } elseif (NOPE_CONST) { return 2; } return 0; }\n";
+    let d = fires(src);
+    assert_eq!(d.len(), 1, "{d:?}");
+}

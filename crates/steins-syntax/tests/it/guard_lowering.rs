@@ -162,7 +162,7 @@ fn switch_true_with_call_cases_lowers_to_an_if_chain() {
         "switch (true) { case defined('A'): return A; case defined('B'): case defined('C'): \
          return B; default: return null; }",
     );
-    let [Stmt { kind: StmtKind::If { cond, then_trace, elseifs, else_trace }, .. }] = &got[..]
+    let [Stmt { kind: StmtKind::If { cond, then_trace, elseifs, else_trace, .. }, .. }] = &got[..]
     else {
         panic!("{got:?}");
     };

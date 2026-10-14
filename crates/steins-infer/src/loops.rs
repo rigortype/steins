@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 
 use steins_domain::Certainty;
-use steins_syntax::{CondExpr, Stmt, StmtKind};
+use steins_syntax::{CondExpr, Header, Stmt, StmtKind};
 
 use crate::fold::Folder;
 use crate::annotate::LineFact;
@@ -14,6 +14,7 @@ use crate::branch::{apply_cond_side, forget_in_branch, unmodelled_tests};
 use crate::cond::eval_cond;
 use crate::env::{Descent, EscapeRecorder, Known, Store};
 use crate::foreach_bind::element_binding;
+use crate::header_reads::check_header;
 use crate::project::Diagnostic;
 use crate::walk::{Flow, WalkCx, push_hidden_exit_floor, walk_trace};
 
@@ -43,14 +44,16 @@ pub(crate) fn walk_loop(
         // value this env holds. Both narrowings are applied after the
         // forgetting; see `apply_loop_exit_negation` for why that order is what
         // makes the exit one sound.
-        StmtKind::While { cond, body, break_free, writes, reads, poisons, may_return } => {
+        StmtKind::While { cond, head, body, break_free, writes, reads, poisons, may_return } => {
             let mut benv = env.clone();
             let mut bstore = store.clone();
             loop_entry_forget(writes, reads, &[], *poisons, &mut benv, &mut bstore);
             loop_fallthrough_forget(w, writes, reads, *poisons, *may_return, env, store);
             apply_loop_exit_negation(w, folder, cond, *break_free, env, store);
             let swept = BodyMark::start(w);
-            let verdict = walk_while_body(w, folder, cond, body, benv, bstore, descent, facts, out);
+            let header = (cond, head);
+            let (verdict, _) =
+                walk_while_body(w, folder, header, body, benv, bstore, descent, facts, out);
             sweep_after_body(w, swept, store);
             loop_flow(*break_free, verdict)
         }
@@ -64,6 +67,8 @@ pub(crate) fn walk_loop(
         StmtKind::For {
             init,
             cond,
+            head,
+            step,
             body,
             carried,
             break_free,
@@ -81,7 +86,14 @@ pub(crate) fn walk_loop(
             loop_entry_forget(writes, reads, carried, *poisons, &mut benv, &mut bstore);
             loop_fallthrough_forget(w, writes, reads, *poisons, *may_return, env, store);
             apply_loop_exit_negation(w, folder, cond, *break_free, env, store);
-            let verdict = walk_while_body(w, folder, cond, body, benv, bstore, descent, facts, out);
+            // The step runs after an iteration completes, in an env the walk does not
+            // hold: its positions are `Conditional`, judged under the loop-head env.
+            let step_env = step.eval.is_some().then(|| (benv.clone(), bstore.clone()));
+            let (verdict, body_flow) =
+                walk_while_body(w, folder, (cond, head), body, benv, bstore, descent, facts, out);
+            if let (Some((senv, sstore)), Some(Flow::FellThrough)) = (step_env, body_flow) {
+                check_header(w, folder, step, &senv, &sstore, descent, out.len(), out);
+            }
             sweep_after_body(w, swept, store);
             loop_flow(*break_free, verdict)
         }
@@ -94,6 +106,7 @@ pub(crate) fn walk_loop(
         // cannot reach the next entry through it.
         StmtKind::Foreach {
             subject,
+            head,
             key_var,
             value_var,
             by_ref,
@@ -103,6 +116,8 @@ pub(crate) fn walk_loop(
             poisons,
             may_return,
         } => {
+            // The subject is evaluated once, in the env the loop is entered with.
+            check_header(w, folder, head, env, store, descent, out.len(), out);
             // An object iterated over may hand itself to the value variable (an
             // iterator yielding `$this`), a name the store does not bind (issue
             // #1048).
@@ -141,6 +156,7 @@ pub(crate) fn walk_loop(
         // `while`'s is. Reachability is `do_while_flow`'s (issue #679).
         StmtKind::DoWhile {
             cond,
+            head,
             body,
             break_free,
             continue_free,
@@ -155,7 +171,15 @@ pub(crate) fn walk_loop(
             loop_fallthrough_forget(w, writes, reads, *poisons, *may_return, env, store);
             apply_loop_exit_negation(w, folder, cond, *break_free, env, store);
             let swept = BodyMark::start(w);
+            // The condition runs after an iteration completes: `Conditional`, judged under
+            // the loop-head env, and only when an iteration can complete or `continue`.
+            let head_env = head.eval.is_some().then(|| (benv.clone(), bstore.clone()));
             let body_flow = walk_loop_body(w, folder, body, benv, bstore, descent, facts, out);
+            if let Some((henv, hstore)) = head_env
+                && (body_flow == Flow::FellThrough || !*continue_free)
+            {
+                check_header(w, folder, head, &henv, &hstore, descent, out.len(), out);
+            }
             sweep_after_body(w, swept, store);
             do_while_flow(*break_free && *continue_free, body_flow)
         }
@@ -487,27 +511,30 @@ fn apply_loop_exit_negation(
 fn walk_while_body(
     w: &WalkCx,
     folder: &mut dyn Folder,
-    cond: &CondExpr,
+    (cond, head): (&CondExpr, &Header),
     body: &[Stmt],
     mut benv: HashMap<String, Known>,
     mut bstore: Store,
     descent: &mut Option<Descent<'_>>,
     facts: &mut Option<&mut Vec<LineFact>>,
     out: &mut Vec<Diagnostic>,
-) -> Certainty {
+) -> (Certainty, Option<Flow>) {
     // The verdict is on the ENTRY env, which holds at every header evaluation, so
     // it is the verdict of every test the loop ever makes: `No` skips the body,
     // and `Yes` is what the caller reads as "no failing test can ever leave this
     // loop" (issue #651's reachability half).
     let verdict = eval_cond(w, folder, cond, &benv, &bstore, w.scope.poisoned);
+    // The header's reads, in the same env: it holds at the first evaluation, which runs
+    // whatever the verdict (ADR-0104's S4 amendment).
+    check_header(w, folder, head, &benv, &bstore, descent, out.len(), out);
     if verdict == Certainty::No {
-        return verdict;
+        return (verdict, None);
     }
     let untested = unmodelled_tests(w, folder, cond, &benv, &bstore);
     forget_in_branch(&untested, &mut benv, &mut bstore);
     apply_cond_side(w, folder, cond, true, &mut benv, &mut bstore);
-    let _ = walk_loop_body(w, folder, body, benv, bstore, descent, facts, out);
-    verdict
+    let flow = walk_loop_body(w, folder, body, benv, bstore, descent, facts, out);
+    (verdict, Some(flow))
 }
 
 /// Walk a structured loop body from an entry pair the header has already had its

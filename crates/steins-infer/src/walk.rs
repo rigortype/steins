@@ -40,6 +40,7 @@ use crate::env::{
 };
 use crate::foreach_check::check_foreach_subject;
 use crate::guard_sweep::sweep_guard_regions;
+use crate::header_reads::check_header;
 use crate::heap::apply_prop_assign;
 use crate::heap_alias::{
     apply_hidden_heap_effects, escape_stored_objects, escape_unspelled_reads,
@@ -932,7 +933,7 @@ fn walk_run(
                 );
                 Flow::FellThrough
             }
-            StmtKind::If { cond, then_trace, elseifs, else_trace } => {
+            StmtKind::If { cond, then_trace, elseifs, else_trace, heads } => {
                 // ADR-0088 §5 (issue #448): a `match (true)`/`match (false)`
                 // guard chain with no `default` desugars to exactly this shape
                 // (`else_trace: None`, issue #431) — the coverage question
@@ -958,12 +959,13 @@ fn walk_run(
                     })
                     .flatten();
                 walk_if(
-                    w, folder, cond, then_trace, elseifs, else_trace.as_deref(), chain.as_ref(),
-                    rebinds, env, store, descent, facts, out,
+                    w, folder, cond, heads, then_trace, elseifs, else_trace.as_deref(),
+                    chain.as_ref(), rebinds, env, store, descent, facts, out,
                 )
             }
-            StmtKind::Match { subject, arms, default, default_lands, loose } => {
+            StmtKind::Match { subject, head, arms, default, default_lands, loose } => {
                 let default = default.as_deref().map(|d| (d, default_lands.as_ref()));
+                check_header(w, folder, head, env, store, descent, out.len(), out);
                 walk_match(
                     w, folder, subject, arms, default, *loose, stmt.span, env, store, descent,
                     facts, out,

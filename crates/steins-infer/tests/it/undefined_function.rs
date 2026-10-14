@@ -47,7 +47,9 @@ impl Folder for Boot {
         if self.reflect_fails {
             return None;
         }
-        Some(self.fns.iter().any(|b| b.eq_ignore_ascii_case(fqn)))
+        // The guard builtins every engine has: a condition is a read position (#1050).
+        let guard = ["function_exists", "is_callable"].iter().any(|g| g.eq_ignore_ascii_case(fqn));
+        Some(guard || self.fns.iter().any(|b| b.eq_ignore_ascii_case(fqn)))
     }
     fn boot_surface_label(&mut self) -> Option<String> {
         Some("PHP 8.5.8 (32 extensions)".to_owned())

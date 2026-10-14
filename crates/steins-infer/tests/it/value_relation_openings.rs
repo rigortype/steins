@@ -73,7 +73,12 @@ impl Folder for Boot {
         self.available
     }
     fn boot_surface_function(&mut self, fqn: &str) -> Option<bool> {
-        self.available.then(|| self.functions.iter().any(|f| f.eq_ignore_ascii_case(fqn)))
+        // The guard builtins every engine has: a condition is a read position (#1050).
+        let guard = ["is_callable", "function_exists", "class_exists", "method_exists"]
+            .iter()
+            .any(|g| g.eq_ignore_ascii_case(fqn));
+        self.available
+            .then(|| guard || self.functions.iter().any(|f| f.eq_ignore_ascii_case(fqn)))
     }
     fn boot_surface_class_like(&mut self, _fqn: &str) -> Option<bool> {
         self.available.then_some(false)

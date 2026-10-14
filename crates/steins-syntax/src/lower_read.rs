@@ -14,9 +14,22 @@
 //!   class-like (class, interface, trait, enum) is its own scope, lowered and judged
 //!   separately; an anonymous class contributes its constructor arguments, which the
 //!   enclosing statement evaluates, and none of its body;
-//! * a `match` is not descended: a structured one is hoisted, each arm a statement of its own
-//!   that carries its own positions, and an unstructured one is not a position the walk can
-//!   claim is reached. Its subject belongs to the headers (a later slice).
+//! * a `match`'s arms are not descended: a structured one is hoisted, each arm a statement of
+//!   its own that carries its own positions, and an unstructured one is not a position the
+//!   walk can claim is reached. Its subject is an operand of the expression around it and is
+//!   read like one; its arm conditions are the structured construct's headers (ADR-0104's S4
+//!   amendment).
+//!
+//! The headers of branches and loops (an `if` or `elseif` condition, a loop header, a
+//! `switch` subject or label, a structured `match`'s arm conditions) are scanned by the same
+//! rules into a [`Header`] of their own ([`read_positions_of_exprs`]), because the walk
+//! judges each where the construct evaluates it. A header evaluated only after its loop's
+//! body completes an iteration (a `do`-`while` condition, a `for` step), or hoisted ahead of
+//! the statement that evaluates it (a value-position `match (true)` chain), is evaluated in
+//! an env the walk does not hold: its positions are recorded `Conditional`
+//! ([`ReadSet::conditional`]).
+//!
+//! [`Header`]: crate::ast::Header
 //!
 //! # Carriers
 //!
@@ -60,7 +73,8 @@
 //! | `c ?: b` | `c` | inherited | evaluated |
 //! | | `b` | `Conditional` | runs only when `c` is falsy |
 //! | `@e` | everything in `e` | `Suppressed` unless a weaker claim holds | warns and runs the handler |
-//! | `match (s) { ... }` | the whole `match` | not descended | arms are statements of their own; conditions belong to the headers |
+//! | `match (s) { ... }` | `s` | inherited | evaluated first |
+//! | | the arms, conditions and bodies | not descended | bodies are statements of their own; conditions belong to the headers |
 //! | `f(...)`, `$o->m(...)`, `C::m(...)` | the callable | kind `CallRef`, folded like a call | throws at creation if missing; no call runs |
 //!
 //! [`string_context_sites`]: crate::lower_stmt
@@ -116,6 +130,31 @@ pub(crate) fn read_positions_of_expr(
     let mut scan = Scan::of(kind);
     scan.plain(e);
     scan.finish()
+}
+
+/// The read positions of a header's expressions, in order, as one set, `None` when there
+/// are none: the conditions of a `for`, a `switch` arm's stacked labels, a `match` arm's
+/// conditions. `kind` is the header's lowered kind (see [`read_positions_of_expr`]).
+pub(crate) fn read_positions_of_exprs(
+    exprs: &[&Expression<'_>],
+    kind: &StmtKind,
+) -> Option<Box<ReadSet>> {
+    let mut scan = Scan::of(kind);
+    exprs.iter().for_each(|e| scan.plain(e));
+    scan.finish()
+}
+
+impl ReadSet {
+    /// Record every position as [`Carrier::Conditional`], but an `IssetLike` one, which is
+    /// weaker: the header these positions belong to is evaluated in an env the walk does
+    /// not hold (see the module doc).
+    pub(crate) fn conditional(&mut self) {
+        for p in &mut self.positions {
+            if p.carrier != Carrier::IssetLike {
+                p.carrier = Carrier::Conditional;
+            }
+        }
+    }
 }
 
 /// What encloses a node, as far as it is inherited by everything below it.
@@ -252,8 +291,9 @@ impl Scan {
             | Node::Class(_)
             | Node::Interface(_)
             | Node::Trait(_)
-            | Node::Enum(_)
-            | Node::Match(_) => {}
+            | Node::Enum(_) => {}
+            // The subject is evaluated as an operand; the arms are not descended.
+            Node::Match(m) => self.expr(m.expression, ctx, &Local::Plain),
             Node::AnonymousClass(ac) => {
                 if let Some(list) = &ac.argument_list {
                     self.partial_args(list, None, ctx);

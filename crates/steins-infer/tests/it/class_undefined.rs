@@ -449,3 +449,20 @@ fn a_project_class_named_resource_silences_the_hint() {
     let d = fires("<?php\nnamespace App;\nclass resource {}\nfunction f(resource $x): void {}\n");
     assert!(d.is_empty(), "{d:?}");
 }
+
+// A condition after one decided true is never evaluated (ADR-0104's S4 amendment,
+// issue #1050). Witnessed PHP 8.5: the function returns without an error.
+
+#[test]
+fn an_elseif_condition_after_a_decided_true_one_is_dead() {
+    let src = "<?php\nfunction f() { if (true) { return 1; } elseif (new NopeClass()) { return 2; } return 0; }\n";
+    let d = fires(src);
+    assert!(d.is_empty(), "{d:?}");
+}
+
+#[test]
+fn a_switch_true_label_after_a_decided_true_one_is_dead() {
+    let src = "<?php\nfunction f() { switch (true) { case true: return 1; case new NopeClass(): return 2; } return 0; }\n";
+    let d = fires(src);
+    assert!(d.is_empty(), "{d:?}");
+}

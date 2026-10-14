@@ -127,6 +127,20 @@ pub(crate) fn call_at<'a>(w: &'a WalkCx, stmt: &'a Stmt, pos: &ReadPosition) -> 
         .or_else(|| w.scope.method_call_at(pos.span))
 }
 
+/// Judge every call position of `stmt` that its kind does not spell, against `env` and
+/// `store`: [`check_stmt_calls`]'s nested half alone, for a header whose kind spells none
+/// (`crate::header_reads`). The caller gates on the plain per-scope pass.
+pub(crate) fn check_position_calls(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    stmt: &Stmt,
+    env: &HashMap<String, Known>,
+    store: &Store,
+    out: &mut Vec<Diagnostic>,
+) {
+    nested::check_nested_calls(w, folder, stmt, env, store, out);
+}
+
 /// What step 1 of [`walk_trace`] learned from a statement's calls, for the phases
 /// after it to read.
 ///

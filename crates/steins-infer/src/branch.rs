@@ -7,7 +7,8 @@ use steins_contract::normalize;
 use steins_domain::{Certainty, Fact, Val};
 use steins_phpdoc::AssertKind;
 use steins_syntax::{
-    ArgValue, ArmLanding, CallExpr, CmpOp, CondExpr, CondOperand, MatchArmT, Span, Stmt,
+    ArgValue, ArmLanding, CallExpr, CmpOp, CondExpr, CondOperand, Header, MatchArmT, Span,
+    Stmt,
 };
 
 use crate::fold::Folder;
@@ -35,7 +36,8 @@ use crate::refine::{
 use crate::shapes::{ShapeGuard, apply_shape_guard, apply_shape_narrowing, guard_key};
 use crate::loops::loop_entry_forget;
 use crate::rebind::top_level_rebind_risk;
-use crate::walk::{Flow, WalkCx, mark_dead, walk_trace};
+use crate::header_reads::{check_header, push_unseen};
+use crate::walk::{Flow, WalkCx, mark_dead, mark_dead_span, walk_trace};
 
 /// Walk a structured `if`/`elseif`/`else` (ADR-0031 stage 1). Evaluates the guard
 /// to a [`Certainty`], walks each **live** branch on a cloned env (applying
@@ -57,12 +59,17 @@ use crate::walk::{Flow, WalkCx, mark_dead, walk_trace};
 /// condition saw up to its first userland call. An `elseif` link recurses with
 /// `false`, the forgetting having happened here, ahead of every branch.
 ///
+/// `heads` are the [`Header`]s of `cond` and of each `elseif` after it, in order: each is
+/// judged where its condition is evaluated, under the env reaching it, and every one after
+/// a condition decided true is dead (`crate::header_reads`).
+///
 /// [`top_level_rebind_risk`]: crate::rebind::top_level_rebind_risk
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn walk_if(
     w: &WalkCx,
     folder: &mut dyn Folder,
     cond: &CondExpr,
+    heads: &[Header],
     then_trace: &[Stmt],
     elseifs: &[(CondExpr, Vec<Stmt>)],
     else_trace: Option<&[Stmt]>,
@@ -94,12 +101,22 @@ pub(crate) fn walk_if(
             for (_, trace) in elseifs {
                 mark_dead(w, &[trace.as_slice()]);
             }
+            // A later condition is never evaluated either.
+            for head in heads.iter().skip(1) {
+                mark_dead_span(w, head.span);
+            }
             if let Some(trace) = else_trace {
                 mark_dead(w, &[trace]);
             }
         }
         Certainty::No => mark_dead(w, &[then_trace]),
         Certainty::Maybe => {}
+    }
+    // The condition's read positions, in the env it is evaluated in, before its own
+    // effects apply (ADR-0104's S4 amendment).
+    let judged = out.len();
+    if let Some(head) = heads.first() {
+        check_header(w, folder, head, env, store, descent, judged, out);
     }
 
     // 2. The guard's own effects on *every* resulting path, sequenced at the calls'
@@ -121,9 +138,11 @@ pub(crate) fn walk_if(
     // condition is not a `checkable_calls` position. An `elseif` chain recurses
     // into `walk_if` per link, so each condition is judged exactly once.
     if descent.is_none() {
+        let mut pregs = Vec::new();
         for call in &guard_calls {
-            check_preg_pattern(w, folder, call, env, out);
+            check_preg_pattern(w, folder, call, env, &mut pregs);
         }
+        push_unseen(out, judged, pregs);
     }
     // The declared-arm lanes a guard call's own `@phpstan-assert-*` tag names, taken
     // before the conservative read-set drop below and put back after it — same
@@ -202,7 +221,9 @@ pub(crate) fn walk_if(
         forget_in_branch(&untested, &mut benv, &mut bclasses);
         narrow_side(&guards, false, &mut benv);
         apply_cond_side(w, folder, cond, false, &mut benv, &mut bclasses);
-        if walk_else(w, folder, elseifs, else_trace, chain, &mut benv, &mut bclasses, descent, facts, out)
+        let rest = heads.get(1..).unwrap_or(&[]);
+        let (b, bc) = (&mut benv, &mut bclasses);
+        if walk_else(w, folder, elseifs, rest, else_trace, chain, b, bc, descent, facts, out)
             == Flow::FellThrough
         {
             restore_branch_scoped(&restore, &mut benv, &mut bclasses);
@@ -576,6 +597,7 @@ fn walk_else(
     w: &WalkCx,
     folder: &mut dyn Folder,
     elseifs: &[(CondExpr, Vec<Stmt>)],
+    heads: &[Header],
     else_trace: Option<&[Stmt]>,
     chain: Option<&GuardChainCoverage>,
     env: &mut HashMap<String, Known>,
@@ -587,8 +609,8 @@ fn walk_else(
     match elseifs.split_first() {
         Some(((cond, trace), rest)) => {
             walk_if(
-                w, folder, cond, trace, rest, else_trace, chain, false, env, store, descent, facts,
-                out,
+                w, folder, cond, heads, trace, rest, else_trace, chain, false, env, store, descent,
+                facts, out,
             )
         }
         None => match else_trace {
@@ -732,10 +754,17 @@ pub(crate) fn walk_match(
     for arm in arms {
         if decided_done {
             takens.push(Certainty::No); // a prior sure match makes this unreachable
+            // Its conditions are never evaluated either.
+            mark_dead_span(w, arm.head.span);
             continue;
         }
         let cond_k =
             eval_arm_cond(op, subj_vals.as_deref(), &arm.conditions, env, poisoned);
+        // The arm's conditions are evaluated, in the env the construct is entered with,
+        // unless one decided taken stops the ones after it (ADR-0104's S4 amendment).
+        if cond_k != Certainty::Yes || arm.conditions.len() == 1 {
+            check_header(w, folder, &arm.head, env, store, descent, out.len(), out);
+        }
         let taken = match cond_k {
             Certainty::No => Certainty::No,
             Certainty::Yes if earlier_all_no => {

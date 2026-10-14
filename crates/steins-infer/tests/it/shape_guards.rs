@@ -545,10 +545,19 @@ fn a_narrowed_sibling_key_keeps_a_float_fields_spelling() {
         guarded("array{a?: string, b: float}", "isset($v['a'])", "$v"),
         "dumped type: array{a: string, b: float} (asserted)"
     );
-    assert_eq!(
-        guarded("array{a?: string, b: float}", "$v['a'] !== null", "$v"),
-        "dumped type: array{a: string, b: float} (asserted)"
+    // The `!== null` twin reads the optional key unguarded, which PHP warns about
+    // (`Undefined array key "a"`, witnessed on PHP 8.5): its condition is a read position
+    // since issue #1050, and the strict leg reports it there.
+    let src = fixture(
+        "array{a?: string, b: float}",
+        "if ($v['a'] !== null) { \\PHPStan\\dumpType($v); }",
     );
+    let ds = diagnostics(&src);
+    let ids: Vec<&str> = ds.iter().filter(|d| !d.id.starts_with("debug.")).map(|d| d.id).collect();
+    assert_eq!(ids, ["offset.maybe-missing"], "{ds:?}");
+    let ty: Vec<&Diagnostic> = ds.iter().filter(|d| d.id == DEBUG_TYPE_ID).collect();
+    assert_eq!(ty.len(), 1, "{ds:?}");
+    assert_eq!(ty[0].message, "dumped type: array{a: string, b: float} (asserted)");
 }
 
 // ---- Invalidation (A-G8's table) -------------------------------------------

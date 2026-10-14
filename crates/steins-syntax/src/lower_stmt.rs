@@ -15,7 +15,7 @@ use mago_syntax::cst::{
 use crate::ast::{
     AppendStmt, ArgValue, ArmLanding, ArrayKey, ArrayLiteralElement, ArrayLiteralSite,
     BinaryOperandOp, BodyEnd, CallExpr, Callee, CondExpr, CondOperand, ForeachBodyShape,
-    ForeachSite, InvalidatedVar, MatchArmT, NameRef, NamedArg, OpaqueConstruct, OpaqueSite,
+    ForeachSite, Header, InvalidatedVar, MatchArmT, NameRef, NamedArg, OpaqueConstruct, OpaqueSite,
     OperandSite, OperandSiteKind, OperandSpan, PrevStmt, Receiver, RunArg, RunCall, Runs, Span,
     Stmt, StmtKind, StringContextKind, StringContextSite, UnaryOperandOp,
 };
@@ -29,9 +29,9 @@ use crate::lower_globals::{
     GlobalsKey, argument_globals, call_hands_dynamic_globals, node_writes_dynamic_globals,
     push_globals_writes,
 };
-use crate::lower_guards::guard_regions_of;
+use crate::lower_guards::{guard_regions_of, scan_guard_regions};
 use crate::lower_presence::subtree_has_goto;
-use crate::lower_read::{read_positions_of, read_positions_of_expr};
+use crate::lower_read::{read_positions_of, read_positions_of_expr, read_positions_of_exprs};
 use crate::lower_pure::{is_pure_expr, is_pure_statement};
 use crate::lower_scope::node_is_generator;
 use crate::lower_jump::{arm_landing, body_has_jump, ends_own_switch, jump_level};
@@ -1065,6 +1065,56 @@ pub(crate) fn named_call(expr: &Expression<'_>) -> Option<CallExpr> {
     }
 }
 
+/// The [`Header`] of a branch condition, a loop header or a `switch` subject or label:
+/// `exprs` in evaluation order (ADR-0104's S4 amendment). The header is lowered as the
+/// expression statement it would be, with a no-op kind, so the read-position consumers
+/// read it as they read a statement: its positions, guard regions, rebound names and the
+/// calls it runs. No `eval` when it records no read position.
+pub(crate) fn header_of(exprs: &[&Expression<'_>]) -> Header {
+    let span = match (exprs.first(), exprs.last()) {
+        (Some(first), Some(last)) => {
+            Span { start: first.span().start.offset, end: last.span().end.offset }
+        }
+        _ => Span { start: 0, end: 0 },
+    };
+    let kind = StmtKind::Echo(Vec::new());
+    let Some(read_positions) = read_positions_of_exprs(exprs, &kind) else {
+        return Header::none(span);
+    };
+    let mut invalidated = Vec::new();
+    let mut runs = Runs::default();
+    let mut guards = Vec::new();
+    for e in exprs {
+        let node = Node::Expression(e);
+        scan_invalidated(&node, &mut invalidated, false);
+        note_embedded_writes(&node, &mut invalidated);
+        scan_runs(&node, &mut runs);
+        scan_guard_regions(&node, &mut guards);
+    }
+    if runs.other {
+        runs.functions = Vec::new();
+        runs.constructs = Vec::new();
+    }
+    let stmt = Stmt {
+        span,
+        runs,
+        guards,
+        read_positions: Some(read_positions),
+        ..Stmt::lowered(kind, invalidated)
+    };
+    Header { span, eval: Some(Box::new(stmt)) }
+}
+
+/// [`header_of`] for a header evaluated in an env the walk does not hold (see
+/// `lower_read`'s module doc): every position is recorded `Conditional`.
+pub(crate) fn conditional_header_of(exprs: &[&Expression<'_>]) -> Header {
+    let mut head = header_of(exprs);
+    if let Some(set) = head.eval.as_mut().and_then(|st| st.read_positions.as_mut()) {
+        set.conditional();
+    }
+    head
+}
+
 /// Lower a structured `if`/`elseif`/`else` statement (ADR-0031) to
 /// [`StmtKind::If`]. Each branch body is lowered by the same statement rules as
 /// the enclosing scope (so nested ifs recurse and unstructured constructs inside
@@ -1075,13 +1125,15 @@ fn lower_if(if_stmt: &mago_syntax::cst::If<'_>) -> Stmt {
     let body = &if_stmt.body;
     let cond = lower_cond(if_stmt.condition);
     let then_trace = lower_trace(body.statements());
-    let elseifs = body
-        .else_if_clauses()
-        .into_iter()
-        .map(|(c, stmts)| (lower_cond(c), lower_trace(stmts)))
+    let clauses = body.else_if_clauses();
+    let heads = std::iter::once(if_stmt.condition)
+        .chain(clauses.iter().map(|(c, _)| *c))
+        .map(|c| header_of(&[c]))
         .collect();
+    let elseifs =
+        clauses.into_iter().map(|(c, stmts)| (lower_cond(c), lower_trace(stmts))).collect();
     let else_trace = body.else_statements().map(lower_trace);
-    Stmt::lowered(StmtKind::If { cond, then_trace, elseifs, else_trace }, Vec::new())
+    Stmt::lowered(StmtKind::If { cond, then_trace, elseifs, else_trace, heads }, Vec::new())
 }
 
 /// Lower a `while` to [`StmtKind::While`] (ADR-0027 amendment, issue #649). The
@@ -1098,10 +1150,11 @@ fn lower_if(if_stmt: &mago_syntax::cst::If<'_>) -> Stmt {
 fn lower_while(s: &Statement<'_>, wh: &While<'_>) -> Stmt {
     let (writes, reads, poisons, may_return) = opaque_sets(&Node::Statement(s));
     let cond = lower_cond(wh.condition);
+    let head = header_of(&[wh.condition]);
     let break_free = body_is_break_free(wh.body.statements());
     let body = lower_trace(wh.body.statements());
     Stmt::lowered(
-        StmtKind::While { cond, body, break_free, writes, reads, poisons, may_return },
+        StmtKind::While { cond, head, body, break_free, writes, reads, poisons, may_return },
         Vec::new(),
     )
 }
@@ -1130,6 +1183,10 @@ fn lower_for(s: &Statement<'_>, f: &mago_syntax::cst::For<'_>) -> Stmt {
         .iter()
         .next_back()
         .map_or_else(|| CondExpr::Truthy(CondOperand::Literal(ArgValue::Bool(true))), |c| lower_cond(c));
+    let conditions: Vec<&Expression<'_>> = f.conditions.iter().copied().collect();
+    let head = header_of(&conditions);
+    let increments: Vec<&Expression<'_>> = f.increments.iter().copied().collect();
+    let step = conditional_header_of(&increments);
     let body = lower_trace(f.body.statements());
     // The loop proper: everything but `init`. A name it writes may hold something
     // else on iteration 2, so it goes at the entry however it was first bound.
@@ -1153,8 +1210,19 @@ fn lower_for(s: &Statement<'_>, f: &mago_syntax::cst::For<'_>) -> Stmt {
     let carried: Vec<String> =
         writes.iter().filter(|w| !loop_writes.contains(w)).cloned().collect();
     let break_free = body_is_break_free(f.body.statements());
-    let kind =
-        StmtKind::For { init, cond, body, carried, break_free, writes, reads, poisons, may_return };
+    let kind = StmtKind::For {
+        init,
+        cond,
+        head,
+        step,
+        body,
+        carried,
+        break_free,
+        writes,
+        reads,
+        poisons,
+        may_return,
+    };
     Stmt::lowered(kind, Vec::new())
 }
 
@@ -1173,6 +1241,7 @@ fn lower_foreach(s: &Statement<'_>, fe: &mago_syntax::cst::Foreach<'_>) -> Stmt 
     let value = target.value();
     let kind = StmtKind::Foreach {
         subject: direct_var_name(fe.expression),
+        head: header_of(&[fe.expression]),
         key_var: target.key().and_then(direct_var_name),
         // The by-ref flag is the refusal-bearing fact, so the name is read off the
         // stripped target either way and the walker decides what to do with it.
@@ -1196,12 +1265,14 @@ fn lower_foreach(s: &Statement<'_>, fe: &mago_syntax::cst::Foreach<'_>) -> Stmt 
 fn lower_do_while(s: &Statement<'_>, d: &mago_syntax::cst::DoWhile<'_>) -> Stmt {
     let (writes, reads, poisons, may_return) = opaque_sets(&Node::Statement(s));
     let cond = lower_cond(d.condition);
+    let head = conditional_header_of(&[d.condition]);
     let body = lower_trace(std::slice::from_ref(d.statement));
     let break_free = body_is_break_free(std::slice::from_ref(d.statement));
     let continue_free = body_is_continue_free(std::slice::from_ref(d.statement));
     Stmt::lowered(
         StmtKind::DoWhile {
             cond,
+            head,
             body,
             break_free,
             continue_free,
@@ -1413,7 +1484,8 @@ fn scan_value_matches(node: &Node<'_, '_>, out: &mut Vec<Stmt>) {
         | Node::Trait(_)
         | Node::Enum(_) => return,
         Node::Match(m) => {
-            if let Some(st) = lower_match_stmt(m) {
+            if let Some(mut st) = lower_match_stmt(m) {
+                hoisted_heads(&mut st.kind);
                 out.push(Stmt {
                     span: to_span(m.span()),
                     // The same terminality a statement-position `match` gets, off
@@ -1431,6 +1503,22 @@ fn scan_value_matches(node: &Node<'_, '_>, out: &mut Vec<Stmt>) {
     }
     for child in children(node) {
         scan_value_matches(&child, out);
+    }
+}
+
+/// The arm conditions of a hoisted `match`: the walk reaches them ahead of the statement
+/// that evaluates the `match`, before the operands to its left run, so they are evaluated
+/// in an env it does not hold and are recorded `Conditional` (ADR-0104's S4 amendment).
+fn hoisted_heads(kind: &mut StmtKind) {
+    let heads: Vec<&mut Header> = match kind {
+        StmtKind::If { heads, .. } => heads.iter_mut().collect(),
+        StmtKind::Match { arms, .. } => arms.iter_mut().map(|a| &mut a.head).collect(),
+        _ => Vec::new(),
+    };
+    for head in heads {
+        if let Some(set) = head.eval.as_mut().and_then(|st| st.read_positions.as_mut()) {
+            set.conditional();
+        }
     }
 }
 
@@ -1456,6 +1544,8 @@ fn lower_match_stmt(m: &mago_syntax::cst::Match<'_>) -> Option<Stmt> {
 /// present.
 fn lower_match_by_value(m: &mago_syntax::cst::Match<'_>) -> Option<Stmt> {
     let subject = usable_operand(m.expression)?;
+    // The subject is an operand of the statement evaluating the `match`, read there.
+    let head = Header::none(to_span(m.expression.span()));
     let mut arms = Vec::new();
     let mut default: Option<Vec<Stmt>> = None;
     for arm in m.arms.iter() {
@@ -1465,8 +1555,10 @@ fn lower_match_by_value(m: &mago_syntax::cst::Match<'_>) -> Option<Stmt> {
                 for c in a.conditions.iter() {
                     conditions.push(usable_operand(c)?);
                 }
+                let exprs: Vec<&Expression<'_>> = a.conditions.iter().copied().collect();
+                let head = header_of(&exprs);
                 let trace = lower_expr_position(a.expression);
-                arms.push(MatchArmT { conditions, trace, lands: None });
+                arms.push(MatchArmT { conditions, head, trace, lands: None });
             }
             mago_syntax::cst::MatchArm::Default(a) => {
                 if default.is_some() {
@@ -1476,7 +1568,8 @@ fn lower_match_by_value(m: &mago_syntax::cst::Match<'_>) -> Option<Stmt> {
             }
         }
     }
-    let kind = StmtKind::Match { subject, arms, default, default_lands: None, loose: false };
+    let kind =
+        StmtKind::Match { subject, head, arms, default, default_lands: None, loose: false };
     Some(Stmt::lowered(kind, Vec::new()))
 }
 
@@ -1505,6 +1598,7 @@ fn lower_match_by_value(m: &mago_syntax::cst::Match<'_>) -> Option<Stmt> {
 fn lower_match_guard_chain(m: &mago_syntax::cst::Match<'_>) -> Option<Stmt> {
     let sense = bool_literal_subject(m.expression)?;
     let mut links: Vec<(CondExpr, Vec<Stmt>)> = Vec::new();
+    let mut heads = Vec::new();
     let mut default: Option<Vec<Stmt>> = None;
     for arm in m.arms.iter() {
         match arm {
@@ -1520,6 +1614,8 @@ fn lower_match_guard_chain(m: &mago_syntax::cst::Match<'_>) -> Option<Stmt> {
                         Some(acc) => CondExpr::Or(Box::new(acc), Box::new(one), OperandSpan::NONE),
                     });
                 }
+                let exprs: Vec<&Expression<'_>> = a.conditions.iter().copied().collect();
+                heads.push(header_of(&exprs));
                 links.push((cond?, lower_expr_position(a.expression)));
             }
             mago_syntax::cst::MatchArm::Default(a) => {
@@ -1532,8 +1628,9 @@ fn lower_match_guard_chain(m: &mago_syntax::cst::Match<'_>) -> Option<Stmt> {
     }
     let mut links = links.into_iter();
     let (cond, then_trace) = links.next()?; // `match (true) { default => … }` is by-value
+    let elseifs = links.collect();
     Some(Stmt::lowered(
-        StmtKind::If { cond, then_trace, elseifs: links.collect(), else_trace: default },
+        StmtKind::If { cond, then_trace, elseifs, else_trace: default, heads },
         Vec::new(),
     ))
 }
@@ -1660,20 +1757,27 @@ fn arm_cond_is_bool_valued(cond: &CondExpr) -> bool {
 /// A `switch (true)` whose cases are not all variables and literals is offered to
 /// [`lower_switch_true`] before it is given up (issue #928).
 fn lower_switch(sw: &mago_syntax::cst::Switch<'_>) -> Option<Stmt> {
+    let label = |e| Some((usable_operand(e)?, e));
     let by_value = usable_operand(sw.expression)
-        .and_then(|subject| Some((subject, collect_switch_arms(sw, usable_operand)?)));
+        .and_then(|subject| Some((subject, collect_switch_arms(sw, label)?)));
     let Some((subject, SwitchArms { arms, default })) = by_value else {
         return lower_switch_true(sw);
     };
     let arms = arms
         .into_iter()
-        .map(|SwitchArm { labels: conditions, trace, lands }| MatchArmT { conditions, trace, lands })
+        .map(|SwitchArm { labels, trace, lands }| {
+            let exprs: Vec<&Expression<'_>> = labels.iter().map(|(_, e)| *e).collect();
+            let head = header_of(&exprs);
+            let conditions = labels.into_iter().map(|(c, _)| c).collect();
+            MatchArmT { conditions, head, trace, lands }
+        })
         .collect();
     let (default, default_lands) = match default {
         Some(SwitchArm { trace, lands, .. }) => (Some(trace), lands),
         None => (None, None),
     };
-    let kind = StmtKind::Match { subject, arms, default, default_lands, loose: true };
+    let head = header_of(&[sw.expression]);
+    let kind = StmtKind::Match { subject, head, arms, default, default_lands, loose: true };
     Some(Stmt::lowered(kind, Vec::new()))
 }
 
@@ -1704,9 +1808,9 @@ struct SwitchArms<C> {
 /// labels follow it, so it leaves the switch exactly as a `break` does, and those
 /// trailing labels stand for the no-op bodies they are — an empty arm, or an empty
 /// `default`.
-fn collect_switch_arms<C>(
-    sw: &mago_syntax::cst::Switch<'_>,
-    lower_label: impl Fn(&Expression<'_>) -> Option<C>,
+fn collect_switch_arms<'a, 'arena, C>(
+    sw: &'a mago_syntax::cst::Switch<'arena>,
+    lower_label: impl Fn(&'a Expression<'arena>) -> Option<C>,
 ) -> Option<SwitchArms<C>> {
     let mut arms: Vec<SwitchArm<C>> = Vec::new();
     let mut default: Option<SwitchArm<C>> = None;
@@ -1831,13 +1935,17 @@ fn lower_switch_true(sw: &mago_syntax::cst::Switch<'_>) -> Option<Stmt> {
         return None;
     }
     let SwitchArms { arms, default } =
-        collect_switch_arms(sw, |e| Some((lower_cond(e), to_span(e.span()))))?;
+        collect_switch_arms(sw, |e| Some((lower_cond(e), to_span(e.span()), e)))?;
     if arms.iter().chain(&default).any(|a| a.lands.is_some()) {
         return None;
     }
+    let mut heads = Vec::new();
     let mut links = arms.into_iter().map(|SwitchArm { labels, trace, .. }| {
+        let exprs: Vec<&Expression<'_>> = labels.iter().map(|(_, _, e)| *e).collect();
+        heads.push(header_of(&exprs));
         let cond = labels
             .into_iter()
+            .map(|(cond, span, _)| (cond, span))
             .reduce(|(acc, _), (one, span)| {
                 (CondExpr::Or(Box::new(acc), Box::new(one), OperandSpan(span)), span)
             })
@@ -1846,11 +1954,9 @@ fn lower_switch_true(sw: &mago_syntax::cst::Switch<'_>) -> Option<Stmt> {
         (cond, trace)
     });
     let (cond, then_trace) = links.next()?;
+    let elseifs = links.collect();
     let else_trace = default.map(|d| d.trace);
-    Some(Stmt::lowered(
-        StmtKind::If { cond, then_trace, elseifs: links.collect(), else_trace },
-        Vec::new(),
-    ))
+    Some(Stmt::lowered(StmtKind::If { cond, then_trace, elseifs, else_trace, heads }, Vec::new()))
 }
 
 /// Lower an operand to a *usable* [`CondOperand`] — a bare variable, a literal, or

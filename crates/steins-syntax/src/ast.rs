@@ -3069,6 +3069,9 @@ pub enum CondExpr {
 #[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub struct MatchArmT {
     pub conditions: Vec<CondOperand>,
+    /// The arm's conditions (a `switch` arm's labels), evaluated only when no earlier arm
+    /// matched.
+    pub head: Header,
     pub trace: Vec<Stmt>,
     pub lands: Option<ArmLanding>,
 }
@@ -3151,11 +3154,16 @@ pub enum StmtKind {
     /// order; `else_trace` is the `else` branch when present. Sub-traces lower by the same
     /// rules (nested ifs recurse; unlowerable constructs appear as `Opaque` inside). Only the
     /// statement form of `if` lowers here; everything else stays [`StmtKind::Opaque`] (ADR-0027).
+    ///
+    /// `heads` holds one [`Header`] per condition, in chain order: `cond` first, then each
+    /// `elseif`'s (for a `switch (true)` or `match (true)` chain, each case's labels or each
+    /// arm's conditions).
     If {
         cond: CondExpr,
         then_trace: Vec<Stmt>,
         elseifs: Vec<(CondExpr, Vec<Stmt>)>,
         else_trace: Option<Vec<Stmt>>,
+        heads: Vec<Header>,
     },
     /// A structured statement-position `match` or `switch` (ADR-0031 Part B): the trace
     /// models arm control flow. `subject` is the scrutinee; `arms` are the conditional arms
@@ -3170,8 +3178,12 @@ pub enum StmtKind {
     /// switch). Any failure stays [`StmtKind::Opaque`] wholesale — an unrepresentable
     /// arm opaques the whole construct. A jump that lands on the successor is carried
     /// on its arm ([`MatchArmT::lands`]), or in `default_lands` for the `default` body.
+    ///
+    /// `head` is a `switch`'s subject; a `match` subject is an operand of the statement
+    /// that evaluates the `match`, read with that statement's own positions.
     Match {
         subject: CondOperand,
+        head: Header,
         arms: Vec<MatchArmT>,
         default: Option<Vec<Stmt>>,
         default_lands: Option<ArmLanding>,
@@ -3231,8 +3243,12 @@ pub enum StmtKind {
     /// nested loop or `switch` is that construct's), no `continue` targeting a level
     /// outside it, and no `goto` at all. A syntactic property of the body, computed
     /// where the body is still a CST; what a walker does with it is its own rule.
+    ///
+    /// `head` is the condition's [`Header`], judged in the env the body is entered with
+    /// before the condition narrows it.
     While {
         cond: CondExpr,
+        head: Header,
         body: Vec<Stmt>,
         break_free: bool,
         writes: Vec<String>,
@@ -3266,9 +3282,14 @@ pub enum StmtKind {
     /// the exit, and with no jump to leave by it never falls through (issue #651).
     ///
     /// `break_free` means what it means on [`Self::While`], read off this body.
+    ///
+    /// `head` holds every condition expression, the earlier ones included, and `step` the
+    /// increments, which run only after an iteration completes.
     For {
         init: Vec<Stmt>,
         cond: CondExpr,
+        head: Header,
+        step: Header,
         body: Vec<Stmt>,
         carried: Vec<String>,
         break_free: bool,
@@ -3301,8 +3322,11 @@ pub enum StmtKind {
     /// This is header **spelling**, exactly as [`ForeachSite`] carries it — what the
     /// subject's type is, and therefore what its elements are, stays the walker's
     /// question.
+    ///
+    /// `head` is the iterated expression's [`Header`], evaluated once, at the construct.
     Foreach {
         subject: Option<String>,
+        head: Header,
         key_var: Option<String>,
         value_var: Option<String>,
         by_ref: bool,
@@ -3341,8 +3365,11 @@ pub enum StmtKind {
     /// counts for nothing, `break 2` out of an inner loop's own inner loop included.
     /// `continue_free` alone is `true` of a body whose only jumps leave for an outer
     /// loop, which `break_free` refuses.
+    ///
+    /// `head` is the condition's [`Header`], which runs only after an iteration completes.
     DoWhile {
         cond: CondExpr,
+        head: Header,
         body: Vec<Stmt>,
         break_free: bool,
         continue_free: bool,
@@ -3922,6 +3949,37 @@ pub struct ReadPosition {
     pub span: Span,
     pub carrier: Carrier,
     pub kind: ReadKind,
+}
+
+/// A branch condition, a loop header or a `switch` subject, with the reads it evaluates
+/// (ADR-0104 §2.4 and its S4 amendment, issue #1050).
+///
+/// A header is evaluated in an env the statement walk does not hold at the statement's
+/// entry: an `elseif` after the earlier conditions failed, a `while` condition at every
+/// iteration. The construct's walker judges it where it evaluates it, so the header is
+/// lowered on its own rather than into the statement's [`Stmt::read_positions`].
+///
+/// `eval` is the header lowered as the expression statement `expr;` would be, minus what
+/// such a statement does to the env: a no-op kind ([`StmtKind::Echo`] with no calls)
+/// carrying the header's read positions, its guard regions, the names it may rebind and
+/// the calls it runs, which are exactly what the read-position consumers read off a
+/// statement. `None` when the header records no read position, which is most headers.
+/// `span` is the header's own extent (from its first expression to its last), always set:
+/// a header after a condition decided true is marked dead by it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
+pub struct Header {
+    pub span: Span,
+    pub eval: Option<Box<Stmt>>,
+}
+
+impl Header {
+    /// A header that records nothing: a synthesized condition, or one the lowering reads
+    /// elsewhere.
+    #[must_use]
+    pub fn none(span: Span) -> Header {
+        Header { span, eval: None }
+    }
 }
 
 /// What [`Stmt::read_positions`] holds: the positions and the calls no other list holds
