@@ -223,6 +223,15 @@ A/B and its classification. Every moved finding is either a trait user's own
 member now resolved (C1), a member a trait gives it (C2), or a trait, enum or
 anonymous-class body now walked with an open receiver.
 
+The effect lane moves with the call resolution. A static call on a class that
+uses traits used to be an `unknown-class` gap; it now reaches its body, so a
+wrapper such as Chronos's `createFromFormat` (a class composing traits, over
+`DateTimeImmutable::createFromFormat`) carries the engine row's zone and clock
+labels (ADR-0101 §3.17) to every caller, definite exactly where the same wrapper
+on a class with no trait already was. Nothing in this is reached through an
+unbounded receiver set: a string conversion of a `mixed` operand stays the
+possibly-grade gap.
+
 Not built here, each a follow-up: `insteadof`/`as` (C5) composed rather than
 declined; judging a trait body per importer; the anonymous class at its
 `new class(...)` site (D2, #941 c/d); the operator chain reading the composition.
