@@ -11,6 +11,7 @@ use steins_syntax::{
 };
 
 use crate::cx::Cx;
+use crate::early_binding::{Binding, class_use, redammed};
 use crate::dump::resolved_fn_fqn;
 use crate::env::{Store, Stratum};
 use crate::heap::simple_class;
@@ -291,9 +292,11 @@ pub(crate) fn check_undefined_method(
     else {
         return;
     };
-    // Leg A2i: a conditional declaration in the chain re-dams the claim — fire only
-    // when the whole-universe dam is clear (vouch machinery is not available here).
-    if any_conditional && !cx.dam.is_clear() {
+    // Leg A2i and early binding: a conditional declaration in the chain re-dams the
+    // claim — fire only when the whole-universe dam is clear (vouch machinery is not
+    // available here) — and a use above a class PHP does not bind early declines.
+    let binding = class_use(cx, folder, &class_fqn, any_conditional, call.span.start);
+    if binding == Binding::Decline {
         return;
     }
     // Leg (h)/A2ii: every chain FQN must be answered NOT-present by the boot-surface
@@ -312,8 +315,9 @@ pub(crate) fn check_undefined_method(
     let chain_render = simple_chain.join(" → ");
     let message = format!(
         "call to undefined method {simple_class}::{method}() — hierarchy fully enumerated ({chain_render}), \
-         no {}, no @method/@property/@mixin",
+         no {}, no @method/@property/@mixin{}",
         kind.magic(),
+        binding.suffix(),
     );
     out.push(Diagnostic {
         id: CALL_UNDEFINED_METHOD_ID,
@@ -620,7 +624,7 @@ fn arm_property_presence(
         PropertyChainOutcome::Declared => return ArmPropertyPresence::Declared,
         PropertyChainOutcome::Unknown => return ArmPropertyPresence::Unknown,
     };
-    if chain.any_conditional && !cx.dam.is_clear() {
+    if redammed(cx, chain.any_conditional) {
         return ArmPropertyPresence::Unknown; // A2i.
     }
     for fqn in &chain.fqns {
@@ -701,7 +705,7 @@ pub(crate) fn check_undefined_property(
             let Some(chain) = enumerate_property_chain(cx, &class_fqn, prop) else {
                 return;
             };
-            if chain.any_conditional && !cx.dam.is_clear() {
+            if redammed(cx, chain.any_conditional) {
                 return; // A2i.
             }
             for fqn in &chain.fqns {
@@ -948,8 +952,10 @@ pub(crate) fn check_undefined_class_const(
     let Some(reach) = enumerate_const_reach(cx, &class_fqn, name) else {
         return;
     };
-    // A2i: a conditional declaration anywhere leaves which body binds to load order.
-    if reach.any_conditional && !cx.dam.is_clear() {
+    // A2i: a conditional declaration anywhere leaves which body binds to load order;
+    // a fetch above a class PHP does not bind early declines.
+    let binding = class_use(cx, folder, &class_fqn, reach.any_conditional, span.start);
+    if binding == Binding::Decline {
         return;
     }
     // A2ii: every class-like in the reach must be answered NOT-present by the
@@ -975,7 +981,8 @@ pub(crate) fn check_undefined_class_const(
             "fetch of undefined class constant {written}::{name} — member reach fully \
              enumerated ({width} class-like(s): parents, interfaces and enum cases), \
              constants have no magic fallback — proven Error (Undefined constant \
-             {written}::{name})"
+             {written}::{name}){}",
+            binding.suffix(),
         ),
     });
 }
@@ -1256,7 +1263,7 @@ pub(crate) fn callable_method_absent(
         conditional |= any_conditional;
         chain = fqns;
     }
-    if conditional && !cx.dam.is_clear() {
+    if redammed(cx, conditional) {
         return false;
     }
     chain.iter().all(|fqn| folder.boot_surface_class_like(fqn) == Some(false))

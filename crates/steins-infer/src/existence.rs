@@ -11,6 +11,7 @@ use steins_syntax::{
 };
 
 use crate::cx::Cx;
+use crate::early_binding::redammed;
 use crate::dam::DamKind;
 use crate::declared_receiver::declared_receiver_lacks_method;
 use crate::env::{GuardVar, Store, Vouch};
@@ -273,7 +274,7 @@ fn method_exists_verdict(
     }
     // A2i: a conditional declaration on the chain re-dams the claim — only the clear
     // whole-universe dam lets either verdict stand.
-    if any_conditional && !cx.dam.is_clear() {
+    if redammed(cx, any_conditional) {
         return Certainty::Maybe;
     }
     // A2ii: every traversed FQN must be boot-surface homonym-clear, else the runtime
@@ -300,7 +301,7 @@ fn function_exists_verdict(cx: &Cx, folder: &mut dyn Folder, name: &str) -> Cert
     }
     match cx.index.resolve_function(&lname) {
         Res::Unique(site) => {
-            if cx.fn_decl(site).conditional && !cx.dam.is_clear() {
+            if redammed(cx, cx.fn_decl(site).conditional) {
                 Certainty::Maybe // a conditional polyfill with the dam standing.
             } else {
                 Certainty::Yes

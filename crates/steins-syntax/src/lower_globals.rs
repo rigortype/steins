@@ -100,7 +100,7 @@ pub(crate) struct FunctionBodies;
 impl FunctionBodies {
     pub(crate) fn enter(program: &Node<'_, '_>) -> Self {
         let mut ranges = Vec::new();
-        collect_function_ranges(program, &mut ranges);
+        collect_function_ranges(program, false, &mut ranges);
         ranges.sort_unstable();
         FUNCTION_BODIES.with_borrow_mut(|r| *r = ranges);
         Self
@@ -113,17 +113,21 @@ impl Drop for FunctionBodies {
     }
 }
 
-fn collect_function_ranges(node: &Node<'_, '_>, out: &mut Vec<(u32, u32)>) {
+/// The byte ranges of the outermost function, method, closure and arrow function nodes
+/// (and property hooks when `hooks`), in source order of discovery. Outermost only, so
+/// the ranges are disjoint and a sorted copy answers containment by one search.
+pub(crate) fn collect_function_ranges(node: &Node<'_, '_>, hooks: bool, out: &mut Vec<(u32, u32)>) {
     if matches!(
         node,
         Node::Function(_) | Node::Method(_) | Node::Closure(_) | Node::ArrowFunction(_)
-    ) {
+    ) || (hooks && matches!(node, Node::PropertyHook(_)))
+    {
         let span = node.span();
         out.push((span.start.offset, span.end.offset));
         return;
     }
     for child in children(node) {
-        collect_function_ranges(&child, out);
+        collect_function_ranges(&child, hooks, out);
     }
 }
 

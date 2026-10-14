@@ -36,6 +36,7 @@ use steins_syntax::Visibility;
 use crate::absence::provides_class_const;
 use crate::contract::IsA;
 use crate::cx::Cx;
+use crate::early_binding::redammed;
 use crate::fold::Folder;
 use crate::inaccessible::{class_scope_known, private_invisible};
 use crate::walk::WalkCx;
@@ -103,7 +104,7 @@ fn providers(
             stack.push(tree.resolve_class_fqn(r));
         }
     }
-    if any_conditional && !cx.dam.is_clear() {
+    if redammed(cx, any_conditional) {
         return None;
     }
     for fqn in &fqns {

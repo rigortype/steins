@@ -11,6 +11,7 @@ use steins_syntax::{
 };
 
 use crate::cx::Cx;
+use crate::early_binding::{Binding, class_use, function_use};
 use crate::env::{Known, Store};
 use crate::existence::global_function_callee;
 use crate::project::{Diagnostic, FnResolution};
@@ -64,6 +65,9 @@ use crate::{
 struct ArityTarget<'a> {
     params: &'a [Param],
     display: String,
+    /// What the message appends when the target's declaration may not have run
+    /// ([`Binding::suffix`]); empty otherwise.
+    suffix: &'static str,
 }
 
 /// The number of **required** parameters (ADR-0049 §6): the 1-based index of the
@@ -214,8 +218,10 @@ fn resolve_arity_function<'a>(
     if !folder.absence_family_available() {
         return None;
     }
-    // A2i: a conditionally-declared function re-dams the claim.
-    if decl.conditional && !cx.dam.is_clear() {
+    // A2i and early binding: a conditional declaration re-dams the claim, declines
+    // above itself, and otherwise appends the undefined-function disjunction.
+    let binding = function_use(cx, site, call.span.start);
+    if binding == Binding::Decline {
         return None;
     }
     // A2ii: the resolved FQN must be answered NOT-present as a boot-surface
@@ -225,7 +231,7 @@ fn resolve_arity_function<'a>(
         Some(false) => {}
         Some(true) | None => return None,
     }
-    Some(ArityTarget { params: &decl.params, display: decl.name.clone() })
+    Some(ArityTarget { params: &decl.params, display: decl.name.clone(), suffix: binding.suffix() })
 }
 
 /// Resolve a method/static/constructor arity target under S2's chain closure
@@ -276,8 +282,10 @@ fn resolve_arity_method<'a>(
     if !folder.absence_family_available() {
         return None;
     }
-    // A2i: a conditional class anywhere on the traversed chain re-dams the claim.
-    if any_conditional && !cx.dam.is_clear() {
+    // A2i and early binding: a conditional class anywhere on the traversed chain
+    // re-dams the claim, and a use above a class PHP does not bind early declines.
+    let binding = class_use(cx, folder, &start_fqn, any_conditional, call.span.start);
+    if binding == Binding::Decline {
         return None;
     }
     // A2ii: every traversed class must be boot-surface-absent as a class-like.
@@ -292,7 +300,7 @@ fn resolve_arity_method<'a>(
     } else {
         format!("{declaring_name}::{}", mdecl.name)
     };
-    Some(ArityTarget { params: &mdecl.params, display })
+    Some(ArityTarget { params: &mdecl.params, display, suffix: binding.suffix() })
 }
 
 /// The finding half: given a resolved target, apply the ordered arity checks
@@ -390,7 +398,11 @@ pub(crate) fn check_arity(
     let Some(target) = target else {
         return;
     };
+    let before = out.len();
     emit_arity(cx, call, &target, out);
+    for d in &mut out[before..] {
+        d.message.push_str(target.suffix);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -430,7 +442,7 @@ pub(crate) fn check_closure_scope_arity(
     params: &[Param],
     out: &mut Vec<Diagnostic>,
 ) {
-    emit_arity(cx, call, &ArityTarget { params, display: "closure".to_owned() }, out);
+    emit_arity(cx, call, &ArityTarget { params, display: "closure".to_owned(), suffix: "" }, out);
 }
 
 /// A string callee as a fully qualified function reference: PHP resolves a callable

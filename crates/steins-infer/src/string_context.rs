@@ -9,6 +9,7 @@ use steins_syntax::{ArgValue, Stmt, StringContextSite};
 
 use crate::contract::IsA;
 use crate::cx::Cx;
+use crate::early_binding::redammed;
 use crate::env::{Known, Store, Stratum, singleton_fact};
 use crate::predicates::{TypePred, pred_holds_on_fact};
 use crate::project::Diagnostic;
@@ -123,7 +124,7 @@ fn check_non_stringable(
     else {
         return;
     };
-    if any_conditional && !cx.dam.is_clear() {
+    if redammed(cx, any_conditional) {
         return;
     }
     for fqn in &fqns {

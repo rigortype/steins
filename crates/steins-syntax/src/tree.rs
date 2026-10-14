@@ -114,6 +114,10 @@ pub struct SourceTree {
     /// [`SourceTree::names_lossy`].
     names_lossy: bool,
     // end byte-lossy source (issue #927, ADR-0080 §3.2 interim)
+    /// The sorted, disjoint byte ranges of the outermost function-like nodes: functions,
+    /// methods, closures, arrow functions and property hooks (issue #1035). See
+    /// [`SourceTree::in_function_like`].
+    function_like: Vec<(u32, u32)>,
     text: String,
 }
 
@@ -273,6 +277,10 @@ impl SourceTree {
         // an unknown label (`utf8_loss::literal_label`).
         let names_lossy = lossy.is_lossy() && utf8_loss::names_touch_a_loss(program);
 
+        let mut function_like = Vec::new();
+        crate::lower_globals::collect_function_ranges(&Node::Program(program), true, &mut function_like);
+        function_like.sort_unstable();
+
         Self {
             strict_types: lowered.strict_types,
             functions: lowered.functions,
@@ -303,8 +311,18 @@ impl SourceTree {
             regions,
             line_starts: line_starts(source),
             names_lossy,
+            function_like,
             text: source.to_owned(),
         }
+    }
+
+    /// Whether byte `offset` lies inside a function, method, closure, arrow function or
+    /// property hook, rather than in the file's top-level code (issue #1035): a body runs
+    /// when it is called, a top-level statement when execution reaches it.
+    #[must_use]
+    pub fn in_function_like(&self, offset: u32) -> bool {
+        let at = self.function_like.partition_point(|(start, _)| *start <= offset);
+        at > 0 && offset < self.function_like[at - 1].1
     }
 
     /// The namespace context enclosing `offset` (its namespace name and the

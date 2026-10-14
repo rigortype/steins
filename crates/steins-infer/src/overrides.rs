@@ -16,6 +16,7 @@ use steins_syntax::{ClassDecl, MethodDecl, NameRef, NativeType, Param, Span, Vis
 use crate::fold::Folder;
 use crate::generics::native_to_contract;
 use crate::cx::Cx;
+use crate::early_binding::redammed;
 use crate::project::{Diagnostic, Res};
 use crate::return_arms::native_arms;
 use crate::walk::in_dead;
@@ -436,7 +437,7 @@ fn check_abstract_unimplemented(
         return;
     }
     // A2i: a conditional declaration among the consulted set re-dams the claim.
-    if anc.any_conditional && !cx.dam.is_clear() {
+    if redammed(cx, anc.any_conditional) {
         return;
     }
 
@@ -490,7 +491,7 @@ fn check_extends_final(
                 return;
             }
             // A2i: a conditionally-declared `final class F` may not be the F that binds.
-            if (subject_conditional || parent.conditional) && !cx.dam.is_clear() {
+            if redammed(cx, subject_conditional || parent.conditional) {
                 return;
             }
             decl_display(parent)
@@ -499,7 +500,7 @@ fn check_extends_final(
             if !folder.absence_family_available() || !cx.class_absent(&fqn) {
                 return;
             }
-            if subject_conditional && !cx.dam.is_clear() {
+            if redammed(cx, subject_conditional) {
                 return;
             }
             match engine_class(folder, &fqn) {
@@ -1002,7 +1003,7 @@ fn check_override_family(
     let Some(anc) = enumerate_ancestry(cx, folder, cd) else { return };
     // A2i, as the tracer's: a conditional declaration among the consulted set leaves
     // which signature binds to load order, so a standing dam re-dams the claim.
-    if anc.any_conditional && !cx.dam.is_clear() {
+    if redammed(cx, anc.any_conditional) {
         return;
     }
     for cm in &cd.methods {
