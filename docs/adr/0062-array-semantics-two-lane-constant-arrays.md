@@ -1411,3 +1411,17 @@ applied to keyed writes).
 the pre-amendment build on all ten public corpus packages, so no finding there
 moves.
 
+## Amendment N (2026-10-23): `IssetVar` refines at then, and `empty($v)` has a rule (issue #1086) — PENDING ratification
+
+Recorded by [ADR-0106](0106-a-condition-narrows-along-its-paths.md) §2.4 and
+§2.9. Amendment H1 is kept as written: a guard-position `isset` decides nothing
+except over a proven value, because deciding reachability from an Asserted shape
+would let a docblock silence a live path. What changes is the other half of the
+guard's payoff. `CondExpr::IssetVar` was documented as refining nothing, and
+`isset($v)` at then is now `$v !== null` (the value lane's `NotNull`, the arm
+lane's `Null` subtrahend; issue #414's guard side, #933). Nothing narrows at
+else.
+
+H3 item 5 defers `empty(…)`. For a bare variable the rule is ADR-0106 §2.9
+(`!$v`, not the `!isset(e) || !e` this item describes), decided into the run
+and deferred if its classified diff is large.

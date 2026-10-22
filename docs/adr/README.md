@@ -143,3 +143,4 @@ list in one place.
 | ADR-0103 | [Jumps are credited by level](0103-jumps-are-credited-by-level.md) |
 | ADR-0104 | [A read is judged at every position it is written, through its carrier](0104-a-read-is-judged-at-every-position-it-is-written.md) |
 | ADR-0105 | [Trait members are composed at query time, and trait bodies are walked with an open receiver](0105-trait-members-are-composed-at-query-time.md) |
+| ADR-0106 | [A condition narrows along its paths, and a stored condition is a condition](0106-a-condition-narrows-along-its-paths.md) |

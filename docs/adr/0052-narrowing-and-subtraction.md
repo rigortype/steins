@@ -2135,3 +2135,23 @@ The same set answers two neighbours. The declared-arm lane a guard call's
 `@phpstan-assert-*` tag lifts over the invalidation is not put back over a
 rebound name, and `assert()`, whose statement lowers with no invalidation set,
 forgets a rebound name before it narrows.
+
+## Note (2026-10-23): §6's "needs no change" is retracted, and the positive class-arm rule is corrected (issue #1086) — PENDING ratification
+
+Two statements of this ADR are corrected by
+[ADR-0106](0106-a-condition-narrows-along-its-paths.md), neither a reversal of
+a decision.
+
+§6 says refinement collection (`collect_refine`) "is already polarity-correct
+and needs no change". The collectors are polarity-safe, not polarity-complete:
+each distributes `And` on the then side and `Or` on the else side, and none
+contributes anything for `Or` on the then side or `And` on the else side, so
+`is_int($x) || is_float($x)` narrows nothing (#1083). That sentence is retracted;
+ADR-0106 §2.1 expands such a node into paths, applies each as a conjunction and
+joins them, and §4's refusal of `union(A, B)` stands.
+
+Point 2's positive class-arm rule (an arm dies only when it is final or an enum
+and is-a is `No`) is right, but `class_covers` implemented it for class, enum,
+object and mixed arms only and answered `Yes` for the rest, so an intersection,
+a `callable`, a non-empty-mixed or a union arm died under a positive
+`instanceof`. ADR-0106 §2.8 states the rule for those arms.
