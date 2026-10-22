@@ -1336,9 +1336,45 @@ fn cast_target(operator: &UnaryPrefixOperator<'_>) -> Option<CastTarget> {
     }
 }
 
+/// `(X ?? null) === null` and `(X ?? null) !== null`, either operand order, as the
+/// `isset` they are (issues #933, #1079).
+///
+/// `X ?? null` evaluates to `X` when `X` is set and non-null and to `null` otherwise, so
+/// comparing it with `null` asks exactly `isset(X)`; `=== null` is its negation. `X` is a
+/// constant-key offset (`Isset`) or a bare variable (`IssetVar`) and nothing else: any
+/// other left side keeps the `Cmp` form. Only a literal `null` default lowers — `?? 0`
+/// compares a value that no longer says whether `X` was set.
+fn coalesce_null_isset(b: &Binary<'_>) -> Option<CondExpr> {
+    let negate = match b.operator {
+        BinaryOperator::Identical(_) => true,
+        BinaryOperator::NotIdentical(_) => false,
+        _ => return None,
+    };
+    let is_null =
+        |e: &Expression<'_>| matches!(e.unparenthesized(), Expression::Literal(Literal::Null(_)));
+    let coalesced = if is_null(b.rhs) {
+        b.lhs
+    } else if is_null(b.lhs) {
+        b.rhs
+    } else {
+        return None;
+    };
+    let Expression::Binary(c) = coalesced.unparenthesized() else { return None };
+    if !matches!(c.operator, BinaryOperator::NullCoalesce(_)) || !is_null(c.rhs) {
+        return None;
+    }
+    let isset = const_key_offset(c.lhs)
+        .map(|(var, key)| CondExpr::Isset { var, key: Box::new(key) })
+        .or_else(|| bare_var_name(c.lhs).map(|var| CondExpr::IssetVar { var }))?;
+    Some(if negate { CondExpr::Not(Box::new(isset)) } else { isset })
+}
+
 /// Lower a binary-operator condition (comparison / `instanceof` / `&&` / `||`).
 pub(crate) fn lower_binary_cond(b: &Binary<'_>) -> CondExpr {
     let op = cmp_op_of(&b.operator);
+    if let Some(isset) = coalesce_null_isset(b) {
+        return isset;
+    }
     if let Some(op) = op {
         let lhs = lower_cond_operand(b.lhs);
         let rhs = lower_cond_operand(b.rhs);

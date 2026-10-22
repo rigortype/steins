@@ -159,6 +159,37 @@ fn assert_isset_routes_through_the_same_guard_path() {
 // to `isset(e) && e`, whose `isset` half is ordinary presence promotion.
 
 #[test]
+fn coalesce_null_compared_with_null_promotes_exactly_as_isset_does() {
+    // Issues #933, #1079: `(X ?? null) !== null` is `isset(X)`, both operand orders,
+    // and the `===` spelling is its negation.
+    let decl = "array{a?: string|null, b?: string}";
+    let want = "dumped type: string (asserted)";
+    for guard in ["($v['a'] ?? null) !== null", "null !== ($v['a'] ?? null)"] {
+        assert_eq!(guarded(decl, guard, "$v['a']"), want, "{guard}");
+    }
+    for guard in ["($v['a'] ?? null) === null", "null === ($v['a'] ?? null)"] {
+        assert_eq!(guarded_else(decl, guard, "$v['a']"), want, "{guard}");
+    }
+    assert_eq!(
+        guarded(decl, "($v['a'] ?? null) !== null", "$v"),
+        guarded(decl, "isset($v['a'])", "$v")
+    );
+}
+
+#[test]
+fn a_non_null_coalesce_default_proves_nothing_about_presence() {
+    // `?? 0` compared with `null` is always unequal: no presence is learned, and the
+    // unguarded read keeps its finding.
+    let src = fixture(
+        "array{a?: string}",
+        "if (($v['a'] ?? 0) !== null) { return $v['a']; }",
+    )
+    .replace("void", "string");
+    let ds = diagnostics(&src);
+    assert!(ds.iter().any(|d| d.id == "offset.maybe-missing"), "{ds:?}");
+}
+
+#[test]
 fn not_empty_promotes_the_key_exactly_as_isset_does() {
     assert_eq!(
         guarded("array{a?: string, b?: string}", "!empty($v['a'])", "$v['a']"),

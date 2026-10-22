@@ -276,3 +276,46 @@ fn a_dl_call_is_a_dynamism_site() {
     let kinds: Vec<_> = tree.dynamism_sites().iter().map(|s| s.kind.clone()).collect();
     assert_eq!(kinds, [DynamismKind::ExtensionLoad, DynamismKind::ExtensionLoad], "{kinds:?}");
 }
+
+#[test]
+fn a_coalesce_null_comparison_with_null_lowers_as_isset() {
+    // Issues #933, #1079: `(X ?? null) !== null` is `isset(X)`, `=== null` its negation,
+    // either operand order; a bare variable lowers to `IssetVar`.
+    let isset = |c: &CondExpr| matches!(c, CondExpr::Isset { var, .. } if var == "a");
+    for (cond, negated) in [
+        ("($a['k'] ?? null) !== null", false),
+        ("null !== ($a['k'] ?? null)", false),
+        ("($a['k'] ?? null) === null", true),
+        ("null === ($a['k'] ?? null)", true),
+    ] {
+        let (got, _) = lowered("array $a", &format!("if ({cond}) {{}}"));
+        let [Stmt { kind: StmtKind::If { cond: c, .. }, .. }] = &got[..] else {
+            panic!("{got:?}");
+        };
+        match (negated, c) {
+            (true, CondExpr::Not(inner)) => assert!(isset(inner), "{cond}: {c:?}"),
+            (false, c) => assert!(isset(c), "{cond}: {c:?}"),
+            _ => panic!("{cond}: {c:?}"),
+        }
+    }
+    let (got, _) = lowered("?string $v", "if (($v ?? null) !== null) {}");
+    let [Stmt { kind: StmtKind::If { cond, .. }, .. }] = &got[..] else { panic!("{got:?}") };
+    assert!(matches!(cond, CondExpr::IssetVar { var } if var == "v"), "{cond:?}");
+}
+
+#[test]
+fn a_coalesce_with_another_default_or_subject_keeps_its_comparison() {
+    for cond in [
+        "($a['k'] ?? 0) !== null",
+        "($a['k'] ?? null) !== 0",
+        "($a['k'] ?? null) == null",
+        "($a['k']['j'] ?? null) !== null",
+        "($a[$i] ?? null) !== null",
+    ] {
+        let (got, _) = lowered("array $a, int $i", &format!("if ({cond}) {{}}"));
+        let [Stmt { kind: StmtKind::If { cond: c, .. }, .. }] = &got[..] else {
+            panic!("{got:?}");
+        };
+        assert!(matches!(c, CondExpr::Cmp { .. }), "{cond}: {c:?}");
+    }
+}
