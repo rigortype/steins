@@ -403,3 +403,15 @@ Measured: on the ten public packages, under strict with vendor diagnostics, with
 and without PHP, the output is identical. Peak RSS on PHPUnit (release, strict
 `--no-php --vendor-diagnostics --no-cache`, median of 3) 492.4 MB to 497.3 MB,
 +1.0%; the three head runs spread over 13 MB.
+
+## Amendment (2026-10-23): stored guards become stored conditions (issue #1086) — PENDING ratification
+
+§2.7's `Store::guard_vars` held a guard only for an existence call, a member
+guard, their negation and a conjunction, and its consumer only re-vouched. Both
+limits go: any condition built from comparisons, type predicates, `isset`, `Not`,
+`Logical` and bare variables is stored with every bare variable it reads as a
+dependency, its verdict is taken under the current env, and a tested variable
+applies the condition's narrowing at the tested polarity beside the vouch. The
+invalidation rules of §2.7 (rebinding the name or a dependency, barriers, join
+intersection, poisoned scopes) are unchanged. See
+[ADR-0106](0106-a-condition-narrows-along-its-paths.md) §2.3.

@@ -546,3 +546,15 @@ silent; an unrecognized guard that narrows nothing; an untyped subject; a
 two-variable chain the single-subject restriction declines; propagation and
 `try`/`catch` damming; and the by-value/guard-chain enum twins showing the
 `Cmp`-vocabulary path was never affected by the `subtract_pred_arms` asymmetry).
+
+## Note (2026-10-23): a loose `switch` arm refines an int or bool subject (issue #1086) — PENDING ratification
+
+§9 puts `switch` out of scope and the #439 note keeps its no-match residue
+silent-only. Both stand. What changes is the positive side, which
+`refine_match_arm` skipped for every loose compare: when the subject is
+int-based (or bool) and every label of a case is a literal of that kind, `==`
+coincides with `===` and the arm refines to the labels, with `null` added for a
+nullable subject under `case 0` (or `false`). String, float and mixed-label
+cases still decline. The rule and its measured table are
+[ADR-0106](0106-a-condition-narrows-along-its-paths.md) §2.6; the no-match path
+rule is unchanged.
