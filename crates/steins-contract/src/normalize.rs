@@ -1572,7 +1572,9 @@ fn enum_case_covers(
 /// - **Positive** (subtrahend = non-instances of T): `M` dies only when
 ///   `final`/enum **and** `is_a(M, T) = No` (an open class could still
 ///   implement `T`, so `Maybe`, as does `Unknown`); a scalar/null/array arm
-///   dies; a bare `object`/`Opaque`/`mixed` arm survives.
+///   dies; a bare `object`/`Opaque`/`mixed`, `non-empty-mixed`, `callable` or
+///   nested-union arm survives, and an intersection dies only through a
+///   member that would die alone (issue #908).
 ///
 /// An [`ContractTy::EnumCase`] arm is an object of exact class `E`, its enum
 /// (issue #700), so it is judged as `E` is: the language makes every enum
@@ -1590,7 +1592,24 @@ fn class_covers(fqn: &str, polarity: bool, arm: &ContractTy, oracle: &dyn IsaOra
             ContractTy::EnumCase { enum_fqn, .. } => {
                 if oracle.is_a(enum_fqn, fqn) == No { Yes } else { Maybe }
             }
-            ContractTy::ObjectAny | ContractTy::Opaque | ContractTy::Mixed => Maybe,
+            // Every inhabitant of `A&B` is an `A`: the arm dies when one member
+            // alone does (a final class or enum not is-a T); otherwise an open
+            // member admits an unseen class that is also a T (issue #908).
+            ContractTy::Inter(members) => {
+                let dies = members.iter().any(|m| {
+                    matches!(m, ContractTy::Class(_) | ContractTy::EnumCase { .. })
+                        && class_covers(fqn, true, m, oracle).is_yes()
+                });
+                if dies { Yes } else { Maybe }
+            }
+            // An object may be callable (`Closure`, an invokable T),
+            // non-empty, or an arm of a nested union.
+            ContractTy::ObjectAny
+            | ContractTy::Opaque
+            | ContractTy::Mixed
+            | ContractTy::MixedMinus(_)
+            | ContractTy::CallableTy { .. }
+            | ContractTy::Union(_) => Maybe,
             _ => Yes,
         }
     } else {
@@ -2653,6 +2672,62 @@ mod tests {
         let mut arms = vec![class("animal")];
         subtract(&mut arms, &Subtrahend::Class { fqn: "Cat".to_owned(), polarity: true }, &mock());
         assert_eq!(arms, vec![class("animal")]);
+    }
+
+    // ---- positive instanceof keeps the arms it cannot rule out (issue #908) --
+
+    /// `Foo`, `Bar` interfaces (open, unenumerated); `FB` final, is-a `Bar`
+    /// only; `Dog` final, is-a `Animal`.
+    fn inter_mock() -> MockIsa {
+        MockIsa {
+            edges: [("fb", vec!["bar"]), ("dog", vec!["animal"])].into_iter().collect(),
+            finals: vec!["fb", "dog"],
+            known: vec!["fb", "dog"],
+        }
+    }
+
+    fn pos(fqn: &str) -> Subtrahend {
+        Subtrahend::Class { fqn: fqn.to_owned(), polarity: true }
+    }
+
+    #[test]
+    fn positive_instanceof_keeps_an_open_intersection_arm() {
+        // `Foo&Bar $x` under `instanceof Foo`: `Both implements Foo, Bar` inhabits it.
+        let arm = ContractTy::Inter(vec![class("foo"), class("bar")]);
+        assert_eq!(subtract_arm(&pos("Foo"), &arm, &inter_mock()), ArmFate::Survives);
+        // A member unrelated to the guard is still open: an unseen class may be both.
+        let arm = ContractTy::Inter(vec![class("bar"), class("baz")]);
+        assert_eq!(subtract_arm(&pos("Foo"), &arm, &inter_mock()), ArmFate::Survives);
+    }
+
+    #[test]
+    fn positive_instanceof_deletes_an_intersection_with_a_final_nonmember() {
+        // `(FB&Bar)` under `instanceof Foo`: every inhabitant is an `FB`, which is final
+        // and not a `Foo`, so the arm dies.
+        let arm = ContractTy::Inter(vec![class("fb"), class("bar")]);
+        assert_eq!(subtract_arm(&pos("Foo"), &arm, &inter_mock()), ArmFate::Dies);
+        // A final member that *is* the guard class keeps the arm.
+        let arm = ContractTy::Inter(vec![class("dog"), class("bar")]);
+        assert_eq!(subtract_arm(&pos("Animal"), &arm, &inter_mock()), ArmFate::Survives);
+        // An enum case member not is-a the guard deletes it as a final class does.
+        let arm = ContractTy::Inter(vec![ecase("fb", "A"), class("bar")]);
+        assert_eq!(subtract_arm(&pos("Foo"), &arm, &inter_mock()), ArmFate::Dies);
+    }
+
+    #[test]
+    fn positive_instanceof_keeps_callable_mixed_minus_and_union_arms() {
+        // A `Closure` or an invokable `Foo` is a `callable`; a `Foo` is `non-empty-mixed`.
+        let callable = ContractTy::CallableTy { sig: None, obl: crate::CallableObl::default() };
+        assert_eq!(subtract_arm(&pos("Foo"), &callable, &inter_mock()), ArmFate::Survives);
+        for cut in [MixedCut::Null, MixedCut::Falsy] {
+            let arm = ContractTy::MixedMinus(cut);
+            assert_eq!(subtract_arm(&pos("Foo"), &arm, &inter_mock()), ArmFate::Survives);
+        }
+        let arm = ContractTy::Union(vec![class("foo"), ContractTy::Base(Base::Int)]);
+        assert_eq!(subtract_arm(&pos("Foo"), &arm, &inter_mock()), ArmFate::Survives);
+        // A scalar arm still dies.
+        let arm = ContractTy::Base(Base::Int);
+        assert_eq!(subtract_arm(&pos("Foo"), &arm, &inter_mock()), ArmFate::Dies);
     }
 
     // ---- the enum case arm and its subtrahend (issue #429) ------------------
