@@ -13,7 +13,9 @@
 //! A path is applied whole rather than atom by atom, so the order inside it is the
 //! order the vocabularies already depend on (`is_string($v) && $v !== ''` mints
 //! `string`, then `non-empty-string`). A condition with no `||` at then and no
-//! `&&` at else is one path and goes to the vocabulary unchanged.
+//! `&&` at else is one path and goes to the vocabulary unchanged. Around the join
+//! the driver leaves out a path the walk refutes, applies the whole condition once
+//! more, and keeps the join from knowing less than the site did ([`narrow_paths`]).
 //!
 //! The expansion is capped at [`MAX_PATHS`]. A node whose paths would pass the
 //! cap stays one atom, so the vocabularies read it as they did before paths
@@ -23,7 +25,7 @@
 
 use std::collections::HashMap;
 
-use steins_domain::Certainty;
+use steins_domain::{Certainty, Fact};
 use steins_syntax::{CondExpr, OperandSpan};
 
 use crate::cond::eval_cond;
@@ -86,7 +88,9 @@ pub(crate) fn narrow_paths(
             clones.push((penv, pstore));
         }
         if !clones.is_empty() {
-            (*env, *store) = join_envs(clones);
+            let (mut jenv, mut jstore) = join_envs(clones);
+            settle_join(env, store, &mut jenv, &mut jstore);
+            (*env, *store) = (jenv, jstore);
         }
     }
     apply(folder, cond, then, env, store);
@@ -94,6 +98,42 @@ pub(crate) fn narrow_paths(
         let mut reads = Vec::new();
         collect_reads(node, &mut reads);
         store.paths_capped.extend(reads);
+    }
+}
+
+/// Keep the join of the paths from knowing less than the site did, or knowing it in a
+/// form the next guard cannot narrow.
+///
+/// - **A nullable cross-base union the paths minted is dropped.** Over a name the
+///   site held no value fact for, `is_int($t)`, `is_string($t)` and `$t === null`
+///   mint `int`, `string` and `null` on their paths, and their join is the value
+///   lane's nullable `int|string` union. A `!== null` does not clear that union's
+///   `null` (`clear_null` leaves a union unchanged), so the `null` arm would outlive
+///   a `$t === null` early return and reach the code after it, which PHP never
+///   does. Without it the name falls back to its declared-type lane, as it did
+///   before paths existed.
+/// - **A declared-type lane the join dropped comes back unnarrowed** where the joined
+///   name holds no value fact either. The join drops a lane one path lacks (`$x ===
+///   null` unbinds it and pins the value instead, and a value one path pins joins
+///   away), so `if ($x === null || $x->m())` over `?Foo` would know nothing of `$x`.
+///   The site's lane holds of every path, so it is the sound fallback.
+fn settle_join(
+    env: &HashMap<String, Known>,
+    store: &Store,
+    jenv: &mut HashMap<String, Known>,
+    jstore: &mut Store,
+) {
+    jenv.retain(|name, k| {
+        env.contains_key(name) || !matches!(k.fact, Some(Fact::Union { nullable: true, .. }))
+    });
+    for (name, arms) in &store.contract {
+        if jstore.contract.contains_key(name) || jenv.contains_key(name) {
+            continue;
+        }
+        jstore.contract.insert(name.clone(), arms.clone());
+        if store.narrowed.contains(name) {
+            jstore.narrowed.insert(name.clone());
+        }
     }
 }
 
