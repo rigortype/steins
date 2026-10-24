@@ -850,3 +850,52 @@ fn a_parameterized_class_string_param_widens_to_the_bare_form() {
         /** @param class-string<Foo> $c */ function f($c): void { \\PHPStan\\dumpType($c); }\n";
     assert_eq!(one_type(src), "dumped type: class-string (asserted)");
 }
+
+/// Every `debug.type` body a source produces, in source order.
+fn type_bodies(src: &str) -> Vec<String> {
+    dumps(src).into_iter().filter(|d| d.id == DEBUG_TYPE_ID).map(|d| d.message).collect()
+}
+
+fn dumped(types: &[&str]) -> Vec<String> {
+    types.iter().map(|t| format!("dumped type: {t}")).collect()
+}
+
+// A positive `instanceof` over a carrier it cannot rule out (issues #908, #909)
+
+#[test]
+fn a_supertype_guard_dumps_the_more_specific_declared_class() {
+    // `Dog $d` under `instanceof Animal` is still a `Dog`, inside and after the
+    // join (the else is dead, so its dump is not reached). A final class and a
+    // union lane read the same way.
+    let src = "<?php class Animal {} class Dog extends Animal {} final class Cat extends Animal {}\n\
+        function d(Dog $d): void { if ($d instanceof Animal) { \\PHPStan\\dumpType($d); }\
+        else { \\PHPStan\\dumpType($d); } \\PHPStan\\dumpType($d); }\n\
+        function c(Cat $c): void { if ($c instanceof Animal) { \\PHPStan\\dumpType($c); } }\n\
+        function u(Dog|int $x): void { if ($x instanceof Animal) { \\PHPStan\\dumpType($x); }\
+        else { \\PHPStan\\dumpType($x); } }\n";
+    assert_eq!(type_bodies(src), dumped(&["Dog", "Dog", "Cat", "Dog", "int"]));
+}
+
+#[test]
+fn a_subtype_guard_still_dumps_the_guard_class() {
+    // `Animal $a` under `instanceof Dog`, and `mixed $m`: the guard is the most
+    // specific carrier, so the `Member` renders.
+    let src = "<?php class Animal {} class Dog extends Animal {}\n\
+        function a(Animal $a): void { if ($a instanceof Dog) { \\PHPStan\\dumpType($a); }\
+        else { \\PHPStan\\dumpType($a); } \\PHPStan\\dumpType($a); }\n\
+        function m(mixed $m): void { if ($m instanceof Dog) { \\PHPStan\\dumpType($m); } }\n";
+    assert_eq!(type_bodies(src), dumped(&["Dog", "Animal", "Animal", "Dog"]));
+}
+
+#[test]
+fn a_guard_on_a_native_intersection_member_keeps_the_branch_inhabited() {
+    // `Both implements Foo, Bar` inhabits `Foo&Bar` under `instanceof Foo`; the
+    // arm survives, so the dump is not `*NEVER*`. The intersection itself has no
+    // arm spelling yet, so the guard class answers.
+    let src = "<?php interface Foo {} interface Bar {}\n\
+        function f(Foo&Bar $x): void { if ($x instanceof Foo) { \\PHPStan\\dumpType($x); } }\n\
+        function g((Foo&Bar)|int $x): void { if ($x instanceof Foo) { \\PHPStan\\dumpType($x); } }\n\
+        /** @param (Foo&Bar)|int $x */\n\
+        function h($x): void { if ($x instanceof Foo) { \\PHPStan\\dumpType($x); } }\n";
+    assert_eq!(type_bodies(src), dumped(&["Foo", "Foo", "Foo"]));
+}
