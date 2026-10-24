@@ -221,7 +221,7 @@ pub(crate) fn narrowed_fact(members: &[Val]) -> Option<Fact> {
 }
 
 /// Every variable the condition mentions, anywhere (atoms of `&&`/`||`/`!` included).
-fn collect_reads(cond: &CondExpr, out: &mut Vec<String>) {
+pub(crate) fn collect_reads(cond: &CondExpr, out: &mut Vec<String>) {
     let operand = |op: &CondOperand, out: &mut Vec<String>| match op {
         CondOperand::Var(v) => out.push(v.clone()),
         CondOperand::Other { reads, .. } => out.extend(reads.iter().cloned()),

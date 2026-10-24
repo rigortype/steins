@@ -10,8 +10,8 @@
 //! narrowing in a nested position still cannot premise a proof-layer id.
 
 use steins_infer::{
-    CALL_UNDEFINED_METHOD_ID, DEBUG_TYPE_ID, Diagnostic, Folder, ID, PARAM_MISMATCH_ID, check,
-    check_with,
+    CALL_UNDEFINED_METHOD_ID, DEBUG_TYPE_ID, Diagnostic, Folder, ID, PARAM_MISMATCH_ID,
+    TYPE_MAYBE_ARGUMENT_MISMATCH_ID, check, check_with,
 };
 use steins_syntax::{ArgValue, SourceTree};
 
@@ -404,23 +404,115 @@ fn a_ternary_arm_reads_the_declared_arms_its_condition_narrowed() {
             "!== null",
             "/** @param 'a'|'b'|null $s */\n\
              function f(?string $s): void { $y = $s !== null ? $s : 'c'; \\PHPStan\\dumpType($y); }",
-            "'a'|'b'|'c'",
+            "'a'|'b'|'c' (asserted)",
         ),
         (
             "!== false",
             "/** @param positive-int|false $s */\n\
              function f(int|false $s): void { $y = $s !== false ? $s : 7; \\PHPStan\\dumpType($y); }",
-            "int<1, max>",
+            "int<1, max> (asserted)",
         ),
         (
             "is_string",
             "/** @param non-empty-string|int $s */\n\
              function f(string|int $s): void { $y = is_string($s) ? $s : 'x'; \
              \\PHPStan\\dumpType($y); }",
-            "non-empty-string",
+            "non-empty-string (asserted)",
         ),
     ] {
         let found = dumps(&format!("<?php\n{src}\n"));
         assert_eq!(found, vec![format!("dumped type: {ty}")], "{name}");
     }
+}
+
+/// The argument-mismatch ids a source reports under the default posture, in order:
+/// the proof grade, and the maybe grade where the default tier keeps it.
+fn mismatch_ids(src: &str) -> Vec<&'static str> {
+    findings(src)
+        .into_iter()
+        .filter_map(|d| match d.id {
+            ID => Some(ID),
+            TYPE_MAYBE_ARGUMENT_MISMATCH_ID => Some(TYPE_MAYBE_ARGUMENT_MISMATCH_ID),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_ternary_over_declared_arms_stays_asserted() {
+    // Every function here is passed an int its docblock denies, and PHP 8.5 runs each
+    // call clean: a value read from the declared arms is the docblock's claim, so it
+    // never premises a proof finding, whichever arm or verdict read it. The `if`/`else`
+    // twin is the control the ternary must agree with: it reports nothing.
+    let header = "<?php\ndeclare(strict_types=1);\nfunction takes_nint(?int $i): void {}\n\
+                  function takes_int(int $i): int { return $i; }\n";
+    for (name, body) in [
+        ("!== null, then arm", "$y = $s !== null ? $s : 'c'; takes_nint($y);"),
+        ("=== null, else arm", "$y = $s === null ? 'c' : $s; takes_nint($y);"),
+        ("truthiness", "$y = $s ? $s : 'c'; takes_nint($y);"),
+        ("a conjunct", "$y = $s !== null && $s !== 'b' ? $s : 'c'; takes_nint($y);"),
+        ("into a non-nullable int", "$y = $s !== null ? $s : 'c'; takes_int($y);"),
+        (
+            "the if/else control",
+            "if ($s !== null) { $y = $s; } else { $y = 'c'; } takes_nint($y);",
+        ),
+    ] {
+        let src =
+            format!("{header}/** @param 'a'|'b'|null $s */\nfunction f($s): void {{ {body} }}\n");
+        assert_eq!(mismatch_ids(&src), Vec::<&str>::new(), "{name}");
+    }
+}
+
+#[test]
+fn a_ternary_over_proven_values_stays_a_proof() {
+    // The kept shapes: a condition and arms that read nothing declared give a proven
+    // value, decided or joined, and a mismatch on it is a proof.
+    let header = "<?php\ndeclare(strict_types=1);\nfunction takes_int(int $i): int { return $i; }\n";
+    for (name, body) in [
+        ("decided over a proven local", "function f(): void { $x = 1; $y = $x === 1 ? 'a' : 2; \
+                                          takes_int($y); }"),
+        ("undecided over two literals", "function f(bool $c): void { $y = $c ? 'a' : 'b'; \
+                                          takes_int($y); }"),
+    ] {
+        assert_eq!(mismatch_ids(&format!("{header}{body}\n")), vec![ID], "{name}");
+    }
+}
+
+#[test]
+fn a_ternary_decided_by_a_declared_literal_stays_asserted() {
+    // `@param 1 $one` lives in the declared arms alone: the verdict rests on the
+    // docblock, so the arm it picks is the docblock's claim too. `f(2)` runs clean in
+    // PHP 8.5 (the else arm is taken).
+    let header = "<?php\ndeclare(strict_types=1);\nfunction takes_int(int $i): int { return $i; }\n\
+                  class N {}\nclass M {}\n";
+    for (name, body) in [
+        (
+            "a declared literal",
+            "/** @param 1 $one */\n\
+             function f(int $one): void { $y = $one === 1 ? 'a' : 2; takes_int($y); }",
+        ),
+        (
+            "a declared class",
+            "/** @param N $x */\n\
+             function f(object $x): void { $y = $x instanceof N ? 'a' : 2; takes_int($y); }",
+        ),
+        (
+            "a declared non-null",
+            "/** @param int $x */\n\
+             function f(?int $x): void { $y = $x === null ? 'a' : 2; takes_int($y); }",
+        ),
+    ] {
+        let src = format!("{header}{body}\n");
+        assert!(!mismatch_ids(&src).contains(&ID), "{name}: {:?}", findings(&src));
+    }
+    // A member guard folds over the declared receiver's arms, and a docblock-only
+    // receiver is a claim: `f(new class { function gone() {} })` takes the then arm.
+    let src = format!(
+        "{header}/** @param N $x */\n\
+         function f(object $x): void {{ $y = method_exists($x, 'gone') ? 2 : 'a'; \
+         takes_int($y); }}\n"
+    );
+    let tree = SourceTree::parse(&src);
+    let found = check_with(&tree, &[], "demo.php", &mut Absent);
+    assert!(found.iter().all(|d| d.id != ID), "a declared receiver: {found:?}");
 }
