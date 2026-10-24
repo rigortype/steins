@@ -923,15 +923,35 @@ fn a_fact_one_path_leaves_unconstrained_joins_away() {
 }
 
 #[test]
-fn a_null_test_disjunction_dumps_unknown_as_the_accepted_residue() {
+fn a_lane_the_join_drops_comes_back_unnarrowed() {
     // ADR-0106 §2.1 D5: path 1 pins `null` and unbinds the arm lane, and the join
-    // drops a lane absent on one side. No finding moves; the dump reads `unknown`.
+    // drops a lane absent on one side. The site's lane holds of every path, so the
+    // branch keeps the declaration rather than knowing nothing (`unknown`).
     let src = path_src(
         "function f(?Foo $x): string {\n\
          if ($x === null || $x->m()) { \\PHPStan\\dumpType($x); return ''; }\n\
          return '';\n}\n",
     );
-    assert_eq!(report(&src), vec!["unknown"]);
+    assert_eq!(report(&src), vec!["Foo|null"]);
+}
+
+/// A `@param` contract re-checked by a throw guard, then narrowed past (a public
+/// setter's shape): the guard's three paths join to `int|string|null`, and the
+/// code after the `null` exit never sees `null`.
+const RECHECKED: &str = "/** @param int|string|null $t */\nfunction f($t): string {\n\
+    if (!\\is_int($t) && !\\is_string($t) && null !== $t) { throw new \\TypeError(''); }\n\
+    if ($t === null) { return ''; }\n";
+
+const NEED: &str = "function need(string $s): string { return $s; }\n";
+
+#[test]
+fn a_union_joined_with_null_does_not_outlive_a_null_exit() {
+    // Past the `int` exit only a string reaches `need`.
+    let src = path_src(&format!("{RECHECKED}if (\\is_int($t)) {{ return ''; }}\nreturn need($t);\n}}\n{NEED}"));
+    assert_eq!(report(&src), Vec::<String>::new());
+    // Without it the `int` arm does, and PHP throws a TypeError.
+    let src = path_src(&format!("{RECHECKED}return need($t);\n}}\n{NEED}"));
+    assert_eq!(report(&src), vec!["phpdoc.maybe-argument-mismatch"]);
 }
 
 #[test]
