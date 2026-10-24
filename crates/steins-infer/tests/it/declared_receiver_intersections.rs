@@ -245,3 +245,75 @@ function f($o): void { $o->gone(); }
     assert_eq!(d.len(), 1, "a final arm that is-a the other arm is no conflict: {d:?}");
 }
 
+// Issue #908: a positive `instanceof` no longer deletes an intersection arm, but the
+// lane does not read the guard (issue #1095), so an intersection arm under a guard
+// declines and the lane stays as silent there as it was when the arm died.
+
+/// f9's fixture: no class is an `A&B&T`, `Fin` is a final non-`A`, `En` an enum.
+const GUARDED: &str = "<?php
+interface A { public function a(): int; } interface B { public function b(): int; }
+interface T { public function tm(): int; }
+final class Fin { public function tm(): int { return 3; } }
+class Both implements A, B { public function a(): int { return 1; } public function b(): int { return 2; } }
+enum En: int implements T { case X = 1; public function tm(): int { return 1; } }
+";
+
+fn guarded(body: &str) -> usize {
+    default_methods(&format!("{GUARDED}{body}\n")).len()
+}
+
+#[test]
+fn an_intersection_arm_under_a_guard_declines() {
+    for g in ["T", "Fin", "En", "A"] {
+        let f = format!("function f(A&B $x): int {{ if ($x instanceof {g}) {{ return $x->tm(); }} return 0; }}");
+        assert_eq!(guarded(&f), 0, "{g}");
+    }
+    // f8:15: `zz()` is on no conjunct, but the lane declines as it did when the
+    // arm was deleted.
+    let f = "function f(A&B $x): int { if ($x instanceof A) { return $x->zz(); } return 0; }";
+    assert_eq!(guarded(f), 0);
+    // Unguarded, the intersection still reports.
+    assert_eq!(guarded("function f(A&B $x): int { return $x->zz(); }"), 1);
+}
+
+#[test]
+fn a_class_arm_under_a_guard_is_unchanged() {
+    // Pre-existing false positives: the lane looks `tm()` up on `A` alone, not on
+    // the guard class (issue #1095).
+    for g in ["T", "Fin"] {
+        let f = format!("function f(A $x): int {{ if ($x instanceof {g}) {{ return $x->tm(); }} return 0; }}");
+        assert_eq!(guarded(&f), 1, "{g}");
+    }
+}
+
+#[test]
+fn method_exists_over_a_guarded_intersection_is_not_folded_false() {
+    // A dump inside the `method_exists` body is emitted only while the body is live.
+    let dumps = |f: &str| {
+        check_under(&format!("{GUARDED}{f}\n"), FinalKeyword::Enforced)
+            .into_iter()
+            .filter(|d| d.id == steins_infer::DEBUG_TYPE_ID)
+            .count()
+    };
+    let guarded = "function f(A&B $x): void { if ($x instanceof T) {\
+                   if (method_exists($x, 'nope')) { \\PHPStan\\dumpType($x); } } }";
+    assert_eq!(dumps(guarded), 1, "the guarded intersection proves nothing: the body is live");
+    // Unguarded, the lane proves `nope()` absent and the body dead.
+    let unguarded = "function f(A&B $x): void { if (method_exists($x, 'nope')) { \\PHPStan\\dumpType($x); } }";
+    assert_eq!(dumps(unguarded), 0, "the unguarded fold is false");
+}
+
+#[test]
+fn a_property_on_a_guarded_intersection_declines() {
+    let src = "<?php
+class Svc { public int $run = 1; }
+class Mock { public int $spy = 2; }
+interface G {}
+function f(Svc&Mock $o): void { if ($o instanceof G) { $a = $o->gone; } }
+function g(Svc&Mock $o): void { $a = $o->gone; }
+";
+    let d = properties(src, FinalKeyword::Enforced);
+    assert_eq!(d.len(), 1, "only the unguarded read reports: {d:?}");
+    assert_eq!(d[0].line, 6);
+}
+

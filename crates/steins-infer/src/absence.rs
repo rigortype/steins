@@ -23,7 +23,9 @@ use crate::{
     CLASS_UNDEFINED_ID, CONSTANT_UNDEFINED_ID, PROPERTY_MAYBE_UNDEFINED_ID, PROPERTY_UNDEFINED_ID,
     is_dump_family_fqn,
 };
-use crate::declared_receiver::{DescendantClosure, declared_receiver_conjuncts, descendant_closure};
+use crate::declared_receiver::{
+    DescendantClosure, declared_receiver_conjuncts, descendant_closure, guarded_intersection,
+};
 
 // ---------------------------------------------------------------------------
 // The finding-breadth flagship: `call.undefined-method` (ADR-0049 §4 / S2).
@@ -584,7 +586,11 @@ fn undefined_property_receiver(cx: &Cx, store: &Store, var: &str) -> Option<Prop
     // (issue #238), or out of scope. A scalar/array/null arm means the runtime
     // receiver may be a non-object — a different finding (`property.on-non-object`),
     // not this one — and an intersection issue #234's posture proves uninhabited is
-    // no receiver at all.
+    // no receiver at all. An intersection arm under an `instanceof` guard is
+    // declined on both legs, as the method lane declines it (issue #908).
+    if guarded_intersection(store, var, arms) {
+        return None;
+    }
     Some(PropertyReceiver::Declared(declared_receiver_conjuncts(cx, arms)?))
 }
 
