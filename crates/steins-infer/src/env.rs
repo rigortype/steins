@@ -714,6 +714,12 @@ pub(crate) struct Store {
     /// the path is not dead for anything else. A join keeps it only where every joined
     /// path carries it.
     pub(crate) withheld: bool,
+    /// The variables a condition past the path cap read (ADR-0106 §2.1): what the
+    /// walk knows of them on this path may be coarser than the condition proves, and
+    /// a dump of one says `(paths capped)` ([`crate::narrow`]). Provenance only: no
+    /// verdict reads it. Dropped for a name by [`Self::release`], emptied by
+    /// [`Self::clear`], and united at a join.
+    pub(crate) paths_capped: HashSet<String>,
 }
 
 /// An existence guard a variable holds the result of (see [`Store::guard_vars`]).
@@ -979,6 +985,7 @@ impl Store {
         // The narrowed mark describes THIS binding's guard history; a rebound var
         // starts a fresh one with none (issue #428).
         self.narrowed.remove(var);
+        self.paths_capped.remove(var);
         // A property vouch is about the binding too (issue #930).
         self.vouched.retain(|v| !matches!(v, Vouch::VarProperty { var: x, .. } if x == var));
         // A guard stored in this name, or one whose arguments name it, is about the old value.
@@ -1041,6 +1048,7 @@ impl Store {
         // Nothing is reachable after a Barrier, a remembered call result included.
         self.remembered.clear();
         self.guard_vars.clear();
+        self.paths_capped.clear();
     }
 
     /// Forget every remembered call result whose key names the place `var` — a
@@ -1824,25 +1832,7 @@ pub(crate) fn join_stores(first: &Store, rest: &[&Store]) -> Store {
         heap.insert(id, joined);
     }
 
-    // Contract lane: a var survives the join only if present in every branch; its
-    // arms are the union of the branches' surviving arms (any value live on ANY
-    // path is possible after the merge), deduped, each arm keeping its own stratum
-    // (an `Asserted` arm never launders to `Verified` through a join). Absent in any
-    // branch → dropped to no-fact (sound: the successor simply carries no lane).
-    let mut contract: HashMap<String, Vec<ContractArm>> = HashMap::new();
-    for (var, arms0) in &first.contract {
-        if !rest.iter().all(|s| s.contract.contains_key(var)) {
-            continue;
-        }
-        let mut merged = arms0.clone();
-        for s in rest {
-            if let Some(arms) = s.contract.get(var) {
-                merged.extend(arms.iter().cloned());
-            }
-        }
-        dedup_contract_arms(&mut merged);
-        contract.insert(var.clone(), merged);
-    }
+    let contract = join_contract(first, rest);
 
     // Narrowed marks (issue #428): the same INTERSECTION [`vouched`]/`members` take
     // — a var counts as narrowed after the join only where every branch proved a
@@ -1916,7 +1906,38 @@ pub(crate) fn join_stores(first: &Store, rest: &[&Store]) -> Store {
         may_hold_places,
         guard_vars: join_guard_vars(first, rest),
         withheld: first.withheld && rest.iter().all(|s| s.withheld),
+        paths_capped: join_paths_capped(first, rest),
     }
+}
+
+/// The contract lane of a join: a var survives only if present in every branch; its
+/// arms are the union of the branches' surviving arms (any value live on ANY path is
+/// possible after the merge), deduped, each arm keeping its own stratum (an
+/// `Asserted` arm never launders to `Verified` through a join). Absent in any branch
+/// → dropped to no-fact (sound: the successor simply carries no lane).
+fn join_contract(first: &Store, rest: &[&Store]) -> HashMap<String, Vec<ContractArm>> {
+    let mut contract: HashMap<String, Vec<ContractArm>> = HashMap::new();
+    for (var, arms0) in &first.contract {
+        if !rest.iter().all(|s| s.contract.contains_key(var)) {
+            continue;
+        }
+        let mut merged = arms0.clone();
+        for s in rest {
+            if let Some(arms) = s.contract.get(var) {
+                merged.extend(arms.iter().cloned());
+            }
+        }
+        dedup_contract_arms(&mut merged);
+        contract.insert(var.clone(), merged);
+    }
+    contract
+}
+
+/// The path-capped names of a join (ADR-0106 §2.1): the union, since a joined fact
+/// is as coarse as its coarsest branch.
+fn join_paths_capped(first: &Store, rest: &[&Store]) -> HashSet<String> {
+    let rest = rest.iter().flat_map(|s| s.paths_capped.iter());
+    first.paths_capped.iter().chain(rest).cloned().collect()
 }
 
 /// A guard stored in a variable survives a join only where every branch holds the same.

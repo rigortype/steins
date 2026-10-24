@@ -772,3 +772,183 @@ fn an_element_type_the_subtraction_would_empty_is_left_whole() {
                function f(array $xs): void { if (!in_array(null, $xs, true)) { \\PHPStan\\dumpType($xs); } }\n";
     assert_eq!(dumps(src), vec!["list<null> (asserted)"]);
 }
+
+// ---- Path semantics: `||` at then, `&&` at else (ADR-0106 §2.1, issue #1083) ----
+
+/// Every finding id and `debug.type` body a source produces, in source order, with
+/// the source's own functions resolvable (a userland `float` sink stands in for
+/// `number_format`, whose parameter types need the sidecar).
+fn report(src: &str) -> Vec<String> {
+    let tree = SourceTree::parse(src);
+    let functions = tree.functions().to_vec();
+    check(&tree, &functions, "t.php")
+        .into_iter()
+        .map(|d| {
+            if d.id == DEBUG_TYPE_ID {
+                d.message.replace("dumped type: ", "")
+            } else {
+                d.id.to_owned()
+            }
+        })
+        .collect()
+}
+
+/// The strict-mode prelude every path witness shares: `fmt` accepts `int|float`
+/// (strict mode widens `int` to `float`) and raises a TypeError for a string.
+fn path_src(body: &str) -> String {
+    format!(
+        "<?php\ndeclare(strict_types=1);\nfunction fmt(float $num): string {{ return ''; }}\n\
+         class Foo {{ public function m(): bool {{ return true; }} }}\n{body}"
+    )
+}
+
+#[test]
+fn a_disjunction_narrows_its_then_branch_to_the_join_of_its_paths() {
+    // `f`: path 1 is `is_int`, path 2 `!is_int && is_float`; the join is
+    // `int|float`, so the string arm is gone and the sink is silent. The else side
+    // was already `string` (`||` distributes there) and stays so.
+    let src = path_src(
+        "function f(int|float|string $n): string {\n\
+         if (\\is_int($n) || \\is_float($n)) { \\PHPStan\\dumpType($n); return fmt($n); }\n\
+         \\PHPStan\\dumpType($n); return $n;\n}\n",
+    );
+    assert_eq!(report(&src), vec!["int|float", "string"]);
+}
+
+#[test]
+fn a_negated_disjunction_narrows_its_fall_through() {
+    // `f_neg`: the then side is `!(a || b)`, one path, `string` as before; the
+    // fall-through is the else side of the negation, `a || b` at then, two paths.
+    let src = path_src(
+        "function f(int|float|string $n): string {\n\
+         if (!(\\is_int($n) || \\is_float($n))) { \\PHPStan\\dumpType($n); return $n; }\n\
+         \\PHPStan\\dumpType($n); return fmt($n);\n}\n",
+    );
+    assert_eq!(report(&src), vec!["string", "int|float"]);
+}
+
+#[test]
+fn a_conjunction_narrows_its_else_side_to_the_join_of_its_paths() {
+    // `f_early`, the `&&`-at-else mirror: `!is_int && !is_float` fails along
+    // `is_int` or along `!is_int && is_float`.
+    let src = path_src(
+        "function f(int|float|string $n): string {\n\
+         if (!\\is_int($n) && !\\is_float($n)) { return $n; }\n\
+         \\PHPStan\\dumpType($n); return fmt($n);\n}\n",
+    );
+    assert_eq!(report(&src), vec!["int|float"]);
+}
+
+#[test]
+fn a_disjunction_of_two_vocabularies_joins_their_lanes() {
+    // `f_mixed`: a type predicate on one path, an `instanceof` on the other.
+    let src = path_src(
+        "function f(int|Foo|string $n): string {\n\
+         if (\\is_int($n) || $n instanceof Foo) { \\PHPStan\\dumpType($n); return ''; }\n\
+         \\PHPStan\\dumpType($n); return $n;\n}\n",
+    );
+    assert_eq!(report(&src), vec!["int|Foo", "string"]);
+}
+
+#[test]
+fn an_asserted_disjunction_narrows_the_fall_through() {
+    // `asrt`: the `assert` statement routes through the same driver.
+    let src = path_src(
+        "function f(int|float|string $n): string {\n\
+         assert(\\is_int($n) || \\is_float($n)); \\PHPStan\\dumpType($n); return fmt($n);\n}\n",
+    );
+    assert_eq!(report(&src), vec!["int|float"]);
+}
+
+#[test]
+fn the_operand_and_ternary_positions_stay_silent() {
+    // `op` and `tern`: silent on the base and on the path driver alike.
+    let op = path_src(
+        "function f(int|float|string $n): string {\n\
+         if ((\\is_int($n) || \\is_float($n)) && fmt($n) !== '') { return 'x'; } return '';\n}\n",
+    );
+    assert_eq!(report(&op), Vec::<String>::new());
+    let tern = path_src(
+        "function f(int|float|string $n): string {\n\
+         return (\\is_int($n) || \\is_float($n)) ? fmt($n) : $n;\n}\n",
+    );
+    assert_eq!(report(&tern), Vec::<String>::new());
+}
+
+#[test]
+fn a_disjunction_of_value_comparisons_joins_the_values() {
+    // `or_scalar`: path 1 pins `null`, path 2 pins `''`; the else side is one path.
+    let src = path_src(
+        "function f(?string $s): string {\n\
+         if ($s === null || $s === '') { \\PHPStan\\dumpType($s); return 'e'; }\n\
+         \\PHPStan\\dumpType($s); return $s;\n}\n",
+    );
+    let got = report(&src);
+    assert!(got[0] == "''|null" || got[0] == "null|''", "then side: {got:?}");
+    assert_eq!(got[1..], ["non-empty-string".to_owned()]);
+}
+
+#[test]
+fn a_disjunction_that_leaves_a_live_arm_keeps_reporting() {
+    // TP `tp`: the `string` arm survives the join, and PHP throws for `'abc'`.
+    let src = path_src(
+        "function f(int|float|string $n): string {\n\
+         if (\\is_int($n) || \\is_string($n)) { \\PHPStan\\dumpType($n); return fmt($n); }\n\
+         return '';\n}\n",
+    );
+    assert_eq!(report(&src), vec!["int|string", "type.maybe-argument-mismatch"]);
+}
+
+#[test]
+fn the_else_of_a_conjunction_keeps_every_arm_a_path_leaves() {
+    // TP `tp2`: the else side joins `string|null` (path 1) with `int` at most 0
+    // (path 2), so the `int` and `null` arms still reach the string return.
+    let src = path_src(
+        "function f(int|string|null $n): string {\n\
+         if (\\is_int($n) && $n > 0) { return ''; }\n\
+         return $n;\n}\n",
+    );
+    assert_eq!(report(&src), vec!["type.maybe-return-mismatch"]);
+}
+
+#[test]
+fn a_fact_one_path_leaves_unconstrained_joins_away() {
+    // `$c || is_string($v)`: path 1 says nothing about `$v`, so the then side
+    // keeps the `int` arm; the else side is one path and stays `int`.
+    let src = "<?php\n/** @param int|string $v */\nfunction f($v, bool $c): void {\n\
+               if ($c || is_string($v)) { \\PHPStan\\dumpType($v); } else { \\PHPStan\\dumpType($v); }\n}\n";
+    let got = dumps(src);
+    assert!(got[0].starts_with("int|string"), "then side: {got:?}");
+    assert_eq!(got[1], "int (asserted)");
+}
+
+#[test]
+fn a_null_test_disjunction_dumps_unknown_as_the_accepted_residue() {
+    // ADR-0106 §2.1 D5: path 1 pins `null` and unbinds the arm lane, and the join
+    // drops a lane absent on one side. No finding moves; the dump reads `unknown`.
+    let src = path_src(
+        "function f(?Foo $x): string {\n\
+         if ($x === null || $x->m()) { \\PHPStan\\dumpType($x); return ''; }\n\
+         return '';\n}\n",
+    );
+    assert_eq!(report(&src), vec!["unknown"]);
+}
+
+#[test]
+fn a_condition_past_the_path_cap_contributes_what_it_did_and_names_the_cap() {
+    // Nine alternatives are nine paths, one past the cap of eight: the `||`
+    // contributes nothing, as on the base, and the dump says why.
+    let alts = (0..9).map(|i| format!("$n === {i}")).collect::<Vec<_>>().join(" || ");
+    let src = format!(
+        "<?php\nfunction f(int|string $n): void {{\n\
+         if ({alts}) {{ \\PHPStan\\dumpType($n); }}\n}}\n"
+    );
+    assert_eq!(dumps(&src), vec!["int|string (paths capped)"]);
+    // Eight alternatives fit and join.
+    let alts = (0..8).map(|i| format!("$n === {i}")).collect::<Vec<_>>().join(" || ");
+    let src = format!(
+        "<?php\nfunction f(int|string $n): void {{\n\
+         if ({alts}) {{ \\PHPStan\\dumpType($n); }}\n}}\n"
+    );
+    assert_eq!(dumps(&src), vec!["0|1|2|3|4|5|6|7"]);
+}
