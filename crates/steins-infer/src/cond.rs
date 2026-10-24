@@ -291,8 +291,10 @@ pub(crate) fn eval_cond(
 /// discarded after one. The remembered call results the `&&`/`||` caller produces
 /// itself. The `@phpstan-assert-if-*` envelopes and the out-parameter seeds would
 /// reach a verdict and are not threaded here: the walk applies them to the guarded
-/// body, and §2.2 names only the arm and shape lanes. A stale conjunct needs no
-/// mask: the operand's own rebinds are forgotten below.
+/// body, and §2.2 names only the arm and shape lanes. `mask_stale_conjuncts` is not
+/// run either: it drops a conjunct whose names a later conjunct rebinds, and the
+/// `cond_invalidations` step below forgets every name the operand rebinds, which
+/// removes the same narrowings and the binding with them.
 ///
 /// [`apply_cond_side`]: crate::branch::apply_cond_side
 fn threaded_operand_env(
@@ -1392,9 +1394,11 @@ fn eval_ternary_fact(
     }
     // The arms evaluate under the guard's respective refinements (ADR-0052 §6):
     // `$c ? A : B` — `A` sees `then_refinements($c)`, `B` sees `else_refinements`.
-    // Only the arm envs thread; the verdict logic is unchanged.
-    let (tenv, _) = threaded_operand_env(w, cond, true, env, store, poisoned);
-    let (eenv, _) = threaded_operand_env(w, cond, false, env, store, poisoned);
+    // Only the arm envs and stores thread; the verdict logic is unchanged. The store
+    // carries the arm lane (ADR-0106 §2.2): `$a !== null ? $a : []` reads `$a`'s
+    // declared arms without `null` in the then arm.
+    let (tenv, tstore) = threaded_operand_env(w, cond, true, env, store, poisoned);
+    let (eenv, estore) = threaded_operand_env(w, cond, false, env, store, poisoned);
     match verdict {
         Certainty::Yes => {
             w.cx
@@ -1416,14 +1420,16 @@ fn eval_ternary_fact(
             // `int|string` had no form to live in. Now each arm falls back to
             // whatever fact it carries and the two join. An arm with no fact at
             // all still drops the binding.
-            let arm = |value: &ArgValue, aenv: &HashMap<String, Known>, folder: &mut dyn Folder| {
+            let arm = |value: &ArgValue,
+                       (aenv, astore): (&HashMap<String, Known>, &Store),
+                       folder: &mut dyn Folder| {
                 w.cx
                     .resolve_literal(value, aenv, poisoned, folder)
                     .and_then(|lit| singleton_fact(&lit))
-                    .or_else(|| transfer_arg_fact(w.cx, folder, value, aenv, Some(store)))
+                    .or_else(|| transfer_arg_fact(w.cx, folder, value, aenv, Some(astore)))
             };
-            let t = arm(then_val, &tenv, folder)?;
-            let e = arm(else_val, &eenv, folder)?;
+            let t = arm(then_val, (&tenv, &tstore), folder)?;
+            let e = arm(else_val, (&eenv, &estore), folder)?;
             t.join(&e)
         }
     }
