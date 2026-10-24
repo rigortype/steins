@@ -16,6 +16,7 @@ use steins_syntax::{
 use crate::cond::eval_cmp;
 use crate::contract::{ProjectIsa, TemplateShadow, neutralize_templates, parse_tag_type};
 use crate::cx::Cx;
+use crate::dump::SHAPE_REFINED;
 use crate::env::{ContractArm, Known, Store, Stratum, absorb_contract_arms, val_of};
 use crate::return_arms::native_arms;
 use crate::walk::WalkCx;
@@ -396,11 +397,13 @@ pub(crate) fn flatten_arms(cty: ContractTy) -> Vec<ContractTy> {
 pub(crate) enum Refine {
     /// `$x === v` (then) — narrow to exactly this value.
     Exact(String, Val),
-    /// `$x !== null` (then) / `$x === null` (else) — drop nullability: clear the
-    /// abstract `nullable` flag, or remove the `null` member of a finite fact.
+    /// `$x !== null` (then) / `$x === null` (else), and `isset($x)` (then) — drop
+    /// nullability: clear the abstract `nullable` flag, or remove the `null`
+    /// member of a finite fact.
     NotNull(String),
     /// `$x !== v` (non-null, then) — remove `v` from a finite fact; for a
-    /// String-based abstract fact and `v == ""`, add `NON_EMPTY` instead.
+    /// String-based abstract fact and `v == ""`, add `NON_EMPTY` instead, and for
+    /// an array shape and `v == []`, set `non_empty`.
     Exclude(String, Val),
     /// `$x > k` &c. — intersect an Int-based abstract fact with this interval.
     IntRange(String, IntRange),
@@ -603,6 +606,16 @@ pub(crate) fn collect_refine(cond: &CondExpr, then: bool, out: &mut Vec<Refine>)
                 out.push(Refine::Truthy(v.clone()));
             }
         }
+        // `isset($v)` holds exactly where `$v !== null` does (#933), so its true
+        // path drops nullability in both lanes. Its false path proves nothing: an
+        // unset binding and a null one both land there, and only the latter
+        // carries a fact to refine. Guard position still decides nothing short of
+        // a proven value (`eval_cond`, ADR-0062 Amendment H1).
+        CondExpr::IssetVar { var } => {
+            if then {
+                out.push(Refine::NotNull(var.clone()));
+            }
+        }
         CondExpr::Not(c) => collect_refine(c, !then, out),
         CondExpr::And(a, b, _) if then => {
             collect_refine(a, true, out);
@@ -651,6 +664,17 @@ fn collect_cmp_refine(
         if matches!((op, then), (CmpOp::Loose, false) | (CmpOp::NotLoose, true))
             && matches!(val_of(&val), Some(Val::Null))
         {
+            out.push(Refine::NotNull(v));
+            return;
+        }
+        // The loose empty-array pair, the same one direction (#1079). `$x == []` is
+        // true for `null` and `false` as well, so only the branch where it fails
+        // proves anything: `$x` is neither `[]` nor `null`. `false` is left in, the
+        // one other loose equal no refinement here can spell.
+        if matches!((op, then), (CmpOp::Loose, false) | (CmpOp::NotLoose, true))
+            && matches!(val_of(&val), Some(Val::Array(items)) if items.is_empty())
+        {
+            out.push(Refine::Exclude(v.clone(), Val::Array(Vec::new())));
             out.push(Refine::NotNull(v));
             return;
         }
@@ -1133,13 +1157,27 @@ pub(crate) fn apply_refinements(
             }
             Refine::NotNull(var) => refine_fact(env, var, stratum, clear_null),
             Refine::Exclude(var, val) => {
+                let before = env.get(var).and_then(|k| k.fact.clone());
                 refine_fact(env, var, stratum, |f| exclude_member(f, val));
+                mark_shape_refined(env, var, before.as_ref());
             }
             Refine::IntRange(var, range) => {
                 refine_fact(env, var, stratum, |f| intersect_int(f, *range));
             }
             Refine::Truthy(var) => refine_fact(env, var, stratum, truthy_narrow),
         }
+    }
+}
+
+/// Mark `var`'s array shape flow-refined when a refinement changed it (`!== []`
+/// setting `non_empty`, #1079), as a shape guard marks the shapes it narrows: the
+/// dump then spells what the branch proved instead of the declaration it narrowed.
+fn mark_shape_refined(env: &mut HashMap<String, Known>, var: &str, before: Option<&Fact>) {
+    if let Some(k) = env.get_mut(var)
+        && matches!(k.fact, Some(Fact::Shape { .. }))
+        && k.fact.as_ref() != before
+    {
+        k.bound = Some(SHAPE_REFINED.to_owned());
     }
 }
 
@@ -1233,6 +1271,9 @@ pub(crate) fn clear_null(f: &Fact) -> Option<Fact> {
             Some(Fact::refined(*base, *refinement, false))
         }
         Fact::General { base, nullable: true } => Some(Fact::General { base: *base, nullable: false }),
+        Fact::Shape { shape, nullable: true } => {
+            Some(Fact::Shape { shape: shape.clone(), nullable: false })
+        }
         Fact::Singleton(_) | Fact::OneOf(_) => exclude_member(f, &Val::Null),
         // Already non-nullable abstract fact — unchanged.
         other => Some(other.clone()),
@@ -1240,7 +1281,8 @@ pub(crate) fn clear_null(f: &Fact) -> Option<Fact> {
 }
 
 /// Remove `val` from a finite fact; for a String-based abstract fact excluding
-/// `""`, add `NON_EMPTY` (the `!== ''` refinement). Otherwise unchanged.
+/// `""`, add `NON_EMPTY` (the `!== ''` refinement); for an array shape excluding
+/// `[]`, set `non_empty` (the `!== []` refinement, #1079). Otherwise unchanged.
 pub(crate) fn exclude_member(f: &Fact, val: &Val) -> Option<Fact> {
     match f.finite_members() {
         Some(members) => {
@@ -1260,6 +1302,11 @@ pub(crate) fn exclude_member(f: &Fact, val: &Val) -> Option<Fact> {
             // member set, so the subtraction lands here at the stratum of the fact
             // it narrows — the mirror of the arm-lane rule of issue #443.
             (_, Val::Bool(b)) => f.exclude_bool(*b),
+            // An array that is not `[]` is non-empty; the shape's normalizer turns
+            // that into the single optional key of a sealed shape being present.
+            (Fact::Shape { shape, nullable }, Val::Array(items)) if items.is_empty() => {
+                Some(Fact::Shape { shape: Box::new(shape.set_non_empty()), nullable: *nullable })
+            }
             _ => Some(f.clone()),
         },
     }

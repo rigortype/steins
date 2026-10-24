@@ -14,6 +14,8 @@
 //!   silently, narrowing nothing.
 //! * **Zero emission.** As in the S4 suite, no fixture here may produce a
 //!   non-debug finding: this slice adds narrowing vocabulary, not a check.
+//!   The emptiness section (#1079) is the exception: it counts the
+//!   `offset.maybe-missing` reads the guard discharges and the ones it keeps.
 
 use std::collections::HashMap;
 
@@ -471,4 +473,117 @@ fn a_catch_that_could_have_caught_the_guards_own_typeerror_proves_nothing() {
     let ds: Vec<Diagnostic> =
         diagnostics(src).into_iter().filter(|d| !d.id.starts_with("debug.")).collect();
     assert!(ds.is_empty(), "the catch body must prove nothing about $v: {ds:?}");
+}
+
+// Emptiness is a floor of one (#1079)
+//
+// A guard proving `$v` is not `[]` floors its count at one, so a sealed shape
+// with one declared optional key holds that key: the exact-count pin above at
+// `n = 1`. The kept rows below still report the read they reported before.
+
+/// `<guard>` on a nullable `@param <decl> $v`, then dump `$v` in its true branch.
+fn guarded_nullable(decl: &str, guard: &str) -> String {
+    one_type(&format!(
+        "<?php\n/** @param {decl} $v */\nfunction f(?array $v): void {{ if ({guard}) {{ \\PHPStan\\dumpType($v); }} }}\n"
+    ))
+}
+
+/// The `offset.maybe-missing` findings of a one-function fixture reading `$v[<key>]`
+/// in the true branch of `<guard>`.
+fn maybe_missing(decl: &str, guard: &str, key: &str) -> usize {
+    let src = fixture(decl, &format!("if ({guard}) {{ echo $v[{key}]; }}"));
+    diagnostics(&src).iter().filter(|d| d.id == "offset.maybe-missing").count()
+}
+
+#[test]
+fn a_non_identity_to_the_empty_array_proves_the_single_optional_key() {
+    assert_eq!(guarded("array{0?: int}", "$v !== []", "$v"), "dumped type: list{int} (asserted)");
+    assert_eq!(
+        guarded_else("array{0?: int}", "$v === []", "$v"),
+        "dumped type: list{int} (asserted)"
+    );
+    assert_eq!(guarded("array{k?: int}", "[] !== $v", "$v"), "dumped type: array{k: int} (asserted)");
+}
+
+#[test]
+fn truthiness_proves_the_single_optional_key() {
+    assert_eq!(guarded("array{0?: int}", "$v", "$v"), "dumped type: list{int} (asserted)");
+}
+
+#[test]
+fn a_loose_inequality_to_the_empty_array_proves_the_key_and_non_null() {
+    assert_eq!(guarded("array{0?: int}", "$v != []", "$v"), "dumped type: list{int} (asserted)");
+    assert_eq!(
+        guarded_else("array{0?: int}", "$v == []", "$v"),
+        "dumped type: list{int} (asserted)"
+    );
+    // `null == []` is true, so the side where it fails also drops `null`.
+    assert_eq!(
+        guarded_nullable("array{0?: int}|null", "$v != []"),
+        "dumped type: list{int} (asserted)"
+    );
+}
+
+#[test]
+fn a_null_check_clears_the_null_of_a_nullable_shape_fact() {
+    // The non-null twin `array{a?: int}` reports this read; the nullable one now
+    // does too once `=== null` has returned, instead of hiding it in its null arm.
+    let src = "<?php\n/** @param array{a?: int}|null $v */\n\
+               function f(?array $v): void { if ($v === null) { return; } echo $v['a']; }\n";
+    let n = diagnostics(src).iter().filter(|d| d.id == "offset.maybe-missing").count();
+    assert_eq!(n, 1);
+}
+
+#[test]
+fn a_loose_equality_to_the_empty_array_proves_nothing_where_it_holds() {
+    // `null == []` and `false == []` are true as well.
+    assert_eq!(
+        guarded_nullable("array{0?: int}|null", "$v == []"),
+        "dumped type: null|list{0?: int} (asserted)"
+    );
+}
+
+#[test]
+fn a_strict_non_identity_to_the_empty_array_keeps_null() {
+    // `null !== []` is true.
+    assert_eq!(
+        guarded_nullable("array{0?: int}|null", "$v !== []"),
+        "dumped type: list{int}|null (asserted)"
+    );
+}
+
+#[test]
+fn an_emptiness_guard_discharges_the_single_optional_read() {
+    for guard in ["$v !== []", "$v != []", "$v", "!($v === [])"] {
+        assert_eq!(maybe_missing("array{0?: int}", guard, "0"), 0, "{guard}");
+    }
+    let elseif = fixture("array{0?: int}", "if ($v === []) {} elseif ($v[0]) { echo $v[0]; }");
+    let ds: Vec<Diagnostic> =
+        diagnostics(&elseif).into_iter().filter(|d| !d.id.starts_with("debug.")).collect();
+    assert!(ds.is_empty(), "{ds:?}");
+}
+
+#[test]
+fn two_optional_keys_stay_optional_under_emptiness() {
+    // `[1 => 2]` is non-empty and has no key 0.
+    for guard in ["$v !== []", "$v != []", "$v"] {
+        assert_eq!(maybe_missing("array{0?: int, 1?: int}", guard, "0"), 1, "{guard}");
+    }
+    assert_eq!(
+        guarded("array{0?: int, 1?: int}", "$v !== []", "$v"),
+        "dumped type: non-empty-array{0?: int, 1?: int} (asserted)"
+    );
+}
+
+#[test]
+fn an_open_tail_stays_open_under_emptiness() {
+    // `array{0?: int, ...}` may hold only an undeclared key.
+    assert_eq!(maybe_missing("array{0?: int, ...}", "$v !== []", "0"), 1);
+}
+
+#[test]
+fn a_declared_non_empty_shape_with_two_optional_keys_proves_neither() {
+    let src = fixture("non-empty-array{a?: int, b?: int}", "echo $v['a'];");
+    let n = diagnostics(&src).iter().filter(|d| d.id == "offset.maybe-missing").count();
+    assert_eq!(n, 1);
 }

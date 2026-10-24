@@ -2,10 +2,14 @@
 //! and `throw.maybe-undeclared`. Units, direct and inherited reporting, the five
 //! discharges and what they deliberately leave. The per-gap-kind fixtures live
 //! beside the emitter, with the totality check over `GapKind::ALL`.
+//!
+//! The last section pins a different strict floor, the possibly-grade return
+//! check, against what an `isset($v)` guard proves about `$v` (#933).
 
 use steins_db::{EffectsPolicy, PluginFacts, Project, ProjectLayout, SourceFile, SteinsDatabase};
 use steins_infer::{
-    Diagnostic, EFFECT_MAYBE_ENVELOPE_EXCEEDED_ID, EFFECT_ID, NoFold, THROW_MAYBE_UNDECLARED_ID,
+    DEBUG_TYPE_ID, Diagnostic, EFFECT_MAYBE_ENVELOPE_EXCEEDED_ID, EFFECT_ID, NoFold,
+    PHPDOC_MAYBE_RETURN_MISMATCH_ID, THROW_MAYBE_UNDECLARED_ID, TYPE_MAYBE_RETURN_MISMATCH_ID,
     check, check_project,
 };
 use steins_syntax::SourceTree;
@@ -444,4 +448,74 @@ fn about_filters_by_the_judged_unit() {
     let ds = effect(src);
     assert_eq!(about(&ds, "f").len(), 1);
     assert_eq!(about(&ds, "g").len(), 1);
+}
+
+// ---- `isset($v)` drops the null arm on its true side (#933) ----------------
+
+fn possibly_return(src: &str) -> Vec<Diagnostic> {
+    run(src)
+        .into_iter()
+        .filter(|d| {
+            d.id == TYPE_MAYBE_RETURN_MISMATCH_ID || d.id == PHPDOC_MAYBE_RETURN_MISMATCH_ID
+        })
+        .collect()
+}
+
+fn dumps(src: &str) -> Vec<String> {
+    run(src).into_iter().filter(|d| d.id == DEBUG_TYPE_ID).map(|d| d.message).collect()
+}
+
+fn strict_src(body: &str) -> String {
+    format!("<?php\ndeclare(strict_types=1);\n{body}\n")
+}
+
+#[test]
+fn an_isset_guard_proves_its_variable_non_null_inside() {
+    let src = strict_src(
+        "function a(?string $v): string { if (isset($v)) { \\PHPStan\\dumpType($v); return $v; } return ''; }",
+    );
+    assert!(possibly_return(&src).is_empty(), "{:#?}", run(&src));
+    assert_eq!(dumps(&src), ["dumped type: string"]);
+}
+
+#[test]
+fn a_negated_isset_guard_proves_its_variable_non_null_after_the_early_return() {
+    let src = strict_src(
+        "function b(?string $v): string { if (!isset($v)) { return ''; } \\PHPStan\\dumpType($v); return $v; }",
+    );
+    assert!(possibly_return(&src).is_empty(), "{:#?}", run(&src));
+    assert_eq!(dumps(&src), ["dumped type: string"]);
+}
+
+#[test]
+fn the_false_side_of_an_isset_guard_narrows_nothing() {
+    // `tp_isset_else(null)` raises the TypeError this reports.
+    let src = strict_src(
+        "function tp_isset_else(?string $v): string { if (isset($v)) { return ''; } return $v; }",
+    );
+    assert_eq!(possibly_return(&src).len(), 1, "{:#?}", run(&src));
+}
+
+#[test]
+fn an_isset_guard_subtracts_the_null_arm_of_a_nullable_object() {
+    let src = strict_src(
+        "final class Foo { public function m(): int { return 1; } }\n\
+         function f(?Foo $o): int { if (isset($o)) { \\PHPStan\\dumpType($o); return $o->m(); } return 0; }",
+    );
+    assert_eq!(dumps(&src), ["dumped type: Foo"]);
+    let other: Vec<_> = run(&src).into_iter().filter(|d| d.id != DEBUG_TYPE_ID).collect();
+    assert!(other.is_empty(), "{other:#?}");
+}
+
+#[test]
+fn an_isset_guard_distributes_as_a_comparison_does() {
+    let and = strict_src(
+        "function c(?string $v, bool $z): string { if (isset($v) && $z) { return $v; } return ''; }",
+    );
+    assert!(possibly_return(&and).is_empty(), "{:#?}", run(&and));
+    // Under `||` the true side is either disjunct's: nothing is proven.
+    let or = strict_src(
+        "function d(?string $v, bool $z): string { if (isset($v) || $z) { return $v; } return ''; }",
+    );
+    assert_eq!(possibly_return(&or).len(), 1, "{:#?}", run(&or));
 }
