@@ -27,11 +27,12 @@ use crate::absence::callable_class_absent;
 use crate::predicates::{TypePred, pred_holds_on_fact, type_predicate};
 use crate::existence::{eval_existence_call, global_function_callee};
 use crate::offsets::{ShapeRead, offset_key_of, offset_operand_fact, shape_read_at};
+use crate::oneof_guard::collect_reads;
 use crate::predicates::apply_type_narrowing;
 use crate::refine::{apply_class_narrowing, apply_refinements, collect_refine};
 use crate::shapes::apply_shape_narrowing;
 use crate::remembered;
-use crate::transfers::{transfer_arg_fact, transfer_arg_known};
+use crate::transfers::transfer_arg_known;
 use crate::walk::{WalkCx, mark_dead_operand, mark_dead_span};
 
 // ---------------------------------------------------------------------------
@@ -1374,6 +1375,12 @@ pub(crate) fn coalesce_lhs_proven_present(
 /// evaluates exactly one arm of a ternary, so `$x === 2 ? f("bad") : 0` with `$x`
 /// proven `1` never runs `f` at all, and a finding on it would be a false positive.
 /// `arms` carries the two source extents for exactly that record.
+///
+/// The fact comes with the stratum of what it read (ADR-0052 §5), each arm under
+/// its own threaded env and store: a `$s !== null ? $s : 'c'` over `@param
+/// 'a'|'b'|null $s` reads the narrowed declared arms, so its value is `Asserted`
+/// however the binding outside the ternary was seeded. A decided verdict adds the
+/// condition's own inputs, since the value is the taken arm only because of them.
 #[allow(clippy::too_many_arguments)]
 fn eval_ternary_fact(
     w: &WalkCx,
@@ -1384,7 +1391,7 @@ fn eval_ternary_fact(
     arms: (Span, Span),
     env: &HashMap<String, Known>,
     store: &Store,
-) -> Option<Fact> {
+) -> Option<(Fact, Stratum)> {
     let poisoned = w.scope.poisoned;
     let verdict = eval_cond(w, folder, cond, env, store, poisoned);
     match verdict {
@@ -1399,17 +1406,13 @@ fn eval_ternary_fact(
     // declared arms without `null` in the then arm.
     let (tenv, tstore) = threaded_operand_env(w, cond, true, env, store, poisoned);
     let (eenv, estore) = threaded_operand_env(w, cond, false, env, store, poisoned);
+    let decided = |value: &ArgValue, aenv: &HashMap<String, Known>, folder: &mut dyn Folder| {
+        let (lit, strat) = w.cx.resolve_literal_strat(value, aenv, poisoned, folder)?;
+        Some((singleton_fact(&lit)?, strat.min(cond_read_stratum(cond, env, store))))
+    };
     match verdict {
-        Certainty::Yes => {
-            w.cx
-                .resolve_literal(then_val, &tenv, poisoned, folder)
-                .and_then(|a| singleton_fact(&a))
-        }
-        Certainty::No => {
-            w.cx
-                .resolve_literal(else_val, &eenv, poisoned, folder)
-                .and_then(|a| singleton_fact(&a))
-        }
+        Certainty::Yes => decided(then_val, &tenv, folder),
+        Certainty::No => decided(else_val, &eenv, folder),
         Certainty::Maybe => {
             // Undecided guard: the value is one of the two arms, so the fact is
             // their join. Both arms proven is the finite case, unchanged —
@@ -1420,26 +1423,48 @@ fn eval_ternary_fact(
             // `int|string` had no form to live in. Now each arm falls back to
             // whatever fact it carries and the two join. An arm with no fact at
             // all still drops the binding.
+            //
+            // Either arm can be the taken one, so the condition's inputs decide
+            // nothing about the value: the join is as trusted as its arms.
             let arm = |value: &ArgValue,
                        (aenv, astore): (&HashMap<String, Known>, &Store),
                        folder: &mut dyn Folder| {
-                w.cx
-                    .resolve_literal(value, aenv, poisoned, folder)
-                    .and_then(|lit| singleton_fact(&lit))
-                    .or_else(|| transfer_arg_fact(w.cx, folder, value, aenv, Some(astore)))
+                let lit = w.cx.resolve_literal_strat(value, aenv, poisoned, folder);
+                match lit.and_then(|(lit, strat)| Some((singleton_fact(&lit)?, strat))) {
+                    Some(found) => Some(found),
+                    None => transfer_arg_known(w.cx, folder, value, aenv, Some(astore)),
+                }
             };
-            let t = arm(then_val, (&tenv, &tstore), folder)?;
-            let e = arm(else_val, (&eenv, &estore), folder)?;
-            t.join(&e)
+            let (t, ts) = arm(then_val, (&tenv, &tstore), folder)?;
+            let (e, es) = arm(else_val, (&eenv, &estore), folder)?;
+            Some((t.join(&e)?, ts.min(es)))
         }
     }
 }
 
-/// [`eval_ternary_fact`] with the stratum its fact enters at: the `min` over the
-/// two arms (derivation clause, ADR-0052 §5), either of which could be the taken
-/// one under a `Maybe` verdict. The assignment seam, a returning exit and the dump
-/// surface all read a ternary through this, so they agree about `(asserted)` as
-/// they do about the fact.
+/// The least trusted input a condition's verdict can rest on: for each variable it
+/// reads, the env binding's stratum and every declared arm of its lane, since a
+/// verdict reads either (a comparison's candidates span both value lanes, a member
+/// guard folds over the declared arms).
+fn cond_read_stratum(cond: &CondExpr, env: &HashMap<String, Known>, store: &Store) -> Stratum {
+    let mut reads = Vec::new();
+    collect_reads(cond, &mut reads);
+    reads.iter().fold(Stratum::Verified, |acc, v| {
+        let bound = env.get(v).map_or(Stratum::Verified, |k| k.stratum);
+        let lane = store
+            .contract_arms(v)
+            .unwrap_or(&[])
+            .iter()
+            .fold(Stratum::Verified, |acc, a| acc.min(a.stratum));
+        acc.min(bound).min(lane)
+    })
+}
+
+/// [`eval_ternary_fact`] with the stratum its fact enters at: the stratum of what
+/// the fact read, and never above the `min` over the two arms as the outer env
+/// reads them (derivation clause, ADR-0052 §5). The assignment seam, a returning
+/// exit and the dump surface all read a ternary through this, so they agree about
+/// `(asserted)` as they do about the fact.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn eval_ternary_fact_strat(
     w: &WalkCx,
@@ -1451,10 +1476,10 @@ pub(crate) fn eval_ternary_fact_strat(
     env: &HashMap<String, Known>,
     store: &Store,
 ) -> Option<(Fact, Stratum)> {
-    let fact = eval_ternary_fact(w, folder, cond, then_val, else_val, arms, env, store)?;
+    let (fact, read) = eval_ternary_fact(w, folder, cond, then_val, else_val, arms, env, store)?;
     let strat = value_stratum(w.cx, then_val, env, Some(store))
         .min(value_stratum(w.cx, else_val, env, Some(store)));
-    Some((fact, strat))
+    Some((fact, strat.min(read)))
 }
 
 /// The candidate values of a condition operand: the fact's value set for a known
