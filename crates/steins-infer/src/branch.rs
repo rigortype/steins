@@ -1018,8 +1018,13 @@ fn refine_match_arm(
     if loose {
         let Some(known) = env.get(name) else { return };
         let Some(fact) = loose_arm_fact(known.fact.as_ref(), vals) else { return };
-        let stratum = known.stratum;
-        let arm = Known::value_strat(fact, line, Some("matched arm".to_owned()), stratum);
+        // Narrow the subject's own binding: only the fact and its provenance label
+        // change. `stratum` (trust), `thinned` (a OneOf walked past an undecided exit,
+        // #1071), `line` and `closure` describe the binding, not the case, so they
+        // are inherited rather than rebuilt at their defaults.
+        let mut arm = known.clone();
+        arm.fact = Some(fact);
+        arm.bound = Some("matched arm".to_owned());
         env.insert(name.clone(), arm);
     } else if let Some(fact) = Fact::from_vals(vals) {
         env.insert(name.clone(), Known::value(fact, line, Some("matched arm".to_owned())));
@@ -1044,7 +1049,8 @@ fn loose_arm_fact(subject: Option<&Fact>, labels: Vec<Val>) -> Option<Fact> {
         Fact::OneOf(vs) => {
             let mut bases = vs.iter().filter_map(Val::base);
             let first = bases.next()?;
-            if bases.any(|b| b != first) || vs.iter().any(|v| v.base().is_none() && *v != Val::Null)
+            if bases.any(|b| b != first)
+                || vs.iter().any(|v| v.base().is_none() && *v != Val::Null)
             {
                 return None;
             }

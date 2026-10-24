@@ -601,3 +601,27 @@ fn loose_switch_declines_a_bool_label_on_an_int_subject() {
     );
     assert_eq!(dumps(&src), vec!["6: int"]);
 }
+
+#[test]
+fn loose_arm_keeps_the_subjects_thinned_flag() {
+    // #1071 path rule: `$k` is a OneOf walked past an undecided exit, so "every
+    // member is rejected" is no proof inside the case. PHP never reaches `takes`
+    // (`$y > 0` holds for both members), so the finding stays maybe-grade.
+    let src = "<?php
+declare(strict_types=1);
+function takes(string $s): void {}
+function sw(bool $c): void { $k = $c ? 1 : 2; $y = $k; if ($y > 0 && time() > 0) return; switch ($k) { case 1: case 2: takes($k); } }
+";
+    assert!(lines_of(src, "type.argument-mismatch").is_empty(), "no proven mismatch");
+}
+
+#[test]
+fn loose_int_case_reports_a_proven_argument_mismatch() {
+    // The true positive the narrowing gains: `$k` is 1 inside the case.
+    let src = "<?php
+declare(strict_types=1);
+function takes(string $s): void {}
+function f(int $k): void { switch ($k) { case 1: takes($k); } }
+";
+    assert_eq!(lines_of(src, "type.argument-mismatch"), vec![4]);
+}
