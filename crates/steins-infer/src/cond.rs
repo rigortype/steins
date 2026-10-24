@@ -28,7 +28,8 @@ use crate::predicates::{TypePred, pred_holds_on_fact, type_predicate};
 use crate::existence::{eval_existence_call, global_function_callee};
 use crate::offsets::{ShapeRead, offset_key_of, offset_operand_fact, shape_read_at};
 use crate::predicates::apply_type_narrowing;
-use crate::refine::{apply_refinements, collect_refine};
+use crate::refine::{apply_class_narrowing, apply_refinements, collect_refine};
+use crate::shapes::apply_shape_narrowing;
 use crate::remembered;
 use crate::transfers::{transfer_arg_fact, transfer_arg_known};
 use crate::walk::{WalkCx, mark_dead_operand, mark_dead_span};
@@ -223,8 +224,7 @@ pub(crate) fn eval_cond(
                 mark_dead_operand(w, b, *span);
                 return Certainty::No;
             }
-            let (benv, mut bstore) =
-                threaded_operand_env(w.cx, a, true, env, store, poisoned);
+            let (benv, mut bstore) = threaded_operand_env(w, a, true, env, store, poisoned);
             // The left operand's calls, narrowed by its having held (ADR-0102): `b`
             // reads them as it reads the variables the operand narrowed.
             remembered::produce(w, folder, a, true, &benv, &mut bstore);
@@ -237,8 +237,7 @@ pub(crate) fn eval_cond(
                 mark_dead_operand(w, b, *span);
                 return Certainty::Yes;
             }
-            let (benv, mut bstore) =
-                threaded_operand_env(w.cx, a, false, env, store, poisoned);
+            let (benv, mut bstore) = threaded_operand_env(w, a, false, env, store, poisoned);
             remembered::produce(w, folder, a, false, &benv, &mut bstore);
             va.or(eval_cond(w, folder, b, &benv, &bstore, poisoned))
         }
@@ -281,14 +280,30 @@ pub(crate) fn eval_cond(
 /// operand's runtime outcome guarantees. Native-condition refinements are
 /// `Verified` (the runtime executed the test); the clone is discarded after the
 /// verdict, so nothing leaks into the caller's env (ADR-0048 §2 walk-locality).
+///
+/// The vocabularies are the branch lane's, in its order ([`apply_cond_side`]), up
+/// to and including the arm and shape lanes (ADR-0106 §2.2): past `$n !== null`
+/// the right operand reads `$n`'s declared arms without `null`, as the `if` body
+/// does, so `method_exists($n, 'gone')` over a class lacking `gone` folds there
+/// too. Of the rest of that list, the same-expression call guards, the existence
+/// vouches and the stored-guard vouches are records the walk reads to suppress
+/// findings in the body it descends into; no verdict reads them, and this clone is
+/// discarded after one. The remembered call results the `&&`/`||` caller produces
+/// itself. The `@phpstan-assert-if-*` envelopes and the out-parameter seeds would
+/// reach a verdict and are not threaded here: the walk applies them to the guarded
+/// body, and §2.2 names only the arm and shape lanes. A stale conjunct needs no
+/// mask: the operand's own rebinds are forgotten below.
+///
+/// [`apply_cond_side`]: crate::branch::apply_cond_side
 fn threaded_operand_env(
-    cx: &Cx,
+    w: &WalkCx,
     operand: &CondExpr,
     then: bool,
     env: &HashMap<String, Known>,
     store: &Store,
     poisoned: bool,
 ) -> (HashMap<String, Known>, Store) {
+    let cx = w.cx;
     let mut benv = env.clone();
     let mut bstore = store.clone();
     let mut refs = Vec::new();
@@ -298,6 +313,11 @@ fn threaded_operand_env(
     apply_type_narrowing(cx, operand, then, &mut benv, &mut bstore);
     collect_refine(operand, then, &mut refs);
     apply_refinements(&refs, &mut benv, &mut bstore, Stratum::Verified);
+    // The arm lane (`instanceof`, `!== null`, `!== v`, truthiness, enum identity)
+    // and the shape lane, as the branch applies them; the operand is a runtime
+    // test, so a presence guard promotes at the branch's evidence stratum.
+    apply_class_narrowing(w, operand, then, &mut bstore);
+    apply_shape_narrowing(cx, operand, then, &mut benv, &mut bstore, true);
     // The operand's own side effects land after its test narrowed (a by-ref call
     // may rebind a variable the test just constrained): forget them.
     for v in cond_invalidations(cx, operand, env, store, poisoned) {
@@ -1373,8 +1393,8 @@ fn eval_ternary_fact(
     // The arms evaluate under the guard's respective refinements (ADR-0052 §6):
     // `$c ? A : B` — `A` sees `then_refinements($c)`, `B` sees `else_refinements`.
     // Only the arm envs thread; the verdict logic is unchanged.
-    let (tenv, _) = threaded_operand_env(w.cx, cond, true, env, store, poisoned);
-    let (eenv, _) = threaded_operand_env(w.cx, cond, false, env, store, poisoned);
+    let (tenv, _) = threaded_operand_env(w, cond, true, env, store, poisoned);
+    let (eenv, _) = threaded_operand_env(w, cond, false, env, store, poisoned);
     match verdict {
         Certainty::Yes => {
             w.cx
