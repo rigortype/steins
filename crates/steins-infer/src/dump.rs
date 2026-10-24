@@ -594,32 +594,42 @@ fn narrowed_lane_dump(cx: &Cx, store: &Store, var: &str) -> Option<String> {
 }
 
 /// Does a carrier below rung 2b already prove `var` a proper subtype of `class`
-/// (issue #909)?
-/// Either the heap's lower-bound class is, or every surviving declared arm is
-/// (a class or enum case that is-a `class`). An empty lane proves nothing.
+/// (issue #909)? The carrier is the one rung 2c or 3 would render: the heap's
+/// lower-bound class when there is one, else every surviving declared arm (a
+/// class or enum case that is-a `class`). An empty lane proves nothing.
+///
+/// Only a `Verified` carrier in an unpoisoned scope counts. A `@param` arm says
+/// less than the guard the walk just executed, and a reference, `extract` or a
+/// by-reference capture can rebind the variable behind a carrier the guard
+/// itself re-checked.
 ///
 /// An intersection arm does not count although it may be is-a `class`: the arm
 /// renderer has no spelling for it, so yielding would print `unknown` where the
 /// guard class is the better answer.
-fn carrier_is_a(cx: &Cx, store: &Store, var: &str, class: &str) -> bool {
+fn carrier_is_a(cx: &Cx, store: &Store, var: &str, class: &str, poisoned: bool) -> bool {
+    if poisoned {
+        return false;
+    }
     // A proper subtype only: a carrier naming the guard class itself says no
-    // more than the `Member`, which is `Verified` where a declared arm may be
-    // `Asserted`.
+    // more than the `Member`.
     let is_a = |sub: &str| {
         !sub.trim_start_matches('\\').eq_ignore_ascii_case(class.trim_start_matches('\\'))
             && cx.is_a(sub, class) == IsA::Yes
     };
-    let arm_is_a = |ty: &ContractTy| match ty {
-        ContractTy::Class(c) => is_a(c),
-        ContractTy::EnumCase { enum_fqn, .. } => is_a(enum_fqn),
-        _ => false,
+    let arm_is_a = |a: &ContractArm| {
+        a.stratum == Stratum::Verified
+            && match &a.ty {
+                ContractTy::Class(c) => is_a(c),
+                ContractTy::EnumCase { enum_fqn, .. } => is_a(enum_fqn),
+                _ => false,
+            }
     };
-    if store.obj_of(var).is_some_and(|obj| is_a(&obj.class)) {
-        return true;
+    // The heap object comes from a native hint only, so it is `Verified`, and
+    // it renders first (rung 2c).
+    if let Some(obj) = store.obj_of(var) {
+        return is_a(&obj.class);
     }
-    store
-        .contract_arms(var)
-        .is_some_and(|arms| !arms.is_empty() && arms.iter().all(|a| arm_is_a(&a.ty)))
+    store.contract_arms(var).is_some_and(|arms| !arms.is_empty() && arms.iter().all(arm_is_a))
 }
 
 /// The `Known::bound` provenance every S4 flow refinement stamps on a shape
@@ -791,7 +801,7 @@ fn dump_var(arg: &DumpArg, _: &mut dyn Folder) -> Option<DumpRendering> {
     //     heap class or the surviving arm list renders below.
     if let Some(m) = store.member_of(name)
         && let [only] = m.yes.as_slice()
-        && !carrier_is_a(cx, store, name, only)
+        && !carrier_is_a(cx, store, name, only, arg.w.scope.poisoned)
     {
         return Some(DumpRendering { text: cx.class_display_fqn(only), asserted: false });
     }
