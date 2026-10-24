@@ -381,7 +381,7 @@ fn a_lowered_switch_case_statement_adopts() {
     // break-terminated) adopts by the same per-file query and answers mid-arm.
     let src = "<?php\nfunction f(int $v): void {\nswitch ($v) {\ncase 1:\n\
                /** @psalm-trace $v */\n$y = 1;\nbreak;\n}\n}\n";
-    assert_eq!(one_trace(src).message, "traced type of $v: int");
+    assert_eq!(one_trace(src).message, "traced type of $v: 1");
 }
 
 #[test]

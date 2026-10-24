@@ -249,7 +249,7 @@ function w2(int $n): void {
 }
 ";
     assert_eq!(lines_of(src, "call.undefined-function"), vec![4, 10]);
-    assert_eq!(dumps(src), vec!["5: int", "11: int"]);
+    assert_eq!(dumps(src), vec!["5: 2", "11: 2"]);
 }
 
 #[test]
@@ -286,7 +286,7 @@ function w5(int $n): void {
 }
 ";
     assert_eq!(lines_of(src, "call.undefined-function"), vec![4, 11]);
-    assert_eq!(dumps(src), vec!["5: int"]);
+    assert_eq!(dumps(src), vec!["5: 2"]);
 }
 
 #[test]
@@ -484,4 +484,120 @@ function b3(bool $c): void {
 }
 ";
     assert_eq!(lines_of(src, "call.on-null"), vec![12]);
+}
+
+// ---- #1041: a loose switch refines an int or bool subject -----------------------
+//
+// Under `==` an int subject agrees with `===` against int labels, so the case binds
+// the label set. A nullable int meets `null == 0`, and a `?bool` meets `null == false`,
+// so those labels keep `null`. Everything else (strings, floats, mixed kinds) declines.
+// Every fixture is a witness probed on PHP 8.5.
+
+const LOOSE_HDR: &str =
+    "<?php\ndeclare(strict_types=1);\nclass X { function m(): string { return 'm'; } }\n";
+
+#[test]
+fn loose_int_case_that_leaves_a_local_alone_is_silent() {
+    // h3 / h3r / h3s: inside `case 1:` the `if` over `$k` is decided true, so the
+    // `$o = null` below it never runs and `$o->m()` is not on null.
+    for guard in ["if ($k) { return 'r'; }", "if ($k === 1) { return 'r'; }"] {
+        let src = format!(
+            "{LOOSE_HDR}function f(int $k): string {{ $o = new X(); switch ($k) {{ case 1: {guard} $o = null; break; default: return 'd'; }} return $o->m(); }}\n"
+        );
+        assert!(lines_of(&src, "call.on-null").is_empty(), "silent for `{guard}`");
+    }
+}
+
+#[test]
+fn loose_int_case_that_does_null_the_local_still_reports() {
+    // h3m: the control. `case 1:` sets `$o = null` outright; PHP throws an Error.
+    let src = format!(
+        "{LOOSE_HDR}function f(int $k): string {{ $o = new X(); switch ($k) {{ case 1: $o = null; break; default: return 'd'; }} return $o->m(); }}\n"
+    );
+    assert_eq!(lines_of(&src, "call.on-null"), vec![4]);
+}
+
+#[test]
+fn loose_nullable_int_case_zero_keeps_null_and_keeps_the_true_positive() {
+    // trap_nullable: `null == 0`, so `case 0:` is taken for null and `$k === 0` is
+    // false there; `$o = null` runs and PHP throws. The finding must stay.
+    let src = format!(
+        "{LOOSE_HDR}function f(?int $k): string {{ $o = new X(); switch ($k) {{ case 0: if ($k === 0) {{ return 'zero'; }} $o = null; break; default: return 'd'; }} return $o->m(); }}\n"
+    );
+    assert_eq!(lines_of(&src, "call.on-null"), vec![4]);
+}
+
+#[test]
+fn loose_switch_dumps_the_label_sets() {
+    // h3d: the arm binds its labels; `default` binds nothing the no-match path has not.
+    let src = format!(
+        "{LOOSE_HDR}function f(int $k): void {{\nswitch ($k) {{\ncase 1: \\PHPStan\\dumpType($k); break;\ncase 2: case 3: \\PHPStan\\dumpType($k); break;\ndefault: \\PHPStan\\dumpType($k);\n}}\n}}\n"
+    );
+    assert_eq!(dumps(&src), vec!["6: 1", "7: 2|3", "8: int"]);
+}
+
+#[test]
+fn loose_bool_switch_binds_the_bool_label() {
+    let src = format!(
+        "{LOOSE_HDR}function f(bool $b): void {{\nswitch ($b) {{\ncase true: \\PHPStan\\dumpType($b); break;\ncase false: \\PHPStan\\dumpType($b); break;\n}}\n}}\n"
+    );
+    assert_eq!(dumps(&src), vec!["6: true", "7: false"]);
+}
+
+#[test]
+fn loose_nullable_bool_false_label_keeps_null() {
+    // `null == false`: `case false:` is taken for null; `case true:` is not.
+    let src = format!(
+        "{LOOSE_HDR}function f(?bool $b): void {{\nswitch ($b) {{\ncase false: \\PHPStan\\dumpType($b); break;\ncase true: \\PHPStan\\dumpType($b); break;\n}}\n}}\n"
+    );
+    assert_eq!(dumps(&src), vec!["6: false|null", "7: true"]);
+}
+
+#[test]
+fn loose_nullable_int_labels_dump_with_and_without_null() {
+    // trap dumps: only the `0` label keeps null.
+    let src = format!(
+        "{LOOSE_HDR}function f(?int $k): void {{\nswitch ($k) {{\ncase 0: \\PHPStan\\dumpType($k); break;\ncase 1: \\PHPStan\\dumpType($k); break;\n}}\n}}\n"
+    );
+    assert_eq!(dumps(&src), vec!["6: 0|null", "7: 1"]);
+}
+
+#[test]
+fn loose_switch_declines_a_string_subject() {
+    // trap_string: `'01'` and `'1.0'` take `case '1'`, so the case is not `'1'`.
+    let src = format!(
+        "{LOOSE_HDR}function f(string $s): void {{\nswitch ($s) {{\ncase '1': \\PHPStan\\dumpType($s); break;\n}}\n}}\n"
+    );
+    assert_eq!(dumps(&src), vec!["6: string"]);
+}
+
+#[test]
+fn loose_switch_declines_a_float_subject() {
+    // trap_float: `1.0 == 1`, so the case is not an int.
+    let src = format!(
+        "{LOOSE_HDR}function f(float $f): void {{\nswitch ($f) {{\ncase 1: \\PHPStan\\dumpType($f); break;\n}}\n}}\n"
+    );
+    assert_eq!(dumps(&src), vec!["6: float"]);
+}
+
+#[test]
+fn loose_switch_declines_mixed_and_string_labels_on_an_int() {
+    // trap_mixed_labels / trap_int_string_label.
+    let mixed = format!(
+        "{LOOSE_HDR}function f(int $k): void {{\nswitch ($k) {{\ncase 1: case 'a': \\PHPStan\\dumpType($k); break;\n}}\n}}\n"
+    );
+    assert_eq!(dumps(&mixed), vec!["6: int"]);
+    let string_label = format!(
+        "{LOOSE_HDR}function f(int $k): void {{\nswitch ($k) {{\ncase '1': \\PHPStan\\dumpType($k); break;\n}}\n}}\n"
+    );
+    assert_eq!(dumps(&string_label), vec!["6: int"]);
+}
+
+#[test]
+fn loose_switch_declines_a_bool_label_on_an_int_subject() {
+    // `true == 1` and `true == 2`: a bool label is a truthiness test on an int.
+    let src = format!(
+        "{LOOSE_HDR}function f(int $k): void {{\nswitch ($k) {{\ncase true: \\PHPStan\\dumpType($k); break;\n}}\n}}\n"
+    );
+    assert_eq!(dumps(&src), vec!["6: int"]);
 }
