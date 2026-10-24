@@ -9,8 +9,10 @@
 //! Zero-FP discipline: the threaded env is walk-local, and an Asserted `-if-true`
 //! narrowing in a nested position still cannot premise a proof-layer id.
 
-use steins_infer::{Diagnostic, ID, PARAM_MISMATCH_ID, check};
-use steins_syntax::SourceTree;
+use steins_infer::{
+    CALL_UNDEFINED_METHOD_ID, Diagnostic, Folder, ID, PARAM_MISMATCH_ID, check, check_with,
+};
+use steins_syntax::{ArgValue, SourceTree};
 
 fn findings(src: &str) -> Vec<Diagnostic> {
     let tree = SourceTree::parse(src);
@@ -262,4 +264,127 @@ fn coalesce_on_array_offset_manufactures_nothing() {
         "{HDR}function f(array $arr): void {{ $x = $arr['k'] ?? \"abc\"; width($x); }}"
     );
     assert_eq!(n(&src), 0, "?? on an unseen array offset manufactures no fact");
+}
+
+// The operand lane carries the branch lane's arm and shape vocabularies (ADR-0106
+// §2.2, issue #984): the right operand of `&&`/`||` and a ternary arm see the arm
+// lane the left operand narrowed, as an `if` body does.
+
+/// The absence family answers and nothing the fixtures name is resident, so a
+/// member guard over a declared receiver folds against the fixture's own classes.
+struct Absent;
+
+impl Folder for Absent {
+    fn fold(&mut self, _: &str, _: &[ArgValue], _strict: bool) -> Option<ArgValue> {
+        None
+    }
+    fn absence_family_available(&mut self) -> bool {
+        true
+    }
+    fn boot_surface_class_like(&mut self, _: &str) -> Option<bool> {
+        Some(false)
+    }
+    fn boot_surface_function(&mut self, name: &str) -> Option<bool> {
+        Some(["method_exists", "is_callable"].contains(&name))
+    }
+}
+
+/// The lines `call.undefined-method` reports on, under the absence-aware folder. The
+/// fixture's functions start on line 5.
+fn undefined_method_lines(body: &str) -> Vec<u32> {
+    let src = format!(
+        "<?php\ndeclare(strict_types=1);\n\
+         class N {{ public function go(): string {{ return 'go'; }} }}\n\
+         class M {{ public function other(): string {{ return 'o'; }} }}\n{body}"
+    );
+    let tree = SourceTree::parse(&src);
+    check_with(&tree, &[], "demo.php", &mut Absent)
+        .into_iter()
+        .filter(|d| d.id == CALL_UNDEFINED_METHOD_ID)
+        .map(|d| d.line)
+        .collect()
+}
+
+#[test]
+fn a_null_check_then_method_guard_proves_the_body_dead() {
+    // `m_fp`: past `$n !== null` the arm lane holds only `N`, which lacks `gone`, so
+    // the guard folds `No` and the body never runs; the `||` twin folds `Yes` and the
+    // fall-through is dead. PHP 8.5 runs both clean on `new N` and on `null`.
+    for (name, body) in [
+        (
+            "m_fp",
+            "function m_fp(N|null $n): string { if ($n !== null \
+             && method_exists($n, 'gone')) { return $n->gone(); } return ''; }\n",
+        ),
+        (
+            "the De Morgan twin's fall-through",
+            "function f(N|null $n): string { if ($n === null || !method_exists($n, 'gone')) \
+             { return ''; } return $n->gone(); }\n",
+        ),
+    ] {
+        assert_eq!(undefined_method_lines(body), Vec::<u32>::new(), "{name}");
+    }
+}
+
+#[test]
+fn the_guard_shapes_that_were_already_silent_stay_silent() {
+    for (name, body) in [
+        (
+            "m_fold",
+            "function m_fold(N|null $n): string { if (method_exists($n, 'gone')) \
+             { return $n->gone(); } return ''; }\n",
+        ),
+        (
+            "m_early",
+            "function m_early(N|null $n): string { if ($n === null) { return ''; } \
+             if (method_exists($n, 'gone')) { return $n->gone(); } return ''; }\n",
+        ),
+        (
+            "m12b",
+            "function m12b(N|null $n): string { if ($n === null || !method_exists($n, 'go')) \
+             { return ''; } return $n->go(); }\n",
+        ),
+        (
+            "m12c",
+            "function m12c(N|null $n): string { if (null !== $n && is_callable([$n, 'go'])) \
+             { return $n->go(); } return ''; }\n",
+        ),
+        (
+            "a third conjunct past the folded guard",
+            "function f(N|null $n): string { if ($n !== null && method_exists($n, 'gone') \
+             && $n->gone() !== '') { return 'x'; } return ''; }\n",
+        ),
+        (
+            "the ternary's then arm",
+            "function f(N|null $n): string { return ($n !== null && method_exists($n, 'gone')) \
+             ? $n->gone() : ''; }\n",
+        ),
+        (
+            "an instanceof left operand",
+            "function f(N|M $x): string { if ($x instanceof N && method_exists($x, 'gone')) \
+             { return $x->gone(); } return ''; }\n",
+        ),
+    ] {
+        assert_eq!(undefined_method_lines(body), Vec::<u32>::new(), "{name}");
+    }
+}
+
+#[test]
+fn a_guard_on_another_method_keeps_reporting() {
+    // `go` exists, so the guard holds on `N` and the body runs: `$n->gone()` throws
+    // `Error` in PHP 8.5, on either connective's spelling.
+    for (name, body) in [
+        (
+            "&&",
+            "function tp(N|null $n): string { if ($n !== null && method_exists($n, 'go')) \
+             { return $n->gone(); } return ''; }\n",
+        ),
+        (
+            "||",
+            "function tp(N|null $n): string { if ($n === null || !method_exists($n, 'go')) \
+             { return ''; } return $n->gone(); }\n",
+        ),
+    ] {
+        assert_eq!(undefined_method_lines(body), vec![5], "{name}");
+    }
 }
