@@ -593,7 +593,8 @@ fn narrowed_lane_dump(cx: &Cx, store: &Store, var: &str) -> Option<String> {
     render_contract_arms(cx, arms)
 }
 
-/// Does a carrier below rung 2b already prove `var` is-a `class` (issue #909)?
+/// Does a carrier below rung 2b already prove `var` a proper subtype of `class`
+/// (issue #909)?
 /// Either the heap's lower-bound class is, or every surviving declared arm is
 /// (a class or enum case that is-a `class`). An empty lane proves nothing.
 ///
@@ -601,7 +602,13 @@ fn narrowed_lane_dump(cx: &Cx, store: &Store, var: &str) -> Option<String> {
 /// renderer has no spelling for it, so yielding would print `unknown` where the
 /// guard class is the better answer.
 fn carrier_is_a(cx: &Cx, store: &Store, var: &str, class: &str) -> bool {
-    let is_a = |sub: &str| cx.is_a(sub, class) == IsA::Yes;
+    // A proper subtype only: a carrier naming the guard class itself says no
+    // more than the `Member`, which is `Verified` where a declared arm may be
+    // `Asserted`.
+    let is_a = |sub: &str| {
+        !sub.trim_start_matches('\\').eq_ignore_ascii_case(class.trim_start_matches('\\'))
+            && cx.is_a(sub, class) == IsA::Yes
+    };
     let arm_is_a = |ty: &ContractTy| match ty {
         ContractTy::Class(c) => is_a(c),
         ContractTy::EnumCase { enum_fqn, .. } => is_a(enum_fqn),
