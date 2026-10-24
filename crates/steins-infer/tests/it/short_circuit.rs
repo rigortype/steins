@@ -10,7 +10,8 @@
 //! narrowing in a nested position still cannot premise a proof-layer id.
 
 use steins_infer::{
-    CALL_UNDEFINED_METHOD_ID, Diagnostic, Folder, ID, PARAM_MISMATCH_ID, check, check_with,
+    CALL_UNDEFINED_METHOD_ID, DEBUG_TYPE_ID, Diagnostic, Folder, ID, PARAM_MISMATCH_ID, check,
+    check_with,
 };
 use steins_syntax::{ArgValue, SourceTree};
 
@@ -386,5 +387,40 @@ fn a_guard_on_another_method_keeps_reporting() {
         ),
     ] {
         assert_eq!(undefined_method_lines(body), vec![5], "{name}");
+    }
+}
+
+/// The `debug.type` messages of a source, in order.
+fn dumps(src: &str) -> Vec<String> {
+    findings(src).into_iter().filter(|d| d.id == DEBUG_TYPE_ID).map(|d| d.message).collect()
+}
+
+#[test]
+fn a_ternary_arm_reads_the_declared_arms_its_condition_narrowed() {
+    // The then arm runs only where the condition held, so it reads the declared lane
+    // without the arm the condition excluded; the else arm keeps its own value.
+    for (name, src, ty) in [
+        (
+            "!== null",
+            "/** @param 'a'|'b'|null $s */\n\
+             function f(?string $s): void { $y = $s !== null ? $s : 'c'; \\PHPStan\\dumpType($y); }",
+            "'a'|'b'|'c'",
+        ),
+        (
+            "!== false",
+            "/** @param positive-int|false $s */\n\
+             function f(int|false $s): void { $y = $s !== false ? $s : 7; \\PHPStan\\dumpType($y); }",
+            "int<1, max>",
+        ),
+        (
+            "is_string",
+            "/** @param non-empty-string|int $s */\n\
+             function f(string|int $s): void { $y = is_string($s) ? $s : 'x'; \
+             \\PHPStan\\dumpType($y); }",
+            "non-empty-string",
+        ),
+    ] {
+        let found = dumps(&format!("<?php\n{src}\n"));
+        assert_eq!(found, vec![format!("dumped type: {ty}")], "{name}");
     }
 }
