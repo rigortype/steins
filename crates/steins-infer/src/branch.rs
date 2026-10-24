@@ -35,6 +35,7 @@ use crate::refine::{
 };
 use crate::shapes::{ShapeGuard, apply_shape_guard, apply_shape_narrowing, guard_key};
 use crate::loops::loop_entry_forget;
+use crate::narrow::narrow_paths;
 use crate::rebind::top_level_rebind_risk;
 use crate::header_reads::{check_header, push_unseen};
 use crate::walk::{Flow, WalkCx, mark_dead, mark_dead_span, walk_trace};
@@ -275,6 +276,11 @@ pub(crate) fn walk_if(
 /// What is applied is the condition with its stale conjuncts masked (issue
 /// #654): `$x === null && ($x = fetch()) !== null` enters its branch with the
 /// `$x` `fetch()` returned, which no refinement of the left conjunct describes.
+///
+/// The masked condition goes through the path driver (ADR-0106 §2.1): a `||` at
+/// then or a `&&` at else runs the vocabularies once per path and joins them
+/// ([`narrow_paths`]); any other condition reaches [`apply_branch_vocabularies`]
+/// unchanged.
 pub(crate) fn apply_cond_side(
     w: &WalkCx,
     folder: &mut dyn Folder,
@@ -284,7 +290,22 @@ pub(crate) fn apply_cond_side(
     store: &mut Store,
 ) {
     let masked = mask_stale_conjuncts(w.cx, cond);
-    let cond = masked.as_ref();
+    let poisoned = w.scope.poisoned;
+    narrow_paths(w, folder, masked.as_ref(), then, env, store, poisoned, &mut |f, c, t, e, s| {
+        apply_branch_vocabularies(w, f, c, t, e, s);
+    });
+}
+
+/// The branch lane's vocabularies over one path of a condition, in the order
+/// [`apply_cond_side`] documents.
+fn apply_branch_vocabularies(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    cond: &CondExpr,
+    then: bool,
+    env: &mut HashMap<String, Known>,
+    store: &mut Store,
+) {
     apply_type_narrowing(w.cx, cond, then, env, store);
     let refs = if then {
         then_refinements(cond)

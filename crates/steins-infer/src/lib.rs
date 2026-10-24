@@ -77,6 +77,7 @@ mod inaccessible;
 mod literal_memo;
 mod mechanics;
 mod method_call;
+mod narrow;
 mod no_effect;
 mod non_object;
 mod offsets;

@@ -143,13 +143,13 @@ fn a_partial_chain_leaves_the_default_the_residue() {
 #[test]
 fn a_multi_condition_arm_subtracts_the_whole_disjunction() {
     // `a, b => …` takes the arm when either holds, so the arms below it inherit
-    // `!a && !b`. The arm itself narrows nothing (a disjunction of two predicates
-    // is not one fact), which is the `if (a || b)` answer, unchanged.
+    // `!a && !b`. The arm itself is the join of its two paths, `a` and `!a && b`
+    // (ADR-0106 §2.1), which is the `if (a || b)` answer.
     assert_eq!(
         dumps(
             "<?php\nfunction f(string|int|float $foo): void {\n\techo match (true) {\n\t\tis_string($foo), is_int($foo) => \\PHPStan\\dumpType($foo),\n\t\tdefault => \\PHPStan\\dumpType($foo),\n\t};\n}\n"
         ),
-        vec!["dumped type: int|float|string", "dumped type: float"]
+        vec!["dumped type: int|string", "dumped type: float"]
     );
 }
 
@@ -197,7 +197,7 @@ fn a_conjunctive_guard_narrows_as_it_does_in_an_if() {
         dumps(
             "<?php\nfunction f(?string $a): void {\n\techo match (true) {\n\t\t$a !== null && $a !== '' => \\PHPStan\\dumpType($a),\n\t\tdefault => \\PHPStan\\dumpType($a),\n\t};\n}\n"
         ),
-        vec!["dumped type: non-empty-string", "dumped type: string|null"]
+        vec!["dumped type: non-empty-string", "dumped type: ''|null"]
     );
 }
 

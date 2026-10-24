@@ -26,6 +26,7 @@ use crate::env::{Known, Member, Store, Stratum, arg_of_val, singleton_fact};
 use crate::absence::callable_class_absent;
 use crate::predicates::{TypePred, pred_holds_on_fact, type_predicate};
 use crate::existence::{eval_existence_call, global_function_callee};
+use crate::narrow::narrow_paths;
 use crate::offsets::{ShapeRead, offset_key_of, offset_operand_fact, shape_read_at};
 use crate::oneof_guard::collect_reads;
 use crate::predicates::apply_type_narrowing;
@@ -225,7 +226,8 @@ pub(crate) fn eval_cond(
                 mark_dead_operand(w, b, *span);
                 return Certainty::No;
             }
-            let (benv, mut bstore) = threaded_operand_env(w, a, true, env, store, poisoned);
+            let (benv, mut bstore) =
+                threaded_operand_env(w, folder, a, true, env, store, poisoned);
             // The left operand's calls, narrowed by its having held (ADR-0102): `b`
             // reads them as it reads the variables the operand narrowed.
             remembered::produce(w, folder, a, true, &benv, &mut bstore);
@@ -238,7 +240,8 @@ pub(crate) fn eval_cond(
                 mark_dead_operand(w, b, *span);
                 return Certainty::Yes;
             }
-            let (benv, mut bstore) = threaded_operand_env(w, a, false, env, store, poisoned);
+            let (benv, mut bstore) =
+                threaded_operand_env(w, folder, a, false, env, store, poisoned);
             remembered::produce(w, folder, a, false, &benv, &mut bstore);
             va.or(eval_cond(w, folder, b, &benv, &bstore, poisoned))
         }
@@ -300,6 +303,7 @@ pub(crate) fn eval_cond(
 /// [`apply_cond_side`]: crate::branch::apply_cond_side
 fn threaded_operand_env(
     w: &WalkCx,
+    folder: &mut dyn Folder,
     operand: &CondExpr,
     then: bool,
     env: &HashMap<String, Known>,
@@ -309,18 +313,22 @@ fn threaded_operand_env(
     let cx = w.cx;
     let mut benv = env.clone();
     let mut bstore = store.clone();
-    let mut refs = Vec::new();
-    // The DR2 type vocabulary threads with the rest, running before the scalar
-    // refinements so a minted fact is what they refine: `is_string($s) &&
-    // strlen($s)` narrows `$s` in that order (ADR-0052 §6).
-    apply_type_narrowing(cx, operand, then, &mut benv, &mut bstore);
-    collect_refine(operand, then, &mut refs);
-    apply_refinements(&refs, &mut benv, &mut bstore, Stratum::Verified);
-    // The arm lane (`instanceof`, `!== null`, `!== v`, truthiness, enum identity)
-    // and the shape lane, as the branch applies them; the operand is a runtime
-    // test, so a presence guard promotes at the branch's evidence stratum.
-    apply_class_narrowing(w, operand, then, &mut bstore);
-    apply_shape_narrowing(cx, operand, then, &mut benv, &mut bstore, true);
+    // Through the path driver, as the branch applies its own list (ADR-0106 §2.2):
+    // `(is_int($n) || is_float($n)) && …` reads `$n` as `int|float`.
+    narrow_paths(w, folder, operand, then, &mut benv, &mut bstore, poisoned, &mut |_, c, t, e, s| {
+        // The DR2 type vocabulary threads with the rest, running before the scalar
+        // refinements so a minted fact is what they refine: `is_string($s) &&
+        // strlen($s)` narrows `$s` in that order (ADR-0052 §6).
+        apply_type_narrowing(cx, c, t, e, s);
+        let mut refs = Vec::new();
+        collect_refine(c, t, &mut refs);
+        apply_refinements(&refs, e, s, Stratum::Verified);
+        // The arm lane (`instanceof`, `!== null`, `!== v`, truthiness, enum identity)
+        // and the shape lane, as the branch applies them; the operand is a runtime
+        // test, so a presence guard promotes at the branch's evidence stratum.
+        apply_class_narrowing(w, c, t, s);
+        apply_shape_narrowing(cx, c, t, e, s, true);
+    });
     // The operand's own side effects land after its test narrowed (a by-ref call
     // may rebind a variable the test just constrained): forget them.
     for v in cond_invalidations(cx, operand, env, store, poisoned) {
@@ -1404,8 +1412,8 @@ fn eval_ternary_fact(
     // Only the arm envs and stores thread; the verdict logic is unchanged. The store
     // carries the arm lane (ADR-0106 §2.2): `$a !== null ? $a : []` reads `$a`'s
     // declared arms without `null` in the then arm.
-    let (tenv, tstore) = threaded_operand_env(w, cond, true, env, store, poisoned);
-    let (eenv, estore) = threaded_operand_env(w, cond, false, env, store, poisoned);
+    let (tenv, tstore) = threaded_operand_env(w, folder, cond, true, env, store, poisoned);
+    let (eenv, estore) = threaded_operand_env(w, folder, cond, false, env, store, poisoned);
     let decided = |value: &ArgValue, aenv: &HashMap<String, Known>, folder: &mut dyn Folder| {
         let (lit, strat) = w.cx.resolve_literal_strat(value, aenv, poisoned, folder)?;
         Some((singleton_fact(&lit)?, strat.min(cond_read_stratum(cond, env, store))))

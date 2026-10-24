@@ -716,12 +716,18 @@ fn best_dump_type(
     fold_resources: bool,
 ) -> DumpRendering {
     let arg = DumpArg { w, value, env, store, span_start, fold_resources };
-    for rung in DUMP_RUNGS {
-        if let Some(rendering) = rung(&arg, folder) {
-            return rendering;
-        }
+    let mut rendering = DUMP_RUNGS
+        .iter()
+        .find_map(|rung| rung(&arg, folder))
+        .unwrap_or_else(DumpRendering::unknown);
+    // A variable a condition past the path cap read (ADR-0106 §2.1): the cutoff
+    // names itself, so a coarse dump is not read as the condition's whole proof.
+    if let ArgValue::Var(name) = value
+        && store.paths_capped.contains(name)
+    {
+        rendering.text.push_str(" (paths capped)");
     }
-    DumpRendering::unknown()
+    rendering
 }
 
 /// A variable: its own lanes, in trust order, ending in honest unknown rather than
