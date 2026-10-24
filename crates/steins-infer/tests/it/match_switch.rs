@@ -230,12 +230,13 @@ fn switch_loose_trap_zero_vs_non_numeric_string_php8() {
     assert_eq!(n(&live), 1, "0 == \"0\" → case live → flagged");
 }
 
-// switch binds nothing (loose truth sets are multi-valued)
+// switch binds only where `==` coincides with `===` (int and bool subjects, #1041)
 
 #[test]
-fn switch_binds_nothing_in_arm() {
-    // Under loose `==`, a `switch` arm does NOT refine the subject: `$s` stays
-    // unknown inside `case "abc"`, so `width($s)` is silent...
+fn switch_binds_nothing_for_a_string_subject_in_arm() {
+    // Under loose `==`, a `switch` arm over a string subject does NOT refine it
+    // (`"abc"` is not the only string equal to a label): `$s` stays unknown inside
+    // `case "abc"`, so `width($s)` is silent...
     let src = "<?php
 function width(int $w): int { return $w; }
 switch ($s) { case \"abc\": width($s); break; }

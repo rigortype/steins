@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 
 use steins_contract::normalize;
-use steins_domain::{Certainty, Fact, Val};
+use steins_domain::{Base, Certainty, Fact, Val};
 use steins_phpdoc::AssertKind;
 use steins_syntax::{
     ArgValue, ArmLanding, CallExpr, CmpOp, CondExpr, CondOperand, Header, MatchArmT, Span,
@@ -981,8 +981,9 @@ fn eval_arm_cond(
 /// Refine the subject variable inside a matched arm's cloned env. A `match`
 /// (strict `===`) whose subject is a bare variable and whose conditions are all
 /// literals binds the subject to that exact finite set (`Singleton`/`OneOf`). A
-/// `switch` (loose `==`) binds nothing: its truth set is multi-valued (`case 0`
-/// matches `0`, `"0"`, `false`, `0.0`, …), so no single `Fact` is sound.
+/// `switch` (loose `==`) binds only where `==` coincides with `===`: see
+/// [`loose_arm_fact`] (issue #1041). A `case 0` on a string matches `"0"`, `false`,
+/// `0.0`, …, so no single `Fact` is sound there.
 fn arm_tag_literals(conditions: &[CondOperand]) -> Option<Vec<ArgValue>> {
     if conditions.is_empty() {
         return None;
@@ -1002,9 +1003,6 @@ fn refine_match_arm(
     loose: bool,
     env: &mut HashMap<String, Known>,
 ) {
-    if loose {
-        return;
-    }
     let CondOperand::Var(name) = subject else { return };
     let mut vals = Vec::with_capacity(conditions.len());
     for c in conditions {
@@ -1016,10 +1014,63 @@ fn refine_match_arm(
             _ => return,
         }
     }
-    if let Some(fact) = Fact::from_vals(vals) {
-        let line = env.get(name).map_or(0, |k| k.line);
+    let line = env.get(name).map_or(0, |k| k.line);
+    if loose {
+        let Some(known) = env.get(name) else { return };
+        let Some(fact) = loose_arm_fact(known.fact.as_ref(), vals) else { return };
+        let stratum = known.stratum;
+        let arm = Known::value_strat(fact, line, Some("matched arm".to_owned()), stratum);
+        env.insert(name.clone(), arm);
+    } else if let Some(fact) = Fact::from_vals(vals) {
         env.insert(name.clone(), Known::value(fact, line, Some("matched arm".to_owned())));
     }
+}
+
+/// The fact a loose `switch` arm binds its subject to, or `None` when `==` and `===`
+/// can disagree on the shape (issue #1041).
+///
+/// Sound only where `==` coincides with `===` for every value the subject can hold:
+/// an int-based subject (`General`/`Refined` Int, or a finite set of ints and `null`)
+/// against int labels, or a bool subject against bool labels. Then the arm's fact is
+/// the labels the subject admits, plus `null` when the subject admits it and a label
+/// equals it (`null == 0` for ints, `null == false` for bools; `null == 1` and
+/// `null == true` are false). A string subject (`"1" == "01"`), a float (`1.0 == 1`),
+/// mixed-kind labels and a string label on an int (`1 == " 1"`) all decline, as does a
+/// subject with a `Union` fact, an array, or no fact at all.
+fn loose_arm_fact(subject: Option<&Fact>, labels: Vec<Val>) -> Option<Fact> {
+    let subject = subject?;
+    let base = match subject {
+        Fact::Singleton(v) => v.base()?,
+        Fact::OneOf(vs) => {
+            let mut bases = vs.iter().filter_map(Val::base);
+            let first = bases.next()?;
+            if bases.any(|b| b != first) || vs.iter().any(|v| v.base().is_none() && *v != Val::Null)
+            {
+                return None;
+            }
+            first
+        }
+        Fact::Refined { base, .. } | Fact::General { base, .. } => *base,
+        Fact::Union { .. } | Fact::Shape { .. } => return None,
+    };
+    // The one label `null` is loosely equal to, for the subject's kind.
+    let null_label = match base {
+        Base::Int => Val::Int(0),
+        Base::Bool => Val::Bool(false),
+        Base::Float | Base::String => return None,
+    };
+    if labels.iter().any(|l| l.base() != Some(base)) {
+        return None;
+    }
+    let keeps_null = subject.admits(&Val::Null) && labels.contains(&null_label);
+    let mut arm: Vec<Val> = labels.into_iter().filter(|l| subject.admits(l)).collect();
+    if arm.is_empty() {
+        return None;
+    }
+    if keeps_null {
+        arm.push(Val::Null);
+    }
+    Fact::from_vals(arm)
 }
 
 /// Refine the subject's enum-case identity inside a matched arm (issue #433):
