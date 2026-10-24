@@ -53,7 +53,7 @@ use crate::env::{ContractArm, HandleState, Store, Stratum};
 pub(crate) fn store_holds_resource(store: &Store, var: &str) -> bool {
     matches!(
         store.contract_arms(var),
-        Some([ContractArm { ty: ContractTy::Resource { .. }, stratum: Stratum::Verified }])
+        Some([ContractArm { ty: ContractTy::Resource { .. }, stratum: Stratum::Verified, .. }])
     )
 }
 

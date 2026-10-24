@@ -170,7 +170,7 @@ fn from_arms(arms: &[ContractArm]) -> ElementBinding {
     let stratum = arm.stratum;
     let value_arms: Vec<ContractArm> = flatten_arms(val_ty.clone())
         .into_iter()
-        .map(|ty| ContractArm { ty, stratum })
+        .map(|ty| ContractArm::new(ty, stratum))
         .collect();
     ElementBinding {
         key: key_ty.and_then(|t| steins_contract::to_fact(&t)).map(|f| (f, stratum)),

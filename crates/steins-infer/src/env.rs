@@ -650,15 +650,6 @@ pub(crate) struct Store {
     /// [`subtract_pred_arms`]: crate::predicates::subtract_pred_arms
     /// [`subtract_shape_arms`]: crate::shapes::subtract_shape_arms
     pub(crate) narrowed: HashSet<String>,
-    /// Variables whose arm lane a **positive class subtrahend** has narrowed on this
-    /// path: an `instanceof T` that held, or an `@phpstan-assert T` (issue #908).
-    /// Marked at the one seam both apply through
-    /// ([`subtract_contract_lane`](crate::refine::subtract_contract_lane)), whether
-    /// or not an arm died, because the receiver is now also a `T` the arms do not
-    /// spell. The declared-receiver lane reads it to decline an intersection arm
-    /// ([`guarded_intersection`](crate::declared_receiver::guarded_intersection)).
-    /// It lives and dies with the lane: removed on rebind, intersected at a join.
-    pub(crate) class_guarded: HashSet<String>,
     /// **Class facts** (ADR-0052 §1): guard-derived is-a bounds on an
     /// object-holding variable, beside the heap's exact class. A positive
     /// `instanceof T` binds `T` into `yes`; negative binds into `no`. Deliberately
@@ -796,10 +787,35 @@ pub(crate) enum Vouch {
 /// One arm of a [`Store::contract`] lane: a declared-type alternative plus the
 /// trust stratum it was seeded at (ADR-0052 §1/§5). The `ty` is the syntactic arm
 /// judged arm-wise through steins-contract's single acceptance relation.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub(crate) struct ContractArm {
     pub(crate) ty: steins_contract::ContractTy,
     pub(crate) stratum: Stratum,
+    /// Whether a **positive class subtrahend** has passed over this arm on this path
+    /// (issue #908): an `instanceof T` that held, or a positive `@phpstan-assert T`,
+    /// set by [`subtract_contract_lane`](crate::refine::subtract_contract_lane). The
+    /// receiver is then also a `T` the arm does not spell, which the declared-receiver
+    /// lane reads ([`guarded_intersection`](crate::declared_receiver::guarded_intersection)).
+    ///
+    /// It rides on the arm so every lane copy (an assignment, a destructure, an
+    /// argument, a capture, a branch hand-back) carries it. A fresh lane starts
+    /// unmarked; a rebind drops it with the lane; a join keeps it only where every
+    /// side's copy of the arm holds it ([`dedup_contract_arms`]). A provenance bit,
+    /// not part of what the arm denotes, so equality ignores it.
+    pub(crate) guarded: bool,
+}
+
+impl ContractArm {
+    /// An unguarded arm.
+    pub(crate) fn new(ty: steins_contract::ContractTy, stratum: Stratum) -> Self {
+        ContractArm { ty, stratum, guarded: false }
+    }
+}
+
+impl PartialEq for ContractArm {
+    fn eq(&self, other: &Self) -> bool {
+        self.ty == other.ty && self.stratum == other.stratum
+    }
 }
 
 /// Guard-derived is-a bounds on an object variable (ADR-0052 §1 `Member`): is-a
@@ -963,7 +979,6 @@ impl Store {
         // The narrowed mark describes THIS binding's guard history; a rebound var
         // starts a fresh one with none (issue #428).
         self.narrowed.remove(var);
-        self.class_guarded.remove(var);
         // A property vouch is about the binding too (issue #930).
         self.vouched.retain(|v| !matches!(v, Vouch::VarProperty { var: x, .. } if x == var));
         // A guard stored in this name, or one whose arguments name it, is about the old value.
@@ -997,7 +1012,6 @@ impl Store {
         self.contract.retain(|k, _| !k.starts_with(&prefix));
         self.members.retain(|k, _| !k.starts_with(&prefix));
         self.narrowed.retain(|k| !k.starts_with(&prefix));
-        self.class_guarded.retain(|k| !k.starts_with(&prefix));
     }
 
     /// The element places bound under `var`, with the allocation each names
@@ -1022,7 +1036,6 @@ impl Store {
         self.members.clear();
         self.contract.clear();
         self.narrowed.clear();
-        self.class_guarded.clear();
         self.vouched.retain(|v| !matches!(v, Vouch::VarProperty { .. }));
         self.may_hold_places = false;
         // Nothing is reachable after a Barrier, a remembered call result included.
@@ -1838,10 +1851,12 @@ pub(crate) fn join_stores(first: &Store, rest: &[&Store]) -> Store {
     // from an unnarrowed one (its joined arms are the sibling's full seed at
     // best), so claiming it here would be the same manufactured-evidence shape
     // [`check_never_sentinel`] exists to refuse.
-    let narrowed = join_marks(first, rest, |s| &s.narrowed);
-    // The positive-class mark, the same intersection: a lane one branch left
-    // unguarded joins back its unguarded arms.
-    let class_guarded = join_marks(first, rest, |s| &s.class_guarded);
+    let narrowed: HashSet<String> = first
+        .narrowed
+        .iter()
+        .filter(|v| rest.iter().all(|s| s.narrowed.contains(*v)))
+        .cloned()
+        .collect();
 
     // Member lane: a var survives only if present in every branch; its `yes`/`no`
     // sets are the INTERSECTION across branches (a bound holds after the merge only
@@ -1894,7 +1909,6 @@ pub(crate) fn join_stores(first: &Store, rest: &[&Store]) -> Store {
         resources,
         contract,
         narrowed,
-        class_guarded,
         members,
         vouched,
         guarded_calls,
@@ -1903,15 +1917,6 @@ pub(crate) fn join_stores(first: &Store, rest: &[&Store]) -> Store {
         guard_vars: join_guard_vars(first, rest),
         withheld: first.withheld && rest.iter().all(|s| s.withheld),
     }
-}
-
-/// A per-variable mark survives a join only where every branch carries it.
-fn join_marks(
-    first: &Store,
-    rest: &[&Store],
-    marks: impl Fn(&Store) -> &HashSet<String>,
-) -> HashSet<String> {
-    marks(first).iter().filter(|v| rest.iter().all(|s| marks(s).contains(*v))).cloned().collect()
 }
 
 /// A guard stored in a variable survives a join only where every branch holds the same.
@@ -1946,23 +1951,29 @@ pub(crate) fn dedup_contract_arms(arms: &mut Vec<ContractArm>) {
             kept.iter_mut().find(|k| k.ty == arm.ty || normalize::arm_eq(&k.ty, &arm.ty))
         {
             k.stratum = k.stratum.min(arm.stratum);
+            // The guard mark holds after the merge only where every copy held it.
+            k.guarded &= arm.guarded;
             continue;
         }
         // Drop an arm strictly subsumed by a kept one; if it subsumes kept arms,
-        // it replaces them (widening), inheriting the min stratum of all it covers.
-        if kept.iter().any(|k| normalize::subsumes(&k.ty, &arm.ty).is_yes()) {
+        // it replaces them (widening), inheriting the min stratum of all it covers
+        // and their guard mark only where all of them hold it.
+        if let Some(k) = kept.iter_mut().find(|k| normalize::subsumes(&k.ty, &arm.ty).is_yes()) {
+            k.guarded &= arm.guarded;
             continue;
         }
         let mut stratum = arm.stratum;
+        let mut guarded = arm.guarded;
         kept.retain(|k| {
             if normalize::subsumes(&arm.ty, &k.ty).is_yes() {
                 stratum = stratum.min(k.stratum);
+                guarded &= k.guarded;
                 false
             } else {
                 true
             }
         });
-        kept.push(ContractArm { ty: arm.ty, stratum });
+        kept.push(ContractArm { ty: arm.ty, stratum, guarded });
     }
     absorb_contract_arms(&mut kept);
     *arms = kept;
@@ -1985,7 +1996,8 @@ pub(crate) fn absorb_contract_arms(arms: &mut Vec<ContractArm>) {
             for j in (i + 1)..arms.len() {
                 if let Some(ty) = normalize::merge_int_arms(&arms[i].ty, &arms[j].ty) {
                     let stratum = arms[i].stratum.min(arms[j].stratum);
-                    merged_at = Some((i, j, ContractArm { ty, stratum }));
+                    let guarded = arms[i].guarded && arms[j].guarded;
+                    merged_at = Some((i, j, ContractArm { ty, stratum, guarded }));
                     break 'outer;
                 }
             }
@@ -2002,10 +2014,7 @@ mod tests {
     use steins_contract::{ContractTy, ResourceState};
 
     fn resource_arm() -> Vec<ContractArm> {
-        vec![ContractArm {
-            ty: ContractTy::resource(ResourceState::Open),
-            stratum: Stratum::Verified,
-        }]
+        vec![ContractArm::new(ContractTy::resource(ResourceState::Open), Stratum::Verified)]
     }
 
     /// The sweep takes the **whole** lane set under the base, not only `refs`

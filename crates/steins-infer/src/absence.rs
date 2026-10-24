@@ -588,7 +588,7 @@ fn undefined_property_receiver(cx: &Cx, store: &Store, var: &str) -> Option<Prop
     // not this one — and an intersection issue #234's posture proves uninhabited is
     // no receiver at all. An intersection arm under an `instanceof` guard is
     // declined on both legs, as the method lane declines it (issue #908).
-    if guarded_intersection(store, var, arms) {
+    if guarded_intersection(arms) {
         return None;
     }
     Some(PropertyReceiver::Declared(declared_receiver_conjuncts(cx, arms)?))

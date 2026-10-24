@@ -117,9 +117,8 @@ pub(crate) fn expand_enum_case_arms(cx: &Cx, arms: &mut Vec<ContractArm>) {
             _ => None,
         };
         match expanded {
-            Some((fqn, cases)) => out.extend(cases.into_iter().map(|case| ContractArm {
-                ty: ContractTy::EnumCase { enum_fqn: fqn.clone(), case },
-                stratum: Stratum::Verified,
+            Some((fqn, cases)) => out.extend(cases.into_iter().map(|case| {
+                ContractArm::new(ContractTy::EnumCase { enum_fqn: fqn.clone(), case }, Stratum::Verified)
             })),
             None => out.push(arm),
         }
@@ -323,7 +322,7 @@ pub(crate) fn refine_contract_arms(
         }
         None => {
             let out: Vec<ContractArm> =
-                native.iter().cloned().map(|ty| ContractArm { ty, stratum: Stratum::Verified }).collect();
+                native.iter().cloned().map(|ty| ContractArm::new(ty, Stratum::Verified)).collect();
             (!out.is_empty()).then_some(out)
         }
     }
@@ -363,7 +362,7 @@ pub(crate) fn refine_declared_arms(
             } else {
                 Stratum::Asserted
             };
-            Some(ContractArm { ty, stratum })
+            Some(ContractArm::new(ty, stratum))
         })
         .collect();
     // Canonicalize before it enters the lane: a mined row like `strpos`'s
@@ -993,13 +992,13 @@ pub(crate) fn subtract_contract_lane(
 ) -> bool {
     let mut landed = false;
     // Every positive class subtrahend comes through here (an `instanceof` that held,
-    // a positive `@phpstan-assert`): mark the lane, landed or not (issue #908).
-    if matches!(sub, normalize::Subtrahend::Class { polarity: true, .. })
-        && store.contract.contains_key(var)
-    {
-        store.class_guarded.insert(var.to_owned());
-    }
+    // a positive `@phpstan-assert`): mark each arm it leaves, landed or not, on the
+    // arm itself so every copy of the lane carries it (issue #908).
+    let positive_class = matches!(sub, normalize::Subtrahend::Class { polarity: true, .. });
     if let Some(arms) = store.contract.get_mut(var) {
+        if positive_class {
+            arms.iter_mut().for_each(|a| a.guarded = true);
+        }
         let mut changed = false;
         // Whether the lane, before this subtraction, was held on Verified premises
         // alone — the question the emptied-lane rule below asks (issue #429).
@@ -1364,7 +1363,7 @@ mod n4_carrier_tests {
         ContractTy::Class(s.to_owned())
     }
     fn arm(ty: ContractTy, stratum: Stratum) -> ContractArm {
-        ContractArm { ty, stratum }
+        ContractArm::new(ty, stratum)
     }
     fn oracle<'c, 'a>(cx: &'c Cx<'a>) -> ProjectIsa<'c, 'a> {
         ProjectIsa { cx, demote_catalog: cx.a11_demote_catalog() }
