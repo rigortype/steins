@@ -195,7 +195,7 @@ type Field = (Key, Presence, Option<Box<Fact>>);
 /// * `non_empty` implied by any `Required` field or a `count_bound` floor ≥ 1;
 /// * `count_bound` clamped non-negative, discharged into `Required` presence
 ///   under a `Sealed` tail the floor already exhausts (the exact-count pin,
-///   issue #272);
+///   issue #272), where `non_empty` counts as a floor of one (issue #1079);
 /// * `order` absent by default — only [`ShapeFact::lift`] and other
 ///   observed-construction sites set it (issue #327).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -318,7 +318,8 @@ impl ShapeFact {
     /// under a `Sealed` tail whose declared keys the floor exhausts, every
     /// declared key becomes `Required` (the exact-count pin), at
     /// `witnessed: false` unless already witnessed (A-G9). No pin under
-    /// `Unsealed` — a floor there bounds count only, not keys. More than
+    /// `Unsealed` — a floor there bounds count only, not keys. `non_empty`
+    /// pins as a floor of one would (#1079), without being stored as one. More than
     /// [`SHAPE_WIDTH_LIMIT`] fields degrade to the tail-only summary
     /// (A-G6), whatever built them.
     #[must_use]
@@ -332,6 +333,17 @@ impl ShapeFact {
     ) -> ShapeFact {
         let count_bound =
             count_bound.intersect(IntRange::NON_NEGATIVE).unwrap_or(IntRange::NON_NEGATIVE);
+        // A non-empty sealed shape holds at least one of its declared keys, so the
+        // flag is a floor of one for the exact-count pin below (#1079), which then
+        // promotes a single optional key. The floor is read, not stored: the stored
+        // accessory stays what the caller learned, so one shape has one form
+        // whichever way its non-emptiness was established. A count the flag
+        // contradicts keeps its own floor.
+        let pin_floor = if non_empty && matches!(tail, Tail::Sealed) {
+            count_bound.intersect(IntRange::POSITIVE).unwrap_or(count_bound).lo()
+        } else {
+            count_bound.lo()
+        };
         fields.sort_by(|a, b| a.0.cmp(&b.0));
         fields.dedup_by(|a, b| a.0 == b.0);
 
@@ -365,7 +377,7 @@ impl ShapeFact {
         // Exact-count pin: no room left for an absent declared key; `declared`
         // is exactly the array's admitted key set (post-retain, above).
         if matches!(tail, Tail::Sealed)
-            && i64::try_from(fields.len()).is_ok_and(|declared| count_bound.lo() >= declared)
+            && i64::try_from(fields.len()).is_ok_and(|declared| pin_floor >= declared)
         {
             for (_, p, _) in &mut fields {
                 let keep = matches!(*p, Presence::Required { witnessed: true });
@@ -2479,6 +2491,75 @@ mod tests {
         let m = sealed(vec![(ks("a"), Presence::Optional, int_slot(1))]);
         assert_eq!(m.is_list, Certainty::Maybe);
         assert_eq!(m.set_non_empty().is_list, Certainty::No);
+    }
+
+    // Emptiness proves the single optional key of a sealed shape (#1079)
+
+    #[test]
+    fn set_non_empty_promotes_the_single_optional_key_of_a_sealed_shape() {
+        // `array{0?: int}` that is not `[]` holds key 0: the floor of one
+        // exhausts the one declared key, and the exact-count pin promotes it.
+        let n = sealed(vec![(k(0), Presence::Optional, int_slot(1))]).set_non_empty();
+        assert_eq!(n.field(&k(0)).expect("declared").1, Presence::Required { witnessed: false });
+        assert_eq!(n.count_range(), IntRange::point(1));
+        assert_eq!(n.is_list, Certainty::Yes);
+        // The floor is read, not stored: the promoted shape is the declared one.
+        assert_eq!(n, sealed(vec![(k(0), req(), int_slot(1))]));
+    }
+
+    #[test]
+    fn set_non_empty_promotes_nothing_with_two_optional_keys() {
+        // `[1 => 2]` is a non-empty `array{0?: int, 1?: int}` without key 0.
+        let s = sealed(vec![(k(0), Presence::Optional, int_slot(1)), (k(1), Presence::Optional, None)]);
+        let n = s.set_non_empty();
+        assert_eq!(n.field(&k(0)).expect("declared").1, Presence::Optional);
+        assert_eq!(n.field(&k(1)).expect("declared").1, Presence::Optional);
+        assert!(n.admits(&[(Key::Int(1), Val::Int(2))]));
+    }
+
+    #[test]
+    fn set_non_empty_promotes_nothing_under_an_open_tail() {
+        // `array{0?: int, ...}` may hold only an undeclared key.
+        let n = unsealed(vec![(k(0), Presence::Optional, None)], KeyClass::ArrayKey, None)
+            .set_non_empty();
+        assert_eq!(n.field(&k(0)).expect("declared").1, Presence::Optional);
+    }
+
+    #[test]
+    fn a_declared_non_empty_flag_reads_as_the_floor_it_implies() {
+        // `non-empty-array{a?: int}` is `array{a: int}`; two optional keys stay open.
+        let one = ShapeFact::normalize(
+            vec![(ks("a"), Presence::Optional, None)],
+            Tail::Sealed,
+            Certainty::Maybe,
+            true,
+            Vec::new(),
+        );
+        assert!(one.field(&ks("a")).expect("declared").1.is_required());
+        let two = ShapeFact::normalize(
+            vec![(ks("a"), Presence::Optional, None), (ks("b"), Presence::Optional, None)],
+            Tail::Sealed,
+            Certainty::Maybe,
+            true,
+            Vec::new(),
+        );
+        assert!(two.fields.iter().all(|(_, p, _)| *p == Presence::Optional));
+        assert_eq!(two.count_range(), IntRange::new(1, 2).expect("ordered"));
+    }
+
+    #[test]
+    fn a_non_empty_flag_against_a_zero_count_keeps_the_count_it_was_given() {
+        // Contradictory inputs widen rather than bottom (ADR-0052 §2).
+        let s = ShapeFact::normalize_counted(
+            vec![(k(0), Presence::Optional, None)],
+            Tail::Sealed,
+            Certainty::Maybe,
+            true,
+            Vec::new(),
+            IntRange::point(0),
+        );
+        assert_eq!(s.count_bound, IntRange::point(0));
+        assert_eq!(s.field(&k(0)).expect("declared").1, Presence::Optional);
     }
 
     #[test]
