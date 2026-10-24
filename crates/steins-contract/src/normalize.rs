@@ -1572,9 +1572,9 @@ fn enum_case_covers(
 /// - **Positive** (subtrahend = non-instances of T): `M` dies only when
 ///   `final`/enum **and** `is_a(M, T) = No` (an open class could still
 ///   implement `T`, so `Maybe`, as does `Unknown`); a scalar/null/array arm
-///   dies; a bare `object`/`Opaque`/`mixed`, `non-empty-mixed`, `callable` or
-///   nested-union arm survives, and an intersection dies only through a
-///   member that would die alone (issue #908).
+///   dies; a bare `object`/`Opaque`/`mixed`, `non-empty-mixed` or `callable`
+///   arm survives, a nested union dies only when every member does, and an
+///   intersection dies only through a member that would die alone (issue #908).
 ///
 /// An [`ContractTy::EnumCase`] arm is an object of exact class `E`, its enum
 /// (issue #700), so it is judged as `E` is: the language makes every enum
@@ -1602,14 +1602,16 @@ fn class_covers(fqn: &str, polarity: bool, arm: &ContractTy, oracle: &dyn IsaOra
                 });
                 if dies { Yes } else { Maybe }
             }
-            // An object may be callable (`Closure`, an invokable T),
-            // non-empty, or an arm of a nested union.
+            // A nested union dies only when every member does.
+            ContractTy::Union(members) => {
+                Certainty::all_of(members.iter().map(|m| class_covers(fqn, true, m, oracle)))
+            }
+            // An object may be callable (`Closure`, an invokable T) or non-empty.
             ContractTy::ObjectAny
             | ContractTy::Opaque
             | ContractTy::Mixed
             | ContractTy::MixedMinus(_)
-            | ContractTy::CallableTy { .. }
-            | ContractTy::Union(_) => Maybe,
+            | ContractTy::CallableTy { .. } => Maybe,
             _ => Yes,
         }
     } else {
@@ -2715,7 +2717,7 @@ mod tests {
     }
 
     #[test]
-    fn positive_instanceof_keeps_callable_mixed_minus_and_union_arms() {
+    fn positive_instanceof_keeps_callable_and_mixed_minus_arms_and_splits_a_union() {
         // A `Closure` or an invokable `Foo` is a `callable`; a `Foo` is `non-empty-mixed`.
         let callable = ContractTy::CallableTy { sig: None, obl: crate::CallableObl::default() };
         assert_eq!(subtract_arm(&pos("Foo"), &callable, &inter_mock()), ArmFate::Survives);
@@ -2725,6 +2727,9 @@ mod tests {
         }
         let arm = ContractTy::Union(vec![class("foo"), ContractTy::Base(Base::Int)]);
         assert_eq!(subtract_arm(&pos("Foo"), &arm, &inter_mock()), ArmFate::Survives);
+        // A nested union is decided member-wise: every member dies, so it does.
+        let arm = ContractTy::Union(vec![class("fb"), ContractTy::Base(Base::Int)]);
+        assert_eq!(subtract_arm(&pos("Foo"), &arm, &inter_mock()), ArmFate::Dies);
         // A scalar arm still dies.
         let arm = ContractTy::Base(Base::Int);
         assert_eq!(subtract_arm(&pos("Foo"), &arm, &inter_mock()), ArmFate::Dies);
