@@ -276,6 +276,50 @@ fn an_intersection_arm_under_a_guard_declines() {
     assert_eq!(guarded("function f(A&B $x): int { return $x->zz(); }"), 1);
 }
 
+/// The asserting functions, one per positive class-assert spelling.
+const ASSERTS: &str = "/** @phpstan-assert T $v */
+function assertT(mixed $v): void { if (!$v instanceof T) { throw new \\InvalidArgumentException(); } }
+/** @phpstan-assert Fin $v */
+function assertFin(mixed $v): void { if (!$v instanceof Fin) { throw new \\InvalidArgumentException(); } }
+/** @phpstan-assert-if-true T $v */
+function isT(mixed $v): bool { return $v instanceof T; }
+";
+
+/// Every site that applies a positive class subtrahend to the arm lane marks it,
+/// so the intersection arm declines after each (issue #908).
+#[test]
+fn every_positive_class_guard_site_declines_the_intersection_arm() {
+    for (site, body) in [
+        // k1b:12 / :13 — a positive `@phpstan-assert`.
+        ("assert T", "assertT($x); return $x->tm();"),
+        ("assert Fin", "assertFin($x); return $x->tm();"),
+        // `@phpstan-assert-if-true` in a condition.
+        ("assert-if-true", "if (isT($x)) { return $x->tm(); } return 0;"),
+        // A native `assert()` of an `instanceof`.
+        ("assert()", "assert($x instanceof T); return $x->tm();"),
+        // A negated `instanceof` on the else side.
+        ("else of !instanceof", "if (!$x instanceof T) { return 0; } return $x->tm();"),
+    ] {
+        let f = format!("{ASSERTS}function f(A&B $x): int {{ {body} }}");
+        assert_eq!(guarded(&f), 0, "{site}");
+    }
+    // A stored `instanceof` applies no class subtrahend to `$x`'s lane, on master
+    // either, so the lane reads the intersection as unguarded (issue #1095).
+    let f = "function f(A&B $x): int { $c = $x instanceof T; if ($c) { return $x->tm(); } return 0; }";
+    assert_eq!(guarded(f), 1, "stored condition: unchanged from master");
+}
+
+/// The mark is a fact about every path: one branch that never passed the guard
+/// joins its unguarded intersection back, and the lane reads it as before.
+#[test]
+fn a_guard_on_one_branch_only_does_not_survive_the_join() {
+    let f = "function f(A&B $x, bool $b): int { if ($b) { assert($x instanceof T); } return $x->zz(); }";
+    assert_eq!(guarded(f), 1);
+    // A rebinding drops the mark with the lane.
+    let f = "function f(A&B $x, A&B $y): int { assert($x instanceof T); $x = $y; return $x->zz(); }";
+    assert_eq!(guarded(f), 1);
+}
+
 #[test]
 fn a_class_arm_under_a_guard_is_unchanged() {
     // Pre-existing false positives: the lane looks `tm()` up on `A` alone, not on
