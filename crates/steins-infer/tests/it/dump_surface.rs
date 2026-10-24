@@ -888,6 +888,26 @@ fn a_subtype_guard_still_dumps_the_guard_class() {
 }
 
 #[test]
+fn a_supertype_guard_dumps_the_guard_class_over_an_asserted_or_aliased_carrier() {
+    // A `@param` arm says less than the guard just executed, and a reference,
+    // `extract` or by-reference capture may have rebound `$d` to a `Cat`: the
+    // `Verified` guard class answers in each.
+    let src = "<?php class Animal {} class Mid extends Animal {} class Dog extends Mid {}\n\
+        final class Cat extends Animal {}\n\
+        /** @param Dog $a */\n\
+        function w(Animal $a): void { if ($a instanceof Mid) { \\PHPStan\\dumpType($a); } }\n\
+        /** @param Dog $d */\n\
+        function doc($d): void { if ($d instanceof Animal) { \\PHPStan\\dumpType($d); } }\n\
+        function s3(Dog $d): void { $r = &$d; $r = new Cat;\
+        if ($d instanceof Animal) { \\PHPStan\\dumpType($d); } }\n\
+        function s4(Dog $d): void { extract(['d' => new Cat]);\
+        if ($d instanceof Animal) { \\PHPStan\\dumpType($d); } }\n\
+        function s6(Dog $d): void { $f = function () use (&$d) { $d = new Cat; }; $f();\
+        if ($d instanceof Animal) { \\PHPStan\\dumpType($d); } }\n";
+    assert_eq!(type_bodies(src), dumped(&["Mid", "Animal", "Animal", "Animal", "Animal"]));
+}
+
+#[test]
 fn a_guard_on_a_native_intersection_member_keeps_the_branch_inhabited() {
     // `Both implements Foo, Bar` inhabits `Foo&Bar` under `instanceof Foo`; the
     // arm survives, so the dump is not `*NEVER*`. The intersection itself has no
