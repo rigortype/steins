@@ -10566,7 +10566,7 @@ shape 14 => {s0=O:-;s1=O:-|.|maybe|-|s0+s1@e}
 shape 15 => {s0=R!:S(int:1)|.|no|ne|-}
 shape 16 => {s0=O:-;s1=O:-;s2=O:-|.|maybe|-|s0+s1@e}
 shape 17 => {s0=X:-;s1=X:-|*k:-|maybe|-|-}
-shape 18 => {s0=O:S(int:1)|.|no|ne|-}
+shape 18 => {s0=R:S(int:1)|.|no|ne|-}
 shapeadmits 0 arr#0 => true
 shapeadmits 0 arr#1 => false
 shapeadmits 0 arr#2 => false
@@ -10984,7 +10984,7 @@ shapejoin 5 14 => {s0=O:-;s1=O:-|.|maybe|-|s0+s1@e}
 shapejoin 5 15 => {s0=R!:S(int:1)|.|no|ne|-}
 shapejoin 5 16 => {s0=O:-;s1=O:-;s2=O:-|.|maybe|-|s0+s1@e}
 shapejoin 5 17 => {s0=O:-;s1=O:-|*k:-|maybe|-|-}
-shapejoin 5 18 => {s0=O:S(int:1)|.|no|ne|-}
+shapejoin 5 18 => {s0=R:S(int:1)|.|no|ne|-}
 shapejoin 6 0 => {i1=O:S(int:2)|.|maybe|-|-}
 shapejoin 6 1 => {i0=O:S(int:1);i1=O:S(int:2)|.|maybe|ne|-}
 shapejoin 6 2 => {i0=O:S(int:1);i1=O:S(int:2)|.|maybe|-|-}
@@ -11098,7 +11098,7 @@ shapejoin 11 14 => {s0=O:-;s1=O:-|*s:G(int,nonnull)|maybe|-|s0+s1@e}
 shapejoin 11 15 => {s0=R!:G(int,nonnull)|*s:G(int,nonnull)|no|ne|-}
 shapejoin 11 16 => {s0=O:-;s1=O:-;s2=O:-|*s:G(int,nonnull)|maybe|-|s0+s1@e}
 shapejoin 11 17 => {s0=O:-;s1=O:-|*k:-|maybe|-|-}
-shapejoin 11 18 => {s0=O:G(int,nonnull)|*s:G(int,nonnull)|no|ne|-}
+shapejoin 11 18 => {s0=R:G(int,nonnull)|*s:G(int,nonnull)|no|ne|-}
 shapejoin 12 0 => {i1=O:S(int:2)|*s:-|maybe|-|-}
 shapejoin 12 1 => {i0=O:-;i1=O:S(int:2)|*s:-|maybe|ne|-}
 shapejoin 12 2 => {i0=O:-;i1=O:S(int:2)|*s:-|maybe|-|-}
@@ -11136,7 +11136,7 @@ shapejoin 13 14 => {s0=O:-;s1=O:-|.|maybe|-|s0+s1@e}
 shapejoin 13 15 => {s0=O:-;s1=O:-|.|maybe|-|s0+s1@i}
 shapejoin 13 16 => {s0=O:-;s1=O:-;s2=O:-|.|maybe|-|s0+s1@e}
 shapejoin 13 17 => {s0=O:-;s1=O:-|*k:-|maybe|-|-}
-shapejoin 13 18 => {s0=O:-;s1=O:-|.|maybe|-|-}
+shapejoin 13 18 => {s0=O:-;s1=O:-|.|maybe|-|s0+s1@i}
 shapejoin 14 0 => {s0=O:-;s1=O:-|.|maybe|-|-}
 shapejoin 14 1 => {i0=O:S(int:1);s0=O:-;s1=O:-|.|maybe|-|-}
 shapejoin 14 2 => {i0=O:S(int:1);s0=O:-;s1=O:-|.|maybe|-|-}
@@ -11155,7 +11155,7 @@ shapejoin 14 14 => {s0=O:-;s1=O:-|.|maybe|-|s0+s1@e}
 shapejoin 14 15 => {s0=O:-;s1=O:-|.|maybe|-|s0+s1@e}
 shapejoin 14 16 => {s0=O:-;s1=O:-;s2=O:-|.|maybe|-|s0+s1@e}
 shapejoin 14 17 => {s0=O:-;s1=O:-|*k:-|maybe|-|-}
-shapejoin 14 18 => {s0=O:-;s1=O:-|.|maybe|-|-}
+shapejoin 14 18 => {s0=O:-;s1=O:-|.|maybe|-|s0+s1@e}
 shapejoin 15 0 => {s0=O:S(int:1)|.|maybe|-|-}
 shapejoin 15 1 => {i0=O:S(int:1);s0=O:S(int:1)|.|maybe|ne|-}
 shapejoin 15 2 => {i0=O:S(int:1);s0=O:S(int:1)|.|maybe|-|-}
@@ -11174,7 +11174,7 @@ shapejoin 15 14 => {s0=O:-;s1=O:-|.|maybe|-|s0+s1@e}
 shapejoin 15 15 => {s0=R!:S(int:1)|.|no|ne|-}
 shapejoin 15 16 => {s0=O:-;s1=O:-;s2=O:-|.|maybe|-|s0+s1@e}
 shapejoin 15 17 => {s0=O:-;s1=O:-|*k:-|maybe|-|-}
-shapejoin 15 18 => {s0=O:S(int:1)|.|no|ne|-}
+shapejoin 15 18 => {s0=R:S(int:1)|.|no|ne|-}
 shapejoin 16 0 => {s0=O:-;s1=O:-;s2=O:-|.|maybe|-|-}
 shapejoin 16 1 => {i0=O:S(int:1);s0=O:-;s1=O:-;s2=O:-|.|maybe|-|-}
 shapejoin 16 2 => {i0=O:S(int:1);s0=O:-;s1=O:-;s2=O:-|.|maybe|-|-}
@@ -11193,7 +11193,7 @@ shapejoin 16 14 => {s0=O:-;s1=O:-;s2=O:-|.|maybe|-|s0+s1@e}
 shapejoin 16 15 => {s0=O:-;s1=O:-;s2=O:-|.|maybe|-|s0+s1@e}
 shapejoin 16 16 => {s0=O:-;s1=O:-;s2=O:-|.|maybe|-|s0+s1@e}
 shapejoin 16 17 => {s0=O:-;s1=O:-;s2=O:-|*k:-|maybe|-|-}
-shapejoin 16 18 => {s0=O:-;s1=O:-;s2=O:-|.|maybe|-|-}
+shapejoin 16 18 => {s0=O:-;s1=O:-;s2=O:-|.|maybe|-|s0+s1@e}
 shapejoin 17 0 => {s0=O:-;s1=O:-|*k:-|maybe|-|-}
 shapejoin 17 1 => {i0=O:-;s0=O:-;s1=O:-|*k:-|maybe|-|-}
 shapejoin 17 2 => {i0=O:-;s0=O:-;s1=O:-|*k:-|maybe|-|-}
@@ -11218,20 +11218,20 @@ shapejoin 18 1 => {i0=O:S(int:1);s0=O:S(int:1)|.|maybe|ne|-}
 shapejoin 18 2 => {i0=O:S(int:1);s0=O:S(int:1)|.|maybe|-|-}
 shapejoin 18 3 => {i0=O:S(int:1);i1=O:S(int:2);s0=O:S(int:1)|.|maybe|ne|-}
 shapejoin 18 4 => {s0=O:S(int:1)|.|maybe|-|-}
-shapejoin 18 5 => {s0=O:S(int:1)|.|no|ne|-}
+shapejoin 18 5 => {s0=R:S(int:1)|.|no|ne|-}
 shapejoin 18 6 => {i1=O:S(int:2);s0=O:S(int:1)|.|no|ne|-}
 shapejoin 18 7 => {i0=O:S(int:1);i1=O:S(int:2);s0=O:S(int:1)|.|maybe|ne|-}
 shapejoin 18 8 => {i-1=O:S(int:2);s0=O:S(int:1)|.|no|ne|-}
 shapejoin 18 9 => {s0=O:-|*k:-|maybe|-|-}
 shapejoin 18 10 => {s0=O:G(int,nonnull)|*i:G(int,nonnull)|maybe|-|-}
-shapejoin 18 11 => {s0=O:G(int,nonnull)|*s:G(int,nonnull)|no|ne|-}
+shapejoin 18 11 => {s0=R:G(int,nonnull)|*s:G(int,nonnull)|no|ne|-}
 shapejoin 18 12 => {i1=O:S(int:2);s0=O:-|*s:-|no|ne|-}
-shapejoin 18 13 => {s0=O:-;s1=O:-|.|maybe|-|-}
-shapejoin 18 14 => {s0=O:-;s1=O:-|.|maybe|-|-}
-shapejoin 18 15 => {s0=O:S(int:1)|.|no|ne|-}
-shapejoin 18 16 => {s0=O:-;s1=O:-;s2=O:-|.|maybe|-|-}
+shapejoin 18 13 => {s0=O:-;s1=O:-|.|maybe|-|s0+s1@i}
+shapejoin 18 14 => {s0=O:-;s1=O:-|.|maybe|-|s0+s1@e}
+shapejoin 18 15 => {s0=R:S(int:1)|.|no|ne|-}
+shapejoin 18 16 => {s0=O:-;s1=O:-;s2=O:-|.|maybe|-|s0+s1@e}
 shapejoin 18 17 => {s0=O:-;s1=O:-|*k:-|maybe|-|-}
-shapejoin 18 18 => {s0=O:S(int:1)|.|no|ne|-}
+shapejoin 18 18 => {s0=R:S(int:1)|.|no|ne|-}
 shapelift arr#0 => {-|.|yes|-|-}
 shapelift arr#1 => {i0=R!:S(int:1)|.|yes|ne|-}
 shapelift arr#2 => {i0=R!:S(int:1);i1=R!:S(int:2)|.|yes|ne|-}
@@ -11811,14 +11811,14 @@ shapepromote 17 s0 isset => {s0=R!:-;s1=X:-|*k:-|no|ne|-}
 shapepromote 17 s0 exists => {s0=R!:-;s1=X:-|*k:-|no|ne|-}
 shapepromote 17 s1 isset => {s0=X:-;s1=R!:-|*k:-|no|ne|-}
 shapepromote 17 s1 exists => {s0=X:-;s1=R!:-|*k:-|no|ne|-}
-shapepromote 18 i0 isset => {s0=O:S(int:1)|.|no|ne|-}
-shapepromote 18 i0 exists => {s0=O:S(int:1)|.|no|ne|-}
-shapepromote 18 i1 isset => {s0=O:S(int:1)|.|no|ne|-}
-shapepromote 18 i1 exists => {s0=O:S(int:1)|.|no|ne|-}
+shapepromote 18 i0 isset => {s0=R:S(int:1)|.|no|ne|-}
+shapepromote 18 i0 exists => {s0=R:S(int:1)|.|no|ne|-}
+shapepromote 18 i1 isset => {s0=R:S(int:1)|.|no|ne|-}
+shapepromote 18 i1 exists => {s0=R:S(int:1)|.|no|ne|-}
 shapepromote 18 s0 isset => {s0=R!:S(int:1)|.|no|ne|-}
 shapepromote 18 s0 exists => {s0=R!:S(int:1)|.|no|ne|-}
-shapepromote 18 s1 isset => {s0=O:S(int:1)|.|no|ne|-}
-shapepromote 18 s1 exists => {s0=O:S(int:1)|.|no|ne|-}
+shapepromote 18 s1 isset => {s0=R:S(int:1)|.|no|ne|-}
+shapepromote 18 s1 exists => {s0=R:S(int:1)|.|no|ne|-}
 shapeabsent 0 i0 => {-|.|yes|-|-}
 shapeabsent 0 i1 => {-|.|yes|-|-}
 shapeabsent 0 s0 => {-|.|yes|-|-}
@@ -11891,15 +11891,15 @@ shapeabsent 17 i0 => {i0=X:-;s0=X:-;s1=X:-|*k:-|maybe|-|-}
 shapeabsent 17 i1 => {i1=X:-;s0=X:-;s1=X:-|*k:-|maybe|-|-}
 shapeabsent 17 s0 => {s0=X:-;s1=X:-|*k:-|maybe|-|-}
 shapeabsent 17 s1 => {s0=X:-;s1=X:-|*k:-|maybe|-|-}
-shapeabsent 18 i0 => {s0=O:S(int:1)|.|no|ne|-}
-shapeabsent 18 i1 => {s0=O:S(int:1)|.|no|ne|-}
+shapeabsent 18 i0 => {s0=R:S(int:1)|.|no|ne|-}
+shapeabsent 18 i1 => {s0=R:S(int:1)|.|no|ne|-}
 shapeabsent 18 s0 => {-|.|yes|-|-}
-shapeabsent 18 s1 => {s0=O:S(int:1)|.|no|ne|-}
+shapeabsent 18 s1 => {s0=R:S(int:1)|.|no|ne|-}
 shapenonempty 0 => {-|.|yes|ne|-}
 shapenonempty 1 => {i0=R!:S(int:1)|.|yes|ne|-}
-shapenonempty 2 => {i0=O:S(int:1)|.|yes|ne|-}
+shapenonempty 2 => {i0=R:S(int:1)|.|yes|ne|-}
 shapenonempty 3 => {i0=R!:S(int:1);i1=R!:S(int:2)|.|maybe|ne|-}
-shapenonempty 4 => {s0=O:S(int:1)|.|no|ne|-}
+shapenonempty 4 => {s0=R:S(int:1)|.|no|ne|-}
 shapenonempty 5 => {s0=R!:S(int:1)|.|no|ne|-}
 shapenonempty 6 => {i1=R!:S(int:2)|.|no|ne|-}
 shapenonempty 7 => {i0=O:S(int:1);i1=R!:S(int:2)|.|maybe|ne|-}
@@ -11913,7 +11913,7 @@ shapenonempty 14 => {s0=O:-;s1=O:-|.|no|ne|s0+s1@e}
 shapenonempty 15 => {s0=R!:S(int:1)|.|no|ne|-}
 shapenonempty 16 => {s0=O:-;s1=O:-;s2=O:-|.|no|ne|s0+s1@e}
 shapenonempty 17 => {s0=X:-;s1=X:-|*k:-|maybe|ne|-}
-shapenonempty 18 => {s0=O:S(int:1)|.|no|ne|-}
+shapenonempty 18 => {s0=R:S(int:1)|.|no|ne|-}
 shapeislist 0 yes => {-|.|yes|-|-}
 shapeislist 0 no => {-|.|yes|-|-}
 shapeislist 1 yes => {i0=R!:S(int:1)|.|yes|ne|-}
@@ -11950,8 +11950,8 @@ shapeislist 16 yes => {s0=O:-;s1=O:-;s2=O:-|.|yes|-|s0+s1@e}
 shapeislist 16 no => {s0=O:-;s1=O:-;s2=O:-|.|no|-|s0+s1@e}
 shapeislist 17 yes => {s0=X:-;s1=X:-|*k:-|yes|-|-}
 shapeislist 17 no => {s0=X:-;s1=X:-|*k:-|no|-|-}
-shapeislist 18 yes => {s0=O:S(int:1)|.|no|ne|-}
-shapeislist 18 no => {s0=O:S(int:1)|.|no|ne|-}
+shapeislist 18 yes => {s0=R:S(int:1)|.|no|ne|-}
+shapeislist 18 no => {s0=R:S(int:1)|.|no|ne|-}
 shaperecordcover 0 i0 i1 i => {-|.|yes|ne|i0+i1@i}
 shaperecordcover 0 i0 i1 e => {-|.|yes|ne|i0+i1@e}
 shaperecordcover 0 i0 s0 i => {-|.|yes|ne|i0+s0@i}
@@ -11976,18 +11976,18 @@ shaperecordcover 1 i1 s1 i => {i0=R!:S(int:1)|.|yes|ne|i1+s1@i}
 shaperecordcover 1 i1 s1 e => {i0=R!:S(int:1)|.|yes|ne|i1+s1@e}
 shaperecordcover 1 s0 s1 i => {i0=R!:S(int:1)|.|yes|ne|s0+s1@i}
 shaperecordcover 1 s0 s1 e => {i0=R!:S(int:1)|.|yes|ne|s0+s1@e}
-shaperecordcover 2 i0 i1 i => {i0=O:S(int:1)|.|yes|ne|i0+i1@i}
-shaperecordcover 2 i0 i1 e => {i0=O:S(int:1)|.|yes|ne|i0+i1@e}
-shaperecordcover 2 i0 s0 i => {i0=O:S(int:1)|.|yes|ne|i0+s0@i}
-shaperecordcover 2 i0 s0 e => {i0=O:S(int:1)|.|yes|ne|i0+s0@e}
-shaperecordcover 2 i0 s1 i => {i0=O:S(int:1)|.|yes|ne|i0+s1@i}
-shaperecordcover 2 i0 s1 e => {i0=O:S(int:1)|.|yes|ne|i0+s1@e}
-shaperecordcover 2 i1 s0 i => {i0=O:S(int:1)|.|yes|ne|i1+s0@i}
-shaperecordcover 2 i1 s0 e => {i0=O:S(int:1)|.|yes|ne|i1+s0@e}
-shaperecordcover 2 i1 s1 i => {i0=O:S(int:1)|.|yes|ne|i1+s1@i}
-shaperecordcover 2 i1 s1 e => {i0=O:S(int:1)|.|yes|ne|i1+s1@e}
-shaperecordcover 2 s0 s1 i => {i0=O:S(int:1)|.|yes|ne|s0+s1@i}
-shaperecordcover 2 s0 s1 e => {i0=O:S(int:1)|.|yes|ne|s0+s1@e}
+shaperecordcover 2 i0 i1 i => {i0=R:S(int:1)|.|yes|ne|-}
+shaperecordcover 2 i0 i1 e => {i0=R:S(int:1)|.|yes|ne|-}
+shaperecordcover 2 i0 s0 i => {i0=R:S(int:1)|.|yes|ne|-}
+shaperecordcover 2 i0 s0 e => {i0=R:S(int:1)|.|yes|ne|-}
+shaperecordcover 2 i0 s1 i => {i0=R:S(int:1)|.|yes|ne|-}
+shaperecordcover 2 i0 s1 e => {i0=R:S(int:1)|.|yes|ne|-}
+shaperecordcover 2 i1 s0 i => {i0=R:S(int:1)|.|yes|ne|i1+s0@i}
+shaperecordcover 2 i1 s0 e => {i0=R:S(int:1)|.|yes|ne|i1+s0@e}
+shaperecordcover 2 i1 s1 i => {i0=R:S(int:1)|.|yes|ne|i1+s1@i}
+shaperecordcover 2 i1 s1 e => {i0=R:S(int:1)|.|yes|ne|i1+s1@e}
+shaperecordcover 2 s0 s1 i => {i0=R:S(int:1)|.|yes|ne|s0+s1@i}
+shaperecordcover 2 s0 s1 e => {i0=R:S(int:1)|.|yes|ne|s0+s1@e}
 shaperecordcover 3 i0 i1 i => {i0=R!:S(int:1);i1=R!:S(int:2)|.|maybe|ne|-}
 shaperecordcover 3 i0 i1 e => {i0=R!:S(int:1);i1=R!:S(int:2)|.|maybe|ne|-}
 shaperecordcover 3 i0 s0 i => {i0=R!:S(int:1);i1=R!:S(int:2)|.|maybe|ne|-}
@@ -12000,18 +12000,18 @@ shaperecordcover 3 i1 s1 i => {i0=R!:S(int:1);i1=R!:S(int:2)|.|maybe|ne|-}
 shaperecordcover 3 i1 s1 e => {i0=R!:S(int:1);i1=R!:S(int:2)|.|maybe|ne|-}
 shaperecordcover 3 s0 s1 i => {i0=R!:S(int:1);i1=R!:S(int:2)|.|maybe|ne|s0+s1@i}
 shaperecordcover 3 s0 s1 e => {i0=R!:S(int:1);i1=R!:S(int:2)|.|maybe|ne|s0+s1@e}
-shaperecordcover 4 i0 i1 i => {s0=O:S(int:1)|.|no|ne|i0+i1@i}
-shaperecordcover 4 i0 i1 e => {s0=O:S(int:1)|.|no|ne|i0+i1@e}
-shaperecordcover 4 i0 s0 i => {s0=O:S(int:1)|.|no|ne|i0+s0@i}
-shaperecordcover 4 i0 s0 e => {s0=O:S(int:1)|.|no|ne|i0+s0@e}
-shaperecordcover 4 i0 s1 i => {s0=O:S(int:1)|.|no|ne|i0+s1@i}
-shaperecordcover 4 i0 s1 e => {s0=O:S(int:1)|.|no|ne|i0+s1@e}
-shaperecordcover 4 i1 s0 i => {s0=O:S(int:1)|.|no|ne|i1+s0@i}
-shaperecordcover 4 i1 s0 e => {s0=O:S(int:1)|.|no|ne|i1+s0@e}
-shaperecordcover 4 i1 s1 i => {s0=O:S(int:1)|.|no|ne|i1+s1@i}
-shaperecordcover 4 i1 s1 e => {s0=O:S(int:1)|.|no|ne|i1+s1@e}
-shaperecordcover 4 s0 s1 i => {s0=O:S(int:1)|.|no|ne|s0+s1@i}
-shaperecordcover 4 s0 s1 e => {s0=O:S(int:1)|.|no|ne|s0+s1@e}
+shaperecordcover 4 i0 i1 i => {s0=R:S(int:1)|.|no|ne|i0+i1@i}
+shaperecordcover 4 i0 i1 e => {s0=R:S(int:1)|.|no|ne|i0+i1@e}
+shaperecordcover 4 i0 s0 i => {s0=R:S(int:1)|.|no|ne|-}
+shaperecordcover 4 i0 s0 e => {s0=R:S(int:1)|.|no|ne|-}
+shaperecordcover 4 i0 s1 i => {s0=R:S(int:1)|.|no|ne|i0+s1@i}
+shaperecordcover 4 i0 s1 e => {s0=R:S(int:1)|.|no|ne|i0+s1@e}
+shaperecordcover 4 i1 s0 i => {s0=R:S(int:1)|.|no|ne|-}
+shaperecordcover 4 i1 s0 e => {s0=R:S(int:1)|.|no|ne|-}
+shaperecordcover 4 i1 s1 i => {s0=R:S(int:1)|.|no|ne|i1+s1@i}
+shaperecordcover 4 i1 s1 e => {s0=R:S(int:1)|.|no|ne|i1+s1@e}
+shaperecordcover 4 s0 s1 i => {s0=R:S(int:1)|.|no|ne|-}
+shaperecordcover 4 s0 s1 e => {s0=R:S(int:1)|.|no|ne|-}
 shaperecordcover 5 i0 i1 i => {s0=R!:S(int:1)|.|no|ne|i0+i1@i}
 shaperecordcover 5 i0 i1 e => {s0=R!:S(int:1)|.|no|ne|i0+i1@e}
 shaperecordcover 5 i0 s0 i => {s0=R!:S(int:1)|.|no|ne|-}
@@ -12168,18 +12168,18 @@ shaperecordcover 17 i1 s1 i => {s0=X:-;s1=X:-|*k:-|maybe|ne|i1+s1@i}
 shaperecordcover 17 i1 s1 e => {s0=X:-;s1=X:-|*k:-|maybe|ne|i1+s1@e}
 shaperecordcover 17 s0 s1 i => {s0=X:-;s1=X:-|*k:-|maybe|ne|s0+s1@i}
 shaperecordcover 17 s0 s1 e => {s0=X:-;s1=X:-|*k:-|maybe|ne|s0+s1@e}
-shaperecordcover 18 i0 i1 i => {s0=O:S(int:1)|.|no|ne|i0+i1@i}
-shaperecordcover 18 i0 i1 e => {s0=O:S(int:1)|.|no|ne|i0+i1@e}
-shaperecordcover 18 i0 s0 i => {s0=O:S(int:1)|.|no|ne|i0+s0@i}
-shaperecordcover 18 i0 s0 e => {s0=O:S(int:1)|.|no|ne|i0+s0@e}
-shaperecordcover 18 i0 s1 i => {s0=O:S(int:1)|.|no|ne|i0+s1@i}
-shaperecordcover 18 i0 s1 e => {s0=O:S(int:1)|.|no|ne|i0+s1@e}
-shaperecordcover 18 i1 s0 i => {s0=O:S(int:1)|.|no|ne|i1+s0@i}
-shaperecordcover 18 i1 s0 e => {s0=O:S(int:1)|.|no|ne|i1+s0@e}
-shaperecordcover 18 i1 s1 i => {s0=O:S(int:1)|.|no|ne|i1+s1@i}
-shaperecordcover 18 i1 s1 e => {s0=O:S(int:1)|.|no|ne|i1+s1@e}
-shaperecordcover 18 s0 s1 i => {s0=O:S(int:1)|.|no|ne|s0+s1@i}
-shaperecordcover 18 s0 s1 e => {s0=O:S(int:1)|.|no|ne|s0+s1@e}
+shaperecordcover 18 i0 i1 i => {s0=R:S(int:1)|.|no|ne|i0+i1@i}
+shaperecordcover 18 i0 i1 e => {s0=R:S(int:1)|.|no|ne|i0+i1@e}
+shaperecordcover 18 i0 s0 i => {s0=R:S(int:1)|.|no|ne|-}
+shaperecordcover 18 i0 s0 e => {s0=R:S(int:1)|.|no|ne|-}
+shaperecordcover 18 i0 s1 i => {s0=R:S(int:1)|.|no|ne|i0+s1@i}
+shaperecordcover 18 i0 s1 e => {s0=R:S(int:1)|.|no|ne|i0+s1@e}
+shaperecordcover 18 i1 s0 i => {s0=R:S(int:1)|.|no|ne|-}
+shaperecordcover 18 i1 s0 e => {s0=R:S(int:1)|.|no|ne|-}
+shaperecordcover 18 i1 s1 i => {s0=R:S(int:1)|.|no|ne|i1+s1@i}
+shaperecordcover 18 i1 s1 e => {s0=R:S(int:1)|.|no|ne|i1+s1@e}
+shaperecordcover 18 s0 s1 i => {s0=R:S(int:1)|.|no|ne|-}
+shaperecordcover 18 s0 s1 e => {s0=R:S(int:1)|.|no|ne|-}
 shapecoverproves 0 i0 i1 i => i
 shapecoverproves 0 i0 i1 e => e
 shapecoverproves 0 i0 s0 i => i
@@ -12204,12 +12204,12 @@ shapecoverproves 1 i1 s1 i => i
 shapecoverproves 1 i1 s1 e => e
 shapecoverproves 1 s0 s1 i => i
 shapecoverproves 1 s0 s1 e => e
-shapecoverproves 2 i0 i1 i => i
-shapecoverproves 2 i0 i1 e => e
-shapecoverproves 2 i0 s0 i => i
-shapecoverproves 2 i0 s0 e => e
-shapecoverproves 2 i0 s1 i => i
-shapecoverproves 2 i0 s1 e => e
+shapecoverproves 2 i0 i1 i => -
+shapecoverproves 2 i0 i1 e => -
+shapecoverproves 2 i0 s0 i => -
+shapecoverproves 2 i0 s0 e => -
+shapecoverproves 2 i0 s1 i => -
+shapecoverproves 2 i0 s1 e => -
 shapecoverproves 2 i1 s0 i => i
 shapecoverproves 2 i1 s0 e => e
 shapecoverproves 2 i1 s1 i => i
@@ -12230,16 +12230,16 @@ shapecoverproves 3 s0 s1 i => i
 shapecoverproves 3 s0 s1 e => e
 shapecoverproves 4 i0 i1 i => i
 shapecoverproves 4 i0 i1 e => e
-shapecoverproves 4 i0 s0 i => i
-shapecoverproves 4 i0 s0 e => e
+shapecoverproves 4 i0 s0 i => -
+shapecoverproves 4 i0 s0 e => -
 shapecoverproves 4 i0 s1 i => i
 shapecoverproves 4 i0 s1 e => e
-shapecoverproves 4 i1 s0 i => i
-shapecoverproves 4 i1 s0 e => e
+shapecoverproves 4 i1 s0 i => -
+shapecoverproves 4 i1 s0 e => -
 shapecoverproves 4 i1 s1 i => i
 shapecoverproves 4 i1 s1 e => e
-shapecoverproves 4 s0 s1 i => i
-shapecoverproves 4 s0 s1 e => e
+shapecoverproves 4 s0 s1 i => -
+shapecoverproves 4 s0 s1 e => -
 shapecoverproves 5 i0 i1 i => i
 shapecoverproves 5 i0 i1 e => e
 shapecoverproves 5 i0 s0 i => -
@@ -12398,16 +12398,16 @@ shapecoverproves 17 s0 s1 i => i
 shapecoverproves 17 s0 s1 e => e
 shapecoverproves 18 i0 i1 i => i
 shapecoverproves 18 i0 i1 e => e
-shapecoverproves 18 i0 s0 i => i
-shapecoverproves 18 i0 s0 e => e
+shapecoverproves 18 i0 s0 i => -
+shapecoverproves 18 i0 s0 e => -
 shapecoverproves 18 i0 s1 i => i
 shapecoverproves 18 i0 s1 e => e
-shapecoverproves 18 i1 s0 i => i
-shapecoverproves 18 i1 s0 e => e
+shapecoverproves 18 i1 s0 i => -
+shapecoverproves 18 i1 s0 e => -
 shapecoverproves 18 i1 s1 i => i
 shapecoverproves 18 i1 s1 e => e
-shapecoverproves 18 s0 s1 i => i
-shapecoverproves 18 s0 s1 e => e
+shapecoverproves 18 s0 s1 i => -
+shapecoverproves 18 s0 s1 e => -
 shapejoinsound 5776 0
 shapeliftsound 16 0
 shapedescentsound 28 0
@@ -12416,4 +12416,4 @@ shapenarrowsound 559 0
 shapeunsetsound 320 0
 shapecountsound 80 0
 shapecoversound 488 0
-shapedischargesound 218 0
+shapedischargesound 210 0

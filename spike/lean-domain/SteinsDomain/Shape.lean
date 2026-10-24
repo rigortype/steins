@@ -407,6 +407,15 @@ def foldCovers (tail : GTail Fact) : List Field × List Cover → Cover → List
     | [k] => (promotePresent acc.1 k tail, acc.2)
     | k₁ :: k₂ :: ks => (acc.1, acc.2 ++ [{ keys := k₁ :: k₂ :: ks, flavor := c.flavor }])
 
+/-- **The single-key pin** (#1079): a non-empty sealed shape holds one of its
+declared keys, so with exactly one declared that key is present. This is the
+Rust side's exact-count pin at the floor of one `nonEmpty` implies; a witnessed
+presence stays witnessed. -/
+def pinSingle (tail : GTail Fact) (nonEmpty : Bool) (fs : List Field) : List Field :=
+  if isSealed tail && nonEmpty && fs.length == 1 then
+    fs.map (fun f => (f.1, Presence.required (f.2.1 == Presence.required true), f.2.2))
+  else fs
+
 /-- **The canonical constructor.** Every invariant the shape form carries is
 established here. -/
 def normalize (fields : List Field) (tail : GTail Fact) (isList : Certainty)
@@ -416,15 +425,17 @@ def normalize (fields : List Field) (tail : GTail Fact) (isList : Certainty)
   let f₁ := sortFields step.1
   -- A sealed tail already proves absence, so an `absent` field is redundant.
   let f₂ := if isSealed tail then f₁.filter (fun f => !(f.2.1 == Presence.absent)) else f₁
+  -- A non-empty sealed shape with one declared key holds it.
+  let f₃ := pinSingle tail nonEmpty f₂
   -- A cover with a required member is discharged.
   let kept := step.2.filter (fun c => !c.keys.any (fun k =>
-    match fieldOf f₂ k with
+    match fieldOf f₃ k with
     | some (_, p, _) => p.isRequired
     | none => false))
-  { fields := f₂
+  { fields := f₃
     tail := tail
-    isList := sharpenIsList (computeIsList f₂ tail nonEmpty) isList
-    nonEmpty := nonEmpty || f₂.any (fun f => f.2.1.isRequired)
+    isList := sharpenIsList (computeIsList f₃ tail nonEmpty) isList
+    nonEmpty := nonEmpty || f₃.any (fun f => f.2.1.isRequired)
     covers := antichain kept }
 
 /-- The degenerate shape: plain `array` (A-G1). -/
@@ -625,12 +636,57 @@ theorem fieldsSorted_filter {p : Field → Bool} : ∀ {l : List Field}, FieldsS
       exact head_blt_of_mem hs (List.mem_filter.mp hf).1
     · exact ih (fieldsSorted_tail hs)
 
+/-- The single-key pin keeps a canonical field list canonical: it changes no key. -/
+theorem fieldsSorted_map_key {g : Field → Field} (hg : ∀ f, (g f).1 = f.1) :
+    ∀ {l : List Field}, FieldsSorted l → FieldsSorted (l.map g)
+  | [], _ => trivial
+  | [_], _ => trivial
+  | a :: b :: l, h => by
+    refine ⟨?_, ?_⟩
+    · rw [hg a, hg b]; exact h.1
+    · exact fieldsSorted_map_key hg (l := b :: l) h.2
+
+theorem fieldsSorted_pinSingle (tail : GTail Fact) (nonEmpty : Bool) {fs : List Field}
+    (h : FieldsSorted fs) : FieldsSorted (pinSingle tail nonEmpty fs) := by
+  unfold pinSingle
+  split
+  · exact fieldsSorted_map_key (g := fun f => (f.1, Presence.required (f.2.1 == Presence.required true), f.2.2))
+      (fun _ => rfl) h
+  · exact h
+
+theorem pin_mem_not_absent {f : Field} {l : List Field}
+    (hf : f ∈ l.map (fun g => (g.1, Presence.required (g.2.1 == Presence.required true), g.2.2))) :
+    f.2.1 ≠ Presence.absent := by
+  induction l with
+  | nil => rw [List.map_nil] at hf; cases hf
+  | cons x xs ih =>
+    rw [List.map_cons] at hf
+    cases hf with
+    | head => exact fun e => Presence.noConfusion e
+    | tail _ h' => exact ih h'
+
+/-- The single-key pin introduces no proven-absent field: it only promotes. -/
+theorem pinSingle_no_absent (tail : GTail Fact) (nonEmpty : Bool) {fs : List Field}
+    (h : ∀ f ∈ fs, f.2.1 ≠ Presence.absent) :
+    ∀ f ∈ pinSingle tail nonEmpty fs, f.2.1 ≠ Presence.absent := by
+  unfold pinSingle
+  -- By cases rather than `split`, which would add `Quot.sound` to the ratchet.
+  cases (isSealed tail && nonEmpty && fs.length == 1) with
+  | true =>
+    intro f hf
+    rw [if_pos rfl] at hf
+    exact pin_mem_not_absent hf
+  | false =>
+    rw [if_neg Bool.false_ne_true]
+    exact h
+
 /-- **The fields of a normalized shape are canonical.** -/
 theorem normalize_fieldsSorted (fields : List Field) (tail : GTail Fact) (isList : Certainty)
     (nonEmpty : Bool) (covers : List Cover) :
     FieldsSorted (normalize fields tail isList nonEmpty covers).fields := by
   unfold normalize
   simp only
+  apply fieldsSorted_pinSingle
   split
   · exact fieldsSorted_filter (fieldsSorted_sortFields _)
   · exact fieldsSorted_sortFields _
@@ -643,7 +699,9 @@ theorem normalize_sealed_no_absent (fields : List Field) (isList : Certainty)
   intro f hf
   unfold normalize at hf
   simp only [isSealed, if_true] at hf
-  have := (List.mem_filter.mp hf).2
+  refine pinSingle_no_absent _ _ ?_ f hf
+  intro g hg
+  have := (List.mem_filter.mp hg).2
   simpa using this
 
 theorem mem_insertCover {c d : Cover} {l : List Cover} (h : d ∈ insertCover c l) :
