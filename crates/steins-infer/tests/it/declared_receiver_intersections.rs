@@ -309,6 +309,22 @@ fn every_positive_class_guard_site_declines_the_intersection_arm() {
     assert_eq!(guarded(f), 1, "stored condition: unchanged from master");
 }
 
+/// The mark rides on the lane, so every copy of the guarded variable carries it.
+#[test]
+fn a_copy_of_a_guarded_intersection_keeps_the_mark() {
+    for (site, body) in [
+        // m1:10 / m1:15.
+        ("assign after instanceof", "if ($x instanceof T) { $y = $x; return $y->tm(); } return 0;"),
+        ("assign after assert", "assertT($x); $y = $x; return $y->tm();"),
+        ("destructure", "assertT($x); [$y] = [$x]; return $y->tm();"),
+        ("by-value argument and return", "assertT($x); $y = idem($x); return $y->tm();"),
+        ("closure capture", "assertT($x); $f = function () use ($x) { return $x->tm(); }; return $f();"),
+    ] {
+        let f = format!("{ASSERTS}function idem($v) {{ return $v; }}\nfunction f(A&B $x): int {{ {body} }}");
+        assert_eq!(guarded(&f), 0, "{site}");
+    }
+}
+
 /// The mark is a fact about every path: one branch that never passed the guard
 /// joins its unguarded intersection back, and the lane reads it as before.
 #[test]

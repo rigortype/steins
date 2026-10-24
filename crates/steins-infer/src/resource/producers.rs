@@ -49,12 +49,10 @@ pub(crate) fn builtin_resource_arms(
         return None;
     }
     let row = folder.builtin_resource_return(name)?;
-    let mut arms = vec![ContractArm {
-        ty: ContractTy::Resource { state: ResourceState::Any },
-        stratum: Stratum::Verified,
-    }];
+    let mut arms =
+        vec![ContractArm::new(ContractTy::Resource { state: ResourceState::Any }, Stratum::Verified)];
     if row.may_be_false {
-        arms.push(ContractArm { ty: ContractTy::LitBool(false), stratum: Stratum::Verified });
+        arms.push(ContractArm::new(ContractTy::LitBool(false), Stratum::Verified));
     }
     let res = HeapRes {
         kind: row.kind,
@@ -80,10 +78,7 @@ pub(crate) fn builtin_resource_arms(
 ///
 /// [`bind_handle_elements`]: crate::assign::bind_handle_elements
 fn produced_place_arms() -> Vec<ContractArm> {
-    vec![ContractArm {
-        ty: ContractTy::Resource { state: ResourceState::Any },
-        stratum: Stratum::Verified,
-    }]
+    vec![ContractArm::new(ContractTy::Resource { state: ResourceState::Any }, Stratum::Verified)]
 }
 
 /// The heap resource one produced element holds: a **fresh** allocation, `Open`,

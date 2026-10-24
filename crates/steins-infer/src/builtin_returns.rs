@@ -277,12 +277,12 @@ pub(crate) fn builtin_return_floor_for_call(
     }
     let stratum = arms.iter().fold(Stratum::Verified, |acc, a| acc.min(a.stratum));
     if RETURN_STRING_BUILTINS.iter().any(|b| b.eq_ignore_ascii_case(name)) {
-        return Some(vec![ContractArm { ty: ContractTy::Base(Base::String), stratum }]);
+        return Some(vec![ContractArm::new(ContractTy::Base(Base::String), stratum)]);
     }
     if name.eq_ignore_ascii_case("highlight_file") {
         return Some(vec![
-            ContractArm { ty: ContractTy::Base(Base::String), stratum },
-            ContractArm { ty: ContractTy::LitBool(false), stratum },
+            ContractArm::new(ContractTy::Base(Base::String), stratum),
+            ContractArm::new(ContractTy::LitBool(false), stratum),
         ]);
     }
     Some(arms)

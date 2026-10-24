@@ -292,11 +292,12 @@ pub(crate) fn declared_receiver_conjuncts(cx: &Cx, arms: &[ContractArm]) -> Opti
     (!lane.is_empty()).then_some(lane)
 }
 
-/// Whether `var`'s lane holds an intersection arm under a positive class guard,
-/// which the declared-receiver lane declines (issue #908). The guard is any
-/// positive class subtrahend on this path, an `instanceof` that held or a positive
-/// `@phpstan-assert`, read from [`Store::class_guarded`]. `Member.yes` would miss
-/// the assert, and binding it there would hand an `Asserted` premise to the
+/// Whether a lane holds an intersection arm under a positive class guard, which the
+/// declared-receiver lane declines (issue #908). The guard is any positive class
+/// subtrahend on this path, an `instanceof` that held or a positive
+/// `@phpstan-assert`, read from the arm's own [`ContractArm::guarded`] mark, so a
+/// copy of the lane into another variable carries it. `Member.yes` would miss the
+/// assert, and binding it there would hand an `Asserted` premise to the
 /// `instanceof` verdict and the dump's `Verified` rung.
 ///
 /// The guard used to delete such an arm, so the lane said nothing in the branch.
@@ -304,9 +305,8 @@ pub(crate) fn declared_receiver_conjuncts(cx: &Cx, arms: &[ContractArm]) -> Opti
 /// member up on the declared conjuncts alone and report it missing where the guard
 /// class supplies it, or inside a branch no class can enter. Reading the guard is
 /// its own design (issue #1095); until then the arm proves nothing, as before.
-pub(crate) fn guarded_intersection(store: &Store, var: &str, arms: &[ContractArm]) -> bool {
-    store.class_guarded.contains(var)
-        && arms.iter().any(|a| matches!(a.ty, ContractTy::Inter(_)))
+pub(crate) fn guarded_intersection(arms: &[ContractArm]) -> bool {
+    arms.iter().any(|a| a.guarded && matches!(a.ty, ContractTy::Inter(_)))
 }
 
 /// Run the ADR-0049 §8 ladder for one `$var->method()` and emit the
@@ -343,7 +343,7 @@ pub(crate) fn check_phpdoc_undefined_method(
     // Every surviving arm must be a class/interface arm, or an intersection
     // of them (issue #238); a scalar/array/null arm means the runtime
     // receiver may be a non-object, so absence doesn't hold here — silence.
-    if guarded_intersection(store, &var, arms) {
+    if guarded_intersection(arms) {
         return;
     }
     let Some(lane) = declared_receiver_conjuncts(cx, arms) else {
@@ -425,7 +425,7 @@ pub(crate) fn declared_receiver_lacks_method(
         return false;
     }
     let Some(arms) = store.contract_arms(var) else { return false };
-    if arms.iter().any(|a| a.stratum != Stratum::Verified) || guarded_intersection(store, var, arms)
+    if arms.iter().any(|a| a.stratum != Stratum::Verified) || guarded_intersection(arms)
     {
         return false;
     }
