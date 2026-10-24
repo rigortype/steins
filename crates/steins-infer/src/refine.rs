@@ -992,6 +992,13 @@ pub(crate) fn subtract_contract_lane(
     oracle: &dyn normalize::IsaOracle,
 ) -> bool {
     let mut landed = false;
+    // Every positive class subtrahend comes through here (an `instanceof` that held,
+    // a positive `@phpstan-assert`): mark the lane, landed or not (issue #908).
+    if matches!(sub, normalize::Subtrahend::Class { polarity: true, .. })
+        && store.contract.contains_key(var)
+    {
+        store.class_guarded.insert(var.to_owned());
+    }
     if let Some(arms) = store.contract.get_mut(var) {
         let mut changed = false;
         // Whether the lane, before this subtraction, was held on Verified premises
