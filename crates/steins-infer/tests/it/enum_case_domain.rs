@@ -264,8 +264,8 @@ fn a_positive_instanceof_of_the_enum_drops_only_the_non_object_arms() {
 fn a_positive_instanceof_of_an_enum_supertype_keeps_every_case() {
     // Every enum is a `UnitEnum`, a backed one a `BackedEnum`, and each is an
     // instance of the interfaces it declares. The guard subtracts nothing from
-    // the lane, so the dump reads the guard's own class (the rung every class
-    // guard over an un-narrowed declaration takes); an identity guard after it
+    // the lane, and every case is already a `UnitEnum`, so the dump reads the
+    // enum rather than the guard class (issue #909); an identity guard after it
     // shows the case domain it left behind is still whole.
     assert_eq!(
         types(&format!(
@@ -279,8 +279,7 @@ fn a_positive_instanceof_of_an_enum_supertype_keeps_every_case() {
              function h(Level $l): void {{ if ($l instanceof \\BackedEnum) {{\
              if ($l === Level::Low) {{ return; }} \\PHPStan\\dumpType($l); }} }}\n"
         )),
-        // `UnitEnum` pins current behaviour (PHPStan prints `Suit`), pending a follow-up.
-        ["UnitEnum", "Suit::Spades|Suit::Clubs", "Suit::Spades|Suit::Clubs", "Level::High"]
+        ["Suit", "Suit::Spades|Suit::Clubs", "Suit::Spades|Suit::Clubs", "Level::High"]
     );
 }
 

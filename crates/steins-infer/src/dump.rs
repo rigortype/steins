@@ -21,6 +21,7 @@ use crate::assert_harness::{ASSERT_SINK, AssertObservation, observers_muted};
 use crate::assign::eval_coalesce_fact;
 use crate::builtin_returns::{BuiltinRung, OptionalRungs, builtin_call_rung, builtin_return_floor};
 use crate::cond::{eval_ternary_fact_strat, total_op_fact};
+use crate::contract::IsA;
 use crate::cx::Cx;
 use crate::declared_property::declared_property_arms;
 use crate::descent::{project_call_summary, project_method_summary, summary_binds};
@@ -592,6 +593,28 @@ fn narrowed_lane_dump(cx: &Cx, store: &Store, var: &str) -> Option<String> {
     render_contract_arms(cx, arms)
 }
 
+/// Does a carrier below rung 2b already prove `var` is-a `class` (issue #909)?
+/// Either the heap's lower-bound class is, or every surviving declared arm is
+/// (a class or enum case that is-a `class`). An empty lane proves nothing.
+///
+/// An intersection arm does not count although it may be is-a `class`: the arm
+/// renderer has no spelling for it, so yielding would print `unknown` where the
+/// guard class is the better answer.
+fn carrier_is_a(cx: &Cx, store: &Store, var: &str, class: &str) -> bool {
+    let is_a = |sub: &str| cx.is_a(sub, class) == IsA::Yes;
+    let arm_is_a = |ty: &ContractTy| match ty {
+        ContractTy::Class(c) => is_a(c),
+        ContractTy::EnumCase { enum_fqn, .. } => is_a(enum_fqn),
+        _ => false,
+    };
+    if store.obj_of(var).is_some_and(|obj| is_a(&obj.class)) {
+        return true;
+    }
+    store
+        .contract_arms(var)
+        .is_some_and(|arms| !arms.is_empty() && arms.iter().all(|a| arm_is_a(&a.ty)))
+}
+
 /// The `Known::bound` provenance every S4 flow refinement stamps on a shape
 /// fact. Two things read it: `annotate` (as prose) and [`shape_is_flow_refined`]
 /// (as the dump-preference signal), which is why it is a constant rather than a
@@ -755,8 +778,13 @@ fn dump_var(arg: &DumpArg, _: &mut dyn Folder) -> Option<DumpRendering> {
     //     the walk just executed is strictly stronger than the declaration it
     //     narrowed — rendering `Box` inside `if ($b instanceof Sub)` would report
     //     the declaration back at a reader who had already refuted it.
+    //
+    //     It yields to a carrier already more specific than the guard (issue
+    //     #909): a `Dog $d` under `instanceof Animal` is still a `Dog`, so the
+    //     heap class or the surviving arm list renders below.
     if let Some(m) = store.member_of(name)
         && let [only] = m.yes.as_slice()
+        && !carrier_is_a(cx, store, name, only)
     {
         return Some(DumpRendering { text: cx.class_display_fqn(only), asserted: false });
     }
