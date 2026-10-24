@@ -190,6 +190,41 @@ fn a_non_null_coalesce_default_proves_nothing_about_presence() {
 }
 
 #[test]
+fn coalesce_null_guard_reads_in_the_absent_branch_are_undeclared_as_under_not_isset() {
+    // The lowering makes `=== null` the negation of `isset`, so the absent branch reads
+    // the key as `!isset($v['a'])` does: `offset.undeclared`, where the old opaque
+    // comparison said `offset.maybe-missing`.
+    let read = |body: &str| -> Vec<String> {
+        let src = fixture("array{a?: int}", body).replace("void", "int");
+        let mut v: Vec<String> = diagnostics(&src)
+            .into_iter()
+            .map(|d| d.id.to_string())
+            .filter(|i| i.starts_with("offset."))
+            .collect();
+        v.dedup();
+        v
+    };
+    let twin = read("if (!isset($v['a'])) { return $v['a']; } return 0;");
+    assert_eq!(twin, ["offset.undeclared"], "the isset twin");
+    assert_eq!(read("if (($v['a'] ?? null) === null) { return $v['a']; } return 0;"), twin);
+    assert_eq!(read("if (($v['a'] ?? null) !== null) { return 0; } return $v['a'];"), twin);
+}
+
+#[test]
+fn a_bare_variable_coalesce_null_guard_is_decided_as_isset_is() {
+    // `$v = "abc"` is proven non-null, so `($v ?? null) !== null` is true and the branch
+    // PHP enters is analysed: the string operand is reported exactly as under `isset($v)`.
+    let operand = |guard: &str| -> bool {
+        let src = format!(
+            "<?php\nfunction f(): int {{ $v = \"abc\"; if ({guard}) {{ return $v + 1; }} return 0; }}\n"
+        );
+        diagnostics(&src).iter().any(|d| d.id == "type.invalid-operand")
+    };
+    assert!(operand("isset($v)"), "the isset twin");
+    assert!(operand("($v ?? null) !== null"));
+}
+
+#[test]
 fn not_empty_promotes_the_key_exactly_as_isset_does() {
     assert_eq!(
         guarded("array{a?: string, b?: string}", "!empty($v['a'])", "$v['a']"),
