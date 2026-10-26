@@ -29,7 +29,7 @@ use steins_domain::{Certainty, Fact};
 use steins_syntax::{CondExpr, OperandSpan};
 
 use crate::cond::eval_cond;
-use crate::env::{Known, Store, join_envs};
+use crate::env::{Known, Store, Stratum, join_envs};
 use crate::fold::Folder;
 use crate::oneof_guard::collect_reads;
 use crate::walk::WalkCx;
@@ -58,6 +58,11 @@ pub(crate) type Vocabulary<'v> =
 ///   && …` at else) is never taken. Applied, its refuted atom would drop the
 ///   binding the way a refuted guard does (the verdict owns death), and the join
 ///   would drop it with it. A node left whole at the cap is not evaluated.
+/// - **A path its own narrowing empties is left out** ([`path_fate`]): over `int
+///   $n`, the path `!is_int($n) && is_string($n)` of `is_int($n) || is_string($n)`
+///   deletes the last arm of `$n`, so the `string` the next atom would mint is a
+///   value no run holds. A docblock's claim emptied is not a proof of that, so
+///   such a path is kept with the name as the site held it.
 /// - **`cond` itself is applied once more over the join.** What a vocabulary proves
 ///   of the whole condition at once, the presence cover of `isset($a['x']) ||
 ///   isset($a['y'])` (ADR-0062 A-G11), is a fact no single path holds, so the join
@@ -83,8 +88,12 @@ pub(crate) fn narrow_paths(
             if refuted(w, folder, path, env, store, poisoned) {
                 continue;
             }
+            let Some(reset) = path_fate(folder, path, env, store, apply) else { continue };
             let (mut penv, mut pstore) = (env.clone(), store.clone());
             apply(folder, &conjunction(path), true, &mut penv, &mut pstore);
+            for name in reset {
+                restore_site_state(&name, env, store, &mut penv, &mut pstore);
+            }
             clones.push((penv, pstore));
         }
         if !clones.is_empty() {
@@ -101,6 +110,116 @@ pub(crate) fn narrow_paths(
     }
 }
 
+/// What one carrier of a name holds before an atom: the value fact's stratum, and
+/// whether a non-empty declared-type lane is bound.
+#[derive(Clone, Copy)]
+struct Carriers {
+    fact: Option<Stratum>,
+    lane: bool,
+}
+
+fn carriers(env: &HashMap<String, Known>, store: &Store, name: &str) -> Carriers {
+    Carriers {
+        fact: env.get(name).and_then(|k| k.fact.as_ref().map(|_| k.stratum)),
+        lane: store.contract.get(name).is_some_and(|arms| !arms.is_empty()),
+    }
+}
+
+/// Whether the site's own carriers of `name` are all runtime evidence: a value fact
+/// or a declared-type lane is bound, the fact is `Verified`, and every arm is.
+/// Judged at the site, before any atom: a `===` or a type test the path applies
+/// mints a `Verified` value over a docblock's lane, and that must not turn the
+/// docblock's claim into the proof that drops a path.
+fn site_verified(env: &HashMap<String, Known>, store: &Store, name: &str) -> bool {
+    let fact = env.get(name).and_then(|k| k.fact.as_ref().map(|_| k.stratum));
+    let lane = store.contract.get(name);
+    (fact.is_some() || lane.is_some_and(|arms| !arms.is_empty()))
+        && fact.is_none_or(|s| s == Stratum::Verified)
+        && lane.is_none_or(|arms| arms.iter().all(|a| a.stratum == Stratum::Verified))
+}
+
+/// Whether `path` can be taken, judged under its own narrowing: its atoms are
+/// applied one by one to a scratch clone, and each name an atom reads is compared
+/// before and after it. `None` drops the path; `Some(names)` keeps it, with the
+/// names whose site state the kept path must carry instead of its own.
+///
+/// | the site's carriers | before the atom | after the atom | path |
+/// | --- | --- | --- | --- |
+/// | all `Verified` | a non-empty lane | the lane kept empty | dropped |
+/// | all `Verified` | a `Verified` value fact | no value fact | dropped |
+/// | any `Asserted` | a carrier | emptied, or no carrier | kept, name reset |
+/// | any | a carrier | no carrier (a shape lane removed) | kept, name reset |
+/// | none | anything | anything | kept, nothing joined |
+/// | any | anything | a carrier left | kept |
+///
+/// The stratum is the site's, never the scratch clone's: over `@param 'a'|'b'`, the
+/// path `$s !== 'a' && $s === 'c'` pins a `Verified` value at its first atom, but
+/// the lane its second atom empties is a docblock's claim, PHP takes the path for
+/// `'c'`, and dropping it would let the join prove `'a'`. Only an all-`Verified`
+/// lane is kept empty (by a type predicate, a null or literal comparison, an
+/// `instanceof` or an enum case); a lane holding an `Asserted` arm, and a shape
+/// lane, are removed instead. A value fact goes when a predicate refutes it, a
+/// comparison excludes its last member or a range empties. "Nothing joined" is
+/// [`settle_join`]'s rule for a name the site held no carrier for.
+///
+/// A remembered call result or a stored guard binds no carrier of a name, so an
+/// atom over one never drops a path. An atom the vocabularies cannot model applies
+/// nothing and changes no row.
+fn path_fate(
+    folder: &mut dyn Folder,
+    path: &[Atom<'_>],
+    env: &HashMap<String, Known>,
+    store: &Store,
+    apply: &mut Vocabulary<'_>,
+) -> Option<Vec<String>> {
+    let (mut senv, mut sstore) = (env.clone(), store.clone());
+    let mut reset = Vec::new();
+    for atom in path {
+        let mut names = Vec::new();
+        collect_reads(atom.0, &mut names);
+        names.sort_unstable();
+        names.dedup();
+        let before: Vec<Carriers> = names.iter().map(|n| carriers(&senv, &sstore, n)).collect();
+        apply(folder, &conjunction(std::slice::from_ref(atom)), true, &mut senv, &mut sstore);
+        for (name, was) in names.into_iter().zip(before) {
+            let now = carriers(&senv, &sstore, &name);
+            let emptied = (was.lane && sstore.contract_emptied(&name))
+                || (was.fact == Some(Stratum::Verified) && now.fact.is_none());
+            if emptied && site_verified(env, store, &name) {
+                return None;
+            }
+            if (was.fact.is_some() || was.lane) && now.fact.is_none() && !now.lane {
+                reset.push(name);
+            }
+        }
+    }
+    Some(reset)
+}
+
+/// Put `name` back as the site held it in a path's clone: its value fact, its
+/// declared-type lane and its narrowed mark.
+fn restore_site_state(
+    name: &str,
+    env: &HashMap<String, Known>,
+    store: &Store,
+    penv: &mut HashMap<String, Known>,
+    pstore: &mut Store,
+) {
+    match env.get(name) {
+        Some(k) => penv.insert(name.to_owned(), k.clone()),
+        None => penv.remove(name),
+    };
+    match store.contract.get(name) {
+        Some(arms) => pstore.contract.insert(name.to_owned(), arms.clone()),
+        None => pstore.contract.remove(name),
+    };
+    if store.narrowed.contains(name) {
+        pstore.narrowed.insert(name.to_owned());
+    } else {
+        pstore.narrowed.remove(name);
+    }
+}
+
 /// Keep the join of the paths from knowing less than the site did, or knowing it in a
 /// form the next guard cannot narrow.
 ///
@@ -112,6 +231,14 @@ pub(crate) fn narrow_paths(
 ///   a `$t === null` early return and reach the code after it, which PHP never
 ///   does. Without it the name falls back to its declared-type lane, as it did
 ///   before paths existed.
+/// - **A name the site held no carrier for gains none.** Over an undeclared `$n`,
+///   or one a loop's entry forgot, `is_int($n) || is_string($n)` mints `int` and
+///   `string` on its paths, and their join reads as a value that may be either. The
+///   path that mints `string` may be one no run takes (the loop forgot that `$n` is
+///   an `int`), and nothing the site knew rules it out, so a possibly-grade finding
+///   over that arm would be a claim the walk cannot back. The name keeps what the
+///   site had, which is nothing; the whole condition applied over the join still
+///   adds what it adds alone.
 /// - **A declared-type lane the join dropped comes back unnarrowed** where the joined
 ///   name holds no value fact either. The join drops a lane one path lacks (`$x ===
 ///   null` unbinds it and pins the value instead, and a value one path pins joins
@@ -123,9 +250,13 @@ fn settle_join(
     jenv: &mut HashMap<String, Known>,
     jstore: &mut Store,
 ) {
+    let held = |name: &str| env.contains_key(name) || store.contract.contains_key(name);
     jenv.retain(|name, k| {
-        env.contains_key(name) || !matches!(k.fact, Some(Fact::Union { nullable: true, .. }))
+        held(name)
+            && (env.contains_key(name)
+                || !matches!(k.fact, Some(Fact::Union { nullable: true, .. })))
     });
+    jstore.contract.retain(|name, _| held(name));
     for (name, arms) in &store.contract {
         if jstore.contract.contains_key(name) || jenv.contains_key(name) {
             continue;

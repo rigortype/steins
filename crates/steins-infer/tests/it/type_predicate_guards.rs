@@ -972,3 +972,167 @@ fn a_condition_past_the_path_cap_contributes_what_it_did_and_names_the_cap() {
     );
     assert_eq!(dumps(&src), vec!["0|1|2|3|4|5|6|7"]);
 }
+
+
+// ---- A path its own narrowing empties (ADR-0106 §2.1, the #1100 review) -----
+//
+// One test per row of `narrow::path_fate`'s table: the atom kind that empties a
+// carrier, the carrier it empties, and what becomes of the path.
+
+/// The report of one function under the path prelude.
+fn one(func: &str) -> Vec<String> {
+    report(&path_src(&format!("{func}\n")))
+}
+
+#[test]
+fn a_type_predicate_that_empties_a_verified_lane_drops_its_path() {
+    // `c2`: over `string $s`, the path `!is_string($s) && is_int($s)` deletes the
+    // only arm; PHP prints 2.
+    assert_eq!(
+        one("function c2(string $s): int { if (is_string($s) || is_int($s)) { \\PHPStan\\dumpType($s); return strlen($s); } return 0; }"),
+        vec!["string"]
+    );
+    // `v_param`, the native `int` mirror.
+    assert_eq!(
+        one("function v_param(int $n): int { if (is_int($n) || is_string($n)) { \\PHPStan\\dumpType($n); return $n; } return 0; }"),
+        vec!["int"]
+    );
+    // `v2`: a lane an earlier exit narrowed to `int`.
+    assert_eq!(
+        one("function v2(int|string $n): int { if (is_string($n)) { return 0; } if (is_int($n) || is_string($n)) { \\PHPStan\\dumpType($n); return $n; } return 1; }"),
+        vec!["int"]
+    );
+}
+
+#[test]
+fn a_literal_comparison_after_an_emptied_lane_drops_its_path() {
+    // `a`: `!is_string($n)` empties the lane before `$n === 3` could pin `3`.
+    assert_eq!(
+        one("function a(int|string $n): string { if (is_int($n)) { return 'i'; } if (is_string($n) || $n === 3) { \\PHPStan\\dumpType($n); return $n; } return 'z'; }"),
+        vec!["string"]
+    );
+    // `v3`, the `&&`-at-else form, and `v5`, the same through `assert`.
+    assert_eq!(
+        one("function v3(int|string $n): int { if (is_string($n)) { return 0; } if (!is_int($n) && $n !== 'x') { return 2; } \\PHPStan\\dumpType($n); return $n; }"),
+        vec!["int"]
+    );
+    assert_eq!(
+        one("function v5(int|string $n): int { if (is_string($n)) { return 0; } assert(is_int($n) || $n === 'k'); \\PHPStan\\dumpType($n); return $n; }"),
+        vec!["int"]
+    );
+}
+
+#[test]
+fn a_predicate_that_empties_a_verified_value_fact_drops_its_path() {
+    // `v_and` and `v_tern`: `$n` is `1|2`, so `!is_int($n)` leaves no value.
+    assert_eq!(
+        one("function v_and(bool $c): int { $n = $c ? 1 : 2; if (!is_int($n) && !is_string($n)) { return 0; } \\PHPStan\\dumpType($n); return $n; }"),
+        vec!["1|2"]
+    );
+    assert_eq!(
+        one("function v_tern(bool $c): int { $n = $c ? 1 : 2; if (is_int($n) || is_string($n)) { \\PHPStan\\dumpType($n); return $n; } return 0; }"),
+        vec!["1|2"]
+    );
+}
+
+#[test]
+fn an_emptied_docblock_claim_keeps_its_path_as_the_site_held_it() {
+    // An `Asserted` lane: `@param int` may lie, so the `string` path stays live,
+    // and it joins in carrying the declaration, not a proven `string`.
+    assert_eq!(
+        one("/** @param int $n */ function asr($n): int { if (is_int($n) || is_string($n)) { \\PHPStan\\dumpType($n); return $n; } return 0; }"),
+        vec!["int (asserted)"]
+    );
+    // An `Asserted` value fact (`count` of a `@param list<int>`): the same.
+    assert_eq!(
+        one("/** @param list<int> $a */ function v_count(array $a): int { $n = count($a); if (is_int($n) || is_string($n)) { \\PHPStan\\dumpType($n); return $n; } return 0; }"),
+        vec!["int<0, max> (asserted)"]
+    );
+    // A shape lane emptied: the shape vocabulary's out-of-vocabulary signal.
+    assert_eq!(
+        one("/** @param array{a?: int} $v */ function sh(array $v): int { if (isset($v['a']) || is_string($v)) { \\PHPStan\\dumpType($v); } return 0; }"),
+        vec!["array{a?: int} (asserted)"]
+    );
+}
+
+#[test]
+fn a_name_the_site_held_nothing_for_gains_nothing_from_the_join() {
+    // A loop's entry forgets `$n` (the header hands it to a call), so nothing
+    // rules out the `string` path; the join must not claim a `string` arm.
+    assert_eq!(
+        one("function s_while(int $n): int { while (is_int($n) || is_string($n)) { \\PHPStan\\dumpType($n); return $n; } return 1; }"),
+        vec!["unknown"]
+    );
+    // An undeclared variable, the same.
+    assert_eq!(
+        one("function un($n): int { if (is_int($n) || is_string($n)) { \\PHPStan\\dumpType($n); } return 0; }"),
+        vec!["unknown", "untyped.parameter"]
+    );
+}
+
+#[test]
+fn an_inhabited_path_of_every_vocabulary_still_joins() {
+    // `instanceof` and the null comparison: the `null` path is refuted by the
+    // early exit, the class path is kept.
+    assert_eq!(
+        one("function v1(?Foo $x): string { if ($x === null) { return ''; } if ($x instanceof Foo || $x === null) { \\PHPStan\\dumpType($x); } return ''; }"),
+        vec!["Foo"]
+    );
+    // Enum identity: both cases are live.
+    assert_eq!(
+        report("<?php\nenum E { case A; case B; case C; }\nfunction en(E $e): int { if ($e === E::A || $e === E::B) { \\PHPStan\\dumpType($e); } return 0; }\n"),
+        vec!["E::A|E::B"]
+    );
+}
+
+#[test]
+fn every_site_drops_the_emptied_path() {
+    for func in [
+        "function s_elseif(int|string $n, bool $c): int { if (is_string($n)) { return 0; } if ($c) { return 2; } elseif (is_int($n) || is_string($n)) { return $n; } return 1; }",
+        "function s_operand(int|string $n): bool { if (is_string($n)) { return false; } return (is_int($n) || is_string($n)) && intdiv($n, 1) > 0; }",
+        "function s_ternary(int|string $n): int { if (is_string($n)) { return 0; } return (is_int($n) || is_string($n)) ? $n : 0; }",
+        "function s_match(int|string $n): int { if (is_string($n)) { return 0; } return match (true) { is_int($n) || is_string($n) => $n, default => 0, }; }",
+        "function s_neg_lit(int|string $n): int { if (is_string($n)) { return 0; } if (!is_int($n) && $n !== 5) { return 9; } return $n; }",
+        "function s_value(): int { $n = random_int(0, 1) ? 1 : 2; if (is_int($n) || is_string($n)) { return $n; } return 0; }",
+    ] {
+        assert_eq!(one(func), Vec::<String>::new(), "{func}");
+    }
+}
+
+/// The prelude's strict `int` sink, fed a string literal: a proven TypeError
+/// wherever the walk keeps the call live.
+const NEED_INT: &str = "function need_int(int $i): int { return $i; }\n";
+
+#[test]
+fn a_docblock_lane_a_runtime_atom_narrowed_first_still_keeps_its_path() {
+    // `lt1`: over `@param 'a'|'b'`, the path `$s !== 'a' && $s === 'c'` empties a
+    // docblock's lane; PHP takes it for `'c'`, so the join keeps it and the
+    // inner `$s !== 'a'` stays live, as on the base.
+    let lt1 = format!(
+        "{NEED_INT}/** @param 'a'|'b' $s */ function lt1(string $s): int {{ if ($s === 'a' || $s === 'c') {{ if ($s !== 'a') {{ return need_int('x'); }} return 1; }} return 0; }}"
+    );
+    assert_eq!(one(&lt1), vec!["type.argument-mismatch"]);
+    // `lt4`, the `&&`-at-else mirror.
+    let lt4 = format!(
+        "{NEED_INT}/** @param 'a'|'b' $s */ function lt4(string $s): int {{ if ($s !== 'a' && $s !== 'c') {{ return 0; }} if ($s === 'c') {{ return need_int('x'); }} return 1; }}"
+    );
+    assert_eq!(one(&lt4), vec!["type.argument-mismatch"]);
+}
+
+#[test]
+fn a_type_predicate_over_a_docblock_emptied_lane_mints_as_on_the_base() {
+    // `ae1`, `ae5` and `nv5`: `@param int` over `int|string`; `is_string` after
+    // `!is_int` names the `string` PHP passes, rather than `*NEVER*`.
+    assert_eq!(
+        one("/** @param int $n */ function ae1(int|string $n): int { if (!is_int($n) && is_string($n)) { \\PHPStan\\dumpType($n); } return 0; }"),
+        vec!["string"]
+    );
+    assert_eq!(
+        one("/** @param int $n */ function ae5(int|string $n): int { if (!is_int($n)) { if (is_string($n)) { \\PHPStan\\dumpType($n); } } return 0; }"),
+        vec!["string"]
+    );
+    assert_eq!(
+        one("/** @param int $n */ function nv5(int|string $n): string { if (!is_int($n) && is_string($n)) { \\PHPStan\\dumpType($n); } return 'z'; }"),
+        vec!["string"]
+    );
+}
