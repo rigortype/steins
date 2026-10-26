@@ -758,6 +758,18 @@ fn method_exists_narrows_at_every_condition_site() {
                 &["N"],
                 &[],
             ),
+            // The `&&` operand: past `method_exists($x, 'go')` the right operand reads N,
+            // which lacks `other`, so the condition folds false and the body is dead.
+            (
+                "function o1(N|M $x): string { if (method_exists($x, 'go') && method_exists($x, 'other')) { \\PHPStan\\dumpType($x); return 'dead'; } return 'n'; }",
+                &[],
+                &[],
+            ),
+            (
+                "function o2(N|M $x): string { if (method_exists($x, 'go') && method_exists($x, 'go')) { \\PHPStan\\dumpType($x); return 'y'; } return 'n'; }",
+                &["N"],
+                &[],
+            ),
             // A stored condition (ADR-0106 §2.3).
             (
                 "function s03(N|M $x): string { $ok = method_exists($x, 'go'); if ($ok) { \\PHPStan\\dumpType($x); return 'y'; } \\PHPStan\\dumpType($x); return $x->go(); }",
