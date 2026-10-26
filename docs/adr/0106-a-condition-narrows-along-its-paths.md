@@ -200,12 +200,22 @@ true; if ($has)` (`release($has)`) all throw in PHP and keep reporting.
   `Fact::Shape` as `set_non_empty`. Truthiness (`if ($a)`) already reaches the
   same call.
 - The loose forms also add `NotNull(v)`: `null == []` is true, so `$a != []`
-  proves a nullable array is not null. `0 == []` and `[0] == []` are false, so
-  nothing else leaks in.
-- In the shape normalizer, **a sealed shape that is non-empty has
-  `count_bound.lo() ≥ 1`**, and the existing exact-count pin then promotes a
+  proves a nullable array is not null. `false == []` is true as well, and the
+  rule adds nothing for it: `false` stays in the fact, which is sound (the branch
+  keeps a value PHP may still hold there) and only less precise. `0 == []` and
+  `[0] == []` are false, so nothing else needs excluding.
+- A shape that can never be non-empty (`array{}`) is left as declared, since
+  `set_non_empty` would build an empty `non-empty-array{}`. The branch is one
+  the `Asserted` declaration says PHP never enters, and a dead region on that
+  premise would silence a live path, so reads there are judged against
+  `array{}` as before (the loose form's `NotNull` still drops a `null` arm).
+- In the shape normalizer, **a sealed shape that is non-empty counts as having
+  a count floor of one** for the existing exact-count pin, which then promotes a
   single optional key to required. This is the rule `count($a) > 0` already
-  satisfies, which is why it is silent today.
+  satisfies, which is why it is silent today. `normalize_counted` reads that
+  floor without storing it in `count_bound`: storing it gave one shape two
+  forms (with and without the floor, depending on how its non-emptiness was
+  established), which broke the canonical form equality relies on.
 - Not promoted: an open tail (`array{0?: int, ...}`) and two or more optional keys
   (`array{0?: int, 1?: int}` is non-empty for `[1 => 2]`, which has no key 0). The
   `non-empty-list<T>` key 0 is left open (§5).
