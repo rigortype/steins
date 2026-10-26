@@ -298,14 +298,17 @@ not a false positive. The rule is to lower it as `Not(Truthy(Var))`, which:
   body reads a variable that is now proven;
 - narrows `!empty($s)` over a string to `non-falsy-string`, and `!empty($a)` over
   `array{0?: int}` through §2.5 (so B2 lands after C);
-- on the else side narrows nothing, as `Not(Truthy)` does: `empty("0")` and
-  `empty([0])` are true and false in PHP, and "falsy" is not representable.
+- on the side where `empty($v)` holds narrows as `!$v` does and no further: an
+  array becomes `array{}` (a falsy array is `[]`), and a scalar keeps its domain,
+  since "falsy" is not representable (`empty("0")` is true, `empty([0])` false).
 
-It adds a new class of true positives: `if (empty($row)) { return $row['x']; }`
-over `array{x?: int}` reports `offset.maybe-missing`, and PHP reads an undefined
-key. Each instance in the corpus diff is classified. The decision to run B2 is
-D1 and not a finding of the analysis; if the diff is large the slice is dropped
-from the run and this section stands as the recorded rule, unimplemented.
+**Landed (2026-10-27, #1079).** The public-corpus diff is empty in both the
+strict and the default profile, though about 39 bare `empty($var)` guards in the
+corpus now lower this way. The expected true-positive class (`if (empty($row))
+{ return $row['x']; }` over `array{x?: int}`) does not appear: a read on an
+`array{}` reached by narrowing is silent, for `!$row` too, while a declared
+`array{}` reports `offset.undeclared`. That gap predates the run and is left
+open in §5.
 
 ## 3. Consequences
 
@@ -315,8 +318,8 @@ untyped `$numbers` under `if (\is_int($numbers) || \is_float($numbers))`) drops,
 Everything else is classified per slice. A narrowing change is never accepted as
 byte-identical: removals are the expected direction (strict-floor false positives
 leave), and every addition must be a true positive, with these named as expected:
-the else-side `call.undefined-method` of §2.7, the `offset.maybe-missing` class
-of §2.9, and dead-operand marks the operand site now earns (§2.2). D's finding
+the else-side `call.undefined-method` of §2.7 and dead-operand marks the operand
+site now earns (§2.2); B2 added none (see §2.9). D's finding
 level is the exception that is expected to be byte-identical, with only
 `debug.type` lines moving.
 
@@ -359,4 +362,8 @@ The private corpus runs under the lock discipline before merge.
 - **Operand and ternary positions do not judge argument mismatch**: observed
   silent on master (`(is_int($n) || is_float($n)) ? number_format($n) : $n`), for a
   reason separate from the narrowing here, and kept silent.
+- **A read on a narrowed `array{}`**: an `array{}` reached by narrowing (`!$v`,
+  the true side of `empty($v)`) reports nothing for `$v['x']`, while a declared
+  `array{}` reports `offset.undeclared` and `$v === []` reports `offset.missing`
+  (§2.9). It predates this run.
 - **PHPStan's behaviour** on these spellings was not re-run for this ADR.
