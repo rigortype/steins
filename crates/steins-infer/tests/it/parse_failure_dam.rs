@@ -389,3 +389,28 @@ fn no_profile_can_disable_or_demote_it() {
     assert!(bare.surfaces_id(SYNTAX_UNPARSABLE_ID));
     assert_eq!(bare.level(SYNTAX_UNPARSABLE_ID), Level::Fail);
 }
+
+// 8. `method_exists` on a literal class reads the same member-incomplete leg (#1092).
+
+#[test]
+fn method_exists_through_a_broken_file_is_undecided_not_false() {
+    // `PF` is recovered from a file that does not parse: a method the recovery kept
+    // still folds `method_exists` true, but a name it lacks may be one the break
+    // dropped, so the guard stays undecided and its body is live. A dump is emitted
+    // only from a live region.
+    let broken = "<?php
+class PF {
+    public function kept(): int { return 1; }
+    public function zz(): int { return 1 +; }
+}
+";
+    let caller = "<?php
+function c1(): void { if (method_exists(PF::class, 'nope')) { \\PHPStan\\dumpType(1); } }
+function c2(): void { if (method_exists(PF::class, 'kept')) { return; } \\PHPStan\\dumpType(2); }
+function c3(): void { \\PHPStan\\dumpType(3); }
+";
+    let all = findings(&[("src/a.php", caller), ("src/b.php", broken)]);
+    let lines: Vec<u32> =
+        all.iter().filter(|d| d.id == steins_infer::DEBUG_TYPE_ID).map(|d| d.line).collect();
+    assert_eq!(lines, vec![2, 4], "the absent name is undecided, the kept one folds true: {all:?}");
+}

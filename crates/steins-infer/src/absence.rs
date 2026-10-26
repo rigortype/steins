@@ -48,7 +48,7 @@ pub(crate) enum UndefKind {
 
 impl UndefKind {
     /// The magic method whose presence anywhere in the chain makes the call defined.
-    pub(crate) fn magic(self) -> &'static str {
+    fn magic(self) -> &'static str {
         match self {
             UndefKind::Instance => "__call",
             UndefKind::Static => "__callStatic",
@@ -1581,4 +1581,81 @@ pub(crate) fn check_undefined_constant(cx: &Cx, folder: &mut dyn Folder, r: &Nam
         facet: None,
         fix: None,
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use steins_syntax::SourceTree;
+
+    use crate::FileUnit;
+    use crate::cx::Cx;
+    use crate::project::{Index, LazyTree};
+
+    use super::{ChainWalk, UndefKind, enumerate_method_chain, walk_method_chain};
+
+    /// The verdict's name, so each test reads as the row of the four-way table it pins.
+    fn name(w: &ChainWalk) -> &'static str {
+        match w {
+            ChainWalk::Absent { .. } => "absent",
+            ChainWalk::Declared { .. } => "declared",
+            ChainWalk::Magic { .. } => "magic",
+            ChainWalk::Unknown => "unknown",
+        }
+    }
+
+    /// Walk `start` for `method` in a one-file project, with the instance fallback
+    /// (`magic`) or with none, which is `method_exists`'s question.
+    fn walk(src: &str, start: &str, method: &str, magic: bool) -> &'static str {
+        let tree = LazyTree::ready(SourceTree::parse(src));
+        let units = [FileUnit { path: "t.php", tree: &tree }];
+        let index = Index::from_units(&units);
+        let cx = Cx::new(&units, &index, 0);
+        if magic {
+            return name(&enumerate_method_chain(&cx, start, method, UndefKind::Instance));
+        }
+        let Some((file, cd)) = cx.find_class(start) else { return "unresolved" };
+        name(&walk_method_chain(&cx, file, cd, start, method, None))
+    }
+
+    const SRC: &str = "<?php
+class Top { public function up(): int { return 1; } }
+class Magic extends Top { public function __call(string $n, array $a): int { return 5; } }
+class Leaf extends Magic {}
+class Plain {}
+class Kid extends Plain {}
+class Lost extends Missing {}
+enum E { case A; }
+";
+
+    #[test]
+    fn a_closed_chain_lacking_the_method_is_absent() {
+        assert_eq!(walk(SRC, "Kid", "m", true), "absent");
+        assert_eq!(walk(SRC, "Kid", "m", false), "absent");
+    }
+
+    #[test]
+    fn a_method_on_an_ancestor_is_declared() {
+        assert_eq!(walk(SRC, "Magic", "up", true), "declared");
+        assert_eq!(walk(SRC, "Magic", "up", false), "declared");
+    }
+
+    #[test]
+    fn the_walk_continues_past_call_to_a_higher_declaration() {
+        // `Magic` holds `__call` below `Top::up()`: the declaration still wins.
+        assert_eq!(walk(SRC, "Leaf", "up", true), "declared");
+    }
+
+    #[test]
+    fn an_inherited_call_alone_is_magic_and_absent_without_a_fallback() {
+        assert_eq!(walk(SRC, "Leaf", "m", true), "magic");
+        // `method_exists` ignores `__call`.
+        assert_eq!(walk(SRC, "Leaf", "m", false), "absent");
+    }
+
+    #[test]
+    fn an_unresolved_ancestor_or_an_enum_is_unknown() {
+        assert_eq!(walk(SRC, "Lost", "m", true), "unknown");
+        assert_eq!(walk(SRC, "Lost", "m", false), "unknown");
+        assert_eq!(walk(SRC, "E", "m", true), "unknown");
+    }
 }

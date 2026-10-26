@@ -12,7 +12,7 @@ use crate::absence::{ChainWalk, walk_method_chain};
 use crate::cx::Cx;
 use crate::early_binding::redammed;
 use crate::dam::DamKind;
-use crate::declared_receiver::declared_receiver_lacks_method;
+use crate::declared_receiver::{CALL_FALLBACK, declared_receiver_lacks_method};
 use crate::env::{GuardVar, Store, Vouch};
 use crate::fold::Folder;
 use crate::project::{FnResolution, Res};
@@ -191,6 +191,10 @@ pub(crate) fn eval_existence_call(
 /// provably false and the body it guards is dead, exactly where the lane would have
 /// reported inside it. Otherwise `Maybe` — an arm that may have `m` leaves the guard
 /// undecided, and an allocation-proven receiver stays with the exact-class vouch.
+///
+/// The two predicates differ on `__call`: `method_exists` reports declared methods only,
+/// so a chain that answers `m` through an inherited `__call` still lacks it there, while
+/// `is_callable` is true on it. Each asks the lane with its own magic fallback.
 fn member_guard_verdict(
     w: &WalkCx,
     folder: &mut dyn Folder,
@@ -198,14 +202,16 @@ fn member_guard_verdict(
     call: &CallExpr,
 ) -> Option<Certainty> {
     let shape = member_guard_shape(w.cx, call)?;
-    if shape.kind != MemberGuard::Method {
-        return None;
-    }
+    let magic = match shape.kind {
+        MemberGuard::Method => None,
+        MemberGuard::Callable => CALL_FALLBACK,
+        MemberGuard::Property => return None,
+    };
     let ArgValue::Var(var) = shape.receiver else { return None };
     let ArgValue::Str(method) = shape.member else { return None };
     let method = method.as_str()?;
     let lacks =
-        declared_receiver_lacks_method(w.cx, folder, store, w.scope.poisoned, var, method);
+        declared_receiver_lacks_method(w.cx, folder, store, w.scope.poisoned, var, method, magic);
     Some(if lacks { Certainty::No } else { Certainty::Maybe })
 }
 
@@ -551,15 +557,19 @@ fn callable_name_vouch(cx: &Cx, call: &CallExpr) -> Option<Vec<Vouch>> {
     })
 }
 
-/// Which member a member guard asks about.
+/// Which member a member guard asks about, and how.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum MemberGuard {
+    /// `method_exists`: a declared method; `__call` does not count.
     Method,
+    /// `is_callable([$r, 'm'])`: a method, or one `__call` answers.
+    Callable,
     Property,
 }
 
-/// A recognized member guard's parts: `method_exists($r, 'm')`, `is_callable([$r, 'm'])`
-/// (both [`MemberGuard::Method`]) and `property_exists($r, 'p')`.
+/// A recognized member guard's parts: `method_exists($r, 'm')`
+/// ([`MemberGuard::Method`]), `is_callable([$r, 'm'])` ([`MemberGuard::Callable`]) and
+/// `property_exists($r, 'p')`.
 struct MemberShape<'a> {
     kind: MemberGuard,
     receiver: &'a ArgValue,
@@ -592,7 +602,7 @@ fn member_guard_shape<'a>(cx: &Cx, call: &'a CallExpr) -> Option<MemberShape<'a>
         if !positional(k0, 0) || !positional(k1, 1) {
             return None;
         }
-        Some(MemberShape { kind: MemberGuard::Method, receiver: recv, member: name })
+        Some(MemberShape { kind: MemberGuard::Callable, receiver: recv, member: name })
     } else {
         None
     }
@@ -745,7 +755,7 @@ fn member_guard_vouch(cx: &Cx, store: &Store, call: &CallExpr) -> Option<Vec<Vou
     let ArgValue::Str(member) = shape.member else { return Some(Vec::new()) };
     let Some(member) = member.as_str() else { return Some(Vec::new()) };
     Some(match shape.kind {
-        MemberGuard::Method => receiver_classes(cx, store, shape.receiver)
+        MemberGuard::Method | MemberGuard::Callable => receiver_classes(cx, store, shape.receiver)
             .into_iter()
             .map(|class| Vouch::Method {
                 class: class.trim_start_matches('\\').to_ascii_lowercase(),
