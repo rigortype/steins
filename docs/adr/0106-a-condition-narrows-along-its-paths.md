@@ -273,6 +273,25 @@ The else side turns a currently silent call into a true positive: `if
 `go`, narrows to `M` and reports `call.undefined-method`. PHP throws `Error`.
 That is an expected addition, listed in the slice's diff.
 
+**Landed (2026-10-27, #981) on the declared-receiver lane's per-arm verdict.**
+The rule above is the arm verdict of the guard-aware lane (`judge_arm`, A4a/A4b),
+asked with no magic fallback: on the then side an arm judged `Absent` or `Dead` is
+deleted, on the else side one judged `Declared` or `Dead`. `Unknown` (an open
+hierarchy, a descendant that declares the method, an obstacle on a chain), an arm
+the lane cannot read (`null`, a scalar, a class-string), and a verdict that rests
+on a class only a `@phpstan-assert` excluded keep the arm on both sides. Strata
+are kept, and an all-`Verified` lane emptied this way is ADR-0052 §2's emptied
+carrier. The narrowing is one more entry of the arm vocabulary, so the branch, the
+`&&`/`||` operand, the path driver, `assert()` and stored conditions all apply it.
+The fold stays No/Maybe; it never answers Yes.
+
+The walk counts an interface's methods for an abstract class or an interface,
+its own or reached through `implements` and every parent of an interface (#1103):
+before, the literal fold `method_exists(Abs::class, 'm')` answered a wrong No
+there. An interface the walk cannot enumerate (a builtin, a vendor name) leaves
+such a node `Unknown`. A concrete class implements every interface method on its
+own chain, so the call lanes keep walking `extends` alone.
+
 ### 2.8 Class arms under a positive guard (D, #908, #909; D4)
 
 ADR-0052 §2's positive class rule says an arm dies only when it is final, or an
@@ -368,6 +387,12 @@ The private corpus runs under the lock discipline before merge.
   lane as a literal arm (`val_contract`). It fixes the §2.1 residue and every
   post-`if` merge; its own slice, filed on D5.
 - **`is_callable` narrowing** (§2.7, D3): declined with the measurement above.
+- **`method_exists` folding Yes** (§2.7): a lane every live arm of which is
+  `Declared` would prove the else side dead; it is narrowed to an empty lane
+  instead, and the region stays walked.
+- **Loop conditions keep no `method_exists` narrowing** (§2.7): `while
+  (!method_exists($x, 'go'))` forgets `$x` on both sides, on master too, while the
+  `instanceof` twin narrows after the loop.
 - **`non-empty-list<T>` key 0**: closed for a declared key 0 by the list-head pin
   (§2.5). A tail-only `non-empty-list<T>` gains no field, and a read of its key 0
   is judged against the tail as before.
