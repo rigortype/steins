@@ -558,6 +558,14 @@ fn shape_seeds() -> Vec<ShapeFact> {
             true,
             Vec::new(),
         ),
+        // 19 non-empty-list{0?: int, ...<int>} — the list-head pin requires key 0
+        ShapeFact::normalize(
+            vec![(ik(0), Presence::Optional, gint())],
+            Tail::Unsealed { key: KeyClass::Int, value: gint() },
+            Certainty::Yes,
+            true,
+            Vec::new(),
+        ),
     ]
 }
 

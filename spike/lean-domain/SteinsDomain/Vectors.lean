@@ -420,7 +420,9 @@ def shapeSeeds : List ShapeFact :=
        { keys := [.str 1, .str 0], flavor := .keyExists }]            -- 16 antichain
   , normalize [(.str 0, .absent, none), (.str 1, .absent, none)]
       (.unsealed .arrayKey none) .maybe false []                      -- 17 absent survives
-  , normalize [(.str 0, .optional, sint 1)] .sealed .maybe true [] ]  -- 18 non-empty, string opt
+  , normalize [(.str 0, .optional, sint 1)] .sealed .maybe true []    -- 18 non-empty, string opt
+  , normalize [(.int 0, .optional, sgint)] (.unsealed .int sgint) .yes true [] ]
+                                                                     -- 19 list-head pin
 
 /-- Four shape facts (one nullable) and the neighbours the mixed-base discipline
 must reject. -/

@@ -196,6 +196,8 @@ type Field = (Key, Presence, Option<Box<Fact>>);
 /// * `count_bound` clamped non-negative, discharged into `Required` presence
 ///   under a `Sealed` tail the floor already exhausts (the exact-count pin,
 ///   issue #272), where `non_empty` counts as a floor of one (issue #1079);
+/// * a declared key `0` `Required` when `is_list` is `Yes` and the shape is
+///   non-empty (the list-head pin, issue #1079);
 /// * `order` absent by default — only [`ShapeFact::lift`] and other
 ///   observed-construction sites set it (issue #327).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -384,6 +386,11 @@ impl ShapeFact {
                 *p = Presence::Required { witnessed: keep };
             }
         }
+
+        // As above, a count the flag contradicts keeps its own floor.
+        let head_floor = (non_empty && count_bound.intersect(IntRange::POSITIVE).is_some())
+            || count_bound.lo() >= 1;
+        pin_list_head(&mut fields, &tail, is_list, head_floor);
 
         // A cover with a `Required` member is discharged.
         kept.retain(|c| !c.keys.iter().any(|k| field_of(&fields, k).is_some_and(|(_, p, _)| p.is_required())));
@@ -1100,6 +1107,26 @@ fn promote_present(fields: &mut Vec<Field>, k: &Key, tail: &Tail) {
     }
 }
 
+/// **The list-head pin** (#1079): a non-empty list holds key `0`, since a list's
+/// keys are `0..n-1`. A declared optional key `0` of a shape whose `is_list` is
+/// `Yes` and that is non-empty becomes `Required { witnessed: false }`.
+///
+/// Only a declared field moves. A key `0` the tail alone supplies is not added
+/// as a field: `non-empty-list<T>` keeps its tail-only form, so the rule maps
+/// `non-empty-list{0?: T, ...<T>}` onto the one form `non-empty-list{0: T,
+/// ...<T>}` and gives no shape a second spelling.
+fn pin_list_head(fields: &mut [Field], tail: &Tail, is_list: Certainty, non_empty: bool) {
+    let non_empty = non_empty || fields.iter().any(|(_, p, _)| p.is_required());
+    let list = sharpen_is_list(compute_is_list(fields, tail, non_empty), is_list);
+    if !non_empty || list != Certainty::Yes {
+        return;
+    }
+    let head = fields.iter_mut().find(|(k, _, _)| *k == Key::Int(0));
+    if let Some((_, p @ Presence::Optional, _)) = head {
+        *p = Presence::Required { witnessed: false };
+    }
+}
+
 /// Keep only the minimal covers, deterministically ordered.
 fn antichain(mut covers: Vec<Cover>) -> Vec<Cover> {
     covers.sort();
@@ -1502,6 +1529,76 @@ mod tests {
             counted(2, 5).narrow_count(IntRange::new(3, 9).expect("ordered")).count_range(),
             IntRange::new(3, 5).expect("ordered")
         );
+    }
+
+    // The list-head pin (issue #1079)
+
+    /// `list{0?: int, ...<int>}`-style: an optional key `0` over an int tail.
+    fn open_list(non_empty: bool, head: Presence) -> ShapeFact {
+        ShapeFact::normalize(
+            vec![(k(0), head, int_slot(1))],
+            Tail::Unsealed { key: KeyClass::Int, value: int_slot(1) },
+            Certainty::Yes,
+            non_empty,
+            Vec::new(),
+        )
+    }
+
+    #[test]
+    fn a_non_empty_list_holds_its_declared_key_zero() {
+        let s = open_list(true, Presence::Optional);
+        assert_eq!(s.field(&k(0)).map(|f| f.1), Some(Presence::Required { witnessed: false }));
+        // Not without non-emptiness, and not when the shape is not a list.
+        let empty_ok = open_list(false, Presence::Optional);
+        assert_eq!(empty_ok.field(&k(0)).map(|f| f.1), Some(Presence::Optional));
+        let maybe = ShapeFact::normalize(
+            vec![(k(0), Presence::Optional, None), (k(1), Presence::Optional, None)],
+            Tail::Sealed,
+            Certainty::Maybe,
+            true,
+            Vec::new(),
+        );
+        assert_eq!(maybe.field(&k(0)).map(|f| f.1), Some(Presence::Optional));
+    }
+
+    #[test]
+    fn the_list_head_pin_leaves_one_form_per_shape() {
+        // `non-empty-list{0?: int, ...}` and `non-empty-list{0: int, ...}` admit the
+        // same arrays and normalize to one value, which a set dedups.
+        let a = open_list(true, Presence::Optional);
+        let b = open_list(true, Presence::Required { witnessed: false });
+        assert_eq!(a, b);
+        assert_eq!(std::collections::HashSet::from([a.clone(), b]).len(), 1);
+        // Whichever way the non-emptiness came: the flag, a count floor, or a guard.
+        assert_eq!(open_list(false, Presence::Optional).set_non_empty(), a);
+        let floored = open_list(false, Presence::Optional).narrow_count(IntRange::POSITIVE);
+        assert_eq!(floored.field(&k(0)).map(|f| f.1), Some(Presence::Required { witnessed: false }));
+        // A tail-only non-empty list gains no field.
+        let tail_only = ShapeFact::normalize(
+            Vec::new(),
+            Tail::Unsealed { key: KeyClass::Int, value: int_slot(1) },
+            Certainty::Yes,
+            true,
+            Vec::new(),
+        );
+        assert!(tail_only.fields.is_empty());
+    }
+
+    #[test]
+    fn joining_a_literal_into_a_non_empty_list_keeps_key_zero() {
+        // `non-empty-list<int>` joined with `[0 => 1]`: key 0 is present on both sides.
+        let ne_list = ShapeFact::normalize(
+            Vec::new(),
+            Tail::Unsealed { key: KeyClass::Int, value: int_slot(1) },
+            Certainty::Yes,
+            true,
+            Vec::new(),
+        );
+        let lit = ShapeFact::lift(&arr(vec![(k(0), Val::Int(1))]));
+        for j in [ne_list.join(&lit), lit.join(&ne_list)] {
+            assert_eq!(j.field(&k(0)).map(|f| f.1), Some(Presence::Required { witnessed: false }));
+            assert_eq!(j.is_list, Certainty::Yes);
+        }
     }
 
     #[test]
