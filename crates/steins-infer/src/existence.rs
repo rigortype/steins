@@ -12,10 +12,13 @@ use crate::absence::{ChainWalk, walk_method_chain};
 use crate::cx::Cx;
 use crate::early_binding::redammed;
 use crate::dam::DamKind;
-use crate::declared_receiver::{CALL_FALLBACK, declared_receiver_lacks_method};
+use crate::declared_receiver::{
+    CALL_FALLBACK, declared_receiver_lacks_method, method_exists_dead_arms,
+};
 use crate::env::{GuardVar, Store, Vouch};
 use crate::fold::Folder;
 use crate::project::{FnResolution, Res};
+use crate::refine::{collect_guard_calls, delete_contract_arms};
 use crate::walk::WalkCx;
 
 mod class_const;
@@ -213,6 +216,52 @@ fn member_guard_verdict(
     let lacks =
         declared_receiver_lacks_method(w.cx, folder, store, w.scope.poisoned, var, method, magic);
     Some(if lacks { Certainty::No } else { Certainty::Maybe })
+}
+
+/// Narrow a receiver's declared arms by the `method_exists($var, 'm')` calls `cond`
+/// proves on this side (issue #981): where a call held, delete the arms the
+/// declared-receiver lane proves lack `m`; where it failed, the arms it proves declare
+/// it; on both, the arms its guards admit nothing of ([`method_exists_dead_arms`]).
+///
+/// The fold of the same call ([`member_guard_verdict`]) reads the same ladder over the
+/// whole lane, so the then side this empties is the one it folds dead. Positional
+/// arguments, a bare variable receiver and a literal method name only; nothing in a
+/// poisoned scope, on an exact receiver (the exact lane's, as for the fold) or without
+/// the absence family. `is_callable([$var, 'm'])` narrows nothing: a `__call` makes it
+/// true and visibility makes it false, neither of which an arm's declarations decide.
+pub(crate) fn apply_member_guard_narrowing(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    cond: &CondExpr,
+    then: bool,
+    store: &mut Store,
+) {
+    if w.scope.poisoned {
+        return;
+    }
+    let mut calls = Vec::new();
+    collect_guard_calls(cond, then, &mut calls);
+    for (call, holds) in calls {
+        let Some(shape) = member_guard_shape(w.cx, call) else { continue };
+        if shape.kind != MemberGuard::Method {
+            continue;
+        }
+        let (ArgValue::Var(var), ArgValue::Str(method)) = (shape.receiver, shape.member) else {
+            continue;
+        };
+        let Some(method) = method.as_str() else { continue };
+        if store.is_exact(var) {
+            continue;
+        }
+        let Some(arms) = store.contract.get(var.as_str()).filter(|a| !a.is_empty()) else {
+            continue;
+        };
+        if !folder.absence_family_available() {
+            return;
+        }
+        let dead = method_exists_dead_arms(w.cx, folder, arms, method, holds);
+        delete_contract_arms(store, var, &dead);
+    }
 }
 
 /// Resolve a *literal* class reference in an existence-predicate argument to an FQN:

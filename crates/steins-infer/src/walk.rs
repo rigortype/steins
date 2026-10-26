@@ -92,7 +92,7 @@ fn apply_assert_vocabularies(
     // `Value`-subtrahend note): each surviving arm keeps its own
     // stratum, so a `Verified` arm cannot launder and an `Asserted`
     // one cannot be promoted by having been asserted about.
-    apply_class_narrowing(w, cond, then, store);
+    apply_class_narrowing(w, folder, cond, then, store);
     // The assert lowering models its argument as a `CondExpr`, so both
     // `assert(isset(...))` and the DR2 type-predicate vocabulary
     // (`assert(is_string($x))`) route through the same `if`-guard

@@ -528,7 +528,7 @@ pub(crate) fn produce(
         seeded.insert(c.key.clone(), lanes);
     }
     apply_refinements(&refs, &mut senv, &mut sstore, Stratum::Verified);
-    apply_class_narrowing(w, &rewritten, then, &mut sstore);
+    apply_class_narrowing(w, folder, &rewritten, then, &mut sstore);
     for c in &cands {
         let Some(seed) = seeded.get(&c.key) else { continue };
         let learned = Lanes {
