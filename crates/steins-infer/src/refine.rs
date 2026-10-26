@@ -18,6 +18,8 @@ use crate::contract::{ProjectIsa, TemplateShadow, neutralize_templates, parse_ta
 use crate::cx::Cx;
 use crate::dump::SHAPE_REFINED;
 use crate::env::{ContractArm, Known, Store, Stratum, absorb_contract_arms, val_of};
+use crate::existence::apply_member_guard_narrowing;
+use crate::fold::Folder;
 use crate::return_arms::native_arms;
 use crate::walk::WalkCx;
 
@@ -880,11 +882,22 @@ fn collect_enum_identity<'a>(
 ///    a surviving arm is never refined within: an `int` arm still spells `int`
 ///    where the guard did exclude `0`. Both readings are widenings of the truth.
 ///
+/// 7. `method_exists($x, 'm')` deletes the arms the declared-receiver lane proves it
+///    false on, where it held, and true on, where it failed (issue #981,
+///    [`apply_member_guard_narrowing`]). Last, so the guards an `instanceof` in the
+///    same condition records are read.
+///
 /// One neighbouring narrowing is deliberately NOT here: keep-only narrowing on
 /// the positive branch (`if ($x === false)` — the value lane's `Refine::Exact`
 /// already owns this, and the arm lane is a subtraction carrier by
 /// construction).
-pub(crate) fn apply_class_narrowing(w: &WalkCx, cond: &CondExpr, then: bool, store: &mut Store) {
+pub(crate) fn apply_class_narrowing(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    cond: &CondExpr,
+    then: bool,
+    store: &mut Store,
+) {
     let oracle = ProjectIsa { cx: w.cx, demote_catalog: w.cx.a11_demote_catalog() };
 
     let mut ins = Vec::new();
@@ -956,6 +969,9 @@ pub(crate) fn apply_class_narrowing(w: &WalkCx, cond: &CondExpr, then: bool, sto
             &oracle,
         );
     }
+
+    // (7) The member guard (issue #981).
+    apply_member_guard_narrowing(w, folder, cond, then, store);
 }
 
 /// Subtract `sub` from `var`'s contract lane in `store`, arm-wise, preserving each
@@ -1041,7 +1057,7 @@ pub(crate) fn subtract_contract_lane_at(
         }
         let mut changed = false;
         // Whether the lane, before this subtraction, was held on Verified premises
-        // alone — the question the emptied-lane rule below asks (issue #429).
+        // alone — the question the emptied-lane rule asks (issue #429).
         let all_verified = arms.iter().all(|a| a.stratum == Stratum::Verified);
         arms.retain_mut(|a| match normalize::subtract_arm(sub, &a.ty, oracle) {
             normalize::ArmFate::Survives => true,
@@ -1055,26 +1071,50 @@ pub(crate) fn subtract_contract_lane_at(
                 true
             }
         });
-        // The emptied carrier (ADR-0052 §2). An all-`Verified` lane subtracted to
-        // nothing is **kept, empty**, so [`Store::contract_emptied`] can read it:
-        // every arm was a runtime-enforced alternative and every subtrahend that
-        // reaches here is a native guard, so "no value of this variable reaches
-        // here" is a Verified statement. It is still not a death signal — the
-        // verdict owns death, and no branch is pruned by it; what the empty lane
-        // buys is a consumer's *silence*.
-        //
-        // A lane holding any `Asserted` arm keeps the landed fallback and drops to
-        // no-fact: emptying a docblock's claim proves nothing, and a consumer must
-        // not read a lying `@param` as an exhaustion.
-        if arms.is_empty() && !all_verified {
-            store.contract.remove(var);
-        }
-        if changed {
-            store.narrowed.insert(var.to_owned());
-        }
+        settle_lane(store, var, all_verified, changed);
         landed = changed;
     }
     landed
+}
+
+/// Delete the arms of `var`'s contract lane at the positions `dead` marks, strata of the
+/// survivors kept, under the emptied-carrier rule [`subtract_contract_lane_at`] keeps.
+/// Returns whether an arm died.
+pub(crate) fn delete_contract_arms(store: &mut Store, var: &str, dead: &[bool]) -> bool {
+    let Some(arms) = store.contract.get_mut(var) else { return false };
+    if !dead.iter().any(|d| *d) || dead.len() != arms.len() {
+        return false;
+    }
+    let all_verified = arms.iter().all(|a| a.stratum == Stratum::Verified);
+    let mut i = 0;
+    arms.retain(|_| {
+        i += 1;
+        !dead[i - 1]
+    });
+    settle_lane(store, var, all_verified, true);
+    true
+}
+
+/// What follows an arm-wise change to `var`'s contract lane: the emptied carrier and
+/// the [`Store::narrowed`] mark.
+fn settle_lane(store: &mut Store, var: &str, all_verified: bool, changed: bool) {
+    // The emptied carrier (ADR-0052 §2). An all-`Verified` lane subtracted to
+    // nothing is **kept, empty**, so [`Store::contract_emptied`] can read it:
+    // every arm was a runtime-enforced alternative and every subtrahend that
+    // reaches here is a native guard, so "no value of this variable reaches
+    // here" is a Verified statement. It is still not a death signal — the
+    // verdict owns death, and no branch is pruned by it; what the empty lane
+    // buys is a consumer's *silence*.
+    //
+    // A lane holding any `Asserted` arm keeps the landed fallback and drops to
+    // no-fact: emptying a docblock's claim proves nothing, and a consumer must
+    // not read a lying `@param` as an exhaustion.
+    if !all_verified && store.contract.get(var).is_some_and(Vec::is_empty) {
+        store.contract.remove(var);
+    }
+    if changed {
+        store.narrowed.insert(var.to_owned());
+    }
 }
 
 /// The `($var, literal)` of a comparison whose two operands are exactly one bare

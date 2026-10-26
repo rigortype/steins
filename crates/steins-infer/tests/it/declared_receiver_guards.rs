@@ -619,3 +619,204 @@ function b2(A $x): int { assert($x instanceof T); return $x->p; }
         .collect();
     assert_eq!(found, vec![(5, CALL_UNDEFINED_METHOD_ID), (6, PROPERTY_UNDEFINED_ID)]);
 }
+
+// ---------------------------------------------------------------------------
+// Issue #981: `method_exists($x, 'm')` narrows the receiver's arms by the lane's
+// per-arm verdict. Where the call held, an arm every inhabitant of which lacks `m`
+// (`Absent`) is deleted; where it failed, one every inhabitant of which declares `m`
+// (`Declared`); a `Dead` arm on both sides; every other arm stays.
+// ---------------------------------------------------------------------------
+
+/// The dumped types inside `f`, in source order.
+fn dumped(fixture: &str, f: &str) -> Vec<String> {
+    check(&format!("<?php\n{fixture}\n{f}\n"))
+        .into_iter()
+        .filter(|d| d.id == DEBUG_TYPE_ID)
+        .map(|d| d.message.trim_start_matches("dumped type: ").to_owned())
+        .collect()
+}
+
+/// Assert each `(function, dumped types, lane findings)` row over `fixture`.
+fn narrows(fixture: &str, cases: &[(&str, &[&str], &[&str])]) {
+    for (f, types, findings) in cases {
+        let types: Vec<String> = types.iter().map(|s| (*s).to_owned()).collect();
+        assert_eq!(dumped(fixture, f), types, "dumps of {f}");
+        let findings: Vec<String> = findings.iter().map(|s| (*s).to_owned()).collect();
+        assert_eq!(lane(fixture, f), findings, "findings of {f}");
+    }
+}
+
+/// `d5_method_exists.php` and `w984.php` from #981's witness table, with #1103's
+/// abstract class.
+const MEMBER_SOURCES: &str = "
+class N { public function go(): string { return 'go'; } }
+class M { public function other(): string { return 'o'; } }
+class W { public function __call(string $n, array $a): string { return 'magic'; } }
+class S { public static function sm(): string { return 'static'; } }
+class P { private function pm(): string { return 'private'; } }
+abstract class Ab { abstract public function am(): string; }
+class AbK extends Ab { public function am(): string { return 'abstract-impl'; } }
+trait TG { public function tg(): string { return 'trait'; } }
+class UsesT { use TG; }
+class Open {}
+class OpenKid extends Open { public function go(): string { return 'kid'; } }
+interface I {} interface T {}
+class Mid implements I { public function zz(): int { return 7; } }
+class Leaf extends Mid implements T {}
+interface HasM { public function m(): string; }
+abstract class Abs implements HasM {}
+class AbsK extends Abs { public function m(): string { return 'k'; } }
+interface Nobody {}
+";
+
+/// `function f(<sig> $x)` testing `method_exists($x, '<m>')`, with a dump on each side.
+fn guarded(sig: &str, m: &str, then: &str, other: &str) -> String {
+    let d = "\\PHPStan\\dumpType($x);";
+    format!("function f({sig} $x): string {{ if (method_exists($x, '{m}')) {{ {d} {then} }} {d} {other} }}")
+}
+
+#[test]
+fn method_exists_narrows_each_arm_by_its_verdict() {
+    let rows: Vec<(String, &[&str])> = vec![
+        // e01: N declares `go`, M lacks it.
+        (guarded("N|M", "go", "return $x->go();", "return $x->other();"), &["N", "M"]),
+        // e04: a non-final arm a descendant declares `go` on is kept on both sides.
+        (guarded("Open|M", "go", "return 'y';", "return 'n';"), &["Open", "Open|M"]),
+        // e06: `__call` does not make `method_exists` true: no arm holds `go`, the fold
+        // proves the guard false and the then side is dead.
+        (guarded("W|M", "go", "return 'y';", "return 'n';"), &["W|M"]),
+        // e07-e10: static, private, abstract and trait-provided methods are declared.
+        (guarded("S|M", "sm", "return 'y';", "return 'n';"), &["S", "M"]),
+        (guarded("P|M", "pm", "return 'y';", "return 'n';"), &["P", "M"]),
+        (guarded("Ab|M", "am", "return 'y';", "return 'n';"), &["Ab", "M"]),
+        (guarded("UsesT|M", "tg", "return 'y';", "return 'n';"), &["UsesT", "M"]),
+        // #1103: an abstract class that declares `m` only through its interface, and the
+        // interface itself.
+        (guarded("Abs|M", "m", "return 'y';", "return 'n';"), &["Abs", "M"]),
+        (guarded("HasM|M", "m", "return 'y';", "return 'n';"), &["HasM", "M"]),
+        // A null arm stays on both sides: `method_exists(null, …)` throws.
+        (guarded("?N", "go", "return 'y';", "return 'n';"), &["N|null", "null"]),
+    ];
+    let cases: Vec<(&str, &[&str], &[&str])> =
+        rows.iter().map(|(f, types)| (f.as_str(), *types, &[] as &[&str])).collect();
+    narrows(MEMBER_SOURCES, &cases);
+    // An anonymous subclass of Q may declare `go`: Q is kept on both sides, M only
+    // where the call failed.
+    let fixture = format!(
+        "{MEMBER_SOURCES}class Q {{}}\n$anon = new class extends Q {{ public function go(): string {{ return 'a'; }} }};"
+    );
+    let f = "function s16(Q|M $x): string { if (method_exists($x, 'go')) { \\PHPStan\\dumpType($x); return 'y'; } \\PHPStan\\dumpType($x); return 'n'; }";
+    assert_eq!(dumped(&fixture, f), ["Q", "Q|M"]);
+}
+
+#[test]
+fn the_else_side_of_method_exists_reports_the_arm_that_lacks_the_method() {
+    narrows(
+        MEMBER_SOURCES,
+        &[
+            // e03 / `tp_else`: PHP raises `Call to undefined method M::go()`.
+            (
+                "function e03(N|M $x): string { if (method_exists($x, 'go')) { return ''; } return $x->go(); }",
+                &[],
+                &["call.undefined-method M"],
+            ),
+            // e02 / `u_neg`: the negated guard's then side is the else side.
+            (
+                "function e02(N|M $x): string { if (!method_exists($x, 'go')) { \\PHPStan\\dumpType($x); return $x->other(); } return $x->go(); }",
+                &["M"],
+                &[],
+            ),
+            // A docblock arm narrows too; the finding stays on the contract layer.
+            (
+                "/** @param N|M $x */ function s11($x): string { if (method_exists($x, 'go')) { return ''; } return $x->go(); }",
+                &[],
+                &["phpdoc.undefined-method M"],
+            ),
+            // Kept: `m12` and `m12b` stay silent.
+            (
+                "function m12(N|null $n): string { if ($n !== null && method_exists($n, 'go')) { return $n->go(); } return ''; }",
+                &[],
+                &[],
+            ),
+            (
+                "function m12b(N|null $n): string { if ($n === null || !method_exists($n, 'go')) { return ''; } return $n->go(); }",
+                &[],
+                &[],
+            ),
+        ],
+    );
+}
+
+#[test]
+fn method_exists_narrows_at_every_condition_site() {
+    narrows(
+        MEMBER_SOURCES,
+        &[
+            // assert()
+            (
+                "function s02(N|M $x): string { assert(method_exists($x, 'go')); \\PHPStan\\dumpType($x); return $x->go(); }",
+                &["N"],
+                &[],
+            ),
+            // A stored condition (ADR-0106 §2.3).
+            (
+                "function s03(N|M $x): string { $ok = method_exists($x, 'go'); if ($ok) { \\PHPStan\\dumpType($x); return 'y'; } \\PHPStan\\dumpType($x); return $x->go(); }",
+                &["N", "M"],
+                &["call.undefined-method M"],
+            ),
+            // `||` through the path driver: the path on which M would pass needs `zz`,
+            // which M lacks too, so the then side is N alone.
+            (
+                "function s05(N|M $x): string { if (method_exists($x, 'go') || method_exists($x, 'zz')) { \\PHPStan\\dumpType($x); return 'y'; } \\PHPStan\\dumpType($x); return $x->go(); }",
+                &["N", "M"],
+                &["call.undefined-method M"],
+            ),
+            // e11: under `instanceof T` only Leaf is admitted, which holds `zz` through
+            // Mid: the else side holds no arm.
+            (
+                "function e11(I $x): int { if ($x instanceof T) { if (method_exists($x, 'zz')) { \\PHPStan\\dumpType($x); return 1; } \\PHPStan\\dumpType($x); return 2; } return 0; }",
+                &["T", "*NEVER*"],
+                &[],
+            ),
+            // A guard no class passes leaves its arms dead, deleted on the then side.
+            (
+                "function s15(N|M $x): string { if ($x instanceof Nobody && method_exists($x, 'go')) { \\PHPStan\\dumpType($x); return 'y'; } return 'n'; }",
+                &["*NEVER*"],
+                &[],
+            ),
+        ],
+    );
+}
+
+#[test]
+fn what_method_exists_does_not_narrow() {
+    narrows(
+        MEMBER_SOURCES,
+        &[
+            // e05: `is_callable` is declined (a `__call` makes it true, visibility false).
+            (
+                "function e05(N|M $x): string { if (is_callable([$x, 'go'])) { \\PHPStan\\dumpType($x); return 'y'; } \\PHPStan\\dumpType($x); return 'n'; }",
+                &["N|M", "N|M"],
+                &[],
+            ),
+            // `property_exists` asks about another member kind.
+            (
+                "function s18(N|M $x): string { if (property_exists($x, 'go')) { \\PHPStan\\dumpType($x); return 'y'; } \\PHPStan\\dumpType($x); return 'n'; }",
+                &["N|M", "N|M"],
+                &[],
+            ),
+            // A method name the walk cannot read.
+            (
+                "function s13(N|M $x, string $m): string { if (method_exists($x, $m)) { \\PHPStan\\dumpType($x); return 'y'; } \\PHPStan\\dumpType($x); return 'n'; }",
+                &["N|M", "N|M"],
+                &[],
+            ),
+            // A rebinding inside the branch drops the narrowing with the lane.
+            (
+                "function s17(N|M $x, N|M $y): string { if (method_exists($x, 'go')) { $x = $y; \\PHPStan\\dumpType($x); return 'y'; } return 'n'; }",
+                &["N|M"],
+                &[],
+            ),
+        ],
+    );
+}

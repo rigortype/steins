@@ -320,7 +320,7 @@ fn threaded_operand_env(
     let mut bstore = store.clone();
     // Through the path driver, as the branch applies its own list (ADR-0106 §2.2):
     // `(is_int($n) || is_float($n)) && …` reads `$n` as `int|float`.
-    narrow_paths(w, folder, operand, then, &mut benv, &mut bstore, poisoned, &mut |_, c, t, e, s| {
+    narrow_paths(w, folder, operand, then, &mut benv, &mut bstore, poisoned, &mut |f, c, t, e, s| {
         // The DR2 type vocabulary threads with the rest, running before the scalar
         // refinements so a minted fact is what they refine: `is_string($s) &&
         // strlen($s)` narrows `$s` in that order (ADR-0052 §6).
@@ -331,7 +331,7 @@ fn threaded_operand_env(
         // The arm lane (`instanceof`, `!== null`, `!== v`, truthiness, enum identity)
         // and the shape lane, as the branch applies them; the operand is a runtime
         // test, so a presence guard promotes at the branch's evidence stratum.
-        apply_class_narrowing(w, c, t, s);
+        apply_class_narrowing(w, f, c, t, s);
         apply_shape_narrowing(cx, c, t, e, s, true);
     });
     // The operand's own side effects land after its test narrowed (a by-ref call

@@ -342,31 +342,33 @@ pub(crate) fn declared_receiver_conjuncts<'s>(
     arms: &'s [ContractArm],
 ) -> Option<Vec<LaneArm<'s>>> {
     let oracle = ProjectIsa { cx, demote_catalog: cx.a11_demote_catalog() };
-    let mut lane: Vec<LaneArm<'s>> = Vec::with_capacity(arms.len());
-    for a in arms {
-        let conjuncts = match &a.ty {
-            ContractTy::Class(f) => vec![f.clone()],
-            ContractTy::Inter(members) => {
-                // A member this lane cannot close over refuses the whole arm.
-                let mut conjuncts: Vec<String> = Vec::with_capacity(members.len());
-                for m in members {
-                    let ContractTy::Class(f) = m else { return None };
-                    conjuncts.push(f.clone());
-                }
-                if conjuncts.is_empty() {
-                    return None;
-                }
-                // #234: an arm no value can inhabit is not a receiver.
-                if normalize::provably_uninhabited(&a.ty, &oracle, cx.postures.final_keyword) {
-                    return None;
-                }
-                conjuncts
-            }
-            _ => return None,
-        };
-        lane.push(LaneArm { conjuncts, guards: &a.guards });
-    }
+    let lane = arms.iter().map(|a| lane_arm(cx, &oracle, a)).collect::<Option<Vec<_>>>()?;
     (!lane.is_empty()).then_some(lane)
+}
+
+/// One arm of [`declared_receiver_conjuncts`], or `None` when the lane cannot read it.
+fn lane_arm<'s>(cx: &Cx, oracle: &ProjectIsa, a: &'s ContractArm) -> Option<LaneArm<'s>> {
+    let conjuncts = match &a.ty {
+        ContractTy::Class(f) => vec![f.clone()],
+        ContractTy::Inter(members) => {
+            // A member this lane cannot close over refuses the whole arm.
+            let mut conjuncts: Vec<String> = Vec::with_capacity(members.len());
+            for m in members {
+                let ContractTy::Class(f) = m else { return None };
+                conjuncts.push(f.clone());
+            }
+            if conjuncts.is_empty() {
+                return None;
+            }
+            // #234: an arm no value can inhabit is not a receiver.
+            if normalize::provably_uninhabited(&a.ty, oracle, cx.postures.final_keyword) {
+                return None;
+            }
+            conjuncts
+        }
+        _ => return None,
+    };
+    Some(LaneArm { conjuncts, guards: &a.guards })
 }
 
 /// The member questions [`judge_arm`] asks, one implementation per member kind: the
@@ -748,6 +750,44 @@ pub(crate) fn declared_receiver_lacks_method(
     }
     let mut ladder = MethodLadder { folder, method, magic };
     lane_lacks_member(cx, &lane, &mut ladder).is_some_and(|a| !a.rests_on_assert)
+}
+
+/// Which arms of `arms` a `method_exists($var, 'm')` test proves no value of `$var`
+/// reaches on the side where the call returned `holds` (issue #981), by the verdict of
+/// the lane's ladder on each arm alone ([`judge_arm`], no magic fallback: a `__call`
+/// never makes `method_exists` true).
+///
+/// Where the call held, an arm every inhabitant of which lacks `m` (`Absent`) cannot be
+/// here; where it failed, an arm every inhabitant of which declares `m` (`Declared`)
+/// cannot. A `Dead` arm, one the guards admit nothing of, is deleted on both sides. Any
+/// other arm stays: an undecided verdict, a value that may not be an object (a scalar,
+/// a `null`, a class-string), an arm the lane cannot read, and a verdict that rests on
+/// a class only a `@phpstan-assert` excluded, which a native test must not turn into a
+/// deletion. The caller checks the absence family and the receiver's exactness.
+pub(crate) fn method_exists_dead_arms(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    arms: &[ContractArm],
+    method: &str,
+    holds: bool,
+) -> Vec<bool> {
+    let oracle = ProjectIsa { cx, demote_catalog: cx.a11_demote_catalog() };
+    let mut ladder = MethodLadder { folder, method, magic: None };
+    arms.iter()
+        .map(|a| {
+            let Some(arm) = lane_arm(cx, &oracle, a) else { return false };
+            let judged = judge_arm(cx, &arm, &mut ladder);
+            if judged.rests_on_assert {
+                return false;
+            }
+            match judged.fate {
+                ArmFate::Dead => true,
+                ArmFate::Live(Held::Absent) => holds,
+                ArmFate::Live(Held::Declared) => !holds,
+                ArmFate::Live(Held::Magic | Held::Unknown) => false,
+            }
+        })
+        .collect()
 }
 
 /// The declared-receiver lane's id for a narrowed arm lane (ADR-0049 A13):

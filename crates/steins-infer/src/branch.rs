@@ -359,7 +359,7 @@ fn apply_branch_vocabularies(
         else_refinements(cond)
     };
     apply_refinements(&refs, env, store, Stratum::Verified);
-    apply_class_narrowing(w, cond, then, store);
+    apply_class_narrowing(w, folder, cond, then, store);
     apply_shape_narrowing(w.cx, cond, then, env, store, true);
     // Same-expression call guards (issue #421): a call has no binding to narrow, so
     // this records the guard rather than a fact — only on the side where the "not
