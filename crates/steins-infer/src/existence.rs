@@ -224,7 +224,7 @@ fn member_guard_verdict(
 /// it; on both, the arms its guards admit nothing of ([`method_exists_dead_arms`]).
 ///
 /// The fold of the same call ([`member_guard_verdict`]) reads the same ladder over the
-/// whole lane, so the then side this empties is the one it folds dead. Positional
+/// whole lane, so a then side it folds dead is one this empties. Positional
 /// arguments, a bare variable receiver and a literal method name only; nothing in a
 /// poisoned scope, on an exact receiver (the exact lane's, as for the fold) or without
 /// the absence family. `is_callable([$var, 'm'])` narrows nothing: a `__call` makes it
