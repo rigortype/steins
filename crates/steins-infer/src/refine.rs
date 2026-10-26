@@ -1304,7 +1304,14 @@ pub(crate) fn exclude_member(f: &Fact, val: &Val) -> Option<Fact> {
             (_, Val::Bool(b)) => f.exclude_bool(*b),
             // An array that is not `[]` is non-empty; the shape's normalizer turns
             // that into the single optional key of a sealed shape being present.
-            (Fact::Shape { shape, nullable }, Val::Array(items)) if items.is_empty() => {
+            // A shape that admits only `[]` (`array{}`) is left as it is:
+            // `set_non_empty` would build an empty `non-empty-array{}`. The branch
+            // is one the declaration says PHP never enters, but the declaration is
+            // `Asserted`, and a dead region on that premise would silence a live
+            // path (the shape guards' rule), so its reads are judged as before.
+            (Fact::Shape { shape, nullable }, Val::Array(items))
+                if items.is_empty() && shape.can_be_non_empty() =>
+            {
                 Some(Fact::Shape { shape: Box::new(shape.set_non_empty()), nullable: *nullable })
             }
             _ => Some(f.clone()),
