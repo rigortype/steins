@@ -1169,25 +1169,33 @@ pub(crate) fn lower_cond(expr: &Expression<'_>) -> CondExpr {
         // De Morgan'd back to `isset(e) && e`, which is exactly the presence
         // promotion `!empty($x['k'])` deserves.
         //
-        // Scope is `isset`'s, deliberately (A-G4's depth-one projection): only
-        // `empty($var[<literal>])`. `empty($x)` on a bare variable, a property or
-        // dynamic key, and every deeper path keep the pre-existing `Opaque`
-        // lowering — a bare-variable `empty` would newly feed the scalar
-        // refinement lane (`Truthy` over a plain local), a much wider behavior
-        // change than this leg is measuring.
-        Expression::Construct(Construct::Empty(e)) => match const_key_offset(e.value) {
-            Some((var, key)) => CondExpr::Or(
-                Box::new(CondExpr::Not(Box::new(CondExpr::Isset {
-                    var: var.clone(),
-                    key: Box::new(key.clone()),
-                }))),
-                Box::new(CondExpr::Not(Box::new(CondExpr::Truthy(CondOperand::Offset {
-                    var,
-                    key: Box::new(key),
-                })))),
-                OperandSpan::NONE,
-            ),
-            None => CondExpr::Opaque { reads: cond_reads(expr), writes: cond_writes(expr) },
+        // A bare `empty($v)` is `!$v` (ADR-0106 §2.9, #1079): `isset($v)` is
+        // `$v !== null` and null is falsy, so the `!isset` disjunct adds nothing.
+        // Its false side is the truthy side, and its true side narrows nothing,
+        // as `!$v`'s does: `empty("0")` is true and `empty("0.0")` false, and
+        // "falsy" is not a representable type. That `empty` reads an unbound `$v`
+        // without a warning is the presence lane's business, which reads the
+        // construct and not this lowering.
+        //
+        // A property, a dynamic key and every deeper path keep the `Opaque`
+        // lowering, the operands `isset` does not model either (A-G4's depth-one
+        // projection).
+        Expression::Construct(Construct::Empty(e)) => match bare_var_name(e.value) {
+            Some(var) => CondExpr::Not(Box::new(CondExpr::Truthy(CondOperand::Var(var)))),
+            None => match const_key_offset(e.value) {
+                Some((var, key)) => CondExpr::Or(
+                    Box::new(CondExpr::Not(Box::new(CondExpr::Isset {
+                        var: var.clone(),
+                        key: Box::new(key.clone()),
+                    }))),
+                    Box::new(CondExpr::Not(Box::new(CondExpr::Truthy(CondOperand::Offset {
+                        var,
+                        key: Box::new(key),
+                    })))),
+                    OperandSpan::NONE,
+                ),
+                None => CondExpr::Opaque { reads: cond_reads(expr), writes: cond_writes(expr) },
+            },
         },
         // `isset($x['k'])` (ADR-0062 S4) and bare `isset($x)` (issue #414). A
         // multi-argument isset is a conjunction by PHP semantics and lowers to the

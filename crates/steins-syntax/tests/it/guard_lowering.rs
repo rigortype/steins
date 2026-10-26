@@ -7,7 +7,7 @@
 //! `Opaque`, or stops being recorded fails here under its own name.
 
 use steins_syntax::{
-    CondExpr, DynamismKind, GuardRegion, ScopeOwner, SourceTree, Span, Stmt, StmtKind,
+    CondExpr, CondOperand, DynamismKind, GuardRegion, ScopeOwner, SourceTree, Span, Stmt, StmtKind,
 };
 
 /// The top-level statements of `function f({params}): void { {body} }`, and the source.
@@ -59,6 +59,38 @@ fn a_synthesized_connective_has_no_extent() {
         panic!("{got:?}");
     };
     assert!(span.is_empty(), "{span:?}");
+}
+
+/// The condition of the one `if` that `body` is.
+fn if_cond(params: &str, body: &str) -> CondExpr {
+    let (got, _) = lowered(params, body);
+    let [Stmt { kind: StmtKind::If { cond, .. }, .. }] = &got[..] else { panic!("{got:?}") };
+    cond.clone()
+}
+
+#[test]
+fn a_bare_variable_empty_is_the_negated_truthiness_of_the_variable() {
+    // `empty($v)` is `!$v` without the undefined-variable warning (#1079).
+    let cond = if_cond("$v", "if (empty($v)) {}");
+    let CondExpr::Not(inner) = &cond else { panic!("{cond:?}") };
+    assert!(matches!(&**inner, CondExpr::Truthy(CondOperand::Var(v)) if v == "v"), "{cond:?}");
+    let cond = if_cond("$v", "if (!empty(($v))) {}");
+    let CondExpr::Not(inner) = &cond else { panic!("{cond:?}") };
+    assert!(matches!(&**inner, CondExpr::Not(_)), "{cond:?}");
+}
+
+#[test]
+fn a_property_a_dynamic_key_and_a_deeper_path_keep_the_opaque_empty() {
+    for body in [
+        "if (empty($o->p)) {}",
+        "if (empty($a[$k])) {}",
+        "if (empty($a['k']['j'])) {}",
+        "if (empty($$n)) {}",
+        "if (empty(f())) {}",
+    ] {
+        let cond = if_cond("$o, $a, $k, $n", body);
+        assert!(matches!(cond, CondExpr::Opaque { .. }), "`{body}`: {cond:?}");
+    }
 }
 
 fn guards_of(body: &str) -> (Vec<GuardRegion>, String) {

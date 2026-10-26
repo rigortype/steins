@@ -270,11 +270,25 @@ fn empty_promotion_does_not_leak_to_the_sibling_key() {
 
 #[test]
 fn empty_outside_the_depth_one_projection_scope_narrows_nothing() {
-    // `empty($v)` on a bare variable and a deeper path keep the pre-existing
-    // `Opaque` lowering — the scope is `isset`'s (A-G4), deliberately.
-    assert_eq!(guarded("array{a?: string}", "!empty($v)", "$v['a']"), "dumped type: unknown");
+    // A deeper path keeps the `Opaque` lowering — the scope is `isset`'s (A-G4),
+    // deliberately.
     assert_eq!(
         guarded("array{a?: array{b?: string}}", "!empty($v['a']['b'])", "$v['a']"),
+        "dumped type: unknown"
+    );
+}
+
+#[test]
+fn a_bare_non_empty_guard_proves_a_single_optional_key() {
+    // A bare `empty($v)` is `!$v` (#1079): its false side is non-empty, which
+    // holds the one declared optional key.
+    assert_eq!(
+        guarded("array{a?: string}", "!empty($v)", "$v['a']"),
+        "dumped type: string (asserted)"
+    );
+    // With two optional keys, non-empty proves neither.
+    assert_eq!(
+        guarded("array{a?: string, b?: string}", "!empty($v)", "$v['a']"),
         "dumped type: unknown"
     );
 }

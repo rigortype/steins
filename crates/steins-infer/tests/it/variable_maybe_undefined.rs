@@ -105,6 +105,26 @@ fn a_terminating_arm_is_silence() {
     );
 }
 
+#[test]
+fn an_empty_guard_is_not_a_read_of_its_variable() {
+    // `empty($x)` on an unbound `$x` is true without a warning; its false side has
+    // `$x` bound. Lowering it as `!$x` (#1079) must not make it a read.
+    for body in [
+        "if (empty($x)) {\n        return 0;\n    }\n    return $x;",
+        "if (!empty($x)) {\n        return $x;\n    }\n    return 0;",
+        "if (empty($x)) {\n        $x = 1;\n    }\n    return $x;",
+    ] {
+        silent(&format!(
+            "<?php\nfunction f(bool $c): int {{\n    if ($c) {{\n        $x = 1;\n    }}\n    {body}\n}}\n"
+        ));
+    }
+    // The read the guard does not cover still fires.
+    fires(
+        "<?php\nfunction f(bool $c): int {\n    if ($c) {\n        $x = 1;\n    }\n    if (empty($x)) {\n        return $x;\n    }\n    return 0;\n}\n",
+        "x",
+    );
+}
+
 // Disjointness from the definite leg, observed end to end.
 
 #[test]

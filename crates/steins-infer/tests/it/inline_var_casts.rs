@@ -285,14 +285,12 @@ fn a_call_in_guard_position_still_forgets() {
     assert_eq!(dumps, ["dumped type: unknown"]);
 }
 
-/// `empty($x)` has the identical defect and is deliberately NOT fixed here: it is
-/// `!isset($x) || !$x`, so it carries a truthiness half that this variant does not
-/// model, and lowering it soundly is its own decision. Pinned so the next reader
-/// sees the boundary was chosen.
+/// `empty($x)` had the identical defect. A bare `empty($x)` is `!$x` (#1079), a
+/// construct that cannot write `$x` either, so it keeps the cast as `isset` does.
 #[test]
-fn empty_still_forgets_and_that_is_deliberate() {
+fn empty_keeps_the_cast_as_isset_does() {
     let dumps = dump_types(
         "<?php\nfunction f($d): void {\n  /** @var \\DateTime $d */\n  if (empty($d)) {} else { \\PHPStan\\dumpType($d); }\n}\n",
     );
-    assert_eq!(dumps, ["dumped type: unknown"]);
+    assert_eq!(dumps, ["dumped type: DateTime (asserted)"]);
 }

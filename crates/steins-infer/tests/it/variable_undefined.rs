@@ -560,6 +560,9 @@ fn isset_is_not_a_read() {
 #[test]
 fn empty_is_not_a_read() {
     silent("<?php\nfunction f(): bool {\n    return empty($u);\n}\n");
+    // In a condition too, where it lowers as `!$u` (#1079).
+    silent("<?php\nfunction f(): int {\n    if (empty($u)) {\n        return 0;\n    }\n    return 1;\n}\n");
+    silent("<?php\nfunction f(): int {\n    if (!empty($u)) {\n        return 0;\n    }\n    return 1;\n}\n");
 }
 
 #[test]

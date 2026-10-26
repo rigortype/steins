@@ -607,3 +607,68 @@ fn a_declared_non_empty_shape_with_two_optional_keys_proves_neither() {
     let n = diagnostics(&src).iter().filter(|d| d.id == "offset.maybe-missing").count();
     assert_eq!(n, 1);
 }
+
+// A bare `empty($v)` is `!$v` (#1079, ADR-0106 §2.9)
+//
+// It used to be an opaque test that forgot `$v` on both sides. As `!$v`, its
+// false side is the truthy side above, and its true side narrows nothing.
+
+#[test]
+fn a_non_empty_guard_proves_the_single_optional_key() {
+    // p3 and p4 of the witness table.
+    assert_eq!(guarded("array{0?: int}", "!empty($v)", "$v"), "dumped type: list{int} (asserted)");
+    assert_eq!(
+        guarded_else("array{0?: int}", "empty($v)", "$v"),
+        "dumped type: list{int} (asserted)"
+    );
+    assert_eq!(maybe_missing("array{0?: int}", "!empty($v)", "0"), 0);
+}
+
+#[test]
+fn an_empty_guard_then_an_offset_test_on_its_else_side_is_silent() {
+    // p5: `$v[0]` is read only where `$v` is not empty.
+    let src = fixture("list{0?: int}", "if (empty($v)) {} elseif ($v[0]) { echo $v[0]; }");
+    let ds: Vec<Diagnostic> =
+        diagnostics(&src).into_iter().filter(|d| !d.id.starts_with("debug.")).collect();
+    assert!(ds.is_empty(), "{ds:?}");
+}
+
+#[test]
+fn a_non_empty_guard_keeps_two_optional_keys_optional() {
+    // `tp_two_keys([1 => 2])` reads an undefined key 0.
+    assert_eq!(maybe_missing("array{0?: int, 1?: int}", "!empty($v)", "0"), 1);
+}
+
+#[test]
+fn an_array_is_the_empty_array_inside_an_empty_guard() {
+    // The body used to see a forgotten `$v`. An array `empty` holds of is `[]`, the
+    // `array{}` shape `!$v` narrows to, and a read there is judged as under `!$v`.
+    // `$v === []` proves the value `[]` itself, which `!$v` does not.
+    assert_eq!(guarded("array{x?: int}", "empty($v)", "$v"), "dumped type: array{} (asserted)");
+    let ids = |guard: &str| {
+        let src = fixture("array{x?: int}", &format!("if ({guard}) {{ echo $v['x']; }}"));
+        diagnostics(&src).into_iter().map(|d| d.id).collect::<Vec<_>>()
+    };
+    assert_eq!(ids("empty($v)"), ids("!$v"));
+}
+
+#[test]
+fn the_true_side_of_an_empty_guard_narrows_what_a_negation_narrows() {
+    // `empty("0")` is true and `empty("0.0")` and `empty([0])` are false: falsy is
+    // not representable, so `empty($v)` and `!$v` agree on every input.
+    for (decl, sig, init) in [
+        ("array{0?: int}", "array $v", ""),
+        ("string", "string $v", ""),
+        ("string", "string $v", "$v = '0';"),
+        ("string", "string $v", "$v = '0.0';"),
+        ("array", "array $v", "$v = [0];"),
+    ] {
+        let at = |guard: &str| {
+            let src = format!(
+                "<?php\n/** @param {decl} $v */\nfunction f({sig}): void {{ {init} if ({guard}) {{ \\PHPStan\\dumpType($v); }} else {{ \\PHPStan\\dumpType($v); }} }}\n"
+            );
+            diagnostics(&src).into_iter().map(|d| (d.id, d.message)).collect::<Vec<_>>()
+        };
+        assert_eq!(at("empty($v)"), at("!$v"), "{decl} {init}");
+    }
+}
