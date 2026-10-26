@@ -800,6 +800,43 @@ fn method_exists_narrows_at_every_condition_site() {
     );
 }
 
+/// An abstract class below the anchor has no instances of its own: its interface leg,
+/// which reaches the builtin `\Countable`, does not leave the arm undecided, since its
+/// concrete subclass speaks for it. PHP: `method_exists` is false for every inhabitant.
+#[test]
+fn an_abstract_candidate_is_passed_over_by_method_exists() {
+    let fixture = "
+interface I {}
+abstract class AbsC implements I, \\Countable {}
+class Conc extends AbsC { public function count(): int { return 0; } }
+class Lacks {}
+";
+    for sig in ["I|Lacks", "I"] {
+        let f = format!(
+            "function f({sig} $x): int {{ if (method_exists($x, 'nope')) {{ \\PHPStan\\dumpType($x); return 1; }} return 0; }}"
+        );
+        assert_eq!(dumps(fixture, &f), 0, "{sig}: the body is dead");
+    }
+    // The finding lane reads every candidate, as before.
+    rows(fixture, &[("function g(I $x): int { return $x->nope(); }", &["call.undefined-method I"])]);
+    // A concrete subclass that cannot be enumerated (a vendor parent) or an anonymous
+    // one still leaves the arm undecided, and the body live.
+    let vendor = "
+interface I {}
+abstract class AbsC implements I, \\Countable {}
+class Conc extends AbsC { public function count(): int { return 0; } }
+class Far extends \\Vendor\\Base implements I {}
+";
+    let f = "function f(I $x): int { if (method_exists($x, 'nope')) { \\PHPStan\\dumpType($x); return 1; } return 0; }";
+    assert_eq!(dumps(vendor, f), 1, "vendor-parented candidate");
+    let open = "
+interface I {}
+abstract class AbsC implements I, \\Countable {}
+$o = new class extends AbsC { public function count(): int { return 0; } public function nope(): int { return 1; } };
+";
+    assert_eq!(dumps(open, f), 1, "anonymous candidate");
+}
+
 #[test]
 fn what_method_exists_does_not_narrow() {
     narrows(
