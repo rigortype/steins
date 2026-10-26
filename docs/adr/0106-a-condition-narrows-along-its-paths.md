@@ -217,8 +217,19 @@ true; if ($has)` (`release($has)`) all throw in PHP and keep reporting.
   forms (with and without the floor, depending on how its non-emptiness was
   established), which broke the canonical form equality relies on.
 - Not promoted: an open tail (`array{0?: int, ...}`) and two or more optional keys
-  (`array{0?: int, 1?: int}` is non-empty for `[1 => 2]`, which has no key 0). The
-  `non-empty-list<T>` key 0 is left open (§5).
+  (`array{0?: int, 1?: int}` is non-empty for `[1 => 2]`, which has no key 0).
+- **A non-empty list holds key 0** (the list-head pin, added with B2): a list's
+  keys are `0..n-1`, so a non-empty shape whose `is_list` is `Yes` has its
+  declared optional key 0 made required, open tail or not. It closes a false
+  positive B2 exposed: filling an empty list (`if (empty($xs)) { $xs[] = 'd'; }`)
+  and joining it back left `non-empty-list{0?: string, ...<string>}`, and the
+  read of `$xs[0]` after the `if` reported (the same held for `!$xs`,
+  `$xs === []`, and a literal joined into a declared `non-empty-list<T>`). Only a
+  declared field moves: a key 0 the tail alone supplies is not added as one, so
+  `non-empty-list<T>` keeps its tail-only form and the rule maps
+  `non-empty-list{0?: T, ...<T>}` onto the one form `non-empty-list{0: T,
+  ...<T>}` without giving any shape a second spelling. Like the floor above, a
+  count the flag contradicts keeps its own floor and promotes nothing.
 
 ### 2.6 Loose `switch` refinement (A1, #1041)
 
@@ -354,8 +365,9 @@ The private corpus runs under the lock discipline before merge.
   lane as a literal arm (`val_contract`). It fixes the §2.1 residue and every
   post-`if` merge; its own slice, filed on D5.
 - **`is_callable` narrowing** (§2.7, D3): declined with the measurement above.
-- **`non-empty-list<T>` key 0**: `non_empty` on an unsealed or non-shape list does
-  not promote a key.
+- **`non-empty-list<T>` key 0**: closed for a declared key 0 by the list-head pin
+  (§2.5). A tail-only `non-empty-list<T>` gains no field, and a read of its key 0
+  is judged against the tail as before.
 - **Intersection arm rendering**: an unnarrowed `Foo&Bar` renders `unknown`.
 - **Path-cap tuning** (D2): 8 is proposed; the measurement of how often it binds
   decides whether it moves.
