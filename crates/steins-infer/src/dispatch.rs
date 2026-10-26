@@ -597,9 +597,10 @@ fn builtin_root(cx: &Cx, class: &str, method: &str) -> Option<String> {
 ///    reason it reaches this function at all is a chain walk A18 re-examines;
 /// 2. the **`instanceof` fact** bound by branch analysis when it names exactly one
 ///    class — the `@param object $foo` witness. Read at `Asserted`: [`Member`]
-///    carries no stratum of its own, and an `assert($foo instanceof Foo)` narrowing
-///    is `Asserted` by ADR-0052 §5, so the whole carrier takes the weaker grade
-///    rather than guessing per site;
+///    carries no stratum of its own, so the whole carrier takes the weaker grade
+///    rather than guessing per site. (An `assert($foo instanceof Foo)` narrowing is
+///    itself `Verified` by ADR-0052's 2026-07-25 amendment; only the
+///    `@phpstan-assert` tag family is `Asserted`.);
 /// 3. the **narrowed contract-arm lane**, when what survives is a single class arm
 ///    — a `?Reservation` parameter past its null guard is exactly this — at the
 ///    lane's own minimum stratum (A13);
