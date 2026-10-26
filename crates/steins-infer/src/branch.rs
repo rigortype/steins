@@ -207,6 +207,7 @@ pub(crate) fn walk_if(
         let mut benv = env.clone();
         let mut bclasses = store.clone();
         forget_in_branch(&untested, &mut benv, &mut bclasses);
+        keep_suspect(&untested_lanes, &benv, &mut bclasses);
         narrow_side(&guards, true, &mut benv);
         apply_cond_side(w, folder, cond, true, &mut benv, &mut bclasses);
         if walk_trace(w, folder, then_trace, &mut benv, &mut bclasses, descent, facts, true, out)
@@ -221,6 +222,7 @@ pub(crate) fn walk_if(
         let mut benv = env.clone();
         let mut bclasses = store.clone();
         forget_in_branch(&untested, &mut benv, &mut bclasses);
+        keep_suspect(&untested_lanes, &benv, &mut bclasses);
         narrow_side(&guards, false, &mut benv);
         apply_cond_side(w, folder, cond, false, &mut benv, &mut bclasses);
         let rest = heads.get(1..).unwrap_or(&[]);
@@ -241,15 +243,17 @@ pub(crate) fn walk_if(
     // then the code after the join runs whichever side PHP took. Reached through one
     // side alone (`if (!T) { return; }`), it is as suspect as that side was.
     let live = usize::from(verdict != Certainty::No) + usize::from(verdict != Certainty::Yes);
+    // Reached through one side, the value stays out of the env, and a later verdict
+    // may still read it (`if (T) { return; } if ($x === 'abc')`): the suspect each
+    // side was seeded with survives only where nothing in the side dropped it, which
+    // every write of the name does (and some statements that write no name do too).
     if !rebinds && fell.len() == live {
         for (benv, bstore) in &mut fell {
             restore_branch_scoped(&untested_lanes, benv, bstore);
-        }
-    } else if !rebinds {
-        // Reached through one side, the value stays out of the env, and a later
-        // verdict may still read it (`if (T) { return; } if ($x === 'abc')`).
-        for (benv, bstore) in &mut fell {
-            keep_suspect(&untested_lanes, benv, bstore);
+            // Handed back as the base walk does, so no longer suspect.
+            for (name, _, _) in &untested_lanes {
+                bstore.suspect.remove(name);
+            }
         }
     }
     // A live side that does not fall through is an exit the walk could not rule out:
@@ -288,8 +292,10 @@ fn eval_with_suspects(
     eval_cond(w, folder, cond, &venv, store, poisoned)
 }
 
-/// Record the values `lanes` held before an undecided test as suspect in a side that
-/// alone reaches the join, where the side's env no longer binds them.
+/// Seed a guarded side with the values `lanes` held before an undecided test, as
+/// suspect ([`Store::suspect`]), before the side is walked: any write to the name
+/// inside the side passes [`Store::release`] or [`Store::clear`] and drops it, so what
+/// reaches the join is the pre-test value only where the side left the name alone.
 fn keep_suspect(lanes: &[BranchScopedLanes], env: &HashMap<String, Known>, store: &mut Store) {
     for (name, known, _) in lanes {
         if let Some(k) = known

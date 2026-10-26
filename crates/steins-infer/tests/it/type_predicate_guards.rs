@@ -1293,6 +1293,49 @@ fn a_value_an_undecided_test_forgot_still_decides_a_later_test() {
 }
 
 #[test]
+fn a_suspect_value_the_falling_side_writes_is_gone_at_the_join() {
+    // The #933 round-2 review: PHP takes the else side, writes `$s`, enters
+    // `$s !== 'abc'` and throws. Every write form drops the suspect, so the
+    // proven `return 1` keeps reporting, as on the base.
+    let setx = "function setx(string &$x): void { $x = 'xyz'; }\n";
+    for write in [
+        "setx($s);",
+        "$s .= 'x';",
+        "foreach (['xyz'] as $s) {}",
+        "try { throw new \\Exception(); } catch (\\Exception $s) {}",
+        "for ($i = 0; $i < 2; $i++) { if ($i === 1) { $s = 'xyz'; } }",
+        "[$s] = ['xyz'];",
+    ] {
+        let func = format!(
+            "{setx}function f(): string {{ $s = 'abc'; if (is_callable($s)) {{ return 'c'; }} else {{ {write} }} if ($s !== 'abc') {{ return 1; }} return 'ok'; }}"
+        );
+        assert_eq!(one(&func), vec!["type.return-mismatch"], "{write}");
+        let stored = format!(
+            "{setx}function s(): string {{ $s = 'abc'; $ok = is_callable($s); if (!$ok) {{ {write} }} else {{ return 'c'; }} if ($s !== 'abc') {{ return 1; }} return 'ok'; }}"
+        );
+        assert_eq!(one(&stored), vec!["type.return-mismatch"], "{write}");
+    }
+}
+
+#[test]
+fn a_join_both_sides_reach_hands_the_value_back_as_the_base_does() {
+    // The #933 round-3 review: where both sides fall through, the tested value comes
+    // back by the base rule, whatever a side did to its suspect. `a_`–`c_` keep the
+    // proven `return $s` (PHP throws), and `d_` stays silent (PHP returns "ok").
+    let pre = "function byval(string $x): void {}\n";
+    for side in ["$t = strlen($s);", "byval($s);", "$t = 1; unset($t);"] {
+        for (func, expect) in [
+            (format!("function a(): int {{ $s = 'abc'; if (is_callable($s)) {{ {side} }} else {{ {side} }} return $s; }}"), vec!["type.return-mismatch"]),
+            (format!("function b(): int {{ $s = 'abc'; if (is_callable($s)) {{ $u = 1; }} else {{ {side} }} return $s; }}"), vec!["type.return-mismatch"]),
+            (format!("function c(): int {{ $s = 'abc'; if (!is_callable($s)) {{ {side} }} return $s; }}"), vec!["type.return-mismatch"]),
+            (format!("function d(): string {{ $s = 'abc'; if (is_callable($s)) {{ {side} }} else {{ {side} }} if ($s !== 'abc') {{ return 1; }} return 'ok'; }}"), vec![]),
+        ] {
+            assert_eq!(one(&format!("{pre}{func}")), expect, "{func}");
+        }
+    }
+}
+
+#[test]
 fn a_stored_test_decided_on_a_proven_value_prunes_its_dead_side() {
     // u6–u9, u19–u21 of the #933 review: PHP (8.5.11) never reaches `return 1`.
     for func in [
