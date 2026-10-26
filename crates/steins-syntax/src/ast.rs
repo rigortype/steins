@@ -3053,9 +3053,11 @@ pub enum CondExpr {
     /// construct, not a call: it cannot mutate its operand, so charging its read set
     /// the by-reference conservatism [`Self::Opaque`] owes an unmodellable condition
     /// discarded every fact the variable had — inside the branch and after it. What
-    /// the variant claims is only that: nothing to forget. It evaluates to `Maybe`
-    /// and refines nothing, so a caller that wants the presence proof itself
-    /// (ADR-0087 §4's `|unset` read inside its own guard) has a place to put it.
+    /// the variant claims is only that: nothing to forget. In guard position it
+    /// evaluates to `Maybe` except over a proven value, and on its true side it
+    /// refines the variable to not-null (ADR-0106 §2.4), so a caller that wants the
+    /// presence proof itself (ADR-0087 §4's `|unset` read inside its own guard) has
+    /// a place to put it.
     IssetVar { var: String },
     /// A condition the lowering cannot model. `reads` lists every bare variable it mentions,
     /// so the excluded path still invalidates them (ADR-0027 read-set rule). `writes` is
