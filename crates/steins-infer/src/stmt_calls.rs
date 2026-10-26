@@ -54,11 +54,11 @@
 //! | --- | --- | --- |
 //! | `G` | `G` | `G` |
 //! | `!G` | `!G` | `!G`: truthy kills the guarded arm, falsy vouches |
-//! | `G && x`, `x` a call or property read | `G && ?` | truthy implies `G`: vouches it; falsy says nothing |
-//! | `G \|\| H` | `G \|\| H` | truthy vouches neither; falsy kills both guarded arms |
-//! | a comparison, `is_*`, `isset`, `$x` under `!`, `&&`, `\|\|` | the condition | the condition, narrowing too |
+//! | `G && x`, `x` a call or property read | `G && ?` | truthy vouches `G`; falsy nothing |
+//! | `G \|\| H` | `G \|\| H` | truthy vouches neither; falsy kills both |
+//! | `===`, `is_*`, `isset`, `$x`, under `!` `&&` `\|\|` | the condition | it, narrowing too |
 //! | a plain copy `$x`, a call, a property read | nothing | undecided, vouches nothing |
-//! | a condition reading `$v` itself, or a guard with a non-variable argument | nothing | undecided |
+//! | a condition reading `$v`, a guard with a non-variable argument | nothing | undecided |
 //!
 //! Where the stored guard is read: the sweep decides the arm or operand a stored guard kills
 //! (`$h ? f() : 0`); the branch walk vouches on the side it is truthy for, with the polarity
