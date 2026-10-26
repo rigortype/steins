@@ -720,6 +720,15 @@ pub(crate) struct Store {
     /// verdict reads it. Dropped for a name by [`Self::release`], emptied by
     /// [`Self::clear`], and united at a join.
     pub(crate) paths_capped: HashSet<String>,
+    /// **Suspect values** (ADR-0043's 2026-10-11 amendment, ADR-0106 §2.3): a proven
+    /// binding a condition tested without deciding, past a join reached through one
+    /// side alone. That side may be the one PHP never takes, so no finding is premised
+    /// on the value and it is not in the env; but if the side is taken, the value is
+    /// what the variable holds, and if it is not, the code here is dead. So a branch
+    /// verdict may read it ([`crate::branch::walk_if`]): a decided test only marks more
+    /// of that code dead. Dropped for a name by [`Self::release`], emptied by
+    /// [`Self::clear`], and kept at a join only where every path holds the same fact.
+    pub(crate) suspect: HashMap<String, Known>,
 }
 
 /// A condition a variable holds the result of (see [`Store::guard_vars`]).
@@ -1047,6 +1056,7 @@ impl Store {
         // starts a fresh one with none (issue #428).
         self.narrowed.remove(var);
         self.paths_capped.remove(var);
+        self.suspect.remove(var);
         // A property vouch is about the binding too (issue #930).
         self.vouched.retain(|v| !matches!(v, Vouch::VarProperty { var: x, .. } if x == var));
         // A condition stored in this name, or one that reads it, is about the old value.
@@ -1117,6 +1127,7 @@ impl Store {
         self.remembered.clear();
         self.guard_vars.clear();
         self.paths_capped.clear();
+        self.suspect.clear();
     }
 
     /// Forget every remembered call result whose key names the place `var` — a
@@ -1975,7 +1986,23 @@ pub(crate) fn join_stores(first: &Store, rest: &[&Store]) -> Store {
         guard_vars: join_guard_vars(first, rest),
         withheld: first.withheld && rest.iter().all(|s| s.withheld),
         paths_capped: join_paths_capped(first, rest),
+        suspect: join_suspect(first, rest),
     }
+}
+
+/// The suspect values of a join (see [`Store::suspect`]): a name every path holds the
+/// same fact for, at the same stratum.
+fn join_suspect(first: &Store, rest: &[&Store]) -> HashMap<String, Known> {
+    first
+        .suspect
+        .iter()
+        .filter(|(name, k)| {
+            rest.iter().all(|s| {
+                s.suspect.get(*name).is_some_and(|o| o.fact == k.fact && o.stratum == k.stratum)
+            })
+        })
+        .map(|(name, k)| (name.clone(), k.clone()))
+        .collect()
 }
 
 /// The contract lane of a join: a var survives only if present in every branch; its

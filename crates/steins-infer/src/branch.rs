@@ -84,8 +84,9 @@ pub(crate) fn walk_if(
 ) -> Flow {
     let poisoned = w.scope.poisoned;
     // 1. Evaluate the guard in the pre-branch env (short-circuit env refinement is
-    // stage 2 — each condition sees the same entry env).
-    let verdict = eval_cond(w, folder, cond, env, store, poisoned);
+    // stage 2 — each condition sees the same entry env), with the suspect values a
+    // one-sided join left: a verdict only marks code dead ([`Store::suspect`]).
+    let verdict = eval_with_suspects(w, folder, cond, env, store);
     // A `OneOf` the guard reads is judged member by member (`oneof_guard`): a side no
     // member reaches is pruned like a `Singleton`'s, a set is narrowed to the members
     // that reach a side, and a guard some member leaves undecided forgets the variable.
@@ -244,6 +245,12 @@ pub(crate) fn walk_if(
         for (benv, bstore) in &mut fell {
             restore_branch_scoped(&untested_lanes, benv, bstore);
         }
+    } else if !rebinds {
+        // Reached through one side, the value stays out of the env, and a later
+        // verdict may still read it (`if (T) { return; } if ($x === 'abc')`).
+        for (benv, bstore) in &mut fell {
+            keep_suspect(&untested_lanes, benv, bstore);
+        }
     }
     // A live side that does not fall through is an exit the walk could not rule out:
     // every `OneOf` binding but the ones this guard decided member by member is
@@ -258,6 +265,39 @@ pub(crate) fn walk_if(
     *env = jenv;
     *store = jclasses;
     Flow::FellThrough
+}
+
+/// `cond`'s verdict in `env`, with the suspect values a one-sided join left where `env`
+/// holds nothing ([`Store::suspect`]): a verdict only marks code dead, which is sound
+/// whichever side of the earlier test PHP took.
+fn eval_with_suspects(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    cond: &CondExpr,
+    env: &HashMap<String, Known>,
+    store: &Store,
+) -> Certainty {
+    let poisoned = w.scope.poisoned;
+    if store.suspect.is_empty() || poisoned {
+        return eval_cond(w, folder, cond, env, store, poisoned);
+    }
+    let mut venv = env.clone();
+    for (name, k) in &store.suspect {
+        venv.entry(name.clone()).or_insert_with(|| k.clone());
+    }
+    eval_cond(w, folder, cond, &venv, store, poisoned)
+}
+
+/// Record the values `lanes` held before an undecided test as suspect in a side that
+/// alone reaches the join, where the side's env no longer binds them.
+fn keep_suspect(lanes: &[BranchScopedLanes], env: &HashMap<String, Known>, store: &mut Store) {
+    for (name, known, _) in lanes {
+        if let Some(k) = known
+            && !env.contains_key(name)
+        {
+            store.suspect.insert(name.clone(), k.clone());
+        }
+    }
 }
 
 /// Apply one side of a decided-or-not condition to an env/store pair: everything
@@ -397,7 +437,10 @@ fn apply_branch_vocabularies(
 /// after the join, every kept side falling      restored, unless a side rebound $x
 /// through
 /// after the join, reached through one side     forgotten (`if (!T) { return; } f($x)`:
-/// only                                         that side may be the dead one)
+/// only                                         that side may be the dead one), but
+///                                              kept suspect: a later verdict reads it
+///                                              (`Store::suspect`), so `if ($x === v)`
+///                                              still prunes
 /// after the loop                               untouched (the header's sides are not
 ///                                              the loop's exit)
 /// T decided on the value (table below)         untouched: the dead side is pruned

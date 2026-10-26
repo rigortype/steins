@@ -1263,3 +1263,47 @@ fn a_stored_test_the_walk_cannot_decide_forgets_its_proven_value() {
         assert_eq!(one(func), Vec::<String>::new(), "{func}");
     }
 }
+
+#[test]
+fn a_value_an_undecided_test_forgot_still_decides_a_later_test() {
+    // Past `if (T) { return; }` with T undecided over a proven `$s`, the value stays
+    // out of the env (that side may be the dead one) but a later verdict reads it:
+    // `$s === 'abc'` is true, and `return 1` is dead (PHP returns "fine" for each).
+    // `u2i`, the inline spelling, was a false positive on the base.
+    for func in [
+        "function u2(): string { $s = 'abc'; $ok = is_callable($s); if ($ok) { return 'c'; } if ($s === 'abc') { return 'fine'; } return 1; }",
+        "function u2i(): string { $s = 'abc'; if (is_callable($s)) { return 'c'; } if ($s === 'abc') { return 'fine'; } return 1; }",
+        "function u2n(): string { $s = 'abc'; $ok = is_callable($s); if (!$ok) { echo 'n'; } else { return 'c'; } if ($s === 'abc') { return 'fine'; } return 1; }",
+        "function u2m(): string { $s = 'abc'; $ok = method_exists($s, 'x'); if ($ok) { return 'c'; } if ($s === 'abc') { return 'fine'; } return 1; }",
+        "function u2x(?string $p): string { $s = 'abc'; $ok = $p !== null && is_callable($s); if ($ok) { return 'c'; } if ($s === 'abc') { return 'fine'; } return 1; }",
+        "function k4(): string { $s = 'abc'; if (!is_callable($s)) { return 'c'; } if ($s === 'abc') { return 'fine'; } return 1; }",
+    ] {
+        assert_eq!(one(func), Vec::<String>::new(), "{func}");
+    }
+    // No finding is premised on the suspect value itself: past `if (!T) { return; }`
+    // the fall-through may be the dead side (here it is: PHP returns 0), so
+    // `need_int($s)` stays silent, inline and stored (`k2` reported on the base).
+    for func in [
+        "function k1(): int { $s = 'abc'; if (!is_callable($s)) { return 0; } return need_int($s); }",
+        "function k2(): int { $s = 'abc'; $ok = is_callable($s); if (!$ok) { return 0; } return need_int($s); }",
+        "function k3(): int { $s = 'abc'; if (is_callable($s)) { echo 1; } else { return 0; } return need_int($s); }",
+    ] {
+        assert_eq!(one(&format!("{NEED_INT}{func}")), Vec::<String>::new(), "{func}");
+    }
+}
+
+#[test]
+fn a_stored_test_decided_on_a_proven_value_prunes_its_dead_side() {
+    // u6–u9, u19–u21 of the #933 review: PHP (8.5.11) never reaches `return 1`.
+    for func in [
+        "function u6(): string { $n = 5; $ok = is_int($n); if (!$ok) { return 1; } return 'z'; }",
+        "function u7(): string { $n = 5; $ok = is_numeric($n); if (!$ok) { return 1; } return 'z'; }",
+        "function u8(): string { $n = '5'; $ok = is_numeric($n); if (!$ok) { return 1; } return 'z'; }",
+        "function u9(): string { $n = 'abc'; $ok = is_numeric($n); if ($ok) { return 1; } return 'z'; }",
+        "function u19(): string { $x = 1.0; $ok = is_float($x) || is_int($x); if (!$ok) { return 1; } return 'z'; }",
+        "function u20(): string { $x = '1e3'; $ok = is_numeric($x) && $x == 1000; if (!$ok) { return 1; } return 'z'; }",
+        "function u21(): string { $x = null; $ok = is_scalar($x); if ($ok) { return 1; } return 'z'; }",
+    ] {
+        assert_eq!(one(func), Vec::<String>::new(), "{func}");
+    }
+}
