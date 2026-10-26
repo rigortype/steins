@@ -519,3 +519,24 @@ fn an_isset_guard_distributes_as_a_comparison_does() {
     );
     assert_eq!(possibly_return(&or).len(), 1, "{:#?}", run(&or));
 }
+
+// ---- a bare `empty($v)` is `!$v` (#1079) -----------------------------------
+
+#[test]
+fn a_non_empty_nullable_string_is_a_non_falsy_string() {
+    let src = strict_src(
+        "function f(?string $s): string { if (empty($s)) { return ''; } \\PHPStan\\dumpType($s); return $s; }",
+    );
+    assert_eq!(dumps(&src), ["dumped type: non-falsy-string"]);
+    let other: Vec<_> = run(&src).into_iter().filter(|d| d.id != DEBUG_TYPE_ID).collect();
+    assert!(other.is_empty(), "{other:#?}");
+}
+
+#[test]
+fn the_true_side_of_an_empty_guard_keeps_null() {
+    // `empty(null)` is true: the side the guard holds still carries the null arm.
+    let src = strict_src(
+        "function f(?string $s): string { if (empty($s)) { return $s; } return ''; }",
+    );
+    assert_eq!(possibly_return(&src).len(), 1, "{:#?}", run(&src));
+}
