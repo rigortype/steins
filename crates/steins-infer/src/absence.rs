@@ -48,7 +48,7 @@ pub(crate) enum UndefKind {
 
 impl UndefKind {
     /// The magic method whose presence anywhere in the chain makes the call defined.
-    fn magic(self) -> &'static str {
+    pub(crate) fn magic(self) -> &'static str {
         match self {
             UndefKind::Instance => "__call",
             UndefKind::Static => "__callStatic",
@@ -116,17 +116,28 @@ fn undefined_method_receiver(
     }
 }
 
-/// The outcome of walking `start_fqn`'s ancestor chain for `method` under the
+/// The outcome of walking a class-like's ancestor chain for `method` under the
 /// ADR-0049 §4 closure discipline (the C1 completeness standard).
+///
+/// Four-valued (issue #1092): a chain that **declares** the method and one that only
+/// answers it through the magic fallback are told apart from each other and from an
+/// obstacle, so the declared-receiver lane can judge each descendant by its chain, and
+/// `method_exists` reads the same walk with no magic fallback at all.
 pub(crate) enum ChainWalk {
     /// The method is absent from a fully-enumerated, obstacle-free chain: fire
     /// eligible. Carries the ordered simple class names (for the message), the
     /// ordered chain FQNs (for the A2ii homonym leg), and whether any node was
     /// declared conditionally (A2i — re-dams the claim).
     Absent { simple_chain: Vec<String>, fqns: Vec<String>, any_conditional: bool },
-    /// An obstacle taints closure anywhere on the chain, or the method is present:
-    /// silence (the FP-safe verdict).
-    Silent,
+    /// A node holds the method, its own or through a trait, abstract, static or of
+    /// any visibility. The walk stops there, so `fqns` ends at the declaring node.
+    Declared { fqns: Vec<String>, any_conditional: bool },
+    /// The method is held nowhere on a fully-enumerated chain, but a node holds the
+    /// magic fallback, so the call runs.
+    Magic { fqns: Vec<String>, any_conditional: bool },
+    /// An obstacle taints closure somewhere on the chain: nothing is proven in either
+    /// direction (the FP-safe verdict).
+    Unknown,
 }
 
 /// Collect every magic-member obstacle record in `start_fqn`'s **resolved reach**
@@ -196,66 +207,99 @@ pub(crate) fn enumerate_method_chain(cx: &Cx, start_fqn: &str, method: &str, kin
     // they are what a `doctor` posture will count and what a plugin pack will
     // discharge member by member (ADR-0049 A14).
     if !magic_obstacles_in_reach(cx, start_fqn).is_empty() {
-        return ChainWalk::Silent;
+        return ChainWalk::Unknown;
     }
-    let magic = kind.magic();
-    let mut cur = start_fqn.to_owned();
+    // Leg (b)/(f)/(i): the start must resolve to a UNIQUE project declaration.
+    let Some((file, cd)) = cx.find_class(start_fqn) else {
+        return ChainWalk::Unknown;
+    };
+    walk_method_chain(cx, file, cd, start_fqn, method, Some(kind.magic()))
+}
+
+/// Walk the chain that starts at declaration `cd` (in file `file`, reached by the
+/// name `start_name`) and climbs its `extends` edges, judging `method` at each node
+/// ([`ChainWalk`]). The chain legs of [`enumerate_method_chain`] without its A14 reach
+/// leg, which belongs to the caller: `method_exists` passes `magic: None`, since it
+/// reports declared methods only and a `@method` tag is not one. Starting at a
+/// declaration rather than a name lets the declared-receiver lane judge each half of
+/// an Ambiguous descendant by its own chain (ADR-0049 A4, issue #1092).
+pub(crate) fn walk_method_chain(
+    cx: &Cx,
+    file: usize,
+    cd: &ClassDecl,
+    start_name: &str,
+    method: &str,
+    magic: Option<&str>,
+) -> ChainWalk {
+    let (mut cfile, mut cd) = (file, cd);
+    let mut cur = start_name.to_owned();
     let mut seen: HashSet<String> = HashSet::new();
     let mut simple_chain: Vec<String> = Vec::new();
     let mut fqns: Vec<String> = Vec::new();
     let mut any_conditional = false;
+    let mut any_magic = false;
     loop {
         if !seen.insert(cur.to_ascii_lowercase()) {
-            return ChainWalk::Silent; // cycle — closure cannot terminate soundly.
-        }
-        // Leg (b)/(f)/(i): every ancestor edge must resolve to a UNIQUE project
-        // declaration. `find_class` returns `None` for `Absent` (a builtin/vendor-
-        // unresolved ancestor — leg f, awaiting the reflect method surface, M2) and
-        // for `Ambiguous` (a duplicate FQN or an alias/decl collision — leg i).
-        let Some((cfile, cd)) = cx.find_class(&cur) else {
-            return ChainWalk::Silent;
-        };
-        // parse failure (ADR-0079, issue #180), leg §2.5: a node declared in an
-        // unparsable file is member-incomplete — the recovery kept the class but may
-        // have dropped methods out of its body, so "the method is not in this chain"
-        // is exactly the enumeration the break makes unprovable. The A14 verdict, one
-        // door later: the whole-universe dam covers name existence, this leg covers
-        // member enumeration, and both read the same site list.
-        if cx.member_incomplete(cfile) {
-            return ChainWalk::Silent;
+            return ChainWalk::Unknown; // cycle — closure cannot terminate soundly.
         }
         // Leg (j)/A3: an enum's methods are lowered now (ADR-0105), but its cases
         // and the engine's `UnitEnum` methods are not methods of the declaration;
         // the enum chain stays Unknown.
         if cd.is_enum {
-            return ChainWalk::Silent;
+            return ChainWalk::Unknown;
         }
         // A trait name is never a chain node: `extends` naming one is its own fatal.
         if cd.is_trait {
-            return ChainWalk::Silent;
+            return ChainWalk::Unknown;
         }
+        fqns.push(cur.clone());
+        any_conditional |= cd.conditional;
         // Leg (e): a trait use adds methods the is-a oracle rightly ignores for
         // ancestry. The class holds them through its composition (ADR-0105); one that
         // declines leaves the chain unenumerable, as every trait use did before it.
-        // Leg (d): a magic fallback anywhere swallows the name — no error at runtime.
         // The method is present (case-insensitively) — including an abstract
         // declaration: it is defined, so the call is not undefined.
-        for name in [magic, method] {
-            if !matches!(cx.held_method(cfile, cd, name), Ok(None)) {
-                return ChainWalk::Silent;
+        match cx.held_method(cfile, cd, method) {
+            Err(_) => return ChainWalk::Unknown,
+            Ok(Some(_)) => return ChainWalk::Declared { fqns, any_conditional },
+            Ok(None) => {}
+        }
+        // parse failure (ADR-0079, issue #180), leg §2.5: a node declared in an
+        // unparsable file is member-incomplete — the recovery kept the class but may
+        // have dropped methods out of its body, so "the method is not in this chain"
+        // is exactly the enumeration the break makes unprovable. The A14 verdict, one
+        // door later: the whole-universe dam covers name existence, this leg covers
+        // member enumeration, and both read the same site list. A method the
+        // recovery kept is still declared, which is why the leg follows that test.
+        if cx.member_incomplete(cfile) {
+            return ChainWalk::Unknown;
+        }
+        // Leg (d): a magic fallback anywhere swallows the name — no error at runtime.
+        // The walk goes on past it, so a declaration further up still reads Declared.
+        if let Some(magic) = magic {
+            match cx.held_method(cfile, cd, magic) {
+                Err(_) => return ChainWalk::Unknown,
+                Ok(Some(_)) => any_magic = true,
+                Ok(None) => {}
             }
         }
         simple_chain.push(cd.name.clone());
-        fqns.push(cur.clone());
-        if cd.conditional {
-            any_conditional = true;
-        }
-        match &cd.parent {
-            None => {
-                return ChainWalk::Absent { simple_chain, fqns, any_conditional };
-            }
-            Some(pref) => cur = cx.units[cfile].tree.resolve_class_fqn(pref),
-        }
+        let Some(pref) = &cd.parent else {
+            return if any_magic {
+                ChainWalk::Magic { fqns, any_conditional }
+            } else {
+                ChainWalk::Absent { simple_chain, fqns, any_conditional }
+            };
+        };
+        cur = cx.units[cfile].tree.resolve_class_fqn(pref);
+        // Leg (b)/(f)/(i): every ancestor edge must resolve to a UNIQUE project
+        // declaration. `find_class` returns `None` for `Absent` (a builtin/vendor-
+        // unresolved ancestor — leg f, awaiting the reflect method surface, M2) and
+        // for `Ambiguous` (a duplicate FQN or an alias/decl collision — leg i).
+        let Some((pfile, pcd)) = cx.find_class(&cur) else {
+            return ChainWalk::Unknown;
+        };
+        (cfile, cd) = (pfile, pcd);
     }
 }
 
@@ -503,7 +547,26 @@ fn enumerate_property_chain_outcome(
     if !magic_obstacles_in_reach(cx, start_fqn).is_empty() {
         return PropertyChainOutcome::Unknown;
     }
-    let mut cur = start_fqn.to_owned();
+    let Some((file, cd)) = cx.find_class(start_fqn) else {
+        return PropertyChainOutcome::Unknown;
+    };
+    walk_property_chain(cx, file, cd, start_fqn, prop)
+}
+
+/// Walk the chain that starts at declaration `cd` (in file `file`, reached by the
+/// name `start_name`) for `prop`: the chain legs of
+/// [`enumerate_property_chain_outcome`] without its A14 reach leg, which the caller
+/// asks. Starting at a declaration lets the declared-receiver lane judge each half of
+/// an Ambiguous descendant by its own chain (issue #1092).
+fn walk_property_chain(
+    cx: &Cx,
+    file: usize,
+    cd: &ClassDecl,
+    start_name: &str,
+    prop: &str,
+) -> PropertyChainOutcome {
+    let mut found = Some((file, cd));
+    let mut cur = start_name.to_owned();
     let mut seen: HashSet<String> = HashSet::new();
     let mut chain = PropertyChain { simple: Vec::new(), fqns: Vec::new(), any_conditional: false };
     loop {
@@ -515,7 +578,7 @@ fn enumerate_property_chain_outcome(
         // `find_class` is `None` for an absent ancestor (a builtin — `stdClass`
         // included — or a vendor class awaiting the reflect surface) and for an
         // `Ambiguous` FQN alike.
-        let Some((cfile, cd)) = cx.find_class(&cur) else {
+        let Some((cfile, cd)) = found.take().or_else(|| cx.find_class(&cur)) else {
             return PropertyChainOutcome::Unknown;
         };
         // ADR-0079 §2.5: a node declared in an unparsable file is member-incomplete —
@@ -594,16 +657,29 @@ fn undefined_property_receiver(cx: &Cx, store: &Store, var: &str) -> Option<Prop
     Some(PropertyReceiver::Declared(declared_receiver_conjuncts(cx, arms)?))
 }
 
-/// Whether a descendant declaration could **introduce** `prop` (or an obstacle
-/// that hides one) below an arm whose own chain already lacks it (ADR-0049 §8
-/// applied to properties). The property twin of [`descendant_introduces_method`],
-/// leg for leg.
-///
-/// [`descendant_introduces_method`]: crate::declared_receiver::descendant_introduces_method
-fn descendant_introduces_property(cx: &Cx, file: usize, cd: &ClassDecl, prop: &str) -> bool {
-    property_walk_obstacle(cx, file, cd)
-        || declares_property(cx, file, cd, prop)
-        || !magic_obstacles_in_reach(cx, &cd.fqn).is_empty()
+/// Whether a descendant declaration provably lacks `prop` below an arm whose own
+/// chain already lacks it (ADR-0049 §8 applied to properties): judged by its **whole
+/// chain**, not by its own body (issue #1092), so a property or a `__get` it inherits
+/// from a class outside the arm's hierarchy counts. The property twin of the method
+/// lane's candidate verdict: an A14 tag in its reach, an obstacle or a declaration
+/// anywhere on the chain, or a homonym of any chain FQN answers `false`.
+fn descendant_lacks_property(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    file: usize,
+    cd: &ClassDecl,
+    prop: &str,
+) -> bool {
+    if !magic_obstacles_in_reach(cx, &cd.fqn).is_empty() {
+        return false;
+    }
+    let PropertyChainOutcome::Absent(chain) = walk_property_chain(cx, file, cd, &cd.fqn, prop)
+    else {
+        return false;
+    };
+    // A homonym node may be dead code shadowed by a loaded class (A2ii).
+    !redammed(cx, chain.any_conditional)
+        && chain.fqns.iter().all(|fqn| folder.boot_surface_class_like(fqn) == Some(false))
 }
 
 /// What the §8 ladder established about `prop` on one narrowed contract arm
@@ -653,13 +729,10 @@ fn arm_property_presence(
                 return ArmPropertyPresence::Unknown;
             }
             for (dfile, dcd) in &descendants {
-                // A descendant that declares the property is NOT the `Declared`
-                // answer: the receiver may or may not be that descendant, which is
-                // precisely an unknown rather than a clean path.
-                if descendant_introduces_property(cx, *dfile, dcd, prop) {
-                    return ArmPropertyPresence::Unknown;
-                }
-                if folder.boot_surface_class_like(&dcd.fqn) != Some(false) {
+                // A descendant whose chain declares the property is NOT the
+                // `Declared` answer: the receiver may or may not be that descendant,
+                // which is precisely an unknown rather than a clean path.
+                if !descendant_lacks_property(cx, folder, *dfile, dcd, prop) {
                     return ArmPropertyPresence::Unknown;
                 }
             }
