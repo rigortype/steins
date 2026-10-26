@@ -702,10 +702,10 @@ pub(crate) struct Store {
     /// nearly every frame, so a scan stands in for the place-to-keys reverse index
     /// ADR-0102 §2.4 names.
     pub(crate) remembered: HashMap<String, Remembered>,
-    /// **Guards stored in a variable** (ADR-0104 amendment): `$has = function_exists('f')`
-    /// binds the existence call to the name, so `if ($has)`, `$has ? … : …` and `$has && …`
-    /// test that guard. Dropped by the funnel every rebind of the name passes
-    /// ([`Self::release`]) and by a rebind of any variable the guard's arguments name,
+    /// **Conditions stored in a variable** (ADR-0104 amendment, ADR-0106 §2.3): `$has =
+    /// function_exists('f')` or `$has = $v !== null` binds the condition to the name, so
+    /// `if ($has)`, `$has ? … : …` and `$has && …` test it. Dropped by the funnel every
+    /// rebind of the name passes ([`Self::release`]) and by a rebind of any variable it reads,
     /// emptied by a Barrier, and intersected at a join like `vouched`.
     pub(crate) guard_vars: HashMap<String, GuardVar>,
     /// Whether this path passed a call whose `@phpstan-assert` a proven value
@@ -722,14 +722,16 @@ pub(crate) struct Store {
     pub(crate) paths_capped: HashSet<String>,
 }
 
-/// An existence guard a variable holds the result of (see [`Store::guard_vars`]).
+/// A condition a variable holds the result of (see [`Store::guard_vars`]).
 #[derive(Clone)]
 pub(crate) struct GuardVar {
-    /// The stored value as a condition: the guard call, its negation, or a conjunction with
-    /// the guard among its operands (a truthy `$v` implies every conjunct). Polarity lives
-    /// in the shape, so `collect_guard_calls` reads it for either side of a test.
+    /// The stored value as a condition (ADR-0106 §2.3): comparisons, type-predicate and
+    /// existence-guard calls, `isset` and bare variables under `!`, `&&` and `||`; an
+    /// operand the store declines is opaque. The variable is truthy exactly when it holds,
+    /// and polarity lives in the shape, so `collect_guard_calls` reads it for either side
+    /// of a test.
     pub(crate) cond: CondExpr,
-    /// The variables its guard calls' arguments name; a rebind of one of them voids it.
+    /// Every bare variable the condition reads, sorted; a rebind of one of them voids it.
     pub(crate) deps: Vec<String>,
 }
 
@@ -757,6 +759,18 @@ fn same_cond(a: &CondExpr, b: &CondExpr) -> bool {
         (CondExpr::Not(x), CondExpr::Not(y)) => same_cond(x, y),
         (CondExpr::And(x1, x2, _), CondExpr::And(y1, y2, _)) => {
             same_cond(x1, y1) && same_cond(x2, y2)
+        }
+        (CondExpr::Or(x1, x2, _), CondExpr::Or(y1, y2, _)) => {
+            same_cond(x1, y1) && same_cond(x2, y2)
+        }
+        (
+            CondExpr::Cmp { op: o1, lhs: l1, rhs: r1 },
+            CondExpr::Cmp { op: o2, lhs: l2, rhs: r2 },
+        ) => o1 == o2 && l1 == l2 && r1 == r2,
+        (CondExpr::Truthy(x), CondExpr::Truthy(y)) => x == y,
+        (CondExpr::IssetVar { var: x }, CondExpr::IssetVar { var: y }) => x == y,
+        (CondExpr::Isset { var: x, key: k }, CondExpr::Isset { var: y, key: l }) => {
+            x == y && k == l
         }
         (CondExpr::Opaque { .. }, CondExpr::Opaque { .. }) => true,
         _ => false,
@@ -1003,6 +1017,17 @@ impl Store {
         self.release(var);
     }
 
+    /// [`Self::unbind`] for a narrowing that pins `var` to a value it already held
+    /// (`=== v` on a branch): the binding's other carriers go, but the conditions
+    /// stored over `var`, or in it, are about that same value and stay (ADR-0106 §2.3).
+    pub(crate) fn unbind_pinned(&mut self, var: &str) {
+        let held = (!self.guard_vars.is_empty()).then(|| self.guard_vars.clone());
+        self.unbind(var);
+        if let Some(held) = held {
+            self.guard_vars = held;
+        }
+    }
+
     /// Drop `var`'s binding because `var` is being given a new value — an
     /// assignment, a `catch` binding, a callee's out-parameter — so it no longer
     /// holds the object, which therefore does not escape ([`Self::unbind`]).
@@ -1024,9 +1049,16 @@ impl Store {
         self.paths_capped.remove(var);
         // A property vouch is about the binding too (issue #930).
         self.vouched.retain(|v| !matches!(v, Vouch::VarProperty { var: x, .. } if x == var));
-        // A guard stored in this name, or one whose arguments name it, is about the old value.
+        // A condition stored in this name, or one that reads it, is about the old value.
+        self.guard_vars.remove(var);
+        self.forget_conditions_reading(var);
+    }
+
+    /// Drop every stored condition that reads `var` ([`Self::guard_vars`]): `var`'s value
+    /// changed in place, as an offset write changes it, so the condition no longer says
+    /// what the variable holding it holds.
+    pub(crate) fn forget_conditions_reading(&mut self, var: &str) {
         if !self.guard_vars.is_empty() {
-            self.guard_vars.remove(var);
             self.guard_vars.retain(|_, g| !g.deps.iter().any(|d| d == var));
         }
     }

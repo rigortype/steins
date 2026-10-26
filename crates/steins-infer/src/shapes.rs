@@ -1001,6 +1001,9 @@ fn open_offset_barrier(w: &WalkCx, base: &str, env: &mut HashMap<String, Known>,
     store.narrowed.clear();
     store.contract.remove(base);
     store.drop_places_of(base);
+    // A condition stored over the base read the value this write changes (ADR-0106
+    // §2.3): `$e = $a === []; $a[] = 1;` leaves `$e` true and `$a` non-empty.
+    store.forget_conditions_reading(base);
 }
 
 /// Whether an offset write in the **top-level frame** may run a userland body

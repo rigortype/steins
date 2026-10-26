@@ -22,6 +22,10 @@
 //! existed: its own `||` at then contributes nothing. The cap is structural, never
 //! a clock, and it names itself: every variable the capped node reads is recorded
 //! in [`Store::paths_capped`], and a dump of it says `(paths capped)`.
+//!
+//! A test of a variable that holds a stored condition (ADR-0106 §2.3) is expanded
+//! first, into the test and the condition together, so the condition's paths are
+//! the variable's ([`with_stored_conditions`]).
 
 use std::collections::HashMap;
 
@@ -30,6 +34,7 @@ use steins_syntax::{CondExpr, OperandSpan};
 
 use crate::cond::eval_cond;
 use crate::env::{Known, Store, Stratum, join_envs};
+use crate::existence::with_stored_conditions;
 use crate::fold::Folder;
 use crate::oneof_guard::collect_reads;
 use crate::walk::WalkCx;
@@ -80,6 +85,10 @@ pub(crate) fn narrow_paths(
     poisoned: bool,
     apply: &mut Vocabulary<'_>,
 ) {
+    // A tested variable that holds a stored condition narrows by that condition too
+    // (ADR-0106 §2.3): `$ok = is_int($n) || is_float($n); if ($ok)` takes both paths.
+    let stored = with_stored_conditions(cond, then, store);
+    let cond = stored.as_ref().unwrap_or(cond);
     let mut capped = Vec::new();
     let paths = expand(cond, then, &mut capped);
     if paths.len() > 1 {

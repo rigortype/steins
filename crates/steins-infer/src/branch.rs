@@ -23,7 +23,7 @@ use crate::conjunct_writes::mask_stale_conjuncts;
 use crate::contract::ProjectIsa;
 use crate::descent::escape_and_sweep_calls;
 use crate::env::{ContractArm, Descent, Known, Store, Stratum, join_envs, val_of};
-use crate::existence::existence_vouch;
+use crate::existence::{existence_vouch, with_stored_conditions};
 use crate::oneof_guard::{mark_thinned, narrow_side, oneof_guards};
 use crate::out_params::{check_preg_pattern, seed_out_params, seed_produced_places};
 use crate::predicates::{apply_type_narrowing, pred_holds_on_fact, type_predicate};
@@ -430,7 +430,9 @@ fn apply_branch_vocabularies(
 /// proven one would only lose facts. Only an atom that tests a type is suspect
 /// ([`atom_tests_type`]): `count($a) === 2` left unfolded is a question about the value
 /// and keeps `$a`. The test is per atom of a `&&`/`||`/`!` tree, so
-/// `is_a($x, $c) && $y` forgets `$x`.
+/// `is_a($x, $c) && $y` forgets `$x`. A tested variable that holds a stored condition
+/// tests that condition's atoms too (ADR-0106 §2.3): `$s = 'abc'; $ok = is_callable($s);
+/// if ($ok)` forgets `$s` as `if (is_callable($s))` does.
 pub(crate) fn unmodelled_tests(
     w: &WalkCx,
     folder: &mut dyn Folder,
@@ -439,8 +441,10 @@ pub(crate) fn unmodelled_tests(
     store: &Store,
 ) -> Vec<String> {
     let masked = mask_stale_conjuncts(w.cx, cond);
+    let stored = with_stored_conditions(masked.as_ref(), true, store);
     let mut out = Vec::new();
-    collect_unmodelled_tests(w, folder, masked.as_ref(), env, store, &mut out);
+    let tested = stored.as_ref().unwrap_or(masked.as_ref());
+    collect_unmodelled_tests(w, folder, tested, env, store, &mut out);
     // A `OneOf` is never "proven" above; a guard over one forgets it unless the caller
     // narrows it member by member (`walk_if` does, a loop header does not).
     out.extend(oneof_guards(w, folder, cond, env, store).into_iter().map(|g| g.var));

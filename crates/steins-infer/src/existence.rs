@@ -4,8 +4,8 @@
 
 use steins_domain::Certainty;
 use steins_syntax::{
-    ArgValue, ArrayKey, CallExpr, ClassDecl, CondExpr, EXISTENCE_PREDICATES, LogicalOp, NameRef,
-    OperandSpan, ReadKind, RefKind, StaticClass, Stmt,
+    ArgValue, ArrayKey, CallExpr, ClassDecl, CondExpr, CondOperand, EXISTENCE_PREDICATES,
+    IssetOperand, LogicalOp, NameRef, OperandSpan, ReadKind, RefKind, StaticClass, Stmt, ValueOp,
 };
 
 use crate::absence::{ChainWalk, walk_method_chain};
@@ -608,13 +608,14 @@ fn member_guard_shape<'a>(cx: &Cx, call: &'a CallExpr) -> Option<MemberShape<'a>
     }
 }
 
-/// Bind `var` to the existence guard the assignment `$var = value` stores, when it stores
-/// one ([`Store::guard_vars`]): the guard call, its negation, or a conjunction with a guard
-/// among its operands (`!G`, `G && x`). A disjunction, a comparison or any other shape stores
-/// nothing: `$v = G || H` truthy says neither. The guard's arguments are literals or bare
-/// variables other than `var`. Called after the assignment's own rebind of `var`, which
-/// dropped any earlier guard, and never in a poisoned scope, where a reference, `extract`,
-/// `global` or by-reference capture may rewrite `var` unseen.
+/// Bind `var` to the condition the assignment `$var = value` stores, when it stores one
+/// ([`Store::guard_vars`], ADR-0106 §2.3): a comparison, a type-predicate or existence-guard
+/// call, `isset`, a negation, `&&` or `||` over those, and a bare variable as an operand of
+/// one. The dependencies are every bare variable the condition reads. A plain copy (`$h =
+/// $v`) stores nothing: the value lane already tracks it. Called after the assignment's own
+/// rebind of `var`, which dropped any earlier condition, and never in a poisoned scope,
+/// where a reference, `extract`, `global` or by-reference capture may rewrite a dependency
+/// unseen.
 pub(crate) fn remember_guard_var(
     w: &WalkCx,
     stmt: &Stmt,
@@ -622,48 +623,173 @@ pub(crate) fn remember_guard_var(
     var: &str,
     value: &ArgValue,
 ) {
-    if w.scope.poisoned {
+    if w.scope.poisoned || matches!(value, ArgValue::Var(_)) {
         return;
     }
     let mut deps = Vec::new();
-    let mut guards = 0usize;
-    let Some(cond) = guard_cond_of(w, stmt, value, &mut deps, &mut guards) else { return };
-    if guards == 0 || deps.iter().any(|d| d == var) {
+    let Some(cond) = stored_cond_of(w, stmt, value, &mut deps) else { return };
+    if !informative(&cond) || deps.iter().any(|d| d == var) {
         return;
     }
+    deps.sort_unstable();
+    deps.dedup();
     store.guard_vars.insert(var.to_owned(), GuardVar { cond, deps });
 }
 
-/// The condition `value` stores, or `None` for a shape that is neither a guard nor built from
-/// one. A conjunct that is not a guard is kept as an opaque operand: it can only make the
-/// whole false, which a vouch never reads.
-fn guard_cond_of(
+/// The condition `value` denotes, or `None` for a value that is not one. Declined: a
+/// property fetch, an offset read in a comparison (an `ArrayAccess` base runs userland),
+/// and any call but a type predicate or an existence guard; none is a function of local
+/// variables alone. Under `&&` or `||` a declined operand is kept as an opaque one, which
+/// narrows nothing and decides nothing: `$h = $v !== null && f()` truthy still proves its
+/// left operand.
+fn stored_cond_of(
     w: &WalkCx,
     stmt: &Stmt,
     value: &ArgValue,
     deps: &mut Vec<String>,
-    guards: &mut usize,
 ) -> Option<CondExpr> {
     match value {
+        ArgValue::Var(v) => {
+            deps.push(v.clone());
+            Some(CondExpr::Truthy(CondOperand::Var(v.clone())))
+        }
+        ArgValue::Binary { op: ValueOp::Cmp(op), lhs, rhs } => {
+            let lhs = stored_operand(lhs, deps)?;
+            let rhs = stored_operand(rhs, deps)?;
+            Some(CondExpr::Cmp { op: *op, lhs, rhs })
+        }
         ArgValue::Call(name, args) => {
             let call = call_with_arguments(w, stmt, name, args)?;
-            if existence_predicate(w.cx, call).is_none() && member_guard_shape(w.cx, call).is_none()
+            let recognized = existence_predicate(w.cx, call).is_some()
+                || member_guard_shape(w.cx, call).is_some()
+                || crate::predicates::type_predicate(w.cx, call).is_some();
+            let mut reads = Vec::new();
+            if !recognized
                 || !call.positional_only
-                || !call.args.iter().all(|a| guard_arg_deps(&a.value, deps))
+                || !call.args.iter().all(|a| guard_arg_deps(&a.value, &mut reads))
             {
                 return None;
             }
-            *guards += 1;
-            Some(CondExpr::Call { call: Box::new(call.clone()), reads: Vec::new(), writes: Vec::new() })
+            deps.extend(reads.iter().cloned());
+            Some(CondExpr::Call { call: Box::new(call.clone()), reads, writes: Vec::new() })
+        }
+        // `isset($a, $b)` is `isset($a) && isset($b)`.
+        ArgValue::Isset(operands) => {
+            let mut atoms = Vec::with_capacity(operands.len());
+            for operand in operands {
+                atoms.push(stored_isset(operand, deps)?);
+            }
+            atoms
+                .into_iter()
+                .reduce(|a, b| CondExpr::And(Box::new(a), Box::new(b), OperandSpan::NONE))
         }
         ArgValue::Not(inner) => {
-            guard_cond_of(w, stmt, inner, deps, guards).map(|c| CondExpr::Not(Box::new(c)))
+            stored_cond_of(w, stmt, inner, deps).map(|c| CondExpr::Not(Box::new(c)))
         }
-        ArgValue::Logical { op: LogicalOp::And, lhs, rhs, .. } => {
+        ArgValue::Logical { op: op @ (LogicalOp::And | LogicalOp::Or), lhs, rhs, .. } => {
             let opaque = || CondExpr::Opaque { reads: Vec::new(), writes: Vec::new() };
-            let l = guard_cond_of(w, stmt, lhs, deps, guards).unwrap_or_else(opaque);
-            let r = guard_cond_of(w, stmt, rhs, deps, guards).unwrap_or_else(opaque);
-            Some(CondExpr::And(Box::new(l), Box::new(r), OperandSpan::NONE))
+            let l = Box::new(stored_cond_of(w, stmt, lhs, deps).unwrap_or_else(opaque));
+            let r = Box::new(stored_cond_of(w, stmt, rhs, deps).unwrap_or_else(opaque));
+            Some(match op {
+                LogicalOp::And => CondExpr::And(l, r, OperandSpan::NONE),
+                _ => CondExpr::Or(l, r, OperandSpan::NONE),
+            })
+        }
+        _ => None,
+    }
+}
+
+/// A comparison operand a stored condition may read: a bare variable, a literal or a
+/// constant fetch.
+fn stored_operand(value: &ArgValue, deps: &mut Vec<String>) -> Option<CondOperand> {
+    match value {
+        ArgValue::Var(v) => {
+            deps.push(v.clone());
+            Some(CondOperand::Var(v.clone()))
+        }
+        ArgValue::Int(_)
+        | ArgValue::Float(_)
+        | ArgValue::Str(_)
+        | ArgValue::Bool(_)
+        | ArgValue::Null => Some(CondOperand::Literal(value.clone())),
+        ArgValue::ClassConst(class, name) => {
+            Some(CondOperand::ClassConst(class.clone(), name.clone()))
+        }
+        ArgValue::GlobalConst(name) => Some(CondOperand::Const(name.clone())),
+        _ => None,
+    }
+}
+
+/// One operand of a stored `isset`: a bare variable, or an offset of one under a literal
+/// key, the only key [`CondExpr::Isset`] carries.
+fn stored_isset(operand: &IssetOperand, deps: &mut Vec<String>) -> Option<CondExpr> {
+    match operand {
+        IssetOperand::Var(var) => {
+            deps.push(var.clone());
+            Some(CondExpr::IssetVar { var: var.clone() })
+        }
+        IssetOperand::Offset { var, key }
+            if matches!(**key, ArgValue::Int(_) | ArgValue::Str(_)) =>
+        {
+            deps.push(var.clone());
+            Some(CondExpr::Isset { var: var.clone(), key: key.clone() })
+        }
+        _ => None,
+    }
+}
+
+/// Whether a stored condition says anything: some atom of it is not opaque.
+fn informative(cond: &CondExpr) -> bool {
+    match cond {
+        CondExpr::Opaque { .. } => false,
+        CondExpr::Not(c) => informative(c),
+        CondExpr::And(a, b, _) | CondExpr::Or(a, b, _) => informative(a) || informative(b),
+        _ => true,
+    }
+}
+
+/// `cond` with every test of a variable that holds a stored condition replaced by the test
+/// and the condition together (ADR-0106 §2.3), or `None` when it tests none. The variable
+/// is true exactly when its condition is, so `$h` where it must hold becomes `$h && C`,
+/// and where it must fail `$h || C`, whose false side is `!$h && !C`. The polarity is the
+/// one `cond` is applied at, flipped under each `!`; a leaf that may hold either way on
+/// the paths of an enclosing connective still reads an equivalent condition, only less
+/// precisely. The stored condition is not expanded again: what it tests was stored before
+/// it, and its own test is the one its vouches already read.
+pub(crate) fn with_stored_conditions(
+    cond: &CondExpr,
+    then: bool,
+    store: &Store,
+) -> Option<CondExpr> {
+    if store.guard_vars.is_empty() {
+        return None;
+    }
+    match cond {
+        CondExpr::Truthy(CondOperand::Var(v)) => {
+            let g = store.guard_vars.get(v)?;
+            let (test, stored) = (Box::new(cond.clone()), Box::new(g.cond.clone()));
+            Some(if then {
+                CondExpr::And(test, stored, OperandSpan::NONE)
+            } else {
+                CondExpr::Or(test, stored, OperandSpan::NONE)
+            })
+        }
+        CondExpr::Not(c) => {
+            with_stored_conditions(c, !then, store).map(|c| CondExpr::Not(Box::new(c)))
+        }
+        CondExpr::And(a, b, span) | CondExpr::Or(a, b, span) => {
+            let na = with_stored_conditions(a, then, store);
+            let nb = with_stored_conditions(b, then, store);
+            if na.is_none() && nb.is_none() {
+                return None;
+            }
+            let a = Box::new(na.unwrap_or_else(|| (**a).clone()));
+            let b = Box::new(nb.unwrap_or_else(|| (**b).clone()));
+            Some(if matches!(cond, CondExpr::And(..)) {
+                CondExpr::And(a, b, *span)
+            } else {
+                CondExpr::Or(a, b, *span)
+            })
         }
         _ => None,
     }
