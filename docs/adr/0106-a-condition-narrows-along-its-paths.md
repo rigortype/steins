@@ -290,7 +290,10 @@ its own or reached through `implements` and every parent of an interface (#1103)
 before, the literal fold `method_exists(Abs::class, 'm')` answered a wrong No
 there. An interface the walk cannot enumerate (a builtin, a vendor name) leaves
 such a node `Unknown`. A concrete class implements every interface method on its
-own chain, so the call lanes keep walking `extends` alone.
+own chain, so a walk from one, and the call lanes, keep walking `extends` alone.
+An abstract class or an interface below the anchor is no candidate of the
+`method_exists` ladder: it has no instances, and its concrete descendants are
+candidates in their own right.
 
 ### 2.8 Class arms under a positive guard (D, #908, #909; D4)
 
