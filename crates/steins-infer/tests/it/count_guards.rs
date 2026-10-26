@@ -524,6 +524,26 @@ fn a_loose_inequality_to_the_empty_array_proves_the_key_and_non_null() {
     );
 }
 
+/// The non-debug finding ids of `<guard>` over a nullable `@param <decl> $v`
+/// reading `$v[0]` in its true branch.
+fn nullable_read_ids(decl: &str, guard: &str) -> Vec<&'static str> {
+    let src = format!(
+        "<?php\n/** @param {decl} $v */\nfunction f(?array $v): void {{ if ({guard}) {{ echo $v[0]; }} }}\n"
+    );
+    diagnostics(&src).into_iter().filter(|d| !d.id.starts_with("debug.")).map(|d| d.id).collect()
+}
+
+#[test]
+fn a_shape_that_is_always_empty_stays_as_declared_under_emptiness() {
+    // `array{}` is only `[]`, so the branch is one the declaration says PHP never
+    // enters. The fact is left as declared rather than made an empty
+    // `non-empty-array{}`, and the read is judged against `array{}` as the strict
+    // twin's already was before emptiness narrowed shapes. The loose form's
+    // `NotNull` strips the null arm, which leaves it the same `array{}`.
+    assert_eq!(nullable_read_ids("array{}", "$v !== []"), ["offset.undeclared"]);
+    assert_eq!(nullable_read_ids("array{}|null", "$v != []"), ["offset.undeclared"]);
+}
+
 #[test]
 fn a_null_check_clears_the_null_of_a_nullable_shape_fact() {
     // The non-null twin `array{a?: int}` reports this read; the nullable one now

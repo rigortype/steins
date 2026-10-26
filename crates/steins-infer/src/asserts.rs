@@ -501,8 +501,9 @@ fn apply_assert_to_var(
         // `refine_fact` mins the result to `Asserted`.
         // The presence test is deliberately blind to a `Fact::Shape` entry
         // (ADR-0062 S3): the shape seed is entry-state provenance, not an
-        // assert-visible narrowing target, and `clear_null` is a no-op on it
-        // anyway. Counting it would flip this to `true` for every array param and
+        // assert-visible narrowing target. `clear_null` does clear a nullable
+        // shape (#1079), so this filter is what keeps an assert from reaching
+        // one here. Counting it would flip this to `true` for every array param and
         // so protect the variable from the by-ref invalidation sweep — a control
         // change with nothing behind it. Shape narrowing (including clearing a
         // nullable shape) is S4's, and arrives with its own refinement operator.
