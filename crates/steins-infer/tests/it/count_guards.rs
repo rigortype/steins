@@ -712,6 +712,45 @@ fn a_join_that_can_leave_a_list_empty_still_reports_key_zero() {
     assert_eq!(ds.iter().filter(|d| d.id == "offset.maybe-missing").count(), 1, "{ds:?}");
 }
 
+/// The `offset.maybe-missing` count of `/** @param <decl> $a */ function f(array
+/// $a, int $k): int { <body> return $a[0]; }`.
+fn head_missing_after(decl: &str, body: &str) -> usize {
+    let src = format!(
+        "<?php\n/** @param {decl} $a */\nfunction f(array $a, int $k): int {{ {body} return $a[0]; }}\n"
+    );
+    diagnostics(&src).iter().filter(|d| d.id == "offset.maybe-missing").count()
+}
+
+#[test]
+fn a_write_that_may_leave_a_gap_does_not_prove_key_zero() {
+    // `f([])` reads an undefined key 0 after each write: the result is not a list.
+    for (decl, body) in [
+        ("list{0?: int}", "$a[5] = 9;"),
+        ("list{0?: int, ...<int>}", "$a[5] = 9;"),
+        ("list{0?: int}", "$a[1] = 9;"),
+        ("list{0?: int, 1?: int}", "$a[2] = 9;"),
+        ("list{0?: int, 1?: int}", "$a[1] = 9;"),
+        ("list{0?: int}", "$a['k'] = 9;"),
+        ("list{0?: int}", "$a[$k] = 9;"),
+    ] {
+        assert_eq!(head_missing_after(decl, body), 1, "{decl} {body}");
+    }
+}
+
+#[test]
+fn a_write_a_list_cannot_gap_keeps_key_zero_proven() {
+    for (decl, body) in [
+        // The next index of an empty list is 0, and an overwrite moves no key.
+        ("list{0?: int}", "$a[0] = 9;"),
+        ("list{0: int, 1?: int}", "$a[1] = 9;"),
+        ("list{0: int, ...<int>}", "$a[] = 9;"),
+        ("list{0: int, ...<int>}", "$a[$k] = 9;"),
+        ("non-empty-list<int>", "$a[] = 9;"),
+    ] {
+        assert_eq!(head_missing_after(decl, body), 0, "{decl} {body}");
+    }
+}
+
 #[test]
 fn a_disjunction_of_non_empty_guards_proves_neither_list_non_empty() {
     // `h([], [1])` reads an undefined key 0 of `$a`.

@@ -1179,9 +1179,22 @@ pub(crate) fn apply_offset_write(
             // declaration across could state something the write falsified.
             // Unknown is the honest floor; a real nested-shape update is not v1.
             let nested = keys.len() > 1;
+            // A write that adds a key does not carry list-ness (issue #884), and
+            // the verdict goes BEFORE the key is promoted: `normalize` reads it
+            // there, and a stale `Yes` would let the list-head pin (#1079) prove
+            // key 0 of a list the write just gapped (`$a[5] = 9` on `list{0?:
+            // int}` leaves `[5 => 9]`). An extension recomputes it from the
+            // witnessed sequence below; an overwrite of a required key, or a
+            // write a proven list cannot make a gap in ([`stays_a_list`]), keeps
+            // it.
+            let extended = witnessed_order.is_some() && shape.field(&first).is_none();
+            let overwrite = shape.field(&first).is_some_and(|(_, p, _)| p.is_required());
+            let keeps_list = extended || overwrite || stays_a_list(shape, &first);
             // A write can only add an entry, so the learned count **ceiling**
             // (issue #272) does not survive it; the floor does.
-            let mut next = shape.relax_count_ceiling().promote_present(&first, false, true);
+            let relaxed = shape.relax_count_ceiling();
+            let receiver = if keeps_list { relaxed } else { without_list_verdict(&relaxed) };
+            let mut next = receiver.promote_present(&first, false, true);
             // Writing an UNDECLARED key under a `Sealed` tail: the runtime value
             // has diverged from the docblock. Resolved the A-G5 way — the write
             // is order-witnessed truth, so the field is added AND the tail
@@ -1222,18 +1235,14 @@ pub(crate) fn apply_offset_write(
                 next = ShapeFact::normalize_counted(
                     next.fields.clone(),
                     Tail::Unsealed { key: KeyClass::ArrayKey, value: None },
-                    next.is_list,
+                    // A sealed receiver recomputes its own `Yes` from its keys, so
+                    // the reset above does not reach here: the new key does.
+                    if keeps_list { next.is_list } else { Certainty::Maybe },
                     next.non_empty,
                     next.covers.clone(),
                     next.count_bound,
                 )
                 .promote_present(&first, false, true);
-            }
-            // A write that adds a key does not carry list-ness (issue #884).
-            let extended = witnessed_order.is_some() && shape.field(&first).is_none();
-            let overwrite = shape.field(&first).is_some_and(|(_, p, _)| p.is_required());
-            if !extended && !overwrite && !stays_a_list(shape, &first) {
-                next = without_list_verdict(&next);
             }
             if nested { set_slot_fact(&next, &first, None) } else { set_slot_fact(&next, &first, slot) }
         }
