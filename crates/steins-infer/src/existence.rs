@@ -2,14 +2,13 @@
 //! `function_exists`, `class_exists` and kin answered from the project index with
 //! the dam's vouch.
 
-use std::collections::HashSet;
-
 use steins_domain::Certainty;
 use steins_syntax::{
     ArgValue, ArrayKey, CallExpr, ClassDecl, CondExpr, EXISTENCE_PREDICATES, LogicalOp, NameRef,
     OperandSpan, ReadKind, RefKind, StaticClass, Stmt,
 };
 
+use crate::absence::{ChainWalk, walk_method_chain};
 use crate::cx::Cx;
 use crate::early_binding::redammed;
 use crate::dam::DamKind;
@@ -232,52 +231,25 @@ fn existence_class_literal(cx: &Cx, v: &ArgValue) -> Option<String> {
 /// declared methods. Abstract or any-visibility declarations count as present
 /// (visibility-blind), a class's own or one a trait gives it (ADR-0105). Any obstacle
 /// to closure (an enum node, a trait composition that declines,
-/// unresolvable ancestor, cycle, conditional node with the dam standing, or an
-/// unanswerable/positive boot-surface homonym) collapses to `Maybe`.
+/// unresolvable ancestor, cycle, conditional node with the dam standing, a node in an
+/// unparsable file for the absent answer, or an unanswerable/positive boot-surface
+/// homonym) collapses to `Maybe`. The walk is the one the absence lanes judge with
+/// ([`walk_method_chain`]), asked with no magic fallback.
 fn method_exists_verdict(
     cx: &Cx,
     folder: &mut dyn Folder,
     start_fqn: &str,
     method: &str,
 ) -> Certainty {
-    let mut cur = start_fqn.to_owned();
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut fqns: Vec<String> = Vec::new();
-    let mut any_conditional = false;
-    let present;
-    loop {
-        if !seen.insert(cur.to_ascii_lowercase()) {
-            return Certainty::Maybe; // cycle — closure cannot terminate soundly.
-        }
-        let Some((cfile, cd)) = cx.find_class(&cur) else {
-            return Certainty::Maybe; // ancestor leaves the project / ambiguous.
+    let Some((file, cd)) = cx.find_class(start_fqn) else {
+        return Certainty::Maybe; // the class leaves the project / ambiguous.
+    };
+    let (present, fqns, any_conditional) =
+        match walk_method_chain(cx, file, cd, start_fqn, method, None) {
+            ChainWalk::Declared { fqns, any_conditional } => (true, fqns, any_conditional),
+            ChainWalk::Absent { fqns, any_conditional, .. } => (false, fqns, any_conditional),
+            ChainWalk::Magic { .. } | ChainWalk::Unknown => return Certainty::Maybe,
         };
-        // An enum node stays unproven (A3); a trait name, or a class whose trait
-        // composition declines its methods (ADR-0105), could carry the method
-        // invisibly to this walk — either way, closure is unproven.
-        if cd.is_enum || cd.is_trait {
-            return Certainty::Maybe;
-        }
-        fqns.push(cur.clone());
-        if cd.conditional {
-            any_conditional = true;
-        }
-        match cx.held_method(cfile, cd, method) {
-            Err(_) => return Certainty::Maybe,
-            Ok(Some(_)) => {
-                present = true;
-                break;
-            }
-            Ok(None) => {}
-        }
-        match &cd.parent {
-            None => {
-                present = false;
-                break;
-            }
-            Some(pref) => cur = cx.units[cfile].tree.resolve_class_fqn(pref),
-        }
-    }
     // A2i: a conditional declaration on the chain re-dams the claim — only the clear
     // whole-universe dam lets either verdict stand.
     if redammed(cx, any_conditional) {

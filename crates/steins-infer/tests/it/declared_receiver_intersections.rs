@@ -377,3 +377,123 @@ function g(Svc&Mock $o): void { $a = $o->gone; }
     assert_eq!(d[0].line, 6);
 }
 
+// Issue #1092: a descendant is judged by its whole chain, not by its own body.
+
+/// An interface arm whose implementors inherit members from classes outside the
+/// interface's hierarchy: `__call`/`__get` through `Base`, `sm`/`gm`/`$gp` through
+/// `GS`, `rg` through the `class_alias`ed `RealG`. PHP 8.5 runs every call below.
+const INHERITED: &str = "<?php
+interface A { public function a(): int; }
+interface U {}
+class AT implements A { public function a(): int { return 1; } }
+class Base {
+    public function __call(string $n, array $a): int { return 5; }
+    public function __get(string $n): int { return 6; }
+}
+class MagicA extends Base implements A, U { public function a(): int { return 1; } }
+class GS { public static function sm(): int { return 1; } public function gm(): int { return 6; } public int $gp = 3; }
+class DS extends GS implements A { public function a(): int { return 1; } }
+class RealG { public function rg(): int { return 8; } }
+class_alias(RealG::class, 'AliasG');
+class DR extends RealG implements A { public function a(): int { return 1; } }
+";
+
+fn inherited(f: &str) -> usize {
+    default_methods(&format!("{INHERITED}{f}\n")).len()
+}
+
+#[test]
+fn a_call_inherited_from_outside_the_hierarchy_is_silent() {
+    // Rows 33-36 of the #1095 design: master reported each as `A::m()`, PHP returns a
+    // value (`__call` through Base, `sm`/`gm` through GS, `rg` through RealG).
+    for f in [
+        "function j01(A $x): int { return $x->anything(); }",
+        "function j02(A $x): int { if ($x instanceof U) { return $x->anything(); } return 0; }",
+        "function j03(A $x): int { if ($x instanceof GS) { return $x->sm(); } return 0; }",
+        "function j03b(A $x): int { if ($x instanceof GS) { return $x->gm(); } return 0; }",
+        "function j04(A $x): int { if ($x instanceof AliasG) { return $x->rg(); } return 0; }",
+        "function j05(A $x): int { return $x->qq(); }",
+        "function unguarded_sm(A $x): int { return $x->sm(); }",
+    ] {
+        assert_eq!(inherited(f), 0, "{f}");
+    }
+}
+
+#[test]
+fn a_method_exists_guard_over_an_inherited_method_stays_live() {
+    // The fold reads the same verdict: `DS` holds `gm()` through `GS`, so the guard
+    // may hold and its body is live.
+    let dumps = |f: &str| {
+        check_under(&format!("{INHERITED}{f}\n"), FinalKeyword::Enforced)
+            .into_iter()
+            .filter(|d| d.id == steins_infer::DEBUG_TYPE_ID)
+            .count()
+    };
+    let gm = "function f(A $x): void { if (method_exists($x, 'gm')) { \\PHPStan\\dumpType($x); } }";
+    assert_eq!(dumps(gm), 1, "DS inherits gm(): the body is live");
+}
+
+#[test]
+fn an_interface_arm_closed_over_its_chains_still_reports() {
+    // Rows 22, 27, 28: no implementor's chain holds `qq()` or `__call`; `mm()` is held
+    // by Mid and inherited by Leaf.
+    let src = "<?php
+interface A { public function a(): int; }
+interface T {}
+class AT implements A, T { public function a(): int { return 1; } }
+class Mid implements A { public function a(): int { return 1; } public function mm(): int { return 7; } }
+class Leaf extends Mid implements T {}
+class AC implements A, \\Countable { public function a(): int { return 1; } public function count(): int { return 0; } }
+enum En: int implements T { case X = 1; }
+function i01(A $x): int { return $x->qq(); }
+function i01b(A $x): int { return $x->mm(); }
+function i07(A $x): int { if ($x instanceof \\Countable) { return $x->qq(); } return 0; }
+function i08(A $x): int { if ($x instanceof T) { return $x->qq(); } return 0; }
+";
+    let lines: Vec<u32> = default_methods(src).iter().map(|d| d.line).collect();
+    assert_eq!(lines, vec![9, 11, 12]);
+}
+
+#[test]
+fn an_intersection_closed_over_its_chains_still_reports() {
+    // Row 39: `qq()` on no candidate of either conjunct.
+    let src = "<?php
+interface A { public function a(): int; }
+interface B {}
+class Base { public function a(): int { return 1; } }
+class Both extends Base implements A, B {}
+function x01(A&B $x): int { return $x->qq(); }
+function x01a(A&B $x): int { return $x->a(); }
+";
+    let lines: Vec<u32> = default_methods(src).iter().map(|d| d.line).collect();
+    assert_eq!(lines, vec![6]);
+}
+
+#[test]
+fn a_property_inherited_from_outside_the_hierarchy_is_silent() {
+    // Rows 58, 59: an interface anchor stays Unknown on the property lane.
+    for f in [
+        "function j06(A $x): int { return $x->gp; }",
+        "function j07(A $x): int { if ($x instanceof GS) { return $x->gp; } return 0; }",
+        "function j08(A $x): int { if ($x instanceof U) { return $x->nope; } return 0; }",
+    ] {
+        let d = properties(&format!("{INHERITED}{f}\n"), FinalKeyword::Enforced);
+        assert!(d.is_empty(), "{f}: {d:?}");
+    }
+}
+
+#[test]
+fn a_class_arm_property_closed_over_its_descendants_still_reports() {
+    // A class arm's descendants inherit only from the arm's own chain or from each
+    // other, so judging each by its chain keeps the class-arm verdicts.
+    let src = "<?php
+class Root {}
+class Kid extends Root { public int $k = 1; }
+class Grand extends Kid {}
+function p(Root $r): void { $a = $r->nope; }
+function q(Root $r): void { $a = $r->k; }
+";
+    let d = properties(src, FinalKeyword::Enforced);
+    let lines: Vec<u32> = d.iter().map(|d| d.line).collect();
+    assert_eq!(lines, vec![5], "{d:?}");
+}

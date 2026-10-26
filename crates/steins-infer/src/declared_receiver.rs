@@ -12,7 +12,9 @@ use crate::env::{ContractArm, Store, Stratum};
 use crate::project::{Diagnostic, Res};
 use crate::fold::Folder;
 use crate::{CALL_UNDEFINED_METHOD_ID, PHPDOC_UNDEFINED_METHOD_ID};
-use crate::absence::{ChainWalk, UndefKind, enumerate_method_chain, magic_obstacles_in_reach};
+use crate::absence::{
+    ChainWalk, UndefKind, enumerate_method_chain, magic_obstacles_in_reach, walk_method_chain,
+};
 
 // ---------------------------------------------------------------------------
 // The declared-receiver lane (ADR-0049 §8 / S6), routed by minimum stratum
@@ -173,70 +175,114 @@ pub(crate) fn descendant_closure<'a>(cx: &Cx<'a>, arm_fqn: &str) -> DescendantCl
     DescendantClosure::Enumerated(descendants)
 }
 
-/// Whether a descendant declaration could **introduce** `method` (or hide an
-/// obstacle to it) below a member whose own chain already lacks it (ADR-0049
-/// §8): holds the method, its own or through a trait (ADR-0105), or carries
-/// `__call` either way; uses traits whose composition declines; is an enum (A3) or a
-/// trait; or is in reach of a magic-member docblock tag (A14). Any such descendant
-/// fails the absence claim (silence).
-fn descendant_introduces_method(cx: &Cx, file: usize, cd: &ClassDecl, method: &str) -> bool {
-    cd.is_enum
-        || cd.is_trait
-        || ["__call", method].iter().any(|m| !matches!(cx.held_method(file, cd, m), Ok(None)))
-        || !magic_obstacles_in_reach(cx, &cd.fqn).is_empty()
+/// What the §8 ladder established about `method` on one class-like of a narrowed
+/// contract arm: the arm's own class-like with its whole descendant set (issue
+/// #1092), each judged by its chain walk ([`ChainWalk`]).
+pub(crate) enum ArmMethodVerdict {
+    /// Every candidate's chain is closed and lacks both the method and `__call`;
+    /// carries the arm's display simple name.
+    Absent(String),
+    /// The arm's own chain declares the method, so every inhabitant does.
+    Declared,
+    /// Every candidate's chain is closed, lacks the method and holds `__call`.
+    Magic,
+    /// A leg refused, or the candidates disagree: nothing is proven.
+    Unknown,
 }
 
-/// Run the full §8 ladder for one narrowed contract arm and return its display
-/// simple-name when the method is **provably absent** across the arm's whole
-/// hierarchy *and* its complete descendant set, or `None` when any leg fails
-/// (silence). Instance calls only — the declared-receiver lane is `$var->m()`.
-fn arm_provably_lacks_method(
+/// The candidate verdicts the arm verdict folds: [`ChainWalk`] with its payload
+/// spent on the A2i/A2ii legs.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Walked {
+    Absent,
+    Declared,
+    Magic,
+    Unknown,
+}
+
+/// Apply the A2i re-dam and the A2ii boot-surface homonym legs to a walk, keeping
+/// its verdict only when both clear.
+fn walked(cx: &Cx, folder: &mut dyn Folder, walk: &ChainWalk) -> Walked {
+    let (verdict, fqns, any_conditional) = match walk {
+        ChainWalk::Absent { fqns, any_conditional, .. } => (Walked::Absent, fqns, *any_conditional),
+        ChainWalk::Declared { fqns, any_conditional } => (Walked::Declared, fqns, *any_conditional),
+        ChainWalk::Magic { fqns, any_conditional } => (Walked::Magic, fqns, *any_conditional),
+        ChainWalk::Unknown => return Walked::Unknown,
+    };
+    // A2i: a conditional declaration in the chain re-dams the claim.
+    if redammed(cx, any_conditional) {
+        return Walked::Unknown;
+    }
+    // A2ii homonym: every chain FQN must be answered NOT-present by the boot surface.
+    if fqns.iter().all(|fqn| folder.boot_surface_class_like(fqn) == Some(false)) {
+        verdict
+    } else {
+        Walked::Unknown
+    }
+}
+
+/// One descendant of an arm, judged by its **whole chain** (issue #1092): an
+/// ancestor outside the arm's hierarchy that declares the method or `__call` counts,
+/// as it does at runtime. A magic-member docblock tag in its reach (A14), an enum
+/// (A3) or a trait, a trait composition that declines, and any obstacle on the chain
+/// are `Unknown`.
+fn descendant_verdict(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    file: usize,
+    cd: &ClassDecl,
+    method: &str,
+) -> Walked {
+    if !magic_obstacles_in_reach(cx, &cd.fqn).is_empty() {
+        return Walked::Unknown;
+    }
+    let walk = walk_method_chain(cx, file, cd, &cd.fqn, method, Some(UndefKind::Instance.magic()));
+    walked(cx, folder, &walk)
+}
+
+/// Run the full §8 ladder for one class-like of a narrowed contract arm. The
+/// candidates are the class-like and its complete descendant set; the arm is
+/// [`ArmMethodVerdict::Absent`] when every candidate's chain lacks the method and
+/// `__call`. Instance calls only — the declared-receiver lane is `$var->m()`.
+pub(crate) fn arm_member_verdict(
     cx: &Cx,
     folder: &mut dyn Folder,
     arm_fqn: &str,
     method: &str,
-) -> Option<String> {
+) -> ArmMethodVerdict {
     // §4 chain closure over the arm's own ancestor chain (reuses S2's walk).
-    let ChainWalk::Absent { simple_chain, fqns, any_conditional } =
-        enumerate_method_chain(cx, arm_fqn, method, UndefKind::Instance)
-    else {
-        return None;
-    };
-    // A2i: a conditional declaration in the chain re-dams the claim.
-    if redammed(cx, any_conditional) {
-        return None;
-    }
-    // A2ii homonym: every chain FQN must be answered NOT-present by the boot surface.
-    for fqn in &fqns {
-        if folder.boot_surface_class_like(fqn) != Some(false) {
-            return None;
-        }
+    let walk = enumerate_method_chain(cx, arm_fqn, method, UndefKind::Instance);
+    let anchor = walked(cx, folder, &walk);
+    match anchor {
+        Walked::Unknown => return ArmMethodVerdict::Unknown,
+        // Every inhabitant of the arm is-a the arm, and so holds what its chain
+        // declares: no descendant can take the method away.
+        Walked::Declared => return ArmMethodVerdict::Declared,
+        Walked::Absent | Walked::Magic => {}
     }
     // Descendant closure (A4): the arm is final-immune, or its descendant set
     // is fully enumerated AND the dam is clear (an `eval`-minted subclass),
-    // and no descendant introduces the method.
+    // and every descendant's chain agrees with the arm's.
     match descendant_closure(cx, arm_fqn) {
         DescendantClosure::Immune => {}
-        DescendantClosure::Obstacle => return None,
+        DescendantClosure::Obstacle => return ArmMethodVerdict::Unknown,
         DescendantClosure::Enumerated(descendants) => {
             if !cx.dam.is_clear() {
-                return None; // eval could mint a subclass carrying the method.
+                return ArmMethodVerdict::Unknown; // eval could mint a subclass carrying the method.
             }
-            // ADR-0079 §2.5 needs no leg here: a member-incomplete descendant
-            // implies an unparsable non-vendor file, itself a dam site already
-            // caught above (revisit if §3 ever allows unparsable-without-dam).
             for (dfile, dcd) in &descendants {
-                if descendant_introduces_method(cx, *dfile, dcd, method) {
-                    return None;
-                }
-                // A homonym descendant may be dead code shadowed by a loaded class.
-                if folder.boot_surface_class_like(&dcd.fqn) != Some(false) {
-                    return None;
+                if descendant_verdict(cx, folder, *dfile, dcd, method) != anchor {
+                    return ArmMethodVerdict::Unknown;
                 }
             }
         }
     }
-    Some(simple_chain.first().cloned().unwrap_or_else(|| arm_fqn.to_owned()))
+    match walk {
+        ChainWalk::Absent { simple_chain, .. } => ArmMethodVerdict::Absent(
+            simple_chain.first().cloned().unwrap_or_else(|| arm_fqn.to_owned()),
+        ),
+        _ => ArmMethodVerdict::Magic,
+    }
 }
 
 /// Read a narrowed contract-arm lane as the declared-receiver lane's
@@ -381,8 +427,8 @@ pub(crate) fn check_phpdoc_undefined_method(
 /// The display names of every arm of `lane` when **every arm — and for an intersection,
 /// every conjunct — provably lacks** `method`, or `None`. Member lookup over an inhabited
 /// intersection is the union of the arms (issue #234), so only absence from all
-/// conjuncts counts. [`arm_provably_lacks_method`] returns `None` both for "the method is
-/// there" and "a leg couldn't close", covering both rules in one fold.
+/// conjuncts counts. Only [`ArmMethodVerdict::Absent`] proves anything here: a declared
+/// method, a `__call` and a leg that couldn't close are all silence.
 ///
 /// The one ladder both readers of the declared-receiver lane share: the finding
 /// ([`check_phpdoc_undefined_method`]) and the `method_exists`/`is_callable` fold
@@ -398,7 +444,11 @@ fn lane_provably_lacks_method(
     for conjuncts in lane {
         let mut names: Vec<String> = Vec::with_capacity(conjuncts.len());
         for f in conjuncts {
-            names.push(arm_provably_lacks_method(cx, folder, f, method)?);
+            let ArmMethodVerdict::Absent(name) = arm_member_verdict(cx, folder, f, method)
+            else {
+                return None;
+            };
+            names.push(name);
         }
         arm_names.push(names.join("&"));
     }
