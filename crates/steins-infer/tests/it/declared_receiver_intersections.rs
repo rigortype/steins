@@ -433,6 +433,36 @@ fn a_method_exists_guard_over_an_inherited_method_stays_live() {
     assert_eq!(dumps(gm), 1, "DS inherits gm(): the body is live");
 }
 
+/// An interface whose only implementor answers every name through an inherited
+/// `__call`: `method_exists` is false on it, `is_callable` true (PHP 8.5).
+const CALL_ONLY: &str = "<?php
+declare(strict_types=1);
+interface I {}
+class Base { public function __call(string $n, array $a): int { return 5; } }
+class Impl extends Base implements I {}
+";
+
+fn call_only_dumps(f: &str) -> usize {
+    check_under(&format!("{CALL_ONLY}{f}\n"), FinalKeyword::Enforced)
+        .into_iter()
+        .filter(|d| d.id == steins_infer::DEBUG_TYPE_ID)
+        .count()
+}
+
+#[test]
+fn method_exists_over_an_inherited_call_alone_folds_false() {
+    // `method_exists` ignores `__call`: the body is one PHP never enters.
+    let f = "function f(I $x): void { if (method_exists($x, 'm')) { \\PHPStan\\dumpType($x); } }";
+    assert_eq!(call_only_dumps(f), 0);
+}
+
+#[test]
+fn is_callable_over_an_inherited_call_stays_live() {
+    // `is_callable` honours `__call`: the body runs on `Impl`.
+    let f = "function f(I $x): void { if (is_callable([$x, 'm'])) { \\PHPStan\\dumpType($x); } }";
+    assert_eq!(call_only_dumps(f), 1);
+}
+
 #[test]
 fn an_interface_arm_closed_over_its_chains_still_reports() {
     // Rows 22, 27, 28: no implementor's chain holds `qq()` or `__call`; `mm()` is held

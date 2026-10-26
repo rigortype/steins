@@ -12,9 +12,7 @@ use crate::env::{ContractArm, Store, Stratum};
 use crate::project::{Diagnostic, Res};
 use crate::fold::Folder;
 use crate::{CALL_UNDEFINED_METHOD_ID, PHPDOC_UNDEFINED_METHOD_ID};
-use crate::absence::{
-    ChainWalk, UndefKind, enumerate_method_chain, magic_obstacles_in_reach, walk_method_chain,
-};
+use crate::absence::{ChainWalk, magic_obstacles_in_reach, walk_method_chain};
 
 // ---------------------------------------------------------------------------
 // The declared-receiver lane (ADR-0049 §8 / S6), routed by minimum stratum
@@ -221,37 +219,61 @@ fn walked(cx: &Cx, folder: &mut dyn Folder, walk: &ChainWalk) -> Walked {
     }
 }
 
+/// One candidate's chain walk (issue #1092): a magic-member docblock tag in the reach
+/// of `name` (A14) is `Unknown` whatever the question, then [`walk_method_chain`] with
+/// the caller's magic fallback.
+fn candidate_walk(
+    cx: &Cx,
+    file: usize,
+    cd: &ClassDecl,
+    name: &str,
+    method: &str,
+    magic: Option<&str>,
+) -> ChainWalk {
+    if !magic_obstacles_in_reach(cx, name).is_empty() {
+        return ChainWalk::Unknown;
+    }
+    walk_method_chain(cx, file, cd, name, method, magic)
+}
+
 /// One descendant of an arm, judged by its **whole chain** (issue #1092): an
-/// ancestor outside the arm's hierarchy that declares the method or `__call` counts,
-/// as it does at runtime. A magic-member docblock tag in its reach (A14), an enum
-/// (A3) or a trait, a trait composition that declines, and any obstacle on the chain
-/// are `Unknown`.
+/// ancestor outside the arm's hierarchy that declares the method, or holds the magic
+/// fallback the caller asks about, counts, as it does at runtime. A magic-member
+/// docblock tag in its reach (A14), an enum (A3) or a trait, a trait composition that
+/// declines, and any obstacle on the chain are `Unknown`.
 fn descendant_verdict(
     cx: &Cx,
     folder: &mut dyn Folder,
     file: usize,
     cd: &ClassDecl,
     method: &str,
+    magic: Option<&str>,
 ) -> Walked {
-    if !magic_obstacles_in_reach(cx, &cd.fqn).is_empty() {
-        return Walked::Unknown;
-    }
-    let walk = walk_method_chain(cx, file, cd, &cd.fqn, method, Some(UndefKind::Instance.magic()));
+    let walk = candidate_walk(cx, file, cd, &cd.fqn, method, magic);
     walked(cx, folder, &walk)
 }
 
+/// The magic fallback a call `$var->m()` honours, and `is_callable([$var, 'm'])` with it.
+pub(crate) const CALL_FALLBACK: Option<&str> = Some("__call");
+
 /// Run the full §8 ladder for one class-like of a narrowed contract arm. The
 /// candidates are the class-like and its complete descendant set; the arm is
-/// [`ArmMethodVerdict::Absent`] when every candidate's chain lacks the method and
-/// `__call`. Instance calls only — the declared-receiver lane is `$var->m()`.
+/// [`ArmMethodVerdict::Absent`] when every candidate's chain lacks the method and the
+/// `magic` fallback. Instance calls only — the declared-receiver lane is `$var->m()`,
+/// which passes [`CALL_FALLBACK`]; `method_exists` passes `None`, since it reports
+/// declared methods only and a `__call` never makes it true.
 pub(crate) fn arm_member_verdict(
     cx: &Cx,
     folder: &mut dyn Folder,
     arm_fqn: &str,
     method: &str,
+    magic: Option<&str>,
 ) -> ArmMethodVerdict {
-    // §4 chain closure over the arm's own ancestor chain (reuses S2's walk).
-    let walk = enumerate_method_chain(cx, arm_fqn, method, UndefKind::Instance);
+    // §4 chain closure over the arm's own ancestor chain (S2's walk and legs).
+    let walk = match cx.find_class(arm_fqn) {
+        Some((file, cd)) => candidate_walk(cx, file, cd, arm_fqn, method, magic),
+        None => ChainWalk::Unknown,
+    };
     let anchor = walked(cx, folder, &walk);
     match anchor {
         Walked::Unknown => return ArmMethodVerdict::Unknown,
@@ -271,7 +293,7 @@ pub(crate) fn arm_member_verdict(
                 return ArmMethodVerdict::Unknown; // eval could mint a subclass carrying the method.
             }
             for (dfile, dcd) in &descendants {
-                if descendant_verdict(cx, folder, *dfile, dcd, method) != anchor {
+                if descendant_verdict(cx, folder, *dfile, dcd, method, magic) != anchor {
                     return ArmMethodVerdict::Unknown;
                 }
             }
@@ -403,7 +425,8 @@ pub(crate) fn check_phpdoc_undefined_method(
     if !folder.absence_family_available() {
         return;
     }
-    let Some(arm_names) = lane_provably_lacks_method(cx, folder, &lane, &method) else {
+    let Some(arm_names) = lane_provably_lacks_method(cx, folder, &lane, &method, CALL_FALLBACK)
+    else {
         return;
     };
 
@@ -428,7 +451,7 @@ pub(crate) fn check_phpdoc_undefined_method(
 /// every conjunct — provably lacks** `method`, or `None`. Member lookup over an inhabited
 /// intersection is the union of the arms (issue #234), so only absence from all
 /// conjuncts counts. Only [`ArmMethodVerdict::Absent`] proves anything here: a declared
-/// method, a `__call` and a leg that couldn't close are all silence.
+/// method, the `magic` fallback and a leg that couldn't close are all silence.
 ///
 /// The one ladder both readers of the declared-receiver lane share: the finding
 /// ([`check_phpdoc_undefined_method`]) and the `method_exists`/`is_callable` fold
@@ -439,12 +462,13 @@ fn lane_provably_lacks_method(
     folder: &mut dyn Folder,
     lane: &[Vec<String>],
     method: &str,
+    magic: Option<&str>,
 ) -> Option<Vec<String>> {
     let mut arm_names: Vec<String> = Vec::with_capacity(lane.len());
     for conjuncts in lane {
         let mut names: Vec<String> = Vec::with_capacity(conjuncts.len());
         for f in conjuncts {
-            let ArmMethodVerdict::Absent(name) = arm_member_verdict(cx, folder, f, method)
+            let ArmMethodVerdict::Absent(name) = arm_member_verdict(cx, folder, f, method, magic)
             else {
                 return None;
             };
@@ -462,7 +486,10 @@ fn lane_provably_lacks_method(
 /// declared-receiver reading admits, and a live absence family.
 ///
 /// A `method_exists($var, 'm')` or `is_callable([$var, 'm'])` over such a receiver is
-/// provably false (issue #930), so the body it guards is dead.
+/// provably false (issue #930), so the body it guards is dead. `magic` is the fallback
+/// the predicate honours: `None` for `method_exists`, which a `__call` never makes true,
+/// so a chain holding only `__call` lacks the method for it; [`CALL_FALLBACK`] for
+/// `is_callable`, which a `__call` does make true.
 pub(crate) fn declared_receiver_lacks_method(
     cx: &Cx,
     folder: &mut dyn Folder,
@@ -470,6 +497,7 @@ pub(crate) fn declared_receiver_lacks_method(
     poisoned: bool,
     var: &str,
     method: &str,
+    magic: Option<&str>,
 ) -> bool {
     if poisoned || store.is_exact(var) {
         return false;
@@ -483,7 +511,7 @@ pub(crate) fn declared_receiver_lacks_method(
     if !folder.absence_family_available() {
         return false;
     }
-    lane_provably_lacks_method(cx, folder, &lane, method).is_some()
+    lane_provably_lacks_method(cx, folder, &lane, method, magic).is_some()
 }
 
 /// The declared-receiver lane's id for a narrowed arm lane (ADR-0049 A13):
