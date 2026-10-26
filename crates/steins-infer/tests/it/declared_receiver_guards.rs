@@ -598,3 +598,24 @@ function assertT(mixed $v): void { if (!$v instanceof T) { throw new \\InvalidAr
     let f = "function f(A $x): void { assertT($x); if (method_exists($x, 'zz')) { \\PHPStan\\dumpType($x); } }";
     assert_eq!(dumps(fixture, f), 1);
 }
+
+/// `assert()` reads as `if (!cond) throw`, `Verified` (ADR-0052's 2026-07-25
+/// amendment, an owner ruling): the guard it records premises proof-layer findings,
+/// unlike a `@phpstan-assert` tag. Under `zend.assertions=-1` the call would run on
+/// `OtherZ`; the amendment assigns that to the operator who disabled the check.
+#[test]
+fn an_assert_statement_guard_premises_proof_layer_findings() {
+    let src = "<?php
+interface A {} interface T {}
+class AT implements A, T {}
+class OtherZ implements A { public function zz(): int { return 8; } public int $p = 1; }
+function b1(A $x): int { assert($x instanceof T); return $x->zz(); }
+function b2(A $x): int { assert($x instanceof T); return $x->p; }
+";
+    let found: Vec<(u32, &str)> = check(src)
+        .into_iter()
+        .filter(|d| d.message.contains("declared receiver"))
+        .map(|d| (d.line, d.id))
+        .collect();
+    assert_eq!(found, vec![(5, CALL_UNDEFINED_METHOD_ID), (6, PROPERTY_UNDEFINED_ID)]);
+}
