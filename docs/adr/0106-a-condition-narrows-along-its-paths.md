@@ -229,7 +229,10 @@ true; if ($has)` (`release($has)`) all throw in PHP and keep reporting.
   `non-empty-list<T>` keeps its tail-only form and the rule maps
   `non-empty-list{0?: T, ...<T>}` onto the one form `non-empty-list{0: T,
   ...<T>}` without giving any shape a second spelling. Like the floor above, a
-  count the flag contradicts keeps its own floor and promotes nothing.
+  count the flag contradicts keeps its own floor and promotes nothing. The pin
+  trusts `is_list` as given, so a write at a literal key drops the verdict before
+  it promotes the key, unless the write overwrites a required key or lands where
+  a list cannot gap: `$a[5] = 9` on `list{0?: int}` may leave `[5 => 9]`.
 
 ### 2.6 Loose `switch` refinement (A1, #1041)
 
