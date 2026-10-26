@@ -657,7 +657,11 @@ pub(crate) fn check_phpdoc_undefined_method(
     // here so it can never drift from the arms the claim rests on; a dead arm or a
     // candidate only a positive `@phpstan-assert` excluded leaves the claim resting
     // on that docblock.
-    let id = if absence.rests_on_assert { PHPDOC_UNDEFINED_METHOD_ID } else { declared_receiver_id(arms) };
+    let id = if absence.rests_on_assert {
+        PHPDOC_UNDEFINED_METHOD_ID
+    } else {
+        declared_receiver_id(arms)
+    };
 
     let pos = cx.tree().position(call.span.start);
     let arms_disp = absence.arms.join("|");

@@ -747,7 +747,8 @@ impl MemberLadder for PropertyLadder<'_, '_> {
         arm_property_presence(cx, self.folder, fqn, self.prop)
     }
     fn declares(&mut self, cx: &Cx, fqn: &str) -> bool {
-        matches!(enumerate_property_chain_outcome(cx, fqn, self.prop), PropertyChainOutcome::Declared)
+        let outcome = enumerate_property_chain_outcome(cx, fqn, self.prop);
+        matches!(outcome, PropertyChainOutcome::Declared)
     }
     fn anchor_clear(&mut self, cx: &Cx, fqn: &str) -> bool {
         magic_obstacles_in_reach(cx, fqn).is_empty()
