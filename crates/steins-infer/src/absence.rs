@@ -223,6 +223,12 @@ pub(crate) fn enumerate_method_chain(cx: &Cx, start_fqn: &str, method: &str, kin
 /// reports declared methods only and a `@method` tag is not one. Starting at a
 /// declaration rather than a name lets the declared-receiver lane judge each half of
 /// an Ambiguous descendant by its own chain (ADR-0049 A4, issue #1092).
+///
+/// With no magic fallback the walk also climbs the interfaces of every abstract class
+/// and interface on the chain ([`climb_interfaces`], issue #1103): `method_exists` is
+/// true of a method such a node only declares through an interface. A concrete class
+/// implements every interface method on its own chain, so the call lanes, which ask
+/// about a value of a concrete class, walk the `extends` chain alone.
 pub(crate) fn walk_method_chain(
     cx: &Cx,
     file: usize,
@@ -238,6 +244,7 @@ pub(crate) fn walk_method_chain(
     let mut fqns: Vec<String> = Vec::new();
     let mut any_conditional = false;
     let mut any_magic = false;
+    let mut interfaces: Vec<String> = Vec::new();
     loop {
         if !seen.insert(cur.to_ascii_lowercase()) {
             return ChainWalk::Unknown; // cycle — closure cannot terminate soundly.
@@ -284,7 +291,17 @@ pub(crate) fn walk_method_chain(
             }
         }
         simple_chain.push(cd.name.clone());
+        // `method_exists` also counts a method an abstract class or an interface only
+        // declares through an interface it implements or extends (issue #1103).
+        if magic.is_none() && (cd.is_abstract || cd.is_interface) {
+            let tree = &cx.units[cfile].tree;
+            interfaces.extend(cd.implements.iter().map(|r| tree.resolve_class_fqn(r)));
+        }
         let Some(pref) = &cd.parent else {
+            if !interfaces.is_empty() {
+                let (pending, chain) = (interfaces, simple_chain);
+                return climb_interfaces(cx, method, pending, seen, chain, fqns, any_conditional);
+            }
             return if any_magic {
                 ChainWalk::Magic { fqns, any_conditional }
             } else {
@@ -301,6 +318,51 @@ pub(crate) fn walk_method_chain(
         };
         (cfile, cd) = (pfile, pcd);
     }
+}
+
+/// The interface leg of a `method_exists` walk (issue #1103): the interfaces an
+/// abstract class or an interface on the chain implements or extends, and theirs in
+/// turn. PHP counts the abstract method an interface declares as one of the class's
+/// own, so a node that holds `method` is [`ChainWalk::Declared`]. An interface reached
+/// twice is a diamond, walked once. An edge that does not resolve to one project
+/// interface (a builtin, a vendor name, an ambiguous one), a member-incomplete file and
+/// a conditional node with the dam standing leave the walk as unprovable as the class
+/// chain's own legs do.
+fn climb_interfaces(
+    cx: &Cx,
+    method: &str,
+    mut pending: Vec<String>,
+    mut seen: HashSet<String>,
+    mut simple_chain: Vec<String>,
+    mut fqns: Vec<String>,
+    mut any_conditional: bool,
+) -> ChainWalk {
+    while let Some(fqn) = pending.pop() {
+        if !seen.insert(fqn.to_ascii_lowercase()) {
+            continue;
+        }
+        let Some((file, cd)) = cx.find_class(&fqn) else {
+            return ChainWalk::Unknown;
+        };
+        if !cd.is_interface {
+            return ChainWalk::Unknown;
+        }
+        fqns.push(fqn);
+        any_conditional |= cd.conditional;
+        match cx.held_method(file, cd, method) {
+            Err(_) => return ChainWalk::Unknown,
+            Ok(Some(_)) => return ChainWalk::Declared { fqns, any_conditional },
+            Ok(None) => {}
+        }
+        if cx.member_incomplete(file) {
+            return ChainWalk::Unknown;
+        }
+        simple_chain.push(cd.name.clone());
+        let tree = &cx.units[file].tree;
+        let edges = cd.parent.iter().chain(cd.implements.iter());
+        pending.extend(edges.map(|r| tree.resolve_class_fqn(r)));
+    }
+    ChainWalk::Absent { simple_chain, fqns, any_conditional }
 }
 
 /// Run the full ADR-0049 §4 ladder for one method/static call and emit
@@ -1678,5 +1740,45 @@ enum E { case A; }
         assert_eq!(walk(SRC, "Lost", "m", true), "unknown");
         assert_eq!(walk(SRC, "Lost", "m", false), "unknown");
         assert_eq!(walk(SRC, "E", "m", true), "unknown");
+    }
+
+    const IFACES: &str = "<?php
+interface HasM { public function m(): int; }
+abstract class Abs implements HasM {}
+abstract class AbsKid extends Abs {}
+interface J1 {} interface J2 { public function m2(): int; }
+interface IJ extends J1, J2 {}
+interface Top extends IJ, J2 {}
+abstract class Opaque implements \\Countable {}
+class Concrete implements \\Countable { public function count(): int { return 0; } }
+";
+
+    #[test]
+    fn method_exists_climbs_the_interfaces_of_an_abstract_class_or_interface() {
+        // Issue #1103: an interface method an abstract class implements, the second
+        // parent of an interface, and both again one node up.
+        assert_eq!(walk(IFACES, "Abs", "m", false), "declared");
+        assert_eq!(walk(IFACES, "IJ", "m2", false), "declared");
+        assert_eq!(walk(IFACES, "AbsKid", "m", false), "declared");
+        // A diamond (`Top` reaches `J2` twice) is walked once and still closes.
+        assert_eq!(walk(IFACES, "Top", "m2", false), "declared");
+        assert_eq!(walk(IFACES, "Top", "nope", false), "absent");
+        assert_eq!(walk(IFACES, "AbsKid", "nope", false), "absent");
+    }
+
+    #[test]
+    fn an_unresolved_interface_leaves_an_abstract_walk_unknown_but_not_a_concrete_one() {
+        // A builtin interface's methods are not enumerated: unprovable for an abstract
+        // class. A concrete class holds every interface method on its own chain.
+        assert_eq!(walk(IFACES, "Opaque", "nope", false), "unknown");
+        assert_eq!(walk(IFACES, "Concrete", "nope", false), "absent");
+        assert_eq!(walk(IFACES, "Concrete", "count", false), "declared");
+    }
+
+    #[test]
+    fn the_call_lanes_walk_the_extends_chain_alone() {
+        // The instance fallback asks about a value of a concrete class: unchanged.
+        assert_eq!(walk(IFACES, "Abs", "m", true), "absent");
+        assert_eq!(walk(IFACES, "Opaque", "nope", true), "absent");
     }
 }

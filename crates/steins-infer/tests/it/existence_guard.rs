@@ -8,7 +8,9 @@
 //!
 //! Drives the [`Boot`] mock folder (mirrors `undefined_method.rs`).
 
-use steins_infer::{CALL_TOO_FEW_ARGUMENTS_ID, CALL_UNDEFINED_METHOD_ID, Diagnostic, Folder, check_with};
+use steins_infer::{
+    CALL_TOO_FEW_ARGUMENTS_ID, CALL_UNDEFINED_METHOD_ID, DEBUG_TYPE_ID, Diagnostic, Folder, check_with,
+};
 use steins_syntax::{ArgValue, SourceTree};
 
 /// A boot-surface mock: `available` is A9's family-availability gate; `class_builtins`/
@@ -396,4 +398,38 @@ $g = Closure::bind(function() { if (defined('SC::SP')) { return SC::NOPE; } retu
 class SC { private const SP = 1; function a() { return fn() => defined('SC::SP') ? SC::NOPE : 0; } }
 ";
     assert_eq!(class_const_findings(arrow).len(), 1, "{:?}", class_const_findings(arrow));
+}
+
+/// Issue #1103: `method_exists` on a literal class counts a method an abstract class or
+/// an interface declares only through an interface it implements or extends, as PHP
+/// does, so the body it guards stays live. PHP 8.5: both calls are true and each body
+/// raises a `TypeError` on `strlen(null)`.
+#[test]
+fn method_exists_on_a_literal_climbs_the_interfaces_of_an_abstract_class_or_interface() {
+    let fixture = "<?php
+interface HasM { public function m(): int; }
+abstract class Abs implements HasM {}
+abstract class AbsKid extends Abs {}
+interface J1 {} interface J2 { public function m2(): int; }
+interface IJ extends J1, J2 {}
+interface Deep extends IJ {}
+";
+    // Whether the body `method_exists(C::class, 'm')` guards is live (its dump emitted).
+    let live = |class: &str, method: &str| {
+        let src = format!(
+            "{fixture}function f(?string $n): int {{ if (method_exists({class}::class, '{method}')) \
+             {{ \\PHPStan\\dumpType($n); return strlen($n); }} return 0; }}\n"
+        );
+        diags_with(&src, &mut Boot::ready()).iter().filter(|d| d.id == DEBUG_TYPE_ID).count()
+    };
+    // The interface method of an abstract class's interface, and the second parent of
+    // an interface (the issue's witness).
+    assert_eq!(live("Abs", "m"), 1, "e1");
+    assert_eq!(live("IJ", "m2"), 1, "e2");
+    // Through an abstract parent, and through an interface's interface.
+    assert_eq!(live("AbsKid", "m"), 1, "e3");
+    assert_eq!(live("Deep", "m2"), 1, "e4");
+    // Kept: a method no interface in reach declares still folds `No`, the body dead.
+    assert_eq!(live("Abs", "nope"), 0, "k1");
+    assert_eq!(live("IJ", "nope"), 0, "k2");
 }
