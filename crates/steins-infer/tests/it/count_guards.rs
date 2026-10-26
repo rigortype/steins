@@ -672,3 +672,51 @@ fn the_true_side_of_an_empty_guard_narrows_what_a_negation_narrows() {
         assert_eq!(at("empty($v)"), at("!$v"), "{decl} {init}");
     }
 }
+
+// A non-empty list holds key 0 (#1079)
+//
+// Filling an empty list and joining it back used to leave key 0 optional:
+// `list{0: 'd'}` joined with `non-empty-list<string>` read `non-empty-list{0?:
+// string, ...<string>}`, and `$xs[0]` after the `if` reported. PHP defines key 0
+// on both paths.
+
+/// The non-debug findings of `/** @param <decl> $xs */ function f(array $xs, bool
+/// $c): string { <body> return $xs[0]; }`.
+fn head_read_findings(decl: &str, body: &str) -> Vec<Diagnostic> {
+    let src = format!(
+        "<?php\n/** @param {decl} $xs */\nfunction f(array $xs, bool $c): string {{ {body} return $xs[0]; }}\n"
+    );
+    diagnostics(&src).into_iter().filter(|d| !d.id.starts_with("debug.")).collect()
+}
+
+#[test]
+fn a_list_filled_when_empty_holds_key_zero_after_the_join() {
+    for guard in ["empty($xs)", "!$xs", "$xs === []", "count($xs) === 0"] {
+        for fill in ["$xs[] = 'd';", "$xs = ['d'];"] {
+            let ds = head_read_findings("list<string>", &format!("if ({guard}) {{ {fill} }}"));
+            assert!(ds.is_empty(), "{guard} {fill}: {ds:?}");
+        }
+    }
+}
+
+#[test]
+fn a_literal_joined_into_a_declared_non_empty_list_keeps_key_zero() {
+    let ds = head_read_findings("non-empty-list<string>", "if ($c) { $xs = ['d']; }");
+    assert!(ds.is_empty(), "{ds:?}");
+}
+
+#[test]
+fn a_join_that_can_leave_a_list_empty_still_reports_key_zero() {
+    // `f([], false)` reads an undefined key 0.
+    let ds = head_read_findings("list<string>", "if ($c) { $xs = ['d']; }");
+    assert_eq!(ds.iter().filter(|d| d.id == "offset.maybe-missing").count(), 1, "{ds:?}");
+}
+
+#[test]
+fn a_disjunction_of_non_empty_guards_proves_neither_list_non_empty() {
+    // `h([], [1])` reads an undefined key 0 of `$a`.
+    let src = "<?php\n/** @param list{0?: int} $a @param list{0?: int} $b */\n\
+               function h(array $a, array $b): int { if (!empty($a) || !empty($b)) { return $a[0]; } return 0; }\n";
+    let n = diagnostics(src).iter().filter(|d| d.id == "offset.maybe-missing").count();
+    assert_eq!(n, 1);
+}

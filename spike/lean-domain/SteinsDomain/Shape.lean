@@ -416,6 +416,27 @@ def pinSingle (tail : GTail Fact) (nonEmpty : Bool) (fs : List Field) : List Fie
     fs.map (fun f => (f.1, Presence.required (f.2.1 == Presence.required true), f.2.2))
   else fs
 
+/-- One field under the list-head pin: an optional key `0` becomes required, at
+`witnessed := false`; every other field is left alone. Written with `bif` so
+that the proofs below reduce it by `cases` alone. -/
+def headPin (f : Field) : Field :=
+  bif (f.1 == Key.int 0) && (f.2.1 == Presence.optional) then (f.1, Presence.required false, f.2.2)
+  else f
+
+/-- Whether the shape is a non-empty list, the premise of the list-head pin. -/
+def listHeadHolds (tail : GTail Fact) (isList : Certainty) (nonEmpty : Bool)
+    (fs : List Field) : Bool :=
+  let ne := nonEmpty || fs.any (fun f => f.2.1.isRequired)
+  ne && (sharpenIsList (computeIsList fs tail ne) isList == Certainty.yes)
+
+/-- **The list-head pin** (#1079): a non-empty list holds key `0`, since a
+list's keys are `0..n-1`. A declared optional key `0` of a non-empty shape whose
+`isList` is `yes` becomes required. A key `0` only the tail supplies is not
+added as a field, so `non-empty-list<T>` keeps its tail-only form. -/
+def pinListHead (tail : GTail Fact) (isList : Certainty) (nonEmpty : Bool)
+    (fs : List Field) : List Field :=
+  bif listHeadHolds tail isList nonEmpty fs then fs.map headPin else fs
+
 /-- **The canonical constructor.** Every invariant the shape form carries is
 established here. -/
 def normalize (fields : List Field) (tail : GTail Fact) (isList : Certainty)
@@ -427,15 +448,17 @@ def normalize (fields : List Field) (tail : GTail Fact) (isList : Certainty)
   let f₂ := if isSealed tail then f₁.filter (fun f => !(f.2.1 == Presence.absent)) else f₁
   -- A non-empty sealed shape with one declared key holds it.
   let f₃ := pinSingle tail nonEmpty f₂
+  -- A non-empty list holds key `0`.
+  let f₄ := pinListHead tail isList nonEmpty f₃
   -- A cover with a required member is discharged.
   let kept := step.2.filter (fun c => !c.keys.any (fun k =>
-    match fieldOf f₃ k with
+    match fieldOf f₄ k with
     | some (_, p, _) => p.isRequired
     | none => false))
-  { fields := f₃
+  { fields := f₄
     tail := tail
-    isList := sharpenIsList (computeIsList f₃ tail nonEmpty) isList
-    nonEmpty := nonEmpty || f₃.any (fun f => f.2.1.isRequired)
+    isList := sharpenIsList (computeIsList f₄ tail nonEmpty) isList
+    nonEmpty := nonEmpty || f₄.any (fun f => f.2.1.isRequired)
     covers := antichain kept }
 
 /-- The degenerate shape: plain `array` (A-G1). -/
@@ -680,12 +703,55 @@ theorem pinSingle_no_absent (tail : GTail Fact) (nonEmpty : Bool) {fs : List Fie
     rw [if_neg Bool.false_ne_true]
     exact h
 
+theorem headPin_key (f : Field) : (headPin f).1 = f.1 := by
+  unfold headPin
+  cases ((f.1 == Key.int 0) && (f.2.1 == Presence.optional)) <;> rfl
+
+/-- The list-head pin keeps a canonical field list canonical: it changes no key. -/
+theorem fieldsSorted_pinListHead (tail : GTail Fact) (isList : Certainty) (nonEmpty : Bool)
+    {fs : List Field} (h : FieldsSorted fs) :
+    FieldsSorted (pinListHead tail isList nonEmpty fs) := by
+  unfold pinListHead
+  cases listHeadHolds tail isList nonEmpty fs
+  · exact h
+  · exact fieldsSorted_map_key headPin_key h
+
+theorem headPin_not_absent {f : Field} (h : f.2.1 ≠ Presence.absent) :
+    (headPin f).2.1 ≠ Presence.absent := by
+  unfold headPin
+  cases ((f.1 == Key.int 0) && (f.2.1 == Presence.optional))
+  · exact h
+  · exact fun e => Presence.noConfusion e
+
+/-- By induction rather than `List.mem_map`, which would add `Quot.sound` to the
+ratchet. -/
+theorem headPin_map_not_absent {l : List Field} (h : ∀ f ∈ l, f.2.1 ≠ Presence.absent) :
+    ∀ f ∈ l.map headPin, f.2.1 ≠ Presence.absent := by
+  induction l with
+  | nil => intro f hf; rw [List.map_nil] at hf; cases hf
+  | cons x xs ih =>
+    intro f hf
+    rw [List.map_cons] at hf
+    cases hf with
+    | head => exact headPin_not_absent (h x (List.Mem.head _))
+    | tail _ h' => exact ih (fun g hg => h g (List.Mem.tail _ hg)) f h'
+
+/-- The list-head pin introduces no proven-absent field: it only promotes. -/
+theorem pinListHead_no_absent (tail : GTail Fact) (isList : Certainty) (nonEmpty : Bool)
+    {fs : List Field} (h : ∀ f ∈ fs, f.2.1 ≠ Presence.absent) :
+    ∀ f ∈ pinListHead tail isList nonEmpty fs, f.2.1 ≠ Presence.absent := by
+  unfold pinListHead
+  cases listHeadHolds tail isList nonEmpty fs
+  · exact h
+  · exact headPin_map_not_absent h
+
 /-- **The fields of a normalized shape are canonical.** -/
 theorem normalize_fieldsSorted (fields : List Field) (tail : GTail Fact) (isList : Certainty)
     (nonEmpty : Bool) (covers : List Cover) :
     FieldsSorted (normalize fields tail isList nonEmpty covers).fields := by
   unfold normalize
   simp only
+  apply fieldsSorted_pinListHead
   apply fieldsSorted_pinSingle
   split
   · exact fieldsSorted_filter (fieldsSorted_sortFields _)
@@ -699,7 +765,7 @@ theorem normalize_sealed_no_absent (fields : List Field) (isList : Certainty)
   intro f hf
   unfold normalize at hf
   simp only [isSealed, if_true] at hf
-  refine pinSingle_no_absent _ _ ?_ f hf
+  refine pinListHead_no_absent _ _ _ (pinSingle_no_absent _ _ ?_) f hf
   intro g hg
   have := (List.mem_filter.mp hg).2
   simpa using this
