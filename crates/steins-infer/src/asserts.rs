@@ -21,7 +21,7 @@ use crate::env::{ContractArm, Known, Store, Stratum};
 use crate::predicates::{
     by_value_guard_builtin, in_array_literals, pure_question_builtin, type_predicate,
 };
-use crate::refine::{clear_null, refine_fact, subtract_contract_lane};
+use crate::refine::{clear_null, refine_fact, subtract_contract_lane, subtract_contract_lane_at};
 use crate::shapes::{
     apply_shape_guard, array_all_any_predicate, array_guard_base, array_guard_key_var,
     array_guard_predicate, collect_shape_guards,
@@ -553,11 +553,14 @@ fn assert_class_to_lane(
     let (file, offset) = decl_at;
     let fqn = cx.resolve_pclass(file, offset, name).trim_start_matches('\\').to_ascii_lowercase();
     let oracle = ProjectIsa { cx, demote_catalog: cx.a11_demote_catalog() };
-    subtract_contract_lane(
+    // A docblock claim, so the guard it records is `Asserted`: a candidate only it
+    // excludes leaves a finding resting on the assert (issue #1095).
+    subtract_contract_lane_at(
         store,
         var,
         &normalize::Subtrahend::Class { fqn, polarity: positive },
         &oracle,
+        Stratum::Asserted,
     );
     true
 }

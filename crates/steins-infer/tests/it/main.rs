@@ -57,6 +57,7 @@ mod declaration_only_dispatch;
 mod declared_effects;
 mod declared_parameter_seed;
 mod declared_property_lane;
+mod declared_receiver_guards;
 mod declared_receiver_intersections;
 mod declared_return_floor;
 mod destructure_call;
