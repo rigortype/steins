@@ -8,7 +8,7 @@ use steins_syntax::{CallExpr, Callee, ClassDecl, Receiver};
 use crate::contract::{IsA, ProjectIsa};
 use crate::cx::Cx;
 use crate::early_binding::redammed;
-use crate::env::{ContractArm, Store, Stratum};
+use crate::env::{ArmGuard, ContractArm, Store, Stratum};
 use crate::project::{Diagnostic, Res};
 use crate::fold::Folder;
 use crate::{CALL_UNDEFINED_METHOD_ID, PHPDOC_UNDEFINED_METHOD_ID};
@@ -173,49 +173,40 @@ pub(crate) fn descendant_closure<'a>(cx: &Cx<'a>, arm_fqn: &str) -> DescendantCl
     DescendantClosure::Enumerated(descendants)
 }
 
-/// What the §8 ladder established about `method` on one class-like of a narrowed
-/// contract arm: the arm's own class-like with its whole descendant set (issue
-/// #1092), each judged by its chain walk ([`ChainWalk`]).
-pub(crate) enum ArmMethodVerdict {
-    /// Every candidate's chain is closed and lacks both the method and `__call`;
-    /// carries the arm's display simple name.
-    Absent(String),
-    /// The arm's own chain declares the method, so every inhabitant does.
-    Declared,
-    /// Every candidate's chain is closed, lacks the method and holds `__call`.
-    Magic,
-    /// A leg refused, or the candidates disagree: nothing is proven.
-    Unknown,
-}
 
-/// The candidate verdicts the arm verdict folds: [`ChainWalk`] with its payload
-/// spent on the A2i/A2ii legs.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Walked {
+/// What a ladder established about one member on one class-like, on one candidate of
+/// an arm, or on a whole arm: the four outcomes of a chain walk ([`ChainWalk`]) after
+/// its A2i/A2ii legs.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Held {
+    /// Every chain is closed and lacks both the member and the magic fallback.
     Absent,
+    /// The member is declared on every chain.
     Declared,
+    /// Every chain is closed, lacks the member and holds the magic fallback.
     Magic,
+    /// A leg refused, or the chains disagree: nothing is proven.
     Unknown,
 }
 
 /// Apply the A2i re-dam and the A2ii boot-surface homonym legs to a walk, keeping
 /// its verdict only when both clear.
-fn walked(cx: &Cx, folder: &mut dyn Folder, walk: &ChainWalk) -> Walked {
+fn walked(cx: &Cx, folder: &mut dyn Folder, walk: &ChainWalk) -> Held {
     let (verdict, fqns, any_conditional) = match walk {
-        ChainWalk::Absent { fqns, any_conditional, .. } => (Walked::Absent, fqns, *any_conditional),
-        ChainWalk::Declared { fqns, any_conditional } => (Walked::Declared, fqns, *any_conditional),
-        ChainWalk::Magic { fqns, any_conditional } => (Walked::Magic, fqns, *any_conditional),
-        ChainWalk::Unknown => return Walked::Unknown,
+        ChainWalk::Absent { fqns, any_conditional, .. } => (Held::Absent, fqns, *any_conditional),
+        ChainWalk::Declared { fqns, any_conditional } => (Held::Declared, fqns, *any_conditional),
+        ChainWalk::Magic { fqns, any_conditional } => (Held::Magic, fqns, *any_conditional),
+        ChainWalk::Unknown => return Held::Unknown,
     };
     // A2i: a conditional declaration in the chain re-dams the claim.
     if redammed(cx, any_conditional) {
-        return Walked::Unknown;
+        return Held::Unknown;
     }
     // A2ii homonym: every chain FQN must be answered NOT-present by the boot surface.
     if fqns.iter().all(|fqn| folder.boot_surface_class_like(fqn) == Some(false)) {
         verdict
     } else {
-        Walked::Unknown
+        Held::Unknown
     }
 }
 
@@ -248,69 +239,83 @@ fn descendant_verdict(
     cd: &ClassDecl,
     method: &str,
     magic: Option<&str>,
-) -> Walked {
+) -> Held {
     let walk = candidate_walk(cx, file, cd, &cd.fqn, method, magic);
     walked(cx, folder, &walk)
+}
+
+/// The walk of the class-like `fqn` names, under the A14/A2i/A2ii legs, or `Unknown`
+/// when the name does not resolve to one project declaration.
+fn named_verdict(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    fqn: &str,
+    method: &str,
+    magic: Option<&str>,
+) -> Held {
+    match cx.find_class(fqn) {
+        Some((file, cd)) => walked(cx, folder, &candidate_walk(cx, file, cd, fqn, method, magic)),
+        None => Held::Unknown,
+    }
 }
 
 /// The magic fallback a call `$var->m()` honours, and `is_callable([$var, 'm'])` with it.
 pub(crate) const CALL_FALLBACK: Option<&str> = Some("__call");
 
-/// Run the full §8 ladder for one class-like of a narrowed contract arm. The
-/// candidates are the class-like and its complete descendant set; the arm is
-/// [`ArmMethodVerdict::Absent`] when every candidate's chain lacks the method and the
-/// `magic` fallback. Instance calls only — the declared-receiver lane is `$var->m()`,
-/// which passes [`CALL_FALLBACK`]; `method_exists` passes `None`, since it reports
-/// declared methods only and a `__call` never makes it true.
-pub(crate) fn arm_member_verdict(
+/// Run the full §8 ladder for one class-like of a narrowed contract arm, with no
+/// guard read. The candidates are the class-like and its complete descendant set;
+/// the verdict is [`Held::Absent`] when every candidate's chain lacks the method and
+/// the `magic` fallback. Instance calls only — the declared-receiver lane is
+/// `$var->m()`, which passes [`CALL_FALLBACK`]; `method_exists` passes `None`, since
+/// it reports declared methods only and a `__call` never makes it true.
+fn arm_member_verdict(
     cx: &Cx,
     folder: &mut dyn Folder,
     arm_fqn: &str,
     method: &str,
     magic: Option<&str>,
-) -> ArmMethodVerdict {
+) -> Held {
     // §4 chain closure over the arm's own ancestor chain (S2's walk and legs).
-    let walk = match cx.find_class(arm_fqn) {
-        Some((file, cd)) => candidate_walk(cx, file, cd, arm_fqn, method, magic),
-        None => ChainWalk::Unknown,
-    };
-    let anchor = walked(cx, folder, &walk);
+    let anchor = named_verdict(cx, folder, arm_fqn, method, magic);
     match anchor {
-        Walked::Unknown => return ArmMethodVerdict::Unknown,
+        Held::Unknown => return Held::Unknown,
         // Every inhabitant of the arm is-a the arm, and so holds what its chain
         // declares: no descendant can take the method away.
-        Walked::Declared => return ArmMethodVerdict::Declared,
-        Walked::Absent | Walked::Magic => {}
+        Held::Declared => return Held::Declared,
+        Held::Absent | Held::Magic => {}
     }
     // Descendant closure (A4): the arm is final-immune, or its descendant set
     // is fully enumerated AND the dam is clear (an `eval`-minted subclass),
     // and every descendant's chain agrees with the arm's.
     match descendant_closure(cx, arm_fqn) {
         DescendantClosure::Immune => {}
-        DescendantClosure::Obstacle => return ArmMethodVerdict::Unknown,
+        DescendantClosure::Obstacle => return Held::Unknown,
         DescendantClosure::Enumerated(descendants) => {
             if !cx.dam.is_clear() {
-                return ArmMethodVerdict::Unknown; // eval could mint a subclass carrying the method.
+                return Held::Unknown; // eval could mint a subclass carrying the method.
             }
             for (dfile, dcd) in &descendants {
                 if descendant_verdict(cx, folder, *dfile, dcd, method, magic) != anchor {
-                    return ArmMethodVerdict::Unknown;
+                    return Held::Unknown;
                 }
             }
         }
     }
-    match walk {
-        ChainWalk::Absent { simple_chain, .. } => ArmMethodVerdict::Absent(
-            simple_chain.first().cloned().unwrap_or_else(|| arm_fqn.to_owned()),
-        ),
-        _ => ArmMethodVerdict::Magic,
-    }
+    anchor
 }
 
-/// Read a narrowed contract-arm lane as the declared-receiver lane's
-/// **conjunct lists** — one inner list per arm, holding the class FQNs a
-/// receiver of that arm must satisfy *all* of — or `None` when the lane is
-/// out of scope (silence).
+/// One arm of the declared-receiver lane: the class FQNs a receiver of the arm
+/// satisfies all of, and the positive class guards that passed over the arm on this
+/// path ([`ContractArm::guards`]).
+pub(crate) struct LaneArm<'s> {
+    pub(crate) conjuncts: Vec<String>,
+    pub(crate) guards: &'s [ArmGuard],
+}
+
+/// Read a narrowed contract-arm lane as the declared-receiver lane's arms — per
+/// arm, the **conjunct list** of class FQNs a receiver of that arm must satisfy
+/// *all* of, with the arm's guards — or `None` when the lane is out of scope
+/// (silence).
 ///
 /// Three arm shapes, and only three (issue #238's intersection consumption):
 /// `Class(f)` (one conjunct, pre-#238 behaviour); `Inter([Class, …])` (the
@@ -332,12 +337,15 @@ pub(crate) fn arm_member_verdict(
 ///
 /// [`RuntimePostures::final_keyword`]: crate::RuntimePostures::final_keyword
 /// [`FinalKeyword::Stripped`]: steins_contract::normalize::FinalKeyword::Stripped
-pub(crate) fn declared_receiver_conjuncts(cx: &Cx, arms: &[ContractArm]) -> Option<Vec<Vec<String>>> {
+pub(crate) fn declared_receiver_conjuncts<'s>(
+    cx: &Cx,
+    arms: &'s [ContractArm],
+) -> Option<Vec<LaneArm<'s>>> {
     let oracle = ProjectIsa { cx, demote_catalog: cx.a11_demote_catalog() };
-    let mut lane: Vec<Vec<String>> = Vec::with_capacity(arms.len());
+    let mut lane: Vec<LaneArm<'s>> = Vec::with_capacity(arms.len());
     for a in arms {
-        match &a.ty {
-            ContractTy::Class(f) => lane.push(vec![f.clone()]),
+        let conjuncts = match &a.ty {
+            ContractTy::Class(f) => vec![f.clone()],
             ContractTy::Inter(members) => {
                 // A member this lane cannot close over refuses the whole arm.
                 let mut conjuncts: Vec<String> = Vec::with_capacity(members.len());
@@ -352,36 +360,258 @@ pub(crate) fn declared_receiver_conjuncts(cx: &Cx, arms: &[ContractArm]) -> Opti
                 if normalize::provably_uninhabited(&a.ty, &oracle, cx.postures.final_keyword) {
                     return None;
                 }
-                lane.push(conjuncts);
+                conjuncts
             }
             _ => return None,
-        }
+        };
+        lane.push(LaneArm { conjuncts, guards: &a.guards });
     }
     (!lane.is_empty()).then_some(lane)
 }
 
-/// Whether a lane holds an intersection arm under a positive class guard, which the
-/// declared-receiver lane declines (issue #908). The guard is any positive class
-/// subtrahend on this path, an `instanceof` that held or a positive
-/// `@phpstan-assert`, read from the arm's own [`ContractArm::guarded`] mark, so a
-/// copy of the lane into another variable carries it. `Member.yes` would miss the
-/// assert, and binding it there would hand an `Asserted` premise to the
-/// `instanceof` verdict and the dump's `Verified` rung.
+/// The member questions [`judge_arm`] asks, one implementation per member kind: the
+/// method lane here, the property lane in `absence.rs`.
+pub(crate) trait MemberLadder {
+    /// The unguarded §8 verdict of one conjunct: its own chain and its whole
+    /// descendant closure, each candidate judged by its chain.
+    fn conjunct(&mut self, cx: &Cx, fqn: &str) -> Held;
+    /// Whether the class-like `fqn` names provably holds the member on its own chain,
+    /// so every value that is-a it holds it.
+    fn declares(&mut self, cx: &Cx, fqn: &str) -> bool;
+    /// Whether the legs that judge a name rather than a chain clear on the anchor
+    /// (A14 reach, A2i, A2ii), so its descendants may speak for it.
+    fn anchor_clear(&mut self, cx: &Cx, fqn: &str) -> bool;
+    /// One candidate declaration, judged by its full chain.
+    fn candidate(&mut self, cx: &Cx, file: usize, cd: &ClassDecl) -> Held;
+}
+
+/// What the lane established about one arm (issue #1095).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ArmFate {
+    /// The guards admit no candidate of the arm, in a closed universe: no value
+    /// reaches this site through it, so the arm drops out of the union.
+    Dead,
+    /// The arm has inhabitants here; what they hold.
+    Live(Held),
+}
+
+/// One judged arm: its fate, its declared spelling (`A`, `A&B`), and whether a
+/// candidate was excluded by an `Asserted` guard alone, so the verdict rests on a
+/// docblock claim (ADR-0049 A13).
+pub(crate) struct ArmJudgement {
+    pub(crate) fate: ArmFate,
+    pub(crate) display: String,
+    pub(crate) rests_on_assert: bool,
+}
+
+/// The declared spelling of one conjunct: the declaration's own name, or the last
+/// segment of a name no project file declares, in its builtin casing.
+fn conjunct_display(cx: &Cx, fqn: &str) -> String {
+    match cx.find_class(fqn) {
+        Some((_, cd)) => cd.name.clone(),
+        None => {
+            let display = cx.class_display_fqn(fqn);
+            display.rsplit('\\').next().unwrap_or(&display).to_owned()
+        }
+    }
+}
+
+/// Whether declaration `cd` (in `file`) is-a `target`, itself included: the name, its
+/// identity (a literal `class_alias`), the implicit `Stringable` a `__toString` gives,
+/// then its own edges ([`decl_is_a`]).
+fn candidate_is_a(cx: &Cx, file: usize, cd: &ClassDecl, target: &str) -> IsA {
+    let target = target.trim_start_matches('\\');
+    if cd.fqn.eq_ignore_ascii_case(target)
+        || cx.class_identity(&cd.fqn).eq_ignore_ascii_case(&cx.class_identity(target))
+    {
+        return IsA::Yes;
+    }
+    match decl_is_a(cx, file, cd, target) {
+        IsA::No if cx.class_identity(target) == "stringable" => {
+            match cx.held_method(file, cd, "__toString") {
+                Ok(Some(_)) => IsA::Yes,
+                Ok(None) => IsA::No,
+                Err(_) => IsA::Unknown,
+            }
+        }
+        verdict => verdict,
+    }
+}
+
+/// The strongest stratum among the guards that provably exclude a candidate, or
+/// `None` when every guard may hold on it (an `Unknown` is-a admits).
+fn excluded_by(guards: &[ArmGuard], is_a: impl Fn(&str) -> IsA) -> Option<Stratum> {
+    let mut by: Option<Stratum> = None;
+    for g in guards {
+        if is_a(&g.fqn) == IsA::No {
+            by = Some(match (by, g.stratum) {
+                (Some(Stratum::Verified), _) | (_, Stratum::Verified) => Stratum::Verified,
+                _ => Stratum::Asserted,
+            });
+        }
+    }
+    by
+}
+
+/// Judge one arm of the declared-receiver lane against its guards (issue #1095).
 ///
-/// The guard used to delete such an arm, so the lane said nothing in the branch.
-/// The arm now survives, but the lane does not read the guard: it would look the
-/// member up on the declared conjuncts alone and report it missing where the guard
-/// class supplies it, or inside a branch no class can enter. Reading the guard is
-/// its own design (issue #1095); until then the arm proves nothing, as before.
-pub(crate) fn guarded_intersection(arms: &[ContractArm]) -> bool {
-    arms.iter().any(|a| a.guarded && matches!(a.ty, ContractTy::Inter(_)))
+/// The **declared type is its own witness**: a value spelled by the arm is admitted
+/// when every guard may hold on some conjunct, and the arm is then read as before,
+/// conjunct by conjunct over each one's whole descendant closure. Otherwise the
+/// **anchor**, the first conjunct whose descendant set is closed, supplies the
+/// candidates: its descendants that may be every other conjunct and every guard. None
+/// admitted, in a clear universe, is [`ArmFate::Dead`]; a member some conjunct or
+/// guard declares is held by every candidate; else each candidate is judged by its
+/// full chain, so a member inherited from an intermediate class the guard excludes
+/// still counts.
+pub(crate) fn judge_arm(cx: &Cx, arm: &LaneArm, ladder: &mut dyn MemberLadder) -> ArmJudgement {
+    let display: Vec<String> = arm.conjuncts.iter().map(|c| conjunct_display(cx, c)).collect();
+    let judged = |fate: ArmFate, rests_on_assert: bool| ArmJudgement {
+        fate,
+        display: display.join("&"),
+        rests_on_assert,
+    };
+    let declared_by = excluded_by(arm.guards, |g| {
+        let mut any_unknown = false;
+        for c in &arm.conjuncts {
+            match cx.is_a(c, g) {
+                IsA::Yes => return IsA::Yes,
+                IsA::Unknown => any_unknown = true,
+                IsA::No => {}
+            }
+        }
+        if any_unknown { IsA::Unknown } else { IsA::No }
+    });
+    let Some(anchor_excluded_by) = declared_by else {
+        return judged(ArmFate::Live(unguarded_verdict(cx, arm, ladder)), false);
+    };
+    // A11: a PHP-minor skew can fake a catalog-backed is-a edge, so an exclusion
+    // proves nothing.
+    if cx.a11_demote_catalog() || !cx.dam.is_clear() {
+        return judged(ArmFate::Live(Held::Unknown), false);
+    }
+    let Some((anchor, descendants)) = guarded_candidates(cx, arm) else {
+        return judged(ArmFate::Live(Held::Unknown), false);
+    };
+    if !ladder.anchor_clear(cx, anchor) {
+        return judged(ArmFate::Live(Held::Unknown), false);
+    }
+    let mut rests_on_assert = anchor_excluded_by == Stratum::Asserted;
+    let mut admitted: Vec<(usize, &ClassDecl)> = Vec::new();
+    for (file, cd) in descendants {
+        match excluded_by(arm.guards, |g| candidate_is_a(cx, file, cd, g)) {
+            None => admitted.push((file, cd)),
+            Some(Stratum::Asserted) => rests_on_assert = true,
+            Some(Stratum::Verified) => {}
+        }
+    }
+    if admitted.is_empty() {
+        return judged(ArmFate::Dead, rests_on_assert);
+    }
+    let guard_names = arm.guards.iter().map(|g| g.fqn.as_str());
+    if arm.conjuncts.iter().map(String::as_str).chain(guard_names).any(|n| ladder.declares(cx, n)) {
+        return judged(ArmFate::Live(Held::Declared), rests_on_assert);
+    }
+    let mut fold: Option<Held> = None;
+    for (file, cd) in admitted {
+        let held = ladder.candidate(cx, file, cd);
+        if held == Held::Unknown || fold.is_some_and(|f| f != held) {
+            return judged(ArmFate::Live(Held::Unknown), rests_on_assert);
+        }
+        fold = Some(held);
+    }
+    judged(ArmFate::Live(fold.unwrap_or(Held::Unknown)), rests_on_assert)
+}
+
+/// The anchor of a guarded arm and its descendants that may be every other conjunct
+/// (an `Unknown` is-a admits), or `None` when no conjunct's descendant set closes.
+fn guarded_candidates<'a, 'n>(
+    cx: &Cx<'a>,
+    arm: &'n LaneArm,
+) -> Option<(&'n str, Vec<(usize, &'a ClassDecl)>)> {
+    for (i, anchor) in arm.conjuncts.iter().enumerate() {
+        let descendants = match descendant_closure(cx, anchor) {
+            DescendantClosure::Obstacle => continue,
+            DescendantClosure::Immune => Vec::new(),
+            DescendantClosure::Enumerated(ds) => ds,
+        };
+        let others = || arm.conjuncts.iter().enumerate().filter(move |(j, _)| *j != i);
+        let inhabitants = descendants
+            .into_iter()
+            .filter(|(file, cd)| {
+                others().all(|(_, c)| candidate_is_a(cx, *file, cd, c) != IsA::No)
+            })
+            .collect();
+        return Some((anchor, inhabitants));
+    }
+    None
+}
+
+/// An arm the guards do not exclude, read conjunct by conjunct as the unguarded lane
+/// reads it: member lookup over an intersection is the union of its conjuncts (issue
+/// #234), so one that declares the member is enough, and every conjunct must close
+/// for absence. A conjunct no project file declares (a builtin interface) has no
+/// closure to read: it is passed over when the arm has a project inhabitant whose
+/// own chain speaks for it, and makes the arm `Unknown` otherwise.
+fn unguarded_verdict(cx: &Cx, arm: &LaneArm, ladder: &mut dyn MemberLadder) -> Held {
+    let mut opaque = false;
+    let mut declared = false;
+    let mut magic = false;
+    for c in &arm.conjuncts {
+        if arm.conjuncts.len() > 1 && cx.class_absent(c) {
+            opaque = true;
+            continue;
+        }
+        match ladder.conjunct(cx, c) {
+            Held::Unknown => return Held::Unknown,
+            Held::Declared => declared = true,
+            Held::Magic => magic = true,
+            Held::Absent => {}
+        }
+    }
+    if declared {
+        return Held::Declared;
+    }
+    if opaque && !has_project_inhabitant(cx, arm) {
+        return Held::Unknown;
+    }
+    if magic { Held::Magic } else { Held::Absent }
+}
+
+/// Whether some project declaration inhabits every conjunct of `arm` (an `Unknown`
+/// is-a counts), read off the first project conjunct's closed descendant set.
+fn has_project_inhabitant(cx: &Cx, arm: &LaneArm) -> bool {
+    let unguarded = LaneArm { conjuncts: arm.conjuncts.clone(), guards: &[] };
+    guarded_candidates(cx, &unguarded).is_some_and(|(_, inhabitants)| !inhabitants.is_empty())
+}
+
+/// The method questions of [`judge_arm`]: `method` under the `magic` fallback.
+struct MethodLadder<'f, 'm> {
+    folder: &'f mut dyn Folder,
+    method: &'m str,
+    magic: Option<&'m str>,
+}
+
+impl MemberLadder for MethodLadder<'_, '_> {
+    fn conjunct(&mut self, cx: &Cx, fqn: &str) -> Held {
+        arm_member_verdict(cx, self.folder, fqn, self.method, self.magic)
+    }
+    fn declares(&mut self, cx: &Cx, fqn: &str) -> bool {
+        named_verdict(cx, self.folder, fqn, self.method, self.magic) == Held::Declared
+    }
+    fn anchor_clear(&mut self, cx: &Cx, fqn: &str) -> bool {
+        named_verdict(cx, self.folder, fqn, self.method, self.magic) != Held::Unknown
+    }
+    fn candidate(&mut self, cx: &Cx, file: usize, cd: &ClassDecl) -> Held {
+        descendant_verdict(cx, self.folder, file, cd, self.method, self.magic)
+    }
 }
 
 /// Run the ADR-0049 §8 ladder for one `$var->method()` and emit the
-/// declared-receiver finding iff the receiver's narrowed contract-arm lane
-/// consists entirely of class arms that **each** provably lack the method
-/// under descendant closure. Any leg failure on any arm is silence; the id
-/// itself is [`declared_receiver_id`]'s call (A13 routing, see above).
+/// declared-receiver finding iff every arm of the receiver's narrowed contract-arm
+/// lane the guards leave alive **provably lacks** the method under descendant
+/// closure. Any leg failure on any live arm is silence; the id itself is
+/// [`declared_receiver_id`]'s call (A13 routing, see above).
 pub(crate) fn check_phpdoc_undefined_method(
     cx: &Cx,
     folder: &mut dyn Folder,
@@ -411,27 +641,26 @@ pub(crate) fn check_phpdoc_undefined_method(
     // Every surviving arm must be a class/interface arm, or an intersection
     // of them (issue #238); a scalar/array/null arm means the runtime
     // receiver may be a non-object, so absence doesn't hold here — silence.
-    if guarded_intersection(arms) {
-        return;
-    }
     let Some(lane) = declared_receiver_conjuncts(cx, arms) else {
         return;
     };
-    // A13: minimum over the participating (post-narrowing) arms, computed
-    // here so it can never drift from the arms the claim rests on.
-    let id = declared_receiver_id(arms);
     // A9 (monkey-patch) + A2ii: without a live sidecar, or with a
     // runtime-redefinition extension loaded, the id is silent.
     if !folder.absence_family_available() {
         return;
     }
-    let Some(arm_names) = lane_provably_lacks_method(cx, folder, &lane, &method, CALL_FALLBACK)
-    else {
+    let mut ladder = MethodLadder { folder, method: &method, magic: CALL_FALLBACK };
+    let Some(absence) = lane_lacks_member(cx, &lane, &mut ladder) else {
         return;
     };
+    // A13: minimum over the participating (post-narrowing) arms, computed
+    // here so it can never drift from the arms the claim rests on; a dead arm or a
+    // candidate only a positive `@phpstan-assert` excluded leaves the claim resting
+    // on that docblock.
+    let id = if absence.rests_on_assert { PHPDOC_UNDEFINED_METHOD_ID } else { declared_receiver_id(arms) };
 
     let pos = cx.tree().position(call.span.start);
-    let arms_disp = arm_names.join("|");
+    let arms_disp = absence.arms.join("|");
     let message = format!(
         "call to undefined method {arms_disp}::{method}() — declared receiver ${var} narrowed to {{{arms_disp}}}, \
          hierarchy and descendants fully enumerated, no __call, no @method/@property/@mixin"
@@ -447,43 +676,46 @@ pub(crate) fn check_phpdoc_undefined_method(
     });
 }
 
-/// The display names of every arm of `lane` when **every arm — and for an intersection,
-/// every conjunct — provably lacks** `method`, or `None`. Member lookup over an inhabited
-/// intersection is the union of the arms (issue #234), so only absence from all
-/// conjuncts counts. Only [`ArmMethodVerdict::Absent`] proves anything here: a declared
-/// method, the `magic` fallback and a leg that couldn't close are all silence.
+/// What [`lane_lacks_member`] proved: the display names of the live arms, and
+/// whether any judged arm rests on an `Asserted` guard.
+pub(crate) struct LaneAbsence {
+    pub(crate) arms: Vec<String>,
+    pub(crate) rests_on_assert: bool,
+}
+
+/// The live arms of `lane` when **every** arm the guards leave alive provably lacks
+/// the member and at least one is alive, or `None` (issue #1095). A dead arm drops out
+/// of the union; any other verdict on a live arm — declared, the magic fallback, a
+/// leg that couldn't close — is silence.
 ///
-/// The one ladder both readers of the declared-receiver lane share: the finding
-/// ([`check_phpdoc_undefined_method`]) and the `method_exists`/`is_callable` fold
-/// ([`declared_receiver_lacks_method`]), so a guard is dead exactly where the lane would
-/// have reported inside it.
-fn lane_provably_lacks_method(
+/// The one ladder both readers of the declared-receiver method lane share: the
+/// finding ([`check_phpdoc_undefined_method`]) and the `method_exists`/`is_callable`
+/// fold ([`declared_receiver_lacks_method`]), so a guard is dead exactly where the
+/// lane would have reported inside it.
+pub(crate) fn lane_lacks_member(
     cx: &Cx,
-    folder: &mut dyn Folder,
-    lane: &[Vec<String>],
-    method: &str,
-    magic: Option<&str>,
-) -> Option<Vec<String>> {
-    let mut arm_names: Vec<String> = Vec::with_capacity(lane.len());
-    for conjuncts in lane {
-        let mut names: Vec<String> = Vec::with_capacity(conjuncts.len());
-        for f in conjuncts {
-            let ArmMethodVerdict::Absent(name) = arm_member_verdict(cx, folder, f, method, magic)
-            else {
-                return None;
-            };
-            names.push(name);
+    lane: &[LaneArm],
+    ladder: &mut dyn MemberLadder,
+) -> Option<LaneAbsence> {
+    let mut absence = LaneAbsence { arms: Vec::with_capacity(lane.len()), rests_on_assert: false };
+    for arm in lane {
+        let judged = judge_arm(cx, arm, ladder);
+        match judged.fate {
+            ArmFate::Dead => {}
+            ArmFate::Live(Held::Absent) => absence.arms.push(judged.display),
+            ArmFate::Live(_) => return None,
         }
-        arm_names.push(names.join("&"));
+        absence.rests_on_assert |= judged.rests_on_assert;
     }
-    Some(arm_names)
+    (!absence.arms.is_empty()).then_some(absence)
 }
 
 /// Whether the declared-receiver lane of `$var` **proves** `method` absent, under the
 /// ladder [`check_phpdoc_undefined_method`] reports with, restricted to a lane that
 /// reports on the proof layer: not poisoned, not an exact receiver (that is the exact
 /// lane's), a non-empty narrowed lane every arm of which is `Verified`, a lane the
-/// declared-receiver reading admits, and a live absence family.
+/// declared-receiver reading admits, a verdict no `@phpstan-assert` guard carries, and
+/// a live absence family.
 ///
 /// A `method_exists($var, 'm')` or `is_callable([$var, 'm'])` over such a receiver is
 /// provably false (issue #930), so the body it guards is dead. `magic` is the fallback
@@ -503,15 +735,15 @@ pub(crate) fn declared_receiver_lacks_method(
         return false;
     }
     let Some(arms) = store.contract_arms(var) else { return false };
-    if arms.iter().any(|a| a.stratum != Stratum::Verified) || guarded_intersection(arms)
-    {
+    if arms.iter().any(|a| a.stratum != Stratum::Verified) {
         return false;
     }
     let Some(lane) = declared_receiver_conjuncts(cx, arms) else { return false };
     if !folder.absence_family_available() {
         return false;
     }
-    lane_provably_lacks_method(cx, folder, &lane, method, magic).is_some()
+    let mut ladder = MethodLadder { folder, method, magic };
+    lane_lacks_member(cx, &lane, &mut ladder).is_some_and(|a| !a.rests_on_assert)
 }
 
 /// The declared-receiver lane's id for a narrowed arm lane (ADR-0049 A13):

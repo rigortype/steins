@@ -1014,14 +1014,30 @@ pub(crate) fn subtract_contract_lane(
     sub: &normalize::Subtrahend,
     oracle: &dyn normalize::IsaOracle,
 ) -> bool {
+    subtract_contract_lane_at(store, var, sub, oracle, Stratum::Verified)
+}
+
+/// [`subtract_contract_lane`] for a subtrahend established at `guard_stratum`: a
+/// runtime test is `Verified`, a positive `@phpstan-assert` `Asserted`. The stratum
+/// is the one a positive class subtrahend records on the arms it leaves.
+pub(crate) fn subtract_contract_lane_at(
+    store: &mut Store,
+    var: &str,
+    sub: &normalize::Subtrahend,
+    oracle: &dyn normalize::IsaOracle,
+    guard_stratum: Stratum,
+) -> bool {
     let mut landed = false;
     // Every positive class subtrahend comes through here (an `instanceof` that held,
-    // a positive `@phpstan-assert`): mark each arm it leaves, landed or not, on the
-    // arm itself so every copy of the lane carries it (issue #908).
-    let positive_class = matches!(sub, normalize::Subtrahend::Class { polarity: true, .. });
+    // a positive `@phpstan-assert`): record it on each arm it leaves, landed or not,
+    // on the arm itself so every copy of the lane carries it (issues #908, #1095).
+    let guard = match sub {
+        normalize::Subtrahend::Class { fqn, polarity: true } => Some(fqn.as_str()),
+        _ => None,
+    };
     if let Some(arms) = store.contract.get_mut(var) {
-        if positive_class {
-            arms.iter_mut().for_each(|a| a.guarded = true);
+        if let Some(fqn) = guard {
+            arms.iter_mut().for_each(|a| a.add_guard(fqn, guard_stratum));
         }
         let mut changed = false;
         // Whether the lane, before this subtraction, was held on Verified premises

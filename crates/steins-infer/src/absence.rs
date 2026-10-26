@@ -14,7 +14,6 @@ use crate::cx::Cx;
 use crate::early_binding::{Binding, class_use, redammed};
 use crate::dump::resolved_fn_fqn;
 use crate::env::{Store, Stratum};
-use crate::heap::simple_class;
 use crate::project::{Diagnostic, MagicObstacle, Res};
 use crate::walk::WalkCx;
 use crate::fold::Folder;
@@ -24,7 +23,8 @@ use crate::{
     is_dump_family_fqn,
 };
 use crate::declared_receiver::{
-    DescendantClosure, declared_receiver_conjuncts, descendant_closure, guarded_intersection,
+    ArmFate, DescendantClosure, Held, LaneArm, MemberLadder, declared_receiver_conjuncts,
+    descendant_closure, judge_arm,
 };
 
 // ---------------------------------------------------------------------------
@@ -614,19 +614,23 @@ fn walk_property_chain(
 /// none), so a docblock-premised property absence gets no id in v1 rather than
 /// laundering onto the proof surface (ADR-0052 §5). The twin, if ever needed, is
 /// a registry addition.
-enum PropertyReceiver {
+enum PropertyReceiver<'s> {
     Exact(String),
-    /// A declared/narrowed arm lane, as **conjunct lists** — one inner list per
-    /// arm, holding the classes a receiver of that arm satisfies all of. A plain
-    /// `Foo` arm is a one-element list; a declared `Foo&Bar` is a two-element one
-    /// (issue #238). Built by [`declared_receiver_conjuncts`].
-    Declared(Vec<Vec<String>>),
+    /// A declared/narrowed arm lane, as **conjunct lists** with their guards — per
+    /// arm, the classes a receiver of that arm satisfies all of. A plain `Foo` arm is
+    /// a one-element list; a declared `Foo&Bar` is a two-element one (issue #238).
+    /// Built by [`declared_receiver_conjuncts`].
+    Declared(Vec<LaneArm<'s>>),
 }
 
 /// Classify a `$var->prop` receiver into [`PropertyReceiver`]. Disjoint by
 /// construction, exactly as S2/S6 are: the exact lane is taken first, and a
 /// lane-carrying variable is never `class_exact`.
-fn undefined_property_receiver(cx: &Cx, store: &Store, var: &str) -> Option<PropertyReceiver> {
+fn undefined_property_receiver<'s>(
+    cx: &Cx,
+    store: &'s Store,
+    var: &str,
+) -> Option<PropertyReceiver<'s>> {
     if let Some(obj) = store.obj_of(var)
         && obj.class_exact
     {
@@ -649,98 +653,139 @@ fn undefined_property_receiver(cx: &Cx, store: &Store, var: &str) -> Option<Prop
     // (issue #238), or out of scope. A scalar/array/null arm means the runtime
     // receiver may be a non-object — a different finding (`property.on-non-object`),
     // not this one — and an intersection issue #234's posture proves uninhabited is
-    // no receiver at all. An intersection arm under an `instanceof` guard is
-    // declined on both legs, as the method lane declines it (issue #908).
-    if guarded_intersection(arms) {
-        return None;
-    }
+    // no receiver at all. The arms carry their guards, which the ladder reads as the
+    // method lane does (issue #1095).
     Some(PropertyReceiver::Declared(declared_receiver_conjuncts(cx, arms)?))
 }
 
-/// Whether a descendant declaration provably lacks `prop` below an arm whose own
-/// chain already lacks it (ADR-0049 §8 applied to properties): judged by its **whole
-/// chain**, not by its own body (issue #1092), so a property or a `__get` it inherits
-/// from a class outside the arm's hierarchy counts. The property twin of the method
-/// lane's candidate verdict: an A14 tag in its reach, an obstacle or a declaration
-/// anywhere on the chain, or a homonym of any chain FQN answers `false`.
-fn descendant_lacks_property(
+/// One descendant declaration, judged for `prop` by its **whole chain**, not by its
+/// own body (issue #1092), so a property or a `__get` it inherits from a class outside
+/// the arm's hierarchy counts. The property twin of the method lane's candidate
+/// verdict: an A14 tag in its reach or an obstacle anywhere on the chain is
+/// `Unknown`, a declaration anywhere on it `Declared`, and an absence holds only when
+/// no chain node is conditional (A2i) or a homonym (A2ii).
+fn descendant_property(
     cx: &Cx,
     folder: &mut dyn Folder,
     file: usize,
     cd: &ClassDecl,
     prop: &str,
-) -> bool {
+) -> Held {
     if !magic_obstacles_in_reach(cx, &cd.fqn).is_empty() {
-        return false;
+        return Held::Unknown;
     }
-    let PropertyChainOutcome::Absent(chain) = walk_property_chain(cx, file, cd, &cd.fqn, prop)
-    else {
-        return false;
+    let chain = match walk_property_chain(cx, file, cd, &cd.fqn, prop) {
+        PropertyChainOutcome::Absent(chain) => chain,
+        PropertyChainOutcome::Declared => return Held::Declared,
+        PropertyChainOutcome::Unknown => return Held::Unknown,
     };
     // A homonym node may be dead code shadowed by a loaded class (A2ii).
-    !redammed(cx, chain.any_conditional)
+    if !redammed(cx, chain.any_conditional)
         && chain.fqns.iter().all(|fqn| folder.boot_surface_class_like(fqn) == Some(false))
+    {
+        Held::Absent
+    } else {
+        Held::Unknown
+    }
 }
 
-/// What the §8 ladder established about `prop` on one narrowed contract arm
-/// (ADR-0081 §7).
+/// What the §8 ladder established about `prop` on one class-like of a narrowed
+/// contract arm, with no guard read (ADR-0081 §7): [`Held::Absent`] across the
+/// class-like's hierarchy and its complete descendant set, [`Held::Declared`] when a
+/// node of its own chain declares the property, else [`Held::Unknown`].
 ///
 /// Three-valued on purpose. The definite leg only ever needed "absent or not" and
 /// collapsed the other two into one silence; splitting them is what lets the
 /// possibly leg rest on an arm that genuinely declares the property while still
 /// refusing an arm the ladder could not close.
-enum ArmPropertyPresence {
-    /// Provably absent across the arm's hierarchy and its complete descendant set,
-    /// carrying the display simple name for the message.
-    Absent(String),
-    /// A node in the arm's chain declares the property: a receiver of this arm
-    /// reads it cleanly.
-    Declared,
-    /// A ladder leg refused. Nothing is proven in either direction, and a
-    /// possibly-grade claim may not rest on it.
-    Unknown,
-}
-
-fn arm_property_presence(
-    cx: &Cx,
-    folder: &mut dyn Folder,
-    arm_fqn: &str,
-    prop: &str,
-) -> ArmPropertyPresence {
+fn arm_property_presence(cx: &Cx, folder: &mut dyn Folder, arm_fqn: &str, prop: &str) -> Held {
     let chain = match enumerate_property_chain_outcome(cx, arm_fqn, prop) {
         PropertyChainOutcome::Absent(chain) => chain,
-        PropertyChainOutcome::Declared => return ArmPropertyPresence::Declared,
-        PropertyChainOutcome::Unknown => return ArmPropertyPresence::Unknown,
+        PropertyChainOutcome::Declared => return Held::Declared,
+        PropertyChainOutcome::Unknown => return Held::Unknown,
     };
     if redammed(cx, chain.any_conditional) {
-        return ArmPropertyPresence::Unknown; // A2i.
+        return Held::Unknown; // A2i.
     }
     for fqn in &chain.fqns {
         if folder.boot_surface_class_like(fqn) != Some(false) {
-            return ArmPropertyPresence::Unknown; // A2ii homonym.
+            return Held::Unknown; // A2ii homonym.
         }
     }
     match descendant_closure(cx, arm_fqn) {
         DescendantClosure::Immune => {}
-        DescendantClosure::Obstacle => return ArmPropertyPresence::Unknown,
+        DescendantClosure::Obstacle => return Held::Unknown,
         DescendantClosure::Enumerated(descendants) => {
             if !cx.dam.is_clear() {
                 // `eval` could mint a subclass declaring the property.
-                return ArmPropertyPresence::Unknown;
+                return Held::Unknown;
             }
             for (dfile, dcd) in &descendants {
                 // A descendant whose chain declares the property is NOT the
                 // `Declared` answer: the receiver may or may not be that descendant,
                 // which is precisely an unknown rather than a clean path.
-                if !descendant_lacks_property(cx, folder, *dfile, dcd, prop) {
-                    return ArmPropertyPresence::Unknown;
+                if descendant_property(cx, folder, *dfile, dcd, prop) != Held::Absent {
+                    return Held::Unknown;
                 }
             }
         }
     }
-    ArmPropertyPresence::Absent(
-        chain.simple.first().cloned().unwrap_or_else(|| arm_fqn.to_owned()),
-    )
+    Held::Absent
+}
+
+/// The property questions of the declared-receiver ladder
+/// ([`judge_arm`](crate::declared_receiver::judge_arm)). An interface anchor keeps
+/// the walk's `Unknown` (an interface declares no property), so only an arm whose
+/// guards reach its implementors can speak.
+struct PropertyLadder<'f, 'p> {
+    folder: &'f mut dyn Folder,
+    prop: &'p str,
+}
+
+impl MemberLadder for PropertyLadder<'_, '_> {
+    fn conjunct(&mut self, cx: &Cx, fqn: &str) -> Held {
+        arm_property_presence(cx, self.folder, fqn, self.prop)
+    }
+    fn declares(&mut self, cx: &Cx, fqn: &str) -> bool {
+        matches!(enumerate_property_chain_outcome(cx, fqn, self.prop), PropertyChainOutcome::Declared)
+    }
+    fn anchor_clear(&mut self, cx: &Cx, fqn: &str) -> bool {
+        magic_obstacles_in_reach(cx, fqn).is_empty()
+            && cx.find_class(fqn).is_some_and(|(_, cd)| !redammed(cx, cd.conditional))
+            && self.folder.boot_surface_class_like(fqn) == Some(false)
+    }
+    fn candidate(&mut self, cx: &Cx, file: usize, cd: &ClassDecl) -> Held {
+        descendant_property(cx, self.folder, file, cd, self.prop)
+    }
+}
+
+/// Split the arms of a declared receiver by what they hold of `prop`: the display
+/// names of the live arms that provably lack it and of those that declare it, or
+/// `None` for silence — a live arm the ladder could not close, or an arm a
+/// `@phpstan-assert` guard decided, since the property family has no contract-layer
+/// twin (ADR-0049 A13). A dead arm drops out (issue #1095).
+fn split_property_arms(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    arms: &[LaneArm],
+    prop: &str,
+) -> Option<(Vec<String>, Vec<String>)> {
+    let mut ladder = PropertyLadder { folder, prop };
+    let mut absent: Vec<String> = Vec::new();
+    let mut declared: Vec<String> = Vec::new();
+    for arm in arms {
+        let judged = judge_arm(cx, arm, &mut ladder);
+        if judged.rests_on_assert {
+            return None;
+        }
+        match judged.fate {
+            ArmFate::Dead => {}
+            ArmFate::Live(Held::Absent) => absent.push(judged.display),
+            ArmFate::Live(Held::Declared) => declared.push(judged.display),
+            ArmFate::Live(Held::Magic | Held::Unknown) => return None,
+        }
+    }
+    Some((absent, declared))
 }
 
 /// `property.undefined` (ADR-0078, issue #197) at a `$var->prop` **read**.
@@ -813,36 +858,11 @@ pub(crate) fn check_undefined_property(
             // and an arm the ladder could not close. Every arm absent is the
             // definite id; some absent and the rest declared is the possibly id;
             // a single unknown arm is silence on both, because a possibly-grade
-            // claim about "some arms" is still a claim about ALL of them.
-            let mut absent: Vec<String> = Vec::new();
-            let mut declared: Vec<String> = Vec::new();
-            for conjuncts in &arms {
-                let mut per_arm: Vec<String> = Vec::with_capacity(conjuncts.len());
-                let mut any_declared = false;
-                for f in conjuncts {
-                    match arm_property_presence(cx, folder, f, prop) {
-                        ArmPropertyPresence::Absent(name) => per_arm.push(name),
-                        ArmPropertyPresence::Declared => {
-                            any_declared = true;
-                            // The declaration's own spelling, so a declared arm
-                            // renders like an absent one (the FQN is case-folded).
-                            per_arm.push(
-                                cx.find_class(f)
-                                    .map_or_else(|| simple_class(f).to_owned(), |(_, cd)| cd.name.clone()),
-                            );
-                        }
-                        // Any conjunct the ladder could not close ⇒ silence on both
-                        // legs, for the whole read.
-                        ArmPropertyPresence::Unknown => return,
-                    }
-                }
-                let rendered = per_arm.join("&");
-                if any_declared {
-                    declared.push(rendered);
-                } else {
-                    absent.push(rendered);
-                }
-            }
+            // claim about "some arms" is still a claim about ALL of them. An arm its
+            // guards leave no inhabitant drops out (issue #1095).
+            let Some((absent, declared)) = split_property_arms(cx, folder, &arms, prop) else {
+                return;
+            };
             if absent.is_empty() {
                 return; // every arm declares it — the read is clean.
             }

@@ -245,9 +245,9 @@ function f($o): void { $o->gone(); }
     assert_eq!(d.len(), 1, "a final arm that is-a the other arm is no conflict: {d:?}");
 }
 
-// Issue #908: a positive `instanceof` no longer deletes an intersection arm, but the
-// lane does not read the guard (issue #1095), so an intersection arm under a guard
-// declines and the lane stays as silent there as it was when the arm died.
+// Issue #908: a positive `instanceof` no longer deletes an intersection arm, and the
+// lane reads the guard (issue #1095): an arm no candidate of which may be the guard
+// class is dead, and the lane is as silent there as it was when the arm died.
 
 /// f9's fixture: no class is an `A&B&T`, `Fin` is a final non-`A`, `En` an enum.
 const GUARDED: &str = "<?php
@@ -263,15 +263,17 @@ fn guarded(body: &str) -> usize {
 }
 
 #[test]
-fn an_intersection_arm_under_a_guard_declines() {
-    for g in ["T", "Fin", "En", "A"] {
+fn an_intersection_arm_under_a_guard_no_inhabitant_holds_is_dead() {
+    for g in ["T", "Fin", "En"] {
         let f = format!("function f(A&B $x): int {{ if ($x instanceof {g}) {{ return $x->tm(); }} return 0; }}");
         assert_eq!(guarded(&f), 0, "{g}");
     }
-    // f8:15: `zz()` is on no conjunct, but the lane declines as it did when the
-    // arm was deleted.
-    let f = "function f(A&B $x): int { if ($x instanceof A) { return $x->zz(); } return 0; }";
-    assert_eq!(guarded(f), 0);
+    // f8:15, g1 b4: a guard that is a conjunct admits the arm as declared, so `tm()`
+    // and `zz()`, on no conjunct, report (PHP: `Both::zz()` is an Error).
+    for m in ["tm", "zz"] {
+        let f = format!("function f(A&B $x): int {{ if ($x instanceof A) {{ return $x->{m}(); }} return 0; }}");
+        assert_eq!(guarded(&f), 1, "{m}");
+    }
     // Unguarded, the intersection still reports.
     assert_eq!(guarded("function f(A&B $x): int { return $x->zz(); }"), 1);
 }
@@ -285,10 +287,11 @@ function assertFin(mixed $v): void { if (!$v instanceof Fin) { throw new \\Inval
 function isT(mixed $v): bool { return $v instanceof T; }
 ";
 
-/// Every site that applies a positive class subtrahend to the arm lane marks it,
-/// so the intersection arm declines after each (issue #908).
+/// Every site that applies a positive class subtrahend to the arm lane records it,
+/// so the intersection arm, which no class inhabits under `T` or `Fin`, is dead after
+/// each (issues #908, #1095).
 #[test]
-fn every_positive_class_guard_site_declines_the_intersection_arm() {
+fn every_positive_class_guard_site_guards_the_intersection_arm() {
     for (site, body) in [
         // k1b:12 / :13 — a positive `@phpstan-assert`.
         ("assert T", "assertT($x); return $x->tm();"),
@@ -309,9 +312,9 @@ fn every_positive_class_guard_site_declines_the_intersection_arm() {
     assert_eq!(guarded(f), 1, "stored condition: unchanged from master");
 }
 
-/// The mark rides on the lane, so every copy of the guarded variable carries it.
+/// The guards ride on the lane, so every copy of the guarded variable carries them.
 #[test]
-fn a_copy_of_a_guarded_intersection_keeps_the_mark() {
+fn a_copy_of_a_guarded_intersection_keeps_the_guards() {
     for (site, body) in [
         // m1:10 / m1:15.
         ("assign after instanceof", "if ($x instanceof T) { $y = $x; return $y->tm(); } return 0;"),
@@ -325,24 +328,24 @@ fn a_copy_of_a_guarded_intersection_keeps_the_mark() {
     }
 }
 
-/// The mark is a fact about every path: one branch that never passed the guard
+/// A guard is a fact about every path: one branch that never passed it
 /// joins its unguarded intersection back, and the lane reads it as before.
 #[test]
 fn a_guard_on_one_branch_only_does_not_survive_the_join() {
     let f = "function f(A&B $x, bool $b): int { if ($b) { assert($x instanceof T); } return $x->zz(); }";
     assert_eq!(guarded(f), 1);
-    // A rebinding drops the mark with the lane.
+    // A rebinding drops the guards with the lane.
     let f = "function f(A&B $x, A&B $y): int { assert($x instanceof T); $x = $y; return $x->zz(); }";
     assert_eq!(guarded(f), 1);
 }
 
 #[test]
-fn a_class_arm_under_a_guard_is_unchanged() {
-    // Pre-existing false positives: the lane looks `tm()` up on `A` alone, not on
-    // the guard class (issue #1095).
+fn a_class_arm_under_a_guard_reads_it() {
+    // Once false positives (issue #1095): the lane looked `tm()` up on `A` alone. `T`
+    // declares it, and no `A` is a `Fin`, so the branch is dead.
     for g in ["T", "Fin"] {
         let f = format!("function f(A $x): int {{ if ($x instanceof {g}) {{ return $x->tm(); }} return 0; }}");
-        assert_eq!(guarded(&f), 1, "{g}");
+        assert_eq!(guarded(&f), 0, "{g}");
     }
 }
 
@@ -357,14 +360,14 @@ fn method_exists_over_a_guarded_intersection_is_not_folded_false() {
     };
     let guarded = "function f(A&B $x): void { if ($x instanceof T) {\
                    if (method_exists($x, 'nope')) { \\PHPStan\\dumpType($x); } } }";
-    assert_eq!(dumps(guarded), 1, "the guarded intersection proves nothing: the body is live");
+    assert_eq!(dumps(guarded), 1, "a dead arm proves nothing: the body is live");
     // Unguarded, the lane proves `nope()` absent and the body dead.
     let unguarded = "function f(A&B $x): void { if (method_exists($x, 'nope')) { \\PHPStan\\dumpType($x); } }";
     assert_eq!(dumps(unguarded), 0, "the unguarded fold is false");
 }
 
 #[test]
-fn a_property_on_a_guarded_intersection_declines() {
+fn a_property_on_a_dead_guarded_intersection_is_silent() {
     let src = "<?php
 class Svc { public int $run = 1; }
 class Mock { public int $spy = 2; }

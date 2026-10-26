@@ -624,8 +624,8 @@ pub(crate) fn declared_receiver_class(cx: &Cx, store: &Store, var: &str) -> Opti
     }
     if let Some(arms) = store.contract_arms(var) {
         if let Some(lane) = declared_receiver_conjuncts(cx, arms)
-            && let [conjuncts] = lane.as_slice()
-            && let [only] = conjuncts.as_slice()
+            && let [arm] = lane.as_slice()
+            && let [only] = arm.conjuncts.as_slice()
         {
             let stratum = arms.iter().fold(Stratum::Verified, |acc, a| acc.min(a.stratum));
             return Some((only.clone(), stratum));

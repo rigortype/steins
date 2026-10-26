@@ -797,24 +797,60 @@ pub(crate) enum Vouch {
 pub(crate) struct ContractArm {
     pub(crate) ty: steins_contract::ContractTy,
     pub(crate) stratum: Stratum,
-    /// Whether a **positive class subtrahend** has passed over this arm on this path
-    /// (issue #908): an `instanceof T` that held, or a positive `@phpstan-assert T`,
-    /// set by [`subtract_contract_lane`](crate::refine::subtract_contract_lane). The
-    /// receiver is then also a `T` the arm does not spell, which the declared-receiver
-    /// lane reads ([`guarded_intersection`](crate::declared_receiver::guarded_intersection)).
+    /// The **positive class subtrahends** that passed over this arm on this path
+    /// (issues #908, #1095): an `instanceof T` that held, or a positive
+    /// `@phpstan-assert T`, recorded by
+    /// [`subtract_contract_lane`](crate::refine::subtract_contract_lane). A receiver
+    /// of this arm is then also a `T` the arm does not spell, so the declared-receiver
+    /// lane admits only the candidates every guard may hold.
     ///
-    /// It rides on the arm so every lane copy (an assignment, a destructure, an
-    /// argument, a capture, a branch hand-back) carries it. A fresh lane starts
-    /// unmarked; a rebind drops it with the lane; a join keeps it only where every
-    /// side's copy of the arm holds it ([`dedup_contract_arms`]). A provenance bit,
-    /// not part of what the arm denotes, so equality ignores it.
-    pub(crate) guarded: bool,
+    /// They ride on the arm so every lane copy (an assignment, a destructure, an
+    /// argument, a capture, a branch hand-back) carries them. A fresh lane starts
+    /// with none; a rebind drops them with the lane; a join keeps a guard only where
+    /// every side's copy of the arm holds it, at the weaker of their strata
+    /// ([`dedup_contract_arms`]). Provenance, not part of what the arm denotes, so
+    /// equality ignores them.
+    pub(crate) guards: Vec<ArmGuard>,
+}
+
+/// One positive class guard on a [`ContractArm`]: the lowercase FQN the guard
+/// tested, and whether a runtime test (`Verified`) or a docblock claim
+/// (`Asserted`) established it.
+#[derive(Clone, Debug)]
+pub(crate) struct ArmGuard {
+    pub(crate) fqn: String,
+    pub(crate) stratum: Stratum,
 }
 
 impl ContractArm {
     /// An unguarded arm.
     pub(crate) fn new(ty: steins_contract::ContractTy, stratum: Stratum) -> Self {
-        ContractArm { ty, stratum, guarded: false }
+        ContractArm { ty, stratum, guards: Vec::new() }
+    }
+
+    /// Record a positive class guard, one entry per FQN: a guard both a runtime
+    /// test and a docblock established holds at the stronger stratum.
+    pub(crate) fn add_guard(&mut self, fqn: &str, stratum: Stratum) {
+        match self.guards.iter_mut().find(|g| g.fqn.eq_ignore_ascii_case(fqn)) {
+            Some(g) => {
+                if stratum == Stratum::Verified {
+                    g.stratum = Stratum::Verified;
+                }
+            }
+            None => self.guards.push(ArmGuard { fqn: fqn.to_owned(), stratum }),
+        }
+    }
+
+    /// Keep only the guards `other` also holds, each at the weaker of the two
+    /// strata: the guards of the arm two copies merge into.
+    fn meet_guards(&mut self, other: &[ArmGuard]) {
+        self.guards.retain_mut(|g| {
+            let Some(o) = other.iter().find(|o| o.fqn.eq_ignore_ascii_case(&g.fqn)) else {
+                return false;
+            };
+            g.stratum = g.stratum.min(o.stratum);
+            true
+        });
     }
 }
 
@@ -1972,29 +2008,28 @@ pub(crate) fn dedup_contract_arms(arms: &mut Vec<ContractArm>) {
             kept.iter_mut().find(|k| k.ty == arm.ty || normalize::arm_eq(&k.ty, &arm.ty))
         {
             k.stratum = k.stratum.min(arm.stratum);
-            // The guard mark holds after the merge only where every copy held it.
-            k.guarded &= arm.guarded;
+            // A guard holds after the merge only where every copy held it.
+            k.meet_guards(&arm.guards);
             continue;
         }
         // Drop an arm strictly subsumed by a kept one; if it subsumes kept arms,
         // it replaces them (widening), inheriting the min stratum of all it covers
-        // and their guard mark only where all of them hold it.
+        // and only the guards all of them hold.
         if let Some(k) = kept.iter_mut().find(|k| normalize::subsumes(&k.ty, &arm.ty).is_yes()) {
-            k.guarded &= arm.guarded;
+            k.meet_guards(&arm.guards);
             continue;
         }
-        let mut stratum = arm.stratum;
-        let mut guarded = arm.guarded;
+        let mut wide = arm;
         kept.retain(|k| {
-            if normalize::subsumes(&arm.ty, &k.ty).is_yes() {
-                stratum = stratum.min(k.stratum);
-                guarded &= k.guarded;
+            if normalize::subsumes(&wide.ty, &k.ty).is_yes() {
+                wide.stratum = wide.stratum.min(k.stratum);
+                wide.meet_guards(&k.guards);
                 false
             } else {
                 true
             }
         });
-        kept.push(ContractArm { ty: arm.ty, stratum, guarded });
+        kept.push(wide);
     }
     absorb_contract_arms(&mut kept);
     *arms = kept;
@@ -2016,9 +2051,10 @@ pub(crate) fn absorb_contract_arms(arms: &mut Vec<ContractArm>) {
         'outer: for i in 0..arms.len() {
             for j in (i + 1)..arms.len() {
                 if let Some(ty) = normalize::merge_int_arms(&arms[i].ty, &arms[j].ty) {
-                    let stratum = arms[i].stratum.min(arms[j].stratum);
-                    let guarded = arms[i].guarded && arms[j].guarded;
-                    merged_at = Some((i, j, ContractArm { ty, stratum, guarded }));
+                    let mut m = ContractArm::new(ty, arms[i].stratum.min(arms[j].stratum));
+                    m.guards = arms[i].guards.clone();
+                    m.meet_guards(&arms[j].guards);
+                    merged_at = Some((i, j, m));
                     break 'outer;
                 }
             }
