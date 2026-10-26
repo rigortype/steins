@@ -294,7 +294,7 @@ fn arm_member_verdict(
             if !cx.dam.is_clear() {
                 return Held::Unknown; // eval could mint a subclass carrying the method.
             }
-            for (dfile, dcd) in &descendants {
+            for (dfile, dcd) in descendants.iter().filter(|(_, d)| instances_count(d, magic)) {
                 if descendant_verdict(cx, folder, *dfile, dcd, method, magic) != anchor {
                     return Held::Unknown;
                 }
@@ -385,6 +385,11 @@ pub(crate) trait MemberLadder {
     fn anchor_clear(&mut self, cx: &Cx, fqn: &str) -> bool;
     /// One candidate declaration, judged by its full chain.
     fn candidate(&mut self, cx: &Cx, file: usize, cd: &ClassDecl) -> Held;
+    /// Whether an admitted candidate's verdict is read at all: one with no instances of
+    /// its own may be passed over when its concrete descendants are candidates too.
+    fn speaks_for(&self, _cd: &ClassDecl) -> bool {
+        true
+    }
 }
 
 /// What the lane established about one arm (issue #1095).
@@ -516,6 +521,9 @@ pub(crate) fn judge_arm(cx: &Cx, arm: &LaneArm, ladder: &mut dyn MemberLadder) -
     }
     let mut fold: Option<Held> = None;
     for (file, cd) in admitted {
+        if !ladder.speaks_for(cd) {
+            continue;
+        }
         let held = ladder.candidate(cx, file, cd);
         if held == Held::Unknown || fold.is_some_and(|f| f != held) {
             return judged(ArmFate::Live(Held::Unknown), rests_on_assert);
@@ -607,6 +615,19 @@ impl MemberLadder for MethodLadder<'_, '_> {
     fn candidate(&mut self, cx: &Cx, file: usize, cd: &ClassDecl) -> Held {
         descendant_verdict(cx, self.folder, file, cd, self.method, self.magic)
     }
+    fn speaks_for(&self, cd: &ClassDecl) -> bool {
+        instances_count(cd, self.magic)
+    }
+}
+
+/// Whether a descendant candidate's own chain verdict is read. Under `method_exists`
+/// (no magic fallback) an abstract class or an interface below the anchor is passed
+/// over (issue #1103's review): it has no instances of its own, every concrete class
+/// that is-a it is a candidate in its own right, and its interface leg, which can reach
+/// a builtin interface the walk cannot enumerate, would otherwise leave the whole arm
+/// `Unknown`. The call lanes keep reading every candidate, as before.
+fn instances_count(cd: &ClassDecl, magic: Option<&str>) -> bool {
+    magic.is_some() || !(cd.is_abstract || cd.is_interface)
 }
 
 /// Run the ADR-0049 §8 ladder for one `$var->method()` and emit the

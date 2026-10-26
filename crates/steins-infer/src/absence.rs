@@ -224,11 +224,12 @@ pub(crate) fn enumerate_method_chain(cx: &Cx, start_fqn: &str, method: &str, kin
 /// declaration rather than a name lets the declared-receiver lane judge each half of
 /// an Ambiguous descendant by its own chain (ADR-0049 A4, issue #1092).
 ///
-/// With no magic fallback the walk also climbs the interfaces of every abstract class
-/// and interface on the chain ([`climb_interfaces`], issue #1103): `method_exists` is
-/// true of a method such a node only declares through an interface. A concrete class
-/// implements every interface method on its own chain, so the call lanes, which ask
-/// about a value of a concrete class, walk the `extends` chain alone.
+/// With no magic fallback, a walk that starts at an abstract class or an interface
+/// also climbs the interfaces of every abstract class and interface on its chain
+/// ([`climb_interfaces`], issue #1103): `method_exists` is true of a method such a node
+/// only declares through an interface. A concrete class implements every interface
+/// method on its own chain, so a walk from one, and the call lanes, which ask about a
+/// value of a concrete class, walk the `extends` chain alone.
 pub(crate) fn walk_method_chain(
     cx: &Cx,
     file: usize,
@@ -245,6 +246,9 @@ pub(crate) fn walk_method_chain(
     let mut any_conditional = false;
     let mut any_magic = false;
     let mut interfaces: Vec<String> = Vec::new();
+    // Only a start with no instances of its own can lack an interface method on its
+    // `extends` chain: a concrete class implements every one there.
+    let climb = magic.is_none() && (cd.is_abstract || cd.is_interface);
     loop {
         if !seen.insert(cur.to_ascii_lowercase()) {
             return ChainWalk::Unknown; // cycle — closure cannot terminate soundly.
@@ -293,7 +297,7 @@ pub(crate) fn walk_method_chain(
         simple_chain.push(cd.name.clone());
         // `method_exists` also counts a method an abstract class or an interface only
         // declares through an interface it implements or extends (issue #1103).
-        if magic.is_none() && (cd.is_abstract || cd.is_interface) {
+        if climb && (cd.is_abstract || cd.is_interface) {
             let tree = &cx.units[cfile].tree;
             interfaces.extend(cd.implements.iter().map(|r| tree.resolve_class_fqn(r)));
         }
@@ -1750,6 +1754,7 @@ interface J1 {} interface J2 { public function m2(): int; }
 interface IJ extends J1, J2 {}
 interface Top extends IJ, J2 {}
 abstract class Opaque implements \\Countable {}
+class OpaqueKid extends Opaque { public function count(): int { return 0; } }
 class Concrete implements \\Countable { public function count(): int { return 0; } }
 ";
 
@@ -1773,6 +1778,8 @@ class Concrete implements \\Countable { public function count(): int { return 0;
         assert_eq!(walk(IFACES, "Opaque", "nope", false), "unknown");
         assert_eq!(walk(IFACES, "Concrete", "nope", false), "absent");
         assert_eq!(walk(IFACES, "Concrete", "count", false), "declared");
+        // Nor does a concrete class below it climb its abstract parent's interfaces.
+        assert_eq!(walk(IFACES, "OpaqueKid", "nope", false), "absent");
     }
 
     #[test]
