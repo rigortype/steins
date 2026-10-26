@@ -47,15 +47,18 @@
 //! | `$v = G` in a condition (`and`/`or`, `&&`, ternary, `if`) | `G`: an assignment is truthy as its value is |
 //! | `lit ?? b`, `lit` a literal that is not `null` | `b` is dead |
 //!
-//! A variable can hold a guard (`Store::guard_vars`). What `$v = value` stores:
+//! A variable can hold a guard, or any condition (`Store::guard_vars`, ADR-0106 §2.3). What
+//! `$v = value` stores:
 //!
 //! | `value` | Stored | A test of `$v` is |
 //! | --- | --- | --- |
 //! | `G` | `G` | `G` |
 //! | `!G` | `!G` | `!G`: truthy kills the guarded arm, falsy vouches |
-//! | `G && x` | `G && ?` | truthy implies `G`: vouches it; falsy says nothing |
-//! | `G \|\| H`, `x && y` with no guard, anything else | nothing | undecided, vouches nothing |
-//! | a guard naming `$v` itself or a non-variable argument | nothing | undecided |
+//! | `G && x`, `x` a call or property read | `G && ?` | truthy implies `G`: vouches it; falsy says nothing |
+//! | `G \|\| H` | `G \|\| H` | truthy vouches neither; falsy kills both guarded arms |
+//! | a comparison, `is_*`, `isset`, `$x` under `!`, `&&`, `\|\|` | the condition | the condition, narrowing too |
+//! | a plain copy `$x`, a call, a property read | nothing | undecided, vouches nothing |
+//! | a condition reading `$v` itself, or a guard with a non-variable argument | nothing | undecided |
 //!
 //! Where the stored guard is read: the sweep decides the arm or operand a stored guard kills
 //! (`$h ? f() : 0`); the branch walk vouches on the side it is truthy for, with the polarity

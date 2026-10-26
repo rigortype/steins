@@ -1136,3 +1136,130 @@ fn a_type_predicate_over_a_docblock_emptied_lane_mints_as_on_the_base() {
         vec!["string"]
     );
 }
+
+// ---- Stored conditions: `$has = C; if ($has)` is `if (C)` (ADR-0106 §2.3, issue #933) ----
+
+#[test]
+fn a_stored_comparison_narrows_where_its_variable_is_tested() {
+    // `e` and `e2`: the then side of `$has`, and the fall-through past `!$has`.
+    assert_eq!(
+        one("function e(?float $v): float { $has = $v !== null; if ($has) { \\PHPStan\\dumpType($v); return $v; } return 0.0; }"),
+        vec!["float"]
+    );
+    assert_eq!(
+        one("function e2(?float $v): float { $has = $v !== null; if (!$has) { return 0.0; } \\PHPStan\\dumpType($v); return $v; }"),
+        vec!["float"]
+    );
+    // The else side of a stored `=== null`, the ternary and `assert` sites, and a
+    // test inside a loop the condition was stored before.
+    for func in [
+        "function n(?float $v): float { $none = $v === null; if ($none) { return 0.0; } return $v; }",
+        "function t(?float $v): float { $has = $v !== null; return $has ? $v : 0.0; }",
+        "function a(?float $v): float { $has = $v !== null; assert($has); return $v; }",
+        "function l(?float $v): float { $has = $v !== null; foreach ([1] as $_) { if ($has) { return $v; } } return 0.0; }",
+    ] {
+        assert_eq!(one(func), Vec::<String>::new(), "{func}");
+    }
+}
+
+#[test]
+fn a_stored_predicate_or_isset_narrows_as_the_inline_test_does() {
+    // `e3`, `e4`, and an offset `isset` over a shape.
+    for func in [
+        "function e3(?float $v): float { $has = isset($v); if ($has) { return $v; } return 0.0; }",
+        "function e4(?float $v): float { $has = is_float($v); if ($has) { return $v; } return 0.0; }",
+        "/** @param array{k?: string} $a */ function k(array $a): string { $has = isset($a['k']); if ($has) { return $a['k']; } return ''; }",
+    ] {
+        assert_eq!(one(func), Vec::<String>::new(), "{func}");
+    }
+}
+
+#[test]
+fn a_stored_connective_narrows_along_its_paths() {
+    // `stored_and`: truthy proves both conjuncts. `stored_or`: the join of the
+    // two paths is `int|float`, and the fall-through is the string.
+    assert_eq!(
+        one("function stored_and(?string $v, bool $z): string { $ok = $v !== null && $z; if ($ok) { return $v; } return ''; }"),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        one("function stored_or(int|float|string $n): string { $ok = \\is_int($n) || \\is_float($n); if ($ok) { \\PHPStan\\dumpType($n); return fmt($n); } \\PHPStan\\dumpType($n); return $n; }"),
+        vec!["int|float", "string"]
+    );
+    // A declined operand under `&&` is opaque: the stored comparison still narrows.
+    assert_eq!(
+        one("function c(?float $v): float { $has = $v !== null && rand(0, 1) === 1; if ($has) { return $v; } return 0.0; }"),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn a_stored_condition_whose_value_moved_keeps_reporting() {
+    // The TP rows, each a TypeError in PHP: a rebound dependency
+    // (`tp_stored_rebound`), a path that leaves `$v` nullable (`tp_stored_or`,
+    // and with an opaque right operand), a reassigned holder
+    // (`tp_stored_reassigned`), and an `unset` of the offset the stored `isset`
+    // read.
+    assert_eq!(
+        one("function tp_stored_rebound(?float $v): float { $has = $v !== null; $v = null; if ($has) { return $v; } return 0.0; }"),
+        vec!["type.return-mismatch"]
+    );
+    for func in [
+        "function tp_stored_or(?float $v, bool $z): float { $has = $v !== null || $z; if ($has) { return $v; } return 0.0; }",
+        "function tp_or_call(?float $v): float { $has = $v !== null || rand(0, 1) === 1; if ($has) { return $v; } return 0.0; }",
+        "function tp_stored_reassigned(?float $v): float { $has = $v !== null; $has = true; if ($has) { return $v; } return 0.0; }",
+    ] {
+        assert_eq!(one(func), vec!["type.maybe-return-mismatch"], "{func}");
+    }
+    let unset = one(
+        "/** @param array{k?: string} $a */ function u(array $a): string { $has = isset($a['k']); unset($a['k']); if ($has) { \\PHPStan\\dumpType($a); return $a['k']; } return ''; }",
+    );
+    assert_eq!(unset.first().map(String::as_str), Some("array{} (asserted)"), "{unset:?}");
+    assert_eq!(unset.len(), 2, "{unset:?}");
+}
+
+#[test]
+fn a_property_read_a_poisoned_scope_or_a_call_stores_nothing() {
+    // A property fetch is not a function of locals; a reference poisons the
+    // scope; a userland call is not a predicate. Each `if ($has)` narrows
+    // nothing, as on the base.
+    let dumps: Vec<Vec<String>> = [
+        "class O { public ?float $p = null; } function p(O $o, ?float $v): float { $has = $v === $o->p; if ($has) { \\PHPStan\\dumpType($v); } return 0.0; }",
+        "function r(?float $v): float { $r = &$v; $has = $v !== null; if ($has) { \\PHPStan\\dumpType($v); } return 0.0; }",
+        "function g(?float $v): bool { return $v !== null; } function c(?float $v): float { $has = g($v); if ($has) { \\PHPStan\\dumpType($v); } return 0.0; }",
+    ]
+    .iter()
+    .map(|f| one(f).into_iter().filter(|d| !d.contains('.')).collect())
+    .collect();
+    assert_eq!(dumps, vec![vec!["float|null"]; 3]);
+}
+
+#[test]
+fn a_stored_condition_is_judged_under_the_current_env() {
+    // `$v` is proven where `$has` is tested, so `$has` is true and the
+    // fall-through is dead (PHP returns 'a'); the base judged it with no env and
+    // reported the dead `return 1`. Without the narrowing it stays undecided.
+    for func in [
+        "function p(int $v): string { $has = $v === 3; if ($v !== 3) { return 'n'; } if ($has) { return 'a'; } return 1; }",
+        "function q(?int $v): string { $has = $v === null; if ($v !== null) { return 'n'; } if ($has) { return 'a'; } return 1; }",
+    ] {
+        assert_eq!(one(func), Vec::<String>::new(), "{func}");
+    }
+    assert_eq!(
+        one("function u(int $v): string { $has = $v === 3; if ($has) { return 'a'; } return 1; }"),
+        vec!["type.return-mismatch"]
+    );
+}
+
+#[test]
+fn a_stored_test_the_walk_cannot_decide_forgets_its_proven_value() {
+    // `is_callable('abc')` is false in PHP (8.5.11), and the walk does not decide it
+    // on a string: either side may be dead, so neither judges the proven `'abc'`,
+    // as `if (is_callable($s))` does not. The base reported both returns.
+    for func in [
+        "function f2(): int { $s = 'abc'; $ok = is_callable($s); if ($ok) { return $s; } return 0; }",
+        "function f3(): int { $s = 'abc'; $ok = is_callable($s); if (!$ok) { return 0; } return $s; }",
+    ] {
+        assert_eq!(one(func), Vec::<String>::new(), "{func}");
+    }
+}

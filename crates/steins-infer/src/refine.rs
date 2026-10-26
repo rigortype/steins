@@ -1169,7 +1169,7 @@ pub(crate) fn apply_refinements(
                         stratum,
                     ),
                 );
-                store.unbind(var);
+                store.unbind_pinned(var);
             }
             Refine::NotNull(var) => refine_fact(env, var, stratum, clear_null),
             Refine::Exclude(var, val) => {

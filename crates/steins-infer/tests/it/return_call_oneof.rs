@@ -519,10 +519,12 @@ fn a_guard_on_a_copy_of_the_set_demotes_the_definite_verdict() {
 
 #[test]
 fn a_guard_on_a_derived_value_demotes_the_definite_verdict() {
-    // d3, d9: a boolean computed from the set; d8: an array holding it.
+    // d3: a boolean computed from the set; d8: an array holding it.
     demoted(&one_fn("$ok = ctype_alpha($x); if ($ok) { return 1; } return $x;"), MAYBE_RET);
-    demoted(&one_fn("$ok = $x === 'a' || $x === 'b'; if ($ok) { return 1; } return $x;"), MAYBE_RET);
     demoted(&one_fn("$arr = [$x]; if (ctype_alpha($arr[0])) { return 1; } return $x;"), MAYBE_RET);
+    // d9: a stored comparison is the comparison (ADR-0106 §2.3), judged where `$ok`
+    // is tested: `$x` is `'a'|'b'`, so `$ok` is true and `return $x` is dead.
+    silent(&one_fn("$ok = $x === 'a' || $x === 'b'; if ($ok) { return 1; } return $x;"));
 }
 
 #[test]

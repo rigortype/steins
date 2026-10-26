@@ -192,12 +192,17 @@ pub(crate) fn eval_cond(
             }
         }
         CondExpr::Truthy(op) => {
-            // A variable that holds an existence guard (`$has = function_exists('f')`)
-            // is that guard (ADR-0104).
+            // A variable that holds a stored condition (`$has = function_exists('f')`,
+            // `$has = $v !== null`) is that condition (ADR-0104, ADR-0106 §2.3), judged
+            // under the current env: the condition is the same function of the same
+            // values, which the env may only know more about since. Its operands lie at
+            // the assignment, not here, so a short circuit inside it marks nothing dead.
             if let CondOperand::Var(v) = op
                 && let Some(g) = store.guard_vars.get(v)
             {
-                let verdict = eval_cond(w, folder, &g.cond, &HashMap::new(), store, poisoned);
+                let dead = w.dead.borrow().len();
+                let verdict = eval_cond(w, folder, &g.cond, env, store, poisoned);
+                w.dead.borrow_mut().truncate(dead);
                 if verdict != Certainty::Maybe {
                     return verdict;
                 }
