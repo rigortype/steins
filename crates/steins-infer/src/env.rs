@@ -2152,4 +2152,47 @@ mod tests {
         );
         assert!(store.places_under("arr").is_empty());
     }
+
+    fn guarded_arm(class: &str, guards: &[(&str, Stratum)]) -> ContractArm {
+        let mut arm = ContractArm::new(ContractTy::Class(class.to_owned()), Stratum::Verified);
+        for (fqn, stratum) in guards {
+            arm.add_guard(fqn, *stratum);
+        }
+        arm
+    }
+
+    fn guard_set(arm: &ContractArm) -> Vec<(String, Stratum)> {
+        arm.guards.iter().map(|g| (g.fqn.clone(), g.stratum)).collect()
+    }
+
+    /// One entry per guard class; a runtime test of a class a docblock asserted makes
+    /// it `Verified` (issue #1095).
+    #[test]
+    fn a_guard_is_recorded_once_at_its_strongest_stratum() {
+        let arm = guarded_arm(
+            "a",
+            &[("t", Stratum::Asserted), ("T", Stratum::Verified), ("u", Stratum::Asserted)],
+        );
+        assert_eq!(
+            guard_set(&arm),
+            vec![("t".to_owned(), Stratum::Verified), ("u".to_owned(), Stratum::Asserted)]
+        );
+    }
+
+    /// A join keeps a guard only where every copy of the arm holds it, at the weaker
+    /// stratum, whichever way the copies merge (issue #1095).
+    #[test]
+    fn a_join_keeps_the_guards_every_copy_holds_at_the_weaker_stratum() {
+        let mut arms = vec![
+            guarded_arm("a", &[("t", Stratum::Verified), ("u", Stratum::Verified)]),
+            guarded_arm("a", &[("t", Stratum::Asserted)]),
+        ];
+        dedup_contract_arms(&mut arms);
+        assert_eq!(arms.len(), 1);
+        assert_eq!(guard_set(&arms[0]), vec![("t".to_owned(), Stratum::Asserted)]);
+        // Two different arms keep their own guards.
+        let mut arms = vec![guarded_arm("a", &[("t", Stratum::Verified)]), guarded_arm("b", &[])];
+        dedup_contract_arms(&mut arms);
+        assert_eq!(arms.iter().map(|a| a.guards.len()).collect::<Vec<_>>(), vec![1, 0]);
+    }
 }
