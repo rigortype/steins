@@ -854,6 +854,9 @@ pub(crate) fn lower_arg_value(expr: &Expression<'_>) -> ArgValue {
             lhs: Box::new(lower_arg_value(b.lhs)),
             rhs: Box::new(lower_arg_value(b.rhs)),
             rhs_span: to_span(b.rhs.span()),
+            // The connective as the `if` would lower it: the value seam evaluates it as
+            // a condition (issue #1098).
+            cond: Box::new(lower_binary_cond(b)),
         },
         // A three-way comparison `<=>` in VALUE position (issue #625). A
         // `ValueOp` rather than a variant of its own because it evaluates both
