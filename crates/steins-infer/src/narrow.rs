@@ -30,13 +30,23 @@
 use std::collections::HashMap;
 
 use steins_domain::{Certainty, Fact};
+use steins_phpdoc::AssertKind;
 use steins_syntax::{CondExpr, OperandSpan};
 
+use crate::asserts::apply_guard_asserts;
 use crate::cond::eval_cond;
 use crate::env::{Known, Store, Stratum, join_envs};
-use crate::existence::with_stored_conditions;
+use crate::existence::{existence_vouch, with_stored_conditions};
 use crate::fold::Folder;
 use crate::oneof_guard::collect_reads;
+use crate::out_params::{seed_out_params, seed_produced_places};
+use crate::predicates::apply_type_narrowing;
+use crate::refine::{
+    apply_class_narrowing, apply_refinements, collect_guard_calls, collect_guard_vars,
+    collect_same_expr_call_guards, else_refinements, then_refinements,
+};
+use crate::remembered;
+use crate::shapes::apply_shape_narrowing;
 use crate::walk::WalkCx;
 
 /// The most paths one condition expands into (ADR-0106 §2.1, D2).
@@ -368,6 +378,85 @@ fn conjunction(path: &[Atom<'_>]) -> CondExpr {
         .next()
         .map_or(CondExpr::Opaque { reads: Vec::new(), writes: Vec::new() }, atom);
     atoms.fold(first, |acc, a| CondExpr::And(Box::new(acc), Box::new(atom(a)), OperandSpan::NONE))
+}
+
+/// The vocabularies over one path of a condition, in the order [`apply_cond_side`]
+/// documents: the one list every site passes to [`narrow_paths`] (ADR-0106, #1096).
+///
+/// [`apply_cond_side`]: crate::branch::apply_cond_side
+pub(crate) fn apply_vocabularies(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    cond: &CondExpr,
+    then: bool,
+    env: &mut HashMap<String, Known>,
+    store: &mut Store,
+) {
+    apply_type_narrowing(w.cx, cond, then, env, store);
+    let refs = if then {
+        then_refinements(cond)
+    } else {
+        else_refinements(cond)
+    };
+    apply_refinements(&refs, env, store, Stratum::Verified);
+    apply_class_narrowing(w, folder, cond, then, store);
+    apply_shape_narrowing(w.cx, cond, then, env, store, true);
+    // Same-expression call guards (issue #421): a call has no binding to narrow, so
+    // this records the guard rather than a fact — only on the side where the "not
+    // null"/"not false" reading actually holds, so a sibling branch that never
+    // tested the expression does not inherit it through the join (`join_stores`
+    // intersects, same as `vouched`). The `false` polarity is the twin reading,
+    // `if ($e === null) {} else { <here> }`.
+    let mut guards = Vec::new();
+    collect_same_expr_call_guards(cond, then, &mut guards);
+    for v in guards {
+        store.guard_call(v);
+    }
+    let mut calls = Vec::new();
+    collect_guard_calls(cond, then, &mut calls);
+    for (call, returns_true) in calls {
+        let kind = if returns_true { AssertKind::IfTrue } else { AssertKind::IfFalse };
+        apply_guard_asserts(w, call, kind, env, store);
+        // Guard-respect leg (ADR-0049 §4): an existence guard vouches its symbol on
+        // the side where it holds true — including the negated-guard else-branch,
+        // `if (!method_exists(...)) {} else <here>`.
+        if returns_true {
+            for v in existence_vouch(w.cx, store, call) {
+                store.vouch(v);
+            }
+        }
+    }
+    // A variable that holds an existence guard vouches it on the side where it is truthy
+    // (ADR-0104): `$has = function_exists('f'); if ($has) { f(); }`.
+    if !store.guard_vars.is_empty() {
+        let mut tested = Vec::new();
+        collect_guard_vars(cond, then, &mut tested);
+        for (var, truthy) in tested {
+            let Some(g) = store.guard_vars.get(var).cloned() else { continue };
+            let mut calls = Vec::new();
+            collect_guard_calls(&g.cond, truthy, &mut calls);
+            for (call, returns_true) in calls {
+                if returns_true {
+                    for v in existence_vouch(w.cx, store, call) {
+                        store.vouch(v);
+                    }
+                }
+            }
+        }
+    }
+    // The out-parameter seed on both sides, for the same reason: `if
+    // (!preg_match($re, $s, $m)) { return; }` reaches its else-branch with the call
+    // proven truthy (ADR-0077 §3.1) — the polarity the witness survives under decides.
+    seed_out_params(w, folder, cond, then, env, store);
+    // The out-parameter **places** a guard call filled (ADR-0098 §2.2), on the
+    // polarity that proves the call returned truthy — the strongest position
+    // the `proc_open` row has, and the one `if (proc_open($c, $s, $pipes))`
+    // lands in.
+    seed_produced_places(w, folder, cond, then, env, store);
+    // Last: what the condition proves about the calls it names, remembered on the
+    // key so that the next identical call answers it (ADR-0102). After every
+    // vocabulary above, which may have forgotten a name a key stands on.
+    remembered::produce(w, folder, cond, then, env, store);
 }
 
 #[cfg(test)]

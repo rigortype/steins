@@ -5,7 +5,6 @@ use std::collections::HashMap;
 
 use steins_contract::normalize;
 use steins_domain::{Base, Certainty, Fact, Val};
-use steins_phpdoc::AssertKind;
 use steins_syntax::{
     ArgValue, ArmLanding, CallExpr, CmpOp, CondExpr, CondOperand, Header, MatchArmT, Span,
     Stmt,
@@ -15,7 +14,7 @@ use crate::fold::Folder;
 use crate::annotate::LineFact;
 use crate::builtin_returns::{apply_resource_effects, resource_call_effects};
 use crate::asserts::{
-    apply_guard_asserts, cond_branch_scoped_invalidations, cond_invalidations,
+    cond_branch_scoped_invalidations, cond_invalidations,
     guard_assert_kept_lanes,
 };
 use crate::cond::{eval_cmp, eval_cond, operand_values};
@@ -23,19 +22,17 @@ use crate::conjunct_writes::mask_stale_conjuncts;
 use crate::contract::ProjectIsa;
 use crate::descent::escape_and_sweep_calls;
 use crate::env::{ContractArm, Descent, Known, Store, Stratum, join_envs, val_of};
-use crate::existence::{existence_vouch, with_stored_conditions};
+use crate::existence::with_stored_conditions;
 use crate::oneof_guard::{mark_thinned, narrow_side, oneof_guards};
-use crate::out_params::{check_preg_pattern, seed_out_params, seed_produced_places};
-use crate::predicates::{apply_type_narrowing, pred_holds_on_fact, type_predicate};
+use crate::out_params::check_preg_pattern;
+use crate::predicates::{pred_holds_on_fact, type_predicate};
 use crate::project::Diagnostic;
-use crate::remembered;
 use crate::refine::{
-    Refine, apply_class_narrowing, apply_refinements, collect_guard_calls, collect_guard_vars, collect_guard_calls_any,
-    collect_same_expr_call_guards, else_refinements, subtract_contract_lane, then_refinements,
+    Refine, apply_refinements, collect_guard_calls_any, subtract_contract_lane,
 };
-use crate::shapes::{ShapeGuard, apply_shape_guard, apply_shape_narrowing, guard_key};
+use crate::shapes::{ShapeGuard, apply_shape_guard, guard_key};
 use crate::loops::loop_entry_forget;
-use crate::narrow::narrow_paths;
+use crate::narrow::{apply_vocabularies, narrow_paths};
 use crate::rebind::top_level_rebind_risk;
 use crate::header_reads::{check_header, push_unseen};
 use crate::walk::{Flow, WalkCx, mark_dead, mark_dead_span, walk_trace};
@@ -325,7 +322,7 @@ fn keep_suspect(lanes: &[BranchScopedLanes], env: &HashMap<String, Known>, store
 ///
 /// The masked condition goes through the path driver (ADR-0106 §2.1): a `||` at
 /// then or a `&&` at else runs the vocabularies once per path and joins them
-/// ([`narrow_paths`]); any other condition reaches [`apply_branch_vocabularies`]
+/// ([`narrow_paths`]); any other condition reaches [`apply_vocabularies`]
 /// unchanged.
 pub(crate) fn apply_cond_side(
     w: &WalkCx,
@@ -338,85 +335,8 @@ pub(crate) fn apply_cond_side(
     let masked = mask_stale_conjuncts(w.cx, cond);
     let poisoned = w.scope.poisoned;
     narrow_paths(w, folder, masked.as_ref(), then, env, store, poisoned, &mut |f, c, t, e, s| {
-        apply_branch_vocabularies(w, f, c, t, e, s);
+        apply_vocabularies(w, f, c, t, e, s);
     });
-}
-
-/// The branch lane's vocabularies over one path of a condition, in the order
-/// [`apply_cond_side`] documents.
-fn apply_branch_vocabularies(
-    w: &WalkCx,
-    folder: &mut dyn Folder,
-    cond: &CondExpr,
-    then: bool,
-    env: &mut HashMap<String, Known>,
-    store: &mut Store,
-) {
-    apply_type_narrowing(w.cx, cond, then, env, store);
-    let refs = if then {
-        then_refinements(cond)
-    } else {
-        else_refinements(cond)
-    };
-    apply_refinements(&refs, env, store, Stratum::Verified);
-    apply_class_narrowing(w, folder, cond, then, store);
-    apply_shape_narrowing(w.cx, cond, then, env, store, true);
-    // Same-expression call guards (issue #421): a call has no binding to narrow, so
-    // this records the guard rather than a fact — only on the side where the "not
-    // null"/"not false" reading actually holds, so a sibling branch that never
-    // tested the expression does not inherit it through the join (`join_stores`
-    // intersects, same as `vouched`). The `false` polarity is the twin reading,
-    // `if ($e === null) {} else { <here> }`.
-    let mut guards = Vec::new();
-    collect_same_expr_call_guards(cond, then, &mut guards);
-    for v in guards {
-        store.guard_call(v);
-    }
-    let mut calls = Vec::new();
-    collect_guard_calls(cond, then, &mut calls);
-    for (call, returns_true) in calls {
-        let kind = if returns_true { AssertKind::IfTrue } else { AssertKind::IfFalse };
-        apply_guard_asserts(w, call, kind, env, store);
-        // Guard-respect leg (ADR-0049 §4): an existence guard vouches its symbol on
-        // the side where it holds true — including the negated-guard else-branch,
-        // `if (!method_exists(...)) {} else <here>`.
-        if returns_true {
-            for v in existence_vouch(w.cx, store, call) {
-                store.vouch(v);
-            }
-        }
-    }
-    // A variable that holds an existence guard vouches it on the side where it is truthy
-    // (ADR-0104): `$has = function_exists('f'); if ($has) { f(); }`.
-    if !store.guard_vars.is_empty() {
-        let mut tested = Vec::new();
-        collect_guard_vars(cond, then, &mut tested);
-        for (var, truthy) in tested {
-            let Some(g) = store.guard_vars.get(var).cloned() else { continue };
-            let mut calls = Vec::new();
-            collect_guard_calls(&g.cond, truthy, &mut calls);
-            for (call, returns_true) in calls {
-                if returns_true {
-                    for v in existence_vouch(w.cx, store, call) {
-                        store.vouch(v);
-                    }
-                }
-            }
-        }
-    }
-    // The out-parameter seed on both sides, for the same reason: `if
-    // (!preg_match($re, $s, $m)) { return; }` reaches its else-branch with the call
-    // proven truthy (ADR-0077 §3.1) — the polarity the witness survives under decides.
-    seed_out_params(w, folder, cond, then, env, store);
-    // The out-parameter **places** a guard call filled (ADR-0098 §2.2), on the
-    // polarity that proves the call returned truthy — the strongest position
-    // the `proc_open` row has, and the one `if (proc_open($c, $s, $pipes))`
-    // lands in.
-    seed_produced_places(w, folder, cond, then, env, store);
-    // Last: what the condition proves about the calls it names, remembered on the
-    // key so that the next identical call answers it (ADR-0102). After every
-    // vocabulary above, which may have forgotten a name a key stands on.
-    remembered::produce(w, folder, cond, then, env, store);
 }
 
 /// The variables a condition **tests without deciding**, though the walk holds their
