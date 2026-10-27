@@ -600,7 +600,7 @@ suite's question, not this id's.
 
 ## Amendment (2026-10-27): an Asserted fact rejected in every member joins the possibly grade (issue #1099, run #1114 slice S6) — PENDING ratification
 
-Designed in run #1114, slice S6 (#1099); landed when that slice merges.
+Designed in run #1114, slice S6 (#1099); landed in #1136.
 
 §A1 and issue #291's "don't build it" concern the definite verdict on a *Verified*
 abstract fact: a native declaration is the runtime truth, callers overwhelmingly hold
@@ -625,3 +625,13 @@ ADR-0043's 2026-10-11 table (a `OneOf` judged member by member) gains the row: a
 rejected in every member at the `Asserted` stratum is `phpdoc.maybe-argument-mismatch`
 (and its return twin), no longer silent; the `Union`, `Refined` and `General` row keeps
 "all-refused is silent" for a `Verified` fact.
+
+Two guards were added on review, both in the direction that withholds. Every new row
+declines when the function body reads the subject, or a copy of it, beyond a plain copy,
+a whole-operand `null` comparison or a `preg_*` out-parameter, and it declines in a body
+that reads variables by name: the claim the Asserted fact makes may be tested there before
+the call runs. The rule is a conservative scan of the body's text, byte-safe and cached
+per body, because an AST walk needed files outside the slice. And the return row skips a
+`return` that a `finally` may replace (master's own judgement of such a return is #1145).
+The declared-arm lane admits a finite literal list at `Asserted` on the all-rejected row
+only.
