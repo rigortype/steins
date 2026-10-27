@@ -65,6 +65,7 @@ use crate::narrow::narrow_paths;
 use crate::oneof_guard;
 use crate::stmt_checks::{check_read_positions, check_return_value};
 use crate::try_catch::walk_try;
+use crate::value_conds::sweep_value_conds;
 
 /// The `assert` statement's vocabularies over one path of its condition (ADR-0052
 /// §5, ADR-0106 §2.2): the type predicates, the scalar refinements, the arm and
@@ -731,6 +732,9 @@ fn walk_run(
         // calls are judged, because a call in a dead arm is not (ADR-0104).
         if descent.is_none() {
             sweep_guard_regions(w, folder, stmt, store);
+            // The value-position `&&`/`||` and ternary conditions, judged against the
+            // entry env (issue #1098).
+            sweep_value_conds(w, folder, stmt, env, store);
             publish_guard_seed(w, stmt, store);
         }
         // 1. Check + descend every statically-named call this statement carries.

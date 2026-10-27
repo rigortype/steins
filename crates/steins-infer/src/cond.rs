@@ -549,8 +549,8 @@ pub(crate) fn total_op_fact(
             eval_spaceship_fact(w.cx, folder, lhs, rhs, env, store, poisoned)
         }
         ArgValue::Isset(ops) => eval_isset_fact(ops, env, poisoned),
-        ArgValue::Logical { op, lhs, rhs, rhs_span, cond: _ } => {
-            eval_logical_fact(w, folder, *op, lhs, rhs, *rhs_span, env, store, poisoned)
+        ArgValue::Logical { op, lhs, rhs, rhs_span, cond } => {
+            eval_logical_fact(w, folder, (*op, cond), (lhs, rhs, *rhs_span), env, store, poisoned)
         }
         ArgValue::Not(inner) => eval_not_fact(w, folder, inner, env, store, poisoned),
         ArgValue::Cast { target, operand } => {
@@ -646,18 +646,33 @@ fn bool_verdict_fact(verdict: Certainty, derived: Stratum) -> (Fact, Stratum) {
 /// The short-circuited operand contributes no stratum either, for the same
 /// reason: an expression PHP never evaluates is not evidence for the verdict.
 /// `xor` never short-circuits, so both of its operands always count.
-#[allow(clippy::too_many_arguments)]
+///
+/// # Conditions, not truthiness (issue #1098)
+///
+/// A `&&`/`||` that has a store to read is **evaluated as the condition the `if` would
+/// make of it** ([`eval_cond`] over the lowering's `cond`): the right operand sees the
+/// narrowing the left one establishes, a foldable existence guard in either folds, and
+/// a decided left operand marks the right one dead through the operand span the lowering
+/// carried. A verdict the condition leaves `Maybe` falls to the operand-fact path below,
+/// which can still decide from value facts the condition lane does not read. `xor`
+/// evaluates both operands always, so it keeps the truthiness path alone.
 fn eval_logical_fact(
     w: &WalkCx,
     folder: &mut dyn Folder,
-    op: LogicalOp,
-    lhs: &ArgValue,
-    rhs: &ArgValue,
-    rhs_span: Span,
+    (op, cond): (LogicalOp, &CondExpr),
+    (lhs, rhs, rhs_span): (&ArgValue, &ArgValue, Span),
     env: &HashMap<String, Known>,
     store: Option<&Store>,
     poisoned: bool,
 ) -> (Fact, Stratum) {
+    if op != LogicalOp::Xor
+        && let Some(store) = store
+    {
+        let verdict = eval_cond(w, folder, cond, env, store, poisoned);
+        if verdict != Certainty::Maybe {
+            return bool_verdict_fact(verdict, cond_read_stratum(cond, env, store));
+        }
+    }
     let (l, ls) = value_truthiness(w, folder, lhs, env, store, poisoned);
     // The short-circuit legs, decided by the left operand alone.
     match (op, l) {
