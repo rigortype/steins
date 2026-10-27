@@ -9,6 +9,7 @@ mod dynamic_callee_arity;
 mod early_binding;
 mod array_duplicate_key;
 mod array_literal_seeding;
+mod asserted_every_arm;
 mod array_read_position;
 mod assert_harness;
 mod assert_helper_discharge;

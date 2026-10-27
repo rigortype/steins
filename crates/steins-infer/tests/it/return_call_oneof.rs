@@ -175,8 +175,18 @@ fn a_builtin_asked_to_return_a_string_is_not_convicted_of_its_other_arms() {
 
 #[test]
 fn a_call_that_proves_nothing_stays_silent_in_both_spellings() {
-    parity("function s(int $n): string { return (string) rand(); }", "int", "s(1)", None);
     parity("function s(int $n): int { return $n; }", "int", "s(1)", None);
+    // The summary here is the engine's `numeric-string`, an Asserted fact whose only arm
+    // `: int` refuses in strict mode: the possibly id since #1099, in both spellings. The
+    // coercive file converts a numeric string, so it stays silent.
+    let prelude = "function s(int $n): string { return (string) rand(); }";
+    let strict_ids = |body: &str| ids(&strict(&format!("{prelude}\n{body}\n")));
+    let coercive_ids = |body: &str| ids(&coercive(&format!("{prelude}\n{body}\n")));
+    let returned = "function g(): int { return s(1); }";
+    let assigned = "function g(): int { $v = s(1); return $v; }";
+    assert_eq!(strict_ids(returned), vec![PHPDOC_MAYBE_RET.to_owned()]);
+    assert_eq!(strict_ids(assigned), vec![PHPDOC_MAYBE_RET.to_owned()]);
+    assert!(coercive_ids(returned).is_empty() && coercive_ids(assigned).is_empty());
 }
 
 #[test]
@@ -346,18 +356,15 @@ fn a_returned_call_with_a_oneof_summary_is_judged_like_its_assignment() {
 
 #[test]
 fn a_declared_arm_list_keeps_its_own_table() {
-    // A `@param 1|null` seed lives in the declared-arm lane, which this judgment does
-    // not read on the argument side and which the return seam has always judged: some
-    // rejected rides the contract id, every rejected stays silent. (No source seeds an
-    // `Asserted` `OneOf` on the value lane today, so that row of the table is held by
-    // the code, not by a test.)
+    // A `@param 1|null` seed lives in the declared-arm lane, an `Asserted` declaration
+    // rather than a proven value: some rejected rides the contract id, and since #1099
+    // so does every rejected, on both sides of the call.
     let some = "/** @param 1|null $x */\nfunction f($x): int { return $x; }";
     fires(&strict(some), PHPDOC_MAYBE_RET);
     let every = "/** @param null|'a' $x */\nfunction f($x): int { return $x; }";
-    silent(&strict(every));
+    fires(&strict(every), PHPDOC_MAYBE_RET);
     let arg = "function ti(int $i): void {}\n/** @param 1|null $x */\nfunction f($x) { ti($x); }";
-    silent(&strict(arg));
-    let _ = PHPDOC_MAYBE_ARG;
+    fires(&strict(arg), PHPDOC_MAYBE_ARG);
 }
 
 #[test]

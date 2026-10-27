@@ -5,11 +5,12 @@
 //! The argument pair's judgment at the return seam, and deliberately nothing more.
 //! It reaches [`is_type_error`] through the same base-level lift
 //! ([`native_rejects_base`]) and the same witness set, takes the same
-//! minimum-stratum split into two ids (ADR-0052 §5), and declines the
-//! all-arms-rejected verdict for the same reason the argument side does. (A finite
-//! `OneOf` is the exception: `finite_verdict` judges it member by member, and one
-//! whose every member is rejected is definite, since every path throws — decision D6
-//! of #1051.) PHP
+//! minimum-stratum split into two ids (ADR-0052 §5), and takes the
+//! all-arms-rejected verdict on the argument side's terms: silent for a `Verified`
+//! fact (issue #291's ruling), the possibly id for an `Asserted` one (#1099). (A
+//! finite `OneOf` has its own table: `finite_verdict` judges it member by member, and
+//! one whose every member is rejected is definite when `Verified`, since every path
+//! throws — decision D6 of #1051.) PHP
 //! applies one coercion table to both boundaries — all 144 return-position cells of
 //! `harness/coercion-grid` answered exactly as their parameter twins at 8.5.9, and
 //! so did the object cells (a `__toString` object into `string` in coercive mode,
@@ -42,8 +43,8 @@ use steins_domain::{Fact, Val};
 use steins_syntax::{ArgValue, NativeType};
 
 use crate::arg_check::{
-    MaybeVerdict, arm_base_set, maybe_fact_verdict, native_rejects_base, possibly_null_rejected,
-    spell_arm,
+    MaybeVerdict, arm_base_set, arm_lane_premise, maybe_fact_verdict, native_rejects_base,
+    possibly_null_rejected, spell_arm,
 };
 use crate::cx::Cx;
 use crate::dump::render_contract_arms;
@@ -97,7 +98,9 @@ fn return_premise(
     Some(Premise::Arms(arms.to_vec(), stratum))
 }
 
-/// The members of a returned variable's `OneOf` value-lane fact, at its stratum.
+/// The members of a returned variable's `OneOf` value-lane fact, at its stratum; an
+/// `Asserted` `Singleton` reads as a one-member set, since the exact rung judges only
+/// a proven one (#1099).
 fn oneof_premise<'e>(
     value: &ArgValue,
     env: &'e HashMap<String, Known>,
@@ -110,8 +113,30 @@ fn oneof_premise<'e>(
     let k = env.get(name)?;
     match k.fact.as_ref()? {
         Fact::OneOf(members) => Some((members, k.stratum, k.thinned)),
+        Fact::Singleton(v) if k.stratum == Stratum::Asserted => {
+            Some((slice::from_ref(v), k.stratum, k.thinned))
+        }
         _ => None,
     }
+}
+
+/// The members of a returned variable's declared-arm lane when it lowers to an
+/// `Asserted` finite fact and the value lane holds nothing for the variable.
+fn arm_lane_finite(
+    value: &ArgValue,
+    env: &HashMap<String, Known>,
+    store: &Store,
+    poisoned: bool,
+) -> Option<(Vec<Val>, Stratum)> {
+    if poisoned {
+        return None;
+    }
+    let ArgValue::Var(name) = value else { return None };
+    if env.get(name).is_some_and(|k| k.fact.is_some()) {
+        return None;
+    }
+    let (fact, stratum, _) = arm_lane_premise(store.contract_arms(name)?.to_vec())?;
+    Some((fact.finite_members()?.to_vec(), stratum))
 }
 
 /// The class an object-world declared arm denotes, or `None` for an arm with a
@@ -171,16 +196,24 @@ fn judge_arm(cx: &Cx, ret: &NativeType, ty: &ContractTy) -> ArmVerdict {
     }
 }
 
-/// The subject spelling and the rejected-arm names for one premise, or `None` where
-/// the verdict is not the possibly grade's (nothing rejected, or everything).
-fn verdict_spelling(cx: &Cx, ret: &NativeType, premise: &Premise) -> Option<(String, Vec<String>)> {
+/// The subject spelling, the rejected-arm names and whether **every** arm is rejected
+/// for one premise, or `None` where the verdict is not the possibly grade's: nothing
+/// rejected, or everything on a `Verified` premise (issue #291's ruling; an `Asserted`
+/// one reports, #1099).
+fn verdict_spelling(
+    cx: &Cx,
+    ret: &NativeType,
+    premise: &Premise,
+) -> Option<(String, Vec<String>, bool)> {
+    let asserted = premise.stratum() == Stratum::Asserted;
     match premise {
         Premise::Value(fact, _) => {
             // No return position has an implicit-nullable default, and the internal
             // carve-out is an argument-boundary rule — both flags are `false` here.
             let (verdict, rejected, null_rejected) =
                 maybe_fact_verdict(cx, ret, fact, false, false);
-            if verdict != MaybeVerdict::Partial {
+            let every = verdict == MaybeVerdict::Every && asserted;
+            if verdict != MaybeVerdict::Partial && !every {
                 return None;
             }
             let mut named: Vec<String> = rejected.iter().map(spell_arm).collect();
@@ -189,7 +222,7 @@ fn verdict_spelling(cx: &Cx, ret: &NativeType, premise: &Premise) -> Option<(Str
             }
             let subject =
                 describe_fact(fact).trim_start_matches("a value of type ").to_owned();
-            Some((subject, named))
+            Some((subject, named, every))
         }
         Premise::Arms(arms, _) => {
             let judged: Vec<(&ContractArm, ArmVerdict)> =
@@ -207,7 +240,8 @@ fn verdict_spelling(cx: &Cx, ret: &NativeType, premise: &Premise) -> Option<(Str
                 .filter(|(_, v)| *v == ArmVerdict::Rejected)
                 .map(|(a, _)| *a)
                 .collect();
-            if rejected.is_empty() || rejected.len() == arms.len() {
+            let every = rejected.len() == arms.len() && asserted;
+            if rejected.is_empty() || (rejected.len() == arms.len() && !every) {
                 return None;
             }
             // A lane with an arm this speller has no faithful rendering for declines
@@ -216,7 +250,7 @@ fn verdict_spelling(cx: &Cx, ret: &NativeType, premise: &Premise) -> Option<(Str
             let subject = render_contract_arms(cx, arms)?;
             let named: Vec<String> =
                 rejected.iter().filter_map(|a| render_contract_arms(cx, slice::from_ref(a))).collect();
-            (named.len() == rejected.len()).then_some((subject, named))
+            (named.len() == rejected.len()).then_some((subject, named, every))
         }
     }
 }
@@ -247,15 +281,23 @@ pub(crate) fn check_maybe_return_mismatch(
         check_oneof_return(cx, ret, display, shown, members, stratum, thinned, span_start, out);
         return;
     }
+    // An `Asserted` declared literal union (`@param 'a'|'b' $x`) is a finite fact on the
+    // arm lane: the same table, read member by member (#1099).
+    if let Some((members, stratum)) = arm_lane_finite(value, env, store, poisoned) {
+        check_oneof_return(cx, ret, display, shown, &members, stratum, false, span_start, out);
+        return;
+    }
     let Some(premise) = return_premise(value, env, store, poisoned) else { return };
-    let Some((subject, named)) = verdict_spelling(cx, ret, &premise) else { return };
+    let Some((subject, named, every)) = verdict_spelling(cx, ret, &premise) else { return };
     let id = if premise.stratum() == Stratum::Verified {
         TYPE_MAYBE_RETURN_MISMATCH_ID
     } else {
         PHPDOC_MAYBE_RETURN_MISMATCH_ID
     };
     let subject_name = shown.render();
-    let arms = if named.len() == 1 {
+    let arms = if every {
+        format!("every one of its arms ({}) raises a TypeError", named.join(", "))
+    } else if named.len() == 1 {
         format!("its {} arm raises a TypeError", named[0])
     } else {
         format!("its {} arms raise a TypeError", named.join(" and "))

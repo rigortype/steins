@@ -8,9 +8,10 @@
 //! routing is pinned from both sides, since a leg that only silenced the contract
 //! id would look green while the promotion leaked past it.
 //!
-//! The **all**-arms-rejected verdict is not emitted at all — issue #291 measured
-//! it empty on every public source — and that silence is pinned too, so a later
-//! reader does not mistake it for a gap.
+//! The **all**-arms-rejected verdict is not emitted for a `Verified` fact — issue
+//! #291 measured it empty on every public source — and that silence is pinned too, so
+//! a later reader does not mistake it for a gap. An `Asserted` fact with every arm
+//! rejected reports (issue #1099); `asserted_every_arm.rs` pins that side.
 //!
 //! Issue #418 extends the premise reader past `ArgValue::Var` to the other
 //! carriers the propagated-argument checks already resolve a fact for: a

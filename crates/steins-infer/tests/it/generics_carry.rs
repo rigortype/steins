@@ -1616,9 +1616,11 @@ fn the_conformance_shape_reads_and_now_enforces() {
     ));
     assert_eq!(ids(&ok), Vec::<String>::new());
 
-    // The declared rung is still exactly as silent as it was: with a body no summary
-    // proves, the same call reads `1 (asserted)` and enforces nothing even in strict
-    // mode. Nothing about the trust order moved — a second road opened beside it.
+    // The declared rung still enforces no proof: with a body no summary proves, the
+    // same call reads `1 (asserted)` and premises no `type.argument-mismatch`. Since
+    // #1099 the possibly id carries it instead: an Asserted fact whose every member
+    // `string` refuses reports `phpdoc.maybe-argument-mismatch`. Nothing about the trust
+    // order moved — a second road opened beside it.
     let o = unwrapper_opaque("template-type<Box<T>, Box, 'T'>");
     assert_eq!(
         dumped(&format!("{o}\\PHPStan\\dumpType(unwrapT(new Box(1)));")),
@@ -1627,7 +1629,7 @@ fn the_conformance_shape_reads_and_now_enforces() {
     let quiet = strict(&format!(
         "{o}function takesString(string $s): void {{}}\ntakesString(unwrapT(new Box(1)));"
     ));
-    assert_eq!(ids(&quiet), Vec::<String>::new());
+    assert_eq!(ids(&quiet), vec!["phpdoc.maybe-argument-mismatch".to_owned()]);
 }
 
 // 8. `key-of<T>` / `value-of<T>` over a function-level template bound from the
@@ -1703,7 +1705,9 @@ fn the_conformance_lines_match_the_spelled_union_finding_for_finding() {
     // is silent too, and exactly as silent as a hand-written `@return
     // 'debug'|'verbose'` is: an Asserted return fact premises no
     // `type.argument-mismatch` (ADR-0032's 2026-08-15 amendment), so enforcing it is
-    // the body summary's job, not this read's.
+    // the body summary's job, not this read's. The `acceptsInt` line is the exception
+    // since #1099: both arms are refused by `int`, and an Asserted fact whose every
+    // member is refused reports `phpdoc.maybe-argument-mismatch`, spelled or projected.
     let body = "function pick(array $items) { foreach ($items as $key => $_) { return $key; } \
                 throw new \\InvalidArgumentException('empty'); }\n";
     let sinks = "function acceptsString(string $value): void {}\n\
@@ -1722,7 +1726,12 @@ fn the_conformance_lines_match_the_spelled_union_finding_for_finding() {
         let t = strict(&format!("{template}{body}{sinks}{call}"));
         let h = strict(&format!("{hand}{body}{sinks}{call}"));
         assert_eq!(ids(&t), ids(&h), "{call} differs from the spelled union");
-        assert_eq!(ids(&t), Vec::<String>::new(), "{call}");
+        let expected: Vec<String> = if call.starts_with("acceptsInt") {
+            vec!["phpdoc.maybe-argument-mismatch".to_owned()]
+        } else {
+            Vec::new()
+        };
+        assert_eq!(ids(&t), expected, "{call}");
     }
     let t = strict(&format!("{template}{body}\\PHPStan\\dumpType(pick({FLAGS}));"));
     assert_eq!(dumped(&t), "dumped type: 'debug'|'verbose' (asserted)");

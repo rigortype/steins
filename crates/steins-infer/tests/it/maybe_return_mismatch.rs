@@ -9,10 +9,11 @@
 //! the promotion leaked past it — the same discipline `maybe_argument_mismatch.rs`
 //! keeps for the argument pair.
 //!
-//! The **all**-arms-rejected verdict is not emitted here either, and neither is a
-//! position with an arm the judgment cannot read: "some rejected, some accepted" is
-//! a claim about the whole arm list, so a list with a hole in it supports neither
-//! half. Both silences are pinned below.
+//! The **all**-arms-rejected verdict is not emitted for a `Verified` premise here
+//! either (an `Asserted` one reports, issue #1099, pinned in `asserted_every_arm.rs`),
+//! and neither is a position with an arm the judgment cannot read: "some rejected,
+//! some accepted" is a claim about the whole arm list, so a list with a hole in it
+//! supports neither half. Both silences are pinned below.
 
 use steins_infer::{
     Diagnostic, PHPDOC_MAYBE_RETURN_MISMATCH_ID, RETURN_ID, TYPE_MAYBE_RETURN_MISMATCH_ID, check,

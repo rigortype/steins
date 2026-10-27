@@ -23,15 +23,19 @@
 //!                                                              rung, unchanged)
 //! OneOf                      all                Verified       the same definite id: every path
 //!                                                              throws (decision D6)
-//! OneOf                      all                Asserted       silent: the proof layer needs a
-//!                                                              Verified premise (ADR-0052 §5)
+//! OneOf                      all                Asserted       phpdoc.maybe-argument-mismatch /
+//!                                                              phpdoc.maybe-return-mismatch,
+//!                                                              naming every member (#1099)
 //! OneOf                      some               Verified       type.maybe-argument-mismatch /
 //!                                                              type.maybe-return-mismatch
 //!                                                              (Floor::Strict)
 //! OneOf                      some               Asserted       phpdoc.maybe-argument-mismatch /
 //!                                                              phpdoc.maybe-return-mismatch
 //! OneOf                      none               any            silent
-//! Union / Refined / General  all                any            silent (issue #291's ruling)
+//! Union / Refined / General  all                Verified       silent (issue #291's ruling)
+//! Union / Refined / General  all                Asserted       phpdoc.maybe-argument-mismatch /
+//!                                                              phpdoc.maybe-return-mismatch
+//!                                                              (#1099)
 //! Union / Refined / General  some               any            the possibly grade, unchanged
 //! ```
 //!
@@ -47,9 +51,17 @@
 //! Which carriers reach this judgment: a variable whose value lane holds the
 //! `OneOf`, and a call whose proven return summary is one (an argument `g($x)`, or
 //! a returned `f($x)` through the same virtual binding `$v = f($x); return $v;`
-//! takes). A `OneOf` read from a declared arm list, a builtin's return envelope or
-//! an array shape stays declined: those lanes are `Asserted` declarations rather
-//! than proven values, and they have their own tables.
+//! takes). A `OneOf` read from a declared arm list (an `@param 'a'|'b'` docblock) is
+//! judged too, at `Asserted` (#1099); one read from a builtin's return envelope or an
+//! array shape stays declined: those lanes have their own tables.
+//!
+//! **The Asserted floor (#1099).** The proof layer needs a Verified premise, so an
+//! `Asserted` fact whose every member is refused cannot report a definite `type.*`
+//! finding; it used to report nothing at all, while the same fact with one accepted
+//! member reported. One rule closes the gap: an `Asserted` fact every member of which
+//! is rejected reports the possibly id (`phpdoc.maybe-*`, strict floor), the id that
+//! says "if the docblock is true, this throws". A `Verified` abstract fact with every
+//! arm rejected (`string $s` into `?int`) stays silent on #291's ruling.
 //!
 //! [`is_type_error`]: crate::arg_check::is_type_error
 
@@ -106,6 +118,9 @@ pub(crate) fn finite_verdict(
 /// The members, spelled the way the message names the subject.
 fn subject_of(members: &[Val]) -> String {
     let named: Vec<String> = members.iter().map(render_val).collect();
+    if let [only] = named.as_slice() {
+        return only.clone();
+    }
     format!("one of {}", named.join(", "))
 }
 
@@ -115,6 +130,14 @@ fn arms_clause(rejected: &[String]) -> String {
     } else {
         format!("its {} arms raise a TypeError", rejected.join(" and "))
     }
+}
+
+/// The clause of an `Asserted` fact whose every member is refused (#1099).
+fn every_clause(rejected: &[String]) -> String {
+    if let [only] = rejected {
+        return format!("its only value {only} raises a TypeError");
+    }
+    format!("every one of its arms ({}) raises a TypeError", rejected.join(", "))
 }
 
 fn mode_of(cx: &Cx) -> &'static str {
@@ -145,34 +168,60 @@ pub(crate) fn check_oneof_argument(
             out.push(cx.diagnostic(offset, value, Some(&provenance), callee, &param.name, ty));
             true
         }
-        FiniteVerdict::Every => false,
+        FiniteVerdict::Every => {
+            // Asserted: there is no proof, but the declared fact throws on every member.
+            let rejected: Vec<String> = members.iter().map(render_val).collect();
+            push_maybe_argument(
+                cx, param, ty, callee, offset, value, members, &every_clause(&rejected),
+                PHPDOC_MAYBE_ARGUMENT_MISMATCH_ID, out,
+            );
+            false
+        }
         FiniteVerdict::Some(rejected) => {
             let id = if stratum == Stratum::Verified {
                 TYPE_MAYBE_ARGUMENT_MISMATCH_ID
             } else {
                 PHPDOC_MAYBE_ARGUMENT_MISMATCH_ID
             };
-            let subject_name = value.render();
-            let pos = cx.tree().position(offset);
-            out.push(Diagnostic {
-                id,
-                path: cx.path().to_owned(),
-                line: pos.line,
-                column: pos.column,
-                message: format!(
-                    "argument {subject_name} to {callee}() may not become {} ${} — {subject_name} is {}, and {} ({} mode)",
-                    ty.render(),
-                    param.name,
-                    subject_of(members),
-                    arms_clause(&rejected),
-                    mode_of(cx),
-                ),
-                facet: None,
-                fix: None,
-            });
+            push_maybe_argument(
+                cx, param, ty, callee, offset, value, members, &arms_clause(&rejected), id, out,
+            );
             false
         }
     }
+}
+
+/// The possibly-grade argument finding for a `OneOf`, whichever clause it carries.
+#[allow(clippy::too_many_arguments)]
+fn push_maybe_argument(
+    cx: &Cx,
+    param: &Param,
+    ty: &NativeType,
+    callee: &str,
+    offset: u32,
+    value: &ArgValue,
+    members: &[Val],
+    clause: &str,
+    id: &'static str,
+    out: &mut Vec<Diagnostic>,
+) {
+    let subject_name = value.render();
+    let pos = cx.tree().position(offset);
+    out.push(Diagnostic {
+        id,
+        path: cx.path().to_owned(),
+        line: pos.line,
+        column: pos.column,
+        message: format!(
+            "argument {subject_name} to {callee}() may not become {} ${} — {subject_name} is {}, and {clause} ({} mode)",
+            ty.render(),
+            param.name,
+            subject_of(members),
+            mode_of(cx),
+        ),
+        facet: None,
+        fix: None,
+    });
 }
 
 /// Judge a `OneOf` return. `shown` is the returned expression as written (`$b`, or
@@ -201,24 +250,20 @@ pub(crate) fn check_oneof_return(
                 mode_of(cx),
             ),
         ),
-        FiniteVerdict::Every => return,
+        FiniteVerdict::Every => {
+            let rejected: Vec<String> = members.iter().map(render_val).collect();
+            (
+                PHPDOC_MAYBE_RETURN_MISMATCH_ID,
+                maybe_return_message(cx, ret, display, shown, members, &every_clause(&rejected)),
+            )
+        }
         FiniteVerdict::Some(rejected) => {
             let id = if stratum == Stratum::Verified {
                 TYPE_MAYBE_RETURN_MISMATCH_ID
             } else {
                 PHPDOC_MAYBE_RETURN_MISMATCH_ID
             };
-            let name = shown.render();
-            (
-                id,
-                format!(
-                    "return value {name} may not become {} (return type of {display}()) — {name} is {}, and {} ({} mode)",
-                    ret.render(),
-                    subject_of(members),
-                    arms_clause(&rejected),
-                    mode_of(cx),
-                ),
-            )
+            (id, maybe_return_message(cx, ret, display, shown, members, &arms_clause(&rejected)))
         }
     };
     let pos = cx.tree().position(span_start);
@@ -231,4 +276,21 @@ pub(crate) fn check_oneof_return(
         facet: None,
         fix: None,
     });
+}
+
+fn maybe_return_message(
+    cx: &Cx,
+    ret: &NativeType,
+    display: &str,
+    shown: &ArgValue,
+    members: &[Val],
+    clause: &str,
+) -> String {
+    let name = shown.render();
+    format!(
+        "return value {name} may not become {} (return type of {display}()) — {name} is {}, and {clause} ({} mode)",
+        ret.render(),
+        subject_of(members),
+        mode_of(cx),
+    )
 }
