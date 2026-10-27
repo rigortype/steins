@@ -224,7 +224,7 @@ fn candidate_walk(
     if !magic_obstacles_in_reach(cx, name).is_empty() {
         return ChainWalk::Unknown;
     }
-    walk_method_chain(cx, file, cd, name, method, magic)
+    walk_method_chain(cx, file, cd, name, method, magic, None)
 }
 
 /// One descendant of an arm, judged by its **whole chain** (issue #1092): an

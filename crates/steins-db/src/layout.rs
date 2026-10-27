@@ -133,6 +133,11 @@ pub struct GoverningRoot {
     first_party: Vec<PathBuf>,
     /// The target PHP range this manifest declares (issue #28), when it does.
     php_target: Option<PhpTarget>,
+    /// Whether the manifest declares a PHP version string the target parser cannot read
+    /// (`">= 8.1"`, `"^8.1 | ^8.2"`): `php_target` is then `None`, though the project
+    /// did declare one. Part of the layout's `Debug` rendering, hence of the generation
+    /// identity.
+    php_target_unreadable: bool,
 }
 
 impl GoverningRoot {
@@ -140,7 +145,7 @@ impl GoverningRoot {
     /// directory; both root lists are resolved against it.
     #[must_use]
     pub fn new(manifest: PathBuf, dir: PathBuf, vendor: Vec<PathBuf>, first_party: Vec<PathBuf>) -> Self {
-        Self { dir, manifest, vendor, first_party, php_target: None }
+        Self { dir, manifest, vendor, first_party, php_target: None, php_target_unreadable: false }
     }
 
     /// Attach the manifest's declared PHP target (issue #28).
@@ -154,6 +159,20 @@ impl GoverningRoot {
     #[must_use]
     pub fn php_target(&self) -> Option<&PhpTarget> {
         self.php_target.as_ref()
+    }
+
+    /// Record that the manifest declares a PHP version string no target could be read from.
+    #[must_use]
+    pub fn with_php_target_unreadable(mut self, unreadable: bool) -> Self {
+        self.php_target_unreadable = unreadable;
+        self
+    }
+
+    /// Whether the manifest declares a PHP version the target parser cannot read, which is
+    /// not the same as declaring none.
+    #[must_use]
+    pub fn php_target_unreadable(&self) -> bool {
+        self.php_target_unreadable
     }
 
     /// The directory this root governs.
@@ -271,6 +290,13 @@ impl ProjectLayout {
     #[must_use]
     pub fn is_fallback(&self) -> bool {
         self.roots.is_empty()
+    }
+
+    /// Whether the outermost governing root declares a PHP version string no target could
+    /// be read from (see [`GoverningRoot::php_target_unreadable`]).
+    #[must_use]
+    pub fn php_target_unreadable(&self) -> bool {
+        self.roots.last().is_some_and(GoverningRoot::php_target_unreadable)
     }
 
     /// The analysis's **target PHP range** (issue #28): the *outermost*

@@ -27,14 +27,14 @@ use steins_syntax::{ArgValue, ArrayKey, php_canonical_int_string};
 /// are its arithmetic.)
 ///
 /// The lowest `PHP_VERSION_ID` a `(major, minor)` admits (patch `00`).
-fn version_id_lo(m: (u16, u16)) -> u32 {
+pub(crate) fn version_id_lo(m: (u16, u16)) -> u32 {
     u32::from(m.0) * 10_000 + u32::from(m.1.min(99)) * 100
 }
 
 /// The highest `PHP_VERSION_ID` a `(major, minor)` ceiling admits (patch `99`;
 /// a `(maj, u16::MAX)` "any minor of this major" ceiling caps at minor 99 —
 /// PHP_VERSION_ID reserves two digits per component).
-fn version_id_hi(m: (u16, u16)) -> u32 {
+pub(crate) fn version_id_hi(m: (u16, u16)) -> u32 {
     u32::from(m.0) * 10_000 + u32::from(m.1.min(99)) * 100 + 99
 }
 

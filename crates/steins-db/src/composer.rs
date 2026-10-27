@@ -183,9 +183,20 @@ fn read_root(manifest: &Path, dir: &Path) -> Option<GoverningRoot> {
                 .and_then(|s| php_target_from(s, PhpTargetSource::Require))
         });
 
+    // A declared string the parser cannot read is not an undeclared target (it may be
+    // `>= 8.1` or `^8.1 | ^8.2`, which Composer accepts): the root records it.
+    let declared_unreadable = [
+        (json.get("config").and_then(|c| c.get("platform")), PhpTargetSource::Platform),
+        (json.get("require"), PhpTargetSource::Require),
+    ]
+    .into_iter()
+    .filter_map(|(o, source)| Some((o?.get("php")?.as_str()?, source)))
+    .any(|(s, source)| php_target_from(s, source).is_none());
+
     Some(
         GoverningRoot::new(manifest.to_path_buf(), dir.to_path_buf(), vendor, first_party)
-            .with_php_target(php_target),
+            .with_php_target(php_target)
+            .with_php_target_unreadable(declared_unreadable),
     )
 }
 
@@ -525,6 +536,23 @@ mod tests {
         assert!(discover(&[PathBuf::from("/definitely-not-a-real-path-9x8")], &cwd).is_fallback());
         // Relative spelling: resolved against `cwd`, and equally absent.
         assert!(discover(&[PathBuf::from("definitely-not-a-real-path-9x8")], &cwd).is_fallback());
+    }
+
+    /// A declared PHP version the target parser cannot read is kept apart from an
+    /// undeclared one (issue #1112): both have no target, only the first is flagged.
+    #[test]
+    fn an_unreadable_php_declaration_is_not_an_undeclared_one() {
+        let flag = |name: &str, manifest: &str| {
+            let t = Tree::new(name);
+            t.write("composer.json", manifest);
+            let l = discover(std::slice::from_ref(&t.0), &t.0);
+            (l.php_target().is_some(), l.php_target_unreadable())
+        };
+        assert_eq!(flag("php-ok", r#"{"require":{"php":">=8.1"}}"#), (true, false));
+        assert_eq!(flag("php-none", r#"{"require":{"ext-json":"*"}}"#), (false, false));
+        assert_eq!(flag("php-space", r#"{"require":{"php":">= 8.1"}}"#), (false, true));
+        assert_eq!(flag("php-pipe", r#"{"require":{"php":"^8.1 | ^8.2"}}"#), (false, true));
+        assert_eq!(flag("php-platform", r#"{"config":{"platform":{"php":"8.3.1"}}}"#), (true, false));
     }
 
     /// A missing seed is dropped, not fatal.

@@ -78,6 +78,7 @@ mod enforced_top_return;
 mod enum_case_domain;
 mod exhaustiveness;
 mod existence_guard;
+mod method_exists_builtin;
 mod false_arm_strip;
 mod float_boundary_coercion;
 mod fold_allowlist_growth;

@@ -105,6 +105,10 @@ pub(crate) struct Cx<'a> {
     /// declared range lies at or above one builtin's change boundary. `None` is an
     /// undeclared target, which the floor admits.
     pub(crate) php_target: Option<&'a steins_db::PhpTarget>,
+    /// The project declares a PHP version string no target could be read from, so
+    /// [`Self::php_target`] being `None` is not "undeclared". Only the sidecar-reflection
+    /// gate reads it (issue #1112); the version folds keep their own reading.
+    pub(crate) php_target_unreadable: bool,
     /// The guards variables held at the statements of the scopes walked so far in this file,
     /// for the closures those statements create: a by-value capture snapshots the variable at
     /// creation, so the guard it held then is the one the closure body tests (ADR-0104).
@@ -129,6 +133,7 @@ impl<'a> Cx<'a> {
             version_id: None,
             purity: None,
             php_target: None,
+            php_target_unreadable: false,
             guard_seeds: None,
         }
     }
@@ -158,6 +163,7 @@ impl<'a> Cx<'a> {
             version_id,
             purity,
             php_target,
+            php_target_unreadable: false,
             guard_seeds: None,
         }
     }
@@ -176,6 +182,7 @@ impl<'a> Cx<'a> {
             version_id: self.version_id,
             purity: self.purity,
             php_target: self.php_target,
+            php_target_unreadable: self.php_target_unreadable,
             guard_seeds: self.guard_seeds,
         }
     }

@@ -6,11 +6,13 @@
 
 use std::collections::HashSet;
 
+use steins_sidecar::{ReflectedClassKind, ReflectedMethod, Visibility};
 use steins_syntax::{
     CallExpr, Callee, ClassDecl, NameRef, Receiver, RefKind, Span, StaticClass, normalize_const_fqn,
 };
 
 use crate::cx::Cx;
+use crate::fold_args::{version_id_hi, version_id_lo};
 use crate::early_binding::{Binding, class_use, redammed};
 use crate::dump::resolved_fn_fqn;
 use crate::env::{Store, Stratum};
@@ -128,6 +130,8 @@ pub(crate) enum ChainWalk {
     /// eligible. Carries the ordered simple class names (for the message), the
     /// ordered chain FQNs (for the A2ii homonym leg), and whether any node was
     /// declared conditionally (A2i — re-dams the claim).
+    /// A builtin node the sidecar's reflection answered (issue #1112) is in neither list: the
+    /// boot-surface homonym check holds for project names only.
     Absent { simple_chain: Vec<String>, fqns: Vec<String>, any_conditional: bool },
     /// A node holds the method, its own or through a trait, abstract, static or of
     /// any visibility. The walk stops there, so `fqns` ends at the declaring node.
@@ -213,7 +217,7 @@ pub(crate) fn enumerate_method_chain(cx: &Cx, start_fqn: &str, method: &str, kin
     let Some((file, cd)) = cx.find_class(start_fqn) else {
         return ChainWalk::Unknown;
     };
-    walk_method_chain(cx, file, cd, start_fqn, method, Some(kind.magic()))
+    walk_method_chain(cx, file, cd, start_fqn, method, Some(kind.magic()), None)
 }
 
 /// Walk the chain that starts at declaration `cd` (in file `file`, reached by the
@@ -237,6 +241,7 @@ pub(crate) fn walk_method_chain(
     start_name: &str,
     method: &str,
     magic: Option<&str>,
+    mut folder: Option<&mut dyn Folder>,
 ) -> ChainWalk {
     let (mut cfile, mut cd) = (file, cd);
     let mut cur = start_name.to_owned();
@@ -301,26 +306,37 @@ pub(crate) fn walk_method_chain(
             let tree = &cx.units[cfile].tree;
             interfaces.extend(cd.implements.iter().map(|r| tree.resolve_class_fqn(r)));
         }
-        let Some(pref) = &cd.parent else {
-            if !interfaces.is_empty() {
-                let (pending, chain) = (interfaces, simple_chain);
-                return climb_interfaces(cx, method, pending, seen, chain, fqns, any_conditional);
-            }
-            return if any_magic {
-                ChainWalk::Magic { fqns, any_conditional }
-            } else {
-                ChainWalk::Absent { simple_chain, fqns, any_conditional }
-            };
-        };
+        let Some(pref) = &cd.parent else { break };
         cur = cx.units[cfile].tree.resolve_class_fqn(pref);
-        // Leg (b)/(f)/(i): every ancestor edge must resolve to a UNIQUE project
-        // declaration. `find_class` returns `None` for `Absent` (a builtin/vendor-
-        // unresolved ancestor — leg f, awaiting the reflect method surface, M2) and
-        // for `Ambiguous` (a duplicate FQN or an alias/decl collision — leg i).
-        let Some((pfile, pcd)) = cx.find_class(&cur) else {
-            return ChainWalk::Unknown;
-        };
-        (cfile, cd) = (pfile, pcd);
+        // Leg (b)/(i): every ancestor edge must resolve to a UNIQUE project declaration.
+        // `find_class` returns `None` for `Absent` (a builtin/vendor-unresolved ancestor)
+        // and for `Ambiguous` (a duplicate FQN or an alias/decl collision — leg i). A
+        // builtin ancestor is leg (f): `method_exists` alone, with the sidecar, asks the
+        // reflected class, which lists what it inherits, so the class chain ends there
+        // (issue #1112); every other lane and a class the sidecar cannot reflect stay
+        // `Unknown`.
+        if let Some((pfile, pcd)) = cx.find_class(&cur) {
+            (cfile, cd) = (pfile, pcd);
+            continue;
+        }
+        match reflect_builtin_node(cx, &mut folder, &cur, method, false, false) {
+            Some(true) => {
+                return ChainWalk::Declared { fqns, any_conditional };
+            }
+            Some(false) => {}
+            None => return ChainWalk::Unknown,
+        }
+        break;
+    }
+    if !interfaces.is_empty() {
+        let pending = interfaces;
+        let chain = (simple_chain, fqns);
+        return climb_interfaces(cx, folder, method, pending, seen, chain, any_conditional);
+    }
+    if any_magic {
+        ChainWalk::Magic { fqns, any_conditional }
+    } else {
+        ChainWalk::Absent { simple_chain, fqns, any_conditional }
     }
 }
 
@@ -331,14 +347,15 @@ pub(crate) fn walk_method_chain(
 /// twice is a diamond, walked once. An edge that does not resolve to one project
 /// interface (a builtin, a vendor name, an ambiguous one), a member-incomplete file and
 /// a conditional node with the dam standing leave the walk as unprovable as the class
-/// chain's own legs do.
+/// chain's own legs do. With a `folder`, a builtin interface is answered by the
+/// sidecar's reflection ([`reflect_builtin_node`], issue #1112).
 fn climb_interfaces(
     cx: &Cx,
+    mut folder: Option<&mut dyn Folder>,
     method: &str,
     mut pending: Vec<String>,
     mut seen: HashSet<String>,
-    mut simple_chain: Vec<String>,
-    mut fqns: Vec<String>,
+    (mut simple_chain, mut fqns): (Vec<String>, Vec<String>),
     mut any_conditional: bool,
 ) -> ChainWalk {
     while let Some(fqn) = pending.pop() {
@@ -346,7 +363,17 @@ fn climb_interfaces(
             continue;
         }
         let Some((file, cd)) = cx.find_class(&fqn) else {
-            return ChainWalk::Unknown;
+            // A reflected interface lists its parents' methods too: its edges are not
+            // walked.
+            match reflect_builtin_node(cx, &mut folder, &fqn, method, true, false) {
+                Some(true) => {
+                    return ChainWalk::Declared { fqns, any_conditional };
+                }
+                Some(false) => {
+                    continue;
+                }
+                None => return ChainWalk::Unknown,
+            }
         };
         if !cd.is_interface {
             return ChainWalk::Unknown;
@@ -367,6 +394,53 @@ fn climb_interfaces(
         pending.extend(edges.map(|r| tree.resolve_class_fqn(r)));
     }
     ChainWalk::Absent { simple_chain, fqns, any_conditional }
+}
+
+/// The sidecar's answer for a chain node `find_class` cannot resolve (issue #1112): `Some(true)`
+/// when the reflected class has `method`, `Some(false)` when it lacks it (a reflected class
+/// lists the methods it inherits, so the walk ends there), `None` when nothing can be said.
+///
+/// Only a name no project file declares ([`Cx::class_absent`]) is asked: an ambiguous one is a
+/// project class Steins cannot pick. Only an internal class or interface of the wanted kind
+/// counts: `reflect_class` never autoloads, so a vendor class is not resident, and a trait or an
+/// enum is not a chain node. `start` marks the class the question names, the only node whose
+/// private methods count. The envelope-grade reflection answers the `method_exists` fold
+/// alone, and only on the project's own PHP minor; no absence finding is premised on it (ADR-0049 A28).
+pub(crate) fn reflect_builtin_node(
+    cx: &Cx,
+    folder: &mut Option<&mut dyn Folder>,
+    fqn: &str,
+    method: &str,
+    interface: bool,
+    start: bool,
+) -> Option<bool> {
+    let folder = folder.as_deref_mut()?;
+    if !cx.class_absent(fqn) {
+        return None;
+    }
+    // The reflection is the sidecar's PHP, not the project's: it answers only when the
+    // analysis PHP view (issue #28) is that minor's whole interval, so no declared
+    // target, or one pinned to the sidecar's minor. A wider target (`>=8.1` on an 8.3
+    // sidecar) is a version the method may not exist on; the `PHP_VERSION_ID` fold
+    // reads the same interval and stays undecided the same way.
+    if cx.php_target_unreadable {
+        return None; // a declared target we could not read is not an undeclared one.
+    }
+    let minor = folder.php_minor()?;
+    let whole = (version_id_lo(minor), Some(version_id_hi(minor)));
+    if cx.version_id != Some(whole) {
+        return None;
+    }
+    let rc = folder.reflected_class(fqn)?.declaration?;
+    let kind = if interface { ReflectedClassKind::Interface } else { ReflectedClassKind::Class };
+    if !rc.internal || rc.kind != kind {
+        return None;
+    }
+    // A private method of a builtin ancestor is listed by the class's own reflection, but
+    // `method_exists` on a subclass is false for it (`AppEx extends \Exception`, `__clone`):
+    // only the start class counts its private methods.
+    let visible = |m: &&ReflectedMethod| start || m.visibility != Visibility::Private;
+    Some(rc.methods.iter().filter(visible).any(|m| m.name.eq_ignore_ascii_case(method)))
 }
 
 /// Run the full ADR-0049 §4 ladder for one method/static call and emit
@@ -1701,7 +1775,7 @@ mod tests {
             return name(&enumerate_method_chain(&cx, start, method, UndefKind::Instance));
         }
         let Some((file, cd)) = cx.find_class(start) else { return "unresolved" };
-        name(&walk_method_chain(&cx, file, cd, start, method, None))
+        name(&walk_method_chain(&cx, file, cd, start, method, None, None))
     }
 
     const SRC: &str = "<?php
