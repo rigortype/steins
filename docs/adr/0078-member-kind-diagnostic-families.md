@@ -515,3 +515,31 @@ carries the statement's form as `Scope::returns` (a `ReturnSite` per `return`,
 found on the syntax tree rather than the trace, so dead code and constructs the
 trace leaves opaque are covered); an arrow function's body is one
 `ReturnForm::ArrowBody`.
+
+## Amendment (2026-10-27): the containment shield of `if` and `?:` is retracted without a `goto` (issue #1108, run #1114 slice S10) — PENDING ratification
+
+Designed in run #1114, slice S10 (#1108); landed when that slice merges.
+
+The 2026-10-03 amendment (#929) kept the enclosing-arm rule "unchanged, either polarity
+and containment": `scan_var_usage` shields a read under a bare `isset`/`empty` test of
+its name in **both** arms of an `if` or `?:`, which withholds the read without deciding
+which arm the guard protects. The sided `bound_when` rule that amendment added is
+applied on top and decides that on its own, so the containment only costs findings:
+`if (empty($u)) { echo $u; }` and `if (!isset($u)) { echo $u; }` over a never-bound `$u`
+are PHP warnings and are silent.
+
+Decision (owner decision 4 of #1114): for `Node::If` and `Node::Conditional`, when the
+scope holds no `goto` or label, the shield is no longer extended with the names the
+condition tests; the sided `bound_when` of rules 1 and 2 is the rule. The body of
+`if (isset($u))`, the true arm of `isset($u) ? $u : 0` and the false arm of
+`empty($u) ? 0 : $u` stay silent because the sided rule proves `$u` bound there. A
+scope with a `goto` keeps today's containment, since the sided shields are disabled
+there (the `goto` exception). The `&&`/`||` operands, `??` and the maybe leg are
+unchanged, `isset($x) || print($x)` keeps reporting, and a name bound anywhere in the
+scope stays on the maybe leg. This adds default-floor `variable.undefined` findings,
+each a true positive by construction.
+
+ADR-0081's decision 5 ("this narrows `guard_tested_names`' both-arms shield to the
+actual protected arm, for this pass only; the definite pass and the walk keep their
+existing shields unchanged") is superseded for the definite pass in the same terms: the
+definite pass takes the sided rule for `if` and `?:` when no `goto` is present.

@@ -2155,3 +2155,27 @@ and is-a is `No`) is right, but `class_covers` implemented it for class, enum,
 object and mixed arms only and answered `Yes` for the rest, so an intersection,
 a `callable`, a non-empty-mixed or a union arm died under a positive
 `instanceof`. ADR-0106 §2.8 states the rule for those arms.
+
+## Note (2026-10-27): an Asserted subtraction demotes the residue of the lane (issue #1107, run #1114 slice S5) — PENDING ratification
+
+Designed in run #1114, slice S5 (#1107); landed when that slice merges.
+
+§5 says a finding rests on its premise's stratum, and §2's subtraction preserves the
+stratum of every arm it keeps, "so an Asserted arm never launders to Verified". The
+dual was missing. A `@phpstan-assert` is a claim and not a fact the engine established,
+yet `subtract_contract_lane_at` recorded the guard on each arm it left and deleted
+arms, and the survivors kept their own `Verified` stratum: after
+`lie($x); $x->zz()` over `TT2|OnlyB` the call was proven undefined, in the default
+profile, although PHP runs it (the lying tag removed `OnlyB` for nothing). The rule: when
+the subtracting guard is `Asserted` and the subtraction changed the lane, every
+surviving arm is demoted to `Asserted`. The negated scalar path
+(`@phpstan-assert !int`) goes through the same `_at(..., Asserted)` entry instead of the
+`Verified` default. The consequences are all conservative: an emptied lane needs an
+all-`Verified` carrier, `path_fate` keeps paths, a derived verdict is demoted, and a
+dump shows `(asserted)`. The finding keeps its path and moves to the `phpdoc.*` id
+under `Floor::Strict` (`phpdoc.undefined-method`).
+
+An `assert()` statement is unaffected: it stays `Verified` (the 2026-07-25 amendment,
+#1095), and so does an `instanceof` guard. See
+[ADR-0106](0106-a-condition-narrows-along-its-paths.md) §2.2, whose envelope path
+(`-if-true`, `-if-false`) reaches the same subtraction.

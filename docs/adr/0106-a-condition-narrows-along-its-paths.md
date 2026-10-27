@@ -10,6 +10,11 @@ ADR-0052 §6, states ADR-0052 §2's positive class rule for the arms
 pointer notes of the same date are on those ADRs, on ADR-0062 (Amendment N) and
 on ADR-0088.
 
+**Amended (2026-10-27) by run #1114**, the twelve follow-ups this run filed. The
+paragraphs headed "Designed in run #1114" below record the design before the code
+lands; each names its slice and issue, and the slice that lands it does not edit
+`docs/adr/`. They are PENDING ratification, like the rest of this ADR.
+
 ## 1. Context
 
 PHP honours a family of guard spellings that Steins does not narrow on. Most of
@@ -145,6 +150,42 @@ declaring `go` but not `gone` keeps reporting. The operand and ternary positions
 can now mark an operand dead where the arm lane proves it; each such sharpening is
 classified in the slice's diff.
 
+**Designed in run #1114, slice S8 (#1096); landed when that slice merges.** A2
+closed the drift for two vocabulary entries, and the operand site still runs only
+four (type, scalar refinement, class, shape) while the branch site runs the full
+list of `apply_branch_vocabularies`: the same-expression guards, the
+`-if-true`/`-if-false` assert envelopes, the existence and stored-guard vouches,
+`seed_out_params`, `seed_produced_places` and `remembered::produce`. So `isFoo($o)
+&& $o->other()` and `isFoo($o) ? $o->other() : 0` stay silent where `if (isFoo($o))
+{ return $o->other(); }` reports, and `preg_match('/(x)?y/', $s, $m) === 1 &&
+strlen($m[1]) > 0` misses the `offset.maybe-missing` the `if` spelling reports.
+The decision is one vocabulary function, `apply_vocabularies`, owned by
+`narrow.rs`: the branch site, the operand and ternary site (through
+`threaded_operand_env`) and the `assert` statement all pass it to the path driver.
+The envelopes apply at `Asserted` whatever the site. The operand site keeps
+`cond_invalidations` after the driver (the branch site masks stale conjuncts
+instead) and drops its own `remembered::produce` call, which the list now
+contains. Cost: the full list on every right operand, cheap scans over the two
+`(env, store)` clones that already exist. The rows that must stay silent are
+`isFoo($o) && $o->fooOnly()` and the required-group `preg_match` operand.
+
+**Designed in run #1114, slice S9 (#1098); landed when that slice merges.** A
+value-position `&&` or `||` (`$r = $n !== null && method_exists($n, 'gone') &&
+f();`, a `return`, a ternary condition) is not a condition today:
+`eval_logical_fact` evaluates the right operand under the entry env, so no left
+operand narrows it and no existence guard folds, and a dead mark is written after
+the positions were judged. The decision (option B): the value-position `&&`/`||`
+is lowered as the condition the `if` would lower (`ArgValue::Logical` carries a
+`CondExpr`, as `ArgValue::Ternary` already does) and evaluated through
+`eval_cond`, which threads the operand env, folds the existence guards and marks
+dead operands. `xor` keeps the truthiness path. Because positions are judged
+before values are evaluated, a pre-step evaluates the statement's value-position
+conditions for dead-marking only; `eval_cond` is read-only, so the double
+evaluation is safe. The trace payload gains a codec arm for `Logical`; no schema
+bump. Per-position environments (option C: findings inside an operand read the
+operand environment, which touches the lowering, `stmt_checks`, `nested` and the
+D3 table) are **deferred** to #1115 and listed in §5.
+
 ### 2.3 Stored conditions (A5, #933 leg 2)
 
 A variable assigned a condition holds that condition in `Store::guard_vars`, and
@@ -174,6 +215,22 @@ True positives stay: `$has = $v !== null; $v = null; if ($has) return $v;` (the
 dependency was rebound), `$has = $v !== null || $z; if ($has) return $v;` (path 2
 leaves `$v` nullable and the join keeps `float|null`), and `$has = …; $has =
 true; if ($has)` (`release($has)`) all throw in PHP and keep reporting.
+
+**Designed in run #1114, slice S3 (#1110); landed when that slice merges.** The
+two-sided fall-through rule restores each untested name through
+`restore_branch_scoped`, whose "rebound itself" test is survival in the side's env
+or contract. A by-reference call forgets the name, which passes the test, so the
+pre-test value (`'abc'`) comes back after both sides rewrote it. The hand-back
+rule reads a **syntactic write set per side** instead, computed in steins-infer
+over the trace (`side_writes.rs`): assignments, offset writes, appends and
+unsets, destructure targets, loop and `try` write sets, opaque writes (a poisoning
+construct writes everything), recursion into `if`/`match`/`try`, and every
+invalidated name that is not a provable by-value site (the predicate the
+conjunct-writes pass already uses). At the join a name goes back only if neither
+side's set holds it. The test is not the survival of the suspect. The same rule
+may serve the presence-guard put-back, which has the same weakness
+(`if (isset($a['k'])) { fill($a); }`), with its own witness. Reads and by-value
+calls keep the hand-back, so the read-only sides keep their findings.
 
 ### 2.4 The isset equivalences (B1, C; #933 legs 1 and 3, #1079)
 
@@ -254,6 +311,20 @@ mixed-kind labels (`case 1: case "a":`), and string labels on an int subject
 rule (ADR-0052's note on #439) is unchanged: a `switch` residue still proves
 silence and may not buy a finding.
 
+**Designed in run #1114, slice S1 (#1090); landed when that slice merges.** The
+arm rebinding of a `match` follows the same table. The loose arm's fact is the
+labels intersected with the subject's fact, so it depends on the subject and
+inherits its `thinned` flag, line and closure (#1088). The strict arm's fact is
+exactly the labels, established by the runtime `===`, so it stays `Verified`
+whatever the subject's stratum (decision 7 of #1114, a deliberate deviation from
+the filed checkbox). What the strict arm used to drop is `thinned`: it was built
+as `Known::value`, so a subject whose fact had been thinned by a guard came back
+un-thinned and the arm's argument check proved a mismatch the guard's exit had
+made unreachable. The arm now keeps `thinned`, `line` and `closure`, replaces
+`fact` and `bound`, and `check_oneof_argument` demotes to the possibly grade as it
+does for the loose arm. A strict `match` over an Asserted `@param 1|2 $k` with
+`1 => takes_string($k)` keeps its proven `type.argument-mismatch`.
+
 ### 2.7 `method_exists` narrows the receiver lane (A4, #981; D3)
 
 On the then side, an arm whose class hierarchy provably lacks the method is
@@ -294,6 +365,23 @@ own chain, so a walk from one, and the call lanes, keep walking `extends` alone.
 An abstract class or an interface below the anchor is no candidate of the
 `method_exists` ladder: it has no instances, and its concrete descendants are
 candidates in their own right.
+
+**Designed in run #1114, slice S11 (#1112); landed when that slice merges.** The
+chain walk returns `Unknown` at a node `find_class` cannot resolve (the start
+class, a parent, an interface), with "awaiting the reflect method surface" as the
+reason. With the sidecar that surface exists: `Folder::reflected_class` returns the
+class with every method, inherited included. The decision (owner decision 2 of
+#1114): **every** unresolved builtin node is answered by reflection, not only
+builtin interfaces. A reflected node that has the method is `Declared`; one that
+lacks it ends the walk absent, since a reflected class already lists what it
+inherits. The node is recorded apart from the project chain (the verdict still
+requires every project chain FQN to be a non-boot-surface class), and a node
+whose reflection is unavailable, or no sidecar, stays `Unknown` as today. So
+`method_exists(AbsB::class, 'nope')` over an `AbsB implements \Countable` folds
+No (the body is dead and the strict-floor finding in it goes), `'count'` folds
+Yes, and a version guard on a builtin class folds on the project's PHP. The
+change is invisible under `--no-php` (byte-identical) and can add and remove
+findings in sidecar runs, which is why the slice measures with a sidecar A/B.
 
 ### 2.8 Class arms under a positive guard (D, #908, #909; D4)
 
@@ -345,6 +433,23 @@ corpus now lower this way. The expected true-positive class (`if (empty($row))
 `array{}` reached by narrowing is silent, for `!$row` too, while a declared
 `array{}` reports `offset.undeclared`. That gap predates the run and is left
 open in §5.
+
+**Designed in run #1114, slice S7 (#1105); landed when that slice merges.** The
+falsy side of a guard on a non-nullable shape bound
+`Fact::Singleton(Val::Array([]))` at the shape's `Asserted` stratum. The proof
+emitter reads a variable base only at `Verified`, and the strict leg resolves
+only a `Fact::Shape`, so the read stayed silent while the declared `array{}`
+reported. The decision: that side binds the sealed shape with no fields and
+`non_empty: false`, the `array{}` this ADR already names, at the shape's stratum,
+instead of the value-lane singleton. A read of an absent key then answers
+`DeclaredAbsent` and reports **`offset.undeclared`** at the contracts floor, the
+id the declared `array{}` reports (owner decision 3 of #1114). It does not report
+`offset.missing`: that is the proof-grade id, and a native-only `array $row` has
+no fact at all, because native array-ness is not in the value lane. The grade
+stays open (§5). A nullable base (`?array` under `!$row`) still binds nothing, and
+a write to the key promotes the shape as before; the list-head and `set_non_empty`
+pins of §2.5 are unchanged. `$row === []` keeps reporting `offset.missing` with
+the sidecar.
 
 ## 3. Consequences
 
@@ -409,4 +514,15 @@ The private corpus runs under the lock discipline before merge.
   the true side of `empty($v)`) reports nothing for `$v['x']`, while a declared
   `array{}` reports `offset.undeclared` and `$v === []` reports `offset.missing`
   (§2.9). It predates this run.
+- **Per-position environments** (run #1114, deferred to #1115): findings inside
+  an operand or a ternary arm read the entry store, because a conditional
+  position is judged at `Reach::Existence` and the value-dependent families
+  decline it (ADR-0104). Judging a position under the operand environment of its
+  guard region means linking each position to its region and polarity at
+  lowering, and touches `stmt_checks`, `nested` and the D3 table. S8 and S9 fix
+  the verdict of the operand and the dead marks, not the findings inside it.
+- **Proof-grade `offset.missing` for a native `array` parameter** (run #1114,
+  decision 3): S7 lands `offset.undeclared` at the contracts floor. The proof id
+  needs native array-ness in the value lane, which does not exist (a native-only
+  `array $row` dumps `unknown`).
 - **PHPStan's behaviour** on these spellings was not re-run for this ADR.

@@ -415,3 +415,29 @@ applies the condition's narrowing at the tested polarity beside the vouch. The
 invalidation rules of §2.7 (rebinding the name or a dependency, barriers, join
 intersection, poisoned scopes) are unchanged. See
 [ADR-0106](0106-a-condition-narrows-along-its-paths.md) §2.3.
+
+## Amendment (2026-10-27): a plain copy rebinds its target (issue #1113, run #1114 slice S2) — PENDING ratification
+
+Designed in run #1114, slice S2 (#1113, with the pins of #1091); landed when that slice
+merges.
+
+§2.7's invalidation says rebinding the stored name or a dependency drops a guard.
+Assigning a heap object by a plain copy (`$x = $y` where `$y` holds an object) took an
+alias arm in `bind_value` that removed `$x` from the env and pointed `refs` at the
+shared id, and never passed `Store::release`, the one funnel that drops `guard_vars`,
+`members`, `narrowed`, `suspect`, `paths_capped`, places, property vouches and remembered
+keys. So `$ok = method_exists($x, 'm'); $x = $y; if ($ok) …` kept a guard about an object
+`$x` no longer holds, and `Store::members` stayed stale (`$x = $y` dumped the old class
+and pruned a live call). Decision: **a plain copy is a rebind of the target**. The alias
+arm reads the source id first, then clears the target (`env.remove` plus `release`), then
+inserts the `refs` entry; the shared heap id and the copied arm lane are the only things
+the target keeps. A self-alias `$a = $a` is unaffected because the id is read before the
+release. Aliasing pins (`$b = $a` sharing an id) are unchanged. This closes a stale
+`Member` hole as well as the guard.
+
+Issue #1091 (a heap carrier surviving a reference write) is **closed as not
+reproducible** (owner decision 5 of #1114): the scope is poisoned at lowering by the
+reference, `extract` or by-reference capture, every heap arm of `bind_value` is gated on
+an unpoisoned scope, and the carrier is never bound, so the dumps say `unknown` and the
+method call after the write is silent. S2 pins those witnesses. See
+[ADR-0036](0036-object-state-heap-model.md) for the store.

@@ -1616,3 +1616,17 @@ A2i is unchanged for the importer; a conditional trait declines the composition
 (ADR-0105 C7) rather than re-damming it. A trait name stays a name in §5's
 sense: `extends` naming one, `new` on one and a chain node that is one still
 answer as before.
+
+## Amendment (2026-10-27): leg (f) is partly closed by the reflect method surface (issue #1112, run #1114 slice S11) — PENDING ratification
+
+Designed in run #1114, slice S11 (#1112); landed when that slice merges.
+
+The method-absence ladder's leg (f), "every chain class is project-defined — a chain
+reaching a builtin ancestor waits for the sidecar reflect slice to enumerate that class's
+method surface, Unknown-silent until then", is closed for the `method_exists` fold only,
+and only with the sidecar. `ReflectedClass.methods` lists every method of the class,
+inherited included, so a builtin node of the chain (the start class, a parent, an
+interface) is answered by `Folder::reflected_class`, and the walk ends there. The call
+lanes (`call.undefined-method`) keep leg (f) as written. Without the sidecar, or for a
+class the sidecar cannot reflect, a builtin node stays `Unknown`. See
+[ADR-0106](0106-a-condition-narrows-along-its-paths.md) §2.7.
