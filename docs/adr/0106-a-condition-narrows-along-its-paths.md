@@ -176,7 +176,7 @@ contains. Cost: the full list on every right operand, cheap scans over the two
 `(env, store)` clones that already exist. The rows that must stay silent are
 `isFoo($o) && $o->fooOnly()` and the required-group `preg_match` operand.
 
-**Designed in run #1114, slice S9 (#1098); landed when that slice merges.** A
+**Designed in run #1114, slice S9 (#1098); landed in #1133.** A
 value-position `&&` or `||` (`$r = $n !== null && method_exists($n, 'gone') &&
 f();`, a `return`, a ternary condition) is not a condition today:
 `eval_logical_fact` evaluates the right operand under the entry env, so no left
@@ -192,6 +192,15 @@ evaluation is safe. The trace payload gains a codec arm for `Logical`; no schema
 bump. Per-position environments (option C: findings inside an operand read the
 operand environment, which touches the lowering, `stmt_checks`, `nested` and the
 D3 table) are **deferred** to #1115 and listed in §5.
+
+As landed, the pre-step skips a condition that reads a name the statement hands to a
+call, unless `by_value_survivors` keeps the name, since the call may rebind it before
+the condition runs. A decided operand is read at `cond_read_stratum`. `echo` values are
+not covered, because `StmtKind::Echo` holds only its calls, and neither is a ternary
+inside a binary operand (#1137). A decided connective is now a proven `true` or
+`false`, which can surface a `type.argument-mismatch` or `type.return-mismatch` against
+a `true` or `false` declaration; PHP throws a TypeError there, so these are true
+positives.
 
 ### 2.3 Stored conditions (A5, #933 leg 2)
 
@@ -223,7 +232,7 @@ dependency was rebound), `$has = $v !== null || $z; if ($has) return $v;` (path 
 leaves `$v` nullable and the join keeps `float|null`), and `$has = …; $has =
 true; if ($has)` (`release($has)`) all throw in PHP and keep reporting.
 
-**Designed in run #1114, slice S3 (#1110); landed when that slice merges.** The
+**Designed in run #1114, slice S3 (#1110); landed in #1131.** The
 two-sided fall-through rule restores each untested name through
 `restore_branch_scoped`, whose "rebound itself" test is survival in the side's env
 or contract. A by-reference call forgets the name, which passes the test, so the
@@ -238,6 +247,15 @@ side's set holds it. The test is not the survival of the suspect. The same rule
 may serve the presence-guard put-back, which has the same weakness
 (`if (isset($a['k'])) { fill($a); }`), with its own witness. Reads and by-value
 calls keep the hand-back, so the read-only sides keep their findings.
+
+Three points differ as landed, all in the sound direction (#1132). A destructure
+counts as writing every name, because the trace does not record its targets. A
+method call is opaque, so even a by-value method withholds the hand-back. And a
+barrier (`unset($s)`, `$s++`) still hands back. The first two lose a true positive
+each. A side that writes while the other side is empty now reports where the design
+expected silence: the suspect join intersects, so a suspect cannot survive a side
+that wrote, which matches the plain assignment spelling. The presence-guard put-back
+was not changed.
 
 ### 2.4 The isset equivalences (B1, C; #933 legs 1 and 3, #1079)
 
