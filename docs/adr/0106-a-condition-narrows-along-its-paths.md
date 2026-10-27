@@ -311,7 +311,7 @@ mixed-kind labels (`case 1: case "a":`), and string labels on an int subject
 rule (ADR-0052's note on #439) is unchanged: a `switch` residue still proves
 silence and may not buy a finding.
 
-**Designed in run #1114, slice S1 (#1090); landed when that slice merges.** The
+**Designed in run #1114, slice S1 (#1090); landed in #1117.** The
 arm rebinding of a `match` follows the same table. The loose arm's fact is the
 labels intersected with the subject's fact, so it depends on the subject and
 inherits its `thinned` flag, line and closure (#1088). The strict arm's fact is
@@ -320,10 +320,14 @@ whatever the subject's stratum (decision 7 of #1114, a deliberate deviation from
 the filed checkbox). What the strict arm used to drop is `thinned`: it was built
 as `Known::value`, so a subject whose fact had been thinned by a guard came back
 un-thinned and the arm's argument check proved a mismatch the guard's exit had
-made unreachable. The arm now keeps `thinned`, `line` and `closure`, replaces
-`fact` and `bound`, and `check_oneof_argument` demotes to the possibly grade as it
-does for the loose arm. A strict `match` over an Asserted `@param 1|2 $k` with
-`1 => takes_string($k)` keeps its proven `type.argument-mismatch`.
+made unreachable. The arm now keeps `thinned` and `line`, replaces `fact` and
+`bound`, and resets `closure`, and `check_oneof_argument` demotes to the possibly
+grade as it does for the loose arm. The closure is reset because a closure is
+never `===` a literal label, so an arm reached through one is dead at runtime;
+keeping it let `match ($f) { 1 => $f("a"), default => 0 }` over
+`$f = fn(int $x): int => $x` prove a mismatch PHP never reaches (#1117's review).
+A strict `match` over an Asserted `@param 1|2 $k` with `1 => takes_string($k)`
+keeps its proven `type.argument-mismatch`.
 
 ### 2.7 `method_exists` narrows the receiver lane (A4, #981; D3)
 
