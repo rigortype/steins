@@ -114,6 +114,9 @@ pub(crate) struct Cx<'a> {
     /// creation, so the guard it held then is the one the closure body tests (ADR-0104).
     /// `None` outside the file walk.
     pub(crate) guard_seeds: Option<&'a std::cell::RefCell<Vec<crate::env::GuardSeed>>>,
+    /// The guard scans of the bodies this file walk has read, for the Asserted all-rejected
+    /// rows ([`crate::guard_scan`]). `None` outside the file walk, which scans uncached.
+    pub(crate) guard_scans: Option<&'a crate::guard_scan::GuardScans>,
 }
 
 /// The one allowlisted name whose folded array can keep its input's next append
@@ -135,6 +138,7 @@ impl<'a> Cx<'a> {
             php_target: None,
             php_target_unreadable: false,
             guard_seeds: None,
+            guard_scans: None,
         }
     }
 
@@ -165,6 +169,7 @@ impl<'a> Cx<'a> {
             php_target,
             php_target_unreadable: false,
             guard_seeds: None,
+            guard_scans: None,
         }
     }
 
@@ -184,6 +189,7 @@ impl<'a> Cx<'a> {
             php_target: self.php_target,
             php_target_unreadable: self.php_target_unreadable,
             guard_seeds: self.guard_seeds,
+            guard_scans: self.guard_scans,
         }
     }
 

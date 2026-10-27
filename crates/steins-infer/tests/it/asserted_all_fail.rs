@@ -408,6 +408,80 @@ fn an_undecided_guard_on_the_variable_silences_the_asserted_rows() {
     }
 }
 
+/// Reads the scan must not mistake for a copy or a null test, and constructs that read a
+/// variable by name: each runs in PHP and the base is silent, so the rows decline.
+#[test]
+fn reads_by_name_and_non_null_tests_silence_the_asserted_rows() {
+    for body in [
+        "/** @param 'a'|'b' $x */ function f(mixed $x): void { $n = 'x'; if (in_array($$n, ['a', 'b'], true)) { return; } ti($x); }",
+        "/** @param 'a'|'b' $x */ function f(mixed $x): void { if (in_array(${'x'}, ['a', 'b'], true)) { return; } ti($x); }",
+        "/** @param 'a'|'b' $x */ function f(mixed $x): void { $c = compact('x'); if (in_array($c['x'], ['a', 'b'], true)) { return; } ti($x); }",
+        "/** @param 'a'|'b' $x */ function f(mixed $x): void { if (in_array(get_defined_vars()['x'], ['a', 'b'], true)) { return; } ti($x); }",
+        "/** @param 'a'|'b' $x */ function f(mixed $x): void { if (in_array(func_get_args()[0], ['a', 'b'], true)) { return; } ti($x); }",
+        "/** @param 'a'|'b' $x */ function f(mixed $x): void { if (in_array(func_get_arg(0), ['a', 'b'], true)) { return; } ti($x); }",
+        "/** @param 'a'|'b' $x */ function f(mixed $x): void { $z = $x ?? 'q'; if (in_array($z, ['a', 'b'], true)) { return; } ti($x); }",
+        "/** @param 'a'|'b' $x */ function f(mixed $x): void { if (isset($x)) { return; } ti($x); }",
+        "/** @param 'a'|'b' $x */ function f(mixed $x): void { $anull = 'a'; if ($anull === $x) { return; } ti($x); }",
+        "/** @param 'a'|'b' $x */ function f(mixed $x): void { $y = $x ?? 'b'; if ($y === 'a' || $y === 'b') { return; } ti($x); }",
+        "/** @param 'a'|'b' $x */ function f(mixed $x): void { if (($x ?? 1) !== 1) { return; } ti($x); }",
+        "/** @param 'a'|'b' $x */ function f(mixed $x): void { foreach (func_get_args() as $v) { if ($v === 'a') { return; } } ti($x); }",
+        "/** @param 'a'|'b' $x */ function f(mixed $x): void { $GLOBALS['g'] = &$x; if (strlen($GLOBALS['g']) === 1) { return; } ti($x); }",
+        "/** @param 'a'|'b' $x */ function f(mixed $x): int { if (strlen(func_get_arg(0)) === 1) { return 0; } return $x; }",
+    ] {
+        let src = strict(body);
+        assert!(maybe_family(&src).is_empty(), "{body}: {:?}", run(&src));
+    }
+}
+
+/// A multibyte character anywhere in the body must not panic the scan, and a multibyte
+/// name is an ordinary variable.
+#[test]
+fn multibyte_bodies_do_not_panic_the_scan() {
+    for body in [
+        "/** @param 'a'|'b' $x */ function f(mixed $x): void { $café = $x; ti($café); }",
+        "/** @param 'a'|'b' $x */ function f(mixed $x): void { $t = ('éé' === $x); ti($x); }",
+        "/** @param 'a'|'b' $x */ function f(mixed $x): void { $é = 'ü'; if ('éé' !== $x) { return; } $日本 = $x; ti($日本); }",
+        "/** @param 'a'|'b' $x */ function f(mixed $x): void { echo 'é'; ti($x); /* éé null === $x */ }",
+    ] {
+        let src = strict(body);
+        let _ = run(&src);
+    }
+    let plain = strict(
+        "/** @param 'a'|'b' $x */ function f(mixed $x): void { echo 'é'; ti($x); }",
+    );
+    assert_eq!(maybe_family(&plain).len(), 1, "{:?}", run(&plain));
+}
+
+/// `null` compared by `===` / `!==` as a standalone keyword is the one test a copy group
+/// admits: it removes nothing the docblock allows.
+#[test]
+fn a_standalone_null_comparison_does_not_silence() {
+    for body in [
+        "/** @param 'a'|'b' $x */ function f(mixed $x): void { if ($x !== null) { ti($x); } }",
+        "/** @param 'a'|'b' $x */ function f(mixed $x): void { if (null === $x) { return; } ti($x); }",
+    ] {
+        let src = strict(body);
+        assert_eq!(maybe_family(&src).len(), 1, "{body}: {:?}", run(&src));
+    }
+}
+
+/// A null test narrows only the reported variable (or a never-copied-into ancestor tested
+/// before it is copied); nested in a larger comparison, or applied to a copy, it removes
+/// nothing the docblock allows, and a ternary joins both of its arms to its target.
+#[test]
+fn a_null_test_that_is_not_the_whole_story_silences_the_asserted_rows() {
+    for body in [
+        "/** @param 'a'|'b' $x */ function f(mixed $x): void { if (($x === null) === false) { return; } ti($x); }",
+        "/** @param 'a'|'b' $x */ function f(mixed $x): void { $x2 = $x; if ($x2 !== null) { return; } ti($x); }",
+        "/** @param 'a'|'b' $x */ function f(mixed $x): void { $x2 = $x; if ($x !== null) { return; } ti($x2); }",
+        "/** @param 'a'|'b' $x */ function f(mixed $x): void { $y = $x === null ? 'q' : $x; if ($y === 'a' || $y === 'b') { return; } ti($x); }",
+        "/** @param 'a'|'b' $x */ function f(mixed $x): void { if (strlen(json_encode(1)) === 1 && strlen(debug_backtrace()[0]['args'][0]) === 1) { return; } ti($x); }",
+    ] {
+        let src = strict(body);
+        assert!(maybe_family(&src).is_empty(), "{body}: {:?}", run(&src));
+    }
+}
+
 /// A guard that reads another variable does not silence the rows.
 #[test]
 fn a_guard_that_reads_another_variable_does_not_silence() {
