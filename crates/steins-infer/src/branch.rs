@@ -1101,7 +1101,19 @@ fn refine_match_arm(
         arm.bound = Some("matched arm".to_owned());
         env.insert(name.clone(), arm);
     } else if let Some(fact) = Fact::from_vals(vals) {
-        env.insert(name.clone(), Known::value(fact, line, Some("matched arm".to_owned())));
+        // The arm's fact is exactly the labels (runtime `===`), so it is `Verified`
+        // whatever the subject's stratum; `thinned` and `line` describe the binding and are
+        // inherited, so a guard's exit is not forgotten (#1090). `closure` is dropped: a
+        // closure is never `===` a literal, so the arm's value is the label.
+        let mut arm = env
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| Known::value(fact.clone(), line, None));
+        arm.fact = Some(fact);
+        arm.bound = Some("matched arm".to_owned());
+        arm.stratum = Stratum::Verified;
+        arm.closure = None;
+        env.insert(name.clone(), arm);
     }
 }
 
