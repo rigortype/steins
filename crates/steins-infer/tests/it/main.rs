@@ -233,6 +233,7 @@ mod unset_positions;
 mod unset_writes;
 mod untyped_surface;
 mod value_ir_method_calls;
+mod value_short_circuit;
 mod value_relation_openings;
 mod value_side_instanceof;
 mod variable_maybe_undefined;
