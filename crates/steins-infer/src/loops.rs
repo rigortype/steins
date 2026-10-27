@@ -139,6 +139,11 @@ pub(crate) fn walk_loop(
                 &mut benv,
                 &mut bstore,
             );
+            // The body never runs over an empty subject: an `Asserted` empty-array
+            // claim on it does not hold inside (the fall-through keeps it).
+            if let Some(subject) = subject.as_deref() {
+                crate::shapes::widen_contradicted_empty(&mut benv, &bstore, subject, true);
+            }
             loop_fallthrough_forget(w, writes, reads, *poisons, *may_return, env, store);
             let swept = BodyMark::start(w);
             let _ = walk_loop_body(w, folder, body, benv, bstore, descent, facts, out);

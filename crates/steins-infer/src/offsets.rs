@@ -556,9 +556,54 @@ pub(crate) fn check_shape_read(
     out: &mut Vec<Diagnostic>,
 ) {
     let Some((shape, canon, _)) = shape_site_at(base, key, env, poisoned) else {
+        check_asserted_literal_read(cx, base, key, env, poisoned, span, out);
         return;
     };
     judge_shape_read(cx, shape, &canon, &base.render(), span, out);
+}
+
+/// The strict leg's read of an **`Asserted` literal array**: the falsy side of a
+/// guard on a shape binds `Singleton([])` (#1105), a value-lane fact the shape
+/// lane does not read. An `Asserted` singleton is a claim — a docblock premise
+/// narrowed by a guard — so its sealed lift is judged as a declared shape is, and
+/// an absent key answers `DeclaredAbsent`. A `Verified` literal (`$row = []`) is
+/// the proof leg's: it keeps `offset.missing` with the sidecar and stays silent
+/// here, so no duplicate id appears. Only this emitter lifts; the value lane's
+/// resolver ([`shape_site_at`]) is unchanged.
+fn check_asserted_literal_read(
+    cx: &Cx,
+    base: &ArgValue,
+    key: &ArgValue,
+    env: &HashMap<String, Known>,
+    poisoned: bool,
+    span: Span,
+    out: &mut Vec<Diagnostic>,
+) {
+    if poisoned {
+        return;
+    }
+    let ArgValue::Var(name) = base else { return };
+    let Some(known) = env.get(name) else { return };
+    let Some(Fact::Singleton(Val::Array(entries))) = &known.fact else { return };
+    if known.stratum != Stratum::Asserted {
+        return;
+    }
+    let Some(Fact::Singleton(key_val)) = offset_operand_fact(key, env, poisoned) else {
+        return;
+    };
+    let Some(canon) = offset_key_of(&key_val) else { return };
+    let shape = ShapeFact::lift(entries);
+    // A present key is the value lane's; only the declared absence is judged.
+    if matches!(shape_read(&shape, &canon), ShapeRead::DeclaredAbsent) {
+        judge_shape_read(cx, &shape, &canon, &base.render(), span, out);
+    }
+}
+
+/// Whether no array satisfies the shape: sealed with no field, yet non-empty.
+/// A branch binding it is one PHP never enters ([`crate::shapes::widen_contradicted_empty`]),
+/// so no read there is judged.
+pub(crate) fn is_uninhabited(shape: &ShapeFact) -> bool {
+    shape.fields.is_empty() && matches!(shape.tail, steins_domain::Tail::Sealed) && shape.non_empty
 }
 
 /// The emitter half of [`check_shape_read`], taking the resolved site rather
@@ -573,6 +618,9 @@ fn judge_shape_read(
     span: Span,
     out: &mut Vec<Diagnostic>,
 ) {
+    if is_uninhabited(shape) || shape.unjudged {
+        return;
+    }
     match shape_read(shape, canon) {
         // Proven present (declared Required, or promoted by an S4 guard / S5 cover),
         // or an unsealed tail's value (out of v1 scope): silent.
