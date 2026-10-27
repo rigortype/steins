@@ -102,6 +102,7 @@ mod return_maybe;
 mod return_missing;
 mod shape_projection;
 mod shapes;
+mod side_writes;
 mod site;
 mod string_context;
 pub mod suppress;

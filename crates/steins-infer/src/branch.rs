@@ -37,6 +37,7 @@ use crate::shapes::{ShapeGuard, apply_shape_guard, apply_shape_narrowing, guard_
 use crate::loops::loop_entry_forget;
 use crate::narrow::narrow_paths;
 use crate::rebind::top_level_rebind_risk;
+use crate::side_writes::{SideWrites, cond_writes, trace_writes};
 use crate::header_reads::{check_header, push_unseen};
 use crate::walk::{Flow, WalkCx, mark_dead, mark_dead_span, walk_trace};
 
@@ -248,13 +249,8 @@ pub(crate) fn walk_if(
     // side was seeded with survives only where nothing in the side dropped it, which
     // every write of the name does (and some statements that write no name do too).
     if !rebinds && fell.len() == live {
-        for (benv, bstore) in &mut fell {
-            restore_branch_scoped(&untested_lanes, benv, bstore);
-            // Handed back as the base walk does, so no longer suspect.
-            for (name, _, _) in &untested_lanes {
-                bstore.suspect.remove(name);
-            }
-        }
+        let sides = Sides { then_trace, elseifs, else_trace };
+        hand_back_untested(w, &untested_lanes, &sides, verdict, &mut fell);
     }
     // A live side that does not fall through is an exit the walk could not rule out:
     // every `OneOf` binding but the ones this guard decided member by member is
@@ -626,6 +622,48 @@ fn collect_other_operand_reads(atom: &CondExpr, out: &mut Vec<String>) {
 /// One name's pre-branch value and declared-arm lanes, held across the branches
 /// a guard decides so [`restore_branch_scoped`] can hand them back.
 type BranchScopedLanes = (String, Option<Known>, Option<Vec<ContractArm>>);
+
+/// The sides of an `if` as the join sees them.
+struct Sides<'a> {
+    then_trace: &'a [Stmt],
+    elseifs: &'a [(CondExpr, Vec<Stmt>)],
+    else_trace: Option<&'a [Stmt]>,
+}
+
+/// Hand the tested values back at a join every live side reaches (issue #1110).
+///
+/// A name goes back only if no live side may have written it: the test is the
+/// syntactic write set of the sides, not the survival of the suspect, because a
+/// by-reference call forgets a name exactly as an untouched side leaves it
+/// unbound. A withheld name keeps whatever suspect its sides left.
+fn hand_back_untested(
+    w: &WalkCx,
+    untested_lanes: &[BranchScopedLanes],
+    sides: &Sides,
+    verdict: Certainty,
+    fell: &mut [(HashMap<String, Known>, Store)],
+) {
+    let mut writes = SideWrites::default();
+    if verdict != Certainty::No {
+        trace_writes(w.cx, sides.then_trace, &mut writes);
+    }
+    if verdict != Certainty::Yes {
+        for (c, t) in sides.elseifs {
+            cond_writes(w.cx, c, &mut writes);
+            trace_writes(w.cx, t, &mut writes);
+        }
+        trace_writes(w.cx, sides.else_trace.unwrap_or(&[]), &mut writes);
+    }
+    let back: Vec<BranchScopedLanes> =
+        untested_lanes.iter().filter(|(name, _, _)| !writes.contains(name)).cloned().collect();
+    for (benv, bstore) in fell {
+        restore_branch_scoped(&back, benv, bstore);
+        // Handed back as the base walk does, so no longer suspect.
+        for (name, _, _) in &back {
+            bstore.suspect.remove(name);
+        }
+    }
+}
 
 /// Put back the lanes a branch-scoped guard forgetting took (issue #536), at
 /// the exit of a branch that falls through to the join.
