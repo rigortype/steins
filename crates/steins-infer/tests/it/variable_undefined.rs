@@ -589,14 +589,14 @@ fn unset_is_neither_a_read_nor_a_binding() {
 // `$page` is non-empty, hence bound, so the id's runtime claim is FALSE there.
 
 #[test]
-fn a_same_variable_empty_ternary_shields_both_arms() {
+fn a_same_variable_empty_ternary_shields_the_arm_it_proves() {
     silent(
         "<?php\nfunction f(int $view): int {\n    $start = (empty($page)) ? 0 : ($page - 1) * $view;\n    return $start;\n}\n",
     );
 }
 
 #[test]
-fn a_same_variable_isset_ternary_shields_both_arms() {
+fn a_same_variable_isset_ternary_shields_the_arm_it_proves() {
     silent("<?php\nfunction f(): mixed {\n    return isset($x) ? $x : null;\n}\n");
     silent("<?php\nfunction f(): mixed {\n    return !isset($x) ? null : $x;\n}\n");
     silent("<?php\nfunction f(): mixed {\n    return !empty($x) ? $x : null;\n}\n");
@@ -610,8 +610,7 @@ fn a_guarded_ternary_shields_only_the_name_it_tests() {
 
 #[test]
 fn a_same_variable_isset_if_shields_its_body() {
-    // The statement spelling: no block-scoped tracking, the `if`'s whole body is
-    // one subtree and shielding it is the same containment rule.
+    // The statement spelling: each arm takes the side of the guard that reaches it.
     silent(
         "<?php\nfunction f(): mixed {\n    if (isset($x)) {\n        return $x;\n    }\n    return null;\n}\n",
     );
@@ -664,6 +663,55 @@ fn a_conjunction_guard_shields_the_names_it_tests() {
         "<?php\nfunction f(bool $c): void {\n    if (isset($x) && $c) {\n    } else {\n        echo $x;\n    }\n}\n",
         "x",
     );
+}
+
+// Issue #1108: without a `goto`, an `if` or `?:` no longer shields its arms merely for
+// testing the name; only the side the condition proves bound is silent. php -r witness
+// (8.3), `$u` never bound: each `fires` shape warns, each `silent` one runs clean.
+
+#[test]
+fn a_guard_that_proves_nothing_on_its_side_does_not_shield_the_read() {
+    for body in [
+        "if (empty($u)) { echo $u; }",
+        "if (!isset($u)) { echo $u; }",
+        "if (isset($u)) { } else { echo $u; }",
+        "if (!empty($u)) { } else { echo $u; }",
+        "if (isset($u)) { } elseif ($c) { echo $u; }",
+        "if (!isset($u, $v)) { echo $u; }",
+        "echo !isset($u) ? $u : 0;",
+        "echo empty($u) ? $u : 0;",
+        "echo !isset($u) ? (isset($v) ? $v : $u) : 0;",
+    ] {
+        fires(&format!("<?php\nfunction f(bool $c): void {{ {body} }}\n"), "u");
+    }
+}
+
+#[test]
+fn a_guard_still_shields_the_side_it_proves_bound() {
+    for body in [
+        "if (isset($u)) { echo $u; }",
+        "if (!empty($u)) { echo $u; }",
+        "if (isset($u, $v)) { echo $u, $v; }",
+        "if (!isset($u)) { } elseif ($c) { echo $u; }",
+        "echo isset($u) ? $u : 0;",
+        "echo empty($u) ? 0 : $u;",
+        "echo !empty($u) ? $u : 0;",
+        "echo isset($u) ? (empty($u) ? $u : 1) : 0;",
+    ] {
+        silent(&format!("<?php\nfunction f(bool $c): void {{ {body} }}\n"));
+    }
+    // A name bound anywhere in the scope is the maybe leg's, not this id's.
+    silent("<?php\nfunction f(): void { if (!isset($u)) { $u = 1; } echo $u; }\n");
+    silent("<?php\nfunction f(bool $c): void { if ($c) { $u = 1; } if (empty($u)) { echo $u; } }\n");
+}
+
+#[test]
+fn a_goto_in_the_scope_keeps_the_containment_shield() {
+    // The sided rule stands down under a `goto`, so the containment stays: silence on
+    // shapes PHP warns on, the cost the jump makes this pass pay.
+    silent("<?php\nfunction f(): void { goto L; L: if (empty($u)) { echo $u; } }\n");
+    silent("<?php\nfunction f(): void { goto L; L: echo empty($u) ? $u : 0; }\n");
+    silent("<?php\nfunction f(): void { goto L; if (!isset($u)) { L: echo $u; } }\n");
 }
 
 // Issue #929: the guard's reach inside its own condition, after a terminating `if`, and
