@@ -333,10 +333,40 @@ fn an_exact_array_access_class_runs_the_offset_method_of_the_role() {
     assert_eq!(runs(&write, "SelfBag::append").1, ["LogicException"]);
     assert!(operator_gaps(&write, "SelfBag::remove").is_empty());
     assert_eq!(runs(&write, "SelfBag::remove").0, ["io.output.buffer"]);
-    // `isset` asks `offsetExists` and then `offsetGet`.
+    // A final `isset` asks `offsetExists` alone; `empty`, `??` and an intermediate
+    // fetch of a chain go on to `offsetGet` (#1094).
     let tested = file(OFFSET_CLASSES, "function f(Bag $b) { return isset($b['k']); }");
     covered(&tested, "f");
-    assert_eq!(runs(&tested, "f").0, ["io.output.buffer"]);
+    assert!(runs(&tested, "f").0.is_empty());
+    for body in ["empty($b['k'])", "$b['k'] ?? null"] {
+        let src = file(OFFSET_CLASSES, &format!("function f(Bag $b) {{ return {body}; }}"));
+        covered(&src, "f");
+        assert_eq!(runs(&src, "f").0, ["io.output.buffer"], "{body}");
+    }
+}
+
+#[test]
+fn a_final_isset_charges_only_exists_and_the_other_fetches_charge_get_too() {
+    let classes = "final class Box implements \\ArrayAccess {\n\
+        public function offsetExists(mixed $k): bool { return true; }\n\
+        /** @throws \\RuntimeException */\n\
+        public function offsetGet(mixed $k): mixed { throw new \\RuntimeException(); }\n\
+        public function offsetSet(mixed $k, mixed $v): void {}\n\
+        public function offsetUnset(mixed $k): void {} }\n\
+        final class Bag2 { public function __isset($n) { return true; }\n\
+        public function __get($n) { throw new \\RuntimeException(); } }";
+    let thrown = |body: &str, param: &str| {
+        let src = file(classes, &format!("function f({param}) {{ return {body}; }}"));
+        runs(&src, "f").1
+    };
+    assert!(thrown("isset($o['k'])", "Box $o").is_empty());
+    assert_eq!(thrown("empty($o['k'])", "Box $o"), ["RuntimeException"]);
+    assert_eq!(thrown("$o['k'] ?? null", "Box $o"), ["RuntimeException"]);
+    assert_eq!(thrown("isset($o['a']['b'])", "Box $o"), ["RuntimeException"]);
+    assert!(thrown("isset($o->p)", "Bag2 $o").is_empty());
+    assert_eq!(thrown("empty($o->p)", "Bag2 $o"), ["RuntimeException"]);
+    assert_eq!(thrown("$o->p ?? null", "Bag2 $o"), ["RuntimeException"]);
+    assert_eq!(thrown("isset($o->a->b)", "Bag2 $o"), ["RuntimeException"]);
 }
 
 #[test]

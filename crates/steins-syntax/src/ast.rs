@@ -1063,8 +1063,8 @@ pub enum OperatorConstruct {
     /// A target the engine reads and then writes: a compound assignment other
     /// than `??=`, and `++`/`--`.
     ReadWrite,
-    /// `isset($o->p)`, and an intermediate fetch of an `isset`, `empty` or `??`
-    /// chain (`__isset` then `__get`).
+    /// The final operand of an `isset` (`isset($o->p)`, `isset($o[k])`): the engine asks
+    /// `__isset` or `offsetExists` and no more. An intermediate fetch is [`Self::IssetFetch`].
     Isset,
     /// `empty($o->p)`.
     Empty,
@@ -1143,6 +1143,9 @@ pub enum OperatorConstruct {
     /// One operand, the value; [`SiteKind::Operator::member`] is the property's name, and the
     /// resolver reads its declared type off the class chain.
     PropertyValue,
+    /// An intermediate fetch of an `isset`, `empty`, `??` or `??=` chain (`$a` in
+    /// `isset($a->b->c)`): `__isset` then `__get`, `offsetExists` then `offsetGet`.
+    IssetFetch,
 }
 
 impl OperatorFamily {
@@ -1153,7 +1156,7 @@ impl OperatorFamily {
 
 impl OperatorConstruct {
     /// Every form, in declaration order, which is the order the payload codec numbers them by.
-    pub const ALL: [Self; 36] = [
+    pub const ALL: [Self; 37] = [
         Self::Concat,
         Self::ConcatAssign,
         Self::Interpolation,
@@ -1190,6 +1193,7 @@ impl OperatorConstruct {
         Self::DropPropUnset,
         Self::Return,
         Self::PropertyValue,
+        Self::IssetFetch,
     ];
 
     /// The family a form belongs to, or `None` for the forms
@@ -1225,6 +1229,7 @@ impl OperatorConstruct {
             | Self::Write
             | Self::ReadWrite
             | Self::Isset
+            | Self::IssetFetch
             | Self::Empty
             | Self::Unset
             | Self::Coalesce

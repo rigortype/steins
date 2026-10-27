@@ -177,7 +177,10 @@ fn a_property_access_takes_the_role_its_context_gives_it() {
 fn a_chain_gives_the_outermost_access_the_role_and_the_rest_a_fetch() {
     let prop = |c: C| (F::MagicProp, c);
     assert_eq!(forms("$o->a->b = 1;"), [prop(C::Write), prop(C::Read)]);
-    assert_eq!(forms("return isset($o->a->b);"), [prop(C::Isset), prop(C::Isset)]);
+    assert_eq!(forms("return isset($o->a->b);"), [prop(C::Isset), prop(C::IssetFetch)]);
+    assert_eq!(forms("return empty($o->a->b);"), [prop(C::Empty), prop(C::IssetFetch)]);
+    assert_eq!(forms("return $o->a->b ?? 1;"), [prop(C::Coalesce), prop(C::IssetFetch)]);
+    assert_eq!(forms("$o->a->b ??= 1;"), [prop(C::CoalesceAssign), prop(C::IssetFetch)]);
     assert_eq!(forms("unset($o->a->b);"), [prop(C::Unset), prop(C::Read)]);
     // The names follow the nesting: the outer access is `b`, its object `$o->a`.
     let chain = ops("return $o->a->b;");
@@ -216,6 +219,9 @@ fn an_offset_access_takes_the_role_its_context_gives_it() {
     assert_eq!(forms("return $o['k'] ?? 1;"), [offset(C::Coalesce)]);
     assert_eq!(forms("$o['k'] ??= 1;"), [offset(C::CoalesceAssign)]);
     assert_eq!(forms("$r = &$o['k'];"), [offset(C::Reference)]);
+    // Only the final operand of an `isset` is `Isset`; its intermediate fetches are
+    // `IssetFetch` (the engine reads them, `offsetExists` then `offsetGet`).
+    assert_eq!(forms("return isset($o['a']['b']);"), [offset(C::Isset), offset(C::IssetFetch)]);
 }
 
 #[test]

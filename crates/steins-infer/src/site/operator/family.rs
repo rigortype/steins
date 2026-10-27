@@ -220,15 +220,16 @@ fn returned_class(ret: Option<&NativeType>) -> Option<&str> {
     }
 }
 
-/// The magic methods the engine runs for a property access of this role. An
-/// `isset` chain and `empty` ask `__isset` and then `__get`; a compound
-/// assignment reads and then writes.
+/// The magic methods the engine runs for a property access of this role. A
+/// final `isset` asks `__isset` alone; an `isset` chain's fetches and `empty`
+/// ask `__isset` and then `__get`; a compound assignment reads and then writes.
 fn property_methods(construct: C) -> &'static [&'static str] {
     match construct {
         C::Read | C::Reference => &["__get"],
         C::Write => &["__set"],
         C::ReadWrite | C::CoalesceAssign => &["__get", "__set", "__isset"],
-        C::Isset | C::Empty | C::Coalesce => &["__isset", "__get"],
+        C::Isset => &["__isset"],
+        C::IssetFetch | C::Empty | C::Coalesce => &["__isset", "__get"],
         C::Unset => &["__unset"],
         _ => &PROPERTY_MAGIC,
     }
@@ -240,7 +241,8 @@ fn offset_methods(construct: C) -> &'static [&'static str] {
         C::Read | C::Reference | C::Destructure => &["offsetGet"],
         C::Write => &["offsetSet"],
         C::ReadWrite => &["offsetGet", "offsetSet"],
-        C::Isset | C::Empty | C::Coalesce => &["offsetExists", "offsetGet"],
+        C::Isset => &["offsetExists"],
+        C::IssetFetch | C::Empty | C::Coalesce => &["offsetExists", "offsetGet"],
         C::CoalesceAssign => &["offsetExists", "offsetGet", "offsetSet"],
         C::Unset => &["offsetUnset"],
         _ => &["offsetGet", "offsetSet", "offsetExists", "offsetUnset"],
