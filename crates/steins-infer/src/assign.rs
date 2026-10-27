@@ -330,9 +330,13 @@ fn bind_value(
         }
         // `$b = $a` where `$a` holds an object (ADR-0036 aliasing): copy the ObjRef
         // (shared id), so a later write through either alias is visible via both.
+        // `var` is given a new value, so its old binding is released like any other
+        // rebind's (issue #1113): a guard stored over it, or a narrowed class, was
+        // about the old value. The source id is read first, so a self-alias `$a = $a`
+        // still names its object.
         ArgValue::Var(src) if !w.scope.poisoned && store.is_bound(src) => {
-            env.remove(var);
             let id = store.id_of(src).expect("bound var has an id");
+            lhs.clear(env, store);
             store.refs.insert(var.to_owned(), id);
         }
         // `clone $a` (ADR-0036 adversarial #1): a NEW id with a COPY of the source
