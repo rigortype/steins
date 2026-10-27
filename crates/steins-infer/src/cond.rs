@@ -26,12 +26,9 @@ use crate::env::{Known, Member, Store, Stratum, arg_of_val, singleton_fact};
 use crate::absence::callable_class_absent;
 use crate::predicates::{TypePred, pred_holds_on_fact, type_predicate};
 use crate::existence::{eval_existence_call, global_function_callee};
-use crate::narrow::narrow_paths;
+use crate::narrow::{apply_vocabularies, narrow_paths};
 use crate::offsets::{ShapeRead, offset_key_of, offset_operand_fact, shape_read_at};
 use crate::oneof_guard::collect_reads;
-use crate::predicates::apply_type_narrowing;
-use crate::refine::{apply_class_narrowing, apply_refinements, collect_refine};
-use crate::shapes::apply_shape_narrowing;
 use crate::remembered;
 use crate::transfers::transfer_arg_known;
 use crate::walk::{WalkCx, mark_dead_operand, mark_dead_span};
@@ -231,11 +228,10 @@ pub(crate) fn eval_cond(
                 mark_dead_operand(w, b, *span);
                 return Certainty::No;
             }
-            let (benv, mut bstore) =
-                threaded_operand_env(w, folder, a, true, env, store, poisoned);
-            // The left operand's calls, narrowed by its having held (ADR-0102): `b`
-            // reads them as it reads the variables the operand narrowed.
-            remembered::produce(w, folder, a, true, &benv, &mut bstore);
+            // The left operand's calls, narrowed by its having held (ADR-0102), are
+            // on the vocabulary list: `b` reads them as it reads the variables the
+            // operand narrowed.
+            let (benv, bstore) = threaded_operand_env(w, folder, a, true, env, store, poisoned);
             va.and(eval_cond(w, folder, b, &benv, &bstore, poisoned))
         }
         CondExpr::Or(a, b, span) => {
@@ -245,9 +241,7 @@ pub(crate) fn eval_cond(
                 mark_dead_operand(w, b, *span);
                 return Certainty::Yes;
             }
-            let (benv, mut bstore) =
-                threaded_operand_env(w, folder, a, false, env, store, poisoned);
-            remembered::produce(w, folder, a, false, &benv, &mut bstore);
+            let (benv, bstore) = threaded_operand_env(w, folder, a, false, env, store, poisoned);
             va.or(eval_cond(w, folder, b, &benv, &bstore, poisoned))
         }
         // A foldable existence predicate in guard position folds to a Yes/No/Maybe
@@ -290,22 +284,24 @@ pub(crate) fn eval_cond(
 /// `Verified` (the runtime executed the test); the clone is discarded after the
 /// verdict, so nothing leaks into the caller's env (ADR-0048 §2 walk-locality).
 ///
-/// The vocabularies are the branch lane's, in its order ([`apply_cond_side`]), up
-/// to and including the arm and shape lanes (ADR-0106 §2.2): past `$n !== null`
-/// the right operand reads `$n`'s declared arms without `null`, as the `if` body
-/// does, so `method_exists($n, 'gone')` over a class lacking `gone` folds there
-/// too. Of the rest of that list, the same-expression call guards, the existence
-/// vouches and the stored-guard vouches are records the walk reads to suppress
-/// findings in the body it descends into; no verdict reads them, and this clone is
-/// discarded after one. The remembered call results the `&&`/`||` caller produces
-/// itself. The `@phpstan-assert-if-*` envelopes and the out-parameter seeds would
-/// reach a verdict and are not threaded here: the walk applies them to the guarded
-/// body, and §2.2 names only the arm and shape lanes. `mask_stale_conjuncts` is not
-/// run either: it drops a conjunct whose names a later conjunct rebinds, and the
-/// `cond_invalidations` step below forgets every name the operand rebinds, which
-/// removes the same narrowings and the binding with them.
+/// The vocabularies are the branch lane's whole list, through the same function
+/// ([`apply_vocabularies`], ADR-0106 §2.2, #1096): past `$n !== null` the right
+/// operand reads `$n`'s declared arms without `null`, as the `if` body does, so
+/// `method_exists($n, 'gone')` over a class lacking `gone` folds there too, and past
+/// `isFoo($o)` it reads the `@phpstan-assert-if-true` envelope and past
+/// `preg_match($re, $s, $m) === 1` the seeded `$m`. The records that list also
+/// writes (the same-expression guards, the existence and stored-guard vouches) land
+/// in a clone that is discarded after one verdict, or that a ternary arm's value
+/// evaluator reads; the remembered call results ([`remembered::produce`]) are on the
+/// list too. The envelopes apply at `Asserted` here as they do at a branch.
 ///
-/// [`apply_cond_side`]: crate::branch::apply_cond_side
+/// The two sites differ in one step. The branch masks a stale conjunct
+/// (`mask_stale_conjuncts`, #654) before the driver; this site runs on the operand
+/// as written and forgets, after the driver, every name the operand rebinds
+/// ([`cond_invalidations`]), which removes the same narrowings and the binding with
+/// them.
+///
+/// [`apply_vocabularies`]: crate::narrow::apply_vocabularies
 fn threaded_operand_env(
     w: &WalkCx,
     folder: &mut dyn Folder,
@@ -321,18 +317,7 @@ fn threaded_operand_env(
     // Through the path driver, as the branch applies its own list (ADR-0106 §2.2):
     // `(is_int($n) || is_float($n)) && …` reads `$n` as `int|float`.
     narrow_paths(w, folder, operand, then, &mut benv, &mut bstore, poisoned, &mut |f, c, t, e, s| {
-        // The DR2 type vocabulary threads with the rest, running before the scalar
-        // refinements so a minted fact is what they refine: `is_string($s) &&
-        // strlen($s)` narrows `$s` in that order (ADR-0052 §6).
-        apply_type_narrowing(cx, c, t, e, s);
-        let mut refs = Vec::new();
-        collect_refine(c, t, &mut refs);
-        apply_refinements(&refs, e, s, Stratum::Verified);
-        // The arm lane (`instanceof`, `!== null`, `!== v`, truthiness, enum identity)
-        // and the shape lane, as the branch applies them; the operand is a runtime
-        // test, so a presence guard promotes at the branch's evidence stratum.
-        apply_class_narrowing(w, f, c, t, s);
-        apply_shape_narrowing(cx, c, t, e, s, true);
+        apply_vocabularies(w, f, c, t, e, s);
     });
     // The operand's own side effects land after its test narrowed (a by-ref call
     // may rebind a variable the test just constrained): forget them.

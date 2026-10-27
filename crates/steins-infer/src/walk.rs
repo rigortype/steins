@@ -50,58 +50,17 @@ use crate::operands::check_operand_sites;
 use crate::out_params::{
     apply_produced_places, apply_stmt_out_param_seeds, stmt_out_param_seeds, stmt_produced_places,
 };
-use crate::predicates::apply_type_narrowing;
 use crate::project::{Diagnostic, FnResolution};
 use crate::rebind;
 use crate::remembered::{self, RememberCache};
-use crate::refine::{
-    apply_class_narrowing, apply_inline_var_casts, apply_refinements, collect_guard_calls_any,
-    collect_refine,
-};
+use crate::refine::{apply_inline_var_casts, collect_guard_calls_any};
 use crate::return_arms::return_envelope_arms;
-use crate::shapes::{apply_offset_append, apply_offset_write, apply_shape_narrowing};
+use crate::shapes::{apply_offset_append, apply_offset_write};
 use crate::stmt_calls::{StmtCalls, check_stmt_calls};
-use crate::narrow::narrow_paths;
+use crate::narrow::{apply_vocabularies, narrow_paths};
 use crate::oneof_guard;
 use crate::stmt_checks::{check_read_positions, check_return_value};
 use crate::try_catch::walk_try;
-
-/// The `assert` statement's vocabularies over one path of its condition (ADR-0052
-/// §5, ADR-0106 §2.2): the type predicates, the scalar refinements, the arm and
-/// shape lanes and the remembered call results, in `walk_if`'s order. `then` is
-/// `true` from the statement and from every path the driver rebuilds.
-fn apply_assert_vocabularies(
-    w: &WalkCx,
-    folder: &mut dyn Folder,
-    cond: &CondExpr,
-    then: bool,
-    env: &mut HashMap<String, Known>,
-    store: &mut Store,
-) {
-    apply_type_narrowing(w.cx, cond, then, env, store);
-    let mut refs = Vec::new();
-    collect_refine(cond, then, &mut refs);
-    apply_refinements(&refs, env, store, Stratum::Verified);
-    // The declared-arm lane, in the same order `walk_if` applies it
-    // (issue #391): `apply_refinements` above reaches the VALUE lane
-    // only, and a `T|false` binding has no value-lane carrier at all
-    // (`seed_refined_scalar_fact` mints one only for a refinement
-    // *within* one base), so without this call `assert($x !== false)`
-    // narrowed nothing while its `if` twin narrowed to `string`. The
-    // arm lane is a subtraction carrier (ADR-0052 §2 / the 2026-08-01
-    // `Value`-subtrahend note): each surviving arm keeps its own
-    // stratum, so a `Verified` arm cannot launder and an `Asserted`
-    // one cannot be promoted by having been asserted about.
-    apply_class_narrowing(w, folder, cond, then, store);
-    // The assert lowering models its argument as a `CondExpr`, so both
-    // `assert(isset(...))` and the DR2 type-predicate vocabulary
-    // (`assert(is_string($x))`) route through the same `if`-guard
-    // narrowing with no assert-specific plumbing (ADR-0064 §5).
-    apply_shape_narrowing(w.cx, cond, then, env, store, true);
-    // A call the assertion narrowed answers the same narrowing at its next
-    // identical call (ADR-0102).
-    remembered::produce(w, folder, cond, then, env, store);
-}
 
 /// Walk one scope's trace with a given initial environment.
 #[allow(clippy::too_many_arguments)]
@@ -887,7 +846,7 @@ fn walk_run(
                 // is_float($n))` leaves `$n` the join of its two paths.
                 let (cond, poisoned) = (masked.as_ref(), w.scope.poisoned);
                 narrow_paths(w, folder, cond, true, env, store, poisoned, &mut |f, c, t, e, s| {
-                    apply_assert_vocabularies(w, f, c, t, e, s);
+                    apply_vocabularies(w, f, c, t, e, s);
                 });
                 Flow::FellThrough
             }
