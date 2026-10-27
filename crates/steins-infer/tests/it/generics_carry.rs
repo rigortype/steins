@@ -1624,10 +1624,12 @@ fn the_conformance_shape_reads_and_now_enforces() {
         dumped(&format!("{o}\\PHPStan\\dumpType(unwrapT(new Box(1)));")),
         "dumped type: 1 (asserted)",
     );
+    // An Asserted fact rejected in every member is the possibly grade since issue #1099:
+    // no `type.argument-mismatch`, but the contract id says what the docblock implies.
     let quiet = strict(&format!(
         "{o}function takesString(string $s): void {{}}\ntakesString(unwrapT(new Box(1)));"
     ));
-    assert_eq!(ids(&quiet), Vec::<String>::new());
+    assert_eq!(ids(&quiet), vec!["phpdoc.maybe-argument-mismatch".to_owned()]);
 }
 
 // 8. `key-of<T>` / `value-of<T>` over a function-level template bound from the
@@ -1700,10 +1702,10 @@ fn a_list_operand_projects_its_positions_and_its_elements() {
 fn the_conformance_lines_match_the_spelled_union_finding_for_finding() {
     // The file's own body — a `foreach` returning its first key — and its three
     // calls, under `strict_types=1`. The two `// V` lines stay silent. The `E?` line
-    // is silent too, and exactly as silent as a hand-written `@return
-    // 'debug'|'verbose'` is: an Asserted return fact premises no
-    // `type.argument-mismatch` (ADR-0032's 2026-08-15 amendment), so enforcing it is
-    // the body summary's job, not this read's.
+    // reports exactly what a hand-written `@return 'debug'|'verbose'` does: an Asserted
+    // return fact premises no `type.argument-mismatch` (ADR-0032's 2026-08-15
+    // amendment), but one rejected in every member is `phpdoc.maybe-argument-mismatch`
+    // since issue #1099.
     let body = "function pick(array $items) { foreach ($items as $key => $_) { return $key; } \
                 throw new \\InvalidArgumentException('empty'); }\n";
     let sinks = "function acceptsString(string $value): void {}\n\
@@ -1722,7 +1724,12 @@ fn the_conformance_lines_match_the_spelled_union_finding_for_finding() {
         let t = strict(&format!("{template}{body}{sinks}{call}"));
         let h = strict(&format!("{hand}{body}{sinks}{call}"));
         assert_eq!(ids(&t), ids(&h), "{call} differs from the spelled union");
-        assert_eq!(ids(&t), Vec::<String>::new(), "{call}");
+        let expected: Vec<String> = if call.starts_with("acceptsInt") {
+            vec!["phpdoc.maybe-argument-mismatch".to_owned()]
+        } else {
+            Vec::new()
+        };
+        assert_eq!(ids(&t), expected, "{call}");
     }
     let t = strict(&format!("{template}{body}\\PHPStan\\dumpType(pick({FLAGS}));"));
     assert_eq!(dumped(&t), "dumped type: 'debug'|'verbose' (asserted)");

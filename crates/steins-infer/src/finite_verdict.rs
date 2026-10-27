@@ -23,8 +23,12 @@
 //!                                                              rung, unchanged)
 //! OneOf                      all                Verified       the same definite id: every path
 //!                                                              throws (decision D6)
-//! OneOf                      all                Asserted       silent: the proof layer needs a
-//!                                                              Verified premise (ADR-0052 §5)
+//! OneOf                      all                Asserted       phpdoc.maybe-argument-mismatch /
+//!                                                              phpdoc.maybe-return-mismatch,
+//!                                                              naming every member (issue #1099:
+//!                                                              the proof layer needs a Verified
+//!                                                              premise, so the claim is the
+//!                                                              possibly grade, not a definite No)
 //! OneOf                      some               Verified       type.maybe-argument-mismatch /
 //!                                                              type.maybe-return-mismatch
 //!                                                              (Floor::Strict)
@@ -49,7 +53,9 @@
 //! a returned `f($x)` through the same virtual binding `$v = f($x); return $v;`
 //! takes). A `OneOf` read from a declared arm list, a builtin's return envelope or
 //! an array shape stays declined: those lanes are `Asserted` declarations rather
-//! than proven values, and they have their own tables.
+//! than proven values, and they have their own tables. (Issue #1099 opens one row of that
+//! table: a **declared literal list** (`@param 'a'|'b'`) whose every member is rejected
+//! reaches the `OneOf all Asserted` row above, and nothing else about it changes.)
 //!
 //! [`is_type_error`]: crate::arg_check::is_type_error
 
@@ -105,6 +111,9 @@ pub(crate) fn finite_verdict(
 
 /// The members, spelled the way the message names the subject.
 fn subject_of(members: &[Val]) -> String {
+    if let [only] = members {
+        return render_val(only);
+    }
     let named: Vec<String> = members.iter().map(render_val).collect();
     format!("one of {}", named.join(", "))
 }
@@ -145,34 +154,62 @@ pub(crate) fn check_oneof_argument(
             out.push(cx.diagnostic(offset, value, Some(&provenance), callee, &param.name, ty));
             true
         }
-        FiniteVerdict::Every => false,
+        // An Asserted fact rejected in every member (issue #1099): the premise is a
+        // claim, so the verdict is the possibly grade with every member named.
+        FiniteVerdict::Every => {
+            let rejected: Vec<String> = members.iter().map(render_val).collect();
+            push_maybe_argument(
+                cx, param, ty, callee, offset, value, members, &rejected, stratum, out,
+            );
+            false
+        }
         FiniteVerdict::Some(rejected) => {
-            let id = if stratum == Stratum::Verified {
-                TYPE_MAYBE_ARGUMENT_MISMATCH_ID
-            } else {
-                PHPDOC_MAYBE_ARGUMENT_MISMATCH_ID
-            };
-            let subject_name = value.render();
-            let pos = cx.tree().position(offset);
-            out.push(Diagnostic {
-                id,
-                path: cx.path().to_owned(),
-                line: pos.line,
-                column: pos.column,
-                message: format!(
-                    "argument {subject_name} to {callee}() may not become {} ${} — {subject_name} is {}, and {} ({} mode)",
-                    ty.render(),
-                    param.name,
-                    subject_of(members),
-                    arms_clause(&rejected),
-                    mode_of(cx),
-                ),
-                facet: None,
-                fix: None,
-            });
+            push_maybe_argument(
+                cx, param, ty, callee, offset, value, members, &rejected, stratum, out,
+            );
             false
         }
     }
+}
+
+/// Push the possibly-grade argument finding for a finite fact, its id routed by the
+/// premise's stratum (ADR-0052 §5).
+#[allow(clippy::too_many_arguments)]
+fn push_maybe_argument(
+    cx: &Cx,
+    param: &Param,
+    ty: &NativeType,
+    callee: &str,
+    offset: u32,
+    value: &ArgValue,
+    members: &[Val],
+    rejected: &[String],
+    stratum: Stratum,
+    out: &mut Vec<Diagnostic>,
+) {
+    let id = if stratum == Stratum::Verified {
+        TYPE_MAYBE_ARGUMENT_MISMATCH_ID
+    } else {
+        PHPDOC_MAYBE_ARGUMENT_MISMATCH_ID
+    };
+    let subject_name = value.render();
+    let pos = cx.tree().position(offset);
+    out.push(Diagnostic {
+        id,
+        path: cx.path().to_owned(),
+        line: pos.line,
+        column: pos.column,
+        message: format!(
+            "argument {subject_name} to {callee}() may not become {} ${} — {subject_name} is {}, and {} ({} mode)",
+            ty.render(),
+            param.name,
+            subject_of(members),
+            arms_clause(rejected),
+            mode_of(cx),
+        ),
+        facet: None,
+        fix: None,
+    });
 }
 
 /// Judge a `OneOf` return. `shown` is the returned expression as written (`$b`, or
@@ -189,9 +226,17 @@ pub(crate) fn check_oneof_return(
     span_start: u32,
     out: &mut Vec<Diagnostic>,
 ) {
-    let (id, message) = match finite_verdict(cx, ret, members, false, thinned) {
+    let verdict = match finite_verdict(cx, ret, members, false, thinned) {
+        // An Asserted fact rejected in every member is the possibly grade with every
+        // member named (issue #1099), as at an argument.
+        FiniteVerdict::Every if stratum != Stratum::Verified => {
+            FiniteVerdict::Some(members.iter().map(render_val).collect())
+        }
+        v => v,
+    };
+    let (id, message) = match verdict {
         FiniteVerdict::Nothing => return,
-        FiniteVerdict::Every if stratum == Stratum::Verified => (
+        FiniteVerdict::Every => (
             RETURN_ID,
             format!(
                 "return {} cannot become {} (return type of {display}()) — proven TypeError on every path: {} ({} mode)",
@@ -201,7 +246,6 @@ pub(crate) fn check_oneof_return(
                 mode_of(cx),
             ),
         ),
-        FiniteVerdict::Every => return,
         FiniteVerdict::Some(rejected) => {
             let id = if stratum == Stratum::Verified {
                 TYPE_MAYBE_RETURN_MISMATCH_ID
