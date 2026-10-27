@@ -896,7 +896,7 @@ Each witnessed on PHP 8.5.11 unless it says it is not.
 
 ## Amendment (2026-10-27): the final `isset` operand runs the existence hook only (issue #1094, run #1114 slice S4) — PENDING ratification
 
-Designed in run #1114, slice S4 (#1094); landed when that slice merges.
+Designed in run #1114, slice S4 (#1094); landed in #1127.
 
 §4.3's MagicProp and ArrayAccess rows list `isset`, `empty` and `??` together, and the
 sentence on intermediate fetches says they run `__isset` (for an offset, `offsetExists`)
