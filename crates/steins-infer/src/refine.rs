@@ -1059,10 +1059,12 @@ pub(crate) fn subtract_contract_lane_at(
         // Whether the lane, before this subtraction, was held on Verified premises
         // alone — the question the emptied-lane rule asks (issue #429).
         let all_verified = arms.iter().all(|a| a.stratum == Stratum::Verified);
+        let mut deleted: Vec<steins_contract::ContractTy> = Vec::new();
         arms.retain_mut(|a| match normalize::subtract_arm(sub, &a.ty, oracle) {
             normalize::ArmFate::Survives => true,
             normalize::ArmFate::Dies => {
                 changed = true;
+                deleted.push(a.ty.clone());
                 false
             }
             normalize::ArmFate::Narrows(narrowed) => {
@@ -1071,6 +1073,16 @@ pub(crate) fn subtract_contract_lane_at(
                 true
             }
         });
+        // The survivors keep their stratum (they are the declared type's own arms), and
+        // carry what a docblock deleted beside them (issue #1107, decision 9 of #1114): a
+        // runtime test that also deletes a recorded arm clears it.
+        for a in arms.iter_mut() {
+            if guard_stratum == Stratum::Asserted {
+                deleted.iter().for_each(|d| a.record_asserted_deleted(d));
+            } else {
+                a.clear_deleted_by(sub, oracle);
+            }
+        }
         settle_lane(store, var, all_verified, changed);
         landed = changed;
     }

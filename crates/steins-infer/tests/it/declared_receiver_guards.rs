@@ -869,3 +869,148 @@ fn what_method_exists_does_not_narrow() {
         ],
     );
 }
+
+// ---------------------------------------------------------------------------
+// Issue #1107 (run #1114, decision 9): an `Asserted` subtraction records the arm types it
+// deleted on the survivors, which keep their stratum. A member read routes to `phpdoc.*`
+// (a property read stays silent) only when the member exists on a recorded arm; a join
+// meets the record, and a later `Verified` subtraction that would delete an entry clears
+// it. Every other finding keeps the proof id.
+// ---------------------------------------------------------------------------
+
+const LIE: &str = "
+interface I {} interface T {} interface T2 extends T {}
+final class A implements I { public function aa(): int { return 1; } public int $pa = 1; }
+final class B { public function zz(): int { return 9; } public int $pb = 2; }
+final class OnlyB { public function zz(): int { return 9; } }
+class TT2 implements T2 {}
+final class Foo { public function other(): int { return 1; } }
+/** @phpstan-assert I $v */
+function lieI(mixed $v): void {}
+/** @phpstan-assert T $v */
+function lie(mixed $v): void {}
+/** @phpstan-assert A|B $v */
+function nodel(mixed $v): void {}
+/** @phpstan-assert !OnlyB $v */
+function no(mixed $v): void {}
+/** @phpstan-assert !int $v */
+function notInt(mixed $v): void {}
+/** @phpstan-assert-if-true T $o */
+function isT(mixed $o): bool { return $o instanceof T; }
+/** @phpstan-assert-if-false T $o */
+function notT(mixed $o): bool { return !($o instanceof T); }
+";
+
+#[test]
+fn a_member_only_the_asserted_deletion_hides_routes_to_the_phpdoc_id() {
+    rows(
+        LIE,
+        &[
+            // The issue's witness: `zz` exists on the deleted `OnlyB` alone.
+            ("function a1(TT2|OnlyB $x): int { lie($x); return $x->zz(); }", &["phpdoc.undefined-method TT2"]),
+            ("function a2(TT2|OnlyB $x): int { no($x); return $x->zz(); }", &["phpdoc.undefined-method TT2"]),
+            // The envelope paths reach the same subtraction.
+            ("function a3(TT2|OnlyB $x): int { if (isT($x)) { return $x->zz(); } return 0; }", &["phpdoc.undefined-method TT2"]),
+            ("function a4(TT2|OnlyB $x): int { if (!notT($x)) { return $x->zz(); } return 0; }", &["phpdoc.undefined-method TT2"]),
+            // A join keeps the record any side holds: that path may have lied.
+            (
+                "function a6(TT2|OnlyB $x, bool $c): int { if ($c) { lie($x); } elseif (!($x instanceof TT2)) { return 0; } return $x->zz(); }",
+                &["phpdoc.undefined-method TT2"],
+            ),
+            // The record survives a join where every side made the assert.
+            (
+                "function a5(TT2|OnlyB $x, bool $c): int { if ($c) { lie($x); } else { lie($x); } return $x->zz(); }",
+                &["phpdoc.undefined-method TT2"],
+            ),
+        ],
+    );
+}
+
+#[test]
+fn a_member_no_deleted_arm_holds_keeps_the_proof_id() {
+    rows(
+        LIE,
+        &[
+            // r1: `nope` is undefined on the deleted arm too.
+            ("function r1(A|B $x): int { lieI($x); return $x->nope(); }", &["call.undefined-method A"]),
+            // r2: a runtime `instanceof A` alone proves the receiver an `A`.
+            (
+                "function r2(A|B $x): int { lieI($x); if ($x instanceof A) { return $x->zz(); } return 0; }",
+                &["call.undefined-method A"],
+            ),
+            // r3: the assert on one branch only; the join meets the record away.
+            (
+                "function r3(A|B $x, bool $c): int { if ($c) { lieI($x); } return $x->nope(); }",
+                &["call.undefined-method A|B"],
+            ),
+            // r7: `!int`, and `nope` is undefined on `A` too; `int` has no members.
+            ("function r7(int|A $x): int { notInt($x); return $x->nope(); }", &["call.undefined-method A"]),
+            // R4: an assert that deletes nothing records nothing.
+            ("function r4(A|B $x): int { nodel($x); return $x->nope(); }", &["call.undefined-method A|B"]),
+            // R8: the lane is already `{A}`; the assert deletes nothing.
+            (
+                "function r8(A|B $x): int { if ($x instanceof A) { lieI($x); return $x->zz(); } return 0; }",
+                &["call.undefined-method A"],
+            ),
+            // A runtime guard deletes at `Verified`.
+            (
+                "function g1(TT2|OnlyB $x): int { if ($x instanceof TT2) { return $x->zz(); } return 0; }",
+                &["call.undefined-method TT2"],
+            ),
+            ("function g2(TT2|OnlyB $x): int { assert($x instanceof TT2); return $x->zz(); }", &["call.undefined-method TT2"]),
+            // A later `Verified` deletion of the same arm clears the record.
+            (
+                "function c1(TT2|OnlyB $x): int { lie($x); if (!($x instanceof OnlyB)) { return $x->zz(); } return 0; }",
+                &["call.undefined-method TT2"],
+            ),
+            (
+                "function c2(TT2|OnlyB $x): int { lie($x); if ($x instanceof TT2) { return $x->zz(); } return 0; }",
+                &["call.undefined-method TT2"],
+            ),
+        ],
+    );
+}
+
+#[test]
+fn the_record_never_changes_a_method_exists_answer() {
+    rows(
+        LIE,
+        &[
+            // `B` declares `zz`: the record routes a finding, it never keeps `A` alive in a
+            // dead-arm decision or answers the fold.
+            ("function m1(A|B $x): int { lieI($x); if (method_exists($x, 'zz')) { return $x->zz(); } return 0; }", &[]),
+            ("function m2(A|B $x): int { lieI($x); if (!method_exists($x, 'zz')) { return 0; } return $x->zz(); }", &[]),
+            ("function m3(A|B $x): int { lieI($x); return method_exists($x, 'zz') ? $x->zz() : 0; }", &[]),
+        ],
+    );
+}
+
+#[test]
+fn the_property_read_is_silent_only_where_a_deleted_arm_holds_the_property() {
+    let ids = |f: &str| -> Vec<&'static str> {
+        check(&format!("<?php\n{LIE}\n{f}\n"))
+            .into_iter()
+            .filter(|d| d.id == PROPERTY_UNDEFINED_ID || d.id == PROPERTY_MAYBE_UNDEFINED_ID)
+            .map(|d| d.id)
+            .collect()
+    };
+    // r5: undefined on every arm, the deleted one included.
+    assert_eq!(ids("function r5(A|B $x): int { lieI($x); return $x->pp; }"), vec![PROPERTY_UNDEFINED_ID]);
+    // The join variant of r5.
+    assert_eq!(
+        ids("function r5j(A|B $x, bool $c): int { if ($c) { lieI($x); } return $x->pp; }"),
+        vec![PROPERTY_UNDEFINED_ID]
+    );
+    // r6: `pb` exists on the deleted `B` alone, and PHP reads it.
+    assert_eq!(ids("function r6(A|B $x): int { lieI($x); return $x->pb; }"), Vec::<&str>::new());
+    // j5: a join keeps the record of the side that asserted.
+    assert_eq!(
+        ids("function j5(A|B $x, bool $c): int { if ($c) { lieI($x); } elseif (!($x instanceof A)) { return 0; } return $x->pb; }"),
+        Vec::<&str>::new()
+    );
+    // A runtime test that deletes `B` too leaves the report to the proof.
+    assert_eq!(
+        ids("function r6c(A|B $x): int { lieI($x); if ($x instanceof A) { return $x->pb; } return 0; }"),
+        vec![PROPERTY_UNDEFINED_ID]
+    );
+}
