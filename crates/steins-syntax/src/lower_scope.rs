@@ -899,9 +899,10 @@ pub(crate) struct VarUsage {
     /// See [`Scope::ref_arg_candidates`] — collected in the same walk but on its own
     /// terms, because a binding form must not depend on a read being recorded.
     pub(crate) arg_candidates: Vec<UndefinedRead>,
-    /// Reads a **disjunctive** shield covers: each is discharged only when every name in
-    /// one of its [`Shield::joint`] sets is never bound, so [`Self::settle`] decides them
-    /// once the whole scope's bindings are known. A read can sit under several.
+    /// Reads a **disjunctive** or dead-arm shield covers: each is discharged only when
+    /// every name in one of its [`Shield::joint`] sets is never bound, so [`Self::settle`]
+    /// decides them once the whole scope's bindings are known. A read can sit under
+    /// several.
     conditional: Vec<(UndefinedRead, Vec<Vec<String>>)>,
     /// The root local of **every** function-call argument, bare or reached through an
     /// offset or property. `bound` leaves these out (a by-value read of `$y` in `f($y)`
@@ -914,6 +915,11 @@ pub(crate) struct VarUsage {
     /// outcome reaches here" ([`terminating_guard_names`], the sided arms of an `if`)
     /// stand down. The right-operand rule needs no such guard — see `scan_var_usage`.
     goto_present: bool,
+    /// The arms of an `if` or `?:` also take the dead-arm shields of
+    /// [`with_dead_arm`]: set by the definite pass only, whose [`Self::settle`] sees
+    /// the whole scope's bindings. The presence pass settles one unit at a time, where
+    /// "never bound" would mean only "not bound in this unit".
+    dead_arms: bool,
     dammed: bool,
 }
 
@@ -977,7 +983,7 @@ impl VarUsage {
             return;
         }
         let mut joints: Vec<Vec<String>> = Vec::new();
-        for shield in shielded.iter().filter(|s| s.name == name) {
+        for shield in shielded.iter().filter(|s| s.any || s.name == name) {
             if shield.joint.is_empty() {
                 return;
             }
@@ -1016,17 +1022,41 @@ impl VarUsage {
 /// A name a guard tests, and the names that must all be never-bound for the guard's
 /// silence to hold. `joint` is empty for a plain `isset($x)` / `empty($x)` test; a
 /// disjunction lists every name any disjunct tests, since the body it guards runs when
-/// *any* of them is bound (see [`VarUsage::settle`]).
+/// *any* of them is bound (see [`VarUsage::settle`]). An `any` shield is a dead-arm
+/// shield ([`with_dead_arm`]): it covers a read of **every** name, and its `joint` is
+/// never empty.
 #[derive(Clone)]
 pub(crate) struct Shield {
     name: String,
     joint: Vec<String>,
+    any: bool,
 }
 
 impl Shield {
     pub(crate) fn plain(name: String) -> Self {
-        Self { name, joint: Vec::new() }
+        Self { name, joint: Vec::new(), any: false }
     }
+}
+
+/// `proved`, the names a condition proves bound on one side (see [`bound_when`]), with
+/// a **dead-arm** shield added for each when `on` (issue #1108). A region that only an
+/// outcome proving `$v` bound reaches never runs when nothing in the scope can bind
+/// `$v`, so no read in it warns, whichever name it reads: `if (isset($v)) { echo $u; }`
+/// is dead code over a never-bound `$v`. Each dead-arm shield covers every name and
+/// parks the read on the proved name (or on a disjunction's whole `joint`), for
+/// [`VarUsage::settle`] to discharge once the scope's bindings are known.
+fn with_dead_arm(mut proved: Vec<Shield>, on: bool) -> Vec<Shield> {
+    if on {
+        let dead: Vec<Shield> = proved
+            .iter()
+            .map(|s| {
+                let joint = if s.joint.is_empty() { vec![s.name.clone()] } else { s.joint.clone() };
+                Shield { name: s.name.clone(), joint, any: true }
+            })
+            .collect();
+        proved.extend(dead);
+    }
+    proved
 }
 
 /// The variable names an `isset`/`empty` condition **tests**, at either polarity —
@@ -1150,9 +1180,11 @@ fn collect_bound_when(
                     }
                 }
             }
-            out.extend(
-                lhs.into_iter().chain(rhs).map(|s| Shield { name: s.name, joint: joint.clone() }),
-            );
+            out.extend(lhs.into_iter().chain(rhs).map(|s| Shield {
+                name: s.name,
+                joint: joint.clone(),
+                any: false,
+            }));
         }
         _ => {}
     }
@@ -1401,16 +1433,21 @@ pub(crate) fn scan_var_usage(node: &Node<'_, '_>, guarded: bool, shielded: &[Shi
                 .then(|| extend_shield(shielded, guard_tested_names(c.condition)))
                 .flatten();
             let base = extended.as_deref().unwrap_or(shielded);
+            // A dead arm is the sided rule's reading, so it stands down under a `goto`
+            // like the `if`'s does, although a jump cannot land inside an expression.
+            let dead_arms = acc.dead_arms && !acc.goto_present;
             // `?:` has no `then` arm; its condition IS the value, already walked. Each
             // arm also takes what the condition proves on its own side (issue #929).
             let mut arms = Vec::new();
             if let Some(then) = c.then {
-                let proved = extend_shield(base, bound_when(c.condition, true));
+                let proved =
+                    extend_shield(base, with_dead_arm(bound_when(c.condition, true), dead_arms));
                 let inner = proved.as_deref().unwrap_or(base);
                 let bound = acc.branch(|a| scan_var_usage(&Node::Expression(then), guarded, inner, a));
                 arms.push((!arm_diverges(then)).then_some(bound));
             }
-            let proved = extend_shield(base, bound_when(c.condition, false));
+            let proved =
+                extend_shield(base, with_dead_arm(bound_when(c.condition, false), dead_arms));
             let inner = proved.as_deref().unwrap_or(base);
             let bound = acc.branch(|a| scan_var_usage(&Node::Expression(c.r#else), guarded, inner, a));
             arms.push((!arm_diverges(c.r#else)).then_some(bound));
@@ -1470,8 +1507,13 @@ pub(crate) fn scan_var_usage(node: &Node<'_, '_>, guarded: bool, shielded: &[Shi
                 .then(|| extend_shield(shielded, guard_tested_names(i.condition)))
                 .flatten();
             let base = extended.as_deref().unwrap_or(shielded);
+            let dead_arms = acc.dead_arms;
             let sided = |want_true| {
-                if goto_present { Vec::new() } else { bound_when(i.condition, want_true) }
+                if goto_present {
+                    Vec::new()
+                } else {
+                    with_dead_arm(bound_when(i.condition, want_true), dead_arms)
+                }
             };
             let proved = extend_shield(base, sided(true));
             let then = proved.as_deref().unwrap_or(base);
@@ -1710,6 +1752,7 @@ fn undefined_variable_reads(
         }
     }
     acc.goto_present = statements.iter().any(|s| subtree_has_goto(&Node::Statement(s)));
+    acc.dead_arms = true;
     scan_statement_seq(statements.iter().copied(), false, &[], &mut acc);
     acc.settle();
     if acc.dammed {
