@@ -549,7 +549,7 @@ pub(crate) fn total_op_fact(
             eval_spaceship_fact(w.cx, folder, lhs, rhs, env, store, poisoned)
         }
         ArgValue::Isset(ops) => eval_isset_fact(ops, env, poisoned),
-        ArgValue::Logical { op, lhs, rhs, rhs_span } => {
+        ArgValue::Logical { op, lhs, rhs, rhs_span, cond: _ } => {
             eval_logical_fact(w, folder, *op, lhs, rhs, *rhs_span, env, store, poisoned)
         }
         ArgValue::Not(inner) => eval_not_fact(w, folder, inner, env, store, poisoned),

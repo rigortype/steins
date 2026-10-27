@@ -1979,7 +1979,18 @@ pub enum ArgValue {
     /// `&&`/`and` and `||`/`or` differ in precedence, not semantics, so they share
     /// a [`LogicalOp`]; the parser has already applied the precedence by the time
     /// the tree is shaped.
-    Logical { op: LogicalOp, lhs: Box<ArgValue>, rhs: Box<ArgValue>, rhs_span: Span },
+    ///
+    /// `cond` is the same connective lowered as the `if` would lower it (operand spans
+    /// included), the way [`Self::Ternary`] carries its guard: the value seam evaluates
+    /// it as a condition, so the left operand narrows the right one and an existence
+    /// guard in either folds (issue #1098). `lhs`/`rhs` stay the value-side reading.
+    Logical {
+        op: LogicalOp,
+        lhs: Box<ArgValue>,
+        rhs: Box<ArgValue>,
+        rhs_span: Span,
+        cond: Box<CondExpr>,
+    },
     /// A logical negation `!<operand>` in **value** position (issue #625).
     ///
     /// Total for [`Self::Logical`]'s reason — `!` is a `bool` whatever it negates —
@@ -2470,10 +2481,11 @@ impl std::hash::Hash for ArgValue {
             ArgValue::Isset(ops) => ops.hash(state),
             // The right operand's extent is excluded, as `Coalesce`'s is: it
             // records where a short-circuited operand sits, not what the value is.
-            ArgValue::Logical { op, lhs, rhs, rhs_span: _ } => {
+            ArgValue::Logical { op, lhs, rhs, rhs_span: _, cond } => {
                 op.hash(state);
                 lhs.hash(state);
                 rhs.hash(state);
+                cond.hash(state);
             }
             ArgValue::Not(v) => v.hash(state),
             ArgValue::Cast { target, operand } => {
