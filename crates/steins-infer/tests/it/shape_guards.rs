@@ -768,3 +768,202 @@ fn an_isset_guard_over_a_declared_shape_prunes_nothing() {
         .collect();
     assert_eq!(dumps, vec!["dumped type: 1", "dumped type: 2"]);
 }
+
+// ---- The falsy side of a guard on a shape is `array{}` (#1105) --------------
+
+/// The `offset.*` ids of `<body>` over `@param <decl> $v` (native type `native`),
+/// with the sidecar mock's absence family on.
+fn offset_ids(decl: &str, native: &str, body: &str) -> Vec<&'static str> {
+    let src = format!(
+        "<?php\n/** @param {decl} $v */\nfunction f({native} $v): ?int {{ {body} }}\n"
+    );
+    let mut ids: Vec<&'static str> = diagnostics(&src)
+        .into_iter()
+        .map(|d| d.id)
+        .filter(|i| i.starts_with("offset."))
+        .collect();
+    ids.dedup();
+    ids
+}
+
+#[test]
+fn a_falsy_array_reads_as_the_declared_empty_shape() {
+    let decl = "array{x?: int}";
+    let declared = offset_ids("array{}", "array", "return $v['x'];");
+    assert_eq!(declared, ["offset.undeclared"]);
+    for guard in ["empty($v)", "!$v"] {
+        let body = format!("if ({guard}) {{ return $v['x']; }} return 1;");
+        assert_eq!(offset_ids(decl, "array", &body), declared, "{guard}");
+    }
+    // The `=== []` side keeps its proof-grade id with the sidecar.
+    assert_eq!(
+        offset_ids(decl, "array", "if ($v === []) { return $v['x']; } return 1;"),
+        ["offset.missing"]
+    );
+}
+
+#[test]
+fn a_falsy_array_dumps_as_the_empty_shape_asserted() {
+    assert_eq!(guarded("array{x?: int}", "!$v", "$v"), "dumped type: array{} (asserted)");
+    assert_eq!(guarded("array{x?: int}", "empty($v)", "$v"), "dumped type: array{} (asserted)");
+}
+
+#[test]
+fn a_falsy_nullable_array_binds_nothing() {
+    // `null` is falsy too.
+    assert!(
+        offset_ids("array{x?: int}|null", "?array", "if (!$v) { return $v['x']; } return 1;")
+            .is_empty()
+    );
+}
+
+#[test]
+fn a_write_after_the_falsy_guard_promotes_the_empty_shape() {
+    assert!(
+        offset_ids(
+            "array{x?: int}",
+            "array",
+            "if (!$v) { $v['x'] = 1; return $v['x']; } return 1;"
+        )
+        .is_empty()
+    );
+}
+
+#[test]
+fn a_falsy_array_probe_of_the_key_stays_silent() {
+    for body in [
+        "if (!$v) { return isset($v['x']) ? $v['x'] : 0; } return 1;",
+        "if (!$v) { return $v['x'] ?? 0; } return 1;",
+        "if (!$v) { if (array_key_exists('x', $v)) { return $v['x']; } } return 1;",
+        "if (!$v) { foreach ($v as $e) { return $e; } } return 1;",
+        "if (!$v) { return count($v); } return 1;",
+    ] {
+        assert!(offset_ids("array{x?: int}", "array", body).is_empty(), "{body}");
+    }
+}
+
+#[test]
+fn a_write_onto_the_falsy_array_reads_the_exact_literal() {
+    // The side binds the proven empty array, so a write extends it exactly and a
+    // read of another key stays outside it (PHP warns on each).
+    for (decl, body) in [
+        ("array{x?: int}", "if (!$v) { $v['y'] = 1; return $v['x']; } return 1;"),
+        ("array{x?: int}", "if (!$v) { $v['x'] = 1; return $v['y']; } return 1;"),
+        ("array{x?: int}", "if (!$v) { $v[] = 1; return $v['x']; } return 1;"),
+        ("array<string, int>", "if (!$v) { $v['y'] = 1; return $v['x']; } return 1;"),
+    ] {
+        assert_eq!(offset_ids(decl, "array", body), ["offset.undeclared"], "{body}");
+    }
+}
+
+#[test]
+fn a_guard_that_contradicts_the_falsy_side_reads_nothing_there() {
+    // The inner region is dead in PHP: the empty array is not truthy, has no
+    // entry and no key. Nothing in it may report.
+    for body in [
+        "if (!$v) { if ($v) { return $v['x']; } } return 1;",
+        "if (!$v) { if (!empty($v)) { return $v['x']; } } return 1;",
+        "if (!$v) { if (count($v) > 0) { return $v['x']; } } return 1;",
+        "if (!$v) { if ($v !== []) { return $v['x']; } } return 1;",
+        "if (!$v) { if (array_key_exists('x', $v)) { return $v['x']; } } return 1;",
+        "if (!$v) { if (isset($v['x'])) { return $v['x']; } } return 1;",
+        "if (!$v) { if (in_array(1, $v, true)) { return $v['x']; } } return 1;",
+        "if (!$v) { if (sizeof($v)) { return $v['x']; } } return 1;",
+        "if (!$v) { if (array_search(1, $v) !== false) { return $v['x']; } } return 1;",
+        "if (!$v) { if (array_key_first($v) !== null) { return $v['x']; } } return 1;",
+        "if (!$v) { if (current($v) !== false) { return $v['x']; } } return 1;",
+        "if (!$v) { if (array_sum($v) > 0) { return $v['x']; } } return 1;",
+        "if (!$v) { foreach ($v as $e) { return $v['x']; } } return 1;",
+        "if (!$v) { $k = 'x'; if (array_key_exists($k, $v)) { return $v['x']; } } return 1;",
+        "if (!$v) { if (array_keys($v)) { return $v['x']; } } return 1;",
+        "if (!$v) { if (array_filter($v)) { return $v['x']; } } return 1;",
+        "if (!$v) { if (array_chunk($v, 1)) { return $v['x']; } } return 1;",
+        "if (!$v) { if (array_combine($v, $v)) { return $v['x']; } } return 1;",
+        "if (!$v) { if (array_rand($v) !== null) { return $v['x']; } } return 1;",
+    ] {
+        assert!(offset_ids("array{x?: int}", "array", body).is_empty(), "{body}");
+    }
+}
+
+#[test]
+fn a_verified_empty_literal_keeps_its_proof_leg_verdict() {
+    // Only an `Asserted` empty array reads as a sealed shape; `$row = []` is the
+    // proof leg's, so the strict leg adds no second id.
+    let src = "<?php\nfunction f(): ?int { $row = []; return $row['x']; }\n";
+    let ids: Vec<_> = diagnostics(src).into_iter().map(|d| d.id).collect();
+    assert_eq!(ids.iter().filter(|i| **i == "offset.missing").count(), 1, "{ids:?}");
+    assert!(!ids.contains(&"offset.undeclared"), "{ids:?}");
+}
+
+#[test]
+fn a_read_after_a_loop_over_the_falsy_array_still_reports() {
+    // The loop body never runs, but the code after it does (PHP warns).
+    assert_eq!(
+        offset_ids(
+            "array{x?: int}",
+            "array",
+            "if (!$v) { foreach ($v as $e) { echo $e; } return $v['x']; } return 1;"
+        ),
+        ["offset.undeclared"]
+    );
+}
+
+#[test]
+fn a_contradicted_falsy_side_joins_away() {
+    // The dead inner region binds nothing the join can see: the outer read after
+    // it is judged on the declared shape exactly, as without the inner guard.
+    for inner in ["if ($v) { }", "if (in_array(1, $v, true)) { }", "foreach ($v as $e) { }"] {
+        let body = format!("if (!$v) {{ {inner} }} return $v['y'];");
+        assert_eq!(offset_ids("array{x?: int}", "array", &body), ["offset.undeclared"], "{inner}");
+    }
+}
+
+#[test]
+fn a_by_reference_call_in_a_helper_argument_is_no_test_of_the_array() {
+    // `check(setx($v))` rebinds `$v`; the empty-array claim must not survive it.
+    let src = "<?php\n/** @phpstan-assert true $c */\nfunction check(bool $c): void {}\n\
+        function setx(mixed &$a): bool { $a = ['x' => 1]; return true; }\n\
+        /** @param array{x?: int} $v */\n\
+        function f(array $v): ?int { if (!$v) { check(setx($v)); return $v['x']; } return 1; }\n";
+    let ids: Vec<_> = diagnostics(src).into_iter().map(|d| d.id).collect();
+    assert!(!ids.iter().any(|i| i.starts_with("offset.")), "{ids:?}");
+}
+
+#[test]
+fn a_comparison_that_cannot_discriminate_keeps_the_falsy_claim() {
+    // `implode` never returns false, so the branch is live and the empty array holds.
+    assert_eq!(
+        offset_ids(
+            "array{x?: int}",
+            "array",
+            "if (!$v) { if (implode(',', $v) !== false) { $v['y'] = 1; return $v['x']; } } return 1;"
+        ),
+        ["offset.undeclared"]
+    );
+}
+
+#[test]
+fn a_test_through_an_unmodelled_call_does_not_manufacture_non_emptiness() {
+    // Neither side of `array_keys($v)` is known dead; the join after it and the
+    // outer join must equal the declared shape, so the read still reports.
+    for body in [
+        "if (!$v) { if (json_encode($v) !== '') { } } return $v['x'];",
+        "if (!$v) { if (array_keys($v)) { } $v['y'] = 1; return $v['x']; } return 1;",
+    ] {
+        assert!(!offset_ids("array{x?: int}", "array", body).is_empty(), "{body}");
+    }
+}
+
+#[test]
+fn a_read_in_a_region_an_unmodelled_truthy_call_decides_is_not_judged() {
+    // `array_merge($v, [1])` is truthy on `[]`, so the code after its `return` is
+    // dead in PHP; the call is not in the probe table, so the walk cannot tell.
+    assert!(
+        offset_ids(
+            "array{x?: int}",
+            "array",
+            "if (!$v) { if (array_merge($v, [1])) { return 5; } return $v['y']; } return 1;"
+        )
+        .is_empty()
+    );
+}

@@ -398,6 +398,15 @@ impl Fact {
     /// `None` = unrepresentable; the caller drops the fact (safe).
     #[must_use]
     pub fn join(&self, other: &Fact) -> Option<Fact> {
+        // The uninhabited array shape (sealed, no field, non-empty) denotes no
+        // value, so it is the identity of the join: the other side, exactly (a
+        // lifted literal would otherwise come back as an approximating shape).
+        if is_uninhabited_shape(self) {
+            return Some(other.clone());
+        }
+        if is_uninhabited_shape(other) {
+            return Some(self.clone());
+        }
         // The array stratum has its own algebra (ADR-0062 A-G5); the scalar
         // layering below cannot express it.
         if matches!(self, Fact::Shape { .. }) || matches!(other, Fact::Shape { .. }) {
@@ -595,6 +604,13 @@ impl Fact {
             }
         }
     }
+}
+
+/// Whether a fact is the array shape no value satisfies: sealed, no field, yet
+/// non-empty, and not nullable.
+fn is_uninhabited_shape(f: &Fact) -> bool {
+    matches!(f, Fact::Shape { shape, nullable: false }
+        if shape.fields.is_empty() && matches!(shape.tail, Tail::Sealed) && shape.non_empty)
 }
 
 /// Join where at least one operand is a [`Fact::Shape`]. `None` (drop the fact) for anything
@@ -979,6 +995,18 @@ mod tests {
         let expected =
             StrPreds::NUMERIC.union(StrPreds::NON_EMPTY).union(StrPreds::LOWERCASE);
         assert_eq!(f, Fact::refined(Base::String, Refinement::Str(expected), false));
+    }
+
+    #[test]
+    fn the_uninhabited_shape_is_the_identity_of_join() {
+        let dead = Fact::Shape {
+            shape: Box::new(ShapeFact::lift(&[]).set_non_empty()),
+            nullable: false,
+        };
+        let lit = Fact::Singleton(Val::Array(Vec::new()));
+        assert_eq!(dead.join(&lit), Some(lit.clone()));
+        assert_eq!(lit.join(&dead), Some(lit));
+        assert_eq!(dead.join(&dead), Some(dead));
     }
 
     #[test]

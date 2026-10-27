@@ -234,6 +234,12 @@ pub struct ShapeFact {
     /// loses the witness. When present it is a permutation of the field keys
     /// under a `Sealed` tail; [`ShapeFact::with_order`] enforces both.
     pub order: Option<Vec<Key>>,
+    /// **Unjudged** (#1105): the shape stands for "the declared shape, on a path
+    /// the walk cannot tell is live", set only by [`ShapeFact::mark_unjudged`].
+    /// An offset reader skips it, so a read in a region PHP may never enter is
+    /// not judged; any rebuild, a join included, clears it (the same drop
+    /// discipline as `order`), so a join with a judged side is that side.
+    pub unjudged: bool,
 }
 
 /// PHP's `array_is_list`: the keys are exactly `0..n-1`, in that order.
@@ -409,7 +415,22 @@ impl ShapeFact {
 
         // `order: None` unconditionally — the drop discipline's enforcement
         // point (every derived shape is built here).
-        ShapeFact { fields, tail, is_list, non_empty, covers, count_bound, order: None }
+        ShapeFact {
+            fields,
+            tail,
+            is_list,
+            non_empty,
+            covers,
+            count_bound,
+            order: None,
+            unjudged: false,
+        }
+    }
+
+    /// This shape marked [`ShapeFact::unjudged`].
+    #[must_use]
+    pub fn mark_unjudged(&self) -> ShapeFact {
+        ShapeFact { unjudged: true, ..self.clone() }
     }
 
     /// Attach an **order witness** (issue #327): the observed build order.
@@ -822,7 +843,7 @@ impl ShapeFact {
     pub fn relax_count_ceiling(&self) -> ShapeFact {
         let relaxed = IntRange::new(self.count_bound.lo(), i64::MAX)
             .unwrap_or(IntRange::NON_NEGATIVE);
-        ShapeFact { count_bound: relaxed, order: None, ..self.clone() }
+        ShapeFact { count_bound: relaxed, order: None, unjudged: false, ..self.clone() }
     }
 
     /// **The count narrowing** (issue #272): meet the learned count interval

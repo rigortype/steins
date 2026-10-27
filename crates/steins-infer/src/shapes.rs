@@ -81,6 +81,13 @@ pub(crate) enum ShapeGuard {
     /// complement interval and not a vacuity trap — and the interval is
     /// already the branch's, so nothing downstream re-reads the operator.
     Count { var: String, range: IntRange },
+    /// A condition that tests `$x` through a call the guards above do not model
+    /// (`in_array(.., $x)`, `array_search`, `current($x) !== false`, …), at
+    /// either polarity. It narrows nothing: it only drops an `Asserted` empty-array
+    /// claim ([`widen_contradicted_empty`]): `dead` when a modelled probe says this
+    /// is the side that found an entry (one an empty `$x` never enters), else the
+    /// claim is only forgotten, since neither side is known dead.
+    Tested { var: String, dead: bool },
 }
 
 impl ShapeGuard {
@@ -92,7 +99,8 @@ impl ShapeGuard {
             | ShapeGuard::Tag { var, .. }
             | ShapeGuard::Cover { var, .. }
             | ShapeGuard::NonEmpty { var, .. }
-            | ShapeGuard::Count { var, .. } => var,
+            | ShapeGuard::Count { var, .. }
+            | ShapeGuard::Tested { var, .. } => var,
         }
     }
 }
@@ -285,6 +293,230 @@ fn count_guard(
 /// still decided from the condition's own syntax, so the walk stays replayable
 /// in the ADR-0048 §1 sense.
 pub(crate) fn collect_shape_guards(
+    cx: &Cx,
+    cond: &CondExpr,
+    then: bool,
+    env: &HashMap<String, Known>,
+    out: &mut Vec<ShapeGuard>,
+) {
+    collect_modelled_guards(cx, cond, then, env, out);
+}
+
+/// What a leaf condition's call says about the array it was handed.
+#[derive(Clone, Copy, PartialEq)]
+enum Probe {
+    /// The call found something in the array at this polarity of the condition.
+    FoundWhen(bool),
+    /// The condition says nothing about emptiness (`implode(..) !== false`).
+    Neutral,
+    /// Not modelled: assume either side may be the one that found something.
+    Unknown,
+}
+
+/// What a leaf call and its comparison literal say, for the **named builtin**.
+/// `cmp` is the comparison operator, its literal and whether the call is on the left.
+fn probe_of(callee: Option<&str>, cmp: Option<(CmpOp, &ArgValue, bool)>) -> Probe {
+    let Some(name) = callee else { return Probe::Unknown };
+    let is = |names: &[&str]| names.iter().any(|n| name.eq_ignore_ascii_case(n));
+    // A bare call in truth position.
+    let Some((op, lit, call_left)) = cmp else {
+        // Truthy of any array, whose else side is the dead one.
+        return if is(&[
+            "is_array",
+            "is_iterable",
+            "is_countable",
+            "array_is_list",
+            "json_encode",
+            "serialize",
+            "var_export",
+            "print_r",
+            "gettype",
+            "get_debug_type",
+            "iterator_count",
+            "spl_object_id",
+        ]) {
+            Probe::Neutral
+        } else if found_position(name, 0) || found_position(name, 1) {
+            // Falsy or throwing on an empty array at the named position (see
+            // [`found_position`]); the position itself is checked per argument.
+            Probe::FoundWhen(true)
+        } else {
+            Probe::Unknown
+        };
+    };
+    let negated = matches!(op, CmpOp::NotIdentical | CmpOp::NotLoose);
+    let equal = matches!(op, CmpOp::Identical | CmpOp::Loose);
+    // Returns `false` or `null` when it found nothing.
+    if is(&[
+        "current",
+        "key",
+        "array_key_first",
+        "array_key_last",
+        "array_search",
+        "reset",
+        "end",
+        "array_pop",
+        "array_shift",
+        "array_rand",
+    ]) {
+        return match lit {
+            // `=== <int>` / `=== <string>` is never true of the not-found result.
+            ArgValue::Int(_) | ArgValue::Str(_) if op == CmpOp::Identical => {
+                Probe::FoundWhen(true)
+            }
+            ArgValue::Null | ArgValue::Bool(false) if negated => Probe::FoundWhen(true),
+            ArgValue::Null | ArgValue::Bool(false) if equal => Probe::FoundWhen(false),
+            _ => Probe::Unknown,
+        };
+    }
+    // Returns a bool.
+    if is(&["in_array", "array_key_exists", "key_exists"]) {
+        return match lit {
+            ArgValue::Bool(b) if equal => Probe::FoundWhen(*b),
+            ArgValue::Bool(b) if negated => Probe::FoundWhen(!*b),
+            _ => Probe::Unknown,
+        };
+    }
+    // Always an int, float or string: never `false` or `null`.
+    if is(&["count", "sizeof", "array_sum", "array_product", "implode", "join", "max", "min"]) {
+        let sums = is(&["count", "sizeof", "array_sum"]);
+        return match lit {
+            ArgValue::Null | ArgValue::Bool(false) if negated || equal => Probe::Neutral,
+            ArgValue::Int(n) if sums && call_left && op == CmpOp::Gt && *n >= 0 => {
+                Probe::FoundWhen(true)
+            }
+            ArgValue::Int(n) if sums && call_left && op == CmpOp::Ge && *n >= 1 => {
+                Probe::FoundWhen(true)
+            }
+            _ => Probe::Unknown,
+        };
+    }
+    Probe::Unknown
+}
+
+/// Whether a call to `name` is falsy or throws on `[]` for every value of its
+/// other arguments, when the array is at argument `pos`. Checked against PHP 8.3
+/// for each entry; a builtin that is truthy on `[]` with `$v` elsewhere (the
+/// needle of `in_array`, the second array of `array_merge`, `array_product`,
+/// `min($v, 1)`, ...) is not here, and so is Unknown.
+fn found_position(name: &str, pos: usize) -> bool {
+    const FIRST: &[&str] = &[
+        "count",
+        "sizeof",
+        "array_sum",
+        "array_keys",
+        "array_values",
+        "array_filter",
+        "array_unique",
+        "array_flip",
+        "array_reverse",
+        "array_count_values",
+        "array_chunk",
+        "array_slice",
+        "array_rand",
+        "current",
+        "key",
+        "array_key_first",
+        "array_key_last",
+        "reset",
+        "end",
+        "array_pop",
+        "array_shift",
+        "array_combine",
+    ];
+    const SECOND: &[&str] =
+        &["in_array", "array_search", "array_key_exists", "key_exists", "array_combine"];
+    let any = |names: &[&str]| names.iter().any(|n| name.eq_ignore_ascii_case(n));
+    match pos {
+        0 => any(FIRST),
+        1 => any(SECOND),
+        _ => false,
+    }
+}
+
+/// The **tested** variables of a condition at polarity `then`: a bare variable a
+/// leaf condition hands directly to a call, on the side where the call may have
+/// found something in it. A [`ShapeGuard::Tested`] each, minus the variables a
+/// modelled guard (`modelled`) already answered for.
+///
+/// The default is to widen: an unknown call, a user function, an unrecognised
+/// comparison all drop an empty-array claim on both sides, because a lost report
+/// beats one inside a region PHP never enters. Only a modelled "found nothing"
+/// side keeps it. This collector is NOT part of [`collect_shape_guards`]: the
+/// helper-assertion path (`apply_helper_guard`) shares that one, and a `Tested`
+/// there would exempt a by-reference call's argument from the by-reference forget.
+pub(crate) fn collect_tested_guards(
+    cx: &Cx,
+    cond: &CondExpr,
+    then: bool,
+    modelled: &[ShapeGuard],
+    out: &mut Vec<ShapeGuard>,
+) {
+    fn call_of(o: &CondOperand) -> Option<&CallExpr> {
+        match o {
+            CondOperand::Other { call: Some(c), .. } => Some(c.as_ref()),
+            _ => None,
+        }
+    }
+    let callee = |c: &CallExpr| global_function_callee(cx, c).map(str::to_owned);
+    let (call, probe): (&CallExpr, Probe) = match cond {
+        CondExpr::Not(c) => return collect_tested_guards(cx, c, !then, modelled, out),
+        CondExpr::And(a, b, _) if then => {
+            collect_tested_guards(cx, a, then, modelled, out);
+            return collect_tested_guards(cx, b, then, modelled, out);
+        }
+        CondExpr::Or(a, b, _) if !then => {
+            collect_tested_guards(cx, a, then, modelled, out);
+            return collect_tested_guards(cx, b, then, modelled, out);
+        }
+        CondExpr::Call { call, .. } => (call, probe_of(callee(call).as_deref(), None)),
+        CondExpr::Truthy(o) => {
+            let Some(c) = call_of(o) else { return };
+            (c, probe_of(callee(c).as_deref(), None))
+        }
+        CondExpr::Cmp { op, lhs, rhs } => match (call_of(lhs), call_of(rhs), lhs, rhs) {
+            (Some(c), None, _, CondOperand::Literal(l)) => {
+                (c, probe_of(callee(c).as_deref(), Some((*op, l, true))))
+            }
+            (None, Some(c), CondOperand::Literal(l), _) => {
+                (c, probe_of(callee(c).as_deref(), Some((*op, l, false))))
+            }
+            // A call compared with something that is not a literal: nothing modelled.
+            (Some(c), _, _, _) | (None, Some(c), _, _) => (c, Probe::Unknown),
+            _ => return,
+        },
+        _ => return,
+    };
+    let widen = match probe {
+        Probe::FoundWhen(side) => side == then,
+        Probe::Neutral => false,
+        Probe::Unknown => true,
+    };
+    let name = callee(call).unwrap_or_default();
+    let positional = call.args.iter().enumerate().map(|(i, a)| (Some(i), &a.value));
+    let named = call.named_args.iter().map(|n| (None, &n.value));
+    for (pos, v) in positional.chain(named) {
+        let ArgValue::Var(var) = v else { continue };
+        if modelled.iter().chain(out.iter()).any(|g| g.var() == var) {
+            continue;
+        }
+        // The probe's "found" reading holds only for the array at its position;
+        // `$v` anywhere else is a test the table does not model.
+        let (probe, widen) = match (probe, pos) {
+            (Probe::FoundWhen(side), Some(i)) if found_position(&name, i) => {
+                (probe, side == then)
+            }
+            (Probe::FoundWhen(_), _) => (Probe::Unknown, true),
+            (p, _) => (p, widen),
+        };
+        if widen {
+            let dead = matches!(probe, Probe::FoundWhen(_));
+            out.push(ShapeGuard::Tested { var: var.clone(), dead });
+        }
+    }
+}
+
+fn collect_modelled_guards(
     cx: &Cx,
     cond: &CondExpr,
     then: bool,
@@ -523,6 +755,9 @@ pub(crate) fn apply_shape_narrowing(
 ) {
     let mut guards = Vec::new();
     collect_shape_guards(cx, cond, then, env, &mut guards);
+    let mut tested = Vec::new();
+    collect_tested_guards(cx, cond, then, &guards, &mut tested);
+    guards.extend(tested);
     for g in &guards {
         apply_shape_guard(g, env, store, witnessed);
     }
@@ -536,9 +771,14 @@ pub(crate) fn apply_shape_guard(
     store: &mut Store,
     witnessed: bool,
 ) {
+    // A tested call narrows no lane: it only drops an empty-array claim.
+    if let ShapeGuard::Tested { var, dead } = g {
+        widen_contradicted_empty(env, store, var, *dead);
+        return;
+    }
     subtract_shape_arms(g, store);
     mint_collapsed_shape(g.var(), env, store);
-    refine_shape_fact(g, env, witnessed);
+    refine_shape_fact(g, env, store, witnessed);
 }
 
 /// **Arm subtraction** (A-G3/A-G4): delete the arms of `var`'s contract lane the
@@ -621,9 +861,10 @@ fn shape_arm_survives(g: &ShapeGuard, ty: &ContractTy) -> bool {
         // Truthiness, list-ness, and A8's non-emptiness are whole-array
         // properties, and every arm can be non-empty/a list for *some* value it
         // admits — v1 subtracts nothing here, refines the fact lane only.
-        ShapeGuard::Truthy { .. } | ShapeGuard::IsList { .. } | ShapeGuard::NonEmpty { .. } => {
-            true
-        }
+        ShapeGuard::Truthy { .. }
+        | ShapeGuard::IsList { .. }
+        | ShapeGuard::NonEmpty { .. }
+        | ShapeGuard::Tested { .. } => true,
         // A count guard **does** discriminate arms (issue #272), through each
         // array arm's own count interval: an arm whose interval excludes `range`
         // cannot be live (`array{}` dies under `count($x) > 0`; `array<int>`
@@ -760,11 +1001,67 @@ fn tail_admits(tail: &steins_domain::Tail, k: &VKey) -> bool {
     }
 }
 
+/// Drop an **`Asserted` empty array** claim on `var` that a branch contradicts.
+/// Returns whether it did. A `Verified` literal keeps its own dead-region
+/// handling, and any other fact is left alone.
+///
+/// The strict offset leg reads the claim as a sealed `array{}`
+/// ([`crate::offsets::check_shape_read`]), so a region PHP never enters must not
+/// keep it. What replaces it depends on what is known of the region:
+/// - `dead`: a modelled guard proves PHP never enters it (a `foreach` over the
+///   array, a branch that finds an entry in it). The binding becomes the
+///   uninhabited sealed-empty non-empty shape, which no array satisfies: the
+///   strict leg is silent on it and a join with the other side's shape gives that
+///   shape back.
+/// - otherwise (an unmodelled call tested the array): neither side is known dead,
+///   and a manufactured uninhabited shape would make the join hand back the other
+///   side's non-emptiness. The claim is only forgotten: the binding returns to the
+///   shape the falsy guard narrowed from, re-minted from the contract arms
+///   (`array`, if the lane was dropped), never non-empty.
+pub(crate) fn widen_contradicted_empty(
+    env: &mut HashMap<String, Known>,
+    store: &Store,
+    var: &str,
+    dead: bool,
+) -> bool {
+    let Some(known) = env.get(var) else { return false };
+    if known.stratum != Stratum::Asserted
+        || !matches!(&known.fact, Some(Fact::Singleton(Val::Array(e))) if e.is_empty())
+    {
+        return false;
+    }
+    let next = if dead {
+        Fact::Shape { shape: Box::new(ShapeFact::lift(&[]).set_non_empty()), nullable: false }
+    } else {
+        match store.contract.get(var).and_then(|arms| seed_shape_fact(arms)) {
+            // The falsy side held a non-null array, so the claim is non-null.
+            Some(Fact::Shape { shape, .. }) => {
+                Fact::Shape { shape: Box::new(shape.mark_unjudged()), nullable: false }
+            }
+            _ => Fact::Shape {
+                shape: Box::new(ShapeFact::plain_array().mark_unjudged()),
+                nullable: false,
+            },
+        }
+    };
+    let line = known.line;
+    env.insert(
+        var.to_owned(),
+        Known::value_strat(next, line, Some(SHAPE_REFINED.to_owned()), Stratum::Asserted),
+    );
+    true
+}
+
 /// **Fact-lane refinement**: apply the guard's domain operator to `var`'s
 /// `Fact::Shape`, if it has one. Every operator is a narrowing
 /// (`crates/steins-domain/src/shape.rs`), so the result admits everything the
 /// binding admitted that satisfies the guard.
-fn refine_shape_fact(g: &ShapeGuard, env: &mut HashMap<String, Known>, witnessed: bool) {
+fn refine_shape_fact(
+    g: &ShapeGuard,
+    env: &mut HashMap<String, Known>,
+    store: &Store,
+    witnessed: bool,
+) {
     use steins_domain::Presence;
     let Some(known) = env.get(g.var()) else { return };
     // **Value-lane coherence first** (issue #272): a count guard is the one
@@ -780,6 +1077,23 @@ fn refine_shape_fact(g: &ShapeGuard, env: &mut HashMap<String, Known>, witnessed
         );
         return;
     }
+    // The falsy side binds an `Asserted` empty singleton (below); a nested guard
+    // that proves the same variable non-empty, or a key present, contradicts it,
+    // and so does a condition that tests it through a call the walk does not model.
+    // The strict leg reads that singleton as the sealed `array{}`, so it must not
+    // outlive the contradiction: see [`widen_contradicted_empty`].
+    if matches!(
+        g,
+        ShapeGuard::Truthy { positive: true, .. }
+            | ShapeGuard::NonEmpty { .. }
+            | ShapeGuard::Present { positive: true, .. }
+            | ShapeGuard::Cover { .. }
+            | ShapeGuard::Tested { .. }
+    ) && widen_contradicted_empty(env, store, g.var(), true)
+    {
+        return;
+    }
+    let Some(known) = env.get(g.var()) else { return };
     let Some(Fact::Shape { shape, nullable }) = &known.fact else { return };
     let (shape, nullable) = (shape.as_ref(), *nullable);
     let next = match g {
@@ -888,7 +1202,7 @@ fn refine_shape_fact(g: &ShapeGuard, env: &mut HashMap<String, Known>, witnessed
         }
         // A tag guard's job is arm subtraction; the collapsed arm's own slot is
         // already the declared literal, so refining the fact adds nothing v1.
-        ShapeGuard::Tag { .. } => None,
+        ShapeGuard::Tag { .. } | ShapeGuard::Tested { .. } => None,
     };
     let Some(next) = next else { return };
     let (line, stratum) = (known.line, known.stratum);
