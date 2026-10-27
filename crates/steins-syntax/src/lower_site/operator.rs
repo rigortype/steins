@@ -414,11 +414,11 @@ fn chain(expr: &Expression<'_>, role: C, sx: &SiteScope<'_>, out: &mut Vec<SiteO
 }
 
 /// The role of an access under another: `isset`, `empty`, `??` and `??=` fetch
-/// their intermediates the way `isset` does (`__isset`, then `__get`; for an
+/// their intermediates ([`C::IssetFetch`]) the way `empty` does (`__isset`, then `__get`; for an
 /// offset, `offsetExists` first); every other context reads them.
 fn inner(role: C) -> C {
     match role {
-        C::Isset | C::Empty | C::Coalesce | C::CoalesceAssign => C::Isset,
+        C::Isset | C::Empty | C::Coalesce | C::CoalesceAssign | C::IssetFetch => C::IssetFetch,
         _ => C::Read,
     }
 }
