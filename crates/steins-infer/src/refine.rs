@@ -1071,6 +1071,11 @@ pub(crate) fn subtract_contract_lane_at(
                 true
             }
         });
+        // An Asserted subtraction is a claim, not a fact: the arms it leaves rest on it
+        // for the deletion, so none stays stronger than `Asserted` (issue #1107).
+        if changed && guard_stratum == Stratum::Asserted {
+            arms.iter_mut().for_each(|a| a.stratum = a.stratum.min(Stratum::Asserted));
+        }
         settle_lane(store, var, all_verified, changed);
         landed = changed;
     }

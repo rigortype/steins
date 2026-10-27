@@ -51,7 +51,7 @@ function f(int|string $value): void {{
 }}
 "
     );
-    assert_eq!(one_type(&src), "dumped type: string");
+    assert_eq!(one_type(&src), "dumped type: string (asserted)");
 }
 
 #[test]

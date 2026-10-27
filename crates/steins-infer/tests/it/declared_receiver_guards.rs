@@ -869,3 +869,53 @@ fn what_method_exists_does_not_narrow() {
         ],
     );
 }
+
+// ---------------------------------------------------------------------------
+// Issue #1107: an `Asserted` subtraction demotes the arms it leaves. The finding that
+// rests on a docblock deleting an arm is `phpdoc.*`, never the proof id. A runtime
+// guard (`instanceof`, `assert()`) deletes at `Verified` and keeps the proof id.
+// ---------------------------------------------------------------------------
+
+const LIE: &str = "
+interface T {} interface T2 extends T {}
+final class OnlyB { public function zz(): int { return 9; } }
+class TT2 implements T2 {}
+final class Foo { public function other(): int { return 1; } }
+/** @phpstan-assert T $v */
+function lie(mixed $v): void {}
+/** @phpstan-assert !OnlyB $v */
+function no(mixed $v): void {}
+/** @phpstan-assert !int $v */
+function notInt(mixed $v): void {}
+/** @phpstan-assert-if-true T $o */
+function isT(mixed $o): bool { return $o instanceof T; }
+/** @phpstan-assert-if-false T $o */
+function notT(mixed $o): bool { return !($o instanceof T); }
+";
+
+#[test]
+fn an_asserted_deletion_routes_the_survivor_to_the_phpdoc_id() {
+    rows(
+        LIE,
+        &[
+            ("function a3(TT2|OnlyB $x): int { lie($x); return $x->zz(); }", &["phpdoc.undefined-method TT2"]),
+            ("function a4(TT2|OnlyB $x): int { no($x); return $x->zz(); }", &["phpdoc.undefined-method TT2"]),
+            // The envelope paths reach the same subtraction.
+            ("function a5(TT2|OnlyB $x): int { if (isT($x)) { return $x->zz(); } return 0; }", &["phpdoc.undefined-method TT2"]),
+            ("function a6(TT2|OnlyB $x): int { if (!notT($x)) { return $x->zz(); } return 0; }", &["phpdoc.undefined-method TT2"]),
+            // The negated scalar base: only the deletion of `int` makes `Foo::zz` undefined.
+            ("function a7(int|Foo $x): int { notInt($x); return $x->zz(); }", &["phpdoc.undefined-method Foo"]),
+        ],
+    );
+}
+
+#[test]
+fn a_runtime_deletion_keeps_the_proof_id() {
+    rows(
+        LIE,
+        &[
+            ("function r1(TT2|OnlyB $x): int { if ($x instanceof TT2) { return $x->zz(); } return 0; }", &["call.undefined-method TT2"]),
+            ("function r2(TT2|OnlyB $x): int { assert($x instanceof TT2); return $x->zz(); }", &["call.undefined-method TT2"]),
+        ],
+    );
+}
