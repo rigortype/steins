@@ -625,3 +625,68 @@ function f(int $k): void { switch ($k) { case 1: takes($k); } }
 ";
     assert_eq!(lines_of(src, "type.argument-mismatch"), vec![4]);
 }
+
+#[test]
+fn strict_arm_keeps_the_subjects_thinned_flag() {
+    // #1090 (the `match` twin of the pin above): the strict arm used to be rebuilt as a
+    // fresh `Verified` value, so the thinned `$k` came back un-thinned and the guard's
+    // exit was forgotten. PHP never reaches `takes` (it prints `ok`): no proven
+    // mismatch, and the possibly grade stays.
+    let src = "<?php
+declare(strict_types=1);
+function takes(string $s): void {}
+function mt(bool $c): void { $k = $c ? 1 : 2; $y = $k; if ($y > 0 && time() > 0) return; match ($k) { 1, 2 => takes($k), }; }
+";
+    assert!(lines_of(src, "type.argument-mismatch").is_empty(), "no proven mismatch");
+    assert_eq!(lines_of(src, "type.maybe-argument-mismatch"), vec![4]);
+}
+
+#[test]
+fn strict_arm_does_not_inherit_a_closure_subject() {
+    // A closure is never `===` a literal: PHP prints `ok` for both, so the arm's
+    // value is the label and `$f(...)` must not resolve to the subject's closure.
+    let call = "<?php
+declare(strict_types=1);
+function mt(): void {
+    $f = fn(int $x): int => $x;
+    $r = match ($f) { 1 => $f(\"a\"), default => 0 };
+    echo $r, \"\\n\";
+}
+";
+    assert!(lines_of(call, "type.argument-mismatch").is_empty(), "call arg");
+    let body = "<?php
+declare(strict_types=1);
+function takes(string $s): void {}
+function mt(): void {
+    $f = function (int $x): void { takes($x); };
+    match ($f) { 1 => $f(5), default => null };
+}
+";
+    assert!(lines_of(body, "type.argument-mismatch").is_empty(), "closure body");
+}
+
+#[test]
+fn strict_arm_without_an_exit_keeps_the_proven_mismatch() {
+    // No exit between the binding and the `match`: both members reach `takes`, which
+    // raises a TypeError on either, so the proof stays.
+    let src = "<?php
+declare(strict_types=1);
+function takes(string $s): void {}
+function mt(bool $c): void { $k = $c ? 1 : 2; match ($k) { 1, 2 => takes($k), }; }
+";
+    assert_eq!(lines_of(src, "type.argument-mismatch"), vec![4]);
+}
+
+#[test]
+fn strict_arm_over_an_asserted_subject_keeps_the_proven_mismatch() {
+    // The strict arm's fact is exactly the label, established by `===`, so it is
+    // `Verified` whatever the subject's stratum (decision 7 of #1114): the `@param`
+    // subject's TypeError on 1 is still proven.
+    let src = "<?php
+declare(strict_types=1);
+function takes_string(string $s): void {}
+/** @param 1|2 $k */
+function f(int $k): void { match ($k) { 1 => takes_string($k) }; }
+";
+    assert_eq!(lines_of(src, "type.argument-mismatch"), vec![5]);
+}
