@@ -597,3 +597,31 @@ neither the win nor the noise reaches the score. The score moves only
 if the suite's profile is raised or this pair is re-floored; the floor
 here follows §A2's split for the argument pair, and changing it is that
 suite's question, not this id's.
+
+## Amendment (2026-10-27): an Asserted fact rejected in every member joins the possibly grade (issue #1099, run #1114 slice S6) — PENDING ratification
+
+Designed in run #1114, slice S6 (#1099); landed when that slice merges.
+
+§A1 and issue #291's "don't build it" concern the definite verdict on a *Verified*
+abstract fact: a native declaration is the runtime truth, callers overwhelmingly hold
+what they declare, and the verdict measured empty on three corpora. That ruling is
+**not reopened** (owner decision 1 of #1114): an abstract `Every` at `Verified`
+(`string` into `?int` under strict types) stays silent.
+
+What §A1 did not consider is a fact at the `Asserted` stratum. There the premise is a
+claim, so "every member is rejected" is not a proof that the call breaks, and it is
+no more definite than the `Partial` verdict §A1 already reports: it is the same
+possibly-grade shape one stratum over. The rule: **an Asserted fact every member of
+which is rejected reports `phpdoc.maybe-argument-mismatch`** (§A2's id for an Asserted
+premise), naming every member, and the return seam reports its phpdoc twin. Three rows
+carry it, and they are one rule: a finite `OneOf` rejected in every member (ADR-0043's
+2026-10-11 table), an abstract `Every` whose stratum is `Asserted` ("its every arm raises
+a TypeError"), and a `Singleton` the proof rung declined because the proof layer needs a
+Verified premise. The family stays strict-floored and in the gate's tripwire bucket,
+held to non-increase. The call-site descent still reports the proven
+`type.argument-mismatch` when a caller passes a literal.
+
+ADR-0043's 2026-10-11 table (a `OneOf` judged member by member) gains the row: a `OneOf`
+rejected in every member at the `Asserted` stratum is `phpdoc.maybe-argument-mismatch`
+(and its return twin), no longer silent; the `Union`, `Refined` and `General` row keeps
+"all-refused is silent" for a `Verified` fact.

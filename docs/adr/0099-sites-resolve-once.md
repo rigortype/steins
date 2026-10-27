@@ -893,3 +893,25 @@ Each witnessed on PHP 8.5.11 unless it says it is not.
 - **A trait's `self`.** A trait method's `self` is the using class, which the trait's body cannot
   name; the frame's class is the trait, which no object is an instance of, so the type reads as
   converting.
+
+## Amendment (2026-10-27): the final `isset` operand runs the existence hook only (issue #1094, run #1114 slice S4) — PENDING ratification
+
+Designed in run #1114, slice S4 (#1094); landed when that slice merges.
+
+§4.3's MagicProp and ArrayAccess rows list `isset`, `empty` and `??` together, and the
+sentence on intermediate fetches says they run `__isset` (for an offset, `offsetExists`)
+"before the read". Run on PHP 8.5.11 the engine splits three cases:
+
+| operand | hooks run |
+| --- | --- |
+| the final operand of `isset` (`isset($o['k'])`, `isset($o->p)`) | `offsetExists` / `__isset` only |
+| the tested operand of `empty`, `??`, `??=` | `offsetExists` then `offsetGet` / `__isset` then `__get`, the second when the first answers true |
+| an intermediate fetch of an `isset`, `empty`, `??` or `??=` chain (`'a'` in `isset($o['a']['b'])`) | both, as above |
+
+The single `OperatorConstruct::Isset` served the final `isset` operand and every
+intermediate fetch, so a final `isset` charged `offsetGet`/`__get` and reported
+`throw.undeclared` for a throwing getter PHP never calls. The decision: a variant
+`IssetFetch` (appended last to the persisted enum; no `SCHEMA_VERSION` bump) names the
+intermediate fetch, `Isset` then means the final `isset` operand only, and the rows of
+`offset_methods` and `property_methods` follow the table. `empty`, `??` and
+intermediate fetches keep both edges and their findings.
