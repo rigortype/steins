@@ -121,8 +121,14 @@ pub(crate) fn walk_try(
 
     // The normal exits: every part that falls through, with the env it ends in.
     let mut exits: Vec<(HashMap<String, Known>, Store)> = Vec::new();
+    // A `return` in the body or a `catch` of a `try` whose `finally` can itself exit is
+    // replaced by that exit: the return seam's mismatch ids decline it (issue #1099).
+    let outer_exits = store.finally_exits;
+    let finally_exits = outer_exits
+        || finally.as_ref().is_some_and(|trace| trace.iter().any(|s| s.has_terminator));
     let mut benv = env.clone();
     let mut bstore = store.clone();
+    bstore.finally_exits = finally_exits;
     let body_flow =
         walk_trace(w, folder, body, &mut benv, &mut bstore, descent, facts, guarded, out);
     if body_flow == Flow::FellThrough {
@@ -133,6 +139,7 @@ pub(crate) fn walk_try(
         for arm in catches {
             let mut henv = cenv.clone();
             let mut hstore = cstore.clone();
+            hstore.finally_exits = finally_exits;
             bind_caught(w, &arm.clause, &mut henv, &mut hstore);
             let trace = &arm.trace;
             let flow =
@@ -172,6 +179,7 @@ pub(crate) fn walk_try(
     {
         *env = fenv;
         *store = fstore;
+        store.finally_exits = outer_exits;
         return Flow::FellThrough;
     }
     let (mut jenv, mut jstore) = join_envs(exits);
@@ -187,6 +195,7 @@ pub(crate) fn walk_try(
     }
     *env = jenv;
     *store = jstore;
+    store.finally_exits = outer_exits;
     Flow::FellThrough
 }
 
