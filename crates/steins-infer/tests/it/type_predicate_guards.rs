@@ -1350,3 +1350,73 @@ fn a_stored_test_decided_on_a_proven_value_prunes_its_dead_side() {
         assert_eq!(one(func), Vec::<String>::new(), "{func}");
     }
 }
+
+#[test]
+fn a_name_both_sides_rewrote_is_not_handed_back_at_the_join() {
+    // #1110: both sides rewrite `$s` through a by-reference call, a destructuring or an
+    // assignment, so PHP reaches `return 1` (TypeError); the join used to hand the
+    // pre-test `'abc'` back because the forgetting looked like an untouched side.
+    let setx = "function setx(mixed &$x): void { $x = 'xyz'; }\n";
+    for write in [
+        "setx($s);",
+        "settype($s, 'integer');",
+        "preg_match('/a/', 'a', $s);",
+        "[$s] = ['xyz'];",
+        "$s = 'xyz';",
+        "$s .= 'x';",
+        "foreach (['xyz'] as $s) {}",
+        "for ($i = 0; $i < 1; $i++) { setx($s); }",
+        "if ($i = 1) { setx($s); }",
+    ] {
+        let func = format!(
+            "{setx}function w(): string {{ $s = 'abc'; if (is_callable($s)) {{ {write} }} else {{ {write} }} if ($s !== 'abc') {{ return 1; }} return 'ok'; }}"
+        );
+        assert_eq!(one(&func), vec!["type.return-mismatch"], "{write}");
+    }
+}
+
+#[test]
+fn a_name_no_side_may_write_is_still_handed_back_at_the_join() {
+    // The kept rows of #1110: by-value reads, a by-reference call on another name,
+    // a write to another name, a `foreach` by value over the name and an unset of
+    // another name leave the pre-test value to decide the later test (`d`: PHP
+    // returns "ok", `return 1` is dead) and keep the proven `return $s` (`a`).
+    let pre = "function setx(mixed &$x): void { $x = 'xyz'; }\nfunction byval(string $x): void {}\n";
+    for side in [
+        "$t = strlen($s);",
+        "byval($s);",
+        "setx($t);",
+        "$t = 'xyz';",
+        "$t = 1; unset($t);",
+        "foreach ([1] as $t) {}",
+        "$t = []; $t[] = $s;",
+    ] {
+        let d = format!(
+            "{pre}function d(): string {{ $s = 'abc'; $t = 1; if (is_callable($s)) {{ {side} }} else {{ {side} }} if ($s !== 'abc') {{ return 1; }} return 'ok'; }}"
+        );
+        assert_eq!(one(&d), Vec::<String>::new(), "{side}");
+        let a = format!(
+            "{pre}function a(): int {{ $s = 'abc'; $t = 1; if (is_callable($s)) {{ {side} }} else {{ {side} }} return $s; }}"
+        );
+        assert_eq!(one(&a), vec!["type.return-mismatch"], "{side}");
+    }
+    // `foreach` by value over the name reads it; PHP returns "ok".
+    for body in ["foreach ($s as $x) {}", "$n = count($s);"] {
+        let func = format!(
+            "function f(): string {{ $s = ['a']; if (is_callable($s)) {{ {body} }} else {{ {body} }} if ($s !== ['a']) {{ return 1; }} return 'ok'; }}"
+        );
+        assert_eq!(one(&func), Vec::<String>::new(), "{body}");
+    }
+}
+
+#[test]
+fn a_side_that_leaves_by_return_keeps_the_suspect_value() {
+    // Row 5 of #1110, unchanged: `return` on one side, a read on the other; the later
+    // test is decided on the suspect and `return 1` is pruned (PHP: "fine").
+    for other in ["echo $s;", "$t = 2;"] {
+        let func = format!(
+            "function k5(): string {{ $s = 'abc'; if (is_callable($s)) {{ return 'c'; }} else {{ {other} }} if ($s === 'abc') {{ return 'fine'; }} return 1; }}"
+        );
+        assert_eq!(one(&func), Vec::<String>::new(), "{other}");
+    }
+}
