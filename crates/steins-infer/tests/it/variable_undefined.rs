@@ -604,8 +604,9 @@ fn a_same_variable_isset_ternary_shields_the_arm_it_proves() {
 
 #[test]
 fn a_guarded_ternary_shields_only_the_name_it_tests() {
-    // Firing control: the guard names `$other`, so `$page` is still judged.
-    fires("<?php\nfunction f(): int {\n    return empty($other) ? 0 : $page;\n}\n", "page");
+    // Firing control: the guard names `$other`, so `$page` is still judged. `$other` is
+    // a parameter: over a never-bound `$other` the arm is dead (issue #1108).
+    fires("<?php\nfunction f(?int $other): int {\n    return empty($other) ? 0 : $page;\n}\n", "page");
 }
 
 #[test]
@@ -632,10 +633,12 @@ fn a_guarded_if_stops_shielding_after_its_body() {
 
 #[test]
 fn a_guarded_if_shields_only_the_name_it_tests() {
-    // `$other` (inside the guarded body, not the tested name) still fires; `$x`
-    // fires only outside — pinning the shield's two dimensions: which name, which subtree.
+    // `$other` (inside the guarded body, not the tested name) still fires where the body
+    // can run, here with a `$y` the parameter binds; `$x` fires only outside — pinning
+    // the shield's two dimensions: which name, which subtree. Over a never-bound `$x`
+    // the body is dead, and `$other` in it is silent (issue #1108).
     let d = diags(
-        "<?php\nfunction f(): mixed {\n    if (isset($x)) {\n        echo $other;\n    }\n    return $x;\n}\n",
+        "<?php\nfunction f(?int $y): mixed {\n    if (isset($x) || isset($y)) {\n        echo $other;\n    }\n    return $x;\n}\n",
     );
     assert_eq!(d.len(), 2, "{d:#?}");
     assert!(d.iter().any(|d| d.line == 4 && d.message.contains("$other")), "{d:#?}");
@@ -648,9 +651,9 @@ fn a_conjunction_guard_shields_the_names_it_tests() {
     // conjunction held, so `isset($x)` in it is as good a test as a bare one. php -r
     // witness (8.5.9): silent, the condition is false on every run.
     silent("<?php\nfunction f(bool $c): mixed {\n    return isset($x) && $c ? $x : null;\n}\n");
-    // The shield is still only for the name the conjunction tests…
+    // The shield is still only for the name the conjunction tests, where the arm can run…
     fires(
-        "<?php\nfunction f(bool $c): mixed {\n    return isset($x) && $c ? $other : null;\n}\n",
+        "<?php\nfunction f(bool $c, ?int $x): mixed {\n    return isset($x) && $c ? $other : null;\n}\n",
         "other",
     );
     // …and only on the side the conjunction proves it: the else arm runs when `$c`
@@ -703,6 +706,38 @@ fn a_guard_still_shields_the_side_it_proves_bound() {
     // A name bound anywhere in the scope is the maybe leg's, not this id's.
     silent("<?php\nfunction f(): void { if (!isset($u)) { $u = 1; } echo $u; }\n");
     silent("<?php\nfunction f(bool $c): void { if ($c) { $u = 1; } if (empty($u)) { echo $u; } }\n");
+}
+
+#[test]
+fn an_arm_a_guard_on_a_never_bound_name_makes_dead_reads_nothing() {
+    // Only the outcome that proves `$v` bound reaches the read, and nothing binds
+    // `$v`, so the arm never runs: php -r witness (8.3), each runs clean.
+    for body in [
+        "if (isset($v)) { echo $u; }",
+        "echo isset($v) ? $u : 1;",
+        "if (!isset($u)) { if (isset($v)) { echo $u; } }",
+        "if (!isset($u)) { echo isset($v) ? $u : 1; }",
+        "if (empty($u)) { echo !empty($v) ? $u : 1; }",
+        "echo empty($u) ? (isset($v) ? $u : 1) : 2;",
+        "if (isset($v) && $c) { echo $u; }",
+        "if (isset($v) || isset($w)) { echo $u; }",
+    ] {
+        silent(&format!("<?php\nfunction f(bool $c): void {{ {body} }}\n"));
+    }
+    // A guard name the scope can bind leaves the arm reachable, and the read judged.
+    for body in [
+        "if (isset($v)) { echo $u; } $v = 1;",
+        "echo isset($v) ? $u : 1; $v = 1;",
+        "if (isset($v) || isset($w)) { echo $u; } $w = 1;",
+        "if (isset($v) || $c) { echo $u; }",
+        "if (isset($v)) { } else { echo $u; }",
+    ] {
+        fires(&format!("<?php\nfunction f(bool $c): void {{ {body} }}\n"), "u");
+    }
+    // The arm's dead-ness is the sided rule's, so a `goto` stands it down too: these run
+    // clean in PHP and report, as they did before #1108 — the boundary, not a goal.
+    fires("<?php\nfunction f(): void { goto L; L: if (isset($v)) { echo $u; } }\n", "u");
+    fires("<?php\nfunction f(): void { goto L; L: echo isset($v) ? $u : 1; }\n", "u");
 }
 
 #[test]
