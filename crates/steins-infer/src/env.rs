@@ -834,6 +834,22 @@ pub(crate) struct ContractArm {
     /// ([`dedup_contract_arms`]). Provenance, not part of what the arm denotes, so
     /// equality ignores them.
     pub(crate) guards: Vec<ArmGuard>,
+    /// The **arm types an `Asserted` subtraction deleted** from this arm's lane on this
+    /// path (issue #1107, ADR-0052's 2026-10-27 note): a `@phpstan-assert T $v` or
+    /// `!C $v` that removed an arm leaves the survivors `Verified` — the arms are the
+    /// declared type's own — but a member the survivors lack may exist on the arm the
+    /// docblock removed, and then the absence is a claim about the docblock's truth.
+    /// The declared-receiver lane reads the record to route such a finding to
+    /// `phpdoc.*` (a property read, which has no twin, stays silent); a member no
+    /// recorded arm holds keeps the proof id.
+    ///
+    /// Rides on the arm like `guards`: every lane copy carries it; a rebind drops it
+    /// with the lane; a join keeps an entry any side's copy of the arm holds
+    /// ([`dedup_contract_arms`], the union: a record only weakens a finding); a later
+    /// `Verified` subtraction that would also delete an entry clears it
+    /// ([`ContractArm::clear_deleted_by`]). Provenance, not part of what the arm
+    /// denotes, so equality ignores it.
+    pub(crate) asserted_deleted: Vec<steins_contract::ContractTy>,
 }
 
 /// One positive class guard on a [`ContractArm`]: the lowercase FQN the guard
@@ -848,7 +864,7 @@ pub(crate) struct ArmGuard {
 impl ContractArm {
     /// An unguarded arm.
     pub(crate) fn new(ty: steins_contract::ContractTy, stratum: Stratum) -> Self {
-        ContractArm { ty, stratum, guards: Vec::new() }
+        ContractArm { ty, stratum, guards: Vec::new(), asserted_deleted: Vec::new() }
     }
 
     /// Record a positive class guard, one entry per FQN: a guard both a runtime
@@ -874,6 +890,34 @@ impl ContractArm {
             g.stratum = g.stratum.min(o.stratum);
             true
         });
+    }
+}
+
+impl ContractArm {
+    /// Record an arm type an `Asserted` subtraction deleted, once per type.
+    pub(crate) fn record_asserted_deleted(&mut self, ty: &steins_contract::ContractTy) {
+        if !self.asserted_deleted.contains(ty) {
+            self.asserted_deleted.push(ty.clone());
+        }
+    }
+
+    /// Keep the recorded deletions of either copy: the record of the arm two copies merge
+    /// into. A record only weakens a finding, so a path that may have lied keeps it.
+    fn join_deleted(&mut self, other: &[steins_contract::ContractTy]) {
+        for d in other {
+            self.record_asserted_deleted(d);
+        }
+    }
+
+    /// Drop the recorded deletions that `sub` also deletes: a `Verified` subtraction
+    /// holds that arm out whatever the docblock said, so nothing rests on the claim.
+    pub(crate) fn clear_deleted_by(
+        &mut self,
+        sub: &normalize::Subtrahend,
+        oracle: &dyn normalize::IsaOracle,
+    ) {
+        self.asserted_deleted
+            .retain(|d| normalize::subtract_arm(sub, d, oracle) != normalize::ArmFate::Dies);
     }
 }
 
@@ -2069,6 +2113,7 @@ pub(crate) fn dedup_contract_arms(arms: &mut Vec<ContractArm>) {
             k.stratum = k.stratum.min(arm.stratum);
             // A guard holds after the merge only where every copy held it.
             k.meet_guards(&arm.guards);
+            k.join_deleted(&arm.asserted_deleted);
             continue;
         }
         // Drop an arm strictly subsumed by a kept one; if it subsumes kept arms,
@@ -2076,6 +2121,7 @@ pub(crate) fn dedup_contract_arms(arms: &mut Vec<ContractArm>) {
         // and only the guards all of them hold.
         if let Some(k) = kept.iter_mut().find(|k| normalize::subsumes(&k.ty, &arm.ty).is_yes()) {
             k.meet_guards(&arm.guards);
+            k.join_deleted(&arm.asserted_deleted);
             continue;
         }
         let mut wide = arm;
@@ -2083,6 +2129,7 @@ pub(crate) fn dedup_contract_arms(arms: &mut Vec<ContractArm>) {
             if normalize::subsumes(&wide.ty, &k.ty).is_yes() {
                 wide.stratum = wide.stratum.min(k.stratum);
                 wide.meet_guards(&k.guards);
+                wide.join_deleted(&k.asserted_deleted);
                 false
             } else {
                 true
@@ -2113,6 +2160,8 @@ pub(crate) fn absorb_contract_arms(arms: &mut Vec<ContractArm>) {
                     let mut m = ContractArm::new(ty, arms[i].stratum.min(arms[j].stratum));
                     m.guards = arms[i].guards.clone();
                     m.meet_guards(&arms[j].guards);
+                    m.asserted_deleted = arms[i].asserted_deleted.clone();
+                    m.join_deleted(&arms[j].asserted_deleted);
                     merged_at = Some((i, j, m));
                     break 'outer;
                 }
@@ -2253,5 +2302,32 @@ mod tests {
         let mut arms = vec![guarded_arm("a", &[("t", Stratum::Verified)]), guarded_arm("b", &[])];
         dedup_contract_arms(&mut arms);
         assert_eq!(arms.iter().map(|a| a.guards.len()).collect::<Vec<_>>(), vec![1, 0]);
+    }
+
+    /// A join keeps a recorded asserted-deletion any copy of the arm holds, whichever way
+    /// the copies merge (issue #1107).
+    #[test]
+    fn a_join_keeps_the_recorded_deletions_any_copy_holds() {
+        let recorded = |names: &[&str]| {
+            let mut arm = ContractArm::new(ContractTy::Class("a".to_owned()), Stratum::Verified);
+            for n in names {
+                arm.record_asserted_deleted(&ContractTy::Class((*n).to_owned()));
+            }
+            arm
+        };
+        let deleted = |arm: &ContractArm| arm.asserted_deleted.clone();
+        let mut arms = vec![recorded(&["b", "c"]), recorded(&["c"])];
+        dedup_contract_arms(&mut arms);
+        assert_eq!(arms.len(), 1);
+        let b = ContractTy::Class("b".to_owned());
+        let c = ContractTy::Class("c".to_owned());
+        assert_eq!(deleted(&arms[0]), vec![b.clone(), c]);
+        let mut arms = vec![recorded(&["b"]), recorded(&[])];
+        dedup_contract_arms(&mut arms);
+        assert_eq!(deleted(&arms[0]), vec![b]);
+        // A record is one entry per type.
+        let mut arm = recorded(&["b"]);
+        arm.record_asserted_deleted(&ContractTy::Class("b".to_owned()));
+        assert_eq!(arm.asserted_deleted.len(), 1);
     }
 }

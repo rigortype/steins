@@ -21,7 +21,7 @@ use crate::env::{ContractArm, Known, Store, Stratum};
 use crate::predicates::{
     by_value_guard_builtin, in_array_literals, pure_question_builtin, type_predicate,
 };
-use crate::refine::{clear_null, refine_fact, subtract_contract_lane, subtract_contract_lane_at};
+use crate::refine::{clear_null, refine_fact, subtract_contract_lane_at};
 use crate::shapes::{
     apply_shape_guard, array_all_any_predicate, array_guard_base, array_guard_key_var,
     array_guard_predicate, collect_shape_guards,
@@ -493,7 +493,15 @@ fn apply_assert_to_var(
             && store.contract.contains_key(var)
         {
             let oracle = ProjectIsa { cx, demote_catalog: cx.a11_demote_catalog() };
-            subtract_contract_lane(store, var, &normalize::Subtrahend::Base(b), &oracle);
+            // A docblock claim, so the arm it deletes is recorded as asserted-deleted
+            // (issue #1107), as for a class spec.
+            subtract_contract_lane_at(
+                store,
+                var,
+                &normalize::Subtrahend::Base(b),
+                &oracle,
+                Stratum::Asserted,
+            );
             return true;
         }
         // Only `!null` is representable as a positive narrowing (clear nullable);

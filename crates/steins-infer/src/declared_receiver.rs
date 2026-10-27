@@ -310,6 +310,9 @@ fn arm_member_verdict(
 pub(crate) struct LaneArm<'s> {
     pub(crate) conjuncts: Vec<String>,
     pub(crate) guards: &'s [ArmGuard],
+    /// The arm types an `Asserted` subtraction deleted beside this arm
+    /// ([`ContractArm::asserted_deleted`]).
+    pub(crate) deleted: &'s [ContractTy],
 }
 
 /// Read a narrowed contract-arm lane as the declared-receiver lane's arms — per
@@ -368,7 +371,7 @@ fn lane_arm<'s>(cx: &Cx, oracle: &ProjectIsa, a: &'s ContractArm) -> Option<Lane
         }
         _ => return None,
     };
-    Some(LaneArm { conjuncts, guards: &a.guards })
+    Some(LaneArm { conjuncts, guards: &a.guards, deleted: &a.asserted_deleted })
 }
 
 /// The member questions [`judge_arm`] asks, one implementation per member kind: the
@@ -471,7 +474,53 @@ fn excluded_by(guards: &[ArmGuard], is_a: impl Fn(&str) -> IsA) -> Option<Stratu
 /// guard declares is held by every candidate; else each candidate is judged by its
 /// full chain, so a member inherited from an intermediate class the guard excludes
 /// still counts.
+///
+/// An arm the member is **absent** from still rests on a docblock when an `Asserted`
+/// subtraction deleted an arm that may hold the member ([`LaneArm::deleted`], issue
+/// #1107): the lying tag would have hidden it, so the verdict is `rests_on_assert`. A
+/// member no deleted arm holds keeps the verdict as it was.
 pub(crate) fn judge_arm(cx: &Cx, arm: &LaneArm, ladder: &mut dyn MemberLadder) -> ArmJudgement {
+    let mut judged = judge_guarded_arm(cx, arm, ladder);
+    if !judged.rests_on_assert
+        && judged.fate == ArmFate::Live(Held::Absent)
+        && arm.deleted.iter().any(|d| deleted_may_hold(cx, d, ladder))
+    {
+        judged.rests_on_assert = true;
+    }
+    judged
+}
+
+/// Whether a deleted arm type may hold the member the ladder asks about: a class-like
+/// unless its chain provably lacks it (an undecided chain counts as holding), an
+/// intersection when a conjunct may, a type that has no members at all never, and any
+/// other object-ish spelling (`object`, `callable`, `mixed`) always.
+fn deleted_may_hold(cx: &Cx, ty: &ContractTy, ladder: &mut dyn MemberLadder) -> bool {
+    match ty {
+        ContractTy::Class(f) | ContractTy::EnumCase { enum_fqn: f, .. } => {
+            ladder.conjunct(cx, f) != Held::Absent
+        }
+        ContractTy::Inter(members) => members.iter().any(|m| deleted_may_hold(cx, m, ladder)),
+        ContractTy::Never
+        | ContractTy::Null
+        | ContractTy::Base(_)
+        | ContractTy::IntIn(_)
+        | ContractTy::StrWith(_)
+        | ContractTy::StrOpaque
+        | ContractTy::LitInt(_)
+        | ContractTy::LitFloat(_)
+        | ContractTy::LitStr(_)
+        | ContractTy::LitBool(_)
+        | ContractTy::ArrayAny { .. }
+        | ContractTy::ListOf { .. }
+        | ContractTy::MapOf { .. }
+        | ContractTy::Shape { .. }
+        | ContractTy::Resource { .. } => false,
+        _ => true,
+    }
+}
+
+/// [`judge_arm`] for the guards alone: the exclusion and the ladder, before the record.
+fn judge_guarded_arm(cx: &Cx, arm: &LaneArm, ladder: &mut dyn MemberLadder) -> ArmJudgement {
     let display: Vec<String> = arm.conjuncts.iter().map(|c| conjunct_display(cx, c)).collect();
     let judged = |fate: ArmFate, rests_on_assert: bool| ArmJudgement {
         fate,
@@ -591,7 +640,7 @@ fn unguarded_verdict(cx: &Cx, arm: &LaneArm, ladder: &mut dyn MemberLadder) -> H
 /// Whether some project declaration inhabits every conjunct of `arm` (an `Unknown`
 /// is-a counts), read off the first project conjunct's closed descendant set.
 fn has_project_inhabitant(cx: &Cx, arm: &LaneArm) -> bool {
-    let unguarded = LaneArm { conjuncts: arm.conjuncts.clone(), guards: &[] };
+    let unguarded = LaneArm { conjuncts: arm.conjuncts.clone(), guards: &[], deleted: &[] };
     guarded_candidates(cx, &unguarded).is_some_and(|(_, inhabitants)| !inhabitants.is_empty())
 }
 
@@ -673,7 +722,7 @@ pub(crate) fn check_phpdoc_undefined_method(
         return;
     }
     let mut ladder = MethodLadder { folder, method: &method, magic: CALL_FALLBACK };
-    let Some(absence) = lane_lacks_member(cx, &lane, &mut ladder) else {
+    let Some(absence) = lane_lacks_member(cx, &lane, &mut ladder, true) else {
         return;
     };
     // A13: minimum over the participating (post-narrowing) arms, computed
@@ -719,14 +768,22 @@ pub(crate) struct LaneAbsence {
 /// finding ([`check_phpdoc_undefined_method`]) and the `method_exists`/`is_callable`
 /// fold ([`declared_receiver_lacks_method`]), so a guard is dead exactly where the
 /// lane would have reported inside it.
+///
+/// `read_record` says whether the verdict reads [`LaneArm::deleted`] (a finding does; a
+/// "the method is absent" fold does not).
 pub(crate) fn lane_lacks_member(
     cx: &Cx,
     lane: &[LaneArm],
     ladder: &mut dyn MemberLadder,
+    read_record: bool,
 ) -> Option<LaneAbsence> {
     let mut absence = LaneAbsence { arms: Vec::with_capacity(lane.len()), rests_on_assert: false };
     for arm in lane {
-        let judged = judge_arm(cx, arm, ladder);
+        let judged = if read_record {
+            judge_arm(cx, arm, ladder)
+        } else {
+            judge_guarded_arm(cx, arm, ladder)
+        };
         match judged.fate {
             ArmFate::Dead => {}
             ArmFate::Live(Held::Absent) => absence.arms.push(judged.display),
@@ -770,7 +827,7 @@ pub(crate) fn declared_receiver_lacks_method(
         return false;
     }
     let mut ladder = MethodLadder { folder, method, magic };
-    lane_lacks_member(cx, &lane, &mut ladder).is_some_and(|a| !a.rests_on_assert)
+    lane_lacks_member(cx, &lane, &mut ladder, false).is_some_and(|a| !a.rests_on_assert)
 }
 
 /// Which arms of `arms` a `method_exists($var, 'm')` test proves no value of `$var`
@@ -797,7 +854,9 @@ pub(crate) fn method_exists_dead_arms(
     arms.iter()
         .map(|a| {
             let Some(arm) = lane_arm(cx, &oracle, a) else { return false };
-            let judged = judge_arm(cx, &arm, &mut ladder);
+            // The record routes a finding; "this arm lacks the method" is a fact about its
+            // own chain, so the dead-arm decision ignores it.
+            let judged = judge_guarded_arm(cx, &arm, &mut ladder);
             if judged.rests_on_assert {
                 return false;
             }
