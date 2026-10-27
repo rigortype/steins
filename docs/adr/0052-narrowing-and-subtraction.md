@@ -2156,24 +2156,52 @@ object and mixed arms only and answered `Yes` for the rest, so an intersection,
 a `callable`, a non-empty-mixed or a union arm died under a positive
 `instanceof`. ADR-0106 §2.8 states the rule for those arms.
 
-## Note (2026-10-27): an Asserted subtraction demotes the residue of the lane (issue #1107, run #1114 slice S5) — PENDING ratification
+## Note (2026-10-27): an Asserted subtraction records the arms it deleted (issue #1107, run #1114 slice S5) — PENDING ratification
 
-Designed in run #1114, slice S5 (#1107); landed when that slice merges.
+Designed in run #1114, slice S5 (#1107), as decision 9 of #1114 records; landed when that
+slice merges. A first design demoted every surviving arm to `Asserted`; the adversarial
+review of it (#1125) rejected it, and this note replaces it.
 
 §5 says a finding rests on its premise's stratum, and §2's subtraction preserves the
 stratum of every arm it keeps, "so an Asserted arm never launders to Verified". The
-dual was missing. A `@phpstan-assert` is a claim and not a fact the engine established,
-yet `subtract_contract_lane_at` recorded the guard on each arm it left and deleted
-arms, and the survivors kept their own `Verified` stratum: after
-`lie($x); $x->zz()` over `TT2|OnlyB` the call was proven undefined, in the default
-profile, although PHP runs it (the lying tag removed `OnlyB` for nothing). The rule: when
-the subtracting guard is `Asserted` and the subtraction changed the lane, every
-surviving arm is demoted to `Asserted`. The negated scalar path
-(`@phpstan-assert !int`) goes through the same `_at(..., Asserted)` entry instead of the
-`Verified` default. The consequences are all conservative: an emptied lane needs an
-all-`Verified` carrier, `path_fate` keeps paths, a derived verdict is demoted, and a
-dump shows `(asserted)`. The finding keeps its path and moves to the `phpdoc.*` id
-under `Floor::Strict` (`phpdoc.undefined-method`).
+dual was missing for one shape. A `@phpstan-assert` is a claim and not a fact the engine
+established, yet after `lie($x); $x->zz()` over `TT2|OnlyB` the call was proven
+undefined in the default profile although PHP runs it: the lying tag removed `OnlyB`,
+which declares `zz`, for nothing. The survivors are the declared type's own arms, so
+their stratum is right; what rests on the docblock is the absence of a member that the
+deleted arm may hold.
+
+The rule. `subtract_contract_lane_at` records, on each arm an `Asserted` subtraction
+leaves, the arm types it deleted (`ContractArm::asserted_deleted`). The record rides on
+the arm like its guards: a lane copy carries it, a rebind drops it with the lane, and a
+join keeps an entry any side's copy of the arm holds (the union, unlike the meet
+`meet_guards` takes: a record only weakens a finding, so a path that may have lied keeps
+it). A later `Verified` subtraction that would also delete an entry
+clears it, since a runtime test then holds that arm out whatever the docblock said. The
+declared-receiver ladder (`judge_arm`) reads the record: an arm the member is absent
+from rests on the docblock when a recorded arm may hold the member (a class-like whose
+chain does not provably lack it, or an object-ish spelling the lane cannot read). A
+method call then routes to the `phpdoc.*` id (`phpdoc.undefined-method`, strict only); a
+property read, which has no contract-layer twin, stays silent. The negated scalar path
+(`@phpstan-assert !int`) goes through the same `Asserted` entry; a scalar arm has no
+members, so it records nothing a member read can hit.
+
+What moves is exactly the finding whose member exists on a recorded asserted-deleted
+arm. What keeps the proof id: a member undefined on the deleted arm too; a receiver a
+runtime `instanceof` or `assert()` narrows (both stay `Verified`, and a `Verified`
+deletion of the recorded arm clears it); an assert that deletes nothing; and a `!int`-style
+scalar removal. A join of a side that asserted with one that did not keeps the record,
+so a member the deleted arm holds still routes away from the proof id there. A dump of
+the narrowed variable is unchanged, because no arm's stratum moves.
+
+The record routes a finding and nothing else. The `method_exists` dead-arm decision and
+the fold of a `method_exists`/`is_callable` test read the arms' own chains and ignore
+it: "this arm lacks `zz`" is a fact about the arm, so a guard such as
+`lie($x); if (method_exists($x, 'zz')) { $x->zz(); }` stays silent.
+
+Known gap (#1144): a runtime test other than `instanceof`, such as `method_exists`
+deleting arms through `delete_contract_arms`, leaves the record in place. The effect can
+only keep a finding weakened (`phpdoc.*` or silent), never add one.
 
 An `assert()` statement is unaffected: it stays `Verified` (the 2026-07-25 amendment,
 #1095), and so does an `instanceof` guard. See
