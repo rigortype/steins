@@ -135,6 +135,39 @@ function t(): void { $a = new O(); $a = $a; \\PHPStan\\dumpType($a); }
     assert_eq!(dumps(src), vec!["3: O"]);
 }
 
+/// The reviewer's `selffp.php` rows: an alias of the same object keeps its narrowed
+/// class. f1, f2, f3 and f5 from line 6; PHP reaches none of the `nope*()` calls.
+const SAME_OBJECT: &str = "<?php
+declare(strict_types=1);
+interface I {}
+class Foo implements I { public function fooMethod(): int { return 1; } }
+class Baz implements I {}
+function f1(I $a): int { if ($a instanceof Foo) { $a = $a; if (!($a instanceof Foo)) { nope1(); } } return 0; }
+function f2(I $a): int { if ($a instanceof Foo) { $b = $a; $a = $b; if (!($a instanceof Foo)) { nope2(); } } return 0; }
+function f3(I $a): int { if ($a instanceof Foo) { $b = $a; if (!($b instanceof Foo)) { nope3(); } } return 0; }
+function f5(I $a): int { if (!($a instanceof Foo)) { return 0; } $a = $a; if ($a instanceof Foo) { return 1; } nope5(); return 0; }
+function d1(I $a): int { if ($a instanceof Foo) { $a = $a; \\PHPStan\\dumpType($a); } return 0; }
+";
+
+#[test]
+fn an_alias_of_the_same_object_keeps_its_narrowed_class() {
+    // f3 (`$b = $a` under `instanceof Foo`) was already reported on the base: the
+    // copy never carried the narrowed class.
+    assert_eq!(findings(SAME_OBJECT), Vec::<String>::new());
+    assert_eq!(dumps(SAME_OBJECT), vec!["10: Foo"]);
+}
+
+#[test]
+fn rebinding_through_a_copy_of_another_object_drops_the_narrowed_class() {
+    // `rebinds.php` r9: `$x` now holds `$y`'s `B`, so `nope9()` runs (PHP: Error).
+    let src = "<?php
+class A { public function m(): int { return 1; } }
+class B { public function b(): int { return 3; } }
+function r9(A|B $x, B $y): int { if ($x instanceof A) { $z = $y; $x = $z; if (!($x instanceof A)) { nope9(); } } return 0; }
+";
+    assert_eq!(findings(src), vec!["4 call.undefined-function"]);
+}
+
 /// `v1091a.php` (f0-f7) and `v1091c.php` (h1-h3) in one file, from line 4.
 const V1091: &str = "<?php
 class Animal {} class Dog extends Animal {} class Cat extends Animal {}

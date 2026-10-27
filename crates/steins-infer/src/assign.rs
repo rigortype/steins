@@ -332,12 +332,17 @@ fn bind_value(
         // (shared id), so a later write through either alias is visible via both.
         // `var` is given a new value, so its old binding is released like any other
         // rebind's (issue #1113): a guard stored over it, or a narrowed class, was
-        // about the old value. The source id is read first, so a self-alias `$a = $a`
-        // still names its object.
+        // about the old value. The source id and narrowed class are read first, so a
+        // self-alias `$a = $a` still names its object, and the shared object keeps
+        // its narrowed class under the new name.
         ArgValue::Var(src) if !w.scope.poisoned && store.is_bound(src) => {
             let id = store.id_of(src).expect("bound var has an id");
+            let member = store.members.get(src).cloned();
             lhs.clear(env, store);
             store.refs.insert(var.to_owned(), id);
+            if let Some(member) = member {
+                store.members.insert(var.to_owned(), member);
+            }
         }
         // `clone $a` (ADR-0036 adversarial #1): a NEW id with a COPY of the source
         // object's props (PHP shallow clone) — post-clone writes stay isolated.
