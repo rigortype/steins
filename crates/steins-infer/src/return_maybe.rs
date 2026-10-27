@@ -6,10 +6,12 @@
 //! It reaches [`is_type_error`] through the same base-level lift
 //! ([`native_rejects_base`]) and the same witness set, takes the same
 //! minimum-stratum split into two ids (ADR-0052 §5), and declines the
-//! all-arms-rejected verdict for the same reason the argument side does. (A finite
+//! all-arms-rejected verdict at the `Verified` stratum for the same reason the argument
+//! side does; at `Asserted` the premise is a claim and the same shape reports the
+//! possibly grade, "its every arm raises a TypeError" (issue #1099). (A finite
 //! `OneOf` is the exception: `finite_verdict` judges it member by member, and one
-//! whose every member is rejected is definite, since every path throws — decision D6
-//! of #1051.) PHP
+//! whose every member is rejected is definite at `Verified`, since every path throws —
+//! decision D6 of #1051.) PHP
 //! applies one coercion table to both boundaries — all 144 return-position cells of
 //! `harness/coercion-grid` answered exactly as their parameter twins at 8.5.9, and
 //! so did the object cells (a `__toString` object into `string` in coercive mode,
@@ -97,7 +99,8 @@ fn return_premise(
     Some(Premise::Arms(arms.to_vec(), stratum))
 }
 
-/// The members of a returned variable's `OneOf` value-lane fact, at its stratum.
+/// The members of a returned variable's `OneOf` value-lane fact, at its stratum (and an
+/// `Asserted` `Singleton` as a one-member set).
 fn oneof_premise<'e>(
     value: &ArgValue,
     env: &'e HashMap<String, Known>,
@@ -110,6 +113,11 @@ fn oneof_premise<'e>(
     let k = env.get(name)?;
     match k.fact.as_ref()? {
         Fact::OneOf(members) => Some((members, k.stratum, k.thinned)),
+        // A `Singleton` the proof rung declined because its stratum is `Asserted`
+        // (issue #1099): a `OneOf` of one, judged by the same table.
+        Fact::Singleton(v) if k.stratum == Stratum::Asserted => {
+            Some((slice::from_ref(v), k.stratum, false))
+        }
         _ => None,
     }
 }
@@ -172,15 +180,22 @@ fn judge_arm(cx: &Cx, ret: &NativeType, ty: &ContractTy) -> ArmVerdict {
 }
 
 /// The subject spelling and the rejected-arm names for one premise, or `None` where
-/// the verdict is not the possibly grade's (nothing rejected, or everything).
-fn verdict_spelling(cx: &Cx, ret: &NativeType, premise: &Premise) -> Option<(String, Vec<String>)> {
+/// the verdict is not the possibly grade's (nothing rejected, or everything at a
+/// `Verified` premise). The flag is set when every arm is rejected at an `Asserted`
+/// premise, which the possibly grade reports too (issue #1099).
+fn verdict_spelling(
+    cx: &Cx,
+    ret: &NativeType,
+    premise: &Premise,
+) -> Option<(String, Vec<String>, bool)> {
     match premise {
         Premise::Value(fact, _) => {
             // No return position has an implicit-nullable default, and the internal
             // carve-out is an argument-boundary rule — both flags are `false` here.
             let (verdict, rejected, null_rejected) =
                 maybe_fact_verdict(cx, ret, fact, false, false);
-            if verdict != MaybeVerdict::Partial {
+            let every = verdict == MaybeVerdict::Every && premise.stratum() == Stratum::Asserted;
+            if verdict != MaybeVerdict::Partial && !every {
                 return None;
             }
             let mut named: Vec<String> = rejected.iter().map(spell_arm).collect();
@@ -189,7 +204,7 @@ fn verdict_spelling(cx: &Cx, ret: &NativeType, premise: &Premise) -> Option<(Str
             }
             let subject =
                 describe_fact(fact).trim_start_matches("a value of type ").to_owned();
-            Some((subject, named))
+            Some((subject, named, every))
         }
         Premise::Arms(arms, _) => {
             let judged: Vec<(&ContractArm, ArmVerdict)> =
@@ -207,7 +222,8 @@ fn verdict_spelling(cx: &Cx, ret: &NativeType, premise: &Premise) -> Option<(Str
                 .filter(|(_, v)| *v == ArmVerdict::Rejected)
                 .map(|(a, _)| *a)
                 .collect();
-            if rejected.is_empty() || rejected.len() == arms.len() {
+            let every = rejected.len() == arms.len();
+            if rejected.is_empty() || (every && premise.stratum() != Stratum::Asserted) {
                 return None;
             }
             // A lane with an arm this speller has no faithful rendering for declines
@@ -216,7 +232,7 @@ fn verdict_spelling(cx: &Cx, ret: &NativeType, premise: &Premise) -> Option<(Str
             let subject = render_contract_arms(cx, arms)?;
             let named: Vec<String> =
                 rejected.iter().filter_map(|a| render_contract_arms(cx, slice::from_ref(a))).collect();
-            (named.len() == rejected.len()).then_some((subject, named))
+            (named.len() == rejected.len()).then_some((subject, named, every))
         }
     }
 }
@@ -248,14 +264,16 @@ pub(crate) fn check_maybe_return_mismatch(
         return;
     }
     let Some(premise) = return_premise(value, env, store, poisoned) else { return };
-    let Some((subject, named)) = verdict_spelling(cx, ret, &premise) else { return };
+    let Some((subject, named, every)) = verdict_spelling(cx, ret, &premise) else { return };
     let id = if premise.stratum() == Stratum::Verified {
         TYPE_MAYBE_RETURN_MISMATCH_ID
     } else {
         PHPDOC_MAYBE_RETURN_MISMATCH_ID
     };
     let subject_name = shown.render();
-    let arms = if named.len() == 1 {
+    let arms = if every {
+        "its every arm raises a TypeError".to_owned()
+    } else if named.len() == 1 {
         format!("its {} arm raises a TypeError", named[0])
     } else {
         format!("its {} arms raise a TypeError", named.join(" and "))

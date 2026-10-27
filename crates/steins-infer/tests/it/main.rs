@@ -5,6 +5,7 @@
 mod alias_rebind;
 mod arg_dispatch_transfers;
 mod arity;
+mod asserted_all_fail;
 mod dynamic_callee_arity;
 mod early_binding;
 mod array_duplicate_key;

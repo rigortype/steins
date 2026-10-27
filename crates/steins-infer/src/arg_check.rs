@@ -17,7 +17,7 @@ use crate::descent::{
     project_call_summary, project_method_summary, propagated_arg_value, summary_binds,
 };
 use crate::dump::render_contract_arms;
-use crate::finite_verdict::check_oneof_argument;
+use crate::finite_verdict::{FiniteVerdict, check_oneof_argument, finite_verdict};
 use crate::env::{ContractArm, HandleState, Known, Store, Stratum};
 use crate::heap::simple_class;
 use crate::project::Diagnostic;
@@ -272,9 +272,11 @@ pub(crate) fn possibly_null_rejected(cx: &Cx, ty: &NativeType) -> bool {
 // parameter type and some is accepted. Two ids, one judgment, split by the
 // premise's minimum stratum (ADR-0052 §5).
 //
-// The ALL-arms-rejected verdict is deliberately NOT emitted: issue #291
-// measured it empty on the pinned corpus, on phpstan-src's nsrt and on
-// php-typing-conformance, and closes with "don't build it".
+// The ALL-arms-rejected verdict is deliberately NOT emitted at the `Verified`
+// stratum: issue #291 measured it empty on the pinned corpus, on phpstan-src's nsrt
+// and on php-typing-conformance, and closes with "don't build it". At `Asserted` the
+// premise is a claim, and the same shape reports the possibly grade (issue #1099,
+// ADR-0081's 2026-10-27 amendment).
 // ===========================================================================
 
 /// The witnesses that decide, for one [`Base`], whether a native type accepts
@@ -327,7 +329,8 @@ pub(crate) type AbstractArm = steins_domain::UnionArm;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MaybeVerdict {
     /// Every arm rejected — the definite No of issue #291. Measured empty, and
-    /// never emitted: see the module header above.
+    /// never emitted at `Verified`; an `Asserted` premise reports the possibly grade
+    /// (issue #1099): see the module header above.
     Every,
     /// Some arm rejected, some accepted — the possibly-grade claim this pair of
     /// ids carries.
@@ -504,7 +507,10 @@ fn spell_rejected_arms(
 ///
 /// `None` for an empty arm list, an arm list the value domain cannot lower at
 /// all, or one that lowers to a finite fact (`Singleton`/`OneOf` are the
-/// concrete lane's, already judged exactly by [`is_type_error`]).
+/// concrete lane's, already judged exactly by [`is_type_error`]) — except at the
+/// `Asserted` stratum, where nothing has judged a *declared* literal list and
+/// [`check_maybe_argument_mismatch`] reports it only when every member is rejected
+/// (issue #1099).
 fn arm_lane_premise(arms: Vec<ContractArm>) -> Option<(Fact, Stratum, Option<Vec<ContractArm>>)> {
     if arms.is_empty() {
         return None;
@@ -512,10 +518,10 @@ fn arm_lane_premise(arms: Vec<ContractArm>) -> Option<(Fact, Stratum, Option<Vec
     let lowered = steins_contract::to_fact(&steins_contract::ContractTy::Union(
         arms.iter().map(|a| a.ty.clone()).collect(),
     ))?;
-    if lowered.finite_members().is_some() {
+    let stratum = arms.iter().fold(Stratum::Verified, |acc, a| acc.min(a.stratum));
+    if lowered.finite_members().is_some() && stratum != Stratum::Asserted {
         return None;
     }
-    let stratum = arms.iter().fold(Stratum::Verified, |acc, a| acc.min(a.stratum));
     Some((lowered, stratum, Some(arms)))
 }
 
@@ -591,8 +597,10 @@ fn arm_lane_premise(arms: Vec<ContractArm>) -> Option<(Fact, Stratum, Option<Vec
 /// code cannot ship even at the strict floor, so it is dropped rather than
 /// shipped unguarded (ADR-0002).
 ///
-/// A `Singleton` declines on every lane: it is the concrete lane's, and
-/// [`is_type_error`] has already judged it exactly. A `OneOf` on the value lane (a
+/// A `Singleton` declines on every lane but one: it is the concrete lane's, and
+/// [`is_type_error`] has already judged it exactly. The exception is a `Singleton` at
+/// the `Asserted` stratum on a variable or an offset read ([`asserted_singleton`]),
+/// which the proof rung declined (issue #1099). A `OneOf` on the value lane (a
 /// variable's fact, or a call's proven summary) reaches
 /// [`crate::finite_verdict`], which judges it member by member; on the declared-arm,
 /// builtin-envelope and shape lanes it still declines.
@@ -627,7 +635,9 @@ fn maybe_arg_premise(
             if let Some(k) = env.get(name)
                 && let Some(f) = &k.fact
             {
-                return (!matches!(f, Fact::Singleton(_))).then(|| (f.clone(), k.stratum, None));
+                let admitted =
+                    !matches!(f, Fact::Singleton(_)) || asserted_singleton(f, k.stratum);
+                return admitted.then(|| (f.clone(), k.stratum, None));
             }
             arm_lane_premise(store.contract_arms(name)?.to_vec())
         }
@@ -687,10 +697,19 @@ fn maybe_arg_premise(
         ArgValue::OffsetRead { base, key } => {
             let (read, stratum) = shape_read_at(base, key, env, poisoned)?;
             let f = read.into_fact()?;
-            f.finite_members().is_none().then_some((f, stratum, None))
+            (f.finite_members().is_none() || asserted_singleton(&f, stratum))
+                .then_some((f, stratum, None))
         }
         _ => None,
     }
+}
+
+/// Whether `f` is a `Singleton` at the `Asserted` stratum. At `Verified` a `Singleton` is
+/// the concrete lane's and [`is_type_error`] has judged it exactly at the proof rung; at
+/// `Asserted` the proof layer declines it (ADR-0052 §5), no rung has judged it, and the
+/// possibly grade reports a claimed value the parameter rejects (issue #1099).
+fn asserted_singleton(f: &Fact, stratum: Stratum) -> bool {
+    matches!(f, Fact::Singleton(_)) && stratum == Stratum::Asserted
 }
 
 /// Emit the possibly-grade argument finding for one argument position. Called from
@@ -734,6 +753,24 @@ pub(crate) fn check_maybe_argument_mismatch(
     };
     // A `OneOf` is judged member by member (`finite_verdict`): it may be a definite
     // No, which the caller must know about.
+    // A declared literal list (the arm lane) is judged on the all-rejected row only: the
+    // some-rejected rows of `finite_verdict` belong to proven values (issue #1099).
+    if lane.is_some()
+        && let Some(members) = fact.finite_members()
+    {
+        let null_ok = null_tolerated || implicit_null_accepted(param, &ArgValue::Null);
+        if !matches!(finite_verdict(cx, ty, members, null_ok, false), FiniteVerdict::Every) {
+            return false;
+        }
+    }
+    if let Fact::Singleton(v) = &fact {
+        // An Asserted singleton the proof rung declined (`maybe_arg_premise` admits no
+        // other): one member, judged by the same table as a `OneOf` of one.
+        return check_oneof_argument(
+            cx, param, ty, callee, arg_offset, value, std::slice::from_ref(v), stratum,
+            null_tolerated, false, out,
+        );
+    }
     if let Fact::OneOf(members) = &fact {
         let thinned = matches!(value, ArgValue::Var(n) if env.get(n).is_some_and(|k| k.thinned));
         return check_oneof_argument(
@@ -743,7 +780,11 @@ pub(crate) fn check_maybe_argument_mismatch(
     }
     let (verdict, rejected, null_rejected) =
         maybe_arg_verdict(cx, param, ty, &fact, null_tolerated);
-    if verdict != MaybeVerdict::Partial {
+    // An abstract `Every` at `Verified` is #291's definite No and stays unbuilt; at
+    // `Asserted` the premise is a claim and the same shape is the possibly grade
+    // (issue #1099, ADR-0081's 2026-10-27 amendment): "its every arm raises a TypeError".
+    let every = verdict == MaybeVerdict::Every && stratum == Stratum::Asserted;
+    if verdict != MaybeVerdict::Partial && !every {
         return false;
     }
     let id = if stratum == Stratum::Verified {
@@ -762,7 +803,9 @@ pub(crate) fn check_maybe_argument_mismatch(
         .and_then(|arms| render_contract_arms(cx, arms))
         .unwrap_or_else(|| describe_fact(&fact).trim_start_matches("a value of type ").to_owned());
     let named = spell_rejected_arms(cx, lane.as_deref(), &rejected, null_rejected);
-    let arms = if named.len() == 1 {
+    let arms = if every {
+        "its every arm raises a TypeError".to_owned()
+    } else if named.len() == 1 {
         format!("its {} arm raises a TypeError", named[0])
     } else {
         format!("its {} arms raise a TypeError", named.join(" and "))

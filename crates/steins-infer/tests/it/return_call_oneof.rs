@@ -175,8 +175,21 @@ fn a_builtin_asked_to_return_a_string_is_not_convicted_of_its_other_arms() {
 
 #[test]
 fn a_call_that_proves_nothing_stays_silent_in_both_spellings() {
-    parity("function s(int $n): string { return (string) rand(); }", "int", "s(1)", None);
     parity("function s(int $n): int { return $n; }", "int", "s(1)", None);
+}
+
+#[test]
+fn an_asserted_numeric_string_summary_into_int_is_the_possibly_grade_in_strict_only() {
+    // Issue #1099: `(string) rand()` is a numeric string whose `rand()` return is only
+    // the catalog's declaration (`Asserted` without the sidecar), so strict mode's
+    // every-arm rejection rides the contract id; coercive mode accepts a numeric string.
+    let prelude = "function s(int $n): string { return (string) rand(); }";
+    let returned = strict(&format!("{prelude}\nfunction g(): int {{ return s(1); }}\n"));
+    let assigned = strict(&format!("{prelude}\nfunction g(): int {{ $v = s(1); return $v; }}\n"));
+    assert_eq!(ids(&returned), vec![PHPDOC_MAYBE_RET.to_owned()], "{returned}");
+    assert_eq!(ids(&assigned), ids(&returned), "the two spellings disagree");
+    let loose = coercive(&format!("{prelude}\nfunction g(): int {{ return s(1); }}\n"));
+    silent(&loose);
 }
 
 #[test]
@@ -346,15 +359,14 @@ fn a_returned_call_with_a_oneof_summary_is_judged_like_its_assignment() {
 
 #[test]
 fn a_declared_arm_list_keeps_its_own_table() {
-    // A `@param 1|null` seed lives in the declared-arm lane, which this judgment does
-    // not read on the argument side and which the return seam has always judged: some
-    // rejected rides the contract id, every rejected stays silent. (No source seeds an
-    // `Asserted` `OneOf` on the value lane today, so that row of the table is held by
-    // the code, not by a test.)
+    // A `@param 1|null` seed lives in the declared-arm lane, which the argument side
+    // reads on its every-rejected row only (issue #1099) and which the return seam has
+    // always judged: some rejected rides the contract id, and so does every rejected
+    // since issue #1099.
     let some = "/** @param 1|null $x */\nfunction f($x): int { return $x; }";
     fires(&strict(some), PHPDOC_MAYBE_RET);
     let every = "/** @param null|'a' $x */\nfunction f($x): int { return $x; }";
-    silent(&strict(every));
+    fires(&strict(every), PHPDOC_MAYBE_RET);
     let arg = "function ti(int $i): void {}\n/** @param 1|null $x */\nfunction f($x) { ti($x); }";
     silent(&strict(arg));
     let _ = PHPDOC_MAYBE_ARG;
