@@ -237,7 +237,8 @@ fn walk_one_file(
         inputs.layout.php_target(),
     );
     let seeds = std::cell::RefCell::new(Vec::new());
-    let cx = Cx { guard_seeds: Some(&seeds), ..cx };
+    let php_target_unreadable = inputs.layout.php_target_unreadable();
+    let cx = Cx { guard_seeds: Some(&seeds), php_target_unreadable, ..cx };
     let (dead_spans, uncovered_entry) = walk_scopes(&cx, folder, out);
     file_passes(&cx, folder, &dead_spans, inputs.plugins, inputs.never_returning, out);
     direct_pass(&cx, folder, &dead_spans, out);

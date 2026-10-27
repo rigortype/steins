@@ -8,7 +8,7 @@ use steins_syntax::{
     IssetOperand, LogicalOp, NameRef, OperandSpan, ReadKind, RefKind, StaticClass, Stmt, ValueOp,
 };
 
-use crate::absence::{ChainWalk, walk_method_chain};
+use crate::absence::{ChainWalk, reflect_builtin_node, walk_method_chain};
 use crate::cx::Cx;
 use crate::early_binding::redammed;
 use crate::dam::DamKind;
@@ -297,10 +297,19 @@ fn method_exists_verdict(
     method: &str,
 ) -> Certainty {
     let Some((file, cd)) = cx.find_class(start_fqn) else {
-        return Certainty::Maybe; // the class leaves the project / ambiguous.
+        // A builtin class the project does not declare: the sidecar's reflection decides
+        // (issue #1112). A vendor name, an ambiguous one and no sidecar leave it `Maybe`.
+        let mut folder = Some(&mut *folder);
+        return match reflect_builtin_node(cx, &mut folder, start_fqn, method, false, true)
+            .or_else(|| reflect_builtin_node(cx, &mut folder, start_fqn, method, true, true))
+        {
+            Some(true) => Certainty::Yes,
+            Some(false) => Certainty::No,
+            None => Certainty::Maybe,
+        };
     };
     let (present, fqns, any_conditional) =
-        match walk_method_chain(cx, file, cd, start_fqn, method, None) {
+        match walk_method_chain(cx, file, cd, start_fqn, method, None, Some(&mut *folder)) {
             ChainWalk::Declared { fqns, any_conditional } => (true, fqns, any_conditional),
             ChainWalk::Absent { fqns, any_conditional, .. } => (false, fqns, any_conditional),
             ChainWalk::Magic { .. } | ChainWalk::Unknown => return Certainty::Maybe,
