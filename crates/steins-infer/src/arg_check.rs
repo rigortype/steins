@@ -17,7 +17,8 @@ use crate::descent::{
     project_call_summary, project_method_summary, propagated_arg_value, summary_binds,
 };
 use crate::dump::render_contract_arms;
-use crate::finite_verdict::{FiniteVerdict, check_oneof_argument, finite_verdict};
+use crate::guard_scan;
+use crate::finite_verdict::{FiniteVerdict, arms_clause, check_oneof_argument, finite_verdict};
 use crate::env::{ContractArm, HandleState, Known, Store, Stratum};
 use crate::heap::simple_class;
 use crate::project::Diagnostic;
@@ -783,7 +784,9 @@ pub(crate) fn check_maybe_argument_mismatch(
     // An abstract `Every` at `Verified` is #291's definite No and stays unbuilt; at
     // `Asserted` the premise is a claim and the same shape is the possibly grade
     // (issue #1099, ADR-0081's 2026-10-27 amendment): "its every arm raises a TypeError".
-    let every = verdict == MaybeVerdict::Every && stratum == Stratum::Asserted;
+    let every = verdict == MaybeVerdict::Every
+        && stratum == Stratum::Asserted
+        && !guard_scan::declines(cx, value, arg_offset);
     if verdict != MaybeVerdict::Partial && !every {
         return false;
     }
@@ -805,10 +808,8 @@ pub(crate) fn check_maybe_argument_mismatch(
     let named = spell_rejected_arms(cx, lane.as_deref(), &rejected, null_rejected);
     let arms = if every {
         "its every arm raises a TypeError".to_owned()
-    } else if named.len() == 1 {
-        format!("its {} arm raises a TypeError", named[0])
     } else {
-        format!("its {} arms raise a TypeError", named.join(" and "))
+        arms_clause(&named)
     };
     let pos = cx.tree().position(arg_offset);
     out.push(Diagnostic {

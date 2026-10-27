@@ -685,6 +685,12 @@ pub(crate) struct Store {
     /// [`collect_cmp_refine`]: crate::refine::collect_cmp_refine
     /// [`collect_shape_guards`]: crate::shapes::collect_shape_guards
     pub(crate) guarded_calls: Vec<ArgValue>,
+    /// The walk is inside the body or a `catch` of a `try` whose `finally` can leave the
+    /// function (`return`, `throw`, `exit`): a `return` here may never hand its value over,
+    /// since the `finally`'s own exit replaces it, so the return seam's mismatch ids
+    /// decline it. Set by `walk_try`, restored to the enclosing value when the `try`
+    /// ends; a join takes the union.
+    pub(crate) finally_exits: bool,
     /// **Remembered call results** (ADR-0102): what a guard proved about a builtin
     /// call's result, keyed by the call's structure (`strlen($s)`, `strpos($h, '=')`),
     /// so a later identical call in this frame answers it. See
@@ -2025,6 +2031,7 @@ pub(crate) fn join_stores(first: &Store, rest: &[&Store]) -> Store {
         members,
         vouched,
         guarded_calls,
+        finally_exits: first.finally_exits || rest.iter().any(|s| s.finally_exits),
         remembered,
         may_hold_places,
         guard_vars: join_guard_vars(first, rest),

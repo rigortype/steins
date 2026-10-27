@@ -65,6 +65,7 @@ use steins_syntax::{ArgValue, NativeType, Param};
 use crate::arg_check::{implicit_null_accepted, is_type_error};
 use crate::cx::Cx;
 use crate::env::{Stratum, arg_of_val, render_val};
+use crate::guard_scan;
 use crate::project::Diagnostic;
 use crate::{
     PHPDOC_MAYBE_ARGUMENT_MISMATCH_ID, PHPDOC_MAYBE_RETURN_MISMATCH_ID, RETURN_ID,
@@ -118,11 +119,15 @@ fn subject_of(members: &[Val]) -> String {
     format!("one of {}", named.join(", "))
 }
 
-fn arms_clause(rejected: &[String]) -> String {
-    if rejected.len() == 1 {
-        format!("its {} arm raises a TypeError", rejected[0])
-    } else {
-        format!("its {} arms raise a TypeError", rejected.join(" and "))
+/// "its a arm raises" / "its a, b and c arms raise" — the clause that names the rejected
+/// arms.
+pub(crate) fn arms_clause(rejected: &[String]) -> String {
+    match rejected {
+        [only] => format!("its {only} arm raises a TypeError"),
+        [init @ .., last] => {
+            format!("its {} and {last} arms raise a TypeError", init.join(", "))
+        }
+        [] => "its every arm raises a TypeError".to_owned(),
     }
 }
 
@@ -157,6 +162,9 @@ pub(crate) fn check_oneof_argument(
         // An Asserted fact rejected in every member (issue #1099): the premise is a
         // claim, so the verdict is the possibly grade with every member named.
         FiniteVerdict::Every => {
+            if guard_scan::declines(cx, value, offset) {
+                return false;
+            }
             let rejected: Vec<String> = members.iter().map(render_val).collect();
             push_maybe_argument(
                 cx, param, ty, callee, offset, value, members, &rejected, stratum, out,
@@ -223,13 +231,19 @@ pub(crate) fn check_oneof_return(
     members: &[Val],
     stratum: Stratum,
     thinned: bool,
+    in_exiting_try: bool,
     span_start: u32,
     out: &mut Vec<Diagnostic>,
 ) {
     let verdict = match finite_verdict(cx, ret, members, false, thinned) {
         // An Asserted fact rejected in every member is the possibly grade with every
-        // member named (issue #1099), as at an argument.
+        // member named (issue #1099), as at an argument; it declines in a `try` whose
+        // `finally` can exit (that exit replaces the value) and after a guard the
+        // syntactic rule of `guard_scan` reads.
         FiniteVerdict::Every if stratum != Stratum::Verified => {
+            if in_exiting_try || guard_scan::declines(cx, shown, span_start) {
+                return;
+            }
             FiniteVerdict::Some(members.iter().map(render_val).collect())
         }
         v => v,

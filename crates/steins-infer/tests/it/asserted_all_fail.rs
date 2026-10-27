@@ -64,7 +64,7 @@ fn an_if_else_join_of_literals_reports_every_member() {
     assert_eq!(
         d[0].message,
         "argument $y to tn() may not become ?int $i — $y is one of \"a\", \"b\", \"c\", \
-         and its \"a\" and \"b\" and \"c\" arms raise a TypeError (strict mode)"
+         and its \"a\", \"b\" and \"c\" arms raise a TypeError (strict mode)"
     );
     assert!(with_id(&src, TYPE_MAYBE_ARGUMENT_MISMATCH_ID).is_empty());
     assert!(run(&src).iter().all(|d| d.id != ID), "no definite id: the premise is a claim");
@@ -325,7 +325,7 @@ fn a_returned_join_of_literals_reports_every_member() {
     assert_eq!(
         d[0].message,
         "return value $y may not become ?int (return type of r7()) — $y is one of \"a\", \"b\", \"c\", \
-         and its \"a\" and \"b\" and \"c\" arms raise a TypeError (strict mode)"
+         and its \"a\", \"b\" and \"c\" arms raise a TypeError (strict mode)"
     );
 }
 
@@ -334,7 +334,11 @@ fn a_returned_declared_literal_list_reports_every_member() {
     let src = strict("/** @param 'a'|'b' $s */\nfunction r5(mixed $s): int { return $s; }\n");
     let d = with_id(&src, PHPDOC_MAYBE_RETURN_MISMATCH_ID);
     assert_eq!(d.len(), 1, "{:?}", run(&src));
-    assert!(d[0].message.contains("$s is 'a'|'b', and its every arm raises"), "{}", d[0].message);
+    assert!(
+        d[0].message.contains("$s is 'a'|'b', and its \"a\" and \"b\" arms raise"),
+        "{}",
+        d[0].message
+    );
 }
 
 #[test]
@@ -359,4 +363,115 @@ fn a_returned_verified_every_stays_silent() {
 fn a_returned_coercible_literal_list_stays_silent() {
     let src = coercive("/** @param '1'|'2' $s */\nfunction r(mixed $s): int { return $s; }\n");
     assert!(maybe_family(&src).is_empty(), "{:?}", run(&src));
+}
+
+// ---------------------------------------------------------------------------
+// A guard that already removed every allowed value (review round 1)
+// ---------------------------------------------------------------------------
+
+/// A condition the walk cannot decide (`in_array`, `strlen`, a loose `==`, `ctype_*`) may
+/// already have removed every value the docblock allows, so the Asserted all-rejected rows
+/// decline a variable a branch condition read. PHP never reaches the call with an allowed
+/// value in any of these.
+#[test]
+fn an_undecided_guard_on_the_variable_silences_the_asserted_rows() {
+    for body in [
+        "/** @param 'a'|'b' $x */ function f(mixed $x): void { if (in_array($x, ['a', 'b'], true)) { return; } ti($x); }",
+        "/** @param 'a'|'b' $x */ function f(mixed $x): void { if (!in_array($x, ['a', 'b'], true)) { ti($x); } }",
+        "/** @param 'a'|'b' $x */ function f(mixed $x): void { if (in_array($x, ['a', 'b'])) { return; } ti($x); }",
+        "/** @param 'a'|'b' $x */ function f(mixed $x): void { if ($x == 'a' || $x == 'b') { return; } ti($x); }",
+        "/** @param 'a'|'b' $x */ function f(mixed $x): void { if (strlen($x) === 1) { return; } ti($x); }",
+        "/** @param 'a'|'b' $x */ function f(mixed $x): void { if (preg_match('/^[ab]$/', $x)) { return; } ti($x); }",
+        "/** @param 'a'|'b' $x */ function f(mixed $x): void { if (ctype_alpha($x)) { return; } ti($x); }",
+        "/** @param 'a'|'b' $x */ function f(mixed $x): void { if ($x) { return; } ti($x); }",
+        "/** @param 'a'|'b' $x */ function f(mixed $x): void { if (array_search($x, ['a', 'b'], true) !== false) { return; } ti($x); }",
+        "/** @param 'a'|'b' $x */ function f(mixed $x): void { if (in_array($x, ['a', 'b'], true)) { return; } $y = $x; ti($y); }",
+        "/** @param 'a'|'b' $s */ function f(mixed $s): void { $y = $s; if ($y) { return; } ti($y); }",
+        "/** @param 'a'|'b' $s */ function f(mixed $s): void { $y = $s; if ($y == 'a' || $y == 'b') { return; } ti($y); }",
+        "/** @param 'a' $s */ function f(mixed $s): void { if ($s == 'a') { return; } ti($s); }",
+        "/** @param 'a' $s */ function f(mixed $s): void { if (is_string($s) && $s !== '') { return; } ti($s); }",
+        "/** @param string $s */ function f(mixed $s): void { if (gettype($s) === 'string') { return; } ti($s); }",
+        "/** @param 'a'|'b' $x */ function f(mixed $x): int { if (in_array($x, ['a', 'b'], true)) { return 0; } return $x; }",
+        "/** @param 'a'|'b' $x */ function f(mixed $x): void { $ok = in_array($x, ['a', 'b'], true); if ($ok) { return; } ti($x); }",
+        "function chk(mixed $v, ?bool &$ok): void { $ok = in_array($v, ['a', 'b'], true); }\n\
+         /** @param 'a'|'b' $x */ function f(mixed $x): void { chk($x, $ok); if ($ok) { return; } ti($x); }",
+        "/** @param 'a'|'b' $x */ function f(mixed $x): void { $y = $x; if (in_array($x, ['a', 'b'], true)) { return; } ti($y); }",
+        "/** @param 'a'|'b' $x */ function f(mixed $x): void { switch ($x) { case 'a': case 'b': return; } ti($x); }",
+        "/** @param 'a'|'b' $x */ function f(mixed $x): int { return in_array($x, ['a', 'b'], true) ? 0 : ti2($x); } function ti2(int $i): int { return $i; }",
+        "/** @param 'a'|'b' $x */ function f(mixed $x): void { in_array($x, ['a', 'b'], true) || ti($x); }",
+        "/** @param 'a'|'b' $x */ function f(mixed $x): void { $g = static function () use ($x) { if (in_array($x, ['a', 'b'], true)) { return; } ti($x); }; $g(); }",
+        "/** @param 'a'|'b' $x */ function f(mixed $x): void { echo \"$x\"; ti($x); }",
+        "/** @param 'a'|'b' $x */ function f(mixed $x): void { if ($x === 'c') { ti($x); } }",
+    ] {
+        let src = strict(body);
+        assert!(maybe_family(&src).is_empty(), "{body}: {:?}", run(&src));
+    }
+}
+
+/// A guard that reads another variable does not silence the rows.
+#[test]
+fn a_guard_that_reads_another_variable_does_not_silence() {
+    for body in [
+        "/** @param 'a'|'b' $x */ function f(mixed $x, bool $c): void { if ($c) { return; } ti($x); }",
+        "/** @param 'a'|'b' $s */ function f(mixed $s, int $n): void { if ($n > 1) { return; } $y = $s; ti($y); }",
+    ] {
+        let src = strict(body);
+        assert_eq!(maybe_family(&src).len(), 1, "{body}: {:?}", run(&src));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// A `return` a `finally` replaces
+// ---------------------------------------------------------------------------
+
+/// PHP: every one of these returns the `finally`'s value, whatever the `try` returned. The
+/// new Asserted all-rejected return row declines them.
+#[test]
+fn a_return_inside_a_try_whose_finally_exits_is_not_judged() {
+    for body in [
+        "/** @param 'a' $s */ function f(mixed $s): ?int { try { return $s; } finally { return 1; } }",
+        "/** @param 'a'|'b' $s */ function f(mixed $s): int { try { return $s; } finally { return 1; } }",
+        "/** @param string $s */ function f(mixed $s): int { try { return $s; } finally { return 2; } }",
+        "/** @param 'a' $s */ function f(mixed $s): int { $y = $s; try { return $y; } finally { return 5; } }",
+        "/** @param 'a' $s */ function f(mixed $s): int { try { return $s; } finally { if (true) { return 6; } } }",
+        "/** @param 'a' $s */ function f(mixed $s): int { try { throw new \\Exception(); } catch (\\Exception $e) { return $s; } finally { return 7; } }",
+    ] {
+        let src = strict(body);
+        assert!(run(&src).is_empty(), "{body}: {:?}", run(&src));
+    }
+}
+
+/// Master's own reports in the same shape are not this slice's to change: the Partial row
+/// (f4) and the definite `type.return-mismatch` of a Verified value (f5, k1, k7, k12, whose
+/// `finally` terminator never runs) stay exactly as they were.
+#[test]
+fn the_existing_return_rows_are_untouched_by_a_finally() {
+    let f4 = strict(
+        "/** @param 'a'|1 $s */ function f(mixed $s): int { try { return $s; } finally { return 3; } }",
+    );
+    assert_eq!(with_id(&f4, PHPDOC_MAYBE_RETURN_MISMATCH_ID).len(), 1, "{:?}", run(&f4));
+    for finally in [
+        "return 4;",
+        "if (!$c && $c) { return 1; }",
+        "foreach ([] as $_) { return 1; }",
+        "while (false) { return 1; }",
+    ] {
+        let src = strict(&format!(
+            "function f(bool $c): int {{ $y = $c ? 'a' : 'b'; try {{ return $y; }} finally {{ {finally} }} }}"
+        ));
+        assert_eq!(with_id(&src, "type.return-mismatch").len(), 1, "{finally}: {:?}", run(&src));
+    }
+}
+
+/// A `finally` that cannot exit leaves the return judged; code after a `try` is judged.
+#[test]
+fn a_finally_that_cannot_exit_leaves_the_return_judged() {
+    let plain = strict(
+        "/** @param 'a' $s */ function f(mixed $s): int { try { return $s; } finally { echo 1; } }",
+    );
+    assert_eq!(with_id(&plain, PHPDOC_MAYBE_RETURN_MISMATCH_ID).len(), 1, "{:?}", run(&plain));
+    let after = strict(
+        "/** @param 'a' $s */ function f(mixed $s): int { try { echo 1; } finally { echo 2; } return $s; }",
+    );
+    assert_eq!(with_id(&after, PHPDOC_MAYBE_RETURN_MISMATCH_ID).len(), 1, "{:?}", run(&after));
 }

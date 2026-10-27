@@ -44,13 +44,14 @@ use steins_domain::{Fact, Val};
 use steins_syntax::{ArgValue, NativeType};
 
 use crate::arg_check::{
-    MaybeVerdict, arm_base_set, maybe_fact_verdict, native_rejects_base, possibly_null_rejected,
-    spell_arm,
+    MaybeVerdict, arm_base_set, maybe_fact_verdict, native_rejects_base,
+    possibly_null_rejected, spell_arm,
 };
 use crate::cx::Cx;
 use crate::dump::render_contract_arms;
-use crate::finite_verdict::check_oneof_return;
-use crate::env::{ContractArm, Known, Store, Stratum};
+use crate::guard_scan;
+use crate::finite_verdict::{arms_clause, check_oneof_return};
+use crate::env::{ContractArm, Known, Store, Stratum, render_val};
 use crate::project::Diagnostic;
 use crate::{PHPDOC_MAYBE_RETURN_MISMATCH_ID, TYPE_MAYBE_RETURN_MISMATCH_ID, describe_fact};
 
@@ -179,6 +180,16 @@ fn judge_arm(cx: &Cx, ret: &NativeType, ty: &ContractTy) -> ArmVerdict {
     }
 }
 
+/// What [`verdict_spelling`] answers: the subject, the names of the rejected arms, whether
+/// the message says "its every arm" (an abstract fact), and whether every arm was rejected
+/// (the Asserted row of issue #1099).
+struct Spelling {
+    subject: String,
+    named: Vec<String>,
+    every: bool,
+    all_rejected: bool,
+}
+
 /// The subject spelling and the rejected-arm names for one premise, or `None` where
 /// the verdict is not the possibly grade's (nothing rejected, or everything at a
 /// `Verified` premise). The flag is set when every arm is rejected at an `Asserted`
@@ -187,7 +198,7 @@ fn verdict_spelling(
     cx: &Cx,
     ret: &NativeType,
     premise: &Premise,
-) -> Option<(String, Vec<String>, bool)> {
+) -> Option<Spelling> {
     match premise {
         Premise::Value(fact, _) => {
             // No return position has an implicit-nullable default, and the internal
@@ -204,7 +215,7 @@ fn verdict_spelling(
             }
             let subject =
                 describe_fact(fact).trim_start_matches("a value of type ").to_owned();
-            Some((subject, named, every))
+            Some(Spelling { subject, named, every, all_rejected: every })
         }
         Premise::Arms(arms, _) => {
             let judged: Vec<(&ContractArm, ArmVerdict)> =
@@ -230,9 +241,28 @@ fn verdict_spelling(
             // whole rather than naming the rest: the message states what the variable
             // is, and half a union is not that.
             let subject = render_contract_arms(cx, arms)?;
+            // A declared literal list names its members, as the argument side does.
+            if every
+                && let Some(f) = steins_contract::to_fact(&ContractTy::Union(
+                    arms.iter().map(|a| a.ty.clone()).collect(),
+                ))
+                && let Some(members) = f.finite_members()
+            {
+                return Some(Spelling {
+                    subject,
+                    named: members.iter().map(render_val).collect(),
+                    every: false,
+                    all_rejected: true,
+                });
+            }
             let named: Vec<String> =
                 rejected.iter().filter_map(|a| render_contract_arms(cx, slice::from_ref(a))).collect();
-            (named.len() == rejected.len()).then_some((subject, named, every))
+            (named.len() == rejected.len()).then_some(Spelling {
+                subject,
+                named,
+                every,
+                all_rejected: every,
+            })
         }
     }
 }
@@ -260,11 +290,21 @@ pub(crate) fn check_maybe_return_mismatch(
     // A `OneOf` is judged member by member, by `finite_verdict`'s table; it is the
     // one finite fact that reaches here (a `Singleton` is the exact rung's).
     if let Some((members, stratum, thinned)) = oneof_premise(value, env, poisoned) {
-        check_oneof_return(cx, ret, display, shown, members, stratum, thinned, span_start, out);
+        check_oneof_return(
+            cx, ret, display, shown, members, stratum, thinned, store.finally_exits, span_start,
+            out,
+        );
         return;
     }
     let Some(premise) = return_premise(value, env, store, poisoned) else { return };
-    let Some((subject, named, every)) = verdict_spelling(cx, ret, &premise) else { return };
+    let Some(Spelling { subject, named, every, all_rejected }) =
+        verdict_spelling(cx, ret, &premise)
+    else {
+        return;
+    };
+    if all_rejected && (store.finally_exits || guard_scan::declines(cx, shown, span_start)) {
+        return;
+    }
     let id = if premise.stratum() == Stratum::Verified {
         TYPE_MAYBE_RETURN_MISMATCH_ID
     } else {
@@ -273,10 +313,8 @@ pub(crate) fn check_maybe_return_mismatch(
     let subject_name = shown.render();
     let arms = if every {
         "its every arm raises a TypeError".to_owned()
-    } else if named.len() == 1 {
-        format!("its {} arm raises a TypeError", named[0])
     } else {
-        format!("its {} arms raise a TypeError", named.join(" and "))
+        arms_clause(&named)
     };
     let pos = cx.tree().position(span_start);
     out.push(Diagnostic {

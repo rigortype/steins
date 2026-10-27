@@ -22,6 +22,7 @@ mod absence;
 mod annotate;
 mod arg_check;
 mod finite_verdict;
+mod guard_scan;
 mod arity;
 mod version_region;
 mod array_out_state;
