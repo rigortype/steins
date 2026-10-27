@@ -1031,19 +1031,20 @@ impl Shield {
 
 /// The variable names an `isset`/`empty` condition **tests**, at either polarity —
 /// the shield an enclosing `isset($x) ? … : …` or `if (empty($x)) { … }` casts over
-/// its arms. This is the `??` discharge idiom in conditional spelling:
-/// `empty($page) ? 0 : ($page - 1) * $view` reaches the `$page` read only when
-/// `$page` is non-empty, hence bound, so this id's runtime claim — "PHP warns and
-/// the read evaluates to null" — is simply false there.
+/// its arms **in a scope that holds a `goto`** (issue #1108). This is the `??`
+/// discharge idiom in conditional spelling: `empty($page) ? 0 : ($page - 1) * $view`
+/// reaches the `$page` read only when `$page` is non-empty, hence bound, so this id's
+/// runtime claim — "PHP warns and the read evaluates to null" — is simply false there.
 ///
 /// **Not reachability, and deliberately not.** The rule asks only what the
 /// condition spells, then withholds reads in *both* arms without deciding which arm
 /// the guard protects — costing a finding on a "wrong" polarity but never
-/// manufacturing one, letting a purely syntactic containment test stand in for a
-/// flow analysis Steins does not have (the `variable.maybe-undefined` foundation,
-/// issue #199). `!` and parentheses are transparent; a conjunction
-/// (`isset($x) && $y`) tests nothing here. A condition's logical operators are read
-/// by [`bound_when`] instead, which does ask which side a guard proves.
+/// manufacturing one. Without a `goto`, [`bound_when`] decides which side a guard
+/// proves and is the whole rule, so this containment would only cost findings
+/// (`if (empty($u)) { echo $u; }` warns); with one, a jump can land inside an arm
+/// without evaluating the condition, the sided rule stands down, and this
+/// containment is what is left. `!` and parentheses are transparent; a conjunction
+/// (`isset($x) && $y`) tests nothing here.
 fn guard_tested_names(cond: &Expression<'_>) -> Vec<Shield> {
     let mut out = Vec::new();
     collect_guard_tested_names(cond, &mut out);
@@ -1386,15 +1387,19 @@ pub(crate) fn scan_var_usage(node: &Node<'_, '_>, guarded: bool, shielded: &[Shi
         // --- Same-variable guarded constructs: the `??` discharge idiom in
         // conditional spelling. `empty($page) ? 0 : ($page - 1) * $view` reaches
         // the `$page` read only when `$page` is non-empty, hence bound, so this
-        // id's runtime claim is false there. Both arms are shielded without asking
-        // which one the guard protects — see `guard_tested_names` for why that is
-        // a containment rule and not a reachability one. Only the TESTED name is
+        // id's runtime claim is false there. Each arm takes what the condition proves
+        // on its own side (`bound_when`), so `empty($u) ? $u : 0` is still judged
+        // (issue #1108). Only with a `goto` in the scope are both arms shielded by
+        // the containment rule of `guard_tested_names`. Only the TESTED name is
         // shielded, so `$view` above is still judged. ---
         Node::Conditional(c) => {
             let cond_bound =
                 acc.branch(|a| scan_var_usage(&Node::Expression(c.condition), guarded, shielded, a));
             acc.uncond_bound.extend(cond_bound.iter().cloned());
-            let extended = extend_shield(shielded, guard_tested_names(c.condition));
+            let extended = acc
+                .goto_present
+                .then(|| extend_shield(shielded, guard_tested_names(c.condition)))
+                .flatten();
             let base = extended.as_deref().unwrap_or(shielded);
             // `?:` has no `then` arm; its condition IS the value, already walked. Each
             // arm also takes what the condition proves on its own side (issue #929).
@@ -1448,20 +1453,23 @@ pub(crate) fn scan_var_usage(node: &Node<'_, '_>, guarded: bool, shielded: &[Shi
         // whether the receiver may be null, so they bind unconditionally (the silent side).
         Node::NullSafeMethodCall(c) => bind_call_arguments(&c.argument_list, acc),
 
-        // The statement spelling of the same idiom. The bare `isset`/`empty` tests need
-        // no block-scoped tracking: the `if`'s whole body — including its
-        // `elseif`/`else` clauses — is one subtree, and shielding all of it is the same
-        // silence-direction containment rule. A read AFTER the `if` is outside that
-        // subtree and is still judged. What the condition *proves* (issue #929) is
-        // sided: the then-body takes its true outcome, the `elseif`/`else` clauses
-        // its false one.
+        // The statement spelling of the same idiom. What the condition *proves*
+        // (issue #929) is sided: the then-body takes its true outcome, the
+        // `elseif`/`else` clauses its false one, and that is the whole rule (issue
+        // #1108): `if (!isset($u)) { echo $u; }` is judged. A read AFTER the `if` is
+        // still judged too. With a `goto` in the scope the sided rule stands down and
+        // the containment of `guard_tested_names` shields the whole body, including
+        // its `elseif`/`else` clauses, in its place.
         Node::If(i) => {
             scan_var_usage(&Node::Expression(i.condition), guarded, shielded, acc);
-            let extended = extend_shield(shielded, guard_tested_names(i.condition));
-            let base = extended.as_deref().unwrap_or(shielded);
             // A `goto` can land inside an arm without evaluating the condition, so with
-            // one in the scope the arms take no sided shield.
+            // one in the scope the arms take no sided shield, and the containment
+            // stands in for it.
             let goto_present = acc.goto_present;
+            let extended = goto_present
+                .then(|| extend_shield(shielded, guard_tested_names(i.condition)))
+                .flatten();
+            let base = extended.as_deref().unwrap_or(shielded);
             let sided = |want_true| {
                 if goto_present { Vec::new() } else { bound_when(i.condition, want_true) }
             };
