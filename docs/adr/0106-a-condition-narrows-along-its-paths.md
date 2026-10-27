@@ -150,7 +150,14 @@ declaring `go` but not `gone` keeps reporting. The operand and ternary positions
 can now mark an operand dead where the arm lane proves it; each such sharpening is
 classified in the slice's diff.
 
-**Designed in run #1114, slice S8 (#1096); landed when that slice merges.** A2
+**Designed in run #1114, slice S8 (#1096); superseded by #1115, not landed.** The
+design below was built and found to change no verdict. A call or an offset inside a
+`&&`/`||` operand or a ternary arm sits at a `Conditional` read position, which the
+method and offset families decline (D3, the carrier table in `stmt_checks.rs`), and it
+is not one of the statement's own calls, so it never reads the operand environment the
+unified vocabulary would build. The rows below are therefore #1115's acceptance rows,
+and the per-position operand environments of #1115 must decide how they meet the D3
+decline (decision 8 of #1114). The original design, kept for #1115: A2
 closed the drift for two vocabulary entries, and the operand site still runs only
 four (type, scalar refinement, class, shape) while the branch site runs the full
 list of `apply_branch_vocabularies`: the same-expression guards, the

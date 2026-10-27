@@ -518,7 +518,7 @@ trace leaves opaque are covered); an arrow function's body is one
 
 ## Amendment (2026-10-27): the containment shield of `if` and `?:` is retracted without a `goto` (issue #1108, run #1114 slice S10) — PENDING ratification
 
-Designed in run #1114, slice S10 (#1108); landed when that slice merges.
+Designed in run #1114, slice S10 (#1108); landed in #1119.
 
 The 2026-10-03 amendment (#929) kept the enclosing-arm rule "unchanged, either polarity
 and containment": `scan_var_usage` shields a read under a bare `isset`/`empty` test of
@@ -537,9 +537,21 @@ scope with a `goto` keeps today's containment, since the sided shields are disab
 there (the `goto` exception). The `&&`/`||` operands, `??` and the maybe leg are
 unchanged, `isset($x) || print($x)` keeps reporting, and a name bound anywhere in the
 scope stays on the maybe leg. This adds default-floor `variable.undefined` findings,
-each a true positive by construction.
+which are true positives only together with the dead-arm rule below.
 
 ADR-0081's decision 5 ("this narrows `guard_tested_names`' both-arms shield to the
 actual protected arm, for this pass only; the definite pass and the walk keep their
 existing shields unchanged") is superseded for the definite pass in the same terms: the
 definite pass takes the sided rule for `if` and `?:` when no `goto` is present.
+
+The retraction alone was not conservative, as #1119's review found. It exposed reads in
+an arm that is dead because a second name the arm's guard proves bound is never bound in
+the scope: `if (!isset($u)) { if (isset($v)) { echo $u; } }` over never-bound `$u` and
+`$v` would report, and PHP never runs the inner arm. So the slice also lands a dead-arm
+rule. Each name an arm's `bound_when` proves bound also carries an any-name shield, and
+`settle` withholds every read in that arm when the name is never bound in the scope,
+since the arm is unreachable. The rule runs in the definite pass only (`dead_arms`), is
+off under a `goto` like the sided shields, and can only remove findings. It also removes
+a default-floor false positive that predates the slice: `if (isset($v)) { echo $u; }` and
+`isset($v) ? $u : 1` over a never-bound `$v` reported `$u`. The `&&`/`||` right operand
+does not take the rule, so `isset($v) && print($u)` over a never-bound `$v` still reports.
