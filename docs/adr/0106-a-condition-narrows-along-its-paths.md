@@ -395,7 +395,7 @@ An abstract class or an interface below the anchor is no candidate of the
 `method_exists` ladder: it has no instances, and its concrete descendants are
 candidates in their own right.
 
-**Designed in run #1114, slice S11 (#1112); landed when that slice merges.** The
+**Designed in run #1114, slice S11 (#1112); landed in #1147.** The
 chain walk returns `Unknown` at a node `find_class` cannot resolve (the start
 class, a parent, an interface), with "awaiting the reflect method surface" as the
 reason. With the sidecar that surface exists: `Folder::reflected_class` returns the
@@ -411,6 +411,15 @@ No (the body is dead and the strict-floor finding in it goes), `'count'` folds
 Yes, and a version guard on a builtin class folds on the project's PHP. The
 change is invisible under `--no-php` (byte-identical) and can add and remove
 findings in sidecar runs, which is why the slice measures with a sidecar A/B.
+
+As landed, "the project's PHP" is narrower. The fold answers only when the project's
+declared PHP target is the sidecar's minor, or when no target is declared, because
+the sidecar reflects its own version (`\DateTime::createFromTimestamp` is absent on
+8.3). A constraint the composer reader cannot parse keeps the fold closed; #1142
+records that the reader drops `>= 8.1` and `^8.1 | ^8.2`. A builtin ancestor's private
+methods do not count, since `method_exists` on a subclass does not see them. Only the
+literal-class fold reaches reflection: union-arm pruning and the call lanes keep
+leg (f) of ADR-0049. The decisions are on #1112, PENDING ratification.
 
 ### 2.8 Class arms under a positive guard (D, #908, #909; D4)
 
@@ -463,7 +472,15 @@ corpus now lower this way. The expected true-positive class (`if (empty($row))
 `array{}` reports `offset.undeclared`. That gap predates the run and is left
 open in §5.
 
-**Designed in run #1114, slice S7 (#1105); landed when that slice merges.** The
+**Designed in run #1114, slice S7 (#1105); parked, not landed.** Neither this design
+nor its alternative B landed (#1129, seven review rounds). Binding the sealed shape
+lost true positives after a write and reported in nested regions PHP never enters.
+Keeping the singleton and letting the strict leg lift it leaked the same false
+positives, because the claim "`$v` is `[]` when this read runs" needs reachability,
+and an Asserted fact gets no dead regions (A-G9), so a value derived from `$v` defeats
+any eligibility mark. #1105 stays open with two redesign options, both owner decisions:
+make `!$v` over a native `array` Verified, which reverses decision 3, or a strict-floor
+policy that treats a region the analyzer cannot decide as live. The original design: The
 falsy side of a guard on a non-nullable shape bound
 `Fact::Singleton(Val::Array([]))` at the shape's `Asserted` stratum. The proof
 emitter reads a variable base only at `Verified`, and the strict leg resolves
