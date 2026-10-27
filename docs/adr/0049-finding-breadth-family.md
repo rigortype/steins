@@ -1619,7 +1619,7 @@ answer as before.
 
 ## Amendment (2026-10-27): leg (f) is partly closed by the reflect method surface (issue #1112, run #1114 slice S11) — PENDING ratification
 
-Designed in run #1114, slice S11 (#1112); landed when that slice merges.
+Designed in run #1114, slice S11 (#1112); landed in #1147.
 
 The method-absence ladder's leg (f), "every chain class is project-defined — a chain
 reaching a builtin ancestor waits for the sidecar reflect slice to enumerate that class's
@@ -1628,5 +1628,7 @@ and only with the sidecar. `ReflectedClass.methods` lists every method of the cl
 inherited included, so a builtin node of the chain (the start class, a parent, an
 interface) is answered by `Folder::reflected_class`, and the walk ends there. The call
 lanes (`call.undefined-method`) keep leg (f) as written. Without the sidecar, or for a
-class the sidecar cannot reflect, a builtin node stays `Unknown`. See
+class the sidecar cannot reflect, a builtin node stays `Unknown`. A builtin ancestor
+node's private methods do not count, and the fold answers only when the project's
+declared PHP target is the sidecar's minor or undeclared. See
 [ADR-0106](0106-a-condition-narrows-along-its-paths.md) §2.7.
