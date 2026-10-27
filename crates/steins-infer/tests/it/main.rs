@@ -2,6 +2,7 @@
 
 #![allow(clippy::too_many_lines, reason = "test code is outside the #778 ratchet")]
 
+mod alias_rebind;
 mod arg_dispatch_transfers;
 mod arity;
 mod dynamic_callee_arity;
