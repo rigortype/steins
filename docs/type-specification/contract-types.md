@@ -33,6 +33,18 @@ rules instead of a keyword zoo:
 
 - `scalar` → the union of the four bases.
 - `positive-int`, `negative-int`, `non-negative-int`, `int<lo, hi>` → `IntIn`.
+- `float<lo, hi>`, `positive-float`, `negative-float`, `non-negative-float`,
+  `non-positive-float`, `finite-float` → `FloatIn` (a `FloatRange`, PHPStan's
+  `FloatRangeType`). `float<lo, hi>` takes int or float literal bounds or
+  `min`/`max` (`-INF`/`INF`), both inclusive; `lo > hi` is `never`. The sign
+  names are the comparisons they spell (`positive-float` is `> 0`, `INF`
+  included), and `finite-float` is `[-PHP_FLOAT_MAX, PHP_FLOAT_MAX]`. **`NAN` is
+  in no range**, `float<min, max>` included (PHPStan: "float without NAN"). An
+  int is judged by the float it widens to, as `float` itself admits it. The
+  value lattice carries no float refinement, so a declared range seeds a plain
+  `float` fact and is only ever *decided* against a proven value or a
+  provably-in-range int fact; against any other abstract fact it answers
+  `Maybe`.
 - The **refined-string grid** (issue #240) → `StrWith`: a core rung ∈ {—,
   `non-empty-`, `non-falsy-`, `numeric-`, `non-falsy-numeric-`} followed by a
   casing rung ∈ {—, `lowercase-`, `uppercase-`, `uncased-`}, suffixed `-string`.

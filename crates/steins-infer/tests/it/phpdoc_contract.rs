@@ -604,6 +604,65 @@ fn int_range_keyword_is_the_int_range() {
     assert_eq!(param_count(&format!("{g}g(1);")), 1, "int<min, 0> still rejects 1");
 }
 
+/// PHPStan's float ranges: `float<lo, hi>` with int or float literal bounds and
+/// `min`/`max`, plus the five named spellings. Bounds are inclusive, `positive-float`
+/// and `negative-float` are strict, and an int argument is judged by the float it
+/// widens to.
+#[test]
+fn float_range_bounds_are_inclusive_and_ints_widen() {
+    let f = "<?php /** @param float<0, 1.5> $value */ function f($value): void {}\n";
+    assert_eq!(param_count(&format!("{f}f(0.5);")), 0, "0.5 is inside float<0, 1.5>");
+    assert_eq!(param_count(&format!("{f}f(0.0);")), 0, "the lower bound is inclusive");
+    assert_eq!(param_count(&format!("{f}f(1.5);")), 0, "the upper bound is inclusive");
+    assert_eq!(param_count(&format!("{f}f(1);")), 0, "the int 1 widens to 1.0");
+    assert_eq!(param_count(&format!("{f}f(2.5);")), 1, "2.5 is above the bounds");
+    assert_eq!(param_count(&format!("{f}f(-1.0);")), 1, "-1.0 is below the bounds");
+    assert_eq!(param_count(&format!("{f}f(2);")), 1, "the int 2 widens to 2.0, above the bounds");
+    assert_eq!(param_count(&format!("{f}f('0.5');")), 1, "a string is no float");
+    let g = "<?php /** @param float<min, 100.0> $value */ function g($value): void {}\n";
+    assert_eq!(param_count(&format!("{g}g(-1.0e300);")), 0, "min is open below");
+    assert_eq!(param_count(&format!("{g}g(100.5);")), 1, "100.5 is above 100.0");
+    let h = "<?php /** @param float<0.5, max> $value */ function h($value): void {}\n";
+    assert_eq!(param_count(&format!("{h}h(1.0e300);")), 0, "max is open above");
+    assert_eq!(param_count(&format!("{h}h(0.25);")), 1, "0.25 is below 0.5");
+}
+
+/// The named float refinements, each against the one value on its edge.
+#[test]
+fn named_float_refinements_decide_their_edge() {
+    let cases: [(&str, &str, usize); 10] = [
+        ("positive-float", "0.0", 1),
+        ("positive-float", "0.001", 0),
+        ("negative-float", "-0.0", 1),
+        ("negative-float", "-0.001", 0),
+        ("non-negative-float", "0.0", 0),
+        ("non-negative-float", "-0.001", 1),
+        ("non-positive-float", "0.0", 0),
+        ("non-positive-float", "0.001", 1),
+        ("finite-float", "1.0e300", 0),
+        ("finite-float", "-1.5", 0),
+    ];
+    for (ty, arg, want) in cases {
+        let src = format!(
+            "<?php /** @param {ty} $value */ function f($value): void {{}}\nf({arg});"
+        );
+        assert_eq!(param_count(&src), want, "{ty} against {arg}");
+    }
+}
+
+/// A float range is a type like any other: it nests in a union and an array, and
+/// a bound word is not read as a class (`min`/`max` stay out of the class lane).
+#[test]
+fn float_range_nests() {
+    let f = "<?php /** @param float<0, 1>|null $value */ function f($value): void {}\n";
+    assert_eq!(param_count(&format!("{f}f(null);")), 0);
+    assert_eq!(param_count(&format!("{f}f(0.5);")), 0);
+    assert_eq!(param_count(&format!("{f}f(1.5);")), 1);
+    let g = "<?php /** @param list<float<min, 0>> $value */ function g($value): void {}\n";
+    assert_eq!(param_count(&format!("{g}g([-1.5, -2.5]);")), 0);
+    assert_eq!(param_count(&format!("{g}g([-1.5, 2.5]);")), 1);
+}
+
 /// `phpdoc_advanced_associative_array`: Phan treats `associative-array<K, V>` as
 /// an array that is specifically not a list, so a plain list argument is
 /// rejected even though its element types match (census bucket ix, ADR-0062's

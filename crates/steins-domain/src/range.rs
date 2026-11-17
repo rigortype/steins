@@ -83,6 +83,90 @@ impl IntRange {
     }
 }
 
+/// A float interval — the denotation of phpdoc `float<lo, hi>` and the named
+/// `positive-float` family.
+///
+/// Bounds are IEEE doubles, so `min`/`max` are `-INF`/`+INF` (both inclusive)
+/// and `finite-float` is `[f64::MIN, f64::MAX]`. Each end is independently open
+/// or closed so `positive-float` (`> 0`) needs no second variant.
+///
+/// Membership is the IEEE comparison itself, so **`NAN` is in no interval** —
+/// `float<min, max>` included, which PHPStan's `FloatRangeType` documents as
+/// "float without NAN" — and `-0.0` compares equal to `0.0`. Invariant: neither
+/// bound is `NAN`, and the interval is not empty.
+///
+/// Unlike [`IntRange`] this has no hull/intersection algebra: no fact carries
+/// it (the value lattice keeps a float as `General`), so it exists only to be
+/// asked membership and containment questions.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FloatRange {
+    lo: f64,
+    hi: f64,
+    lo_open: bool,
+    hi_open: bool,
+}
+
+impl FloatRange {
+    /// `positive-float` — `> 0`, `INF` included.
+    pub const POSITIVE: FloatRange =
+        FloatRange { lo: 0.0, hi: f64::INFINITY, lo_open: true, hi_open: false };
+    /// `negative-float` — `< 0`, `-INF` included.
+    pub const NEGATIVE: FloatRange =
+        FloatRange { lo: f64::NEG_INFINITY, hi: 0.0, lo_open: false, hi_open: true };
+    /// `non-negative-float` — `>= 0`.
+    pub const NON_NEGATIVE: FloatRange =
+        FloatRange { lo: 0.0, hi: f64::INFINITY, lo_open: false, hi_open: false };
+    /// `non-positive-float` — `<= 0`.
+    pub const NON_POSITIVE: FloatRange =
+        FloatRange { lo: f64::NEG_INFINITY, hi: 0.0, lo_open: false, hi_open: false };
+    /// `finite-float` — every float except `INF`, `-INF` and `NAN`.
+    pub const FINITE: FloatRange =
+        FloatRange { lo: f64::MIN, hi: f64::MAX, lo_open: false, hi_open: false };
+
+    /// The closed interval `[lo, hi]`; `None` for a `NAN` bound or `lo > hi`.
+    #[must_use]
+    pub fn new(lo: f64, hi: f64) -> Option<Self> {
+        (lo <= hi).then_some(FloatRange { lo, hi, lo_open: false, hi_open: false })
+    }
+
+    /// Lower bound.
+    #[must_use]
+    pub const fn lo(self) -> f64 {
+        self.lo
+    }
+
+    /// Upper bound.
+    #[must_use]
+    pub const fn hi(self) -> f64 {
+        self.hi
+    }
+
+    /// Membership of a float; `NAN` is in no interval.
+    #[must_use]
+    pub fn contains(self, v: f64) -> bool {
+        (if self.lo_open { self.lo < v } else { self.lo <= v })
+            && (if self.hi_open { v < self.hi } else { v <= self.hi })
+    }
+
+    /// Whether `self` holds every member of `other`.
+    #[must_use]
+    pub fn contains_range(self, other: Self) -> bool {
+        let lo_ok = self.lo < other.lo
+            || (self.lo == other.lo && (!self.lo_open || other.lo_open));
+        let hi_ok = other.hi < self.hi
+            || (self.hi == other.hi && (!self.hi_open || other.hi_open));
+        lo_ok && hi_ok
+    }
+
+    /// Membership of an int, by PHP's int-to-float widening (`5` satisfies
+    /// `float<5, 6>`): the same value-equality reading as a float literal type.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn contains_int(self, v: i64) -> bool {
+        self.contains(v as f64)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -96,6 +180,25 @@ mod tests {
         assert_eq!(a.intersect(IntRange::new(11, 12).unwrap()), None);
         assert!(IntRange::FULL.contains_range(a));
         assert!(IntRange::POSITIVE.contains(1) && !IntRange::POSITIVE.contains(0));
+    }
+
+    #[test]
+    fn float_ranges_are_ieee_intervals() {
+        let r = FloatRange::new(0.0, 1.5).unwrap();
+        assert!(r.contains(0.0) && r.contains(-0.0) && r.contains(1.5) && !r.contains(1.6));
+        assert!(!r.contains(f64::NAN) && !r.contains(f64::INFINITY));
+        assert!(r.contains_int(1) && !r.contains_int(2));
+        assert!(FloatRange::new(2.0, 1.0).is_none() && FloatRange::new(f64::NAN, 1.0).is_none());
+        assert!(!FloatRange::POSITIVE.contains(0.0) && FloatRange::POSITIVE.contains(f64::INFINITY));
+        assert!(FloatRange::NEGATIVE.contains(f64::NEG_INFINITY) && !FloatRange::NEGATIVE.contains(-0.0));
+        assert!(FloatRange::NON_NEGATIVE.contains(-0.0) && FloatRange::NON_POSITIVE.contains(0.0));
+        let all = FloatRange::new(f64::NEG_INFINITY, f64::INFINITY).unwrap();
+        assert!(!all.contains(f64::NAN) && all.contains(f64::INFINITY));
+        let fin = FloatRange::FINITE;
+        assert!(fin.contains(f64::MAX) && !fin.contains(f64::INFINITY) && !fin.contains(f64::NAN));
+        assert!(FloatRange::NON_NEGATIVE.contains_range(FloatRange::POSITIVE));
+        assert!(!FloatRange::POSITIVE.contains_range(FloatRange::NON_NEGATIVE));
+        assert!(all.contains_range(fin) && !fin.contains_range(all) && all.contains_range(all));
     }
 
     #[test]

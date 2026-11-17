@@ -678,7 +678,10 @@ fn is_refined_scalar_keyword(n: &str) -> bool {
     }
     matches!(
         steins_contract::lower_identifier(n),
-        ContractTy::IntIn(_) | ContractTy::StrWith(_) | ContractTy::StrOpaque
+        ContractTy::IntIn(_)
+            | ContractTy::FloatIn(_)
+            | ContractTy::StrWith(_)
+            | ContractTy::StrOpaque
     )
 }
 

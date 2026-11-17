@@ -273,6 +273,13 @@ pub fn subsumes(a: &ContractTy, b: &ContractTy) -> Certainty {
             admits_fact(a, &Fact::refined(Base::String, Refinement::Str(*p), false))
         }
         ContractTy::IntIn(r) => admits_fact(a, &Fact::refined(Base::Int, Refinement::Int(*r), false)),
+        // A float interval holds no lattice fact; against another interval the
+        // containment is exact, against anything else it is the whole `float`
+        // base that must fit (a `Maybe` where only part of it does).
+        ContractTy::FloatIn(rb) => match a {
+            ContractTy::FloatIn(ra) => Certainty::from_bool(ra.contains_range(*rb)),
+            _ => admits_fact(a, &Fact::General { base: Base::Float, nullable: false }),
+        },
 
         // Object arms: no scalar-fact denotation; reflexive is-a floor.
         ContractTy::Class(name) => subsumes_class(a, name),
@@ -500,6 +507,7 @@ fn subsumes_array(a: &ContractTy, b: &ContractTy) -> Certainty {
         | ContractTy::Null
         | ContractTy::Base(_)
         | ContractTy::IntIn(_)
+        | ContractTy::FloatIn(_)
         | ContractTy::StrWith(_)
         | ContractTy::StrOpaque
         | ContractTy::LitInt(_)
@@ -526,6 +534,7 @@ pub(crate) fn array_incapable(t: &ContractTy) -> bool {
         | ContractTy::Null
         | ContractTy::Base(_)
         | ContractTy::IntIn(_)
+        | ContractTy::FloatIn(_)
         | ContractTy::StrWith(_)
         | ContractTy::StrOpaque
         | ContractTy::LitInt(_)
@@ -1532,6 +1541,7 @@ fn enum_case_covers(
         | ContractTy::Null
         | ContractTy::Base(_)
         | ContractTy::IntIn(_)
+        | ContractTy::FloatIn(_)
         | ContractTy::StrWith(_)
         | ContractTy::StrOpaque
         | ContractTy::LitInt(_)

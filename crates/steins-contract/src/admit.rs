@@ -37,6 +37,12 @@ pub fn admits_val(ty: &ContractTy, v: &Val) -> Certainty {
             Val::Int(i) => Certainty::from_bool(r.contains(*i)),
             _ => No,
         },
+        // An int is judged by the float it widens to, as `float` itself admits it.
+        ContractTy::FloatIn(r) => match v {
+            Val::Float(f) => Certainty::from_bool(r.contains(*f)),
+            Val::Int(i) => Certainty::from_bool(r.contains_int(*i)),
+            _ => No,
+        },
         // Extensional predicates decide outright. `class-string` (#236) only
         // refutes via grammar (rules out `''`,`'0'`,`'123'`); it never proves
         // `Yes` (needs the class table), so `Yes` degrades to `Maybe` (ADR-0038).
@@ -223,6 +229,20 @@ fn base_only(ty: &ContractTy, base: Base, known: ArmKnown) -> Certainty {
                 } else {
                     Maybe
                 }
+            }
+            (Base::Int, _) => Maybe,
+            _ => No,
+        },
+        // The lattice holds no float refinement, so a float base is never
+        // proven inside a proper interval; an int base is, by its endpoints.
+        ContractTy::FloatIn(r) => match (base, known) {
+            // `float` holds `NAN`, which no interval does.
+            (Base::Float, _) => Maybe,
+            (Base::Int, ArmKnown::Refined(Refinement::Int(have))) => {
+                if r.contains_int(have.lo()) && r.contains_int(have.hi()) { Yes } else { Maybe }
+            }
+            (Base::Int, ArmKnown::Whole) => {
+                if r.contains_int(i64::MIN) && r.contains_int(i64::MAX) { Yes } else { Maybe }
             }
             (Base::Int, _) => Maybe,
             _ => No,
@@ -548,6 +568,7 @@ fn admits_shape_fact(ty: &ContractTy, sf: &ShapeFact) -> Certainty {
         ContractTy::Null
         | ContractTy::Base(_)
         | ContractTy::IntIn(_)
+        | ContractTy::FloatIn(_)
         | ContractTy::StrWith(_)
         | ContractTy::StrOpaque
         | ContractTy::LitInt(_)
