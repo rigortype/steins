@@ -273,11 +273,16 @@ pub fn subsumes(a: &ContractTy, b: &ContractTy) -> Certainty {
             admits_fact(a, &Fact::refined(Base::String, Refinement::Str(*p), false))
         }
         ContractTy::IntIn(r) => admits_fact(a, &Fact::refined(Base::Int, Refinement::Int(*r), false)),
-        // A float interval holds no lattice fact; against another interval the
-        // containment is exact, against anything else it is the whole `float`
-        // base that must fit (a `Maybe` where only part of it does).
+        // A float interval holds no lattice fact. Against another interval only
+        // containment is proven (`Yes`); anything short of it is `Maybe`, never
+        // `No`, which this relation reserves for disjoint arms — `extract-from`
+        // drops an arm on `No`, and a partial overlap still holds members. (An
+        // exact disjointness `No` waits on the interval's canonical form.)
+        // Against anything else it is the whole `float` base that must fit.
         ContractTy::FloatIn(rb) => match a {
-            ContractTy::FloatIn(ra) => Certainty::from_bool(ra.contains_range(*rb)),
+            ContractTy::FloatIn(ra) => {
+                if ra.contains_range(*rb) { Yes } else { Maybe }
+            }
             _ => admits_fact(a, &Fact::General { base: Base::Float, nullable: false }),
         },
 
@@ -1491,6 +1496,8 @@ fn falsy_covers(arm: &ContractTy) -> Certainty {
         // here, because the falsy set removes an interior point of every
         // interval that straddles zero and no arm can spell that gap.
         ContractTy::IntIn(r) => r.lo() == 0 && r.hi() == 0,
+        // The same point at zero, as a float interval (`float<0, 0>`).
+        ContractTy::FloatIn(r) => r.is_zero_point(),
         _ => false,
     };
     if falsy { Yes } else { No }
@@ -1671,6 +1678,20 @@ mod tests {
     }
 
     // ---- subsumes -----------------------------------------------------------
+
+    /// The falsy cut covers a float interval only when it is the point `0.0`
+    /// (`float<0, 0>`), as for `int<0, 0>`: any wider interval admits a truthy
+    /// float and a half-open one at zero (`positive-float`) admits nothing falsy.
+    #[test]
+    fn the_falsy_cut_covers_only_the_float_zero_point() {
+        use steins_domain::FloatRange;
+        let arm = |r: FloatRange| falsy_covers(&ContractTy::FloatIn(r));
+        assert_eq!(arm(FloatRange::new(0.0, 0.0).unwrap()), Certainty::Yes);
+        assert_eq!(arm(FloatRange::new(-0.0, 0.0).unwrap()), Certainty::Yes);
+        assert_eq!(arm(FloatRange::new(0.0, 1.0).unwrap()), Certainty::No);
+        assert_eq!(arm(FloatRange::NON_NEGATIVE), Certainty::No);
+        assert_eq!(arm(FloatRange::POSITIVE), Certainty::No);
+    }
 
     #[test]
     fn base_subsumes_its_literals_and_refinements() {

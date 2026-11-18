@@ -663,6 +663,49 @@ fn float_range_nests() {
     assert_eq!(param_count(&format!("{g}g([-1.5, 2.5]);")), 1);
 }
 
+/// A partially overlapping float arm is kept, not proven absent: `subsumes` answers
+/// `No` only for a disjoint arm, and `extract-from` drops an arm on `No`. The int
+/// twin keeps `int<0, 10>` and so did a wrong `No` here, which emptied the type
+/// and fired `phpdoc.never-param-reachable` on a legal argument.
+#[test]
+fn extract_from_keeps_a_partially_overlapping_float_arm() {
+    let f = "<?php /** @param extract-from<float<0, 10>, float<1, 2>> $a */ \
+             function f($a): void {}\nf(5.0);";
+    let hits: Vec<_> = findings(f).into_iter().map(|d| d.id).collect();
+    assert!(hits.is_empty(), "float<0, 10> is not empty, and 5.0 is in it: {hits:?}");
+    let g = "<?php /** @param extract-from<int<0, 10>, int<1, 2>> $a */ \
+             function g($a): void {}\ng(5);";
+    assert!(findings(g).is_empty(), "the int twin stays silent");
+}
+
+/// A declared range in a nested position keeps its base in the dump, not `mixed`,
+/// and the same declaration still judges arguments through the nesting.
+#[test]
+fn a_nested_float_range_spells_as_its_base() {
+    let src = "<?php\n/**\n * @param list<positive-float> $b\n * @param array{x: float<0, 1>} $c\n */\n\
+               function t($b, $c): void { \\PHPStan\\dumpType($b); \\PHPStan\\dumpType($c); }";
+    let dumps: Vec<String> =
+        findings(src).into_iter().filter(|d| d.id == "debug.type").map(|d| d.message).collect();
+    assert_eq!(dumps.len(), 2, "{dumps:?}");
+    assert!(dumps[0].contains("list<float>"), "{}", dumps[0]);
+    assert!(dumps[1].contains("array{x: float}"), "{}", dumps[1]);
+    assert!(!dumps.iter().any(|m| m.contains("mixed")), "{dumps:?}");
+}
+
+/// A `@return`/`@phpstan-assert` range establishes `float`, as `float` does:
+/// the lattice has no float refinement, so the honest seed is the base, and the
+/// finding for the claim itself is unchanged.
+#[test]
+fn an_asserted_or_returned_float_range_establishes_float() {
+    let src = "<?php\n/** @return float<0, 1> */\nfunction r() { return mt_rand() / mt_getrandmax(); }\n\
+               /** @phpstan-assert positive-float $x */\nfunction a($x): void {}\n\
+               function t($y): void { a($y); \\PHPStan\\dumpType($y); \\PHPStan\\dumpType(r()); }";
+    let dumps: Vec<String> =
+        findings(src).into_iter().filter(|d| d.id == "debug.type").map(|d| d.message).collect();
+    assert_eq!(dumps.len(), 2, "{dumps:?}");
+    assert!(dumps.iter().all(|m| m.contains("float") && !m.contains("unknown")), "{dumps:?}");
+}
+
 /// `phpdoc_advanced_associative_array`: Phan treats `associative-array<K, V>` as
 /// an array that is specifically not a list, so a plain list argument is
 /// rejected even though its element types match (census bucket ix, ADR-0062's

@@ -148,6 +148,12 @@ impl FloatRange {
             && (if self.hi_open { v < self.hi } else { v <= self.hi })
     }
 
+    /// Whether this is exactly the point `0.0` (which is also `-0.0`).
+    #[must_use]
+    pub fn is_zero_point(self) -> bool {
+        self.lo == 0.0 && self.hi == 0.0 && !self.lo_open && !self.hi_open
+    }
+
     /// Whether `self` holds every member of `other`.
     #[must_use]
     pub fn contains_range(self, other: Self) -> bool {

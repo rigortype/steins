@@ -504,6 +504,7 @@ fn deleted_may_hold(cx: &Cx, ty: &ContractTy, ladder: &mut dyn MemberLadder) -> 
         | ContractTy::Null
         | ContractTy::Base(_)
         | ContractTy::IntIn(_)
+        | ContractTy::FloatIn(_)
         | ContractTy::StrWith(_)
         | ContractTy::StrOpaque
         | ContractTy::LitInt(_)

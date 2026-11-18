@@ -44,7 +44,11 @@ rules instead of a keyword zoo:
   value lattice carries no float refinement, so a declared range seeds a plain
   `float` fact and is only ever *decided* against a proven value or a
   provably-in-range int fact; against any other abstract fact it answers
-  `Maybe`.
+  `Maybe`. `subsumes` between two intervals is `Yes` on containment and `Maybe`
+  otherwise — `No` is reserved for disjoint arms, which the interval does not yet
+  decide. An int bound widens to the nearest double, as PHP's `(float)` and
+  PHPStan's `resolveFloatRangeBound` do (`float<0, 9007199254740993>` is
+  `float<0, 9007199254740992>`).
 - The **refined-string grid** (issue #240) → `StrWith`: a core rung ∈ {—,
   `non-empty-`, `non-falsy-`, `numeric-`, `non-falsy-numeric-`} followed by a
   casing rung ∈ {—, `lowercase-`, `uppercase-`, `uncased-`}, suffixed `-string`.
@@ -228,12 +232,13 @@ These are the places where "obvious" would be wrong.
 
 **`float` accepts `int`.** PHPStan core semantics, and PHP's own widening; an
 int value satisfies a `float` contract with `Yes`. `to_fact` (`steins-contract`)
-never lowers a `float`-typed field to a value-lane `Fact` for the same reason:
-`Fact::General { base: Float }` does not admit ints, so lowering would reject
-values the contract admits — the field's value-lane slot stays `None`. A
-narrowed shape's dump render (`steins-infer`) still spells such a field from
-its declared arm rather than `mixed` (issue #424): the floor bounds what the
-*value* lane may claim, not what the *declared* type is known to be.
+lowers a `float` declaration to `Fact::General { base: Float }` — what the slot
+*holds* — while acceptance, which admits an int, is answered against the arm
+lane, not the value lane (issue #607). A declared float interval (`FloatIn`)
+seeds the same `float`, and a narrowed shape's dump renders such a field as
+`float` from its declared arm rather than `mixed` (issue #424): the value lane
+may not claim more than the lattice holds, and the declared type is never
+spelled as less than it is.
 
 **Float literal types compare by PHP value equality.** Int `5` satisfies the
 literal type `5.0` (IEEE `==`), deliberately unlike the domain's set equality

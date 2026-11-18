@@ -3621,6 +3621,14 @@ mod float_range_tests {
 
     /// An empty interval is `never`, as `int<5, 1>` is; a bound that is not a
     /// number states nothing checkable, and neither does a wrong arity.
+    /// An int bound beyond 2⁵³ widens to the nearest double, exactly as PHP's
+    /// `(float)` and PHPStan's `resolveFloatRangeBound` cast it.
+    #[test]
+    fn an_int_bound_widens_like_php_does() {
+        assert_eq!(range("float<0, 9007199254740993>").hi(), 9_007_199_254_740_992.0);
+        assert_eq!(range("float<-9223372036854775808, 0>").lo(), -9_223_372_036_854_775_808.0);
+    }
+
     #[test]
     fn degenerate_spellings_floor() {
         assert_eq!(lower_str("float<2, 1>"), Some(ContractTy::Never));
@@ -3701,9 +3709,12 @@ mod float_range_tests {
             normalize::subsumes(&lower_str(a).expect("a"), &lower_str(b).expect("b"))
         };
         assert_eq!(sub("float<0, 10>", "float<1, 2>"), Certainty::Yes);
-        assert_eq!(sub("float<1, 2>", "float<0, 10>"), Certainty::No);
+        // Short of containment is `Maybe`, never `No`: `No` is for disjoint arms
+        // (`extract-from` drops an arm on it), and a partial overlap holds members.
+        assert_eq!(sub("float<1, 2>", "float<0, 10>"), Certainty::Maybe);
+        assert_eq!(sub("float<0, 5>", "float<3, 10>"), Certainty::Maybe);
         assert_eq!(sub("non-negative-float", "positive-float"), Certainty::Yes);
-        assert_eq!(sub("positive-float", "non-negative-float"), Certainty::No);
+        assert_eq!(sub("positive-float", "non-negative-float"), Certainty::Maybe);
         assert_eq!(sub("float", "finite-float"), Certainty::Yes);
         assert_eq!(sub("finite-float", "float"), Certainty::Maybe);
         assert_eq!(sub("int", "float<0, 1>"), Certainty::No);

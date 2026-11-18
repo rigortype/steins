@@ -88,6 +88,10 @@ pub fn spell_arms(arms: &[ContractTy]) -> Option<String> {
             ContractTy::Base(Base::String) => string_keyword = Some("string".to_owned()),
             ContractTy::LitStr(s) => string_lits.push(s),
             ContractTy::IntIn(r) => int_ranges.push(int_range_keyword(*r)),
+            // Spelled as the base until float bounds have a PHP-faithful
+            // renderer: wider than the declaration, never a claim it did not
+            // make — and not the `mixed` a refused arm used to fall to.
+            ContractTy::FloatIn(_) => has_float = true,
             ContractTy::LitInt(i) => int_lits.push(*i),
             ContractTy::LitFloat(f) => float_lits.push(*f),
             ContractTy::Resource { state } => {

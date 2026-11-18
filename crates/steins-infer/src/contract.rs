@@ -1162,9 +1162,9 @@ impl<'a> Cx<'a> {
             PKind::Identifier(name) => qualify(name),
             PKind::Generic { base, args } => {
                 qualify(base);
-                if is_int_range_base(base) {
+                if is_range_base(base) {
                     for arg in args {
-                        if !is_int_range_bound(&arg.ty) {
+                        if !is_range_bound(&arg.ty) {
                             self.qualify_class_names(&mut arg.ty, efile, eoff);
                         }
                     }
@@ -2277,7 +2277,7 @@ fn const_pattern_matches(pattern: &str, name: &str) -> bool {
 /// Whether a generic's base is a range spelling — `int<lo, hi>`
 /// (`lower_generic`'s `"int" | "int-range"` arm) or `float<lo, hi>` — whose
 /// arguments may be the bound words `min`/`max` rather than types.
-fn is_int_range_base(base: &str) -> bool {
+fn is_range_base(base: &str) -> bool {
     matches!(
         base.trim_start_matches('\\').to_ascii_lowercase().as_str(),
         "int" | "int-range" | "float"
@@ -2287,7 +2287,7 @@ fn is_int_range_base(base: &str) -> bool {
 /// Whether a range argument is the bound word `min` or `max` — the spelling
 /// `lower_int_range` reads as a bound, and so the one `qualify_class_names` must
 /// not turn into a class name.
-fn is_int_range_bound(ty: &PType) -> bool {
+fn is_range_bound(ty: &PType) -> bool {
     matches!(&ty.kind, PKind::Identifier(id) if id.eq_ignore_ascii_case("min") || id.eq_ignore_ascii_case("max"))
 }
 

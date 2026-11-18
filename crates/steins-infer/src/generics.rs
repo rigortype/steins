@@ -705,6 +705,7 @@ fn scalar_decidable(ty: &ContractTy) -> bool {
     match ty {
         ContractTy::Base(_)
         | ContractTy::IntIn(_)
+        | ContractTy::FloatIn(_)
         | ContractTy::StrWith(_)
         | ContractTy::LitInt(_)
         | ContractTy::LitFloat(_)

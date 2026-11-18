@@ -260,6 +260,7 @@ fn is_scalar_arm(ty: &ContractTy) -> bool {
         ContractTy::Null
             | ContractTy::Base(_)
             | ContractTy::IntIn(_)
+            | ContractTy::FloatIn(_)
             | ContractTy::StrWith(_)
             | ContractTy::StrOpaque
             | ContractTy::LitInt(_)
