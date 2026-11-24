@@ -678,6 +678,36 @@ fn extract_from_keeps_a_partially_overlapping_float_arm() {
     assert!(findings(g).is_empty(), "the int twin stays silent");
 }
 
+/// `positive-float` and `float<5.0E-324, max>` are one set (PHPStan dumps the first
+/// as the second), so extracting one from the other keeps it. The open-end form
+/// held two values for that set that failed to contain each other; with a `No` for
+/// any non-containment that emptied the type and fired on a legal argument. The
+/// ordinal form makes them one value (pinned in `steins-contract`); this guards
+/// the end-to-end symptom.
+#[test]
+fn an_open_end_equals_its_closed_spelling() {
+    let f = "<?php /** @param extract-from<positive-float, float<5.0E-324, max>> $a */ \
+             function f($a): void {}\nf(1.5);";
+    let hits: Vec<_> = findings(f).into_iter().map(|d| d.id).collect();
+    assert!(hits.is_empty(), "the type is positive-float, not never: {hits:?}");
+}
+
+/// An int fact disjoint from a float range is an exact violation, as against the
+/// int twin; one that fits, or partly fits, is not.
+#[test]
+fn a_disjoint_int_fact_violates_a_float_range() {
+    let src = |range: &str| {
+        format!(
+            "<?php\n/** @param float<0, 1> $u */\nfunction unit($u): void {{}}\n\
+             /** @param {range} $i */\nfunction t(int $i): void {{ unit($i); }}"
+        )
+    };
+    assert_eq!(param_count(&src("int<6, max>")), 1, "no int of int<6, max> is in [0, 1]");
+    assert_eq!(param_count(&src("int<min, -1>")), 1, "no negative int is in [0, 1]");
+    assert_eq!(param_count(&src("int<0, 1>")), 0, "0 and 1 widen into [0, 1]");
+    assert_eq!(param_count(&src("int<0, 5>")), 0, "a partial overlap is not proven");
+}
+
 /// A declared range in a nested position keeps its base in the dump, not `mixed`,
 /// and the same declaration still judges arguments through the nesting.
 #[test]

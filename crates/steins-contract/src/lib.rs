@@ -3697,10 +3697,34 @@ mod float_range_tests {
         assert_eq!(admits_fact(&ty, &ints), Certainty::Yes);
         let wide = Fact::refined(Base::Int, Refinement::Int(IntRange::new(1, 500).unwrap()), false);
         assert_eq!(admits_fact(&ty, &wide), Certainty::Maybe);
+        // No int of a disjoint fact widens into the interval: an exact `No`, as
+        // `int<0, 100>` answers the same fact.
+        let above = Fact::refined(Base::Int, Refinement::Int(IntRange::new(101, i64::MAX).unwrap()), false);
+        assert_eq!(admits_fact(&ty, &above), Certainty::No);
+        assert_eq!(admits_fact(&lower_str("int<0, 100>").expect("lowers"), &above), Certainty::No);
+        let any_int = Fact::General { base: Base::Int, nullable: false };
+        assert_eq!(admits_fact(&ty, &any_int), Certainty::Maybe);
+        assert_eq!(admits_fact(&lower_str("float<min, max>").expect("lowers"), &any_int), Certainty::Yes);
+        assert_eq!(admits_fact(&lower_str("positive-float").expect("lowers"), &any_int), Certainty::Maybe);
         let string = Fact::General { base: Base::String, nullable: false };
         assert_eq!(admits_fact(&ty, &string), Certainty::No);
         // A declared interval seeds the honest `float`, never a narrower claim.
         assert_eq!(to_fact(&ty), Some(float));
+    }
+
+    /// An open end is the closed end at the neighbouring double, so the two
+    /// spellings of one set are one value — PHPStan dumps `positive-float` as
+    /// `float<5.0E-324, max>`, and `extract-from` of one by the other keeps it.
+    #[test]
+    fn an_open_end_and_its_closed_spelling_are_one_range() {
+        assert_eq!(range("float<5.0E-324, max>"), FloatRange::POSITIVE);
+        assert_eq!(range("float<min, -5.0E-324>"), FloatRange::NEGATIVE);
+        assert_eq!(range("float<-1.7976931348623157E+308, 1.7976931348623157E+308>"), FloatRange::FINITE);
+        assert_eq!(range("float<-0.0, 0.0>"), range("float<0, 0>"));
+        assert_eq!(
+            lower_str("extract-from<positive-float, float<5.0E-324, max>>"),
+            Some(ContractTy::FloatIn(FloatRange::POSITIVE)),
+        );
     }
 
     #[test]
@@ -3709,12 +3733,17 @@ mod float_range_tests {
             normalize::subsumes(&lower_str(a).expect("a"), &lower_str(b).expect("b"))
         };
         assert_eq!(sub("float<0, 10>", "float<1, 2>"), Certainty::Yes);
-        // Short of containment is `Maybe`, never `No`: `No` is for disjoint arms
-        // (`extract-from` drops an arm on it), and a partial overlap holds members.
+        // A partial overlap is `Maybe`: `No` is for disjoint arms only
+        // (`extract-from` drops an arm on it), and an overlap holds members.
         assert_eq!(sub("float<1, 2>", "float<0, 10>"), Certainty::Maybe);
         assert_eq!(sub("float<0, 5>", "float<3, 10>"), Certainty::Maybe);
         assert_eq!(sub("non-negative-float", "positive-float"), Certainty::Yes);
         assert_eq!(sub("positive-float", "non-negative-float"), Certainty::Maybe);
+        // Disjoint is an exact `No`, down to the neighbouring double.
+        assert_eq!(sub("float<0, 1>", "float<2, 3>"), Certainty::No);
+        assert_eq!(sub("positive-float", "non-positive-float"), Certainty::No);
+        assert_eq!(sub("negative-float", "float<0, 0>"), Certainty::No);
+        assert_eq!(sub("float<0, 1>", "float<1, 2>"), Certainty::Maybe);
         assert_eq!(sub("float", "finite-float"), Certainty::Yes);
         assert_eq!(sub("finite-float", "float"), Certainty::Maybe);
         assert_eq!(sub("int", "float<0, 1>"), Certainty::No);

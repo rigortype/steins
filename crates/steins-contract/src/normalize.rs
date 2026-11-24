@@ -273,15 +273,20 @@ pub fn subsumes(a: &ContractTy, b: &ContractTy) -> Certainty {
             admits_fact(a, &Fact::refined(Base::String, Refinement::Str(*p), false))
         }
         ContractTy::IntIn(r) => admits_fact(a, &Fact::refined(Base::Int, Refinement::Int(*r), false)),
-        // A float interval holds no lattice fact. Against another interval only
-        // containment is proven (`Yes`); anything short of it is `Maybe`, never
-        // `No`, which this relation reserves for disjoint arms — `extract-from`
-        // drops an arm on `No`, and a partial overlap still holds members. (An
-        // exact disjointness `No` waits on the interval's canonical form.)
+        // A float interval holds no lattice fact. Against another interval the
+        // ordinal form decides both ways: `Yes` on containment, `No` only when
+        // the two share no float — the relation reserves `No` for disjoint arms
+        // (`extract-from` drops an arm on it) — and `Maybe` on a partial overlap.
         // Against anything else it is the whole `float` base that must fit.
         ContractTy::FloatIn(rb) => match a {
             ContractTy::FloatIn(ra) => {
-                if ra.contains_range(*rb) { Yes } else { Maybe }
+                if ra.contains_range(*rb) {
+                    Yes
+                } else if ra.is_disjoint(*rb) {
+                    Certainty::No
+                } else {
+                    Maybe
+                }
             }
             _ => admits_fact(a, &Fact::General { base: Base::Float, nullable: false }),
         },

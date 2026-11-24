@@ -49,7 +49,7 @@ pub use php::{
 };
 pub use php_str::PhpStr;
 pub use preds::StrPreds;
-pub use range::{FloatRange, IntRange};
+pub use range::{FloatRange, IntRange, float_ordinal};
 pub use shape::{
     Cover, CoverFlavor, KeyClass, Presence, SHAPE_WIDTH_LIMIT, ShapeFact, Tail, array_is_list,
     keys_are_a_list,
