@@ -3748,4 +3748,126 @@ mod float_range_tests {
         assert_eq!(sub("finite-float", "float"), Certainty::Maybe);
         assert_eq!(sub("int", "float<0, 1>"), Certainty::No);
     }
+
+    /// PHPStan's `FloatRangeType::describe`: the interval with `min`/`max`, every
+    /// other bound in PHP's float spelling, and a point as its literal.
+    #[test]
+    fn a_range_spells_as_phpstan_describes_it() {
+        use crate::spell::float_range_keyword as kw;
+        assert_eq!(kw(FloatRange::POSITIVE), "float<5.0E-324, max>");
+        assert_eq!(kw(FloatRange::NEGATIVE), "float<min, -5.0E-324>");
+        assert_eq!(kw(FloatRange::NON_NEGATIVE), "float<0.0, max>");
+        assert_eq!(kw(FloatRange::NON_POSITIVE), "float<min, 0.0>");
+        assert_eq!(kw(FloatRange::ALL), "float<min, max>");
+        assert_eq!(
+            kw(FloatRange::FINITE),
+            "float<-1.7976931348623157E+308, 1.7976931348623157E+308>"
+        );
+        assert_eq!(kw(range("float<0, 1.5>")), "float<0.0, 1.5>");
+        assert_eq!(kw(range("float<1e-5, 1e17>")), "float<1.0E-5, 1.0E+17>");
+        assert_eq!(kw(range("float<1.5, 1.5>")), "1.5");
+        assert_eq!(kw(range("float<-0.0, 0>")), "0.0");
+        let arms = [ContractTy::Base(Base::Int), ContractTy::FloatIn(FloatRange::POSITIVE), ContractTy::Null];
+        assert_eq!(spell::spell_arms(&arms).as_deref(), Some("int|float<5.0E-324, max>|null"));
+    }
+
+    /// Every spelling re-lowers to the set it was spelled from: the same range,
+    /// or — for a point — a literal that is mutually subsumed with it.
+    #[test]
+    fn every_range_spelling_round_trips() {
+        let tiny = f64::from_bits(1);
+        let ranges = [
+            FloatRange::POSITIVE,
+            FloatRange::NEGATIVE,
+            FloatRange::NON_NEGATIVE,
+            FloatRange::NON_POSITIVE,
+            FloatRange::FINITE,
+            FloatRange::ALL,
+            FloatRange::new(0.0, 1.5).unwrap(),
+            FloatRange::new(-1e-5, 1e17).unwrap(),
+            FloatRange::new(0.1, 0.30000000000000004).unwrap(),
+            FloatRange::new(tiny, f64::MIN_POSITIVE).unwrap(),
+            FloatRange::new(-f64::MAX, -tiny).unwrap(),
+            FloatRange::point(1.5).unwrap(),
+            FloatRange::point(-0.0).unwrap(),
+            FloatRange::point(f64::MAX).unwrap(),
+        ];
+        for r in ranges {
+            let spelled = spell::float_range_keyword(r);
+            let back = lower_str(&spelled).unwrap_or_else(|| panic!("{spelled} lowers"));
+            let original = ContractTy::FloatIn(r);
+            assert!(
+                normalize::subsumes(&back, &original).is_yes()
+                    && normalize::subsumes(&original, &back).is_yes(),
+                "{r:?} spelled {spelled} came back as {back:?}"
+            );
+            if !r.is_point() {
+                assert_eq!(back, original, "{spelled}");
+            }
+        }
+    }
+
+    /// The float twin of issue #90's interval absorption: one interval where the
+    /// union is one, two arms across a gap, and nothing merged across bases.
+    #[test]
+    fn union_arms_merge_where_the_union_is_one_interval() {
+        let f = |src: &str| lower_str(src).expect("lowers");
+        let deduped = |arms: Vec<ContractTy>| {
+            let mut arms = arms;
+            normalize::dedup_arms(&mut arms);
+            arms
+        };
+        assert_eq!(deduped(vec![f("float<0, 1>"), f("float<1, 2>")]), vec![f("float<0, 2>")]);
+        assert_eq!(deduped(vec![f("float<0, 1>"), f("float<0.5, 2>")]), vec![f("float<0, 2>")]);
+        assert_eq!(deduped(vec![f("positive-float"), f("0.0")]), vec![f("non-negative-float")]);
+        assert_eq!(deduped(vec![f("positive-float"), f("-0.0")]), vec![f("non-negative-float")]);
+        assert_eq!(deduped(vec![f("negative-float"), f("non-negative-float")]), vec![f("float<min, max>")]);
+        // An interior literal is subsumed; a gap is kept.
+        assert_eq!(deduped(vec![f("float<0, 2>"), f("1.0")]), vec![f("float<0, 2>")]);
+        assert_eq!(deduped(vec![f("float<0, 1>"), f("float<2, 3>")]).len(), 2);
+        assert_eq!(deduped(vec![f("1.0"), f("1.5")]).len(), 2);
+        // Ints and floats never merge into each other.
+        assert_eq!(deduped(vec![f("int<0, 1>"), f("float<1, 2>")]).len(), 2);
+        assert_eq!(normalize::merge_float_arms(&f("float<0, 1>"), &f("int<2, 3>")), None);
+        assert_eq!(
+            normalize::merge_float_arms(&f("float<0, 1>"), &ContractTy::LitFloat(f64::NAN)),
+            None
+        );
+    }
+
+    /// The display-safe float normalization: float arms merge and absorb, and
+    /// nothing else moves — `int|float` keeps its `int`.
+    #[test]
+    fn absorb_float_arms_touches_only_the_float_family() {
+        let f = |src: &str| lower_str(src).expect("lowers");
+        let absorbed = |arms: Vec<ContractTy>| {
+            let mut arms = arms;
+            normalize::absorb_float_arms(&mut arms);
+            arms
+        };
+        assert_eq!(absorbed(vec![f("float<0, 1>"), f("float<1, 2>")]), vec![f("float<0, 2>")]);
+        assert_eq!(absorbed(vec![f("float"), f("float<0, 1>")]), vec![f("float")]);
+        assert_eq!(absorbed(vec![f("float<0, 1>"), f("float")]), vec![f("float")]);
+        assert_eq!(absorbed(vec![f("float<0, 1>"), f("0.5")]), vec![f("float<0, 1>")]);
+        assert_eq!(absorbed(vec![f("0.0"), f("positive-float")]), vec![f("non-negative-float")]);
+        assert_eq!(
+            absorbed(vec![f("int"), f("float"), f("null")]),
+            vec![f("int"), f("float"), f("null")]
+        );
+        assert_eq!(absorbed(vec![f("int<0, 1>"), f("int<2, 3>")]).len(), 2);
+        assert_eq!(absorbed(vec![f("float<0, 1>"), f("float<3, 4>")]).len(), 2);
+    }
+
+    /// A float literal covers an interval only when the interval is that point.
+    #[test]
+    fn a_literal_and_its_point_range_are_mutually_subsumed() {
+        let sub = |a: &str, b: &str| {
+            normalize::subsumes(&lower_str(a).expect("a"), &lower_str(b).expect("b"))
+        };
+        assert_eq!(sub("1.5", "float<1.5, 1.5>"), Certainty::Yes);
+        assert_eq!(sub("float<1.5, 1.5>", "1.5"), Certainty::Yes);
+        assert_eq!(sub("0.0", "float<-0.0, 0>"), Certainty::Yes);
+        assert_eq!(sub("1.5", "float<0, 1>"), Certainty::No);
+        assert_eq!(sub("1.5", "float<0, 2>"), Certainty::Maybe);
+    }
 }

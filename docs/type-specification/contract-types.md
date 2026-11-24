@@ -324,7 +324,7 @@ final:
 | --- | --- |
 | `subsumes(a, b)` | pairwise arm subsumption, trinary |
 | `arm_eq(a, b)` | semantic type equality — **defined only** as mutual subsumption (ADR-0030 registry entry 5) |
-| `dedup_arms(arms)` | order-stable dedup + subsumption collapse |
+| `dedup_arms(arms)` | order-stable dedup + subsumption collapse, then interval absorption (`merge_int_arms`, `merge_float_arms`: `positive-float\|0.0` is `float<0.0, max>`) |
 | `summarize_vals(vals)` | proven value set → normal-form arm list |
 | `subtract(arms, subtrahend)` | arm-wise negative narrowing (see [narrowing.md](narrowing.md)) |
 
@@ -341,9 +341,16 @@ keeps position queries reachable).
 PHPDoc type string (`int|numeric-string|null`, `'GET'|'POST'`). It spells the
 literal and range arms a lowered PHPDoc envelope carries value-precisely —
 int-range (`IntIn` → `int<1, 5>`, `positive-int`), int literal (`LitInt` → `5`),
-and float literal (`LitFloat` → `1.5`) — extended for the contract-arm dump
+float range (`FloatIn` → `float<0.0, 1.5>`, `positive-float` →
+`float<5.0E-324, max>`, a point → its literal) and float literal (`LitFloat` →
+`1.5`) — extended for the contract-arm dump
 surface (ADR-0052 §9); the docblock renderer is unchanged, since a summarized
 value set never produces those buckets (its int members collapse to `Base(Int)`).
+Every float, there and in diagnostics, takes PHP's own spelling
+(`steins_domain::php_float_repr`, PHPStan's `ConstantFloatType::describe`):
+`(string) $f` under `precision = -1` with `.0` on an integral finite value, so
+`5.0`, `0.0001`, `1.0E-5`, `10000000000000000.0`, `1.0E+17`,
+`1.7976931348623157E+308`, `INF`, `-0.0`.
 It is the one shared spelling, consumed by both the `annotate`/dump emitters and
 the docblock renderer in `steins-edit` — the latter layering docblock-literal
 armor (`*/` and raw-newline widening) on top before delegating.

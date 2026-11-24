@@ -9,7 +9,9 @@
 //! then delegates to [`spell_arms`]. Byte-identical against `steins-edit`'s
 //! honesty tests and cross-crate parity test.
 
-use steins_domain::{Base, Certainty, IntRange, Key, NextInt, PhpStr, StrPreds, Val, CAP};
+use steins_domain::{
+    php_float_repr, Base, Certainty, FloatRange, IntRange, Key, NextInt, PhpStr, StrPreds, Val, CAP,
+};
 
 use crate::{
     is_array_key_ty, shape_is_list, CallableObl, CField, CKey, ContractTy, MixedCut, ResourceState,
@@ -58,6 +60,7 @@ pub fn spell_arms(arms: &[ContractTy]) -> Option<String> {
     // empty here since summarized ints collapse to `Base(Int)` (ADR-0052 §9).
     let mut int_ranges: Vec<String> = Vec::new();
     let mut int_lits: Vec<i64> = Vec::new();
+    let mut float_ranges: Vec<String> = Vec::new();
     let mut float_lits: Vec<f64> = Vec::new();
     // A summarized set yields the numeric-string class or literal arms, never both.
     let mut string_keyword: Option<String> = None;
@@ -88,10 +91,7 @@ pub fn spell_arms(arms: &[ContractTy]) -> Option<String> {
             ContractTy::Base(Base::String) => string_keyword = Some("string".to_owned()),
             ContractTy::LitStr(s) => string_lits.push(s),
             ContractTy::IntIn(r) => int_ranges.push(int_range_keyword(*r)),
-            // Spelled as the base until float bounds have a PHP-faithful
-            // renderer: wider than the declaration, never a claim it did not
-            // make — and not the `mixed` a refused arm used to fall to.
-            ContractTy::FloatIn(_) => has_float = true,
+            ContractTy::FloatIn(r) => float_ranges.push(float_range_keyword(*r)),
             ContractTy::LitInt(i) => int_lits.push(*i),
             ContractTy::LitFloat(f) => float_lits.push(*f),
             ContractTy::Resource { state } => {
@@ -127,7 +127,8 @@ pub fn spell_arms(arms: &[ContractTy]) -> Option<String> {
     if has_float {
         members.push("float".to_owned());
     }
-    members.extend(float_lits.iter().map(|f| float_literal(*f)));
+    members.extend(float_ranges);
+    members.extend(float_lits.iter().map(|f| php_float_repr(*f)));
     // A summarized set yields the keyword or the literals, never both, and the
     // class arms sit between them: after a constant string, before a keyword
     // (see the mixed-list note above).
@@ -480,7 +481,7 @@ fn is_bare_ident(s: &str) -> bool {
 pub fn spell_val(v: &Val) -> String {
     match v {
         Val::Int(i) => i.to_string(),
-        Val::Float(f) => float_literal(*f),
+        Val::Float(f) => php_float_repr(*f),
         // A byte string has no phpdoc literal spelling; `string` is its honest supertype.
         Val::Str(s) => s.as_str().map_or_else(|| "string".to_owned(), string_literal),
         Val::Bool(true) => "true".to_owned(),
@@ -540,11 +541,29 @@ pub fn int_range_keyword(r: IntRange) -> String {
     )
 }
 
-/// Spell a float literal as PHPStan does: an integral value keeps a visible
-/// fractional part (`5.0`, not `5`); every other value uses its shortest
-/// round-tripping decimal (`3.14`).
-fn float_literal(f: f64) -> String {
-    if f.is_finite() && f.fract() == 0.0 { format!("{f:.1}") } else { f.to_string() }
+/// Spell a float interval as PHPStan's `FloatRangeType::describe` does:
+/// `float<lo, hi>` with `min`/`max` for `-INF`/`INF` and every other bound in
+/// PHP's own float spelling ([`php_float_repr`]), so `positive-float` reads
+/// `float<5.0E-324, max>` — the interval, never the keyword, as for
+/// `int<1, max>` (issue #90). A single point is the float literal it is, as
+/// PHPStan's `fromInterval` collapses it to a constant (`float<1.5, 1.5>` is
+/// `1.5`). Every spelling re-lowers to the same set.
+#[must_use]
+pub fn float_range_keyword(r: FloatRange) -> String {
+    let (lo, hi) = (r.lo(), r.hi());
+    if r.is_point() {
+        return php_float_repr(lo);
+    }
+    let bound = |v: f64| {
+        if v == f64::NEG_INFINITY {
+            "min".to_owned()
+        } else if v == f64::INFINITY {
+            "max".to_owned()
+        } else {
+            php_float_repr(v)
+        }
+    };
+    format!("float<{}, {}>", bound(lo), bound(hi))
 }
 
 /// The tightest refined-string keyword a predicate summary admits: the

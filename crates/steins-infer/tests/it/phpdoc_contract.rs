@@ -708,17 +708,18 @@ fn a_disjoint_int_fact_violates_a_float_range() {
     assert_eq!(param_count(&src("int<0, 5>")), 0, "a partial overlap is not proven");
 }
 
-/// A declared range in a nested position keeps its base in the dump, not `mixed`,
-/// and the same declaration still judges arguments through the nesting.
+/// A declared range in a nested position dumps as PHPStan's interval spelling —
+/// `positive-float` is `float<5.0E-324, max>`, bounds in PHP's own float form —
+/// never as `mixed`.
 #[test]
-fn a_nested_float_range_spells_as_its_base() {
+fn a_nested_float_range_spells_as_the_interval() {
     let src = "<?php\n/**\n * @param list<positive-float> $b\n * @param array{x: float<0, 1>} $c\n */\n\
                function t($b, $c): void { \\PHPStan\\dumpType($b); \\PHPStan\\dumpType($c); }";
     let dumps: Vec<String> =
         findings(src).into_iter().filter(|d| d.id == "debug.type").map(|d| d.message).collect();
     assert_eq!(dumps.len(), 2, "{dumps:?}");
-    assert!(dumps[0].contains("list<float>"), "{}", dumps[0]);
-    assert!(dumps[1].contains("array{x: float}"), "{}", dumps[1]);
+    assert!(dumps[0].contains("list<float<5.0E-324, max>>"), "{}", dumps[0]);
+    assert!(dumps[1].contains("array{x: float<0.0, 1.0>}"), "{}", dumps[1]);
     assert!(!dumps.iter().any(|m| m.contains("mixed")), "{dumps:?}");
 }
 

@@ -44,7 +44,7 @@ pub use certainty::Certainty;
 pub use fact::{ArmKnown, CAP, Fact, Refinement, UnionArm};
 pub use next_int::{NEXT_INT_BOUNDARY, NextInt, append_index};
 pub use php::{
-    php_is_falsy, php_is_numeric, php_str_is_decimal_int, php_str_is_lowercase,
+    php_float_repr, php_is_falsy, php_is_numeric, php_str_is_decimal_int, php_str_is_lowercase,
     php_str_is_uppercase,
 };
 pub use php_str::PhpStr;

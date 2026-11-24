@@ -203,6 +203,19 @@ impl FloatRange {
         Self::new(r.lo() as f64, r.hi() as f64).expect("int bounds are ordered and not NAN")
     }
 
+    /// Whether this holds exactly one float.
+    #[must_use]
+    pub const fn is_point(self) -> bool {
+        self.lo == self.hi
+    }
+
+    /// The ordinal interval, for callers that step by one double — the
+    /// [`float_ordinal`] of each bound.
+    #[must_use]
+    pub const fn ordinals(self) -> (i64, i64) {
+        (self.lo, self.hi)
+    }
+
     /// Whether this is exactly the point `0.0` (which is also `-0.0`).
     #[must_use]
     pub const fn is_zero_point(self) -> bool {
