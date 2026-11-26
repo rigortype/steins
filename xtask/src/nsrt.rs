@@ -803,7 +803,7 @@ fn is_supported_atom(a: &str) -> bool {
     if is_array_accessory_conjunction(a) || is_class_intersection(a) {
         return true;
     }
-    if is_int_range(&low) {
+    if is_int_range(&low) || is_float_range(&low) {
         return true;
     }
     if is_int_literal(a) || is_float_literal(a) {
@@ -945,18 +945,48 @@ fn is_int_literal(a: &str) -> bool {
     !t.is_empty() && t.bytes().all(|c| c.is_ascii_digit())
 }
 
+/// A float literal as PHP spells one (`1.5`, `-0.0`, `1.0E+17`, `5.0E-324`):
+/// digits with one `.`, then an optional signed exponent. Case-blind, since the
+/// comparison runs on lowercased text.
 fn is_float_literal(a: &str) -> bool {
     let t = a.strip_prefix('-').unwrap_or(a);
+    let (mantissa, exp) = match t.find(['e', 'E']) {
+        Some(i) => (&t[..i], Some(&t[i + 1..])),
+        None => (t, None),
+    };
     let mut dot = false;
     let mut digit = false;
-    for c in t.chars() {
+    for c in mantissa.chars() {
         match c {
             '0'..='9' => digit = true,
             '.' if !dot => dot = true,
             _ => return false,
         }
     }
-    dot && digit
+    let exp_ok = exp.is_none_or(|e| {
+        let e = e.strip_prefix(['+', '-']).unwrap_or(e);
+        !e.is_empty() && e.bytes().all(|c| c.is_ascii_digit())
+    });
+    dot && digit && exp_ok
+}
+
+/// `float<lo, hi>` where lo/hi are `min`/`max` or an int or float literal
+/// (whitespace-tolerant) — PHPStan's `FloatRangeType` spelling.
+fn is_float_range(low: &str) -> bool {
+    canonical_float_range(low).is_some()
+}
+
+/// The whitespace-free spelling of a `float<lo, hi>` atom, so the two sides
+/// compare on bounds alone; `None` for anything else.
+fn canonical_float_range(low: &str) -> Option<String> {
+    let inner = low.strip_prefix("float<")?.strip_suffix('>')?;
+    let mut parts = inner.split(',');
+    let (Some(lo), Some(hi), None) = (parts.next(), parts.next(), parts.next()) else {
+        return None;
+    };
+    let (lo, hi) = (lo.trim(), hi.trim());
+    let bound = |b: &str| is_range_bound(b) || is_float_literal(b);
+    (bound(lo) && bound(hi)).then(|| format!("float<{lo},{hi}>"))
 }
 
 fn is_plain_class_name(a: &str) -> bool {
@@ -1026,7 +1056,7 @@ fn normalize_atom(a: &str) -> String {
     }
     // Collapse the three int-range spellings onto one canonical keyword, and vice
     // versa, so `positive-int` == `int<1, max>` etc.
-    match canonical_int_range(&low) {
+    match canonical_int_range(&low).or_else(|| canonical_float_range(&low)) {
         Some(canon) => canon,
         None => low,
     }
@@ -1242,6 +1272,9 @@ fn atom_kind(a: &str) -> &'static str {
     }
     if a.starts_with("int<") {
         return "int-range";
+    }
+    if a.starts_with("float<") {
+        return "float-range";
     }
     // Array vocabulary (S1.5): shapes/generics get their own gap-class label
     // instead of the catch-all `other`, keeping the differ ranking legible.
@@ -1473,6 +1506,22 @@ mod tests {
     fn union_order_and_dedup() {
         assert_eq!(normalize("string|int"), normalize("int|string"));
         assert_eq!(normalize("int|int|string"), normalize("string|int"));
+    }
+
+    /// PHPStan's float-range and exponent spellings are compared, not set aside
+    /// as unsupported vocabulary: whitespace in the interval is not a difference.
+    #[test]
+    fn float_ranges_and_exponent_literals_are_supported() {
+        assert_eq!(unsupported_pattern("float<5.0E-324, max>"), None);
+        assert_eq!(unsupported_pattern("float<min, 0.0>|float<1.5, 2.0>"), None);
+        assert_eq!(unsupported_pattern("1.0E+17"), None);
+        assert_eq!(unsupported_pattern("-9.223372036854776E+18"), None);
+        assert_eq!(normalize("float<0.0, 1.0>"), normalize("float<0.0,1.0>"));
+        assert_ne!(normalize("float<0.0, 1.0>"), normalize("float<0.0, 2.0>"));
+        assert_eq!(classify("float<0.0, 1.0>", "float<0.0, 1.0>").0, Verdict::Match);
+        assert!(!is_float_literal("1.0E"));
+        assert!(!is_float_literal("1.0E+"));
+        assert!(!is_float_range("float<0.0, foo>"));
     }
 
     #[test]

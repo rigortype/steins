@@ -44,6 +44,8 @@ fn assert_fact_of(cty: &steins_contract::ContractTy) -> Option<Fact> {
     match cty {
         C::Base(b) => Some(Fact::General { base: *b, nullable: false }),
         C::IntIn(r) => Some(Fact::refined(Base::Int, Refinement::Int(*r), false)),
+        // The lattice has no float refinement: asserting a range establishes `float`.
+        C::FloatIn(_) => Some(Fact::General { base: Base::Float, nullable: false }),
         C::StrWith(p) => Some(Fact::refined(Base::String, Refinement::Str(*p), false)),
         C::Null => Some(Fact::Singleton(Val::Null)),
         // Literal claims (`@phpstan-assert 'hi' $v`, `42`, `true`) are Singleton

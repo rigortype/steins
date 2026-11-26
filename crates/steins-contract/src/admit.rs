@@ -7,8 +7,8 @@
 use crate::{CField, CKey, ContractTy, MixedCut, ckey_to_domain};
 use steins_domain::Key as VKey;
 use steins_domain::{
-    ArmKnown, Base, Certainty, Fact, KeyClass, Presence, Refinement, ShapeFact, StrPreds, Tail, Val,
-    php_is_falsy,
+    ArmKnown, Base, Certainty, Fact, FloatRange, IntRange, KeyClass, Presence, Refinement,
+    ShapeFact, StrPreds, Tail, Val, php_is_falsy,
 };
 
 /// Is the concrete value admitted by the contract?
@@ -35,6 +35,12 @@ pub fn admits_val(ty: &ContractTy, v: &Val) -> Certainty {
         },
         ContractTy::IntIn(r) => match v {
             Val::Int(i) => Certainty::from_bool(r.contains(*i)),
+            _ => No,
+        },
+        // An int is judged by the float it widens to, as `float` itself admits it.
+        ContractTy::FloatIn(r) => match v {
+            Val::Float(f) => Certainty::from_bool(r.contains(*f)),
+            Val::Int(i) => Certainty::from_bool(r.contains_int(*i)),
             _ => No,
         },
         // Extensional predicates decide outright. `class-string` (#236) only
@@ -174,6 +180,19 @@ pub fn admits_fact(ty: &ContractTy, fact: &Fact) -> Certainty {
     }
 }
 
+/// A float interval against the floats an int fact widens to: `Yes` when all of
+/// them fit, `No` when none can, `Maybe` between. Every int of the fact lands in
+/// `ints` (the widening is monotone), so both verdicts are exact for the fact.
+fn float_vs_ints(r: FloatRange, ints: FloatRange) -> Certainty {
+    if r.contains_range(ints) {
+        Certainty::Yes
+    } else if r.is_disjoint(ints) {
+        Certainty::No
+    } else {
+        Certainty::Maybe
+    }
+}
+
 /// For-all judgment over the (non-null) base part of an abstract fact. Union
 /// folding needs one member covering the whole base, so jointly-covering
 /// unions answer `Maybe`.
@@ -224,6 +243,19 @@ fn base_only(ty: &ContractTy, base: Base, known: ArmKnown) -> Certainty {
                     Maybe
                 }
             }
+            (Base::Int, _) => Maybe,
+            _ => No,
+        },
+        // The lattice holds no float refinement, so a float base is never
+        // proven inside a proper interval. An int base is decided both ways by
+        // the floats it widens to — one interval, since the widening is monotone.
+        ContractTy::FloatIn(r) => match (base, known) {
+            // `float` holds `NAN`, which no interval does.
+            (Base::Float, _) => Maybe,
+            (Base::Int, ArmKnown::Refined(Refinement::Int(have))) => {
+                float_vs_ints(*r, FloatRange::widened(have))
+            }
+            (Base::Int, ArmKnown::Whole) => float_vs_ints(*r, FloatRange::widened(IntRange::FULL)),
             (Base::Int, _) => Maybe,
             _ => No,
         },
@@ -548,6 +580,7 @@ fn admits_shape_fact(ty: &ContractTy, sf: &ShapeFact) -> Certainty {
         ContractTy::Null
         | ContractTy::Base(_)
         | ContractTy::IntIn(_)
+        | ContractTy::FloatIn(_)
         | ContractTy::StrWith(_)
         | ContractTy::StrOpaque
         | ContractTy::LitInt(_)
@@ -763,7 +796,7 @@ fn fact_tail_vs_contract(
 mod shape_fact_tests {
     use super::*;
     use crate::lower_str;
-    use steins_domain::{IntRange, Key};
+    use steins_domain::Key;
 
     fn ty(src: &str) -> ContractTy {
         lower_str(src).unwrap_or_else(|| panic!("`{src}` must lower"))

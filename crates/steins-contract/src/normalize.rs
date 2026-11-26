@@ -14,9 +14,9 @@
 //!
 //! Public surface (ADR-0052 §4, `merge_int_arms` added per the §4 note of
 //! 2026-08-02): [`subsumes`], [`arm_eq`], [`dedup_arms`], [`summarize_vals`]
-//! (value-set → normal-form), [`subtract`], and [`merge_int_arms`] (interval
-//! absorption behind [`dedup_arms`], reusable by a stratified arm carrier such
-//! as steins-infer's contract lane). Deliberately no generic `union(A, B)` or
+//! (value-set → normal-form), [`subtract`], and [`merge_int_arms`] /
+//! [`merge_float_arms`] (interval absorption behind [`dedup_arms`], reusable by
+//! a stratified arm carrier such as steins-infer's contract lane). Deliberately no generic `union(A, B)` or
 //! `remove(T, S)` (joins stay the value domain's job, ADR-0030);
 //! `merge_int_arms` answers only where the union of two arms IS a single arm,
 //! mirrored on subtraction by [`subtract_arm`]'s endpoint clip.
@@ -37,7 +37,7 @@
 
 use crate::{CField, CKey, ContractTy, MixedCut, ResourceState, admits_fact, admits_val};
 use steins_domain::{
-    Base, Certainty, Fact, IntRange, Key, KeyClass, PhpStr, Presence, Refinement, ShapeFact,
+    Base, Certainty, Fact, FloatRange, IntRange, Key, KeyClass, PhpStr, Presence, Refinement, ShapeFact,
     StrPreds, Tail, Val, php_is_falsy,
 };
 
@@ -273,6 +273,31 @@ pub fn subsumes(a: &ContractTy, b: &ContractTy) -> Certainty {
             admits_fact(a, &Fact::refined(Base::String, Refinement::Str(*p), false))
         }
         ContractTy::IntIn(r) => admits_fact(a, &Fact::refined(Base::Int, Refinement::Int(*r), false)),
+        // A float interval holds no lattice fact. Against another interval the
+        // ordinal form decides both ways: `Yes` on containment, `No` only when
+        // the two share no float — the relation reserves `No` for disjoint arms
+        // (`extract-from` drops an arm on it) — and `Maybe` on a partial overlap.
+        // Against anything else it is the whole `float` base that must fit.
+        ContractTy::FloatIn(rb) => match a {
+            // A float literal covers an interval only when the interval is that
+            // one point (zeros are one point on both sides); it shares nothing
+            // with an interval that does not hold it.
+            ContractTy::LitFloat(x) => match FloatRange::point(*x) {
+                Some(p) if p == *rb => Yes,
+                _ if !rb.contains(*x) => Certainty::No,
+                _ => Maybe,
+            },
+            ContractTy::FloatIn(ra) => {
+                if ra.contains_range(*rb) {
+                    Yes
+                } else if ra.is_disjoint(*rb) {
+                    Certainty::No
+                } else {
+                    Maybe
+                }
+            }
+            _ => admits_fact(a, &Fact::General { base: Base::Float, nullable: false }),
+        },
 
         // Object arms: no scalar-fact denotation; reflexive is-a floor.
         ContractTy::Class(name) => subsumes_class(a, name),
@@ -500,6 +525,7 @@ fn subsumes_array(a: &ContractTy, b: &ContractTy) -> Certainty {
         | ContractTy::Null
         | ContractTy::Base(_)
         | ContractTy::IntIn(_)
+        | ContractTy::FloatIn(_)
         | ContractTy::StrWith(_)
         | ContractTy::StrOpaque
         | ContractTy::LitInt(_)
@@ -526,6 +552,7 @@ pub(crate) fn array_incapable(t: &ContractTy) -> bool {
         | ContractTy::Null
         | ContractTy::Base(_)
         | ContractTy::IntIn(_)
+        | ContractTy::FloatIn(_)
         | ContractTy::StrWith(_)
         | ContractTy::StrOpaque
         | ContractTy::LitInt(_)
@@ -1154,7 +1181,9 @@ fn absorb_int_arms(arms: &mut Vec<ContractTy>) {
         let mut merged_at: Option<(usize, usize, ContractTy)> = None;
         'outer: for i in 0..arms.len() {
             for j in (i + 1)..arms.len() {
-                if let Some(m) = merge_int_arms(&arms[i], &arms[j]) {
+                let merged = merge_int_arms(&arms[i], &arms[j])
+                    .or_else(|| merge_float_arms(&arms[i], &arms[j]));
+                if let Some(m) = merged {
                     merged_at = Some((i, j, m));
                     break 'outer;
                 }
@@ -1164,6 +1193,68 @@ fn absorb_int_arms(arms: &mut Vec<ContractTy>) {
         arms[i] = m;
         arms.remove(j);
     }
+}
+
+/// Normalize the **float family** of an arm list in place, and nothing else:
+/// a float literal or interval inside another float interval, or under a bare
+/// `float`, is dropped, and intervals that touch merge ([`merge_float_arms`]).
+/// Earlier arms keep their slots. Every other arm is left exactly as it is —
+/// this is the display-safe subset of [`dedup_arms`], which also folds `int`
+/// into `float` (a `float` contract admits ints) where a printed type must not.
+pub fn absorb_float_arms(arms: &mut Vec<ContractTy>) {
+    let float_like = |t: &ContractTy| matches!(t, ContractTy::FloatIn(_) | ContractTy::LitFloat(_));
+    let covers = |k: &ContractTy, t: &ContractTy| match k {
+        ContractTy::Base(Base::Float) => true,
+        ContractTy::FloatIn(_) => subsumes(k, t).is_yes(),
+        _ => false,
+    };
+    let mut kept: Vec<ContractTy> = Vec::with_capacity(arms.len());
+    for arm in arms.drain(..) {
+        if float_like(&arm) && kept.iter().any(|k| covers(k, &arm)) {
+            continue;
+        }
+        if matches!(arm, ContractTy::Base(Base::Float) | ContractTy::FloatIn(_)) {
+            kept.retain(|k| !(float_like(k) && covers(&arm, k)));
+        }
+        kept.push(arm);
+    }
+    loop {
+        let mut merged_at: Option<(usize, usize, ContractTy)> = None;
+        'outer: for i in 0..kept.len() {
+            for j in (i + 1)..kept.len() {
+                if let Some(m) = merge_float_arms(&kept[i], &kept[j]) {
+                    merged_at = Some((i, j, m));
+                    break 'outer;
+                }
+            }
+        }
+        let Some((i, j, m)) = merged_at else { break };
+        kept[i] = m;
+        kept.remove(j);
+    }
+    *arms = kept;
+}
+
+/// [`merge_int_arms`]' float twin: when the union of two float-flavored arms IS
+/// one interval, that interval; `None` otherwise. On ordinals the shapes are
+/// the int ones — an interval and a literal at its neighbouring double, and two
+/// intervals that overlap or touch — so `float<0, 1>|float<1, 2>` is
+/// `float<0, 2>` and `positive-float|0.0` is `float<0, max>`
+/// (`non-negative-float`). Two literals are never merged: the range of two
+/// neighbouring doubles is not an arm anyone wrote. A gap is never bridged, and
+/// a `NAN` literal has no place in the order to merge at.
+#[must_use]
+pub fn merge_float_arms(a: &ContractTy, b: &ContractTy) -> Option<ContractTy> {
+    let as_range = |t: &ContractTy| match t {
+        ContractTy::FloatIn(r) => Some(*r),
+        ContractTy::LitFloat(x) => FloatRange::point(*x),
+        _ => None,
+    };
+    if !matches!(a, ContractTy::FloatIn(_)) && !matches!(b, ContractTy::FloatIn(_)) {
+        return None;
+    }
+    let (x, y) = (as_range(a)?, as_range(b)?);
+    x.touches(y).then(|| ContractTy::FloatIn(x.hull(y)))
 }
 
 /// The one **denotation-preserving** int-arm merge (issue #90): when the union
@@ -1482,6 +1573,8 @@ fn falsy_covers(arm: &ContractTy) -> Certainty {
         // here, because the falsy set removes an interior point of every
         // interval that straddles zero and no arm can spell that gap.
         ContractTy::IntIn(r) => r.lo() == 0 && r.hi() == 0,
+        // The same point at zero, as a float interval (`float<0, 0>`).
+        ContractTy::FloatIn(r) => r.is_zero_point(),
         _ => false,
     };
     if falsy { Yes } else { No }
@@ -1532,6 +1625,7 @@ fn enum_case_covers(
         | ContractTy::Null
         | ContractTy::Base(_)
         | ContractTy::IntIn(_)
+        | ContractTy::FloatIn(_)
         | ContractTy::StrWith(_)
         | ContractTy::StrOpaque
         | ContractTy::LitInt(_)
@@ -1661,6 +1755,20 @@ mod tests {
     }
 
     // ---- subsumes -----------------------------------------------------------
+
+    /// The falsy cut covers a float interval only when it is the point `0.0`
+    /// (`float<0, 0>`), as for `int<0, 0>`: any wider interval admits a truthy
+    /// float and a half-open one at zero (`positive-float`) admits nothing falsy.
+    #[test]
+    fn the_falsy_cut_covers_only_the_float_zero_point() {
+        use steins_domain::FloatRange;
+        let arm = |r: FloatRange| falsy_covers(&ContractTy::FloatIn(r));
+        assert_eq!(arm(FloatRange::new(0.0, 0.0).unwrap()), Certainty::Yes);
+        assert_eq!(arm(FloatRange::new(-0.0, 0.0).unwrap()), Certainty::Yes);
+        assert_eq!(arm(FloatRange::new(0.0, 1.0).unwrap()), Certainty::No);
+        assert_eq!(arm(FloatRange::NON_NEGATIVE), Certainty::No);
+        assert_eq!(arm(FloatRange::POSITIVE), Certainty::No);
+    }
 
     #[test]
     fn base_subsumes_its_literals_and_refinements() {

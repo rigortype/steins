@@ -604,6 +604,139 @@ fn int_range_keyword_is_the_int_range() {
     assert_eq!(param_count(&format!("{g}g(1);")), 1, "int<min, 0> still rejects 1");
 }
 
+/// PHPStan's float ranges: `float<lo, hi>` with int or float literal bounds and
+/// `min`/`max`, plus the five named spellings. Bounds are inclusive, `positive-float`
+/// and `negative-float` are strict, and an int argument is judged by the float it
+/// widens to.
+#[test]
+fn float_range_bounds_are_inclusive_and_ints_widen() {
+    let f = "<?php /** @param float<0, 1.5> $value */ function f($value): void {}\n";
+    assert_eq!(param_count(&format!("{f}f(0.5);")), 0, "0.5 is inside float<0, 1.5>");
+    assert_eq!(param_count(&format!("{f}f(0.0);")), 0, "the lower bound is inclusive");
+    assert_eq!(param_count(&format!("{f}f(1.5);")), 0, "the upper bound is inclusive");
+    assert_eq!(param_count(&format!("{f}f(1);")), 0, "the int 1 widens to 1.0");
+    assert_eq!(param_count(&format!("{f}f(2.5);")), 1, "2.5 is above the bounds");
+    assert_eq!(param_count(&format!("{f}f(-1.0);")), 1, "-1.0 is below the bounds");
+    assert_eq!(param_count(&format!("{f}f(2);")), 1, "the int 2 widens to 2.0, above the bounds");
+    assert_eq!(param_count(&format!("{f}f('0.5');")), 1, "a string is no float");
+    let g = "<?php /** @param float<min, 100.0> $value */ function g($value): void {}\n";
+    assert_eq!(param_count(&format!("{g}g(-1.0e300);")), 0, "min is open below");
+    assert_eq!(param_count(&format!("{g}g(100.5);")), 1, "100.5 is above 100.0");
+    let h = "<?php /** @param float<0.5, max> $value */ function h($value): void {}\n";
+    assert_eq!(param_count(&format!("{h}h(1.0e300);")), 0, "max is open above");
+    assert_eq!(param_count(&format!("{h}h(0.25);")), 1, "0.25 is below 0.5");
+}
+
+/// The named float refinements, each against the one value on its edge.
+#[test]
+fn named_float_refinements_decide_their_edge() {
+    let cases: [(&str, &str, usize); 10] = [
+        ("positive-float", "0.0", 1),
+        ("positive-float", "0.001", 0),
+        ("negative-float", "-0.0", 1),
+        ("negative-float", "-0.001", 0),
+        ("non-negative-float", "0.0", 0),
+        ("non-negative-float", "-0.001", 1),
+        ("non-positive-float", "0.0", 0),
+        ("non-positive-float", "0.001", 1),
+        ("finite-float", "1.0e300", 0),
+        ("finite-float", "-1.5", 0),
+    ];
+    for (ty, arg, want) in cases {
+        let src = format!(
+            "<?php /** @param {ty} $value */ function f($value): void {{}}\nf({arg});"
+        );
+        assert_eq!(param_count(&src), want, "{ty} against {arg}");
+    }
+}
+
+/// A float range is a type like any other: it nests in a union and an array, and
+/// a bound word is not read as a class (`min`/`max` stay out of the class lane).
+#[test]
+fn float_range_nests() {
+    let f = "<?php /** @param float<0, 1>|null $value */ function f($value): void {}\n";
+    assert_eq!(param_count(&format!("{f}f(null);")), 0);
+    assert_eq!(param_count(&format!("{f}f(0.5);")), 0);
+    assert_eq!(param_count(&format!("{f}f(1.5);")), 1);
+    let g = "<?php /** @param list<float<min, 0>> $value */ function g($value): void {}\n";
+    assert_eq!(param_count(&format!("{g}g([-1.5, -2.5]);")), 0);
+    assert_eq!(param_count(&format!("{g}g([-1.5, 2.5]);")), 1);
+}
+
+/// A partially overlapping float arm is kept, not proven absent: `subsumes` answers
+/// `No` only for a disjoint arm, and `extract-from` drops an arm on `No`. The int
+/// twin keeps `int<0, 10>` and so did a wrong `No` here, which emptied the type
+/// and fired `phpdoc.never-param-reachable` on a legal argument.
+#[test]
+fn extract_from_keeps_a_partially_overlapping_float_arm() {
+    let f = "<?php /** @param extract-from<float<0, 10>, float<1, 2>> $a */ \
+             function f($a): void {}\nf(5.0);";
+    let hits: Vec<_> = findings(f).into_iter().map(|d| d.id).collect();
+    assert!(hits.is_empty(), "float<0, 10> is not empty, and 5.0 is in it: {hits:?}");
+    let g = "<?php /** @param extract-from<int<0, 10>, int<1, 2>> $a */ \
+             function g($a): void {}\ng(5);";
+    assert!(findings(g).is_empty(), "the int twin stays silent");
+}
+
+/// `positive-float` and `float<5.0E-324, max>` are one set (PHPStan dumps the first
+/// as the second), so extracting one from the other keeps it. The open-end form
+/// held two values for that set that failed to contain each other; with a `No` for
+/// any non-containment that emptied the type and fired on a legal argument. The
+/// ordinal form makes them one value (pinned in `steins-contract`); this guards
+/// the end-to-end symptom.
+#[test]
+fn an_open_end_equals_its_closed_spelling() {
+    let f = "<?php /** @param extract-from<positive-float, float<5.0E-324, max>> $a */ \
+             function f($a): void {}\nf(1.5);";
+    let hits: Vec<_> = findings(f).into_iter().map(|d| d.id).collect();
+    assert!(hits.is_empty(), "the type is positive-float, not never: {hits:?}");
+}
+
+/// An int fact disjoint from a float range is an exact violation, as against the
+/// int twin; one that fits, or partly fits, is not.
+#[test]
+fn a_disjoint_int_fact_violates_a_float_range() {
+    let src = |range: &str| {
+        format!(
+            "<?php\n/** @param float<0, 1> $u */\nfunction unit($u): void {{}}\n\
+             /** @param {range} $i */\nfunction t(int $i): void {{ unit($i); }}"
+        )
+    };
+    assert_eq!(param_count(&src("int<6, max>")), 1, "no int of int<6, max> is in [0, 1]");
+    assert_eq!(param_count(&src("int<min, -1>")), 1, "no negative int is in [0, 1]");
+    assert_eq!(param_count(&src("int<0, 1>")), 0, "0 and 1 widen into [0, 1]");
+    assert_eq!(param_count(&src("int<0, 5>")), 0, "a partial overlap is not proven");
+}
+
+/// A declared range in a nested position dumps as PHPStan's interval spelling —
+/// `positive-float` is `float<5.0E-324, max>`, bounds in PHP's own float form —
+/// never as `mixed`.
+#[test]
+fn a_nested_float_range_spells_as_the_interval() {
+    let src = "<?php\n/**\n * @param list<positive-float> $b\n * @param array{x: float<0, 1>} $c\n */\n\
+               function t($b, $c): void { \\PHPStan\\dumpType($b); \\PHPStan\\dumpType($c); }";
+    let dumps: Vec<String> =
+        findings(src).into_iter().filter(|d| d.id == "debug.type").map(|d| d.message).collect();
+    assert_eq!(dumps.len(), 2, "{dumps:?}");
+    assert!(dumps[0].contains("list<float<5.0E-324, max>>"), "{}", dumps[0]);
+    assert!(dumps[1].contains("array{x: float<0.0, 1.0>}"), "{}", dumps[1]);
+    assert!(!dumps.iter().any(|m| m.contains("mixed")), "{dumps:?}");
+}
+
+/// A `@return`/`@phpstan-assert` range establishes `float`, as `float` does:
+/// the lattice has no float refinement, so the honest seed is the base, and the
+/// finding for the claim itself is unchanged.
+#[test]
+fn an_asserted_or_returned_float_range_establishes_float() {
+    let src = "<?php\n/** @return float<0, 1> */\nfunction r() { return mt_rand() / mt_getrandmax(); }\n\
+               /** @phpstan-assert positive-float $x */\nfunction a($x): void {}\n\
+               function t($y): void { a($y); \\PHPStan\\dumpType($y); \\PHPStan\\dumpType(r()); }";
+    let dumps: Vec<String> =
+        findings(src).into_iter().filter(|d| d.id == "debug.type").map(|d| d.message).collect();
+    assert_eq!(dumps.len(), 2, "{dumps:?}");
+    assert!(dumps.iter().all(|m| m.contains("float") && !m.contains("unknown")), "{dumps:?}");
+}
+
 /// `phpdoc_advanced_associative_array`: Phan treats `associative-array<K, V>` as
 /// an array that is specifically not a list, so a plain list argument is
 /// rejected even though its element types match (census bucket ix, ADR-0062's

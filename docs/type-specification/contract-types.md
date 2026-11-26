@@ -33,6 +33,31 @@ rules instead of a keyword zoo:
 
 - `scalar` → the union of the four bases.
 - `positive-int`, `negative-int`, `non-negative-int`, `int<lo, hi>` → `IntIn`.
+- `float<lo, hi>`, `positive-float`, `negative-float`, `non-negative-float`,
+  `non-positive-float`, `finite-float` → `FloatIn` (a `FloatRange`, PHPStan's
+  `FloatRangeType`). `float<lo, hi>` takes int or float literal bounds or
+  `min`/`max` (`-INF`/`INF`), both inclusive; `lo > hi` is `never`. An int bound
+  widens to the nearest double, as PHP's `(float)` and PHPStan's
+  `resolveFloatRangeBound` do (`float<0, 9007199254740993>` is
+  `float<0, 9007199254740992>`). **`NAN` is in no range**, `float<min, max>`
+  included (PHPStan: "float without NAN"). An int is judged by the float it
+  widens to, as `float` itself admits it.
+
+  A `FloatRange` is an inclusive interval of **ordinals** — each non-`NAN`
+  double's position in PHP's comparison order, both zeros at one point
+  (PHPStan's `toOrdinal`). An open end is therefore the closed end at the
+  neighbouring double, so every set has one value: `positive-float` *is*
+  `float<5.0E-324, max>`, `negative-float` is `float<min, -5.0E-324>`, and
+  `finite-float` is `[-PHP_FLOAT_MAX, PHP_FLOAT_MAX]`. Containment, disjointness,
+  hull and intersection are integer-interval operations.
+
+  The value lattice carries no float refinement, so a declared range seeds a
+  plain `float` fact. Against a proven value it decides exactly. Against an int
+  fact it decides both ways, by the one interval the fact's ints widen to (the
+  widening is monotone): `int<6, max>` violates `float<0, 1>`. Against a float
+  fact it is `Maybe` — `float` holds `NAN`. `subsumes` between two intervals is
+  `Yes` on containment, `No` when they share no float, and `Maybe` on a partial
+  overlap.
 - The **refined-string grid** (issue #240) → `StrWith`: a core rung ∈ {—,
   `non-empty-`, `non-falsy-`, `numeric-`, `non-falsy-numeric-`} followed by a
   casing rung ∈ {—, `lowercase-`, `uppercase-`, `uncased-`}, suffixed `-string`.
@@ -216,12 +241,13 @@ These are the places where "obvious" would be wrong.
 
 **`float` accepts `int`.** PHPStan core semantics, and PHP's own widening; an
 int value satisfies a `float` contract with `Yes`. `to_fact` (`steins-contract`)
-never lowers a `float`-typed field to a value-lane `Fact` for the same reason:
-`Fact::General { base: Float }` does not admit ints, so lowering would reject
-values the contract admits — the field's value-lane slot stays `None`. A
-narrowed shape's dump render (`steins-infer`) still spells such a field from
-its declared arm rather than `mixed` (issue #424): the floor bounds what the
-*value* lane may claim, not what the *declared* type is known to be.
+lowers a `float` declaration to `Fact::General { base: Float }` — what the slot
+*holds* — while acceptance, which admits an int, is answered against the arm
+lane, not the value lane (issue #607). A declared float interval (`FloatIn`)
+seeds the same `float`, and a narrowed shape's dump renders such a field as
+`float` from its declared arm rather than `mixed` (issue #424): the value lane
+may not claim more than the lattice holds, and the declared type is never
+spelled as less than it is.
 
 **Float literal types compare by PHP value equality.** Int `5` satisfies the
 literal type `5.0` (IEEE `==`), deliberately unlike the domain's set equality
@@ -298,7 +324,7 @@ final:
 | --- | --- |
 | `subsumes(a, b)` | pairwise arm subsumption, trinary |
 | `arm_eq(a, b)` | semantic type equality — **defined only** as mutual subsumption (ADR-0030 registry entry 5) |
-| `dedup_arms(arms)` | order-stable dedup + subsumption collapse |
+| `dedup_arms(arms)` | order-stable dedup + subsumption collapse, then interval absorption (`merge_int_arms`, `merge_float_arms`: `positive-float\|0.0` is `float<0.0, max>`) |
 | `summarize_vals(vals)` | proven value set → normal-form arm list |
 | `subtract(arms, subtrahend)` | arm-wise negative narrowing (see [narrowing.md](narrowing.md)) |
 
@@ -315,9 +341,16 @@ keeps position queries reachable).
 PHPDoc type string (`int|numeric-string|null`, `'GET'|'POST'`). It spells the
 literal and range arms a lowered PHPDoc envelope carries value-precisely —
 int-range (`IntIn` → `int<1, 5>`, `positive-int`), int literal (`LitInt` → `5`),
-and float literal (`LitFloat` → `1.5`) — extended for the contract-arm dump
+float range (`FloatIn` → `float<0.0, 1.5>`, `positive-float` →
+`float<5.0E-324, max>`, a point → its literal) and float literal (`LitFloat` →
+`1.5`) — extended for the contract-arm dump
 surface (ADR-0052 §9); the docblock renderer is unchanged, since a summarized
 value set never produces those buckets (its int members collapse to `Base(Int)`).
+Every float, there and in diagnostics, takes PHP's own spelling
+(`steins_domain::php_float_repr`, PHPStan's `ConstantFloatType::describe`):
+`(string) $f` under `precision = -1` with `.0` on an integral finite value, so
+`5.0`, `0.0001`, `1.0E-5`, `10000000000000000.0`, `1.0E+17`,
+`1.7976931348623157E+308`, `INF`, `-0.0`.
 It is the one shared spelling, consumed by both the `annotate`/dump emitters and
 the docblock renderer in `steins-edit` — the latter layering docblock-literal
 armor (`*/` and raw-newline widening) on top before delegating.

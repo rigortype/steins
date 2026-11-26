@@ -102,7 +102,7 @@ fn arm_rt_kinds(arm: &ContractTy) -> Option<&'static [RtKind]> {
     Some(match arm {
         C::Null => &[Null],
         C::Base(Base::Int) | C::IntIn(_) | C::LitInt(_) => &[Int],
-        C::Base(Base::Float) | C::LitFloat(_) => &[Float],
+        C::Base(Base::Float) | C::FloatIn(_) | C::LitFloat(_) => &[Float],
         // `class-string`/`literal-string`/`callable-string` are strings at
         // runtime — their non-extensionality (ADR-0038) is about *which*
         // strings, never about being one.

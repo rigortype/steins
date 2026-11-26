@@ -398,7 +398,7 @@ fn render_finite_precise(members: &[Val]) -> Option<String> {
         _ => None,
     }));
     parts.extend(vals.iter().filter_map(|v| match v {
-        Val::Float(f) => Some(render_dump_float(*f)),
+        Val::Float(f) => Some(steins_domain::php_float_repr(*f)),
         _ => None,
     }));
     parts.extend(vals.iter().filter_map(|v| match v {
@@ -426,24 +426,6 @@ fn render_finite_precise(members: &[Val]) -> Option<String> {
         _ => None,
     }));
     (!parts.is_empty()).then(|| parts.join("|"))
-}
-
-/// Render a float constant as PHPStan does: an integral value keeps a visible
-/// fractional part (`123.0`, not `123`); every other value uses its shortest
-/// round-tripping decimal (`3.14`, `1.5`).
-fn render_dump_float(f: f64) -> String {
-    // A float whose decimal spelling runs long takes PHP's exponent form instead.
-    // Rust's `Display` never uses an exponent, so `PHP_FLOAT_MAX` (ADR-0094 §3.1, a
-    // value the analyzer now carries) spells as 309 digits and one diagnostic fills
-    // a terminal. The rule is on the rendered LENGTH and not on the magnitude, so
-    // every spelling short enough to read — the int-overflow promotions at 1e19 and
-    // 1e20 among them — is left exactly as it was.
-    //
-    // The same rule `ArgValue::render` applies, so the two surfaces cannot
-    // disagree about one value.
-    let decimal =
-        if f.is_finite() && f.fract() == 0.0 { format!("{f:.1}") } else { f.to_string() };
-    if f.is_finite() && decimal.len() > 24 { format!("{f:E}") } else { decimal }
 }
 
 /// Append `|null` when the fact admits null (the honest nullable spelling).
@@ -536,10 +518,15 @@ fn int_range_keyword(r: IntRange) -> String {
 /// name first (issue #429): the expanded case set and the declaration denote the
 /// same thing, and a reader who narrowed nothing must be shown what they wrote.
 pub(crate) fn render_contract_arms(cx: &Cx, arms: &[ContractArm]) -> Option<String> {
-    let tys: Vec<ContractTy> = collapse_whole_enums(cx, arms.iter().map(|a| a.ty.clone()))
+    let mut tys: Vec<ContractTy> = collapse_whole_enums(cx, arms.iter().map(|a| a.ty.clone()))
         .into_iter()
         .map(|ty| source_cased(cx, ty))
         .collect();
+    // The float arms as PHPStan's `TypeCombinator` prints them: `float<0, 1>|
+    // float<1, 2>` is `float<0.0, 2.0>`, `float|float<0, 1>` is `float`. Only
+    // the float family: the general `dedup_arms` would fold `int|float` to
+    // `float`, since a `float` *contract* admits ints, which no dump may print.
+    steins_contract::normalize::absorb_float_arms(&mut tys);
     steins_contract::spell::spell_arms(&tys)
 }
 

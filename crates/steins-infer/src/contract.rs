@@ -1162,9 +1162,9 @@ impl<'a> Cx<'a> {
             PKind::Identifier(name) => qualify(name),
             PKind::Generic { base, args } => {
                 qualify(base);
-                if is_int_range_base(base) {
+                if is_range_base(base) {
                     for arg in args {
-                        if !is_int_range_bound(&arg.ty) {
+                        if !is_range_bound(&arg.ty) {
                             self.qualify_class_names(&mut arg.ty, efile, eoff);
                         }
                     }
@@ -2274,17 +2274,20 @@ fn const_pattern_matches(pattern: &str, name: &str) -> bool {
     rest.len() >= last.len() && rest.ends_with(last)
 }
 
-/// Whether a generic's base is the `int<lo, hi>` range spelling
-/// (`lower_generic`'s `"int" | "int-range"` arm), whose arguments may be the
-/// bound words `min`/`max` rather than types.
-fn is_int_range_base(base: &str) -> bool {
-    matches!(base.trim_start_matches('\\').to_ascii_lowercase().as_str(), "int" | "int-range")
+/// Whether a generic's base is a range spelling — `int<lo, hi>`
+/// (`lower_generic`'s `"int" | "int-range"` arm) or `float<lo, hi>` — whose
+/// arguments may be the bound words `min`/`max` rather than types.
+fn is_range_base(base: &str) -> bool {
+    matches!(
+        base.trim_start_matches('\\').to_ascii_lowercase().as_str(),
+        "int" | "int-range" | "float"
+    )
 }
 
 /// Whether a range argument is the bound word `min` or `max` — the spelling
 /// `lower_int_range` reads as a bound, and so the one `qualify_class_names` must
 /// not turn into a class name.
-fn is_int_range_bound(ty: &PType) -> bool {
+fn is_range_bound(ty: &PType) -> bool {
     matches!(&ty.kind, PKind::Identifier(id) if id.eq_ignore_ascii_case("min") || id.eq_ignore_ascii_case("max"))
 }
 
@@ -2345,9 +2348,9 @@ fn accepts_generic(
             check_arraylike(cx, cfile, coff, entries, key_ty, val_ty, require_list, non_empty)
         }
         // `int<lo, hi>` and Phan's `int-range<lo, hi>` — the same bounded range
-        // under two base names. The one generic table lowers it and the shared
+        // under two base names — and PHPStan's `float<lo, hi>`. The one generic table lowers it and the shared
         // relation judges it, exactly as the identifier path does (ADR-0062 §5).
-        "int" | "int-range" if args.len() == 2 => match cval_as_val(v) {
+        "int" | "int-range" | "float" if args.len() == 2 => match cval_as_val(v) {
             Some(val) => {
                 steins_contract::admits_val(&steins_contract::lower_generic(base, args), &val)
             }

@@ -122,6 +122,8 @@ fn union_envelope(members: &[ContractTy]) -> Option<Fact> {
             ContractTy::Null => Fact::Singleton(Val::Null),
             ContractTy::Base(b) => Fact::General { base: *b, nullable: false },
             ContractTy::IntIn(r) => Fact::refined(Base::Int, Refinement::Int(*r), false),
+            // No float refinement in the lattice: the honest member is `float`.
+            ContractTy::FloatIn(_) => Fact::General { base: Base::Float, nullable: false },
             ContractTy::StrWith(p) => Fact::refined(Base::String, Refinement::Str(*p), false),
             // Anything else — a class, a shape, a callable, a nested union —
             // is not a scalar arm, so the union has no fact form.
@@ -144,6 +146,7 @@ fn contractty_to_fact(ty: &ContractTy) -> Option<Fact> {
     match ty {
         ContractTy::Base(b) => Some(Fact::General { base: *b, nullable: false }),
         ContractTy::IntIn(r) => Some(Fact::refined(Base::Int, Refinement::Int(*r), false)),
+        ContractTy::FloatIn(_) => Some(Fact::General { base: Base::Float, nullable: false }),
         ContractTy::StrWith(p) => Some(Fact::refined(Base::String, Refinement::Str(*p), false)),
         // An all-`StrWith` intersection is one predicate set (issue #240), folded
         // by `steins_contract::inter_str_preds` — the same fold

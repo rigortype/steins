@@ -331,6 +331,7 @@ fn classify_null_member(ty: &ContractTy, shape: &mut NullShape) -> bool {
         ContractTy::Base(_)
         | ContractTy::LitBool(_)
         | ContractTy::IntIn(_)
+        | ContractTy::FloatIn(_)
         | ContractTy::StrWith(_)
         | ContractTy::LitInt(_)
         | ContractTy::LitFloat(_)

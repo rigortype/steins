@@ -30,14 +30,14 @@ fn dumped(expr: &str) -> String {
 #[test]
 fn a_literal_above_int_max_promotes_to_float() {
     // Was `-9223372036854775808` (the silent `u64 as i64` wrap).
-    assert_eq!(dumped("9223372036854775808"), "9223372036854775808.0");
+    assert_eq!(dumped("9223372036854775808"), "9.223372036854776E+18");
 }
 
 #[test]
 fn the_unary_minus_spelling_promotes_too() {
     // `-9223372036854775808` is unary minus over an already-overflowed literal, so
     // it is a float in PHP too.
-    assert_eq!(dumped("-9223372036854775808"), "-9223372036854775808.0");
+    assert_eq!(dumped("-9223372036854775808"), "-9.223372036854776E+18");
     // `PHP_INT_MIN` has no integer-literal spelling; the nearest int literal is
     // `-(PHP_INT_MAX)`, which stays an int.
     assert_eq!(dumped("-9223372036854775807"), "-9223372036854775807");
@@ -47,7 +47,7 @@ fn the_unary_minus_spelling_promotes_too() {
 fn the_boundary_is_checked_on_both_sides() {
     assert_eq!(dumped("9223372036854775806"), "9223372036854775806");
     assert_eq!(dumped("9223372036854775807"), "9223372036854775807");
-    assert_eq!(dumped("9223372036854775808"), "9223372036854775808.0");
+    assert_eq!(dumped("9223372036854775808"), "9.223372036854776E+18");
 }
 
 // (ii) Every base follows the same rule.
@@ -65,18 +65,18 @@ fn ordinary_literals_are_unaffected_in_every_base() {
 
 #[test]
 fn overflow_promotes_in_every_base() {
-    assert_eq!(dumped("0x8000000000000000"), "9223372036854775808.0");
-    assert_eq!(dumped("0b1000000000000000000000000000000000000000000000000000000000000000"), "9223372036854775808.0");
-    assert_eq!(dumped("01000000000000000000000"), "9223372036854775808.0");
-    assert_eq!(dumped("0o1000000000000000000000"), "9223372036854775808.0");
-    assert_eq!(dumped("9_223_372_036_854_775_808"), "9223372036854775808.0");
+    assert_eq!(dumped("0x8000000000000000"), "9.223372036854776E+18");
+    assert_eq!(dumped("0b1000000000000000000000000000000000000000000000000000000000000000"), "9.223372036854776E+18");
+    assert_eq!(dumped("01000000000000000000000"), "9.223372036854776E+18");
+    assert_eq!(dumped("0o1000000000000000000000"), "9.223372036854776E+18");
+    assert_eq!(dumped("9_223_372_036_854_775_808"), "9.223372036854776E+18");
 }
 
 #[test]
 fn beyond_u64_decimal_still_converts_other_bases_decline() {
     // A decimal digit string rounds to the nearest double identically in Rust and
     // PHP, so this is exact, not approximate.
-    assert_eq!(dumped("99999999999999999999"), "100000000000000000000.0");
+    assert_eq!(dumped("99999999999999999999"), "1.0E+20");
     // A >64-bit hex literal would need big-integer arithmetic to convert, so it
     // declines rather than guessing — silence, not the parser's saturated
     // `u64::MAX`.
@@ -155,20 +155,9 @@ fn oracle_agrees_on_every_spelling() {
     for (spelling, expected) in SPELLINGS.iter().zip(engine) {
         let ours = dumped(spelling);
         assert_ne!(ours, "unknown", "spelling `{spelling}` failed to resolve");
-        // Compare numerically: both sides agree on the value, and only the rendering
-        // register differs (`1.0E+20` vs `100000000000000000000.0`). An int/float
-        // MISMATCH still fails, because a float rendering always carries the `.0`.
-        let ours_is_float = ours.contains('.');
-        let engine_is_float = expected.contains('.') || expected.contains('E');
-        assert_eq!(
-            ours_is_float, engine_is_float,
-            "spelling `{spelling}`: int/float disagreement — engine {expected:?}, we said {ours:?}"
-        );
-        let ours_n: f64 = ours.parse().expect("our value parses");
-        let engine_n: f64 = expected.parse().expect("engine value parses");
-        assert_eq!(
-            ours_n, engine_n,
-            "spelling `{spelling}`: engine said {expected:?}, we said {ours:?}"
-        );
+        // The dump spells a float as PHP does (`php_float_repr`), so the two sides
+        // agree on the exact text, not only on the value: `var_export` and the
+        // dump share PHP's `1.0E+20` / `9.223372036854776E+18` register.
+        assert_eq!(ours, expected, "spelling `{spelling}`: engine said {expected:?}, we said {ours:?}");
     }
 }

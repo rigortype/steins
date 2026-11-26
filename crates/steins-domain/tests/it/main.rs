@@ -2,6 +2,7 @@
 
 #![allow(clippy::too_many_lines, reason = "test code is outside the #778 ratchet")]
 
+mod float_range;
 mod lattice;
 mod lean_vectors;
 mod php_oracle;

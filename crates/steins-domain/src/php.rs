@@ -149,6 +149,50 @@ pub fn php_is_falsy(v: &crate::Val) -> bool {
     }
 }
 
+/// A float as PHP spells it — `(string) $f` under `precision = -1`, with `.0`
+/// appended to an integral finite spelling. This is PHPStan's
+/// `ConstantFloatType::castFloatToString`, the form every float in a dumped type
+/// or a diagnostic takes (`1.5`, `5.0`, `1.0E+17`, `5.0E-324`, `INF`, `-0.0`).
+///
+/// The digits are the shortest that round-trip (Rust's `{:e}` and PHP's
+/// `zend_gcvt` agree there). The layout is `zend_gcvt`'s with 17 significant
+/// digits: with `p` the position of the decimal point (`1.5` has `p = 1`), an
+/// exponent form is used when `p < -3` or `p > 17` — so `0.0001` and
+/// `10000000000000000.0` (1e16) stay fixed while `1.0E-5` and `1.0E+17` do not —
+/// and that form always shows a fractional digit and a signed exponent.
+#[must_use]
+pub fn php_float_repr(f: f64) -> String {
+    if f.is_nan() {
+        return "NAN".to_owned();
+    }
+    if f.is_infinite() {
+        return if f > 0.0 { "INF" } else { "-INF" }.to_owned();
+    }
+    let sign = if f.is_sign_negative() { "-" } else { "" };
+    let sci = format!("{:e}", f.abs());
+    let (mantissa, exp) = sci.split_once('e').expect("`{:e}` always has an exponent");
+    let exp: i32 = exp.parse().expect("`{:e}` exponent is an integer");
+    let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
+    // `{:e}` writes one digit before the point, so the point sits after `exp + 1`.
+    let point = exp + 1;
+    if !(-3..=17).contains(&point) {
+        let (lead, rest) = digits.split_at(1);
+        let rest = if rest.is_empty() { "0" } else { rest };
+        let esign = if exp < 0 { '-' } else { '+' };
+        return format!("{sign}{lead}.{rest}E{esign}{}", exp.unsigned_abs());
+    }
+    let len = i32::try_from(digits.len()).expect("at most 17 digits");
+    let body = if point <= 0 {
+        format!("0.{}{digits}", "0".repeat(point.unsigned_abs() as usize))
+    } else if point >= len {
+        format!("{digits}{}.0", "0".repeat((point - len) as usize))
+    } else {
+        let (int, frac) = digits.split_at(point as usize);
+        format!("{int}.{frac}")
+    };
+    format!("{sign}{body}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,6 +249,42 @@ mod tests {
         assert!(!php_str_is_decimal_int("9223372036854775808"));
         for no in ["", "abc", "-", "1,3", "0x1A", "１２３"] {
             assert!(!php_str_is_decimal_int(no), "expected not decimal-int: {no:?}");
+        }
+    }
+
+    /// The spellings PHP 8.5/8.6 print for `(string) $f` under `precision = -1`
+    /// (with PHPStan's `.0`), witnessed on the engine; `tests/it/php_oracle.rs`
+    /// compares a wider set live.
+    #[test]
+    fn php_float_repr_matches_the_engines_spelling() {
+        for (f, want) in [
+            (0.0, "0.0"),
+            (-0.0, "-0.0"),
+            (1.0, "1.0"),
+            (1.5, "1.5"),
+            (-2.25, "-2.25"),
+            (0.1, "0.1"),
+            (0.30000000000000004, "0.30000000000000004"),
+            (1e-4, "0.0001"),
+            (1.5e-4, "0.00015"),
+            (1e-5, "1.0E-5"),
+            (3e-10, "3.0E-10"),
+            (100.0, "100.0"),
+            (123_456_789_012_345.0, "123456789012345.0"),
+            (1e16, "10000000000000000.0"),
+            (1.5e16, "15000000000000000.0"),
+            (1e17, "1.0E+17"),
+            (1e19, "1.0E+19"),
+            (1e100, "1.0E+100"),
+            (f64::MAX, "1.7976931348623157E+308"),
+            (-f64::MAX, "-1.7976931348623157E+308"),
+            (f64::from_bits(1), "5.0E-324"),
+            (f64::MIN_POSITIVE, "2.2250738585072014E-308"),
+            (f64::INFINITY, "INF"),
+            (f64::NEG_INFINITY, "-INF"),
+            (f64::NAN, "NAN"),
+        ] {
+            assert_eq!(php_float_repr(f), want, "{f:?}");
         }
     }
 }

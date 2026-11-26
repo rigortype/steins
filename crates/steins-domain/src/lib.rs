@@ -44,12 +44,12 @@ pub use certainty::Certainty;
 pub use fact::{ArmKnown, CAP, Fact, Refinement, UnionArm};
 pub use next_int::{NEXT_INT_BOUNDARY, NextInt, append_index};
 pub use php::{
-    php_is_falsy, php_is_numeric, php_str_is_decimal_int, php_str_is_lowercase,
+    php_float_repr, php_is_falsy, php_is_numeric, php_str_is_decimal_int, php_str_is_lowercase,
     php_str_is_uppercase,
 };
 pub use php_str::PhpStr;
 pub use preds::StrPreds;
-pub use range::IntRange;
+pub use range::{FloatRange, IntRange, float_ordinal};
 pub use shape::{
     Cover, CoverFlavor, KeyClass, Presence, SHAPE_WIDTH_LIMIT, ShapeFact, Tail, array_is_list,
     keys_are_a_list,

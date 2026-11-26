@@ -19,7 +19,7 @@ pub mod spell;
 pub use admit::{ShapeSpec, admits_fact, admits_val, shape_verdict};
 
 use steins_domain::{
-    Base, Certainty, Fact, IntRange, KeyClass, Key as DKey, NextInt, PhpStr,
+    Base, Certainty, Fact, FloatRange, IntRange, KeyClass, Key as DKey, NextInt, PhpStr,
     Presence as DPresence, Refinement, ShapeFact, StrPreds, Tail as DTail, Val,
 };
 use steins_phpdoc::ast::{ArrayShapeKind, ConstExpr, ShapeKey, StringLit, Type, TypeKind};
@@ -178,6 +178,13 @@ pub enum ContractTy {
     Base(Base),
     /// `int<lo, hi>`, `positive-int`, ….
     IntIn(IntRange),
+    /// `float<lo, hi>`, `positive-float`, `finite-float`, … — a float interval.
+    ///
+    /// Like [`ContractTy::Base`]`(Float)` it admits ints, by value (`5` is in
+    /// `float<4, 6>`). The value lattice keeps no float refinement, so an
+    /// abstract fact seeds as plain `float` and this arm is only ever decided
+    /// against a proven value.
+    FloatIn(FloatRange),
     /// `numeric-string`, `non-empty-string`, `non-falsy-string`,
     /// `lowercase-string`, `uppercase-string` and their intersections.
     StrWith(StrPreds),
@@ -752,6 +759,14 @@ pub fn lower_identifier(name: &str) -> ContractTy {
             ContractTy::IntIn(IntRange::new(i64::MIN, -1).expect("valid range")),
             ContractTy::IntIn(IntRange::new(1, i64::MAX).expect("valid range")),
         ]),
+        // The float counterparts. PHPStan documents them with inclusive bounds
+        // for `float<lo, hi>`; the named sign types are the comparisons their
+        // names say (`positive-float` is `> 0`, so `0.0` is out).
+        "positive-float" => ContractTy::FloatIn(FloatRange::POSITIVE),
+        "negative-float" => ContractTy::FloatIn(FloatRange::NEGATIVE),
+        "non-negative-float" => ContractTy::FloatIn(FloatRange::NON_NEGATIVE),
+        "non-positive-float" => ContractTy::FloatIn(FloatRange::NON_POSITIVE),
+        "finite-float" => ContractTy::FloatIn(FloatRange::FINITE),
         "array" => ContractTy::ArrayAny { non_empty: false },
         "non-empty-array" => ContractTy::ArrayAny { non_empty: true },
         // Phan's `associative-array`/`non-empty-associative-array`: an array that
@@ -1029,6 +1044,9 @@ pub fn lower_generic(base: &str, args: &[steins_phpdoc::ast::GenericArg]) -> Con
         // `int<lo, hi>` (PHPStan/Psalm/Mago) and `int-range<lo, hi>` (Phan) are the
         // same bounded range under two base names — one lowering, not two.
         ("int" | "int-range", 2) => lower_int_range(args),
+        // `float<lo, hi>` — PHPStan's float range, bounds int or float literals
+        // or `min`/`max`. Any other arity or bound says nothing Steins can check.
+        ("float", 2) => lower_float_range(args),
         ("iterable", 1) => ContractTy::IterableOf {
             key: Box::new(ContractTy::Mixed),
             val: Box::new(arg(0).expect("len checked")),
@@ -1464,6 +1482,32 @@ fn lower_int_range(args: &[steins_phpdoc::ast::GenericArg]) -> ContractTy {
     }
 }
 
+/// `float<lo, hi>`: both bounds inclusive; `min`/`max` are `-INF`/`INF`. An int
+/// bound widens to the nearest double, as PHPStan's `resolveFloatRangeBound`
+/// casts it. `lo > hi` is empty: `Never`, as for `int<5, 1>`; a bound that is
+/// not a number, `min` or `max` says nothing checkable: `Opaque`.
+fn lower_float_range(args: &[steins_phpdoc::ast::GenericArg]) -> ContractTy {
+    let bound = |ty: &Type| -> Option<f64> {
+        match &ty.kind {
+            TypeKind::Identifier(id) if id.eq_ignore_ascii_case("min") => Some(f64::NEG_INFINITY),
+            TypeKind::Identifier(id) if id.eq_ignore_ascii_case("max") => Some(f64::INFINITY),
+            TypeKind::Const(ConstExpr::Float(s)) => s.replace('_', "").parse::<f64>().ok(),
+            #[allow(clippy::cast_precision_loss)]
+            TypeKind::Const(ConstExpr::Int(s)) => {
+                s.replace('_', "").parse::<i64>().ok().map(|n| n as f64)
+            }
+            _ => None,
+        }
+    };
+    match (bound(&args[0].ty), bound(&args[1].ty)) {
+        (Some(lo), Some(hi)) => match FloatRange::new(lo, hi) {
+            Some(r) => ContractTy::FloatIn(r),
+            None => ContractTy::Never,
+        },
+        _ => ContractTy::Opaque,
+    }
+}
+
 /// The normalized runtime keys a shape's items denote, in item order:
 /// positional items take the key the same array literal would give them
 /// ([`NextInt::new`], ADR-0049 A22), so `array{-5: T, U}` declares `U` at
@@ -1611,6 +1655,8 @@ pub fn to_fact(ty: &ContractTy) -> Option<Fact> {
         ContractTy::LitFloat(v) => Some(Fact::Singleton(Val::Float(*v))),
         ContractTy::Base(b) => Some(Fact::General { base: *b, nullable: false }),
         ContractTy::IntIn(r) => Some(Fact::refined(Base::Int, Refinement::Int(*r), false)),
+        // The lattice has no float refinement: the honest seed is `float`.
+        ContractTy::FloatIn(_) => Some(Fact::General { base: Base::Float, nullable: false }),
         ContractTy::StrWith(p) => Some(Fact::refined(Base::String, Refinement::Str(*p), false)),
         // A conjunction of string refinements IS a predicate set (issue #240):
         // the domain's own representation of `A&B` is the closed union of the
@@ -3211,6 +3257,11 @@ mod hyphen_reservation_tests {
             ("positive-int", ContractTy::IntIn(IntRange::POSITIVE)),
             ("negative-int", ContractTy::IntIn(IntRange::NEGATIVE)),
             ("non-negative-int", ContractTy::IntIn(IntRange::NON_NEGATIVE)),
+            ("positive-float", ContractTy::FloatIn(FloatRange::POSITIVE)),
+            ("negative-float", ContractTy::FloatIn(FloatRange::NEGATIVE)),
+            ("non-negative-float", ContractTy::FloatIn(FloatRange::NON_NEGATIVE)),
+            ("non-positive-float", ContractTy::FloatIn(FloatRange::NON_POSITIVE)),
+            ("finite-float", ContractTy::FloatIn(FloatRange::FINITE)),
             ("non-empty-string", ContractTy::StrWith(StrPreds::NON_EMPTY)),
             ("numeric-string", ContractTy::StrWith(StrPreds::NUMERIC.close())),
             ("non-falsy-string", ContractTy::StrWith(StrPreds::NON_FALSY.close())),
@@ -3350,6 +3401,11 @@ mod unknown_vocabulary_tests {
             "non-negative-int",
             "non-positive-int",
             "non-zero-int",
+            "positive-float",
+            "negative-float",
+            "non-negative-float",
+            "non-positive-float",
+            "finite-float",
             "non-empty-string",
             "numeric-string",
             "non-falsy-string",
@@ -3529,5 +3585,289 @@ mod type_vocabulary_tests {
         // anyway, while `hasoffset` is a Psalm spelling it does not model.
         assert!(is_type_vocabulary("Closure"));
         assert!(is_type_vocabulary("hasoffset"));
+    }
+}
+
+/// `float<lo, hi>` and the `positive-float` family — PHPStan's `FloatRangeType`,
+/// checked against its `TypeNodeResolver` (bounds), `isSuperTypeOf` (membership)
+/// and the class doc's "NAN is in no range".
+#[cfg(test)]
+mod float_range_tests {
+    use super::*;
+
+    fn range(src: &str) -> FloatRange {
+        match lower_str(src) {
+            Some(ContractTy::FloatIn(r)) => r,
+            other => panic!("{src} lowered to {other:?}"),
+        }
+    }
+
+    fn admits(src: &str, v: Val) -> Certainty {
+        admits_val(&lower_str(src).expect("lowers"), &v)
+    }
+
+    #[test]
+    fn bounds_are_int_or_float_literals_or_min_max() {
+        assert_eq!(range("float<0, 1.5>"), FloatRange::new(0.0, 1.5).unwrap());
+        assert_eq!(range("float<-2, -0.5>"), FloatRange::new(-2.0, -0.5).unwrap());
+        assert_eq!(range("float<1_0.5, 1e2>"), FloatRange::new(10.5, 100.0).unwrap());
+        assert_eq!(range("float<min, 100.0>").hi(), 100.0);
+        assert_eq!(range("float<min, 100.0>").lo(), f64::NEG_INFINITY);
+        assert_eq!(range("float<0.5, max>").hi(), f64::INFINITY);
+        assert_eq!(range("float<MIN, Max>"), FloatRange::new(f64::NEG_INFINITY, f64::INFINITY).unwrap());
+        // A point is a legal interval.
+        assert_eq!(range("float<1, 1>"), FloatRange::new(1.0, 1.0).unwrap());
+    }
+
+    /// An empty interval is `never`, as `int<5, 1>` is; a bound that is not a
+    /// number states nothing checkable, and neither does a wrong arity.
+    /// An int bound beyond 2⁵³ widens to the nearest double, exactly as PHP's
+    /// `(float)` and PHPStan's `resolveFloatRangeBound` cast it.
+    #[test]
+    fn an_int_bound_widens_like_php_does() {
+        assert_eq!(range("float<0, 9007199254740993>").hi(), 9_007_199_254_740_992.0);
+        assert_eq!(range("float<-9223372036854775808, 0>").lo(), -9_223_372_036_854_775_808.0);
+    }
+
+    #[test]
+    fn degenerate_spellings_floor() {
+        assert_eq!(lower_str("float<2, 1>"), Some(ContractTy::Never));
+        assert_eq!(lower_str("float<0, 'a'>"), Some(ContractTy::Opaque));
+        assert_eq!(lower_str("float<0, Foo::BAR>"), Some(ContractTy::Opaque));
+    }
+
+    #[test]
+    fn membership_is_inclusive_and_nan_is_in_no_range() {
+        let r = "float<0, 1.5>";
+        assert_eq!(admits(r, Val::Float(0.0)), Certainty::Yes);
+        assert_eq!(admits(r, Val::Float(-0.0)), Certainty::Yes);
+        assert_eq!(admits(r, Val::Float(1.5)), Certainty::Yes);
+        assert_eq!(admits(r, Val::Float(1.6)), Certainty::No);
+        assert_eq!(admits(r, Val::Float(f64::INFINITY)), Certainty::No);
+        assert_eq!(admits(r, Val::Float(f64::NAN)), Certainty::No);
+        assert_eq!(admits("float<min, max>", Val::Float(f64::INFINITY)), Certainty::Yes);
+        assert_eq!(admits("float<min, max>", Val::Float(f64::NAN)), Certainty::No);
+    }
+
+    /// An int is judged by the float it widens to, as `float` admits it; every
+    /// other kind is out.
+    #[test]
+    fn ints_widen_and_other_kinds_are_out() {
+        assert_eq!(admits("float<0, 1.5>", Val::Int(1)), Certainty::Yes);
+        assert_eq!(admits("float<0, 1.5>", Val::Int(2)), Certainty::No);
+        assert_eq!(admits("float<0, 1.5>", Val::Null), Certainty::No);
+        assert_eq!(admits("float<0, 1.5>", Val::Bool(true)), Certainty::No);
+        assert_eq!(admits("float<0, 1.5>", Val::Str("1".into())), Certainty::No);
+    }
+
+    #[test]
+    fn the_named_sign_types_are_the_comparisons_they_name() {
+        assert_eq!(admits("positive-float", Val::Float(0.0)), Certainty::No);
+        assert_eq!(admits("positive-float", Val::Float(f64::MIN_POSITIVE / 2.0)), Certainty::Yes);
+        assert_eq!(admits("positive-float", Val::Float(f64::INFINITY)), Certainty::Yes);
+        assert_eq!(admits("negative-float", Val::Float(-0.0)), Certainty::No);
+        assert_eq!(admits("negative-float", Val::Float(f64::NEG_INFINITY)), Certainty::Yes);
+        assert_eq!(admits("non-negative-float", Val::Float(-0.0)), Certainty::Yes);
+        assert_eq!(admits("non-negative-float", Val::Float(-1.0)), Certainty::No);
+        assert_eq!(admits("non-positive-float", Val::Float(0.0)), Certainty::Yes);
+        assert_eq!(admits("non-positive-float", Val::Float(1.0)), Certainty::No);
+        assert_eq!(admits("positive-float", Val::Int(0)), Certainty::No);
+        assert_eq!(admits("positive-float", Val::Int(1)), Certainty::Yes);
+    }
+
+    /// `finite-float` is "any float except `INF`, `-INF`, and `NAN`".
+    #[test]
+    fn finite_float_excludes_infinities_and_nan() {
+        assert_eq!(admits("finite-float", Val::Float(f64::MAX)), Certainty::Yes);
+        assert_eq!(admits("finite-float", Val::Float(f64::MIN)), Certainty::Yes);
+        assert_eq!(admits("finite-float", Val::Float(f64::INFINITY)), Certainty::No);
+        assert_eq!(admits("finite-float", Val::Float(f64::NEG_INFINITY)), Certainty::No);
+        assert_eq!(admits("finite-float", Val::Float(f64::NAN)), Certainty::No);
+    }
+
+    /// The lattice holds no float refinement, so an abstract fact is never
+    /// proven inside an interval (`float` holds `NAN`); an int base is decided
+    /// by its endpoints; anything non-numeric is out.
+    #[test]
+    fn abstract_facts_are_judged_conservatively() {
+        let ty = lower_str("float<0, 100>").expect("lowers");
+        let float = Fact::General { base: Base::Float, nullable: false };
+        assert_eq!(admits_fact(&ty, &float), Certainty::Maybe);
+        let ints = Fact::refined(Base::Int, Refinement::Int(IntRange::new(1, 50).unwrap()), false);
+        assert_eq!(admits_fact(&ty, &ints), Certainty::Yes);
+        let wide = Fact::refined(Base::Int, Refinement::Int(IntRange::new(1, 500).unwrap()), false);
+        assert_eq!(admits_fact(&ty, &wide), Certainty::Maybe);
+        // No int of a disjoint fact widens into the interval: an exact `No`, as
+        // `int<0, 100>` answers the same fact.
+        let above = Fact::refined(Base::Int, Refinement::Int(IntRange::new(101, i64::MAX).unwrap()), false);
+        assert_eq!(admits_fact(&ty, &above), Certainty::No);
+        assert_eq!(admits_fact(&lower_str("int<0, 100>").expect("lowers"), &above), Certainty::No);
+        let any_int = Fact::General { base: Base::Int, nullable: false };
+        assert_eq!(admits_fact(&ty, &any_int), Certainty::Maybe);
+        assert_eq!(admits_fact(&lower_str("float<min, max>").expect("lowers"), &any_int), Certainty::Yes);
+        assert_eq!(admits_fact(&lower_str("positive-float").expect("lowers"), &any_int), Certainty::Maybe);
+        let string = Fact::General { base: Base::String, nullable: false };
+        assert_eq!(admits_fact(&ty, &string), Certainty::No);
+        // A declared interval seeds the honest `float`, never a narrower claim.
+        assert_eq!(to_fact(&ty), Some(float));
+    }
+
+    /// An open end is the closed end at the neighbouring double, so the two
+    /// spellings of one set are one value — PHPStan dumps `positive-float` as
+    /// `float<5.0E-324, max>`, and `extract-from` of one by the other keeps it.
+    #[test]
+    fn an_open_end_and_its_closed_spelling_are_one_range() {
+        assert_eq!(range("float<5.0E-324, max>"), FloatRange::POSITIVE);
+        assert_eq!(range("float<min, -5.0E-324>"), FloatRange::NEGATIVE);
+        assert_eq!(range("float<-1.7976931348623157E+308, 1.7976931348623157E+308>"), FloatRange::FINITE);
+        assert_eq!(range("float<-0.0, 0.0>"), range("float<0, 0>"));
+        assert_eq!(
+            lower_str("extract-from<positive-float, float<5.0E-324, max>>"),
+            Some(ContractTy::FloatIn(FloatRange::POSITIVE)),
+        );
+    }
+
+    #[test]
+    fn subsumption_between_intervals_is_exact() {
+        let sub = |a: &str, b: &str| {
+            normalize::subsumes(&lower_str(a).expect("a"), &lower_str(b).expect("b"))
+        };
+        assert_eq!(sub("float<0, 10>", "float<1, 2>"), Certainty::Yes);
+        // A partial overlap is `Maybe`: `No` is for disjoint arms only
+        // (`extract-from` drops an arm on it), and an overlap holds members.
+        assert_eq!(sub("float<1, 2>", "float<0, 10>"), Certainty::Maybe);
+        assert_eq!(sub("float<0, 5>", "float<3, 10>"), Certainty::Maybe);
+        assert_eq!(sub("non-negative-float", "positive-float"), Certainty::Yes);
+        assert_eq!(sub("positive-float", "non-negative-float"), Certainty::Maybe);
+        // Disjoint is an exact `No`, down to the neighbouring double.
+        assert_eq!(sub("float<0, 1>", "float<2, 3>"), Certainty::No);
+        assert_eq!(sub("positive-float", "non-positive-float"), Certainty::No);
+        assert_eq!(sub("negative-float", "float<0, 0>"), Certainty::No);
+        assert_eq!(sub("float<0, 1>", "float<1, 2>"), Certainty::Maybe);
+        assert_eq!(sub("float", "finite-float"), Certainty::Yes);
+        assert_eq!(sub("finite-float", "float"), Certainty::Maybe);
+        assert_eq!(sub("int", "float<0, 1>"), Certainty::No);
+    }
+
+    /// PHPStan's `FloatRangeType::describe`: the interval with `min`/`max`, every
+    /// other bound in PHP's float spelling, and a point as its literal.
+    #[test]
+    fn a_range_spells_as_phpstan_describes_it() {
+        use crate::spell::float_range_keyword as kw;
+        assert_eq!(kw(FloatRange::POSITIVE), "float<5.0E-324, max>");
+        assert_eq!(kw(FloatRange::NEGATIVE), "float<min, -5.0E-324>");
+        assert_eq!(kw(FloatRange::NON_NEGATIVE), "float<0.0, max>");
+        assert_eq!(kw(FloatRange::NON_POSITIVE), "float<min, 0.0>");
+        assert_eq!(kw(FloatRange::ALL), "float<min, max>");
+        assert_eq!(
+            kw(FloatRange::FINITE),
+            "float<-1.7976931348623157E+308, 1.7976931348623157E+308>"
+        );
+        assert_eq!(kw(range("float<0, 1.5>")), "float<0.0, 1.5>");
+        assert_eq!(kw(range("float<1e-5, 1e17>")), "float<1.0E-5, 1.0E+17>");
+        assert_eq!(kw(range("float<1.5, 1.5>")), "1.5");
+        assert_eq!(kw(range("float<-0.0, 0>")), "0.0");
+        let arms = [ContractTy::Base(Base::Int), ContractTy::FloatIn(FloatRange::POSITIVE), ContractTy::Null];
+        assert_eq!(spell::spell_arms(&arms).as_deref(), Some("int|float<5.0E-324, max>|null"));
+    }
+
+    /// Every spelling re-lowers to the set it was spelled from: the same range,
+    /// or — for a point — a literal that is mutually subsumed with it.
+    #[test]
+    fn every_range_spelling_round_trips() {
+        let tiny = f64::from_bits(1);
+        let ranges = [
+            FloatRange::POSITIVE,
+            FloatRange::NEGATIVE,
+            FloatRange::NON_NEGATIVE,
+            FloatRange::NON_POSITIVE,
+            FloatRange::FINITE,
+            FloatRange::ALL,
+            FloatRange::new(0.0, 1.5).unwrap(),
+            FloatRange::new(-1e-5, 1e17).unwrap(),
+            FloatRange::new(0.1, 0.30000000000000004).unwrap(),
+            FloatRange::new(tiny, f64::MIN_POSITIVE).unwrap(),
+            FloatRange::new(-f64::MAX, -tiny).unwrap(),
+            FloatRange::point(1.5).unwrap(),
+            FloatRange::point(-0.0).unwrap(),
+            FloatRange::point(f64::MAX).unwrap(),
+        ];
+        for r in ranges {
+            let spelled = spell::float_range_keyword(r);
+            let back = lower_str(&spelled).unwrap_or_else(|| panic!("{spelled} lowers"));
+            let original = ContractTy::FloatIn(r);
+            assert!(
+                normalize::subsumes(&back, &original).is_yes()
+                    && normalize::subsumes(&original, &back).is_yes(),
+                "{r:?} spelled {spelled} came back as {back:?}"
+            );
+            if !r.is_point() {
+                assert_eq!(back, original, "{spelled}");
+            }
+        }
+    }
+
+    /// The float twin of issue #90's interval absorption: one interval where the
+    /// union is one, two arms across a gap, and nothing merged across bases.
+    #[test]
+    fn union_arms_merge_where_the_union_is_one_interval() {
+        let f = |src: &str| lower_str(src).expect("lowers");
+        let deduped = |arms: Vec<ContractTy>| {
+            let mut arms = arms;
+            normalize::dedup_arms(&mut arms);
+            arms
+        };
+        assert_eq!(deduped(vec![f("float<0, 1>"), f("float<1, 2>")]), vec![f("float<0, 2>")]);
+        assert_eq!(deduped(vec![f("float<0, 1>"), f("float<0.5, 2>")]), vec![f("float<0, 2>")]);
+        assert_eq!(deduped(vec![f("positive-float"), f("0.0")]), vec![f("non-negative-float")]);
+        assert_eq!(deduped(vec![f("positive-float"), f("-0.0")]), vec![f("non-negative-float")]);
+        assert_eq!(deduped(vec![f("negative-float"), f("non-negative-float")]), vec![f("float<min, max>")]);
+        // An interior literal is subsumed; a gap is kept.
+        assert_eq!(deduped(vec![f("float<0, 2>"), f("1.0")]), vec![f("float<0, 2>")]);
+        assert_eq!(deduped(vec![f("float<0, 1>"), f("float<2, 3>")]).len(), 2);
+        assert_eq!(deduped(vec![f("1.0"), f("1.5")]).len(), 2);
+        // Ints and floats never merge into each other.
+        assert_eq!(deduped(vec![f("int<0, 1>"), f("float<1, 2>")]).len(), 2);
+        assert_eq!(normalize::merge_float_arms(&f("float<0, 1>"), &f("int<2, 3>")), None);
+        assert_eq!(
+            normalize::merge_float_arms(&f("float<0, 1>"), &ContractTy::LitFloat(f64::NAN)),
+            None
+        );
+    }
+
+    /// The display-safe float normalization: float arms merge and absorb, and
+    /// nothing else moves — `int|float` keeps its `int`.
+    #[test]
+    fn absorb_float_arms_touches_only_the_float_family() {
+        let f = |src: &str| lower_str(src).expect("lowers");
+        let absorbed = |arms: Vec<ContractTy>| {
+            let mut arms = arms;
+            normalize::absorb_float_arms(&mut arms);
+            arms
+        };
+        assert_eq!(absorbed(vec![f("float<0, 1>"), f("float<1, 2>")]), vec![f("float<0, 2>")]);
+        assert_eq!(absorbed(vec![f("float"), f("float<0, 1>")]), vec![f("float")]);
+        assert_eq!(absorbed(vec![f("float<0, 1>"), f("float")]), vec![f("float")]);
+        assert_eq!(absorbed(vec![f("float<0, 1>"), f("0.5")]), vec![f("float<0, 1>")]);
+        assert_eq!(absorbed(vec![f("0.0"), f("positive-float")]), vec![f("non-negative-float")]);
+        assert_eq!(
+            absorbed(vec![f("int"), f("float"), f("null")]),
+            vec![f("int"), f("float"), f("null")]
+        );
+        assert_eq!(absorbed(vec![f("int<0, 1>"), f("int<2, 3>")]).len(), 2);
+        assert_eq!(absorbed(vec![f("float<0, 1>"), f("float<3, 4>")]).len(), 2);
+    }
+
+    /// A float literal covers an interval only when the interval is that point.
+    #[test]
+    fn a_literal_and_its_point_range_are_mutually_subsumed() {
+        let sub = |a: &str, b: &str| {
+            normalize::subsumes(&lower_str(a).expect("a"), &lower_str(b).expect("b"))
+        };
+        assert_eq!(sub("1.5", "float<1.5, 1.5>"), Certainty::Yes);
+        assert_eq!(sub("float<1.5, 1.5>", "1.5"), Certainty::Yes);
+        assert_eq!(sub("0.0", "float<-0.0, 0>"), Certainty::Yes);
+        assert_eq!(sub("1.5", "float<0, 1>"), Certainty::No);
+        assert_eq!(sub("1.5", "float<0, 2>"), Certainty::Maybe);
     }
 }

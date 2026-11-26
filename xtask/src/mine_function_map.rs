@@ -870,6 +870,7 @@ impl Dropped {
             | ContractTy::Shape { .. } => &mut self.arrays,
             ContractTy::Union(_) | ContractTy::Inter(_) => &mut self.unions,
             ContractTy::IntIn(_)
+            | ContractTy::FloatIn(_)
             | ContractTy::StrWith(_)
             | ContractTy::StrOpaque
             | ContractTy::LitInt(_)

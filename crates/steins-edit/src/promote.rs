@@ -625,8 +625,10 @@ fn is_finer_than_native(ty: &PType) -> bool {
         TypeKind::Const(c) => {
             matches!(c, ConstExpr::Int(_) | ConstExpr::Float(_) | ConstExpr::Str(_))
         }
-        // `int<a, b>` — a bounded-int refinement (`array<…>` etc. are not).
-        TypeKind::Generic { base, .. } => base.eq_ignore_ascii_case("int"),
+        // `int<a, b>` / `float<a, b>` — a bounded refinement (`array<…>` etc. are not).
+        TypeKind::Generic { base, .. } => {
+            base.eq_ignore_ascii_case("int") || base.eq_ignore_ascii_case("float")
+        }
         // A union is "finer" only if every member is representable-or-finer and
         // at least one is a refinement — else genuinely non-representable.
         TypeKind::Union { types, .. } => {
@@ -678,7 +680,10 @@ fn is_refined_scalar_keyword(n: &str) -> bool {
     }
     matches!(
         steins_contract::lower_identifier(n),
-        ContractTy::IntIn(_) | ContractTy::StrWith(_) | ContractTy::StrOpaque
+        ContractTy::IntIn(_)
+            | ContractTy::FloatIn(_)
+            | ContractTy::StrWith(_)
+            | ContractTy::StrOpaque
     )
 }
 

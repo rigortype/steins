@@ -180,3 +180,43 @@ fn decimal_int_string_matches_the_array_key_cast() {
         );
     }
 }
+
+/// `php_float_repr` agrees with the engine's `(string) $f` under `precision = -1`
+/// (plus PHPStan's `.0` on an integral finite spelling). Floats cross as their
+/// bit patterns, so no decimal parse sits between the two sides.
+#[test]
+fn float_repr_matches_the_engine() {
+    if Command::new("php").arg("--version").output().is_err() {
+        eprintln!("SKIP: php not on PATH; oracle comparison not run");
+        return;
+    }
+    let mut cases: Vec<f64> = vec![
+        0.0, -0.0, 1.0, -1.0, 0.5, 0.1, 0.2, 1.0 / 3.0, 2.0f64.sqrt(), 1e-3, 1e-4, 1.2345e-4,
+        9.9999e-5, 1e-5, 1e-300, 5e-324, f64::MIN_POSITIVE, 1e15, 1e16, 9.999_999_999_999_998e16,
+        1e17, 1.5e17, 1e18, 1e19, 1e20, 1e21, 9_007_199_254_740_993.0, 123_456_789.125,
+        f64::MAX, f64::INFINITY, f64::NEG_INFINITY, 12_345_678_901_234_567.0, 0.000_123_456_789,
+    ];
+    let negated: Vec<f64> = cases.iter().map(|f| -f).collect();
+    cases.extend(negated);
+    let hex: Vec<String> = cases.iter().map(|f| format!("{:016x}", f.to_bits())).collect();
+    let script = format!(
+        r#"ini_set('precision', '-1');
+        foreach ([{}] as $h) {{
+            $f = unpack('E', hex2bin($h))[1];
+            $s = (string) $f;
+            if (is_finite($f) && !str_contains($s, '.')) {{ $s .= '.0'; }}
+            echo $s, "\n";
+        }}"#,
+        hex.iter().map(|h| format!("'{h}'")).collect::<Vec<_>>().join(",")
+    );
+    let out = Command::new("php")
+        .args(["-d", "display_errors=stderr", "-r", &script])
+        .output()
+        .expect("run php");
+    assert!(out.status.success(), "php failed: {}", String::from_utf8_lossy(&out.stderr));
+    let answers: Vec<&str> = std::str::from_utf8(&out.stdout).expect("utf8").lines().collect();
+    assert_eq!(answers.len(), cases.len(), "answer count mismatch");
+    for (f, engine) in cases.iter().zip(answers) {
+        assert_eq!(steins_domain::php_float_repr(*f), engine, "spelling of {f:?}");
+    }
+}
