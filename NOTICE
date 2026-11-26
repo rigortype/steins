@@ -6,8 +6,8 @@ Steins itself is licensed under the Apache License, Version 2.0; see LICENSE.
 This file records third-party material that is **not** a Cargo dependency and
 therefore does not appear in THIRD-PARTY-LICENSES.md, which is generated from
 the dependency graph alone. Non-cargo lineage lives beside the thing it
-licenses; this is the same posture the browser playground takes for php-wasm
-(apps/playground/vendor-licenses/).
+licenses; this is the same posture the browser playground takes for its PHP
+engine (apps/playground/vendor-licenses/).
 
 ================================================================================
 1. PHPStan functionMap — the builtin declared-return table

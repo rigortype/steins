@@ -13,7 +13,7 @@
 #              iteration loop's critical path; see the job comment.
 #   wasm      builds the playground module for wasm32-unknown-unknown and runs
 #             `apps/playground/smoke.mjs` over it in Node, then
-#             `smoke-replay.mjs` over it and a real php-wasm. The browser is the
+#             `smoke-replay.mjs` over it and a real PHP engine. The browser is the
 #             one surface that cannot buy stack headroom (issue #264) and the one
 #             whose failures are invisible to every gate below, so the module is
 #             smoked where it is built rather than trusted at upload time.
@@ -208,7 +208,9 @@ jobs:
   wasm:
     name: wasm
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # A cache miss builds the PHP engine from source (Emscripten, php-src and
+    # its libraries) inside Docker; a hit skips all of it.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
 
@@ -229,8 +231,8 @@ jobs:
           node-version: "22"
 
       # The module the playground loads, built exactly as apps/playground/build.sh
-      # builds it. That script also vendors php-wasm, which only the second smoke
-      # below needs.
+      # builds it. That script also builds the PHP engine, which only the second
+      # smoke below needs.
       - name: Build the playground module
         run: cargo build -p steins-wasm --target wasm32-unknown-unknown --release --locked
 
@@ -242,20 +244,22 @@ jobs:
       - name: Node smoke over the module
         run: node apps/playground/smoke.mjs
 
-      # `smoke-replay.mjs` pins the replay loop against the 32-bit php-wasm the
-      # browser downloads, and no workflow ran it either: three of its assertions
-      # went stale behind catalog and transfer changes that were each deliberate,
-      # and nothing noticed. The pin lives in build.sh, so build.sh keys the
-      # cache, and so do the tracked license texts: a hit skips the ~47 MB npm
-      # fetch, and a change to either re-runs build.sh's license-text check
-      # against the fresh tarball. build.sh's own cargo build is a no-op after
-      # the step above.
+      # `smoke-replay.mjs` pins the replay loop against the 32-bit engine the
+      # browser downloads (its node build, from the same build), and no workflow
+      # ran it either: three of its assertions went stale behind catalog and
+      # transfer changes that were each deliberate, and nothing noticed. The
+      # pins (builder commit, PHP version, extensions, memory) live in build.sh,
+      # so build.sh keys the cache, and so do the tracked license texts: a hit
+      # skips the Docker build, and a change to either re-runs build.sh's
+      # license checks against a fresh checkout of the builder. build.sh's own
+      # cargo build is a no-op after the step above.
       - uses: actions/cache@v4
         with:
           path: apps/playground/vendor/php-wasm
-          key: php-wasm-${{ hashFiles('apps/playground/build.sh', 'apps/playground/vendor-licenses/**') }}
+          key: php-wasm-builder-${{ hashFiles('apps/playground/build.sh', 'apps/playground/vendor-licenses/**') }}
 
-      - name: Vendor the PHP engine
+      # The runner image ships Docker with buildx, which is all the builder needs.
+      - name: Build the PHP engine
         run: ./apps/playground/build.sh
 
       - name: Node smoke over the real engine
