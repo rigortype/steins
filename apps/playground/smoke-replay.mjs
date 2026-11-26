@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 // Node end-to-end over the REAL engine (issue #64 S2): the built steins-wasm
-// module and a real php-wasm instance, driven by the very replay loop the
-// frontend runs (`replay.mjs`) over the very dispatch the frontend uses
-// (`php-dispatch.mjs`). `smoke.mjs` pins the ABI against a canned table; this
-// pins the loop against php-src.
+// module and a real PHP module (php-src built by php-wasm-builder), driven by
+// the very replay loop the frontend runs (`replay.mjs`) over the very dispatch
+// the frontend uses (`php-dispatch.mjs`). `smoke.mjs` pins the ABI against a
+// canned table; this pins the loop against php-src.
 //
-// It runs the vendored php-wasm — the same 8.5 binary the browser downloads —
-// through PhpNode, so there is nothing to npm-install and nothing that can drift
-// from what ships.
+// It runs the node build of the engine build.sh produces, from the same build as
+// the web one the browser downloads, so there is nothing to npm-install and
+// nothing that can drift from what ships.
 //
 //   ./apps/playground/build.sh
 //   node apps/playground/smoke-replay.mjs [path/to/steins_wasm.wasm]
@@ -15,7 +15,7 @@
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { PhpNode } from "./vendor/php-wasm/PhpNode.mjs";
+import createPhp from "./vendor/php-wasm/php-node.mjs";
 import { loadSteins } from "./steins.mjs";
 import { createEngine } from "./php-dispatch.mjs";
 import { driveReplay, ITERATION_CAP } from "./replay.mjs";
@@ -40,9 +40,9 @@ function assert(cond, label) {
 const steins = await loadSteins(await readFile(wasmPath));
 const runner = await readFile(join(here, "vendor/runner.php"), "utf8");
 
-// 1. Boot: the unmodified runner, stdin loop and all, inside php-wasm.
+// 1. Boot: the unmodified runner, stdin loop and all, inside the PHP module.
 const t0 = Date.now();
-const engine = await createEngine(new PhpNode({ version: "8.5" }), runner);
+const engine = await createEngine(await createPhp(), runner);
 console.log(`engine: PHP ${engine.version}, PHP_INT_SIZE=${engine.intSize}, boot ${Date.now() - t0} ms`);
 assert(engine.version.startsWith("8.5"), `the vendored build is PHP 8.5 (got ${engine.version})`);
 assert(engine.intSize === 4 || engine.intSize === 8, "the boot probe reports an integer width");
@@ -52,17 +52,9 @@ assert(engine.intSize === 4 || engine.intSize === 8, "the boot probe reports an 
 const asked = [];
 async function answer(keys) {
   asked.push([...keys]);
-  const answers = Object.create(null);
-  const failed = [];
-  for (const key of keys) {
-    try {
-      answers[key] = await engine.answer(key);
-    } catch (err) {
-      console.error(`  engine failure on ${key}: ${err.message}`);
-      failed.push(key);
-    }
-  }
-  return { answers, failures: failed };
+  const { answers, failures, reasons } = await engine.answerMany(keys);
+  failures.forEach((key, i) => console.error(`  engine failure on ${key}: ${reasons[i]}`));
+  return { answers, failures };
 }
 
 function analyzer(source, profile = "") {
@@ -166,7 +158,7 @@ assert(
 
 // 4. The boot object (issue #64 S3): the engine surface as the analysis' own
 //    gates see it, which is what the page renders its boundary from. On the
-//    machine the browser actually gets — php-wasm's 32-bit 8.5 — that is the
+//    machine the browser actually gets — a 32-bit 8.5 — that is the
 //    portable fold subset, no curated rows, absence family live.
 const boot = flagship.value.boot;
 console.log(`boot: ${JSON.stringify(boot)}`);
@@ -473,5 +465,26 @@ assert(
 const bogus = await answer(['{"method":"nope","params":{}}']);
 console.log(`bogus dispatch: ${JSON.stringify(bogus)}`);
 assert(bogus.failures.length === 0 && bogus.answers['{"method":"nope","params":{}}'] !== undefined, "an unknown method still answers structurally");
+
+// 9. A fatal ends the runner's run mid-batch, as it ends the native child. The
+//    request that died is a failure, and every request on either side of it is
+//    still answered: a batch is never lost to one bad fold.
+const OK_BEFORE = '{"method":"fold","params":{"function":"strtoupper","args":["a"],"strict":false}}';
+const FATAL = '{"method":"fold","params":{"function":"str_pad","args":["abc",2147483647],"strict":false}}';
+const OK_AFTER = '{"method":"fold","params":{"function":"strrev","args":["ab"],"strict":false}}';
+const mixed = await engine.answerMany([OK_BEFORE, FATAL, OK_AFTER]);
+assert(mixed.failures.length === 1 && mixed.failures[0] === FATAL, `the fatal request alone fails (got ${JSON.stringify(mixed.failures)})`);
+assert(mixed.answers[OK_BEFORE]?.value === "A", "the request before the fatal is answered");
+assert(mixed.answers[OK_AFTER]?.value === "ba", "the request after the fatal is asked again and answered");
+
+// 10. The engine's extension set is what the absence family calls defined, so a
+//     call into a bundled extension the build carries is not "undefined".
+const BUNDLED = "<?php\necho mb_strlen('x');\necho bcadd('1', '2');\necho filter_var('1', FILTER_VALIDATE_INT);\nnot_a_function();\n";
+const bundled = await driveReplay({ analyze: analyzer(BUNDLED), answer, table });
+const undefinedLines = bundled.value.findings.filter((f) => f.id.endsWith(".undefined-function") || f.id === "constant.undefined").map((f) => f.line);
+assert(
+  bundled.status === "converged" && JSON.stringify(undefinedLines) === "[5]",
+  `only the made-up name is undefined (got lines ${JSON.stringify(undefinedLines)})`,
+);
 
 process.exit(failures === 0 ? 0 : 1);

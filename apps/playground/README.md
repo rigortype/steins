@@ -18,9 +18,10 @@ itself is untouched, because the UI decides what to show and not what is true.
 
 ## The PHP engine (issue #64)
 
-The page loads **php-wasm** — php-src compiled to WebAssembly — and lets the
+The page loads php-src compiled to WebAssembly by
+[php-wasm-builder](https://github.com/lyrixx/php-wasm-builder) and lets the
 analysis ask the real engine its questions. It loads at page boot by default:
-the plain (sound-subset) result paints first, the ~4 MB download proceeds
+the plain (sound-subset) result paints first, the ~4.5 MB download proceeds
 alongside it, and the first converged run repaints. The *PHP engine* button
 toggles it off, and off means the plain `sw_check` / `sw_annotate` pair,
 nothing asked of the engine.
@@ -39,6 +40,10 @@ A pending key *is* the request — `{"method":…,"params":…}` — and is hand
 the PHP worker verbatim; the answer stored under it is the raw JSON-RPC `result`
 from `steins_handle`, the same dispatch function the native sidecar embeds
 (`crates/steins-sidecar/runner.php`, copied into `vendor/`, never forked).
+The runner runs as the native child does: a batch goes in as NDJSON on stdin
+and comes back one response line per request. Each batch starts from fresh PHP
+state, and a fatal ends the run where the native child would die: that request
+is a failure, and the ones after it are asked again.
 
 Only a **converged** run is rendered. The iteration cap (32), the per-batch
 deadline (10 s, enforced by terminating the PHP worker — a PHP busy loop starves
@@ -48,8 +53,9 @@ half-converged envelope is a partial lie and is never shown.
 
 ### What lights up, and what does not
 
-php-wasm 0.1.0 is PHP **8.5.2 built 32-bit** (`PHP_INT_SIZE = 4`), and that
-machine — not the version — decides the boundary. On it:
+The engine is PHP **8.5.13 built 32-bit** (`PHP_INT_SIZE = 4`: the builder
+targets wasm32, where a C `long` is 32 bits), and that machine, not the
+version, decides the boundary. On it:
 
 | lane | state | why |
 | --- | --- | --- |
@@ -77,21 +83,45 @@ sound-subset banner did once an engine was actually present.
   composed from the envelope's `boot` object.
 - `worker.js` — the analysis thread; owns the wasm instance. Runs the plain
   pair, or one replay iteration when the request carries a table.
-- `php-worker.js` — the PHP thread; owns the php-wasm instance. Hand-written
-  because php-wasm 0.1.0 ships no working worker entrypoint.
-- `php-dispatch.mjs` — boot the sidecar runner inside php-wasm and answer one
-  request key with it. Shared by `php-worker.js` and `smoke-replay.mjs`.
+- `php-worker.js` — the PHP thread; owns the PHP module, and replaces it when
+  a run aborts it. Its own rather than the builder's Worker helper, because the
+  main thread terminates it on a deadline.
+- `php-dispatch.mjs` — install the sidecar runner in the PHP module and answer
+  a batch of request keys with it. Shared by `php-worker.js` and
+  `smoke-replay.mjs`.
 - `replay.mjs` — the fixpoint driver, transport-agnostic. Shared by the
   frontend and the smoke, so the loop the suite pins is the loop that ships.
 - `steins.mjs` — the dependency-free JS half of the `steins-wasm` C ABI.
 - `smoke.mjs` — the Node smoke over the built module (canned answers); the CI
   gate before any artifact upload.
-- `smoke-replay.mjs` — the Node end-to-end over the REAL engine: the vendored
-  php-wasm, driven through `replay.mjs`.
-- `build.sh` — builds `steins-wasm`, and vendors php-wasm at its pin plus the
-  sidecar runner into `vendor/`.
-- `vendor-licenses/` — the license texts the vendored engine obliges (tracked;
-  `build.sh` fails if the packaged texts drift from them).
+- `smoke-replay.mjs` — the Node end-to-end over the REAL engine: the node
+  build of the same engine, driven through `replay.mjs`.
+- `build.sh` — builds `steins-wasm`, builds the engine with php-wasm-builder
+  at its pinned commit, and copies it plus the sidecar runner into `vendor/`.
+- `vendor-licenses/` — the license texts the engine obliges (tracked; `build.sh`
+  fails if the builder's LICENSE or a library pin they were taken at moves).
+
+## The engine build
+
+php-wasm-builder publishes no binaries, so `build.sh` builds one: it checks out
+the builder at an exact commit and runs its `docker buildx bake`, which pins
+Emscripten and every library and verifies php-src's commit. That needs Docker
+with buildx; a cold build takes a few minutes, and CI caches the result on
+`build.sh` and `vendor-licenses/`.
+
+Two build arguments are choices, and `build.sh` says why:
+
+- **The extensions.** What the engine defines is what the absence family calls
+  defined, so a missing extension turns every call into it into
+  `call.undefined-function`. The build carries every extension whose linked
+  libraries are php-src's own or carry a notice tracked here (libxml2 for the
+  XML family, Oniguruma for mbstring, SQLite, zlib). iconv (LGPL), openssl,
+  gd, zip, sodium and intl are left out, so a call into them is still reported
+  as undefined.
+- **The memory.** The module's memory is fixed at link time. `runner.php` sets
+  `memory_limit = 256M` so that a fold's outcome is a property of the code and
+  not of the host. The heap is 320 MB because below about 300 MB the heap, not
+  that limit, would end a large fold.
 
 ## Local development
 
@@ -102,8 +132,8 @@ cd apps/playground && python3 -m http.server 8642
 ```
 
 Any static file server works; nothing else runs. `build.sh` is idempotent and
-re-runnable: it skips the php-wasm download when the pinned version is already
-vendored. `steins_wasm.wasm` and `vendor/` are build products and gitignored —
+re-runnable: it skips the engine build when the stamp in `vendor/php-wasm/`
+matches the pinned commit, version, memory and extensions. `steins_wasm.wasm` and `vendor/` are build products and gitignored —
 deployment (issue #58, deferred) fetches published artifacts instead.
 
 ## Smoke tests
@@ -127,15 +157,20 @@ php-src itself: the flagship `dumpType(greet(2, "World"))` inlining to
 margin and being absent without the engine, `abs("3000000000")` widening because
 the name is refused on this build's integer width while `abs(-3)` still answers
 `3` on the transfer seam, the `boot` object matching the engine that actually
-booted, the absence family lighting up with the engine and silent without it, and
-`env` being asked once and never again. CI's `wasm` job runs both.
+booted, the absence family lighting up with the engine and silent without it,
+`env` being asked once and never again, a fatal mid-batch costing only its own
+request, and calls into the bundled extensions not being reported undefined.
+CI's `wasm` job runs both.
 
 ## Attribution
 
-The optional engine runs PHP via [php-wasm](https://github.com/seanmorris/php-wasm)
-by Sean Morris, Apache-2.0 (`vendor-licenses/php-wasm-LICENSE`,
-`vendor-licenses/php-wasm-NOTICE`). Vendoring its `.wasm` redistributes PHP in
-binary form: this product includes PHP software, freely available from
+The optional engine is built by
+[php-wasm-builder](https://github.com/lyrixx/php-wasm-builder), MIT
+(`vendor-licenses/php-wasm-builder-LICENSE`), with Emscripten
+(`vendor-licenses/emscripten-LICENSE`, and `musl-COPYRIGHT` for its libc).
+It links libxml2 (`libxml2-Copyright`), Oniguruma (`oniguruma-COPYING`), zlib
+(`zlib-LICENSE`) and SQLite, which is in the public domain. Shipping its
+`.wasm` redistributes PHP in binary form: this product includes PHP software, freely available from
 <https://www.php.net/software/> (`vendor-licenses/PHP-LICENSE-3.01`). The page
 carries the same attribution, and none of it belongs in
 `THIRD-PARTY-LICENSES.md`, which is generated from the cargo graph only.

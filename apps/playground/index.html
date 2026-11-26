@@ -11,7 +11,7 @@
     tokens, and interaction model follow the rigor-playground frontend (rigor
     ADR-29), the sibling project this page's spec comes from.
 
-    The php-wasm engine (issue #64) loads at boot by default; while it loads
+    The PHP engine (issue #64) loads at boot by default; while it loads
     (and whenever it is toggled off or fails) every run is the documented
     sound subset: the banner at the bottom is the envelope's `notice` field
     rendered as data — the same sentence `steins check --no-php` prints. That
@@ -276,7 +276,7 @@
     <span id="status" aria-live="polite">Loading analyzer…</span>
     <div class="toolbar">
       <button class="btn" id="engine-btn" aria-pressed="false"
-              title="Run real php-src in your browser (php-wasm) and let the analysis ask it directly — builtin folds, declared return types, and whether a name exists. The engine bar states exactly what that buys.">Load PHP engine (~4 MB)</button>
+              title="Run real PHP in your browser (php-src compiled to WebAssembly) and let the analysis ask it directly — builtin folds, declared return types, and whether a name exists. The engine bar states exactly what that buys.">Load PHP engine (~4.5 MB)</button>
       <label class="ctl-label" for="profile-sel">Profile</label>
       <select class="ctl" id="profile-sel" aria-label="Analysis profile">
         <option value="default">default</option>
@@ -317,11 +317,16 @@
     <details id="attribution">
       <summary>Attribution</summary>
       <p>
-        The optional engine runs PHP via
-        <a href="https://github.com/seanmorris/php-wasm" rel="noopener">php-wasm</a>
-        by Sean Morris, Apache-2.0
-        (<a href="vendor-licenses/php-wasm-LICENSE">LICENSE</a>,
-        <a href="vendor-licenses/php-wasm-NOTICE">NOTICE</a>).
+        The optional engine is PHP built to WebAssembly by
+        <a href="https://github.com/lyrixx/php-wasm-builder" rel="noopener">php-wasm-builder</a>,
+        MIT (<a href="vendor-licenses/php-wasm-builder-LICENSE">LICENSE</a>),
+        with <a href="https://emscripten.org/" rel="noopener">Emscripten</a>
+        (<a href="vendor-licenses/emscripten-LICENSE">LICENSE</a>; its musl libc,
+        <a href="vendor-licenses/musl-COPYRIGHT">COPYRIGHT</a>), libxml2
+        (<a href="vendor-licenses/libxml2-Copyright">Copyright</a>), Oniguruma
+        (<a href="vendor-licenses/oniguruma-COPYING">COPYING</a>), zlib
+        (<a href="vendor-licenses/zlib-LICENSE">LICENSE</a>) and SQLite (public domain)
+        linked in.
         This product includes PHP software, freely available from
         &lt;<a href="https://www.php.net/software/" rel="noopener">https://www.php.net/software/</a>&gt;
         (<a href="vendor-licenses/PHP-LICENSE-3.01">PHP License 3.01</a>).
@@ -407,7 +412,7 @@ $greeting = str_repeat("Hello, " . "World" . "! ", 2);
 
     // ── The PHP engine (issue #64) ────────────────────────────────────────
     // Loads at boot by default: the page paints the plain (sound-subset)
-    // result first, and the engine's ~4 MB download proceeds alongside it —
+    // result first, and the engine's ~4.5 MB download proceeds alongside it —
     // the first converged run repaints. The toggle turns it off, and off
     // means the plain check/annotate pair, no engine asked.
     //
@@ -476,7 +481,7 @@ $greeting = str_repeat("Hello, " . "World" . "! ", 2);
 
     async function bootEngine() {
       const reply = await phpCall({}, ENGINE_BOOT_DEADLINE_MS)
-      engineLabel = `PHP ${reply.version} (php-wasm)`
+      engineLabel = `PHP ${reply.version} (wasm)`
       return reply
     }
     function rebootEngine() {
@@ -853,7 +858,7 @@ $greeting = str_repeat("Hello, " . "World" . "! ", 2);
     // refused name is typed into this file: which builtins fold on the machine
     // that actually booted is the analysis' answer, not the page's opinion.
     //
-    // What this buys: with php-wasm's 32-bit PHP 8.5 the page says "folding
+    // What this buys: with the engine's 32-bit PHP 8.5 the page says "folding
     // portable builtins" and names the refused set (both derived live from boot data),
     // and if a 64-bit engine ever answers instead the same code says
     // "all ${b.fold_total}" — the whole allowlist — and names nothing.
@@ -891,7 +896,7 @@ $greeting = str_repeat("Hello, " . "World" . "! ", 2);
       const b = engineBoot
       if (!b || !b.php_version) return `${engineLabel} — loaded`
       const proves = b.absence_family ? "reflection & existence live" : "reflection & existence declined"
-      return `PHP ${b.php_version} (php-wasm, ${bitsOf(b)}) — ${foldPhrase(b)}, ${proves}`
+      return `PHP ${b.php_version} (wasm, ${bitsOf(b)}) — ${foldPhrase(b)}, ${proves}`
     }
 
     function setEngineState(state, detail = "") {
@@ -905,7 +910,7 @@ $greeting = str_repeat("Hello, " . "World" . "! ", 2);
       engineLine.textContent = `PHP engine: ${line}`
       engineLine.className = state
       engineBtn.textContent = ENGINE_BTN_LABEL[state]
-        ?? (engineEverLoaded ? "PHP engine off" : "Load PHP engine (~4 MB)")
+        ?? (engineEverLoaded ? "PHP engine off" : "Load PHP engine (~4.5 MB)")
       engineBtn.disabled = state === "loading" || state === "failed"
       engineBtn.classList.toggle("active", state === "on")
       engineBtn.setAttribute("aria-pressed", String(state === "on"))
